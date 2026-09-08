@@ -1,11 +1,23 @@
 import sqlite3
 import datetime
 import threading
+import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import chromadb
 from chromadb.config import Settings
 from thai_rag.config import SQLITE_PATH, CHROMA_PATH
+
+def tokenize_text_for_fts(text: str) -> str:
+    """Tokenize Thai and multilingual text with word boundaries for SQLite FTS5."""
+    if not text:
+        return ""
+    try:
+        import pythainlp
+        tokens = pythainlp.tokenize.word_tokenize(text, engine="newmm")
+        return " ".join(t.strip() for t in tokens if t.strip())
+    except Exception:
+        return text
 
 class StorageManager:
     """Persistent storage coordinator: SQLite (FTS5 + Docs + Cache) + ChromaDB (Vectors)."""
@@ -91,6 +103,62 @@ class StorageManager:
                     last_indexed TEXT NOT NULL
                 );
             """)
+
+            # Realtime conversation turns
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_turns (
+                    turn_id TEXT PRIMARY KEY,
+                    workspace TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    summary TEXT,
+                    tags TEXT,
+                    created_at TEXT NOT NULL
+                );
+            """)
+
+            cur.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS fts_conversation USING fts5(
+                    turn_id UNINDEXED,
+                    workspace,
+                    content,
+                    summary,
+                    tags,
+                    tokenize = 'porter unicode61'
+                );
+            """)
+
+            # Code Property Graph (CPG-Lite) tables
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS code_symbols (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    symbol_name TEXT NOT NULL,
+                    symbol_type TEXT NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    workspace TEXT NOT NULL,
+                    UNIQUE(file_path, symbol_name, line_start)
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_code_symbols_ws_name ON code_symbols(workspace, symbol_name);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_path);")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS code_edges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_symbol TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    target_symbol TEXT NOT NULL,
+                    target_file TEXT,
+                    edge_type TEXT NOT NULL,
+                    workspace TEXT NOT NULL,
+                    UNIQUE(source_symbol, source_file, target_symbol, edge_type, workspace)
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_target ON code_edges(workspace, target_symbol);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_source ON code_edges(workspace, source_symbol);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_source_file ON code_edges(source_file);")
             self.sqlite_conn.commit()
 
     # --- Parent Documents CRUD ---
@@ -292,6 +360,102 @@ class StorageManager:
                 })
         return items
 
+    # --- Realtime Conversational Memory CRUD ---
+
+    def save_conversation_turn(
+        self,
+        turn_id: str,
+        workspace: str,
+        role: str,
+        content: str,
+        summary: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        embedding: Optional[List[float]] = None
+    ):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        tags_str = ",".join(tags) if tags else ""
+        fts_content = tokenize_text_for_fts(content)
+        fts_summary = tokenize_text_for_fts(summary or "")
+        fts_tags = tokenize_text_for_fts(tags_str)
+
+        with self._lock:
+            with self.sqlite_conn:
+                self.sqlite_conn.execute("""
+                    INSERT OR REPLACE INTO conversation_turns (turn_id, workspace, role, content, summary, tags, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (turn_id, workspace, role, content, summary or "", tags_str, now))
+                self.sqlite_conn.execute("""
+                    INSERT INTO fts_conversation (turn_id, workspace, content, summary, tags)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (turn_id, workspace, fts_content, fts_summary, fts_tags))
+
+        if embedding:
+            doc_text = f"[{workspace}] {role}: {summary or content}"
+            self.memory_collection.upsert(
+                ids=[turn_id],
+                embeddings=[embedding],
+                documents=[doc_text],
+                metadatas=[{"workspace": workspace, "role": role, "tags": tags_str, "type": "turn"}]
+            )
+
+    def search_conversation_turns(
+        self,
+        query: str,
+        workspace: Optional[str] = None,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        clean_query = re.sub(r'[^\w\s]', ' ', query).strip()
+        if not clean_query:
+            return []
+
+        try:
+            import pythainlp
+            tokens = [t.strip() for t in pythainlp.tokenize.word_tokenize(clean_query, engine="newmm") if t.strip()]
+        except Exception:
+            tokens = clean_query.split()
+
+        words = [w for w in tokens if len(w) > 0]
+        if not words:
+            words = [clean_query]
+
+        fts_expr = " OR ".join(f'"{w}"*' for w in words)
+        with self._lock:
+            cur = self.sqlite_conn.cursor()
+            try:
+                if workspace:
+                    rows = cur.execute("""
+                        SELECT t.turn_id, t.workspace, t.role, t.content, t.summary, t.tags, t.created_at, f.rank
+                        FROM fts_conversation f
+                        JOIN conversation_turns t ON f.turn_id = t.turn_id
+                        WHERE fts_conversation MATCH ? AND t.workspace = ?
+                        ORDER BY f.rank
+                        LIMIT ?
+                    """, (fts_expr, workspace, limit)).fetchall()
+                else:
+                    rows = cur.execute("""
+                        SELECT t.turn_id, t.workspace, t.role, t.content, t.summary, t.tags, t.created_at, f.rank
+                        FROM fts_conversation f
+                        JOIN conversation_turns t ON f.turn_id = t.turn_id
+                        WHERE fts_conversation MATCH ?
+                        ORDER BY f.rank
+                        LIMIT ?
+                    """, (fts_expr, limit)).fetchall()
+                return [dict(r) for r in rows]
+            except Exception:
+                return []
+
+    def get_file_constraints(
+        self,
+        file_path: str,
+        workspace: Optional[str] = None,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        p = Path(file_path)
+        candidates = self.search_conversation_turns(p.stem, workspace=workspace, limit=limit)
+        if not candidates and p.name != p.stem:
+            candidates = self.search_conversation_turns(p.name, workspace=workspace, limit=limit)
+        return candidates
+
     # --- Incremental Cache & Cleanup ---
 
     def get_file_hash(self, file_path: str) -> Optional[Dict[str, Any]]:
@@ -317,10 +481,170 @@ class StorageManager:
                 self.sqlite_conn.execute("DELETE FROM parent_documents WHERE file_path = ?", (file_path,))
                 self.sqlite_conn.execute("DELETE FROM fts_code_symbols WHERE file_path = ?", (file_path,))
                 self.sqlite_conn.execute("DELETE FROM file_cache WHERE file_path = ?", (file_path,))
+                self.sqlite_conn.execute("DELETE FROM code_symbols WHERE file_path = ?", (file_path,))
+                self.sqlite_conn.execute("DELETE FROM code_edges WHERE source_file = ?", (file_path,))
         try:
             self.code_collection.delete(where={"file_path": file_path})
         except Exception:
             pass
+
+    # --- Code Property Graph (CPG-Lite) CRUD ---
+
+    def save_code_graph(
+        self,
+        file_path: str,
+        symbols: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        workspace: str = ""
+    ):
+        with self._lock:
+            with self.sqlite_conn:
+                self.sqlite_conn.execute(
+                    "DELETE FROM code_symbols WHERE file_path = ? AND workspace = ?",
+                    (file_path, workspace)
+                )
+                self.sqlite_conn.execute(
+                    "DELETE FROM code_edges WHERE source_file = ? AND workspace = ?",
+                    (file_path, workspace)
+                )
+                if symbols:
+                    self.sqlite_conn.executemany("""
+                        INSERT OR IGNORE INTO code_symbols (file_path, symbol_name, symbol_type, line_start, line_end, workspace)
+                        VALUES (:file_path, :symbol_name, :symbol_type, :line_start, :line_end, :workspace)
+                    """, symbols)
+                if edges:
+                    self.sqlite_conn.executemany("""
+                        INSERT OR IGNORE INTO code_edges (source_symbol, source_file, target_symbol, target_file, edge_type, workspace)
+                        VALUES (:source_symbol, :source_file, :target_symbol, :target_file, :edge_type, :workspace)
+                    """, edges)
+
+    def find_callers(
+        self,
+        symbol_name: str,
+        workspace: Optional[str] = None,
+        max_depth: int = 2
+    ) -> List[Dict[str, Any]]:
+        """Find functions, methods, and files that call the specified symbol directly or transitively."""
+        ws = workspace.strip().replace("-", "_").lower() if workspace else None
+        query = """
+        WITH RECURSIVE caller_graph(source_symbol, source_file, target_symbol, target_file, edge_type, depth) AS (
+            SELECT source_symbol, source_file, target_symbol, target_file, edge_type, 1
+            FROM code_edges
+            WHERE (target_symbol = ? OR target_symbol LIKE ? OR source_symbol LIKE ?)
+              AND (? IS NULL OR workspace = ? OR instr(?, lower(workspace)) > 0 OR instr(lower(workspace), ?) > 0)
+            UNION
+            SELECT e.source_symbol, e.source_file, e.target_symbol, e.target_file, e.edge_type, cg.depth + 1
+            FROM code_edges e
+            JOIN caller_graph cg ON (
+                e.target_symbol = cg.source_symbol
+                OR e.target_symbol LIKE '%.' || cg.source_symbol
+                OR cg.source_symbol LIKE '%.' || e.target_symbol
+                OR (instr(cg.source_symbol, '.') > 0 AND e.target_symbol = substr(cg.source_symbol, instr(cg.source_symbol, '.') + 1))
+            )
+            WHERE cg.depth < ?
+              AND (? IS NULL OR e.workspace = ? OR instr(?, lower(e.workspace)) > 0 OR instr(lower(e.workspace), ?) > 0)
+        )
+        SELECT DISTINCT source_symbol, source_file, target_symbol, target_file, edge_type, depth
+        FROM caller_graph
+        ORDER BY depth ASC
+        LIMIT 100;
+        """
+        exact = symbol_name
+        like_suffix = f"%.{symbol_name}"
+        with self._lock:
+            cur = self.sqlite_conn.cursor()
+            rows = cur.execute(
+                query,
+                (exact, like_suffix, like_suffix, ws, ws, ws, ws, max_depth, ws, ws, ws, ws)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_callees(
+        self,
+        symbol_name: str,
+        workspace: Optional[str] = None,
+        max_depth: int = 2
+    ) -> List[Dict[str, Any]]:
+        """Find functions, methods, and modules that the specified symbol calls directly or transitively."""
+        ws = workspace.strip().replace("-", "_").lower() if workspace else None
+        query = """
+        WITH RECURSIVE callee_graph(source_symbol, source_file, target_symbol, target_file, edge_type, depth) AS (
+            SELECT source_symbol, source_file, target_symbol, target_file, edge_type, 1
+            FROM code_edges
+            WHERE (source_symbol = ? OR source_symbol LIKE ? OR source_symbol LIKE ?)
+              AND (? IS NULL OR workspace = ? OR instr(?, lower(workspace)) > 0 OR instr(lower(workspace), ?) > 0)
+            UNION
+            SELECT e.source_symbol, e.source_file, e.target_symbol, e.target_file, e.edge_type, cg.depth + 1
+            FROM code_edges e
+            JOIN callee_graph cg ON (
+                e.source_symbol = cg.target_symbol
+                OR e.source_symbol LIKE '%.' || cg.target_symbol
+                OR cg.target_symbol LIKE '%.' || e.source_symbol
+                OR (instr(cg.target_symbol, '.') > 0 AND e.source_symbol = substr(cg.target_symbol, instr(cg.target_symbol, '.') + 1))
+            )
+            WHERE cg.depth < ?
+              AND (? IS NULL OR e.workspace = ? OR instr(?, lower(e.workspace)) > 0 OR instr(lower(e.workspace), ?) > 0)
+        )
+        SELECT DISTINCT source_symbol, source_file, target_symbol, target_file, edge_type, depth
+        FROM callee_graph
+        ORDER BY depth ASC
+        LIMIT 100;
+        """
+        exact = symbol_name
+        like_prefix = f"{symbol_name}.%"
+        like_suffix = f"%.{symbol_name}"
+        with self._lock:
+            cur = self.sqlite_conn.cursor()
+            rows = cur.execute(
+                query,
+                (exact, like_prefix, like_suffix, ws, ws, ws, ws, max_depth, ws, ws, ws, ws)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_file_symbols(self, file_path: str, workspace: Optional[str] = None) -> List[Dict[str, Any]]:
+        ws = workspace.strip().replace("-", "_").lower() if workspace else None
+        with self._lock:
+            cur = self.sqlite_conn.cursor()
+            if ws:
+                rows = cur.execute(
+                    """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace 
+                       FROM code_symbols 
+                       WHERE (file_path = ? OR file_path LIKE ?) 
+                         AND (workspace = ? OR instr(?, lower(workspace)) > 0 OR instr(lower(workspace), ?) > 0) 
+                       ORDER BY line_start ASC""",
+                    (file_path, f"%{Path(file_path).name}", ws, ws, ws)
+                ).fetchall()
+            else:
+                rows = cur.execute(
+                    "SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace FROM code_symbols WHERE file_path = ? OR file_path LIKE ? ORDER BY line_start ASC",
+                    (file_path, f"%{Path(file_path).name}")
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_symbol_blast_radius(
+        self,
+        symbol_name: str,
+        file_path: Optional[str] = None,
+        workspace: Optional[str] = None,
+        max_depth: int = 2
+    ) -> Dict[str, Any]:
+        callers = self.find_callers(symbol_name, workspace=workspace, max_depth=max_depth)
+        callees = self.find_callees(symbol_name, workspace=workspace, max_depth=max_depth)
+
+        impacted_files = set()
+        for c in callers:
+            src_f = c.get("source_file")
+            if src_f and (not file_path or src_f != file_path):
+                impacted_files.add(src_f)
+
+        return {
+            "symbol": symbol_name,
+            "file_path": file_path,
+            "workspace": workspace or "",
+            "callers": callers,
+            "callees": callees,
+            "impacted_files": sorted(list(impacted_files))
+        }
 
     def close(self):
         with self._lock:
@@ -328,3 +652,4 @@ class StorageManager:
                 self.sqlite_conn.close()
             except Exception:
                 pass
+

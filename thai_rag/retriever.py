@@ -97,6 +97,15 @@ class HybridRetriever:
         if not parents:
             return 0
 
+        # CPG AST & Call Graph Extraction
+        try:
+            from thai_rag.cpg_extractor import extract_cpg
+            ws_name = file_path.split("/")[0] if "/" in file_path else ""
+            symbols, edges = extract_cpg(file_path, content, workspace=ws_name)
+            self.storage.save_code_graph(file_path, symbols, edges, workspace=ws_name)
+        except Exception:
+            pass
+
         all_child_ids = []
         all_child_docs = []
         all_child_metas = []

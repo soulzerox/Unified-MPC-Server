@@ -92,3 +92,27 @@ def test_code_index_force_reindex(test_server):
     assert "Indexed: `1 files`" in res3
     assert "Skipped (unchanged): `0 files`" in res3
 
+
+def test_remember_turn_and_pre_edit_context_e2e(test_server):
+    server, ws_dir = test_server
+
+    # 1. Record a live conversational turn with constraint on auth.py
+    turn_res = server.remember_turn(
+        role="user",
+        content="คำสั่งสำคัญ: ฟังก์ชัน authenticate_user ใน auth.py ห้ามเปลี่ยน return type เป็น dict ให้ใช้ boolean เท่านั้น",
+        workspace="test_ws",
+        summary="Constraint on authenticate_user return type",
+        tags=["security", "auth"]
+    )
+    assert "✅ Conversation turn recorded" in turn_res
+
+    # 2. Call pre_edit_context on auth.py
+    pre_res = server.pre_edit_context(
+        file_path="auth.py",
+        workspace="test_ws"
+    )
+    assert pre_res["can_proceed"] is True
+    assert len(pre_res["constraints"]) >= 1
+    assert "authenticate_user" in pre_res["constraints"][0]["content"]
+    assert "boolean" in pre_res["constraints"][0]["content"]
+

@@ -23,9 +23,10 @@ class LocalContextServer:
         sqlite_path: Path = SQLITE_PATH,
         chroma_path: str = CHROMA_PATH,
         ollama_url: str = OLLAMA_BASE_URL,
-        model_name: str = EMBEDDING_MODEL
+        model_name: str = EMBEDDING_MODEL,
+        storage: Optional[StorageManager] = None
     ):
-        self.storage = StorageManager(sqlite_path=sqlite_path, chroma_path=chroma_path)
+        self.storage = storage if storage is not None else StorageManager(sqlite_path=sqlite_path, chroma_path=chroma_path)
         self.embedder = OllamaEmbeddingAdapter(base_url=ollama_url, model=model_name)
         self.chunker = CodeChunker()
         self.retriever = HybridRetriever(
@@ -160,6 +161,107 @@ class LocalContextServer:
         except Exception as e:
             return f"Error retrieving context: {str(e)}"
 
+    def remember_turn(
+        self,
+        role: str,
+        content: str,
+        workspace: str = "",
+        summary: Optional[str] = None,
+        tags: Optional[list] = None
+    ) -> str:
+        """Record an interaction turn or decision immediately during chat into persistent memory."""
+        if not content.strip():
+            return "Error: Content cannot be empty."
+
+        turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+        vector = None
+        if self.embedder.is_alive():
+            try:
+                vector = self.embedder.embed_document(f"[{workspace}] {role}: {summary or content}")
+            except Exception:
+                pass
+
+        self.storage.save_conversation_turn(
+            turn_id=turn_id,
+            workspace=workspace or "general",
+            role=role,
+            content=content,
+            summary=summary,
+            tags=tags or [],
+            embedding=vector
+        )
+        return f"✅ Conversation turn recorded [ID: {turn_id}]"
+
+    def pre_edit_context(
+        self,
+        file_path: str,
+        workspace: Optional[str] = None,
+        proposed_symbol: Optional[str] = None
+    ) -> dict:
+        """Verify constraints, blast radius, and enclosing context before editing a file."""
+        constraints = self.storage.get_file_constraints(file_path, workspace=workspace)
+
+        code_ctx = None
+        try:
+            p = Path(file_path)
+            if p.is_file():
+                code_ctx = self.retriever.get_context(file_path, 1, window_lines=30)
+        except Exception:
+            pass
+
+        blast_radius = None
+        if proposed_symbol:
+            blast_radius = self.storage.get_symbol_blast_radius(proposed_symbol, file_path=file_path, workspace=workspace)
+        else:
+            file_symbols = self.storage.get_file_symbols(file_path, workspace=workspace)
+            if file_symbols:
+                top_sym = file_symbols[0]["symbol_name"]
+                blast_radius = self.storage.get_symbol_blast_radius(top_sym, file_path=file_path, workspace=workspace)
+
+        return {
+            "file_path": file_path,
+            "workspace": workspace or "",
+            "can_proceed": True,
+            "constraints": constraints,
+            "code_context": code_ctx,
+            "blast_radius": blast_radius,
+            "message": f"Found {len(constraints)} past constraints for {file_path}." if constraints else "No prior constraints found, safe to proceed."
+        }
+
+    def code_blast_radius(
+        self,
+        symbol_name: str,
+        workspace: str = "",
+        max_depth: int = 2
+    ) -> str:
+        """Analyze Code Property Graph (CPG) blast radius: find all direct/transitive callers and impacted files."""
+        blast = self.storage.get_symbol_blast_radius(symbol_name, workspace=workspace or None, max_depth=max_depth)
+        callers = blast.get("callers", [])
+        callees = blast.get("callees", [])
+        impacted = blast.get("impacted_files", [])
+
+        out = [f"### 💥 Blast Radius Analysis for `{symbol_name}`:"]
+        out.append(f"- **Direct & Transitive Callers**: {len(callers)}")
+        out.append(f"- **Callees / Dependencies**: {len(callees)}")
+        out.append(f"- **Impacted Files**: {len(impacted)}")
+
+        if callers:
+            out.append("\n#### 📞 Inbound Callers (Who will be affected):")
+            for c in callers[:10]:
+                out.append(f"- `depth {c.get('depth', 1)}`: `{c.get('source_symbol')}` in `{c.get('source_file')}` ({c.get('edge_type')})")
+
+        if callees:
+            out.append("\n#### 🎯 Outbound Callees (What this depends on):")
+            for c in callees[:10]:
+                out.append(f"- `depth {c.get('depth', 1)}`: calls `{c.get('target_symbol')}` ({c.get('edge_type')})")
+
+        if impacted:
+            out.append("\n#### 📁 Impacted External Files:")
+            for f in impacted:
+                out.append(f"- `{f}`")
+
+        return "\n".join(out)
+
     def close(self):
         self.storage.close()
 
@@ -184,6 +286,48 @@ def remember(content: str, category: str = "general") -> str:
 def recall(query: str, category: str = None, limit: int = 5) -> str:
     """Retrieve memories and past context matching a semantic query."""
     return get_server().recall(query, category=category, limit=limit)
+
+@mcp.tool()
+def remember_turn(role: str, content: str, workspace: str = "", summary: str = "", tags: str = "") -> str:
+    """Record an interaction turn or decision immediately during chat into persistent memory."""
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    return get_server().remember_turn(role=role, content=content, workspace=workspace, summary=summary, tags=tag_list)
+
+@mcp.tool()
+def pre_edit_context(file_path: str, workspace: str = "", proposed_symbol: str = "") -> str:
+    """MANDATORY pre-edit check: Retrieve prior architectural constraints, decisions, enclosing code scope, and CPG blast radius before editing a file."""
+    res = get_server().pre_edit_context(file_path=file_path, workspace=workspace, proposed_symbol=proposed_symbol)
+    
+    out = [f"### 🛡️ Pre-Edit Verification for `{res['file_path']}`:"]
+    out.append(f"**Status**: {'✅ Safe to proceed' if res['can_proceed'] else '⚠️ Review Required'}")
+    out.append(f"**Notice**: {res['message']}\n")
+    
+    if res["constraints"]:
+        out.append("#### 📌 Prior Decisions & Constraints Found:")
+        for idx, c in enumerate(res["constraints"], 1):
+            out.append(f"{idx}. [{c.get('created_at', '')}] **{c.get('role', 'user')}**: {c.get('content')}")
+        out.append("")
+
+    if res.get("blast_radius") and (res["blast_radius"].get("callers") or res["blast_radius"].get("impacted_files")):
+        br = res["blast_radius"]
+        out.append(f"#### 💥 CPG Blast Radius ({len(br.get('callers', []))} Callers, {len(br.get('impacted_files', []))} External Files):")
+        for c in br.get("callers", [])[:5]:
+            out.append(f"- Depth {c.get('depth', 1)} Caller: `{c.get('source_symbol')}` in `{c.get('source_file')}`")
+        if br.get("impacted_files"):
+            out.append(f"- Impacted files: {', '.join(br['impacted_files'][:5])}")
+        out.append("")
+
+    if res.get("code_context") and res["code_context"].get("content"):
+        ctx = res["code_context"]
+        out.append(f"#### 📍 Enclosing Code Scope [{ctx['file_path']}:{ctx['start_line']}-{ctx['end_line']}]:")
+        out.append(f"```text\n{ctx['content']}\n```")
+
+    return "\n".join(out)
+
+@mcp.tool()
+def code_blast_radius(symbol_name: str, workspace: str = "", max_depth: int = 2) -> str:
+    """Analyze Code Property Graph (CPG) blast radius: find all direct/transitive callers and impacted files before modifying a symbol."""
+    return get_server().code_blast_radius(symbol_name=symbol_name, workspace=workspace, max_depth=max_depth)
 
 @mcp.tool()
 def forget(memory_id: str) -> str:

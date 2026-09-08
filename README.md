@@ -348,3 +348,4 @@ flowchart TD
 
 ## 📜 License
 พัฒนาภายใต้สัญญาอนุญาต **MIT License** — ใช้งาน ดัดแปลง และแจกจ่ายได้อย่างเสรี 100% Offline & Privacy-Preserved.
+

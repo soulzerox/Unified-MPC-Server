@@ -145,3 +145,38 @@ def test_pre_edit_context_with_cpg_blast_radius():
         assert "run_job" in mcp_res
 
         server.close()
+
+def test_find_callers_excludes_own_callees():
+    """BUG-1 regression: caller graph must root only on target_symbol matches."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        storage = StorageManager(sqlite_path=os.path.join(tmpdir, "t.db"), chroma_path=os.path.join(tmpdir, "chroma"))
+        symbols, edges = extract_cpg("engine.py", PYTHON_SAMPLE, workspace="test_ws")
+        storage.save_code_graph("engine.py", symbols, edges, workspace="test_ws")
+
+        callers = storage.find_callers("validate", max_depth=1)
+        # Every caller row must be an edge whose TARGET is validate
+        assert all(c["target_symbol"] == "validate" for c in callers)
+        # run_job -> validate must be found
+        assert any("run_job" in c["source_symbol"] for c in callers)
+        # Own outgoing calls (validate -> sanitize) must NOT appear as callers
+        assert not any(
+            c["source_symbol"].endswith("validate") and c["target_symbol"] != "validate"
+            for c in callers
+        )
+        storage.close()
+
+def test_cpg_workspace_filter_exact_case():
+    """BUG-2 regression: workspace filter must match the stored value regardless of dash/case."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        storage = StorageManager(sqlite_path=os.path.join(tmpdir, "t.db"), chroma_path=os.path.join(tmpdir, "chroma"))
+        symbols, edges = extract_cpg("engine.py", PYTHON_SAMPLE, workspace="My-WorkSpace")
+        storage.save_code_graph("engine.py", symbols, edges, workspace="My-WorkSpace")
+
+        unfiltered = storage.find_callers("validate", max_depth=1)
+        filtered = storage.find_callers("validate", workspace="My-WorkSpace", max_depth=1)
+        assert len(unfiltered) > 0
+        assert len(filtered) == len(unfiltered)
+
+        filtered_callees = storage.find_callees("run_job", workspace="My-WorkSpace", max_depth=1)
+        assert any("validate" in c["target_symbol"] for c in filtered_callees)
+        storage.close()

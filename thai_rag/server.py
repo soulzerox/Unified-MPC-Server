@@ -107,13 +107,16 @@ class LocalContextServer:
         try:
             reporter = ProgressReporter()
             res = self.retriever.index_workspace(workspace_path, force=force, progress_reporter=reporter)
-            return (
+            out = (
                 f"📁 **Code Indexing Completed:**\n"
                 f"- Indexed: `{res['indexed']} files`\n"
                 f"- Skipped (unchanged): `{res['skipped']} files`\n"
                 f"- Duration: `{res['duration_s']}s`\n"
                 f"- Workspace: `{res['workspace']}`"
             )
+            if res.get("embed_fallbacks"):
+                out += f"\n- ⚠️ Embed fallbacks (zero-vector): `{res['embed_fallbacks']}` chunks — check Ollama health"
+            return out
         except Exception as e:
             return f"Error indexing workspace: {str(e)}"
 
@@ -201,22 +204,35 @@ class LocalContextServer:
         """Verify constraints, blast radius, and enclosing context before editing a file."""
         constraints = self.storage.get_file_constraints(file_path, workspace=workspace)
 
-        code_ctx = None
-        try:
-            p = Path(file_path)
-            if p.is_file():
-                code_ctx = self.retriever.get_context(file_path, 1, window_lines=30)
-        except Exception:
-            pass
+        file_symbols = self.storage.get_file_symbols(file_path, workspace=workspace)
 
         blast_radius = None
         if proposed_symbol:
             blast_radius = self.storage.get_symbol_blast_radius(proposed_symbol, file_path=file_path, workspace=workspace)
-        else:
-            file_symbols = self.storage.get_file_symbols(file_path, workspace=workspace)
-            if file_symbols:
-                top_sym = file_symbols[0]["symbol_name"]
-                blast_radius = self.storage.get_symbol_blast_radius(top_sym, file_path=file_path, workspace=workspace)
+        elif file_symbols:
+            top_sym = file_symbols[0]["symbol_name"]
+            blast_radius = self.storage.get_symbol_blast_radius(top_sym, file_path=file_path, workspace=workspace)
+
+        code_ctx = None
+        try:
+            # Only fetch code context when the file truly exists on disk.
+            # Indexed paths look like "<workspace>/<rel/path>" and may need base resolution.
+            if self._resolve_real_path(file_path) is not None:
+                target_line = 1
+                if proposed_symbol:
+                    match = next(
+                        (s for s in file_symbols
+                         if s["symbol_name"] == proposed_symbol
+                         or s["symbol_name"].endswith("." + proposed_symbol)),
+                        None,
+                    )
+                    if match:
+                        target_line = max(1, (match["line_start"] + match["line_end"]) // 2)
+                elif file_symbols:
+                    target_line = max(1, (file_symbols[0]["line_start"] + file_symbols[0]["line_end"]) // 2)
+                code_ctx = self.retriever.get_context(file_path, target_line, window_lines=30)
+        except Exception:
+            pass
 
         return {
             "file_path": file_path,
@@ -227,6 +243,26 @@ class LocalContextServer:
             "blast_radius": blast_radius,
             "message": f"Found {len(constraints)} past constraints for {file_path}." if constraints else "No prior constraints found, safe to proceed."
         }
+
+    @staticmethod
+    def _resolve_real_path(file_path: str) -> Optional[Path]:
+        """Resolve an indexed path ("ws/rel/file") to an existing on-disk file, if possible."""
+        p = Path(file_path)
+        if p.is_file():
+            return p
+        parts = p.parts
+        if len(parts) < 2:
+            return None
+        candidates = [Path.cwd() / p, Path.home() / p, Path.cwd().parent / p]
+        # cwd itself may be the workspace root → drop the workspace name segment
+        candidates.append(Path.cwd().joinpath(*parts[1:]))
+        for cand in candidates:
+            try:
+                if cand.is_file():
+                    return cand
+            except Exception:
+                continue
+        return None
 
     def code_blast_radius(
         self,

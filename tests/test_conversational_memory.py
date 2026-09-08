@@ -88,3 +88,21 @@ def test_pre_edit_context_integration(temp_env):
 
     server.close()
 
+
+def test_resave_same_turn_id_no_fts_duplicate(temp_env):
+    """BUG-3 regression: re-saving the same turn_id must not duplicate FTS rows."""
+    storage, *_ = temp_env
+    turn_id = "turn_dup_check"
+    content = "unique marker content for duplicate check"
+
+    storage.save_conversation_turn(turn_id=turn_id, workspace="ws", role="user", content=content, embedding=None)
+    storage.save_conversation_turn(turn_id=turn_id, workspace="ws", role="user", content=content, embedding=None)
+
+    n = storage.sqlite_conn.execute(
+        "SELECT COUNT(*) FROM fts_conversation WHERE turn_id = ?", (turn_id,)
+    ).fetchone()[0]
+    assert n == 1
+
+    rows = storage.search_conversation_turns("unique marker duplicate")
+    assert len([r for r in rows if r["turn_id"] == turn_id]) == 1
+

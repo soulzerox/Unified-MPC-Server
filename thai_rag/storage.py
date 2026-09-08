@@ -266,7 +266,7 @@ class StorageManager:
         words = [w for w in clean_query.split() if len(w) > 1]
         if not words:
             words = [clean_query]
-        fts_expr = " OR ".join(f"{w}*" for w in words)
+        fts_expr = " OR ".join(f'"{w}"*' for w in words)
 
         with self._lock:
             cur = self.sqlite_conn.cursor()
@@ -343,7 +343,10 @@ class StorageManager:
         where = None
         if category:
             where = {"category": category}
-        
+
+        if self.memory_collection.count() == 0:
+            return []
+
         results = self.memory_collection.query(
             query_embeddings=[query_vector],
             n_results=limit,
@@ -384,6 +387,7 @@ class StorageManager:
                     INSERT OR REPLACE INTO conversation_turns (turn_id, workspace, role, content, summary, tags, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (turn_id, workspace, role, content, summary or "", tags_str, now))
+                self.sqlite_conn.execute("DELETE FROM fts_conversation WHERE turn_id = ?", (turn_id,))
                 self.sqlite_conn.execute("""
                     INSERT INTO fts_conversation (turn_id, workspace, content, summary, tags)
                     VALUES (?, ?, ?, ?, ?)
@@ -525,13 +529,15 @@ class StorageManager:
         max_depth: int = 2
     ) -> List[Dict[str, Any]]:
         """Find functions, methods, and files that call the specified symbol directly or transitively."""
-        ws = workspace.strip().replace("-", "_").lower() if workspace else None
+        ws = workspace.strip().lower().replace("-", "_").replace(" ", "_") if workspace else None
         query = """
         WITH RECURSIVE caller_graph(source_symbol, source_file, target_symbol, target_file, edge_type, depth) AS (
             SELECT source_symbol, source_file, target_symbol, target_file, edge_type, 1
             FROM code_edges
-            WHERE (target_symbol = ? OR target_symbol LIKE ? OR source_symbol LIKE ?)
-              AND (? IS NULL OR workspace = ? OR instr(?, lower(workspace)) > 0 OR instr(lower(workspace), ?) > 0)
+            WHERE (target_symbol = ? OR target_symbol LIKE ?)
+              AND (? IS NULL
+                   OR instr(REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_'), ?) > 0
+                   OR instr(?, REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_')) > 0)
             UNION
             SELECT e.source_symbol, e.source_file, e.target_symbol, e.target_file, e.edge_type, cg.depth + 1
             FROM code_edges e
@@ -542,7 +548,9 @@ class StorageManager:
                 OR (instr(cg.source_symbol, '.') > 0 AND e.target_symbol = substr(cg.source_symbol, instr(cg.source_symbol, '.') + 1))
             )
             WHERE cg.depth < ?
-              AND (? IS NULL OR e.workspace = ? OR instr(?, lower(e.workspace)) > 0 OR instr(lower(e.workspace), ?) > 0)
+              AND (? IS NULL
+                   OR instr(REPLACE(REPLACE(lower(e.workspace), '-', '_'), ' ', '_'), ?) > 0
+                   OR instr(?, REPLACE(REPLACE(lower(e.workspace), '-', '_'), ' ', '_')) > 0)
         )
         SELECT DISTINCT source_symbol, source_file, target_symbol, target_file, edge_type, depth
         FROM caller_graph
@@ -555,7 +563,7 @@ class StorageManager:
             cur = self.sqlite_conn.cursor()
             rows = cur.execute(
                 query,
-                (exact, like_suffix, like_suffix, ws, ws, ws, ws, max_depth, ws, ws, ws, ws)
+                (exact, like_suffix, ws, ws, ws, max_depth, ws, ws, ws)
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -566,13 +574,15 @@ class StorageManager:
         max_depth: int = 2
     ) -> List[Dict[str, Any]]:
         """Find functions, methods, and modules that the specified symbol calls directly or transitively."""
-        ws = workspace.strip().replace("-", "_").lower() if workspace else None
+        ws = workspace.strip().lower().replace("-", "_").replace(" ", "_") if workspace else None
         query = """
         WITH RECURSIVE callee_graph(source_symbol, source_file, target_symbol, target_file, edge_type, depth) AS (
             SELECT source_symbol, source_file, target_symbol, target_file, edge_type, 1
             FROM code_edges
             WHERE (source_symbol = ? OR source_symbol LIKE ? OR source_symbol LIKE ?)
-              AND (? IS NULL OR workspace = ? OR instr(?, lower(workspace)) > 0 OR instr(lower(workspace), ?) > 0)
+              AND (? IS NULL
+                   OR instr(REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_'), ?) > 0
+                   OR instr(?, REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_')) > 0)
             UNION
             SELECT e.source_symbol, e.source_file, e.target_symbol, e.target_file, e.edge_type, cg.depth + 1
             FROM code_edges e
@@ -583,7 +593,9 @@ class StorageManager:
                 OR (instr(cg.target_symbol, '.') > 0 AND e.source_symbol = substr(cg.target_symbol, instr(cg.target_symbol, '.') + 1))
             )
             WHERE cg.depth < ?
-              AND (? IS NULL OR e.workspace = ? OR instr(?, lower(e.workspace)) > 0 OR instr(lower(e.workspace), ?) > 0)
+              AND (? IS NULL
+                   OR instr(REPLACE(REPLACE(lower(e.workspace), '-', '_'), ' ', '_'), ?) > 0
+                   OR instr(?, REPLACE(REPLACE(lower(e.workspace), '-', '_'), ' ', '_')) > 0)
         )
         SELECT DISTINCT source_symbol, source_file, target_symbol, target_file, edge_type, depth
         FROM callee_graph
@@ -597,12 +609,12 @@ class StorageManager:
             cur = self.sqlite_conn.cursor()
             rows = cur.execute(
                 query,
-                (exact, like_prefix, like_suffix, ws, ws, ws, ws, max_depth, ws, ws, ws, ws)
+                (exact, like_prefix, like_suffix, ws, ws, ws, max_depth, ws, ws, ws)
             ).fetchall()
             return [dict(r) for r in rows]
 
     def get_file_symbols(self, file_path: str, workspace: Optional[str] = None) -> List[Dict[str, Any]]:
-        ws = workspace.strip().replace("-", "_").lower() if workspace else None
+        ws = workspace.strip().lower().replace("-", "_").replace(" ", "_") if workspace else None
         with self._lock:
             cur = self.sqlite_conn.cursor()
             if ws:
@@ -610,14 +622,15 @@ class StorageManager:
                     """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace 
                        FROM code_symbols 
                        WHERE (file_path = ? OR file_path LIKE ?) 
-                         AND (workspace = ? OR instr(?, lower(workspace)) > 0 OR instr(lower(workspace), ?) > 0) 
+                         AND (instr(REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_'), ?) > 0
+                              OR instr(?, REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_')) > 0) 
                        ORDER BY line_start ASC""",
-                    (file_path, f"%{Path(file_path).name}", ws, ws, ws)
+                    (file_path, f"%/{Path(file_path).name}", ws, ws)
                 ).fetchall()
             else:
                 rows = cur.execute(
                     "SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace FROM code_symbols WHERE file_path = ? OR file_path LIKE ? ORDER BY line_start ASC",
-                    (file_path, f"%{Path(file_path).name}")
+                    (file_path, f"%/{Path(file_path).name}")
                 ).fetchall()
             return [dict(r) for r in rows]
 

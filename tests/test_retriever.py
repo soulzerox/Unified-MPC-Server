@@ -187,3 +187,49 @@ def test_retriever_indexes_web_frontend_extensions_and_excludes_meta_js(temp_env
     finally:
         shutil.rmtree(ws_dir, ignore_errors=True)
 
+
+def test_incremental_skip_by_mtime():
+    """IMP-2 regression: unchanged mtime must skip without re-indexing; changed mtime must re-index."""
+    import os
+    import time as _time
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        db_path = Path(temp_dir) / "t.db"
+        chroma_path = str(Path(temp_dir) / "chroma")
+        storage = StorageManager(sqlite_path=db_path, chroma_path=chroma_path)
+        retriever = HybridRetriever(
+            storage=storage,
+            embedder=OllamaEmbeddingAdapter(),
+            chunker=CodeChunker(),
+        )
+        ws_dir = Path(temp_dir) / "ws"
+        ws_dir.mkdir()
+        f = ws_dir / "mod.py"
+        f.write_text("def alpha():\n    return 1\n", encoding="utf-8")
+
+        res1 = retriever.index_workspace(str(ws_dir))
+        assert res1["indexed"] == 1
+
+        # Second run: nothing changed → skipped
+        res2 = retriever.index_workspace(str(ws_dir))
+        assert res2["indexed"] == 0 and res2["skipped"] == 1
+
+        # Change content but restore the old mtime → mtime short-circuit must skip
+        st = f.stat()
+        f.write_text("def beta():\n    return 2\n", encoding="utf-8")
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+        res3 = retriever.index_workspace(str(ws_dir))
+        assert res3["indexed"] == 0 and res3["skipped"] == 1
+
+        # Bump mtime → must re-index
+        _time.sleep(0.01)
+        os.utime(f, None)
+        res4 = retriever.index_workspace(str(ws_dir))
+        assert res4["indexed"] == 1
+        assert "embed_fallbacks" in res4
+
+        storage.close()
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+

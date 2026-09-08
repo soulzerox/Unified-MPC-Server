@@ -26,3 +26,20 @@ def test_ollama_embed_documents_batch():
     assert len(vectors) == 2
     assert len(vectors[0]) == 768
     assert len(vectors[1]) == 768
+
+def test_embed_query_raises_when_ollama_dead(monkeypatch):
+    """IMP-1 regression: query path must raise instead of silently returning a zero vector."""
+    import requests as _requests
+
+    def _boom(*args, **kwargs):
+        raise IOError("ollama down")
+
+    adapter = OllamaEmbeddingAdapter()
+    monkeypatch.setattr(_requests, "get", _boom)
+    monkeypatch.setattr(_requests, "post", _boom)
+    try:
+        adapter.embed_query("ทดสอบการค้นหา")
+        raised = False
+    except Exception:
+        raised = True
+    assert raised, "embed_query should raise when Ollama is unreachable"

@@ -216,6 +216,7 @@ class HybridRetriever:
             progress_reporter.notify_start(total_files, str(root))
 
         ws_name = root.name
+        self.embedder._fallback_count = 0
         for idx, full_path in enumerate(target_files, 1):
             rel_path = str(full_path.relative_to(root))
             indexed_path = f"{ws_name}/{rel_path}"
@@ -223,16 +224,27 @@ class HybridRetriever:
             try:
                 stat = full_path.stat()
                 mtime = stat.st_mtime
-                
+
+                # Fast path: mtime unchanged → skip without reading/hashing the file
+                cached = self.storage.get_file_hash(indexed_path)
+                if not force and cached and cached["mtime"] == mtime:
+                    skipped_count += 1
+                    if progress_reporter:
+                        progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
+                    continue
+
                 # Read content
                 content = full_path.read_text(encoding="utf-8", errors="ignore")
                 if is_minified_content(content):
+                    skipped_count += 1
+                    if progress_reporter:
+                        progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
                     continue
                 sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-                # Check cache
-                cached = self.storage.get_file_hash(indexed_path)
+                # Content identical (e.g. restored backup) → refresh cache entry only
                 if not force and cached and cached["sha256"] == sha256:
+                    self.storage.set_file_hash(indexed_path, mtime, sha256)
                     skipped_count += 1
                     if progress_reporter:
                         progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
@@ -244,7 +256,10 @@ class HybridRetriever:
                 if progress_reporter:
                     progress_reporter.notify_step(indexed_path, idx, total_files, skipped=False, chunks=chunks)
             except Exception:
-                # Skip unreadable or erroring files gracefully
+                # Skip unreadable or erroring files gracefully (still advance the HUD)
+                skipped_count += 1
+                if progress_reporter:
+                    progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
                 continue
 
         duration = round(time.time() - start_time, 2)
@@ -255,7 +270,8 @@ class HybridRetriever:
             "indexed": indexed_count,
             "skipped": skipped_count,
             "duration_s": duration,
-            "workspace": str(root)
+            "workspace": str(root),
+            "embed_fallbacks": getattr(self.embedder, "_fallback_count", 0)
         }
 
     def search(

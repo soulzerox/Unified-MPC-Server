@@ -11,7 +11,9 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
-PROGRESS_SOCK_PATH = Path.home() / ".cache" / "thai-rag-mcp" / "progress.sock"
+# Respect THAI_RAG_CACHE_DIR so the socket lives next to the configured cache dir
+_CACHE_DIR = Path(os.environ.get("THAI_RAG_CACHE_DIR", str(Path.home() / ".cache" / "thai-rag-mcp")))
+PROGRESS_SOCK_PATH = _CACHE_DIR / "progress.sock"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HUD_SCRIPT_PATH = REPO_ROOT / "thai_rag" / "ui" / "hud.py"
 

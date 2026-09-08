@@ -105,12 +105,16 @@ def test_retriever_excludes_sensitive_credentials_and_secrets(temp_env):
         # Create valid file
         (ws_dir / "app.py").write_text("print('safe')", encoding="utf-8")
 
-        # Create sensitive files
+        # Create sensitive and minified files
         (ws_dir / "client_secrets.json").write_text('{"client_id": "secret123"}', encoding="utf-8")
         (ws_dir / "google_credentials.json").write_text('{"private_key": "pk"}', encoding="utf-8")
         (ws_dir / "service_account.json").write_text('{"type": "service_account"}', encoding="utf-8")
         (ws_dir / "token.json").write_text('{"access_token": "xyz"}', encoding="utf-8")
         (ws_dir / "server.pem").write_text("-----BEGIN RSA PRIVATE KEY-----", encoding="utf-8")
+        (ws_dir / "TOKEN_ENC_KEY.txt").write_text("183c8f911cf073f9f0a5e3bbaeebd610", encoding="utf-8")
+        (ws_dir / ".dev.vars").write_text("SECRET_KEY=supersecret", encoding="utf-8")
+        (ws_dir / "app.min.js").write_text("var a=1,b=2;", encoding="utf-8")
+        (ws_dir / "engine-core.hash.js").write_text("var x=1;" + "a" * 25000, encoding="utf-8")
 
         res = retriever.index_workspace(str(ws_dir))
         assert res["indexed"] == 1
@@ -124,6 +128,10 @@ def test_retriever_excludes_sensitive_credentials_and_secrets(temp_env):
         assert not any("service_account" in p for p in paths)
         assert not any("token.json" in p for p in paths)
         assert not any(".pem" in p for p in paths)
+        assert not any("TOKEN_ENC_KEY" in p for p in paths)
+        assert not any(".dev.vars" in p for p in paths)
+        assert not any(".min.js" in p for p in paths)
+        assert not any("engine-core" in p for p in paths)
     finally:
         shutil.rmtree(ws_dir, ignore_errors=True)
 

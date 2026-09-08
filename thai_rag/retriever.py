@@ -29,6 +29,8 @@ SENSITIVE_PATTERNS = [
     re.compile(r"^.*\.(?:pem|key|pfx|p12|pkcs12|keystore)$", re.IGNORECASE),
     re.compile(r"^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$", re.IGNORECASE),
     re.compile(r"^\.env(?:\..*)?$", re.IGNORECASE),
+    re.compile(r"^\.dev\.vars(?:\..*)?$", re.IGNORECASE),
+    re.compile(r"^.*(?:secret|token|credential|password|passwd|private_key|enc_key).*\.(?:txt|json|env|vars|key)$", re.IGNORECASE),
 ]
 
 EXTENSIONLESS_CODE_FILES = {
@@ -39,8 +41,33 @@ def is_sensitive_file(filename: str) -> bool:
     """Return True if filename matches sensitive credentials/tokens/secrets patterns."""
     return any(p.match(filename) for p in SENSITIVE_PATTERNS)
 
+def is_minified_name(filename: str) -> bool:
+    """Return True if filename indicates a minified bundle, source map, or build output."""
+    lower = filename.lower()
+    return (
+        lower.endswith(".min.js") or
+        lower.endswith(".min.mjs") or
+        lower.endswith(".min.cjs") or
+        lower.endswith(".min.css") or
+        lower.endswith(".map") or
+        lower.endswith(".bundle.js")
+    )
+
+def is_minified_content(content: str) -> bool:
+    """Detect minified/bundled code by analyzing line length distributions."""
+    total_bytes = len(content.encode("utf-8", errors="ignore"))
+    if total_bytes > 20_000:
+        lines = content.splitlines()
+        if len(lines) > 0:
+            avg_line_len = total_bytes / len(lines)
+            if avg_line_len > 500:
+                return True
+            if len(lines) < 15 and total_bytes > 30_000:
+                return True
+    return False
+
 CODE_EXTENSIONS = {
-    ".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java",
+    ".py", ".ts", ".js", ".tsx", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
     ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".rb", ".swift",
     ".sql", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1", ".md", ".json", ".yaml", ".yml", ".toml",
     ".txt", ".prompt"
@@ -155,7 +182,7 @@ class HybridRetriever:
             ]
 
             for file in files:
-                if file.startswith(".") or file in EXCLUDED_FILES or is_sensitive_file(file):
+                if file.startswith(".") or file in EXCLUDED_FILES or is_sensitive_file(file) or is_minified_name(file):
                     continue
                 ext = Path(file).suffix.lower()
                 full_file_path = Path(cur_root) / file
@@ -188,6 +215,8 @@ class HybridRetriever:
                 
                 # Read content
                 content = full_path.read_text(encoding="utf-8", errors="ignore")
+                if is_minified_content(content):
+                    continue
                 sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
                 # Check cache

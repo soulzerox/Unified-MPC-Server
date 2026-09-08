@@ -183,7 +183,7 @@ class CodeChunker:
                     # In regex fallback for python, only match top-level to avoid slicing outer functions
                     if leading_spaces == 0:
                         match = py_pattern.match(stripped)
-                elif ext in ("ts", "js", "tsx", "jsx", "mjs"):
+                elif ext in ("ts", "js", "tsx", "jsx", "mjs", "cjs"):
                     if leading_spaces == 0:
                         match = js_pattern.match(stripped) or var_func_pattern.match(stripped)
                     else:

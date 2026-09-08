@@ -241,6 +241,7 @@ class ProgressReporter(BaseProgressReporter):
             summary=f"Completed {indexed} indexed, {skipped} skipped in {duration_s:.1f}s",
         )
         self._send_event(event)
+        time.sleep(0.1)
         self.close()
 
     def notify_error(self, message: str) -> None:
@@ -249,6 +250,7 @@ class ProgressReporter(BaseProgressReporter):
             summary=message,
         )
         self._send_event(event)
+        time.sleep(0.1)
         self.close()
 
     def close(self) -> None:

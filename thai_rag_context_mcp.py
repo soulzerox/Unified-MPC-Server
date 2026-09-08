@@ -4,7 +4,10 @@ import sys
 from thai_rag.server import mcp
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--index":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h"):
+        print("Usage: thai_rag_context_mcp.py [--index <workspace_path>]")
+        sys.exit(0)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--index":
         path = sys.argv[2] if len(sys.argv) > 2 else "."
         from thai_rag.server import get_server
         res = get_server().code_index(workspace_path=path)

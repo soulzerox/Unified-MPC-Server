@@ -61,6 +61,9 @@ class HUDWindow:
         self.accent_green = "#a6e3a1"
         self.accent_orange = "#fab387"
 
+        self.is_closing = False
+        self.last_activity = time.time()
+
         self.init_window()
         self.init_widgets()
         self.init_tray()
@@ -119,16 +122,37 @@ class HUDWindow:
         )
         self.percent_lbl.pack(side="left", padx=8)
 
+        # Header action buttons (Minimize to Tray & Exit)
+        btn_box = tk.Frame(header_frame, bg=self.bg_color)
+        btn_box.pack(side="right")
+
+        # Minimize to System Tray button
+        min_btn = tk.Label(
+            btn_box,
+            text="—",
+            font=("DejaVu Sans", 9, "bold"),
+            fg=self.text_muted,
+            bg=self.bg_color,
+            cursor="hand2",
+            padx=4,
+        )
+        min_btn.pack(side="left")
+        min_btn.bind("<Button-1>", lambda e: self.hide_window())
+        min_btn.bind("<Enter>", lambda e: min_btn.config(fg=self.accent_blue))
+        min_btn.bind("<Leave>", lambda e: min_btn.config(fg=self.text_muted))
+
+        # Close / Exit button
         close_btn = tk.Label(
-            header_frame,
+            btn_box,
             text="✕",
             font=("DejaVu Sans", 10, "bold"),
             fg=self.text_muted,
             bg=self.bg_color,
             cursor="hand2",
+            padx=4,
         )
-        close_btn.pack(side="right")
-        close_btn.bind("<Button-1>", lambda e: self.hide_window())
+        close_btn.pack(side="left")
+        close_btn.bind("<Button-1>", lambda e: self.close_app())
         close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#f38ba8"))
         close_btn.bind("<Leave>", lambda e: close_btn.config(fg=self.text_muted))
 
@@ -186,7 +210,8 @@ class HUDWindow:
 
         def run_tray():
             menu = pystray.Menu(
-                pystray.MenuItem("Toggle HUD", lambda: self.root.after(0, self.toggle_window)),
+                pystray.MenuItem("Show HUD", lambda: self.root.after(0, self.show_window), default=True),
+                pystray.MenuItem("Hide HUD", lambda: self.root.after(0, self.hide_window)),
                 pystray.MenuItem("Exit", lambda: self.root.after(0, self.close_app)),
             )
             img = create_tray_icon_image(0)
@@ -200,6 +225,7 @@ class HUDWindow:
         t.start()
 
     def update_progress(self, percent: float, file_name: str, queue_str: str, eta_str: str):
+        self.last_activity = time.time()
         # Truncate filename if needed
         max_chars = 44
         disp_name = file_name
@@ -255,6 +281,7 @@ class HUDWindow:
         try:
             while True:
                 data = self.event_queue.get_nowait()
+                self.last_activity = time.time()
                 ev_type = data.get("event_type")
 
                 if ev_type == "start":
@@ -273,6 +300,7 @@ class HUDWindow:
                     self.update_progress(pct, fname, q_str, eta)
 
                 elif ev_type == "finish":
+                    self.is_closing = True
                     self.canvas.itemconfig(self.bar_id, fill=self.accent_green)
                     canvas_w = self.canvas.winfo_width() or 360
                     self.canvas.coords(self.bar_id, 0, 0, canvas_w, 8)
@@ -287,26 +315,57 @@ class HUDWindow:
                         except Exception:
                             pass
 
-                    # Auto-dismiss after 2.5 seconds
-                    self.root.after(2500, self.close_app)
+                    # Auto-dismiss after 1.5 seconds and cleanly terminate process
+                    self.root.after(1500, self.close_app)
+
+                elif ev_type == "disconnected":
+                    # Client disconnected: if not already closing, auto dismiss after 1.2 seconds
+                    if not self.is_closing:
+                        self.is_closing = True
+                        self.root.after(1200, self.close_app)
 
                 elif ev_type == "error":
+                    self.is_closing = True
                     self.canvas.itemconfig(self.bar_id, fill="#f38ba8")
                     self.file_lbl.config(text=f"⚠️ {data.get('summary', 'Error')}", fg="#f38ba8")
-                    self.root.after(5000, self.close_app)
+                    self.root.after(3000, self.close_app)
 
         except queue.Empty:
             pass
 
+        # Inactivity watchdog: close if idle for > 45s without activity
+        if not self.is_closing and (time.time() - self.last_activity > 45.0):
+            self.close_app()
+            return
+
         self.root.after(40, self.poll_events)
 
     def close_app(self):
+        if self.is_closing and hasattr(self, "_already_closed"):
+            os._exit(0)
+        self.is_closing = True
+        self._already_closed = True
+
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
             except Exception:
                 pass
-        self.root.destroy()
+        if PROGRESS_SOCK_PATH.exists():
+            try:
+                PROGRESS_SOCK_PATH.unlink()
+            except Exception:
+                pass
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        # Guarantee full process exit so no zombie HUD processes linger
+        os._exit(0)
 
 
 def socket_server_thread(event_queue: queue.Queue):
@@ -340,6 +399,7 @@ def socket_server_thread(event_queue: queue.Queue):
             try:
                 chunk = conn.recv(4096)
                 if not chunk:
+                    event_queue.put({"event_type": "disconnected"})
                     break
                 buffer += chunk.decode("utf-8", errors="ignore")
                 while "\n" in buffer:
@@ -352,6 +412,7 @@ def socket_server_thread(event_queue: queue.Queue):
                         except Exception:
                             pass
             except Exception:
+                event_queue.put({"event_type": "disconnected"})
                 break
         try:
             conn.close()
@@ -431,7 +492,12 @@ def main():
 
     root = tk.Tk()
     app = HUDWindow(root, event_queue)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except Exception:
+        pass
+    finally:
+        app.close_app()
 
 
 if __name__ == "__main__":

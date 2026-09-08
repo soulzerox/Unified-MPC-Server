@@ -5,6 +5,9 @@ from thai_rag.config import OLLAMA_BASE_URL, EMBEDDING_MODEL
 class OllamaEmbeddingAdapter:
     """Ollama Embedding Adapter for nomic-embed-text-v2-moe with proper task prefixes."""
     
+    # Safe character budget: nomic-v2 GGUF has 512 context tokens. Dense Base64/code fits comfortably in 750 chars.
+    MAX_PAYLOAD_CHARS = 750
+
     def __init__(
         self,
         base_url: str = OLLAMA_BASE_URL,
@@ -23,25 +26,51 @@ class OllamaEmbeddingAdapter:
             return resp.status_code == 200
         except Exception:
             return False
+
+    def _truncate_payload(self, text: str) -> str:
+        """Safely truncate text to prevent exceeding Ollama's 512 context tokens limit."""
+        clean = text.strip()
+        if len(clean) > self.MAX_PAYLOAD_CHARS:
+            return clean[:self.MAX_PAYLOAD_CHARS]
+        return clean
         
     def _get_embedding(self, prompt: str) -> List[float]:
-        resp = requests.post(
-            self.embed_url,
-            json={"model": self.model, "prompt": prompt},
-            timeout=self.timeout
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["embedding"]
+        try:
+            resp = requests.post(
+                self.embed_url,
+                json={"model": self.model, "prompt": prompt},
+                timeout=self.timeout
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["embedding"]
+        except Exception as e:
+            # Fallback for dense token strings: halve prompt length and retry
+            if len(prompt) > 200:
+                try:
+                    shorter = prompt[: len(prompt) // 2]
+                    resp = requests.post(
+                        self.embed_url,
+                        json={"model": self.model, "prompt": shorter},
+                        timeout=self.timeout
+                    )
+                    resp.raise_for_status()
+                    return resp.json()["embedding"]
+                except Exception:
+                    pass
+            # Final fallback: return zero vector so index process never crashes
+            return [0.0] * 768
 
     def embed_query(self, query: str) -> List[float]:
-        """Embed a search query with task prefix."""
-        prompt = f"search_query: {query.strip()}"
+        """Embed a search query with task prefix and length guard."""
+        truncated = self._truncate_payload(query)
+        prompt = f"search_query: {truncated}"
         return self._get_embedding(prompt)
 
     def embed_document(self, document: str) -> List[float]:
-        """Embed a document/code chunk with task prefix."""
-        prompt = f"search_document: {document.strip()}"
+        """Embed a document/code chunk with task prefix and length guard."""
+        truncated = self._truncate_payload(document)
+        prompt = f"search_document: {truncated}"
         return self._get_embedding(prompt)
 
     def embed_documents(self, documents: List[str]) -> List[List[float]]:

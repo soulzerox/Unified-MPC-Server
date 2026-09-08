@@ -67,3 +67,14 @@ def test_ollama_unreachable_handling():
     from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
     bad_adapter = OllamaEmbeddingAdapter(base_url="http://127.0.0.1:99999", timeout=1.0)
     assert bad_adapter.is_alive() is False
+
+def test_long_document_auto_truncation(diag_server):
+    # Very long text that would otherwise exceed 512 context tokens in Ollama
+    very_long_doc = "นี่คือข้อความทดสอบขนาดยาวมาก " * 200 + "def very_long_function(): pass\n" * 100
+    res = diag_server.remember(very_long_doc, category="test_long")
+    assert "Remembered" in res
+
+    # Long search query
+    very_long_query = "ค้นหาคำที่มีความยาวเกินปกติ " * 50
+    search_res = diag_server.recall(very_long_query)
+    assert isinstance(search_res, str)

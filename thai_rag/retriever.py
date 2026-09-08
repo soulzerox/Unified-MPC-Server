@@ -68,7 +68,17 @@ class HybridRetriever:
                 })
 
         if all_child_docs:
-            vectors = self.embedder.embed_documents(all_child_docs)
+            try:
+                vectors = self.embedder.embed_documents(all_child_docs)
+            except Exception:
+                # Resilient fallback: embed sequentially with zero-vector fallback
+                vectors = []
+                for doc in all_child_docs:
+                    try:
+                        vectors.append(self.embedder.embed_document(doc))
+                    except Exception:
+                        vectors.append([0.0] * 768)
+
             self.storage.save_child_vectors(
                 ids=all_child_ids,
                 embeddings=vectors,

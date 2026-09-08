@@ -75,3 +75,20 @@ def test_code_rag_tools_lifecycle(test_server):
     ctx_res = server.code_context("auth.py", line_number=3)
     assert "authenticate_user" in ctx_res
     assert "auth.py" in ctx_res
+
+def test_code_index_force_reindex(test_server):
+    server, ws_dir = test_server
+
+    # First index
+    res1 = server.code_index(str(ws_dir))
+    assert "Indexed: `1 files`" in res1
+
+    # Normal reindex skips
+    res2 = server.code_index(str(ws_dir), force=False)
+    assert "Skipped (unchanged): `1 files`" in res2
+
+    # Forced reindex re-indexes all
+    res3 = server.code_index(str(ws_dir), force=True)
+    assert "Indexed: `1 files`" in res3
+    assert "Skipped (unchanged): `0 files`" in res3
+

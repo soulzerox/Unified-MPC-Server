@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Optional
 
 PROGRESS_SOCK_PATH = Path.home() / ".cache" / "thai-rag-mcp" / "progress.sock"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HUD_SCRIPT_PATH = REPO_ROOT / "thai_rag" / "ui" / "hud.py"
 
 
 def format_duration(seconds: float) -> str:
@@ -106,30 +108,47 @@ class ProgressReporter(BaseProgressReporter):
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         hud_disabled = os.environ.get("PROGRESS_HUD", "1").lower() in ("0", "false", "no")
 
-        if not self.sock_path.exists():
-            if self.auto_launch_hud and has_display and not hud_disabled:
-                self._spawn_hud()
-                # Brief pause to let socket initialize
-                time.sleep(0.15)
+        # 1. If socket exists, probe if an active HUD is truly listening
+        if self.sock_path.exists():
+            try:
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                probe.settimeout(0.1)
+                probe.connect(str(self.sock_path))
+                self.sock = probe
+                self._connected = True
+                return True
+            except (ConnectionRefusedError, FileNotFoundError, socket.timeout):
+                # Socket file is stale/dead! Clean it up so a fresh HUD can bind
+                try:
+                    self.sock_path.unlink()
+                except Exception:
+                    pass
 
-        if not self.sock_path.exists():
-            return False
+        # 2. If no active listener and GUI is feasible, spawn HUD
+        if self.auto_launch_hud and has_display and not hud_disabled:
+            self._spawn_hud()
+            # Wait up to 1.5 seconds for socket to become ready
+            for _ in range(30):
+                time.sleep(0.05)
+                if self.sock_path.exists():
+                    try:
+                        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        probe.settimeout(0.1)
+                        probe.connect(str(self.sock_path))
+                        self.sock = probe
+                        self._connected = True
+                        return True
+                    except Exception:
+                        pass
 
-        try:
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.settimeout(0.08)
-            self.sock.connect(str(self.sock_path))
-            self._connected = True
-            return True
-        except Exception:
-            self.sock = None
-            self._connected = False
-            return False
+        return False
 
     def _spawn_hud(self) -> None:
         """Launch background HUD process detached from current terminal/session."""
         try:
-            cmd = [sys.executable, "-m", "thai_rag.ui.hud"]
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(REPO_ROOT)
+            cmd = [sys.executable, str(HUD_SCRIPT_PATH)]
             subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -137,6 +156,8 @@ class ProgressReporter(BaseProgressReporter):
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+                cwd=str(REPO_ROOT),
+                env=env,
             )
         except Exception:
             pass

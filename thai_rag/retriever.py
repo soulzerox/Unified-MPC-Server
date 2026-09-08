@@ -42,7 +42,7 @@ def is_sensitive_file(filename: str) -> bool:
 CODE_EXTENSIONS = {
     ".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java",
     ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".rb", ".swift",
-    ".sql", ".sh", ".bash", ".zsh", ".md", ".json", ".yaml", ".yml", ".toml",
+    ".sql", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1", ".md", ".json", ".yaml", ".yml", ".toml",
     ".txt", ".prompt"
 }
 

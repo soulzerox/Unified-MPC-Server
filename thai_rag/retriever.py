@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import time
 from pathlib import Path
@@ -22,6 +23,21 @@ EXCLUDED_FILES = {
     "poetry.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "flake.lock",
     "LICENSE.txt", "AUTHORS.txt"
 }
+
+SENSITIVE_PATTERNS = [
+    re.compile(r"^(?:client_secret.*|.*credential.*|.*service_account.*|token|tokens)\.json$", re.IGNORECASE),
+    re.compile(r"^.*\.(?:pem|key|pfx|p12|pkcs12|keystore)$", re.IGNORECASE),
+    re.compile(r"^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$", re.IGNORECASE),
+    re.compile(r"^\.env(?:\..*)?$", re.IGNORECASE),
+]
+
+EXTENSIONLESS_CODE_FILES = {
+    "makefile", "dockerfile", "containerfile", "procfile", "gemfile", "vagrantfile", "rakefile"
+}
+
+def is_sensitive_file(filename: str) -> bool:
+    """Return True if filename matches sensitive credentials/tokens/secrets patterns."""
+    return any(p.match(filename) for p in SENSITIVE_PATTERNS)
 
 CODE_EXTENSIONS = {
     ".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java",
@@ -139,10 +155,23 @@ class HybridRetriever:
             ]
 
             for file in files:
-                ext = Path(file).suffix.lower()
-                if ext not in CODE_EXTENSIONS or file.startswith(".") or file in EXCLUDED_FILES:
+                if file.startswith(".") or file in EXCLUDED_FILES or is_sensitive_file(file):
                     continue
-                target_files.append(Path(cur_root) / file)
+                ext = Path(file).suffix.lower()
+                full_file_path = Path(cur_root) / file
+                if ext in CODE_EXTENSIONS:
+                    target_files.append(full_file_path)
+                elif file.lower() in EXTENSIONLESS_CODE_FILES:
+                    target_files.append(full_file_path)
+                elif ext == "":
+                    # Check if file is executable script starting with shebang
+                    try:
+                        with open(full_file_path, "rb") as fp:
+                            first_bytes = fp.read(32)
+                            if first_bytes.startswith(b"#!"):
+                                target_files.append(full_file_path)
+                    except Exception:
+                        pass
 
         total_files = len(target_files)
         if progress_reporter:

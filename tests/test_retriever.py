@@ -96,3 +96,58 @@ def test_retriever_excludes_backup_and_lockfiles(temp_env):
         assert not any("Backup" in p for p in paths)
     finally:
         shutil.rmtree(ws_dir, ignore_errors=True)
+
+
+def test_retriever_excludes_sensitive_credentials_and_secrets(temp_env):
+    retriever, storage = temp_env
+    ws_dir = Path(tempfile.mkdtemp())
+    try:
+        # Create valid file
+        (ws_dir / "app.py").write_text("print('safe')", encoding="utf-8")
+
+        # Create sensitive files
+        (ws_dir / "client_secrets.json").write_text('{"client_id": "secret123"}', encoding="utf-8")
+        (ws_dir / "google_credentials.json").write_text('{"private_key": "pk"}', encoding="utf-8")
+        (ws_dir / "service_account.json").write_text('{"type": "service_account"}', encoding="utf-8")
+        (ws_dir / "token.json").write_text('{"access_token": "xyz"}', encoding="utf-8")
+        (ws_dir / "server.pem").write_text("-----BEGIN RSA PRIVATE KEY-----", encoding="utf-8")
+
+        res = retriever.index_workspace(str(ws_dir))
+        assert res["indexed"] == 1
+
+        cur = storage.sqlite_conn.cursor()
+        rows = cur.execute("SELECT file_path FROM parent_documents").fetchall()
+        paths = [r[0] for r in rows]
+        assert any("app.py" in p for p in paths)
+        assert not any("client_secrets" in p for p in paths)
+        assert not any("credentials" in p for p in paths)
+        assert not any("service_account" in p for p in paths)
+        assert not any("token.json" in p for p in paths)
+        assert not any(".pem" in p for p in paths)
+    finally:
+        shutil.rmtree(ws_dir, ignore_errors=True)
+
+
+def test_retriever_indexes_shebang_scripts_without_extension(temp_env):
+    retriever, storage = temp_env
+    ws_dir = Path(tempfile.mkdtemp())
+    try:
+        # Script without extension starting with #!
+        (ws_dir / "live").write_text("#!/bin/bash\nexec python3 app.py\n", encoding="utf-8")
+        # Standard Makefile
+        (ws_dir / "Makefile").write_text("all:\n\techo build\n", encoding="utf-8")
+        # Binary file without extension (should be skipped)
+        (ws_dir / "binary_blob").write_bytes(b"\x00\x01\x02\x03\x04")
+
+        res = retriever.index_workspace(str(ws_dir))
+        assert res["indexed"] >= 2
+
+        cur = storage.sqlite_conn.cursor()
+        rows = cur.execute("SELECT file_path FROM parent_documents").fetchall()
+        paths = [r[0] for r in rows]
+        assert any("live" in p for p in paths)
+        assert any("Makefile" in p for p in paths)
+        assert not any("binary_blob" in p for p in paths)
+    finally:
+        shutil.rmtree(ws_dir, ignore_errors=True)
+

@@ -82,3 +82,22 @@ def test_fts5_code_symbols_search(temp_storage):
     assert len(matches) > 0
     assert matches[0]["doc_id"] == "p1"
     assert matches[0]["symbol_name"] == "calculate_vat_thailand"
+
+
+def test_search_code_vector_with_path_filter(temp_storage):
+    vec1 = [1.0] + [0.0] * 767
+    vec2 = [0.0, 1.0] + [0.0] * 766
+    temp_storage.save_child_vectors(
+        ids=["c1", "c2"],
+        embeddings=[vec1, vec2],
+        documents=["doc 1", "doc 2"],
+        metadatas=[
+            {"file_path": "webtrans_violentmonkey/src/api.ts", "parent_id": "p1"},
+            {"file_path": "other_project/src/api.ts", "parent_id": "p2"}
+        ]
+    )
+
+    # When querying with path_filter, it MUST NOT raise ValueError and must return only matching file_path
+    results = temp_storage.search_code_vector(vec1, top_k=5, path_filter="webtrans_violentmonkey")
+    assert len(results) == 1
+    assert results[0]["id"] == "c1"

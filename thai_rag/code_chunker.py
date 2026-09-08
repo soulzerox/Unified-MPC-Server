@@ -116,7 +116,12 @@ class CodeChunker:
                 if ext in ("py", ""):
                     match = py_pattern.match(stripped)
                 if not match and ext in ("ts", "js", "tsx", "jsx", "mjs"):
-                    match = js_pattern.match(stripped) or var_func_pattern.match(stripped)
+                    if leading_spaces == 0:
+                        match = js_pattern.match(stripped) or var_func_pattern.match(stripped)
+                    else:
+                        # Inside classes: match class methods, but exclude local closures (const/let/var)
+                        method_pattern = re.compile(r'^(?:(?:public|private|protected|static|async|override)\s+)+([a-zA-Z0-9_]+)\s*\(')
+                        match = js_pattern.match(stripped) or method_pattern.match(stripped)
 
                 if match:
                     indices.append((idx, match.group(1)))

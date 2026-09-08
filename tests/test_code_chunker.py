@@ -65,3 +65,22 @@ export class ApiService {
     parents = chunker.chunk_file("api.ts", ts_code)
     assert len(parents) >= 1
     assert any("ApiService" in p.symbol_name for p in parents)
+
+
+def test_nested_arrow_functions_do_not_split_outer_function():
+    code = """export async function processBatch(items: string[]) {
+  const innerHelper = (x: string) => x.trim();
+  const results = items.map(innerHelper);
+  return results;
+}
+
+export const topLevelArrow = () => {
+  return 123;
+};
+"""
+    chunker = CodeChunker()
+    parents = chunker.chunk_file("batch.ts", code)
+    symbols = [p.symbol_name for p in parents]
+    assert "processBatch" in symbols
+    assert "topLevelArrow" in symbols
+    assert "innerHelper" not in symbols

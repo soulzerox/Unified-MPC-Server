@@ -56,3 +56,43 @@ def test_get_context_around_line(temp_env):
     assert ctx is not None
     assert "calculate_vat_thailand" in ctx["content"]
     assert ctx["start_line"] <= 3 <= ctx["end_line"]
+
+
+def test_retriever_search_with_path_filter(temp_env):
+    retriever, _ = temp_env
+    retriever.index_file("project_a/core.py", "def compute_alpha(): return 42")
+    retriever.index_file("project_b/core.py", "def compute_beta(): return 99")
+
+    res_a = retriever.search("compute", top_k=5, path_filter="project_a")
+    assert all("project_a" in r["file_path"] for r in res_a)
+
+    res_b = retriever.search("compute", top_k=5, path_filter="project_b")
+    assert all("project_b" in r["file_path"] for r in res_b)
+
+
+def test_retriever_excludes_backup_and_lockfiles(temp_env):
+    retriever, storage = temp_env
+    ws_dir = Path(tempfile.mkdtemp())
+    try:
+        # Create normal file
+        (ws_dir / "src").mkdir(parents=True)
+        (ws_dir / "src" / "index.ts").write_text("export const run = () => 1;", encoding="utf-8")
+
+        # Create lockfile
+        (ws_dir / "package-lock.json").write_text('{"name": "test", "lockfileVersion": 3}', encoding="utf-8")
+
+        # Create Backup folder
+        (ws_dir / "Backup").mkdir(parents=True)
+        (ws_dir / "Backup" / "index.ts").write_text("export const run = () => 0;", encoding="utf-8")
+
+        res = retriever.index_workspace(str(ws_dir))
+        assert res["indexed"] == 1
+        
+        cur = storage.sqlite_conn.cursor()
+        rows = cur.execute("SELECT file_path FROM parent_documents").fetchall()
+        paths = [r[0] for r in rows]
+        assert any("index.ts" in p and "Backup" not in p for p in paths)
+        assert not any("package-lock.json" in p for p in paths)
+        assert not any("Backup" in p for p in paths)
+    finally:
+        shutil.rmtree(ws_dir, ignore_errors=True)

@@ -151,24 +151,33 @@ class StorageManager:
         top_k: int = 5,
         path_filter: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        where = None
-        if path_filter:
-            where = {"file_path": {"$contains": path_filter}}
-        
+        col_count = self.code_collection.count()
+        if col_count == 0:
+            return []
+
+        # When filtering by path, fetch a broader candidate pool to avoid false misses
+        fetch_k = min(col_count, max(top_k * 10, 50) if path_filter else top_k)
+
         results = self.code_collection.query(
             query_embeddings=[query_vector],
-            n_results=top_k,
-            where=where
+            n_results=fetch_k
         )
         items = []
         if results and results["ids"] and len(results["ids"][0]) > 0:
             for i in range(len(results["ids"][0])):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                file_path = meta.get("file_path", "")
+                if path_filter and path_filter.lower() not in file_path.lower():
+                    continue
+
                 items.append({
                     "id": results["ids"][0][i],
                     "document": results["documents"][0][i] if results["documents"] else "",
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+                    "metadata": meta,
                     "distance": results["distances"][0][i] if results.get("distances") else 0.0
                 })
+                if len(items) >= top_k:
+                    break
         return items
 
     def search_code_fts(self, query: str, top_k: int = 10, path_filter: Optional[str] = None) -> List[Dict[str, Any]]:

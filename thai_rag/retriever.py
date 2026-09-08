@@ -12,7 +12,14 @@ from thai_rag.progress import BaseProgressReporter, NullProgressReporter
 DEFAULT_EXCLUDES = {
     ".git", ".svn", ".hg", "node_modules", "venv", ".venv", "env",
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "dist", "build", "target", ".idea", ".vscode", "coverage", ".cache"
+    "dist", "build", "target", ".idea", ".vscode", "coverage", ".cache",
+    "backup", "Backup", "backups", "Backups", "bak", "tmp", "temp",
+    "vendor", ".turbo", ".next", ".nuxt", ".output", "out"
+}
+
+EXCLUDED_FILES = {
+    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+    "poetry.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "flake.lock"
 }
 
 CODE_EXTENSIONS = {
@@ -116,18 +123,20 @@ class HybridRetriever:
                 pass
 
         target_files = []
+        lower_excludes = {x.lower() for x in DEFAULT_EXCLUDES}
         for cur_root, dirs, files in os.walk(root):
-            # Prune default excludes and gitignore
+            # Prune default excludes and gitignore (case-insensitive)
             dirs[:] = [
                 d for d in dirs
                 if d not in DEFAULT_EXCLUDES
+                and d.lower() not in lower_excludes
                 and not d.startswith(".")
                 and d not in gitignore_patterns
             ]
 
             for file in files:
                 ext = Path(file).suffix.lower()
-                if ext not in CODE_EXTENSIONS or file.startswith("."):
+                if ext not in CODE_EXTENSIONS or file.startswith(".") or file in EXCLUDED_FILES:
                     continue
                 target_files.append(Path(cur_root) / file)
 

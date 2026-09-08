@@ -171,7 +171,7 @@ class StorageManager:
                 })
         return items
 
-    def search_code_fts(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    def search_code_fts(self, query: str, top_k: int = 10, path_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         clean_query = "".join(c for c in query if c.isalnum() or c in (" ", "_")).strip()
         if not clean_query:
             return []
@@ -184,13 +184,22 @@ class StorageManager:
         with self._lock:
             cur = self.sqlite_conn.cursor()
             try:
-                rows = cur.execute("""
-                    SELECT doc_id, symbol_name, file_path, rank
-                    FROM fts_code_symbols
-                    WHERE fts_code_symbols MATCH ?
-                    ORDER BY rank
-                    LIMIT ?
-                """, (fts_expr, top_k)).fetchall()
+                if path_filter:
+                    rows = cur.execute("""
+                        SELECT doc_id, symbol_name, file_path, rank
+                        FROM fts_code_symbols
+                        WHERE fts_code_symbols MATCH ? AND file_path LIKE ?
+                        ORDER BY rank
+                        LIMIT ?
+                    """, (fts_expr, f"%{path_filter}%", top_k)).fetchall()
+                else:
+                    rows = cur.execute("""
+                        SELECT doc_id, symbol_name, file_path, rank
+                        FROM fts_code_symbols
+                        WHERE fts_code_symbols MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                    """, (fts_expr, top_k)).fetchall()
                 return [dict(r) for r in rows]
             except Exception:
                 return []

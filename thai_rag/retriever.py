@@ -135,8 +135,10 @@ class HybridRetriever:
         if progress_reporter:
             progress_reporter.notify_start(total_files, str(root))
 
+        ws_name = root.name
         for idx, full_path in enumerate(target_files, 1):
             rel_path = str(full_path.relative_to(root))
+            indexed_path = f"{ws_name}/{rel_path}"
 
             try:
                 stat = full_path.stat()
@@ -147,18 +149,18 @@ class HybridRetriever:
                 sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
                 # Check cache
-                cached = self.storage.get_file_hash(rel_path)
+                cached = self.storage.get_file_hash(indexed_path)
                 if not force and cached and cached["sha256"] == sha256:
                     skipped_count += 1
                     if progress_reporter:
-                        progress_reporter.notify_step(rel_path, idx, total_files, skipped=True, chunks=0)
+                        progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
                     continue
 
-                chunks = self.index_file(rel_path, content)
-                self.storage.set_file_hash(rel_path, mtime, sha256)
+                chunks = self.index_file(indexed_path, content)
+                self.storage.set_file_hash(indexed_path, mtime, sha256)
                 indexed_count += 1
                 if progress_reporter:
-                    progress_reporter.notify_step(rel_path, idx, total_files, skipped=False, chunks=chunks)
+                    progress_reporter.notify_step(indexed_path, idx, total_files, skipped=False, chunks=chunks)
             except Exception:
                 # Skip unreadable or erroring files gracefully
                 continue
@@ -186,7 +188,7 @@ class HybridRetriever:
             return []
 
         # 1. Lexical Search (FTS5)
-        fts_matches = self.storage.search_code_fts(clean_query, top_k=top_k * 2)
+        fts_matches = self.storage.search_code_fts(clean_query, top_k=top_k * 2, path_filter=path_filter)
 
         # 2. Vector Search (ChromaDB)
         try:
@@ -221,9 +223,11 @@ class HybridRetriever:
         ranked_parents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
 
         results = []
-        for p_id, score in ranked_parents[:top_k]:
+        for p_id, score in ranked_parents:
             p_doc = parent_map.get(p_id)
             if not p_doc:
+                continue
+            if path_filter and path_filter.lower() not in p_doc["file_path"].lower():
                 continue
 
             results.append({
@@ -235,6 +239,8 @@ class HybridRetriever:
                 "score": round(score, 4),
                 "content": p_doc["content"]
             })
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -246,13 +252,14 @@ class HybridRetriever:
     ) -> Optional[Dict[str, Any]]:
         """Retrieve the enclosing parent document or surrounding lines for a file and line number."""
         cur = self.storage.sqlite_conn.cursor()
-        # Find exact enclosing parent doc
+        # Find exact enclosing parent doc (support exact or suffix match)
         row = cur.execute("""
             SELECT * FROM parent_documents
-            WHERE file_path = ? AND start_line <= ? AND end_line >= ?
+            WHERE (file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
+              AND start_line <= ? AND end_line >= ?
             ORDER BY (end_line - start_line) ASC
             LIMIT 1
-        """, (file_path, line_number, line_number)).fetchone()
+        """, (file_path, f"%/{file_path}", f"%{file_path}%", line_number, line_number)).fetchone()
 
         if row:
             doc = dict(row)
@@ -267,10 +274,10 @@ class HybridRetriever:
         # If not indexed as a parent doc, look up any parent from this file
         fallback = cur.execute("""
             SELECT * FROM parent_documents
-            WHERE file_path = ?
+            WHERE (file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
             ORDER BY ABS(start_line - ?) ASC
             LIMIT 1
-        """, (file_path, line_number)).fetchone()
+        """, (file_path, f"%/{file_path}", f"%{file_path}%", line_number)).fetchone()
 
         if fallback:
             doc = dict(fallback)

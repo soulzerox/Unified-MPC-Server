@@ -14,7 +14,7 @@ DEFAULT_EXCLUDES = {
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     "dist", "build", "target", ".idea", ".vscode", "coverage", ".cache",
     "backup", "Backup", "backups", "Backups", "bak", "tmp", "temp",
-    "vendor", ".turbo", ".next", ".nuxt", ".output", "out"
+    "vendor", ".turbo", ".next", ".nuxt", ".output", "output", "out"
 }
 
 EXCLUDED_FILES = {

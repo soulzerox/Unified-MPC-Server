@@ -1,0 +1,255 @@
+import os
+import hashlib
+import time
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+from thai_rag.storage import StorageManager
+from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
+from thai_rag.code_chunker import CodeChunker, ParentDocument, CodeChunk
+
+# Standard directories and files to ignore
+DEFAULT_EXCLUDES = {
+    ".git", ".svn", ".hg", "node_modules", "venv", ".venv", "env",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "dist", "build", "target", ".idea", ".vscode", "coverage", ".cache"
+}
+
+CODE_EXTENSIONS = {
+    ".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".rb", ".swift",
+    ".sql", ".sh", ".bash", ".zsh", ".md", ".json", ".yaml", ".yml", ".toml"
+}
+
+class HybridRetriever:
+    """Hybrid Retriever combining SQLite FTS5 (BM25) and ChromaDB (Dense Vector) with RRF."""
+
+    def __init__(
+        self,
+        storage: StorageManager,
+        embedder: OllamaEmbeddingAdapter,
+        chunker: CodeChunker
+    ):
+        self.storage = storage
+        self.embedder = embedder
+        self.chunker = chunker
+
+    def index_file(self, file_path: str, content: str):
+        """Index a single file's parents and child vectors."""
+        # Clean previous entries for this file
+        self.storage.delete_file_data(file_path)
+
+        parents = self.chunker.chunk_file(file_path, content)
+        if not parents:
+            return
+
+        all_child_ids = []
+        all_child_docs = []
+        all_child_metas = []
+
+        for p in parents:
+            self.storage.save_parent_doc(
+                doc_id=p.id,
+                file_path=p.file_path,
+                start_line=p.start_line,
+                end_line=p.end_line,
+                content=p.content,
+                symbol_name=p.symbol_name
+            )
+
+            for c in p.child_chunks:
+                all_child_ids.append(c.id)
+                all_child_docs.append(c.content)
+                all_child_metas.append({
+                    "parent_id": c.parent_id,
+                    "file_path": c.file_path,
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "symbol_name": c.symbol_name
+                })
+
+        if all_child_docs:
+            vectors = self.embedder.embed_documents(all_child_docs)
+            self.storage.save_child_vectors(
+                ids=all_child_ids,
+                embeddings=vectors,
+                documents=all_child_docs,
+                metadatas=all_child_metas
+            )
+
+    def index_workspace(self, workspace_path: str = ".", force: bool = False) -> Dict[str, Any]:
+        """Traverse directory, check SHA256 hashes, and incrementally index code files."""
+        root = Path(workspace_path).resolve()
+        if not root.is_dir():
+            raise ValueError(f"Workspace path {workspace_path} is not a directory.")
+
+        start_time = time.time()
+        indexed_count = 0
+        skipped_count = 0
+
+        # Read .gitignore if exists
+        gitignore_patterns = set()
+        gi_file = root / ".gitignore"
+        if gi_file.is_file():
+            try:
+                for line in gi_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    l = line.strip()
+                    if l and not l.startswith("#"):
+                        gitignore_patterns.add(l.rstrip("/"))
+            except Exception:
+                pass
+
+        for cur_root, dirs, files in os.walk(root):
+            # Prune default excludes and gitignore
+            dirs[:] = [
+                d for d in dirs
+                if d not in DEFAULT_EXCLUDES
+                and not d.startswith(".")
+                and d not in gitignore_patterns
+            ]
+
+            for file in files:
+                ext = Path(file).suffix.lower()
+                if ext not in CODE_EXTENSIONS or file.startswith("."):
+                    continue
+
+                full_path = Path(cur_root) / file
+                rel_path = str(full_path.relative_to(root))
+
+                try:
+                    stat = full_path.stat()
+                    mtime = stat.st_mtime
+                    
+                    # Read content
+                    content = full_path.read_text(encoding="utf-8", errors="ignore")
+                    sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+                    # Check cache
+                    cached = self.storage.get_file_hash(rel_path)
+                    if not force and cached and cached["sha256"] == sha256:
+                        skipped_count += 1
+                        continue
+
+                    self.index_file(rel_path, content)
+                    self.storage.set_file_hash(rel_path, mtime, sha256)
+                    indexed_count += 1
+                except Exception as e:
+                    # Skip unreadable or erroring files gracefully
+                    continue
+
+        duration = round(time.time() - start_time, 2)
+        return {
+            "indexed": indexed_count,
+            "skipped": skipped_count,
+            "duration_s": duration,
+            "workspace": str(root)
+        }
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        path_filter: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Hybrid Search: SQLite FTS5 (BM25) + ChromaDB (Dense Vector) with RRF."""
+        clean_query = query.strip()
+        if not clean_query:
+            return []
+
+        # 1. Lexical Search (FTS5)
+        fts_matches = self.storage.search_code_fts(clean_query, top_k=top_k * 2)
+
+        # 2. Vector Search (ChromaDB)
+        try:
+            q_vec = self.embedder.embed_query(clean_query)
+            vec_matches = self.storage.search_code_vector(q_vec, top_k=top_k * 2, path_filter=path_filter)
+        except Exception:
+            vec_matches = []
+
+        # 3. Reciprocal Rank Fusion (RRF)
+        # parent_id -> {"score": float, "source": str}
+        rrf_scores: Dict[str, float] = {}
+        parent_map: Dict[str, Dict[str, Any]] = {}
+
+        k = 60.0  # standard RRF constant
+
+        # Rank FTS results (map doc_id to parent)
+        for rank, item in enumerate(fts_matches):
+            p_id = item["doc_id"]
+            rrf_scores[p_id] = rrf_scores.get(p_id, 0.0) + (1.0 / (k + rank + 1))
+            if p_id not in parent_map:
+                parent_map[p_id] = self.storage.get_parent_doc(p_id)
+
+        # Rank Vector results (map child metadata parent_id to parent)
+        for rank, item in enumerate(vec_matches):
+            meta = item.get("metadata", {})
+            p_id = meta.get("parent_id") or item["id"]
+            rrf_scores[p_id] = rrf_scores.get(p_id, 0.0) + (1.0 / (k + rank + 1))
+            if p_id not in parent_map:
+                parent_map[p_id] = self.storage.get_parent_doc(p_id)
+
+        # Sort by RRF score descending
+        ranked_parents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+
+        results = []
+        for p_id, score in ranked_parents[:top_k]:
+            p_doc = parent_map.get(p_id)
+            if not p_doc:
+                continue
+
+            results.append({
+                "parent_id": p_id,
+                "file_path": p_doc["file_path"],
+                "start_line": p_doc["start_line"],
+                "end_line": p_doc["end_line"],
+                "symbol_name": p_doc.get("symbol_name", ""),
+                "score": round(score, 4),
+                "content": p_doc["content"]
+            })
+
+        return results
+
+    def get_context(
+        self,
+        file_path: str,
+        line_number: int,
+        window_lines: int = 25
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve the enclosing parent document or surrounding lines for a file and line number."""
+        cur = self.storage.sqlite_conn.cursor()
+        # Find exact enclosing parent doc
+        row = cur.execute("""
+            SELECT * FROM parent_documents
+            WHERE file_path = ? AND start_line <= ? AND end_line >= ?
+            ORDER BY (end_line - start_line) ASC
+            LIMIT 1
+        """, (file_path, line_number, line_number)).fetchone()
+
+        if row:
+            doc = dict(row)
+            return {
+                "file_path": doc["file_path"],
+                "start_line": doc["start_line"],
+                "end_line": doc["end_line"],
+                "symbol_name": doc.get("symbol_name", ""),
+                "content": doc["content"]
+            }
+
+        # If not indexed as a parent doc, look up any parent from this file
+        fallback = cur.execute("""
+            SELECT * FROM parent_documents
+            WHERE file_path = ?
+            ORDER BY ABS(start_line - ?) ASC
+            LIMIT 1
+        """, (file_path, line_number)).fetchone()
+
+        if fallback:
+            doc = dict(fallback)
+            return {
+                "file_path": doc["file_path"],
+                "start_line": doc["start_line"],
+                "end_line": doc["end_line"],
+                "symbol_name": doc.get("symbol_name", ""),
+                "content": doc["content"]
+            }
+
+        return None

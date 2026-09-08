@@ -19,13 +19,15 @@ DEFAULT_EXCLUDES = {
 
 EXCLUDED_FILES = {
     "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
-    "poetry.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "flake.lock"
+    "poetry.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "flake.lock",
+    "LICENSE.txt", "AUTHORS.txt"
 }
 
 CODE_EXTENSIONS = {
     ".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java",
     ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".rb", ".swift",
-    ".sql", ".sh", ".bash", ".zsh", ".md", ".json", ".yaml", ".yml", ".toml"
+    ".sql", ".sh", ".bash", ".zsh", ".md", ".json", ".yaml", ".yml", ".toml",
+    ".txt", ".prompt"
 }
 
 class HybridRetriever:
@@ -67,12 +69,14 @@ class HybridRetriever:
             for c in p.child_chunks:
                 all_child_ids.append(c.id)
                 all_child_docs.append(c.content)
+                ws_name = c.file_path.split("/")[0] if "/" in c.file_path else ""
                 all_child_metas.append({
                     "parent_id": c.parent_id,
                     "file_path": c.file_path,
                     "start_line": c.start_line,
                     "end_line": c.end_line,
-                    "symbol_name": c.symbol_name
+                    "symbol_name": c.symbol_name,
+                    "workspace": ws_name
                 })
 
         if all_child_docs:

@@ -1,4 +1,5 @@
 import re
+import ast
 import hashlib
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -60,7 +61,7 @@ class CodeChunker:
         ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
 
         # Find block boundaries based on syntax
-        blocks = self._detect_blocks(lines, ext)
+        blocks = self._detect_blocks(lines, ext, content=content)
         if not blocks:
             # Fallback: treat whole file or coarse chunks as parent
             blocks = [(1, total_lines, Path(file_path).stem if hasattr(Path(file_path), 'stem') else "root")]
@@ -94,12 +95,77 @@ class CodeChunker:
 
         return parent_docs
 
-    def _detect_blocks(self, lines: List[str], ext: str) -> List[tuple]:
-        """Detect class, function, or block headers with line numbers."""
+    def _detect_python_blocks(self, content: str, lines: List[str], max_lines_for_single_class: int = 60) -> Optional[List[tuple]]:
+        """Parse Python code using AST to find accurate top-level and method blocks."""
+        try:
+            tree = ast.parse(content)
+        except Exception:
+            return None
+
+        total_lines = len(lines)
+        if total_lines == 0:
+            return []
+
         blocks = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                start = node.lineno
+                end = getattr(node, "end_lineno", start)
+                blocks.append((start, end, node.name))
+            elif isinstance(node, ast.ClassDef):
+                start = node.lineno
+                end = getattr(node, "end_lineno", start)
+                class_len = end - start + 1
+                if class_len <= max_lines_for_single_class:
+                    # Keep whole small/medium class together for complete context
+                    blocks.append((start, end, node.name))
+                else:
+                    # For large classes, keep class header with __init__ (if present), then separate methods
+                    methods = [sub for sub in node.body if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                    if not methods:
+                        blocks.append((start, end, node.name))
+                    else:
+                        first_method = methods[0]
+                        if first_method.name == "__init__" and len(methods) > 1:
+                            header_end = getattr(first_method, "end_lineno", first_method.lineno)
+                            remaining_methods = methods[1:]
+                        else:
+                            header_end = first_method.lineno - 1
+                            remaining_methods = methods
+
+                        if header_end >= start:
+                            blocks.append((start, header_end, node.name))
+                        for m in remaining_methods:
+                            m_start = m.lineno
+                            m_end = getattr(m, "end_lineno", m_start)
+                            blocks.append((m_start, m_end, f"{node.name}.{m.name}"))
+
+        if not blocks:
+            return None
+
+        # Sort blocks by start_line
+        blocks.sort(key=lambda b: b[0])
+
+        # If there is a substantial module header/preamble before the first block
+        first_start = blocks[0][0]
+        if first_start > 2:
+            blocks.insert(0, (1, first_start - 1, "header"))
+
+        return blocks
+
+    def _detect_blocks(self, lines: List[str], ext: str, content: Optional[str] = None) -> List[tuple]:
+        """Detect class, function, or block headers with line numbers."""
         total = len(lines)
         if total == 0:
             return []
+
+        # If Python, attempt native AST parsing first for exact boundaries
+        if ext in ("py", "") and content:
+            ast_blocks = self._detect_python_blocks(content, lines)
+            if ast_blocks is not None:
+                return ast_blocks
+
+        blocks = []
 
         # Patterns for function/class definitions
         py_pattern = re.compile(r'^(?:async\s+)?(?:def|class)\s+([a-zA-Z0-9_]+)')
@@ -109,13 +175,15 @@ class CodeChunker:
         indices = []
         for idx, line in enumerate(lines):
             stripped = line.strip()
-            # Check indentation: top-level or method level (indent <= 4 spaces)
+            # Check indentation: top-level or method level
             leading_spaces = len(line) - len(line.lstrip(' '))
             if leading_spaces <= 4:
                 match = None
                 if ext in ("py", ""):
-                    match = py_pattern.match(stripped)
-                if not match and ext in ("ts", "js", "tsx", "jsx", "mjs"):
+                    # In regex fallback for python, only match top-level to avoid slicing outer functions
+                    if leading_spaces == 0:
+                        match = py_pattern.match(stripped)
+                elif ext in ("ts", "js", "tsx", "jsx", "mjs"):
                     if leading_spaces == 0:
                         match = js_pattern.match(stripped) or var_func_pattern.match(stripped)
                     else:

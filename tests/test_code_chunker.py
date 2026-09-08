@@ -84,3 +84,59 @@ export const topLevelArrow = () => {
     assert "processBatch" in symbols
     assert "topLevelArrow" in symbols
     assert "innerHelper" not in symbols
+
+
+def test_python_ast_class_chunking_not_truncated():
+    code = """class ShadowWeaver:
+    def __init__(self, llm_client: LLMClient) -> None:
+        self.llm = llm_client
+
+    async def generate_seed(self, chapter: int, outline: str) -> str:
+        return "seed"
+"""
+    chunker = CodeChunker()
+    parents = chunker.chunk_file("shadow_weaver.py", code)
+    sw = [p for p in parents if p.symbol_name == "ShadowWeaver"][0]
+    # The cohesive class must encompass the full class definition and not be truncated to 1 line
+    assert sw.end_line > sw.start_line
+    assert "def __init__" in sw.content
+    assert "generate_seed" in sw.content
+
+
+def test_python_inner_class_in_function_does_not_split_outer_function():
+    code = """def test_emotion_word_check():
+    class MockLLM:
+        pass
+    reviewer = MicroReviewer(MockLLM())
+    assert reviewer is not None
+"""
+    chunker = CodeChunker()
+    parents = chunker.chunk_file("test_craft.py", code)
+    symbols = [p.symbol_name for p in parents]
+    assert "test_emotion_word_check" in symbols
+    assert "MockLLM" not in symbols
+    test_p = [p for p in parents if p.symbol_name == "test_emotion_word_check"][0]
+    assert test_p.start_line == 1
+    assert test_p.end_line >= 5
+    assert "assert reviewer is not None" in test_p.content
+
+
+def test_python_large_class_separates_methods_with_qualname():
+    methods = "\n".join([f"    def method_{i}(self):\n        return {i}\n" * 5 for i in range(8)])
+    code = f"""class BigService:
+    \"\"\"Big service docstring.\"\"\"
+    def __init__(self):
+        self.val = 42
+
+{methods}
+"""
+    chunker = CodeChunker()
+    parents = chunker.chunk_file("service.py", code)
+    symbols = [p.symbol_name for p in parents]
+    assert "BigService" in symbols
+    # Methods must be qualified with BigService.method_*
+    assert any("BigService.method_" in s for s in symbols)
+    # Class header must contain __init__
+    header_p = [p for p in parents if p.symbol_name == "BigService"][0]
+    assert "def __init__" in header_p.content
+

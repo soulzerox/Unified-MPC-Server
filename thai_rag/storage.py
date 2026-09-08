@@ -155,12 +155,22 @@ class StorageManager:
         if col_count == 0:
             return []
 
-        # When filtering by path, fetch a broader candidate pool to avoid false misses
-        fetch_k = min(col_count, max(top_k * 10, 50) if path_filter else top_k)
+        where_filter = None
+        if path_filter:
+            ws_candidate = path_filter.strip().rstrip("/").split("/")[0]
+            try:
+                test_match = self.code_collection.get(where={"workspace": ws_candidate}, limit=1)
+                if test_match and test_match["ids"]:
+                    where_filter = {"workspace": ws_candidate}
+            except Exception:
+                where_filter = None
+
+        fetch_k = top_k if where_filter else min(col_count, max(top_k * 40, 200) if path_filter else top_k)
 
         results = self.code_collection.query(
             query_embeddings=[query_vector],
-            n_results=fetch_k
+            n_results=fetch_k,
+            where=where_filter
         )
         items = []
         if results and results["ids"] and len(results["ids"][0]) > 0:

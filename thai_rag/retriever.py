@@ -50,7 +50,8 @@ def is_minified_name(filename: str) -> bool:
         lower.endswith(".min.cjs") or
         lower.endswith(".min.css") or
         lower.endswith(".map") or
-        lower.endswith(".bundle.js")
+        lower.endswith(".bundle.js") or
+        lower.endswith(".meta.js")
     )
 
 def is_minified_content(content: str) -> bool:
@@ -70,7 +71,8 @@ CODE_EXTENSIONS = {
     ".py", ".ts", ".js", ".tsx", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
     ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".rb", ".swift",
     ".sql", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1", ".md", ".json", ".yaml", ".yml", ".toml",
-    ".txt", ".prompt"
+    ".txt", ".prompt",
+    ".html", ".htm", ".css", ".scss", ".less", ".vue", ".svelte"
 }
 
 class HybridRetriever:

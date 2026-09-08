@@ -159,3 +159,31 @@ def test_retriever_indexes_shebang_scripts_without_extension(temp_env):
     finally:
         shutil.rmtree(ws_dir, ignore_errors=True)
 
+
+def test_retriever_indexes_web_frontend_extensions_and_excludes_meta_js(temp_env):
+    retriever, storage = temp_env
+    ws_dir = Path(tempfile.mkdtemp())
+    try:
+        # Create web frontend files
+        (ws_dir / "index.html").write_text("<!DOCTYPE html><html><body><h1>Title</h1></body></html>", encoding="utf-8")
+        (ws_dir / "style.css").write_text(".container { display: flex; color: #333; }", encoding="utf-8")
+        (ws_dir / "app.vue").write_text("<template><div>Vue</div></template>", encoding="utf-8")
+        (ws_dir / "widget.svelte").write_text("<script>let count = 0;</script>", encoding="utf-8")
+
+        # Create meta.js userscript header (should be excluded)
+        (ws_dir / "script.user.js.meta.js").write_text("// ==UserScript==\n// @version 1.0\n// ==/UserScript==", encoding="utf-8")
+
+        res = retriever.index_workspace(str(ws_dir))
+        assert res["indexed"] == 4
+
+        cur = storage.sqlite_conn.cursor()
+        rows = cur.execute("SELECT file_path FROM parent_documents").fetchall()
+        paths = [r[0] for r in rows]
+        assert any("index.html" in p for p in paths)
+        assert any("style.css" in p for p in paths)
+        assert any("app.vue" in p for p in paths)
+        assert any("widget.svelte" in p for p in paths)
+        assert not any(".meta.js" in p for p in paths)
+    finally:
+        shutil.rmtree(ws_dir, ignore_errors=True)
+

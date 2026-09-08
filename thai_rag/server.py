@@ -13,6 +13,7 @@ from thai_rag.storage import StorageManager
 from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
 from thai_rag.code_chunker import CodeChunker
 from thai_rag.retriever import HybridRetriever
+from thai_rag.progress import ProgressReporter, NullProgressReporter
 
 class LocalContextServer:
     """Core server logic for Local Context & Code RAG."""
@@ -103,7 +104,8 @@ class LocalContextServer:
             return err
 
         try:
-            res = self.retriever.index_workspace(workspace_path, force=force)
+            reporter = ProgressReporter()
+            res = self.retriever.index_workspace(workspace_path, force=force, progress_reporter=reporter)
             return (
                 f"📁 **Code Indexing Completed:**\n"
                 f"- Indexed: `{res['indexed']} files`\n"

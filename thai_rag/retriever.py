@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from thai_rag.storage import StorageManager
 from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
 from thai_rag.code_chunker import CodeChunker, ParentDocument, CodeChunk
+from thai_rag.progress import BaseProgressReporter, NullProgressReporter
 
 # Standard directories and files to ignore
 DEFAULT_EXCLUDES = {
@@ -40,7 +41,7 @@ class HybridRetriever:
 
         parents = self.chunker.chunk_file(file_path, content)
         if not parents:
-            return
+            return 0
 
         all_child_ids = []
         all_child_docs = []
@@ -85,8 +86,14 @@ class HybridRetriever:
                 documents=all_child_docs,
                 metadatas=all_child_metas
             )
+        return len(all_child_docs)
 
-    def index_workspace(self, workspace_path: str = ".", force: bool = False) -> Dict[str, Any]:
+    def index_workspace(
+        self,
+        workspace_path: str = ".",
+        force: bool = False,
+        progress_reporter: Optional[BaseProgressReporter] = None,
+    ) -> Dict[str, Any]:
         """Traverse directory, check SHA256 hashes, and incrementally index code files."""
         root = Path(workspace_path).resolve()
         if not root.is_dir():
@@ -108,6 +115,7 @@ class HybridRetriever:
             except Exception:
                 pass
 
+        target_files = []
         for cur_root, dirs, files in os.walk(root):
             # Prune default excludes and gitignore
             dirs[:] = [
@@ -121,32 +129,44 @@ class HybridRetriever:
                 ext = Path(file).suffix.lower()
                 if ext not in CODE_EXTENSIONS or file.startswith("."):
                     continue
+                target_files.append(Path(cur_root) / file)
 
-                full_path = Path(cur_root) / file
-                rel_path = str(full_path.relative_to(root))
+        total_files = len(target_files)
+        if progress_reporter:
+            progress_reporter.notify_start(total_files, str(root))
 
-                try:
-                    stat = full_path.stat()
-                    mtime = stat.st_mtime
-                    
-                    # Read content
-                    content = full_path.read_text(encoding="utf-8", errors="ignore")
-                    sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        for idx, full_path in enumerate(target_files, 1):
+            rel_path = str(full_path.relative_to(root))
 
-                    # Check cache
-                    cached = self.storage.get_file_hash(rel_path)
-                    if not force and cached and cached["sha256"] == sha256:
-                        skipped_count += 1
-                        continue
+            try:
+                stat = full_path.stat()
+                mtime = stat.st_mtime
+                
+                # Read content
+                content = full_path.read_text(encoding="utf-8", errors="ignore")
+                sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-                    self.index_file(rel_path, content)
-                    self.storage.set_file_hash(rel_path, mtime, sha256)
-                    indexed_count += 1
-                except Exception as e:
-                    # Skip unreadable or erroring files gracefully
+                # Check cache
+                cached = self.storage.get_file_hash(rel_path)
+                if not force and cached and cached["sha256"] == sha256:
+                    skipped_count += 1
+                    if progress_reporter:
+                        progress_reporter.notify_step(rel_path, idx, total_files, skipped=True, chunks=0)
                     continue
 
+                chunks = self.index_file(rel_path, content)
+                self.storage.set_file_hash(rel_path, mtime, sha256)
+                indexed_count += 1
+                if progress_reporter:
+                    progress_reporter.notify_step(rel_path, idx, total_files, skipped=False, chunks=chunks)
+            except Exception:
+                # Skip unreadable or erroring files gracefully
+                continue
+
         duration = round(time.time() - start_time, 2)
+        if progress_reporter:
+            progress_reporter.notify_finish(indexed_count, skipped_count, duration)
+
         return {
             "indexed": indexed_count,
             "skipped": skipped_count,

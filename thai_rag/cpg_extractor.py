@@ -143,8 +143,14 @@ def extract_python_cpg(file_path: str, content: str, workspace: str) -> Tuple[Li
 RE_TS_IMPORT = re.compile(r"""(?:import\s+.*?\s+from\s+['"](.*?)['"]|require\(['"](.*?)['"]\))""")
 RE_TS_CLASS = re.compile(r"""class\s+([A-Za-z0-9_]+)(?:\s+extends\s+([A-Za-z0-9_]+))?""")
 RE_TS_FUNC = re.compile(r"""(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\(""")
-RE_TS_ARROW = re.compile(r"""(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\(""")
-RE_TS_METHOD = re.compile(r"""(?:async\s+)?([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{""")
+# BUG-R7: require '=>' — without it 'const x = someCall(...)' (parenthesized
+# assignment RHS) is misread as an arrow function declaration, leaving
+# current_func = x and poisoning every later call edge's source_symbol.
+RE_TS_ARROW = re.compile(r"""(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{?""")
+# BUG-R7b: allow optional access modifiers + static + async so class methods
+# like 'private save(): void {' still register current_func. Without this the
+# enclosing method context is lost and call edges get misattributed.
+RE_TS_METHOD = re.compile(r"""(?:(?:private|public|protected|static|readonly|override)\s+)?(?:async\s+)?([A-Za-z0-9_]+)\s*\([^)]*\)\s*(?::[^{;]*)?\s*\{""")
 RE_TS_CALL = re.compile(r"""(?:\b([A-Za-z0-9_]+)\s*\(|\.([A-Za-z0-9_]+)\s*\()""")
 
 TS_KEYWORDS_FILTER = {

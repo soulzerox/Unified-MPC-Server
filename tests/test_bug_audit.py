@@ -453,6 +453,39 @@ def test_get_context_normalizes_absolute_path(tmp_path):
             server.close()
 
 
+# --- BUG-R7: TS arrow regex must require '=>' (avoid const x = call( ) false match) ---
+
+
+def test_ts_arrow_regex_rejects_assignment_with_call_rhs():
+    """`const customEndpointUrl = (this.el.querySelector('x'))` is an assignment,
+    not an arrow function — it must not hijack current_func for call edges."""
+    from thai_rag.cpg_extractor import extract_ts_cpg, RE_TS_ARROW
+
+    # precision: regex itself rejects the assignment-with-call form
+    assert not RE_TS_ARROW.search(
+        "const customEndpointUrl = (this.modalElement.querySelector('#wt-custom-endpoint'))"
+    ), "RE_TS_ARROW matched a plain assignment whose RHS is a call"
+
+    # still matches real arrow functions (paren and bare styles)
+    assert RE_TS_ARROW.search("const handler = async (e) => {")
+    assert RE_TS_ARROW.search("const fn = (a, b) => a + b")
+
+    content = (
+        "class Settings {\n"
+        "  private save(): void {\n"
+        "    const customEndpointUrl = (this.el.querySelector('#wt-custom-endpoint')).value;\n"
+        "    const res = testApiKey(customEndpointUrl);\n"
+        "  }\n"
+        "}\n"
+    )
+    symbols, edges = extract_ts_cpg("settings-modal.ts", content, "webtrans_prepaid")
+    call_edges = [e for e in edges if e["target_symbol"] == "testApiKey"]
+    assert call_edges, "expected a testApiKey call edge"
+    # caller must be the real enclosing method, not the assignment variable
+    assert call_edges[0]["source_symbol"] == "Settings.save", call_edges[0]
+    assert "customEndpointUrl" not in {e["source_symbol"] for e in edges}
+
+
 # --- helpers ---
 
 

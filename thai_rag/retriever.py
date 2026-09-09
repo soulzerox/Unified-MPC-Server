@@ -365,14 +365,22 @@ class HybridRetriever:
     ) -> Optional[Dict[str, Any]]:
         """Retrieve the enclosing parent document or surrounding lines for a file and line number."""
         cur = self.storage.sqlite_conn.cursor()
+        # BUG-R6: normalize absolute input to stored '<ws>/<rel>' form so an
+        # absolute path (e.g. /home/qwerty/.../webtrans_prepaid/tsconfig.json)
+        # still matches the rel parent row (webtrans_prepaid/tsconfig.json).
+        candidates = {file_path}
+        rel = self.storage._normalize_abs_to_rel(file_path)
+        if rel and rel != file_path:
+            candidates.add(rel)
+        placeholders = " OR ".join("file_path = ?" for _ in candidates)
         # Find exact enclosing parent doc (support exact or suffix match)
-        row = cur.execute("""
+        row = cur.execute(f"""
             SELECT * FROM parent_documents
-            WHERE (file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
+            WHERE ({placeholders} OR file_path LIKE ? OR file_path LIKE ?)
               AND start_line <= ? AND end_line >= ?
             ORDER BY (end_line - start_line) ASC
             LIMIT 1
-        """, (file_path, f"%/{file_path}", f"%{file_path}%", line_number, line_number)).fetchone()
+        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", line_number, line_number)).fetchone()
 
         if row:
             doc = dict(row)
@@ -385,12 +393,13 @@ class HybridRetriever:
             }
 
         # If not indexed as a parent doc, look up any parent from this file
-        fallback = cur.execute("""
+        # (BUG-R6: same absolute->rel normalization applied here)
+        fallback = cur.execute(f"""
             SELECT * FROM parent_documents
-            WHERE (file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
+            WHERE ({placeholders} OR file_path LIKE ? OR file_path LIKE ?)
             ORDER BY ABS(start_line - ?) ASC
             LIMIT 1
-        """, (file_path, f"%/{file_path}", f"%{file_path}%", line_number)).fetchone()
+        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", line_number)).fetchone()
 
         if fallback:
             doc = dict(fallback)

@@ -419,6 +419,40 @@ def test_index_workspace_logs_errors_instead_of_silent_skip(tmp_path, caplog):
             server.close()
 
 
+# --- BUG-R6: get_context must normalize absolute paths to stored rel form ---
+
+
+def test_get_context_normalizes_absolute_path(tmp_path):
+    """code_context-style lookup with an absolute file path must resolve to the
+    <ws>/<rel> parent doc that index_file stored (BUG-10 class)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = LocalContextServer(
+            sqlite_path=Path(tmpdir) / "t.db",
+            chroma_path=str(Path(tmpdir) / "chroma"),
+        )
+        try:
+            st = server.storage
+            st.save_parent_doc(
+                "p_ctx",
+                "prepaid/tsconfig.json",
+                1, 20,
+                "{\n  \"compilerOptions\": {}\n}",
+                "tsconfig_json",
+            )
+
+            # relative form works (baseline)
+            rel = server.retriever.get_context("prepaid/tsconfig.json", 5)
+            assert rel and rel["file_path"] == "prepaid/tsconfig.json"
+
+            # absolute form must resolve via suffix normalization
+            abs_path = "/home/qwerty/Documents/Src Code/prepaid/tsconfig.json"
+            got = server.retriever.get_context(abs_path, 5)
+            assert got, f"absolute path_filter should resolve, got None: {abs_path}"
+            assert got["file_path"] == "prepaid/tsconfig.json", got
+        finally:
+            server.close()
+
+
 # --- helpers ---
 
 

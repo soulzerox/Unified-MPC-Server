@@ -96,3 +96,21 @@ Validation pipeline (each step must pass before the next):
 7. Smoke + e2e stress scripts (temp-isolated).
 8. Run `normalize_bare_paths.py` on prod DB (backfill), verify counts, spot-check `code_search`/`get_file_symbols`/blast radius on formerly-bare files against prod.
 9. Commit + push; update `implementation_plan.md` STATUS to COMPLETE.
+
+---
+
+# Round-3 Audit (2026-09-09) — Post-fix verification pass
+
+Ran the audit skills cycle (diagnosing-bugs / improve-codebase-architecture / performance / triage / tdd / systematic-debugging) against the post-round-2 codebase + prod DB.
+
+## Findings
+- **R4 (fixed)** — `thai_rag/code_chunker.py` used `Path` on line 67's no-blocks fallback without importing it → latent `NameError`. Unreachable in practice (`_detect_blocks` always returns a non-empty list for non-blank content) but a live crash waiting on a future file type. Fix: added `from pathlib import Path`.
+- **Verified NOT bugs** (empirically ruled out): `'"word"*'` FTS5 prefix form is valid SQLite (throws no error, matches correctly); Thai FTS weakness on code is a documented lexical limit, not a regression; memory FTS newmm tokenization is consistent between write (`tokenize_text_for_fts`) and query (`search_conversation_turns`); zero-vector embed fallback is guarded (`if embedding:`).
+
+## Validation
+- Full suite: **77 passed** (unchanged — R4 is defensive, no behavior delta, no contrived test added).
+- `scripts/smoke_test.py`: all checks pass (Ollama health, remember/recall, code_index, symbol+Thai code_search, code_context).
+- `scripts/e2e_stress_session_test.py`: 128/128 turns ingested, CPG blast radius + pre_edit_context verified.
+
+## Conclusion
+No further actionable defects identified in this pass. R4 committed as hygiene; system stable at 77 tests + smoke + stress green.

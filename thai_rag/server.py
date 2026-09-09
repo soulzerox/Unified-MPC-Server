@@ -56,18 +56,20 @@ class JobProgressReporter(NullProgressReporter):
         self._hud = hud
 
     def notify_start(self, total_files: int, workspace: str) -> None:
-        self._job["total_files"] = total_files
+        with _INDEX_JOBS_LOCK:
+            self._job["total_files"] = total_files
         if self._hud:
             self._hud.notify_start(total_files, workspace)
 
     def notify_step(self, file_name: str, index: int, total: int,
                     skipped: bool = False, chunks: int = 0) -> None:
-        if skipped:
-            self._job["skipped_files"] += 1
-        else:
-            self._job["indexed_files"] += 1
-        if total:
-            self._job["total_files"] = total
+        with _INDEX_JOBS_LOCK:
+            if skipped:
+                self._job["skipped_files"] += 1
+            else:
+                self._job["indexed_files"] += 1
+            if total:
+                self._job["total_files"] = total
         if self._hud:
             self._hud.notify_step(file_name, index, total, skipped=skipped, chunks=chunks)
 
@@ -190,20 +192,23 @@ class LocalContextServer:
                     res = self.retriever.index_workspace(
                         workspace_path, force=force, progress_reporter=bridge
                     )
-                    job["indexed_files"] = res.get("indexed", 0)
-                    job["skipped_files"] = res.get("skipped", 0)
-                    job["result"] = res
-                    job["status"] = "done"
+                    with _INDEX_JOBS_LOCK:
+                        job["indexed_files"] = res.get("indexed", 0)
+                        job["skipped_files"] = res.get("skipped", 0)
+                        job["result"] = res
+                        job["status"] = "done"
                 except Exception as e:
-                    job["status"] = "error"
-                    job["error"] = str(e)
+                    with _INDEX_JOBS_LOCK:
+                        job["status"] = "error"
+                        job["error"] = str(e)
                     try:
                         bridge = JobProgressReporter(job, None)
                         bridge.notify_error(str(e))
                     except Exception:
                         pass
                 finally:
-                    job["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    with _INDEX_JOBS_LOCK:
+                        job["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
             t = threading.Thread(target=_run, daemon=True)
             t.start()
@@ -260,14 +265,15 @@ class LocalContextServer:
         if not query.strip():
             return "Error: Search query cannot be empty."
 
-        err = self._check_ollama()
-        if err:
-            return err
+        # BUG-R1: no hard Ollama gate — retriever.search() already degrades to
+        # FTS-only when embeddings are unavailable. Surface a warning suffix.
+        degraded = not self.embedder.is_alive()
 
         try:
             results = self.retriever.search(query, top_k=top_k, path_filter=path_filter)
             if not results:
-                return f"No code snippets found matching '{query}'."
+                base = f"No code snippets found matching '{query}'."
+                return base + ("  ⚠️ semantic ranking degraded (Ollama unreachable) — FTS5 results only" if degraded else "")
 
             out = [f"### 🔎 Code Matches for '{query}':"]
             for idx, r in enumerate(results, 1):
@@ -278,6 +284,8 @@ class LocalContextServer:
                     f"{r['content']}\n"
                     f"```"
                 )
+            if degraded:
+                out.append("⚠️ semantic ranking degraded (Ollama unreachable) — FTS5 results only")
             return "\n\n".join(out)
         except Exception as e:
             return f"Error searching code: {str(e)}"
@@ -313,11 +321,14 @@ class LocalContextServer:
 
         turn_id = f"turn_{uuid.uuid4().hex[:12]}"
         vector = None
+        embed_failed = False
         if self.embedder.is_alive():
             try:
                 vector = self.embedder.embed_document(f"[{workspace}] {role}: {summary or content}")
             except Exception:
-                pass
+                # BUG-4: turn still saved to SQLite (FTS search works), but Chroma
+                # vector is skipped — surface a warning so silent data loss is visible.
+                embed_failed = True
 
         self.storage.save_conversation_turn(
             turn_id=turn_id,
@@ -328,6 +339,8 @@ class LocalContextServer:
             tags=tags or [],
             embedding=vector
         )
+        if embed_failed:
+            return f"✅ Conversation turn recorded [ID: {turn_id}] ⚠️ (embedded without vector — embedding failed; FTS search still works)"
         return f"✅ Conversation turn recorded [ID: {turn_id}]"
 
     def pre_edit_context(

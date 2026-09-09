@@ -676,24 +676,59 @@ class StorageManager:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    @staticmethod
+    def _canonicalize_index_path(file_path: str, workspace: str = "") -> str:
+        """Enforce canonical '<ws>/<rel>' form for stored index paths.
+
+        Legacy rows may have bare relative paths ('plan.md') — normalizing on
+        write keeps parent_documents / code_symbols / code_edges / file_cache
+        consistent so workspace-scoped lookups work. Tolerant to already-canonical
+        input (never double-prefixes) and to absolute paths (keeps last 2 segments).
+        """
+        if not file_path:
+            return file_path
+        s = file_path.replace("\\", "/")
+        # strip leading slashes and '.' segments
+        parts = [x for x in s.split("/") if x not in ("", ".")]
+        if not parts:
+            return file_path
+        # already has a workspace prefix (>=2 segments) -> leave as-is
+        if len(parts) >= 2:
+            return "/".join(parts)
+        # absolute-ish path with a real directory? keep last 2 segments
+        if "/" in s and len(parts) == 1:
+            return parts[-1]
+        # bare single segment: prepend workspace when provided
+        if workspace and workspace.strip():
+            return f"{workspace.strip().strip('/')}/{parts[0]}"
+        return parts[0]
+
     def get_file_symbols(self, file_path: str, workspace: Optional[str] = None) -> List[Dict[str, Any]]:
         ws = workspace.strip().lower().replace("-", "_").replace(" ", "_") if workspace else None
         with self._lock:
             cur = self.sqlite_conn.cursor()
+            # BUG-R3: match both canonical ('ws/rel') and legacy bare ('rel') rows.
+            canonical = self._canonicalize_index_path(file_path, workspace or "")
+            rel_suffix = f"%/{Path(canonical).name}"
+            orig = file_path.replace("\\", "/")
             if ws:
                 rows = cur.execute(
-                    """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace 
-                       FROM code_symbols 
-                       WHERE (file_path = ? OR file_path LIKE ?) 
-                         AND (instr(REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_'), ?) > 0
-                              OR instr(?, REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_')) > 0) 
+                    """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace
+                       FROM code_symbols
+                       WHERE (file_path = ? OR file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
+                         AND (workspace = ? OR workspace = '' OR workspace IS NULL
+                              OR instr(REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_'), ?) > 0
+                              OR instr(?, REPLACE(REPLACE(lower(workspace), '-', '_'), ' ', '_')) > 0)
                        ORDER BY line_start ASC""",
-                    (file_path, f"%/{Path(file_path).name}", ws, ws)
+                    (canonical, orig, f"%/{canonical}", rel_suffix, ws, ws, ws)
                 ).fetchall()
             else:
                 rows = cur.execute(
-                    "SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace FROM code_symbols WHERE file_path = ? OR file_path LIKE ? ORDER BY line_start ASC",
-                    (file_path, f"%/{Path(file_path).name}")
+                    """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace
+                       FROM code_symbols
+                       WHERE file_path = ? OR file_path = ? OR file_path LIKE ? OR file_path LIKE ?
+                       ORDER BY line_start ASC""",
+                    (canonical, orig, f"%/{canonical}", rel_suffix)
                 ).fetchall()
             return [dict(r) for r in rows]
 

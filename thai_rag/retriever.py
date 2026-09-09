@@ -2,6 +2,7 @@ import os
 import re
 import hashlib
 import time
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from thai_rag.storage import StorageManager
@@ -88,8 +89,10 @@ class HybridRetriever:
         self.embedder = embedder
         self.chunker = chunker
 
-    def index_file(self, file_path: str, content: str):
+    def index_file(self, file_path: str, content: str, workspace: str = ""):
         """Index a single file's parents and child vectors."""
+        # BUG-R2: canonicalize to '<ws>/<rel>' so workspace-scoped lookups work
+        file_path = self.storage._canonicalize_index_path(file_path, workspace or "")
         # Clean previous entries for this file
         self.storage.delete_file_data(file_path)
 
@@ -103,8 +106,12 @@ class HybridRetriever:
             ws_name = file_path.split("/")[0] if "/" in file_path else ""
             symbols, edges = extract_cpg(file_path, content, workspace=ws_name)
             self.storage.save_code_graph(file_path, symbols, edges, workspace=ws_name)
-        except Exception:
-            pass
+        except Exception as exc:
+            # BUG-1: previously swallowed silently — parent_docs still saved, but
+            # CPG (blast radius) went missing with zero trace. Log for diagnosis.
+            logging.getLogger(__name__).warning(
+                "CPG extraction failed for %s: %s", file_path, exc
+            )
 
         all_child_ids = []
         all_child_docs = []
@@ -250,7 +257,7 @@ class HybridRetriever:
                         progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
                     continue
 
-                chunks = self.index_file(indexed_path, content)
+                chunks = self.index_file(indexed_path, content, workspace=ws_name)
                 self.storage.set_file_hash(indexed_path, mtime, sha256)
                 indexed_count += 1
                 if progress_reporter:

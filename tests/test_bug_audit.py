@@ -328,6 +328,97 @@ def test_normalize_bare_paths_idempotent():
             server.close()
 
 
+# --- BUG-R5: search_code_vector path_filter fetch pool too small ---
+
+
+def test_path_filter_vector_search_does_not_deplete_fetch_pool():
+    """Exact-file path_filter must still hit a vector even when the file is NOT
+    among Chroma's nearest top_k — the python-side path filter needs a larger
+    candidate pool than top_k."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = LocalContextServer(
+            sqlite_path=Path(tmpdir) / "t.db",
+            chroma_path=str(Path(tmpdir) / "chroma"),
+        )
+        try:
+            st = server.storage
+            n = 200
+            docs = [f"def func_{i}(): return {i}" for i in range(n)]
+            ids = [f"c_{i}" for i in range(n)]
+            metas = [
+                {
+                    "parent_id": f"p_{i}",
+                    "file_path": f"wsA/module{i}.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "symbol_name": f"func_{i}",
+                    "workspace": "wsA",
+                }
+                for i in range(n)
+            ]
+            # Injected vectors: all docs share dims, so Chroma's nearest-k order
+            # is arbitrary — the target file will not reliably rank in top-5.
+            vectors = [[1.0 + (i % 7) * 0.5] * 8 for i in range(n)]
+            st.save_child_vectors(ids, vectors, docs, metas)
+
+            q = [3.5] * 8
+
+            exact = st.search_code_vector(q, top_k=5, path_filter="wsA/module199.py")
+            assert len(exact) >= 1, (
+                "exact-file path_filter dropped an indexed file: expected >=1 vector hit, got 0"
+            )
+            assert exact[0]["metadata"]["file_path"] == "wsA/module199.py"
+
+            # directory-prefix filter keeps working
+            pref = st.search_code_vector(q, top_k=5, path_filter="wsA/module1")
+            assert all(
+                "wsA/module1" in r["metadata"]["file_path"] for r in pref
+            ), "prefix path_filter leaked non-matching files"
+        finally:
+            server.close()
+
+
+# --- BUG-R5b: index_workspace silently swallows programmer errors as 'skipped' ---
+
+
+def test_index_workspace_logs_errors_instead_of_silent_skip(tmp_path, caplog):
+    """When index_file raises (e.g. a chunker NameError), index_workspace must
+    surface it in logs — a blanket except previously hid real bugs (R4)."""
+    work = tmp_path / "ws"
+    work.mkdir()
+    (work / "good.py").write_text("def add(a, b):\n    return a + b\n")
+    (work / "bad.py").write_text("def boom():\n    return 1\n")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = LocalContextServer(
+            sqlite_path=Path(tmpdir) / "t.db",
+            chroma_path=str(Path(tmpdir) / "chroma"),
+        )
+        try:
+            original = server.chunker.chunk_file
+
+            def _explode(file_path, content):
+                if file_path.endswith("bad.py"):
+                    raise NotImplementedError("synthetic chunker failure")
+                return original(file_path, content)
+
+            server.chunker.chunk_file = _explode
+
+            with caplog.at_level(logging.WARNING, logger="thai_rag.retriever"):
+                res = server.retriever.index_workspace(str(work))
+
+            # one file indexed, one skipped
+            assert res["indexed"] == 1, res
+            assert res["skipped"] == 1, res
+            # failure is visible, not silent
+            assert any(
+                r.message and "bad.py" in r.message and "synthetic" in r.message
+                for r in caplog.records
+            ), "index_workspace hid the chunker failure — no log record"
+        finally:
+            server.close()
+
+
 # --- helpers ---
 
 

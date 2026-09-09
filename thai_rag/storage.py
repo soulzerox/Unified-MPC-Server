@@ -250,7 +250,12 @@ class StorageManager:
             except Exception:
                 where_filter = None
 
-        fetch_k = top_k if where_filter else min(col_count, max(top_k * 40, 200) if path_filter else top_k)
+        # BUG-R5: fetch a generous candidate pool whenever path_filter is set.
+        # With a workspace where_filter the old code fetched only top_k rows,
+        # then the python-side path filter depleted that pool — an exact-file
+        # filter returned zero hits even for indexed files. Always fetch up to
+        # max(top_k*40, 200) so the path filter has candidates to narrow.
+        fetch_k = min(col_count, max(top_k * 40, 200) if path_filter else top_k)
 
         results = self.code_collection.query(
             query_embeddings=[query_vector],

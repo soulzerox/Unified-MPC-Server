@@ -262,9 +262,15 @@ class HybridRetriever:
                 indexed_count += 1
                 if progress_reporter:
                     progress_reporter.notify_step(indexed_path, idx, total_files, skipped=False, chunks=chunks)
-            except Exception:
-                # Skip unreadable or erroring files gracefully (still advance the HUD)
+            except Exception as exc:
+                # BUG-R5b: don't hide programmer errors as silent 'skipped' —
+                # an opaque except here hid a chunker NameError for a long time.
+                # Still skip the file (indexing continues), but surface the cause.
                 skipped_count += 1
+                logging.getLogger(__name__).warning(
+                    "index_file failed for %s: %s: %s",
+                    indexed_path, type(exc).__name__, exc,
+                )
                 if progress_reporter:
                     progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
                 continue

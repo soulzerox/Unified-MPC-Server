@@ -224,8 +224,9 @@ class StorageManager:
             return []
 
         where_filter = None
+        rel_filter = self._normalize_abs_to_rel(path_filter) if path_filter else None
         if path_filter:
-            ws_candidate = path_filter.strip().rstrip("/").split("/")[0]
+            ws_candidate = (rel_filter or path_filter).strip().rstrip("/").split("/")[0]
             try:
                 test_match = self.code_collection.get(where={"workspace": ws_candidate}, limit=1)
                 if test_match and test_match["ids"]:
@@ -245,7 +246,8 @@ class StorageManager:
             for i in range(len(results["ids"][0])):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
                 file_path = meta.get("file_path", "")
-                if path_filter and path_filter.lower() not in file_path.lower():
+                # BUG-10: normalized path filter check here too
+                if rel_filter and rel_filter.lower() not in file_path.lower():
                     continue
 
                 items.append({
@@ -262,23 +264,26 @@ class StorageManager:
         clean_query = "".join(c for c in query if c.isalnum() or c in (" ", "_")).strip()
         if not clean_query:
             return []
-        
+
         words = [w for w in clean_query.split() if len(w) > 1]
         if not words:
             words = [clean_query]
         fts_expr = " OR ".join(f'"{w}"*' for w in words)
 
+        # BUG-10: normalized path_filter — match relative stored paths from absolute inputs
+        rel_filter = self._normalize_abs_to_rel(path_filter) if path_filter else None
+
         with self._lock:
             cur = self.sqlite_conn.cursor()
             try:
-                if path_filter:
+                if rel_filter:
                     rows = cur.execute("""
                         SELECT doc_id, symbol_name, file_path, rank
                         FROM fts_code_symbols
                         WHERE fts_code_symbols MATCH ? AND file_path LIKE ?
                         ORDER BY rank
                         LIMIT ?
-                    """, (fts_expr, f"%{path_filter}%", top_k)).fetchall()
+                    """, (fts_expr, f"%{rel_filter}%", top_k)).fetchall()
                 else:
                     rows = cur.execute("""
                         SELECT doc_id, symbol_name, file_path, rank
@@ -290,6 +295,22 @@ class StorageManager:
                 return [dict(r) for r in rows]
             except Exception:
                 return []
+
+    @staticmethod
+    def _normalize_abs_to_rel(path_filter: Optional[str]) -> Optional[str]:
+        """Best-effort normalize an absolute path_filter to the relative form stored in DB.
+
+        Indexed file_paths look like "<ws_name>/<rel_path>" (e.g. "thai_rag/storage.py").
+        An absolute path from the user (e.g. "/mnt/.../thai_rag/storage.py") won't match a
+        LIKE '%<abs>%'. We fall back to the last 2 segments (ws/rel) or the basename.
+        """
+        if not path_filter:
+            return None
+        s = path_filter.replace("\\", "/")
+        parts = [x for x in s.split("/") if x]
+        if len(parts) >= 2:
+            return "/".join(parts[-2:])
+        return parts[-1] if parts else None
 
     # --- Agent Memory CRUD (Replacing OpenViking) ---
 
@@ -340,27 +361,31 @@ class StorageManager:
         limit: int = 5,
         category: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        where = None
-        if category:
-            where = {"category": category}
-
         if self.memory_collection.count() == 0:
             return []
 
+        # BUG-8: vector `where` on category only matches remember() metadata, silently
+        # dropping turns. Query without the where filter, then filter in Python so both
+        # remember() (metadata["category"]) and remember_turn() (now unified) are matched.
         results = self.memory_collection.query(
             query_embeddings=[query_vector],
-            n_results=limit,
-            where=where
+            n_results=limit * 8
         )
         items = []
         if results and results["ids"] and len(results["ids"][0]) > 0:
             for i in range(len(results["ids"][0])):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                row_category = meta.get("category") or meta.get("tags", "").split(",")[0] or "general"
+                if category and row_category != category:
+                    continue
                 items.append({
                     "id": results["ids"][0][i],
                     "content": results["documents"][0][i] if results["documents"] else "",
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+                    "metadata": meta,
                     "distance": results["distances"][0][i] if results.get("distances") else 0.0
                 })
+                if len(items) >= limit:
+                    break
         return items
 
     # --- Realtime Conversational Memory CRUD ---
@@ -376,7 +401,11 @@ class StorageManager:
         embedding: Optional[List[float]] = None
     ):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        tags_str = ",".join(tags) if tags else ""
+        # BUG-9: guard — accept str or list; never join a string per-character
+        if isinstance(tags, str):
+            tags = [tags]
+        tags = [t for t in (tags or []) if str(t).strip()]
+        tags_str = ",".join(tags)
         fts_content = tokenize_text_for_fts(content)
         fts_summary = tokenize_text_for_fts(summary or "")
         fts_tags = tokenize_text_for_fts(tags_str)
@@ -395,11 +424,25 @@ class StorageManager:
 
         if embedding:
             doc_text = f"[{workspace}] {role}: {summary or content}"
+            # BUG-8b: unify metadata — include category + created_at so recall can
+            # display/ filter turns consistently with remember() memories.
+            category = "general"
+            for t in tags:
+                if t in ("decision", "constraint", "preference", "rule"):
+                    category = t
+                    break
             self.memory_collection.upsert(
                 ids=[turn_id],
                 embeddings=[embedding],
                 documents=[doc_text],
-                metadatas=[{"workspace": workspace, "role": role, "tags": tags_str, "type": "turn"}]
+                metadatas=[{
+                    "workspace": workspace,
+                    "role": role,
+                    "tags": tags_str,
+                    "type": "turn",
+                    "category": category,
+                    "created_at": now,
+                }]
             )
 
     def search_conversation_turns(

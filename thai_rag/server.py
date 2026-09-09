@@ -77,8 +77,9 @@ class LocalContextServer:
             out = [f"### 🧠 Retrieved Memories for '{query}':"]
             for m in matches:
                 meta = m.get("metadata", {})
-                cat = meta.get("category", "general")
-                date = meta.get("created_at", "")[:19]
+                cat = meta.get("category") or "general"
+                date_raw = meta.get("created_at") or meta.get("date") or ""
+                date = str(date_raw)[:19]
                 dist = round(m.get("distance", 0.0), 3)
                 out.append(f"- **[ID: {m['id']}]** (Category: `{cat}`, Date: `{date}`, Dist: `{dist}`):\n  {m['content']}")
 

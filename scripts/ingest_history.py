@@ -56,6 +56,8 @@ def ingest_cline_knowledge_graph(server, kg_path: Path) -> int:
                 for obs in obs_list:
                     turn_id = generate_stable_id("cline_kg", f"{name}:{obs}")
                     tags = [etype, ws, name]
+                    if isinstance(tags, str):
+                        tags = [tags]
 
                     # Save to storage
                     vector = None

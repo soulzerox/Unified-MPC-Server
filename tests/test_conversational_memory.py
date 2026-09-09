@@ -106,3 +106,44 @@ def test_resave_same_turn_id_no_fts_duplicate(temp_env):
     rows = storage.search_conversation_turns("unique marker duplicate")
     assert len([r for r in rows if r["turn_id"] == turn_id]) == 1
 
+
+def test_recall_category_returns_turns(temp_env):
+    """BUG-8 regression: recall(category=...) must return remember_turn turns, not drop them."""
+    storage, retriever, embedder, chunker = temp_env
+    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
+    if not embedder.is_alive():
+        # Skip when Ollama is unavailable (only embeddings need it)
+        server.close()
+        pytest.skip("Ollama not available")
+    server.remember_turn(role="user", content="ตัดสินใจ: ใช้ JWT ไม่ใช่ session", workspace="ws", tags=["decision"])
+    server.remember("ผู้ใช้ชอบธีมสีมืด", category="preference")
+    res = server.recall("ตัดสินใจ JWT", category="decision", limit=5)
+    assert "JWT" in res, f"recall(category=decision) should return the turn, got: {res[:200]}"
+    server.close()
+
+
+def test_turn_tags_stored_as_list_not_perchar(temp_env):
+    """BUG-9 regression: a string tag must be stored as-is, not per-character."""
+    storage, *_ = temp_env
+    storage.save_conversation_turn(turn_id="turn_tags_str", workspace="ws", role="user",
+                                   content="c", summary="s", tags="decision", embedding=None)
+    stored = dict(storage.sqlite_conn.execute(
+        "SELECT tags FROM conversation_turns WHERE turn_id='turn_tags_str'").fetchone())
+    assert stored["tags"] == "decision", f"got per-char tags: {stored['tags']}"
+
+
+def test_recall_turn_shows_date_and_category(temp_env):
+    """BUG-8b regression: turn results carry created_at + category in metadata."""
+    storage, retriever, embedder, chunker = temp_env
+    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
+    if not embedder.is_alive():
+        server.close()
+        pytest.skip("Ollama not available")
+    server.remember_turn(role="assistant", content="สรุป bug fix", workspace="ws", tags=["constraint"], summary="bug")
+    res = server.recall("bug fix", limit=5)
+    assert "Date:" in res
+    assert "Category:" in res
+    # Turn category must be displayed (max shown via metadata), never empty date for a typed turn
+    assert "`constraint`" in res or "Date: `" in res
+    server.close()
+

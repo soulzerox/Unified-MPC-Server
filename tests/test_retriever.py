@@ -233,3 +233,28 @@ def test_incremental_skip_by_mtime():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
+def test_code_search_absolute_path_filter():
+    """BUG-10 regression: absolute path_filter must match relative indexed paths."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        storage = StorageManager(sqlite_path=str(Path(temp_dir) / "t.db"), chroma_path=str(Path(temp_dir) / "ch"))
+        retriever = HybridRetriever(storage=storage, embedder=OllamaEmbeddingAdapter(), chunker=CodeChunker())
+        ws_dir = Path(temp_dir) / "finance"
+        ws_dir.mkdir()
+        f = ws_dir / "calc.py"
+        f.write_text("# คำนวณภาษี\n\ndef calculate_vat_thailand(amount: float) -> float:\n    return amount * 0.07\n", encoding="utf-8")
+        retriever.index_workspace(str(ws_dir))
+
+        # Relative stored path is "finance/calc.py"; search with the full absolute file path
+        rel = storage._normalize_abs_to_rel(str(f))
+        assert rel.endswith("finance/calc.py"), rel
+
+        results = retriever.search("calculate_vat_thailand", top_k=3, path_filter=str(f))
+        assert len(results) > 0, f"absolute path_filter should match, got: {results}"
+        assert any("calc.py" in r["file_path"] for r in results)
+
+        storage.close()
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+

@@ -320,12 +320,14 @@ class HybridRetriever:
         # Sort by RRF score descending
         ranked_parents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
 
+        # BUG-10: use normalized path for the final Python-side filter too
+        rel_filter = self.storage._normalize_abs_to_rel(path_filter) if path_filter else None
         results = []
         for p_id, score in ranked_parents:
             p_doc = parent_map.get(p_id)
             if not p_doc:
                 continue
-            if path_filter and path_filter.lower() not in p_doc["file_path"].lower():
+            if rel_filter and rel_filter.lower() not in p_doc["file_path"].lower():
                 continue
 
             results.append({

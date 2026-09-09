@@ -137,6 +137,13 @@ class LocalContextServer:
         if not query.strip():
             return "Error: Query cannot be empty."
 
+        # BUG-R8: clamp limit — Chroma rejects n_results=0/negative outright,
+        # which leaked a raw library error to the caller. Cap the top end too:
+        # fetch limit*8 candidates, so huge limits balloon the query.
+        if not isinstance(limit, int) or limit < 1:
+            limit = 5
+        limit = min(limit, 50)
+
         err = self._check_ollama()
         if err:
             return err

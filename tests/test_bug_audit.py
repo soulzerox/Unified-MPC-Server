@@ -486,6 +486,40 @@ def test_ts_arrow_regex_rejects_assignment_with_call_rhs():
     assert "customEndpointUrl" not in {e["source_symbol"] for e in edges}
 
 
+# --- BUG-R8: recall limit must be clamped (Chroma rejects 0/negative) ---
+
+
+def test_recall_clamps_invalid_limit(monkeypatch):
+    """recall with limit=0 or a negative int must not leak a raw Chroma error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = LocalContextServer(
+            sqlite_path=Path(tmpdir) / "t.db",
+            chroma_path=str(Path(tmpdir) / "chroma"),
+        )
+        try:
+            # stub embedder so recall reaches the storage query without Ollama
+            class _FakeVector:
+                def is_alive(self):
+                    return True
+
+                def embed_query(self, q):
+                    return [0.0] * 8
+
+            server.embedder = _FakeVector()
+            monkeypatch.setattr(
+                server.storage, "search_memories_vector",
+                lambda qv, limit=5, category=None: [],
+            )
+            res0 = server.recall("anything", limit=0)
+            resneg = server.recall("anything", limit=-3)
+            resstr = server.recall("anything", limit="x")
+            for r in (res0, resneg, resstr):
+                assert "Error recalling" not in r, f"raw error leaked: {r[:100]}"
+                assert "Error" not in r or "No memories" in r
+        finally:
+            server.close()
+
+
 # --- helpers ---
 
 

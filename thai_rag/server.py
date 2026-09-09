@@ -1,7 +1,9 @@
+import threading
+import time
 import uuid
 import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -13,7 +15,76 @@ from thai_rag.storage import StorageManager
 from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
 from thai_rag.code_chunker import CodeChunker
 from thai_rag.retriever import HybridRetriever
-from thai_rag.progress import ProgressReporter, NullProgressReporter
+from thai_rag.progress import BaseProgressReporter, ProgressReporter, NullProgressReporter
+
+# In-memory background index job registry (single MCP process).
+# Jobs do not survive a server restart — re-run code_index (incremental cache makes it cheap).
+_INDEX_JOBS: Dict[str, Dict[str, Any]] = {}
+_INDEX_JOBS_LOCK = threading.Lock()
+
+
+def _new_index_job(workspace_path: str, force: bool) -> Dict[str, Any]:
+    job_id = f"idx_{uuid.uuid4().hex[:8]}"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    job: Dict[str, Any] = {
+        "job_id": job_id,
+        "status": "running",
+        "workspace": workspace_path,
+        "force": force,
+        "indexed_files": 0,
+        "skipped_files": 0,
+        "total_files": 0,
+        "started_at": now,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+    with _INDEX_JOBS_LOCK:
+        _INDEX_JOBS[job_id] = job
+    return job
+
+
+class JobProgressReporter(NullProgressReporter):
+    """Bridge progress callbacks into an in-memory index job record.
+
+    Forwards events to an optional HUD reporter so the floating progress
+    window keeps working during background indexing.
+    """
+
+    def __init__(self, job: Dict[str, Any], hud: Optional[BaseProgressReporter] = None):
+        self._job = job
+        self._hud = hud
+
+    def notify_start(self, total_files: int, workspace: str) -> None:
+        self._job["total_files"] = total_files
+        if self._hud:
+            self._hud.notify_start(total_files, workspace)
+
+    def notify_step(self, file_name: str, index: int, total: int,
+                    skipped: bool = False, chunks: int = 0) -> None:
+        if skipped:
+            self._job["skipped_files"] += 1
+        else:
+            self._job["indexed_files"] += 1
+        if total:
+            self._job["total_files"] = total
+        if self._hud:
+            self._hud.notify_step(file_name, index, total, skipped=skipped, chunks=chunks)
+
+    def notify_finish(self, indexed: int, skipped: int, duration_s: float) -> None:
+        if self._hud:
+            try:
+                self._hud.notify_finish(indexed, skipped, duration_s)
+            except Exception:
+                pass
+
+    def notify_error(self, message: str) -> None:
+        if self._hud:
+            try:
+                self._hud.notify_error(message)
+            except Exception:
+                pass
+
 
 class LocalContextServer:
     """Core server logic for Local Context & Code RAG."""
@@ -99,11 +170,48 @@ class LocalContextServer:
 
     # --- Domain B: Code RAG ---
 
-    def code_index(self, workspace_path: str = ".", force: bool = False) -> str:
-        """Index all source code files in a workspace with SHA256 incremental caching."""
+    def code_index(self, workspace_path: str = ".", force: bool = False, background: bool = False) -> str:
+        """Index all source code files in a workspace with SHA256 incremental caching.
+
+        background=True returns a job_id immediately; poll with index_status().
+        """
         err = self._check_ollama()
         if err:
             return err
+
+        if background:
+            job = _new_index_job(workspace_path, force)
+            job_id = job["job_id"]
+
+            def _run() -> None:
+                try:
+                    hud = ProgressReporter()
+                    bridge = JobProgressReporter(job, hud)
+                    res = self.retriever.index_workspace(
+                        workspace_path, force=force, progress_reporter=bridge
+                    )
+                    job["indexed_files"] = res.get("indexed", 0)
+                    job["skipped_files"] = res.get("skipped", 0)
+                    job["result"] = res
+                    job["status"] = "done"
+                except Exception as e:
+                    job["status"] = "error"
+                    job["error"] = str(e)
+                    try:
+                        bridge = JobProgressReporter(job, None)
+                        bridge.notify_error(str(e))
+                    except Exception:
+                        pass
+                finally:
+                    job["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            return (
+                f"🚀 Indexing started in background [Job: {job_id}]\n"
+                f"- Workspace: `{workspace_path}`\n"
+                f"- Poll with `index_status(\"{job_id}\")`."
+            )
 
         try:
             reporter = ProgressReporter()
@@ -120,6 +228,32 @@ class LocalContextServer:
             return out
         except Exception as e:
             return f"Error indexing workspace: {str(e)}"
+
+    def index_status(self, job_id: str) -> str:
+        """Poll a background code_index job by its job_id."""
+        with _INDEX_JOBS_LOCK:
+            job = _INDEX_JOBS.get(job_id)
+        if not job:
+            return f"⚠️ Warning: Unknown job_id `{job_id}`. Jobs do not survive server restarts — re-run code_index."
+
+        if job["status"] == "running":
+            return (
+                f"⏳ Indexing in progress [{job['job_id']}]\n"
+                f"- Indexed: {job['indexed_files']}/{job['total_files']}\n"
+                f"- Skipped: {job['skipped_files']}\n"
+                f"- Workspace: `{job['workspace']}`"
+            )
+        if job["status"] == "error":
+            return f"❌ Indexing failed [{job['job_id']}]: {job['error']}"
+
+        res = job["result"] or {}
+        return (
+            f"✅ Indexing complete [{job['job_id']}]\n"
+            f"- Indexed: `{res.get('indexed', job['indexed_files'])} files`\n"
+            f"- Skipped: `{res.get('skipped', job['skipped_files'])} files`\n"
+            f"- Duration: `{res.get('duration_s', '?')}s`\n"
+            f"- Workspace: `{job['workspace']}`"
+        )
 
     def code_search(self, query: str, top_k: int = 5, path_filter: Optional[str] = None) -> str:
         """Search code symbols and semantic logic across the indexed codebase."""
@@ -372,9 +506,18 @@ def forget(memory_id: str) -> str:
     return get_server().forget(memory_id)
 
 @mcp.tool()
-def code_index(workspace_path: str = ".", force: bool = False) -> str:
-    """Index all source code files in a workspace with SHA256 incremental caching."""
-    return get_server().code_index(workspace_path, force=force)
+def code_index(workspace_path: str = ".", force: bool = False, background: bool = False) -> str:
+    """Index all source code files in a workspace with SHA256 incremental caching.
+
+    background=True returns a job_id immediately; poll with index_status().
+    """
+    return get_server().code_index(workspace_path, force=force, background=background)
+
+
+@mcp.tool()
+def index_status(job_id: str) -> str:
+    """Poll a background code_index job by its job_id."""
+    return get_server().index_status(job_id)
 
 @mcp.tool()
 def code_search(query: str, top_k: int = 5, path_filter: str = None) -> str:

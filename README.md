@@ -95,9 +95,10 @@ flowchart TD
 | **`code_blast_radius`** | `symbol_name` (str)<br>`workspace` (str, opt)<br>`max_depth` (int, default=2) | วิเคราะห์กราฟ CPG ค้นหาว่ามีฟังก์ชันไหนในไฟล์ใดเรียกใช้สัญลักษณ์นี้บ้าง (Multi-Hop Callers) | 🟡 **เรียกเมื่อวางแผน Refactor หรือลบ/เปลี่ยนชื่อฟังก์ชัน** |
 | **`code_search`** | `query` (str)<br>`top_k` (int, default=5)<br>`path_filter` (str, opt) | ค้นหาโค้ดแบบ Hybrid (BM25 + Semantic Vector) รองรับคำค้นหาภาษาไทย | 🟡 **เรียกก่อน grep เพื่อหาตำแหน่งไฟล์และบรรทัดที่เกี่ยวข้อง** |
 | **`code_context`** | `file_path` (str)<br>`line_number` (int)<br>`window` (int, default=25) | ดึงขอบเขตของฟังก์ชันหรือคลาสทั้งบล็อกตามเลขบรรทัด | 🟡 **เรียกหลังจากได้ตำแหน่งบรรทัดจาก `code_search`** |
-| **`code_index`** | `workspace_path` (str)<br>`force` (bool, default=False) | สแกนและดัชนีโค้ดทั้งโปรเจกต์ด้วย SHA256 cache พร้อมสกัด CPG AST | 🔵 **เรียกเมื่อเปิดโปรเจกต์ใหม่ หรือหลัง git pull ครั้งใหญ่** |
+| **`code_index`** | `workspace_path` (str)<br>`force` (bool, default=False)<br>`background` (bool, default=False) | สแกนและดัชนีโค้ดทั้งโปรเจกต์ด้วย SHA256 cache พร้อมสกัด CPG AST (`background=True` คืน job_id ทันที) | 🔵 **เรียกเมื่อเปิดโปรเจกต์ใหม่ หรือหลัง git pull ครั้งใหญ่ (workspace ใหญ่ใช้ background)** |
+| **`index_status`** | `job_id` (str) | Poll ผล background `code_index` (running/done/error) | 🔵 **เรียก poll หลังสั่ง `code_index(background=True)`** |
 | **`remember`** | `content` (str)<br>`category` (str, default="general") | บันทึกความจำถาวรหรือกฎระยะยาวของโปรเจกต์ | 🟢 **บันทึกกฎถาวร เช่น Architecture Decision Records (ADR)** |
-| **`recall`** | `query` (str)<br>`category` (str, opt)<br>`limit` (int, default=5) | ค้นหาความจำถาวรด้วย Semantic Vector Search | 🟡 **ค้นหาข้อตกลงในอดีตเกี่ยวกับ Preference หรือ Rules** |
+| **`recall`** | `query` (str)<br>`category` (str, opt)<br>`limit` (int, default=5) | ค้นหาความจำถาวรด้วย Semantic Vector Search (turn ที่ไม่มี tag หมวดหมู่จะถูกนับเป็น `general` และผ่านทุก category filter) | 🟡 **ค้นหาข้อตกลงในอดีตเกี่ยวกับ Preference หรือ Rules** |
 | **`forget`** | `memory_id` (str) | ลบความจำถาวรที่ไม่ต้องการ | ⚪ **ใช้เฉพาะเมื่อผู้ใช้สั่งให้ลบอย่างชัดเจนเท่านั้น** |
 
 ---
@@ -136,7 +137,8 @@ flowchart TD
         "code_blast_radius",
         "code_search",
         "code_context",
-        "code_index"
+        "code_index",
+        "index_status"
       ]
     }
   }
@@ -320,6 +322,18 @@ flowchart TD
 ```bash
 /home/qwerty/thai-rag-mcp/venv/bin/python3 /home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py --index "/path/to/project" --force
 ```
+
+### 2b. ดัชนี workspace ใหญ่แบบ Background (ไม่บล็อก Agent)
+เรียกผ่าน MCP tool แทน CLI sync (workspace ใหญ่ embed ผ่าน Ollama นาน ~60s+):
+```
+code_index(workspace_path="/path/to/project", background=True)
+-> 🚀 Indexing started in background [Job: idx_xxxxxxxx] ... Poll with `index_status("idx_xxxxxxxx")`.
+
+index_status(job_id="idx_xxxxxxxx")
+-> ⏳ still running ... / ✅ complete (indexed/skipped/duration) / ❌ failed: <error>
+```
+- Job อยู่ใน memory ของ MCP process เดียว (restart server แล้วหาย — รัน `code_index` ใหม่ได้เพราะ incremental cache)
+- Floating HUD ยังแสดง progress ตามเดิมผ่าน `ProgressReporter`
 
 ### 3. ดูดประวัติแชตย้อนหลังเข้าสู่ Memory (Historical Chat Ingestion)
 ```bash

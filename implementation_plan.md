@@ -1,41 +1,34 @@
 # Implementation Plan
 
 [Overview]
-Test the real-world usability of thai-rag-mcp by embedding the current live Antigravity session transcript into an isolated RAG instance and probing recall/search/pre_edit for remaining bugs.
-The transcript (3494 lines, Thai/English mixed coding dialogue) is an ideal stress case for FTS5 Thai tokenization, vector recall, and CPG indexing. Approach: extract USER_INPUT + PLANNER_RESPONSE turns, ingest via `LocalContextServer.remember_turn` on temp SQLite+Chroma storage (never touching real `~/.cache/thai-rag-mcp`), then run recall, code_search, code_index + blast_radius, and pre_edit_context probes; record every failure as a bug with file/line evidence before fixing anything.
+Fix two follow-ups from the session-embed audit: (A) category filter exact-match hides untagged turns, (B) code_index blocks ~60s on Ollama embeds for large workspaces.
+
 
 [Types]
-No production type changes in this phase (test-only). Test harness data shapes:
-- `SessionTurn { role, content (max 2000 chars), summary (first 150 chars), step_index, created_at }` — from transcript JSONL fields.
-- `EmbedReport { total_turns, ingested_ok, ingest_failures, recall_cases, search_cases, pre_edit_case, bugs_found }` — printed as JSON + summary, not persisted.
+(A) Category mapping: no schema change. Chroma metadata gains derived `category` on every turn via `derive_category_from_tags(tags) -> str`; `search_memories_vector` keeps Python-side filter but treats `general` as wildcard-pass. New type: `KNOWN_CATEGORIES = {"decision","constraint","preference","rule","general"}` (frozenset in `storage.py`).
+(B) Background jobs: new `IndexJob { job_id: str, status: Literal["running","done","error"], workspace, total_files, indexed_files, skipped_files, started_at, finished_at, result: dict|None, error: str|None }` held in module-level `_INDEX_JOBS: dict[str, IndexJob]` in `server.py` (in-memory only, single MCP process). New tool return shapes: `code_index(background: bool) -> str` returns `job_id` immediately when background; `index_status(job_id) -> str` renders progress/result.
 
 [Files]
-New files (under `/home/qwerty/thai-rag-mcp/`):
-- `scripts/embed_session_audit.py` (new, ~180 lines) — standalone audit harness; extract transcript to temp `LocalContextServer`, run ingest + probes, print JSON report. Extends `scripts/e2e_stress_session_test.py::extract_session_dialogue` with bug-hunting probes (category recall, absolute path_filter, empty-query guards, FTS duplicate check).
-- `tests/test_embed_session_audit.py` (new, ~120 lines) — pytest wrapper; vector parts skip if Ollama down, FTS parts always run.
-Existing files: read-only in plan phase (`server.py`, `storage.py`, `retriever.py`, `ollama_adapter.py`, `config.py`, existing e2e scripts). No edits, no deletions, no config changes (temp dirs via `tempfile.TemporaryDirectory`).
+- `/home/qwerty/thai-rag-mcp/thai_rag/storage.py` (modify) — add `KNOWN_CATEGORIES` + `derive_category_from_tags()`; use in `save_conversation_turn` (replace inline loop at lines 429-433); relax `search_memories_vector` filter (lines 379-380) so `general` rows pass any category query.
+- `/home/qwerty/thai-rag-mcp/thai_rag/server.py` (modify) — add `threading`-based `_INDEX_JOBS` registry + `code_index(..., background: bool=False)` branch + `index_status(job_id)` method + `@mcp.tool() index_status`; keep sync path byte-identical.
+- `/home/qwerty/thai-rag-mcp/tests/test_conversational_memory.py` (modify) — add 2 tests for (A).
+- `/home/qwerty/thai-rag-mcp/tests/test_server_e2e.py` (modify, or new `tests/test_background_index.py`) — add 2-3 tests for (B).
+- `/home/qwerty/thai-rag-mcp/README.md` (modify) — document derived-category rule + `code_index background` / `index_status` usage.
 
 [Functions]
-New functions in `scripts/embed_session_audit.py`:
-- `extract_turns(transcript_path, max_chars=2000) -> list` — parse JSONL, keep USER_INPUT + PLANNER_RESPONSE (len>30), truncate, skip malformed lines.
-- `ingest_turns(server, turns, workspace="thai-rag-mcp") -> (ok_count, failures)` — loop `server.remember_turn(...)` with tags `["session-audit","embed-test"]`; measure turns/sec.
-- `probe_recall(server, cases) -> list[dict]` — `server.recall(query, category, limit=5)` for Thai, English, category-filtered (`decision`), and empty query; record hits + expected-keyword presence.
-- `probe_code_search(server, cases) -> list[dict]` — after `index_workspace("thai_rag")`: no filter vs relative (`thai_rag`) vs absolute path; record hits (BUG-10 parity check).
-- `probe_pre_edit(server) -> dict` — `server.pre_edit_context(file_path=<abs storage.py>, workspace="thai-rag-mcp", proposed_symbol="save_conversation_turn")`; record can_proceed, constraints, callers.
-- `main() -> int` — wire everything on temp storage, print JSON report, nonzero on failure.
-Modified/removed functions: none in plan phase (fix candidates noted only: `StorageManager.search_memories_vector`, `server.py::recall`, `retriever.py::search`).
+(A) `derive_category_from_tags(tags: list[str]) -> str` (new, `storage.py`) — normalize each tag (strip+lower); return first hit in `KNOWN_CATEGORIES` minus `general`; else `"general"`. `StorageManager.save_conversation_turn` — replace inline loop with helper. `StorageManager.search_memories_vector` — change filter to `if category and category != "general" and row_category != "general" and row_category != category: continue` (general rows pass; explicit non-general mismatch still excluded).
+(B) `LocalContextServer.code_index(workspace_path, force, background=False)` (modify, `server.py`) — background=True: create job_id `idx_<hex8>`, spawn `threading.Thread(daemon=True)` running `retriever.index_workspace` with `ProgressReporter`, return `🚀 Indexing started in background [Job: ...]`; sync path unchanged. `LocalContextServer.index_status(job_id)` (new) — return `⏳ running (indexed_files/skipped_files so far)` or final result/error string; unknown id → `Warning`. `@mcp.tool() index_status` (new) — thin wrapper. `HybridRetriever.index_file/index_workspace`, `OllamaEmbeddingAdapter` — untouched.
 
 [Classes]
-New/modified/removed classes: none (harness uses functions + existing `LocalContextServer`).
-Classes under test (read-only): `LocalContextServer` (`server.py:18`), `StorageManager` (`storage.py:22`), `HybridRetriever` (`retriever.py:78`), `OllamaEmbeddingAdapter` (`ollama_adapter.py:7`), `CodeChunker` (`code_chunker.py:29`).
+No new/modified/removed classes. Touched: `StorageManager` (`storage.py:22` — 2 methods), `LocalContextServer` (`server.py:18` — 1 modified + 1 new method). `HybridRetriever`, `OllamaEmbeddingAdapter`, `CodeChunker` untouched. `_INDEX_JOBS` is a plain module-level dict of dicts (not a class) guarded by a `threading.Lock`.
 
 [Dependencies]
-No new packages, no version changes (chromadb 1.5.9, mcp 2.2.0, pythainlp 5.3.7, requests, pytest — all in `venv`). Requires `ollama serve` + model `nomic-embed-text-v2-moe:latest` for vector probes; harness must call `embedder.is_alive()` first and skip vector asserts gracefully (earlier `curl /api/tags` timed out in this shell — never hang). No network beyond localhost:11434.
+None — stdlib `threading`+`uuid` only. No new packages, no Ollama/embedding changes (batch `/api/embed` path stays as-is). Thread-safety: `StorageManager` already serializes SQLite via `self._lock`; Chroma writes from the single worker thread; SQLite `check_same_thread=False` already set (`storage.py:36`).
 
 [Testing]
-New: `tests/test_embed_session_audit.py` — 4 tests (`test_ingest_all_turns_succeed`, `test_recall_thai_and_category`, `test_code_search_abs_vs_relative_parity`, `test_pre_edit_returns_constraints_and_callers`) asserting on the temp-server report, never on real cache.
-Existing tests: untouched (`test_conversational_memory.py`, `test_retriever.py`, `test_session_e2e_stress.py`).
-Validation: (1) `venv/bin/python scripts/embed_session_audit.py` → inspect JSON; (2) `pytest tests/test_embed_session_audit.py -q`; (3) gate `pytest tests/ -q` stays green; (4) optional MCP stdio smoke (`initialize` + `tools/list` → 9 tools). Every probe failure logged as BUG-<n> with repro + file:line — fixes out of scope until user approves.
+- (A) `tests/test_conversational_memory.py`: `test_untagged_turn_passes_category_filter` (remember_turn tags=["session-audit"] → recall(category="decision") must include it); `test_explicit_mismatch_still_excluded` (tags=["preference"] must NOT appear under category="decision").
+- (B) new `tests/test_background_index.py` (or extend `test_server_e2e.py`): `test_background_returns_job_id_immediately` (<2s, contains `Job:`); `test_index_status_transitions_to_done` (poll ≤60s → done + counts); `test_index_status_unknown_job` (warning string).
+- Gate: full `pytest tests/ -q` green (baseline 62); MCP stdio smoke lists 10 tools (9 + `index_status`); rerun `scripts/embed_session_audit.py --quick` for regression.
 
 [Implementation Order]
 1. Inspect transcript sample (first 5 + random 5 lines) to confirm USER_INPUT/PLANNER_RESPONSE schema and Thai ratio.

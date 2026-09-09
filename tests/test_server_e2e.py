@@ -116,3 +116,41 @@ def test_remember_turn_and_pre_edit_context_e2e(test_server):
     assert "authenticate_user" in pre_res["constraints"][0]["content"]
     assert "boolean" in pre_res["constraints"][0]["content"]
 
+
+def test_background_index_returns_job_id_immediately(test_server):
+    """(B) background=True must return a job_id string immediately (<2s)."""
+    import time as _time
+
+    server, ws_dir = test_server
+    t0 = _time.time()
+    res = server.code_index(str(ws_dir), background=True)
+    elapsed = _time.time() - t0
+    assert "Job:" in res, f"expected job_id in response, got: {res[:200]}"
+    assert elapsed < 2.0, f"background call must return fast, took {elapsed:.2f}s"
+    job_id = res.split("Job:")[1].split("]")[0].strip()
+    assert job_id.startswith("idx_")
+
+
+def test_index_status_transitions_to_done(test_server):
+    """(B) Poll index_status until the background job reaches done."""
+    import time as _time
+
+    server, ws_dir = test_server
+    res = server.code_index(str(ws_dir), background=True)
+    job_id = res.split("Job:")[1].split("]")[0].strip()
+    final = ""
+    for _ in range(60):
+        final = server.index_status(job_id)
+        if "complete" in final or "failed" in final:
+            break
+        _time.sleep(1.0)
+    assert "complete" in final, f"job should finish, got: {final[:300]}"
+    assert "auth.py" in server.code_search("authenticate_user")
+
+
+def test_index_status_unknown_job(test_server):
+    """(B) Unknown job_id must return a warning, not raise."""
+    server, _ = test_server
+    res = server.index_status("idx_doesnotexist")
+    assert "unknown" in res.lower() or "Warning" in res
+

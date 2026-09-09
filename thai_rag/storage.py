@@ -8,6 +8,22 @@ import chromadb
 from chromadb.config import Settings
 from thai_rag.config import SQLITE_PATH, CHROMA_PATH
 
+KNOWN_CATEGORIES = frozenset({"decision", "constraint", "preference", "rule", "general"})
+
+
+def derive_category_from_tags(tags) -> str:
+    """Derive a memory category from a tag list (case-insensitive).
+
+    Returns the first tag matching a known category (decision/constraint/
+    preference/rule); falls back to "general" when no tag matches so that
+    untagged turns stay discoverable via the relaxed recall filter.
+    """
+    for t in (tags or []):
+        norm = str(t).strip().lower()
+        if norm in KNOWN_CATEGORIES and norm != "general":
+            return norm
+    return "general"
+
 def tokenize_text_for_fts(text: str) -> str:
     """Tokenize Thai and multilingual text with word boundaries for SQLite FTS5."""
     if not text:
@@ -375,9 +391,17 @@ class StorageManager:
         if results and results["ids"] and len(results["ids"][0]) > 0:
             for i in range(len(results["ids"][0])):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                row_category = meta.get("category") or meta.get("tags", "").split(",")[0] or "general"
-                if category and row_category != category:
-                    continue
+                raw_cat = (meta.get("category") or "").strip().lower()
+                row_category = raw_cat if raw_cat else derive_category_from_tags(
+                    (meta.get("tags", "") or "").split(",")
+                )
+                if category:
+                    want = category.strip().lower()
+                    # Relaxed match: rows with a concrete but different category are
+                    # still filtered out, while untagged ("general") rows pass any
+                    # category query so derived-category turns stay discoverable.
+                    if row_category != "general" and row_category != want:
+                        continue
                 items.append({
                     "id": results["ids"][0][i],
                     "content": results["documents"][0][i] if results["documents"] else "",
@@ -425,12 +449,8 @@ class StorageManager:
         if embedding:
             doc_text = f"[{workspace}] {role}: {summary or content}"
             # BUG-8b: unify metadata — include category + created_at so recall can
-            # display/ filter turns consistently with remember() memories.
-            category = "general"
-            for t in tags:
-                if t in ("decision", "constraint", "preference", "rule"):
-                    category = t
-                    break
+            # display/filter turns consistently with remember() memories.
+            category = derive_category_from_tags(tags)
             self.memory_collection.upsert(
                 ids=[turn_id],
                 embeddings=[embedding],

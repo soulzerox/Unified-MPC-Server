@@ -147,3 +147,43 @@ def test_recall_turn_shows_date_and_category(temp_env):
     assert "`constraint`" in res or "Date: `" in res
     server.close()
 
+
+def test_untagged_turn_passes_category_filter(temp_env):
+    """(A) Untagged/general turns must pass any category query (wildcard)."""
+    storage, retriever, embedder, chunker = temp_env
+    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
+    if not embedder.is_alive():
+        server.close()
+        pytest.skip("Ollama not available")
+    server.remember_turn(
+        role="user",
+        content="ตัดสินใจใช้ JWT สำหรับ auth flow ใหม่ทั้งหมด",
+        workspace="ws",
+        tags=["session-audit"],
+        summary="JWT auth decision",
+    )
+    res = server.recall("ตัดสินใจใช้ JWT", category="decision", limit=5)
+    assert "JWT" in res, f"untagged turn should pass category filter, got: {res[:300]}"
+    server.close()
+
+
+def test_explicit_mismatch_still_excluded(temp_env):
+    """(A) A concrete non-matching category must still be filtered out."""
+    storage, retriever, embedder, chunker = temp_env
+    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
+    if not embedder.is_alive():
+        server.close()
+        pytest.skip("Ollama not available")
+    server.remember_turn(
+        role="user",
+        content="ผู้ใช้ชอบธีมสีมืดสำหรับการ coding ตอนกลางคืนมาก",
+        workspace="ws",
+        tags=["preference"],
+        summary="dark theme preference",
+    )
+    res = server.recall("ธีมสีมืด", category="decision", limit=5)
+    # The turn was correctly excluded — verify the query term only appears in the
+    # "No memories found" fallback message, not as actual returned content.
+    assert "dark theme preference" not in res, f"preference turn must not match decision filter, got: {res[:300]}"
+    server.close()
+

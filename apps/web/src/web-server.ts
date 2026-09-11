@@ -69,7 +69,10 @@ export class ControlPlaneServer {
     if (origin) {
       try {
         const parsed = new URL(origin);
-        if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+        if (
+          (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+          (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost')
+        ) {
           res.writeHead(403, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Origin not allowed: loopback only' }));
           return;
@@ -117,7 +120,8 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/policies/sync' && req.method === 'POST') {
-      const body = await readJsonBody(req);
+      const body = await parseRequestBody(req, res);
+      if (body === undefined) return;
       const targets = Array.isArray(body?.targets) ? body.targets : ['all'];
       const result = await this.ideSync.sync(targets);
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
@@ -172,7 +176,8 @@ export class ControlPlaneServer {
 
     // Ingestion Routes
     if (pathname === '/api/skills/install' && req.method === 'POST') {
-      const body = await readJsonBody(req);
+      const body = await parseRequestBody(req, res);
+      if (body === undefined) return;
       const result = await this.installer.installSkill(body);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -180,7 +185,8 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/servers/install' && req.method === 'POST') {
-      const body = await readJsonBody(req);
+      const body = await parseRequestBody(req, res);
+      if (body === undefined) return;
       const result = await this.installer.installServer(body);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -189,7 +195,8 @@ export class ControlPlaneServer {
 
     // Pruning Routes
     if (pathname === '/api/skills/prune' && req.method === 'POST') {
-      const body = await readJsonBody(req);
+      const body = await parseRequestBody(req, res);
+      if (body === undefined) return;
       const result = await this.pruner.pruneSkill(body);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -197,7 +204,8 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/servers/prune' && req.method === 'POST') {
-      const body = await readJsonBody(req);
+      const body = await parseRequestBody(req, res);
+      if (body === undefined) return;
       const result = await this.pruner.pruneServer(body);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -210,18 +218,52 @@ export class ControlPlaneServer {
   }
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<any> {
-  return new Promise((resolve) => {
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MB limit
+
+async function parseRequestBody(req: IncomingMessage, res: ServerResponse): Promise<any | undefined> {
+  try {
+    return await readJsonBody(req);
+  } catch (err: any) {
+    if (err?.message === 'PAYLOAD_TOO_LARGE') {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Payload Too Large: body exceeds 1MB limit' }));
+      return undefined;
+    }
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Bad Request: malformed JSON' }));
+    return undefined;
+  }
+}
+
+async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<any> {
+  return new Promise((resolve, reject) => {
     let raw = '';
-    req.on('data', (chunk) => {
+    let size = 0;
+    let exceeded = false;
+
+    req.on('data', (chunk: Buffer | string) => {
+      if (exceeded) return;
+      size += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+      if (size > maxBytes) {
+        exceeded = true;
+        reject(new Error('PAYLOAD_TOO_LARGE'));
+        return;
+      }
       raw += chunk;
     });
+
     req.on('end', () => {
+      if (exceeded) return;
       try {
         resolve(JSON.parse(raw));
       } catch {
         resolve({});
       }
     });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
   });
 }
+

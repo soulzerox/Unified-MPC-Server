@@ -97,7 +97,7 @@ describe('external replacement recovery evidence', () => {
   });
 
   it('returns the Recovery Trash id when DOCX merge provider fails after backup', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'lnwjud-docx-recovery-'));
+    const root = await mkdtemp(path.join(tmpdir(), 'unified-mpc-docx-recovery-'));
     const primary = path.join(root, 'primary.docx');
     const secondary = path.join(root, 'secondary.docx');
     const target = path.join(root, 'merged.docx');

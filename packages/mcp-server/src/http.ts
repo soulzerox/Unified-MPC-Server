@@ -25,7 +25,7 @@ import { createOriginPolicy, type OriginPolicy } from './origin-policy.js';
 import { APP_NAME, APP_VERSION } from '@unified-mpc/shared';
 
 export const MAX_MCP_HTTP_BODY_BYTES = 1_048_576;
-export const LNWJUD_MCP_IDENTITY_PATH = '/_lnwjud/identity';
+export const UNIFIED_MPC_MCP_IDENTITY_PATH = '/_unified-mpc/identity';
 
 export interface McpHttpServerOptions extends McpServerOptions {
   readonly port: number;
@@ -55,7 +55,7 @@ interface LegacySession {
 }
 
 function writeDiagnostic(error: Error): void {
-  process.stderr.write(`lnwjud MCP HTTP error: ${error.message}\n`);
+  process.stderr.write(`unified-mpc MCP HTTP error: ${error.message}\n`);
 }
 
 function isValidPort(port: number): boolean {
@@ -304,7 +304,7 @@ async function handleRequest(
   maxBodyBytes: number,
 ): Promise<void> {
   const requestedPath = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
-  if (requestedPath !== '/mcp' && requestedPath !== LNWJUD_MCP_IDENTITY_PATH) {
+  if (requestedPath !== '/mcp' && requestedPath !== UNIFIED_MPC_MCP_IDENTITY_PATH) {
     sendStatus(response, 404, 'Not found');
     return;
   }
@@ -323,7 +323,7 @@ async function handleRequest(
     return;
   }
 
-  if (requestedPath === LNWJUD_MCP_IDENTITY_PATH) {
+  if (requestedPath === UNIFIED_MPC_MCP_IDENTITY_PATH) {
     if (fetchRequest.method !== 'GET') {
       sendStatus(response, 405, 'Method not allowed');
       return;
@@ -336,7 +336,7 @@ async function handleRequest(
     }, {
       headers: {
         'cache-control': 'no-store',
-        'x-lnwjud-service': 'desktop-mcp',
+        'x-unified-mpc-service': 'desktop-mcp',
       },
     }));
     return;

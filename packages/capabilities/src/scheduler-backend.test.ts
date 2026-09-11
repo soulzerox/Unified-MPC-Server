@@ -23,7 +23,7 @@ describe('SchedulerCapabilityBackend', () => {
 
     const result = await backend.execute({
       action: 'create',
-      task_name: 'LnwjudTest',
+      task_name: 'UnifiedMpcTest',
       command: 'C:\\Program Files\\app\\tool.exe',
       arguments: ['--flag', 'value with space'],
       schedule: 'DAILY',
@@ -31,9 +31,9 @@ describe('SchedulerCapabilityBackend', () => {
       userConfirmed: true,
     });
 
-    expect(result).toMatchObject({ ok: true, value: { created: true, task_name: 'LnwjudTest' } });
+    expect(result).toMatchObject({ ok: true, value: { created: true, task_name: 'UnifiedMpcTest' } });
     expect(runImpl).toHaveBeenCalledWith('schtasks.exe', [
-      '/Create', '/TN', 'LnwjudTest',
+      '/Create', '/TN', 'UnifiedMpcTest',
       '/TR', '"C:\\Program Files\\app\\tool.exe" --flag "value with space"',
       '/SC', 'DAILY', '/ST', '09:30',
     ]);
@@ -43,13 +43,13 @@ describe('SchedulerCapabilityBackend', () => {
     const runImpl = vi.fn(async (): Promise<{ stdout: string; stderr: string }> => ({ stdout: 'SUCCESS', stderr: '' }));
     const backend = new SchedulerCapabilityBackend({ platform: 'win32', runImpl });
 
-    await expect(backend.execute({ action: 'delete', task_name: 'LnwjudTest' }))
+    await expect(backend.execute({ action: 'delete', task_name: 'UnifiedMpcTest' }))
       .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
     expect(runImpl).not.toHaveBeenCalled();
 
-    await expect(backend.execute({ action: 'delete', task_name: 'LnwjudTest', userConfirmed: true }))
-      .resolves.toMatchObject({ ok: true, value: { deleted: true, task_name: 'LnwjudTest' } });
-    expect(runImpl).toHaveBeenCalledWith('schtasks.exe', ['/Delete', '/TN', 'LnwjudTest', '/F']);
+    await expect(backend.execute({ action: 'delete', task_name: 'UnifiedMpcTest', userConfirmed: true }))
+      .resolves.toMatchObject({ ok: true, value: { deleted: true, task_name: 'UnifiedMpcTest' } });
+    expect(runImpl).toHaveBeenCalledWith('schtasks.exe', ['/Delete', '/TN', 'UnifiedMpcTest', '/F']);
   });
 
   it('accepts trusted Full Bypass authorization without caller confirmation', async () => {
@@ -57,7 +57,7 @@ describe('SchedulerCapabilityBackend', () => {
     const backend = new SchedulerCapabilityBackend({ platform: 'win32', runImpl });
     const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
 
-    await expect(backend.execute({ action: 'delete', task_name: 'LnwjudTest' }, undefined, authorization))
+    await expect(backend.execute({ action: 'delete', task_name: 'UnifiedMpcTest' }, undefined, authorization))
       .resolves.toMatchObject({ ok: true, value: { deleted: true } });
     expect(runImpl).toHaveBeenCalledTimes(1);
   });
@@ -66,8 +66,8 @@ describe('SchedulerCapabilityBackend', () => {
     const runImpl = vi.fn(async (): Promise<{ stdout: string; stderr: string }> => ({ stdout: 'SHOULD NOT RUN', stderr: '' }));
     const backend = new SchedulerCapabilityBackend({ platform: 'win32', runImpl });
 
-    await expect(backend.execute({ action: 'delete', task_name: 'LnwjudTest', dry_run: true }))
-      .resolves.toMatchObject({ ok: true, value: { dry_run: true, action: 'delete', task_name: 'LnwjudTest' } });
+    await expect(backend.execute({ action: 'delete', task_name: 'UnifiedMpcTest', dry_run: true }))
+      .resolves.toMatchObject({ ok: true, value: { dry_run: true, action: 'delete', task_name: 'UnifiedMpcTest' } });
     expect(runImpl).not.toHaveBeenCalled();
   });
 
@@ -75,8 +75,8 @@ describe('SchedulerCapabilityBackend', () => {
     const runImpl = vi.fn(async (): Promise<{ stdout: string; stderr: string }> => ({ stdout: 'SUCCESS', stderr: '' }));
     const backend = new SchedulerCapabilityBackend({ platform: 'win32', runImpl });
     const input = action === 'create'
-      ? { action, task_name: 'LnwjudTest', command: 'tool.exe' }
-      : { action, task_name: 'LnwjudTest' };
+      ? { action, task_name: 'UnifiedMpcTest', command: 'tool.exe' }
+      : { action, task_name: 'UnifiedMpcTest' };
 
     await expect(backend.execute(input))
       .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
@@ -116,7 +116,7 @@ describe('SchedulerCapabilityBackend', () => {
     });
     const backend = new SchedulerCapabilityBackend({ platform: 'win32', runImpl });
 
-    const result = await backend.execute({ action: 'delete', task_name: 'LnwjudTest', userConfirmed: true });
+    const result = await backend.execute({ action: 'delete', task_name: 'UnifiedMpcTest', userConfirmed: true });
 
     expect(result).toMatchObject({
       ok: false,
@@ -134,7 +134,7 @@ describe('SchedulerCapabilityBackend', () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(backend.execute({ action: 'run', task_name: 'LnwjudTest' }, controller.signal))
+    await expect(backend.execute({ action: 'run', task_name: 'UnifiedMpcTest' }, controller.signal))
       .resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
     expect(runImpl).not.toHaveBeenCalled();
   });

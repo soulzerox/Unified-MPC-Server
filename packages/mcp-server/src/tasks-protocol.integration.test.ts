@@ -49,7 +49,7 @@ describe('MCP tasks protocol over localhost HTTP', () => {
 
   it('does not advertise the deprecated core tasks capability to current-protocol clients', async () => {
     const client = new Client(
-      { name: 'lnwjud-modern-tasks-test-client', version: '0.1.0' },
+      { name: 'unified-mpc-modern-tasks-test-client', version: '0.1.0' },
       { versionNegotiation: { mode: { pin: '2026-07-28' } } },
     );
     const transport = new StreamableHTTPClientTransport(handle.endpoint);
@@ -68,7 +68,7 @@ describe('MCP tasks protocol over localhost HTTP', () => {
 
   it('advertises the tasks capability and serves the four task operations to a 2025-era client', async () => {
     const client = new Client(
-      { name: 'lnwjud-tasks-test-client', version: '0.1.0' },
+      { name: 'unified-mpc-tasks-test-client', version: '0.1.0' },
       { versionNegotiation: { mode: 'legacy' } },
     );
     const transport = new StreamableHTTPClientTransport(handle.endpoint);

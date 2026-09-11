@@ -51,6 +51,23 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     expect(gateway.status().state).toBe('SESSION_CONNECTED');
   });
 
+  it('does not resurrect a bridge after a pending start is stopped', async () => {
+    let release: ((url: string) => void) | undefined;
+    const pending = new Promise<string>((resolve) => { release = resolve; });
+    const gateway = new GatewayService({ tunnelProvider: (): Promise<string> => pending });
+
+    const starting = gateway.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(gateway.status().state).toBe('INITIALIZING');
+
+    await gateway.stop();
+    release?.('https://stale.invalid');
+    await starting;
+
+    expect(gateway.status().state).toBe('STOPPED');
+    expect(gateway.status().tunnelUrl).toBeUndefined();
+  });
+
   it('stops cleanly and returns to STOPPED state', async () => {
     const gateway = new GatewayService({ localPort: 18765 });
     await gateway.start();

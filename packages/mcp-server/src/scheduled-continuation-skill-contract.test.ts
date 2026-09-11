@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 describe('scheduled continuation skill contract', () => {
   it('documents one hourly recurring native watchdog through verified terminal cleanup', async () => {
     const skill = await readFile(
-      path.resolve(import.meta.dirname, '../../../.agents/skills/lnwjud-scheduled-continuation/SKILL.md'),
+      path.resolve(import.meta.dirname, '../../../.agents/skills/unified-mpc-scheduled-continuation/SKILL.md'),
       'utf8',
     );
 
@@ -24,7 +24,7 @@ describe('scheduled continuation skill contract', () => {
     expect(skill).toContain('historical `occurrence=once` compatibility paths only');
     expect(skill).toContain('Never create a recurring watchdog while a confirmed live one-time watchdog');
 
-    expect(skill).toContain('`claim_scheduled_continuation` must be the **first connected lnwjud action');
+    expect(skill).toContain('`claim_scheduled_continuation` must be the **first connected unified-mpc action');
     expect(skill).toContain('`recurring_acquired`');
     expect(skill).toContain('`worker_busy_noop`');
     expect(skill).toContain('`orphan_probe_noop`');
@@ -68,8 +68,8 @@ describe('scheduled continuation skill contract', () => {
     expect(skill).toContain('completionState=completed');
     expect(skill).toContain('get_goal` confirms a terminal status');
 
-    expect(skill).toContain('lnwjud `scheduler`');
-    expect(skill).toContain('Windows Task Scheduler');
+    expect(skill).toContain('unified-mpc `scheduler`');
+    expect(skill).toContain('unified-mpc `scheduler`');
     expect(skill).toContain('cron');
     expect(skill).toContain('browser/DOM automation');
     expect(skill).not.toMatch(/Automations(?:\.|:)/i);

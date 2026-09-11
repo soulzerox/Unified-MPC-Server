@@ -2,78 +2,78 @@ export const APP_NAME = 'Unified-MPC-Server';
 export const APP_VERSION = '1.0.0';
 
 export const ipcChannels = {
-  listWorkspaces: 'lnwjud:list-workspaces',
-  addWorkspace: 'lnwjud:add-workspace',
-  selectWorkspace: 'lnwjud:select-workspace',
-  setWorkspaceActive: 'lnwjud:set-workspace-active',
-  setWorkspaceArchived: 'lnwjud:set-workspace-archived',
-  deleteWorkspace: 'lnwjud:delete-workspace',
-  getDashboard: 'lnwjud:get-dashboard',
-  setPermissionProfile: 'lnwjud:set-permission-profile',
-  setUnrestrictedMode: 'lnwjud:set-unrestricted-mode',
-  setAiDeletePolicy: 'lnwjud:set-ai-delete-policy',
-  setStdioPolicy: 'lnwjud:set-stdio-policy',
-  createBackup: 'lnwjud:create-backup',
-  scheduleRestoreBackup: 'lnwjud:schedule-restore-backup',
-  restoreRecoveryItem: 'lnwjud:restore-recovery-item',
-  restoreCheckpoint: 'lnwjud:restore-checkpoint',
-  listProcesses: 'lnwjud:list-processes',
-  startProcess: 'lnwjud:start-process',
-  stopProcess: 'lnwjud:stop-process',
-  startMcp: 'lnwjud:start-mcp',
-  stopMcp: 'lnwjud:stop-mcp',
-  restartMcp: 'lnwjud:restart-mcp',
-  clearWorkLog: 'lnwjud:clear-work-log',
-  saveTunnelApiKey: 'lnwjud:save-tunnel-api-key',
-  startTunnel: 'lnwjud:start-tunnel',
-  stopTunnel: 'lnwjud:stop-tunnel',
-  getTunnelStatus: 'lnwjud:get-tunnel-status',
-  beginTunnelOAuthLogin: 'lnwjud:begin-tunnel-oauth-login',
-  getTunnelOAuthLoginStatus: 'lnwjud:get-tunnel-oauth-login-status',
-  cancelTunnelOAuthLogin: 'lnwjud:cancel-tunnel-oauth-login',
-  switchTunnelAuthToLegacy: 'lnwjud:switch-tunnel-auth-to-legacy',
-  logoutTunnelOAuth: 'lnwjud:logout-tunnel-oauth',
-  getRemoteMcpStatus: 'lnwjud:get-remote-mcp-status',
-  installRemoteMcpProvider: 'lnwjud:install-remote-mcp-provider',
-  saveRemoteMcpAuthtoken: 'lnwjud:save-remote-mcp-authtoken',
-  startRemoteMcp: 'lnwjud:start-remote-mcp',
-  stopRemoteMcp: 'lnwjud:stop-remote-mcp',
-  regenerateRemoteMcpPairingCode: 'lnwjud:regenerate-remote-mcp-pairing-code',
-  setTunnelClientPath: 'lnwjud:set-tunnel-client-path',
-  setLocale: 'lnwjud:set-locale',
-  setUserSettings: 'lnwjud:set-user-settings',
-  getPonytailPolicyContext: 'lnwjud:get-ponytail-policy-context',
-  setWorkspacePonytailMode: 'lnwjud:set-workspace-ponytail-mode',
-  setGoalPonytailMode: 'lnwjud:set-goal-ponytail-mode',
-  chooseTunnelClientPath: 'lnwjud:choose-tunnel-client-path',
-  configureTunnelProfile: 'lnwjud:configure-tunnel-profile',
-  openExternalSetupPage: 'lnwjud:open-external-setup-page',
-  launchManagedBrowser: 'lnwjud:launch-managed-browser',
-  installPdfProvider: 'lnwjud:install-pdf-provider',
-  runDoctor: 'lnwjud:run-doctor',
-  getToolCatalog: 'lnwjud:get-tool-catalog',
-  recheckToolCatalog: 'lnwjud:recheck-tool-catalog',
-  setToolAvailability: 'lnwjud:set-tool-availability',
-  resetToolAvailability: 'lnwjud:reset-tool-availability',
-  openToolSetupTarget: 'lnwjud:open-tool-setup-target',
-  copyToolCommand: 'lnwjud:copy-tool-command',
-  getLogSnapshot: 'lnwjud:get-log-snapshot',
-  clearLogBuffer: 'lnwjud:clear-log-buffer',
-  resolveActivityTargetDetail: 'lnwjud:resolve-activity-target-detail',
-  searchActivityTargetDetails: 'lnwjud:search-activity-target-details',
-  exportLogs: 'lnwjud:export-logs',
-  exportWorkLog: 'lnwjud:export-work-log',
-  captureIncident: 'lnwjud:capture-incident',
-  openLogViewer: 'lnwjud:open-log-viewer',
-  getUpdateStatus: 'lnwjud:get-update-status',
-  checkForUpdates: 'lnwjud:check-for-updates',
-  installUpdate: 'lnwjud:install-update',
-  getGitDiff: 'lnwjud:get-git-diff',
+  listWorkspaces: 'unified-mpc:list-workspaces',
+  addWorkspace: 'unified-mpc:add-workspace',
+  selectWorkspace: 'unified-mpc:select-workspace',
+  setWorkspaceActive: 'unified-mpc:set-workspace-active',
+  setWorkspaceArchived: 'unified-mpc:set-workspace-archived',
+  deleteWorkspace: 'unified-mpc:delete-workspace',
+  getDashboard: 'unified-mpc:get-dashboard',
+  setPermissionProfile: 'unified-mpc:set-permission-profile',
+  setUnrestrictedMode: 'unified-mpc:set-unrestricted-mode',
+  setAiDeletePolicy: 'unified-mpc:set-ai-delete-policy',
+  setStdioPolicy: 'unified-mpc:set-stdio-policy',
+  createBackup: 'unified-mpc:create-backup',
+  scheduleRestoreBackup: 'unified-mpc:schedule-restore-backup',
+  restoreRecoveryItem: 'unified-mpc:restore-recovery-item',
+  restoreCheckpoint: 'unified-mpc:restore-checkpoint',
+  listProcesses: 'unified-mpc:list-processes',
+  startProcess: 'unified-mpc:start-process',
+  stopProcess: 'unified-mpc:stop-process',
+  startMcp: 'unified-mpc:start-mcp',
+  stopMcp: 'unified-mpc:stop-mcp',
+  restartMcp: 'unified-mpc:restart-mcp',
+  clearWorkLog: 'unified-mpc:clear-work-log',
+  saveTunnelApiKey: 'unified-mpc:save-tunnel-api-key',
+  startTunnel: 'unified-mpc:start-tunnel',
+  stopTunnel: 'unified-mpc:stop-tunnel',
+  getTunnelStatus: 'unified-mpc:get-tunnel-status',
+  beginTunnelOAuthLogin: 'unified-mpc:begin-tunnel-oauth-login',
+  getTunnelOAuthLoginStatus: 'unified-mpc:get-tunnel-oauth-login-status',
+  cancelTunnelOAuthLogin: 'unified-mpc:cancel-tunnel-oauth-login',
+  switchTunnelAuthToLegacy: 'unified-mpc:switch-tunnel-auth-to-legacy',
+  logoutTunnelOAuth: 'unified-mpc:logout-tunnel-oauth',
+  getRemoteMcpStatus: 'unified-mpc:get-remote-mcp-status',
+  installRemoteMcpProvider: 'unified-mpc:install-remote-mcp-provider',
+  saveRemoteMcpAuthtoken: 'unified-mpc:save-remote-mcp-authtoken',
+  startRemoteMcp: 'unified-mpc:start-remote-mcp',
+  stopRemoteMcp: 'unified-mpc:stop-remote-mcp',
+  regenerateRemoteMcpPairingCode: 'unified-mpc:regenerate-remote-mcp-pairing-code',
+  setTunnelClientPath: 'unified-mpc:set-tunnel-client-path',
+  setLocale: 'unified-mpc:set-locale',
+  setUserSettings: 'unified-mpc:set-user-settings',
+  getPonytailPolicyContext: 'unified-mpc:get-ponytail-policy-context',
+  setWorkspacePonytailMode: 'unified-mpc:set-workspace-ponytail-mode',
+  setGoalPonytailMode: 'unified-mpc:set-goal-ponytail-mode',
+  chooseTunnelClientPath: 'unified-mpc:choose-tunnel-client-path',
+  configureTunnelProfile: 'unified-mpc:configure-tunnel-profile',
+  openExternalSetupPage: 'unified-mpc:open-external-setup-page',
+  launchManagedBrowser: 'unified-mpc:launch-managed-browser',
+  installPdfProvider: 'unified-mpc:install-pdf-provider',
+  runDoctor: 'unified-mpc:run-doctor',
+  getToolCatalog: 'unified-mpc:get-tool-catalog',
+  recheckToolCatalog: 'unified-mpc:recheck-tool-catalog',
+  setToolAvailability: 'unified-mpc:set-tool-availability',
+  resetToolAvailability: 'unified-mpc:reset-tool-availability',
+  openToolSetupTarget: 'unified-mpc:open-tool-setup-target',
+  copyToolCommand: 'unified-mpc:copy-tool-command',
+  getLogSnapshot: 'unified-mpc:get-log-snapshot',
+  clearLogBuffer: 'unified-mpc:clear-log-buffer',
+  resolveActivityTargetDetail: 'unified-mpc:resolve-activity-target-detail',
+  searchActivityTargetDetails: 'unified-mpc:search-activity-target-details',
+  exportLogs: 'unified-mpc:export-logs',
+  exportWorkLog: 'unified-mpc:export-work-log',
+  captureIncident: 'unified-mpc:capture-incident',
+  openLogViewer: 'unified-mpc:open-log-viewer',
+  getUpdateStatus: 'unified-mpc:get-update-status',
+  checkForUpdates: 'unified-mpc:check-for-updates',
+  installUpdate: 'unified-mpc:install-update',
+  getGitDiff: 'unified-mpc:get-git-diff',
 } as const;
 
 export const pushChannels = {
-  logEvent: 'lnwjud:event:log',
-  updateStatus: 'lnwjud:event:update-status',
+  logEvent: 'unified-mpc:event:log',
+  updateStatus: 'unified-mpc:event:update-status',
 } as const;
 
 export type IpcChannel = typeof ipcChannels[keyof typeof ipcChannels];
@@ -118,7 +118,7 @@ export interface PonytailPolicyContext {
   readonly activeGoals: readonly PonytailGoalPolicySummary[];
 }
 
-export type ToolOrigin = 'lnwjud' | 'external_mcp';
+export type ToolOrigin = 'unified-mpc' | 'external_mcp';
 export type ToolCategory =
   | 'workspace'
   | 'files'
@@ -272,9 +272,9 @@ export interface ExtraMcpServerSettings {
 
 export interface UserSettings {
   readonly customPermission: CustomPermissionSettings;
-  /** Full profile only. Explicitly bypasses lnwjud application authorization on Desktop HTTP/Secure Tunnel. */
+  /** Full profile only. Explicitly bypasses unified-mpc application authorization on Desktop HTTP/Secure Tunnel. */
   readonly desktopFullBypassAll: boolean;
-  /** Full profile only. Explicitly bypasses lnwjud application authorization for direct STDIO. */
+  /** Full profile only. Explicitly bypasses unified-mpc application authorization for direct STDIO. */
   readonly stdioFullBypassAll: boolean;
   readonly mcpCallTimeoutMs: number;
   readonly mcpIdleTimeoutMs: number;
@@ -1089,7 +1089,7 @@ export interface IpcResponseMap {
   readonly [ipcChannels.getGitDiff]: GetGitDiffResponse;
 }
 
-export interface LnwjudApi {
+export interface UnifiedMpcApi {
   listWorkspaces(): Promise<IpcResponseMap[typeof ipcChannels.listWorkspaces]>;
   addWorkspace(request: AddWorkspaceRequest): Promise<IpcResponseMap[typeof ipcChannels.addWorkspace]>;
   selectWorkspace(request: SelectWorkspaceRequest): Promise<IpcResponseMap[typeof ipcChannels.selectWorkspace]>;

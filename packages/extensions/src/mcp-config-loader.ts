@@ -174,7 +174,7 @@ export function exclusionReason(name: string, config: McpServerLaunchConfig): st
   if (lowered === 'constructor' || lowered === '__proto__' || lowered === 'prototype') {
     return 'MCP server name is invalid: reserved keyword';
   }
-  if (lowered === 'unified-mpc' || lowered.startsWith('unified-mpc-') || lowered === 'unified-mpc-server' || lowered === 'lnwjud' || lowered.startsWith('lnwjud-')) {
+  if (lowered === 'unified-mpc' || lowered.startsWith('unified-mpc-') || lowered === 'unified-mpc-server') {
     return 'Refusing to aggregate unified-mpc itself';
   }
   const command = path.basename(config.command).toLowerCase();
@@ -183,11 +183,11 @@ export function exclusionReason(name: string, config: McpServerLaunchConfig): st
   if (
     command === 'unified-mpc' ||
     command.includes('unified-mpc') ||
-    command.includes('lnwjud') ||
+    command.includes('unified-mpc') ||
     rawCommand.includes('unified-mpc') ||
-    rawCommand.includes('lnwjud') ||
+    rawCommand.includes('unified-mpc') ||
     args.includes('unified-mpc') ||
-    args.includes('lnwjud') ||
+    args.includes('unified-mpc') ||
     args.includes('mcp-stdio.js')
   ) {
     return 'Refusing to aggregate unified-mpc itself';

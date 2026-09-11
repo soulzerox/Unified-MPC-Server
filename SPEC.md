@@ -64,7 +64,7 @@ The repository adheres to a modular monorepo layout powered by pnpm workspaces:
 Unified-MPC-Server/
 ├── apps/
 │   ├── cli/                  # Native CLI entrypoint (bin: unified-mpc)
-│   ├── web/                  # Local Web Control Plane (Fastify + Obsidian Telemetry SPA)
+│   ├── web/                  # Local Web Control Plane (native node:http + modular Obsidian Telemetry SPA)
 │   └── cf-gateway/           # Decoupled Cloudflare Tunnel + ChatGPT Remote Bridge
 ├── packages/
 │   ├── extensions/           # Downstream Multiplexer, Dynamic Ingestion, Pruner, IDE Sync
@@ -327,12 +327,13 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
    - Full monorepo `corepack pnpm test` and root `npx vitest run tests/` pass 100%.
 9. **Interactive Reactive Web Control Plane SPA (Option 1 — TDD)**:
-   - Built zero-dependency vanilla JS reactivity engine in `apps/web/src/dashboard-html.ts` matching Obsidian dark token styling.
-   - Wired live client-side telemetry polling (`/api/status`, `/api/chatgpt-gateway/status`), policy synchronization (`POST /api/policies/sync`), modal forms for bifurcated skill installation (`POST /api/skills/install`) and server installation (`POST /api/servers/install`), and client-side gated "Connect ChatGPT Web" button.
-   - Developed under strict TDD: created test suite `apps/web/src/dashboard-html.test.ts` asserting DOM scripts, endpoints, modals, and gating logic (5/5 tests passing).
-   - Package verification: all 3 test files in `@unified-mpc/web` passed 100% (23/23 tests).
+   - Kept zero-dependency vanilla HTML/TypeScript UI, with `apps/web/src/dashboard-html.ts` composing `ui/tokens.ts`, `ui/views.ts`, and `ui/client-script.ts`.
+   - Wired live telemetry and management routes: `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, `/api/chatgpt-gateway/status`, policy sync, bifurcated install/prune, and gated `GET /api/chatgpt-web/connect`.
+   - Server pruning now accepts only server-issued opaque `serverId` ownership proof; raw PID input is rejected.
+   - `ControlPlaneServer` uses native `node:http`, validates loopback `Host`/`Origin`, requires Origin on mutations, caps bodies at 1 MiB, and converts async route failures to `500` without killing the process.
+   - Detailed file-level audit record: `docs/AUDIT_REMEDIATION.md`.
 10. **Residual `lnwjud` Purge & Unified-MPC Skill Modernization (Option 2 — TDD)**:
-   - Created `.agents/skills/unified-mpc-scheduled-continuation/SKILL.md` targeting pure Linux POSIX `gh run watch` and Unified-MPC runtime rules, keeping `.agents/skills/lnwjud-scheduled-continuation/` as a backward-compatible alias.
+   - Created `.agents/skills/unified-mpc-scheduled-continuation/SKILL.md` targeting pure Linux POSIX `gh run watch` and Unified-MPC runtime rules, with no legacy alias.
    - Cleaned `AGENTS.md` removing residual Windows PowerShell examples, enforcing POSIX native commands, updating skill pointers, and replacing `lnwjud approval gates` with `unified-mpc approval gates`.
    - Updated `packages/mcp-server/src/server.ts` instructions to reference unified-mpc tools and modern skill contracts.
    - Modernized `.env.example` to use `UNIFIED_MPC_*` environment variables and Linux POSIX paths (`~/.local/share/unified-mpc`).

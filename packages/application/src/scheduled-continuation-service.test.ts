@@ -34,7 +34,7 @@ async function fixture(
   isoNow = '2026-08-27T10:00:00.000Z',
   workerLiveness?: ScheduledContinuationWorkerLivenessPort,
 ): Promise<ScheduledContinuationFixture> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-scheduled-application-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-scheduled-application-'));
   temporaryRoots.push(root);
   const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
   const workspaces = new SqliteWorkspaceRepository(database);

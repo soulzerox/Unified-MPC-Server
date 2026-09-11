@@ -12,7 +12,7 @@ function createServices(workspaceProfile?: unknown, skillMatchFailure = false): 
   const services = {
     file: {
       async readFile(_actor: unknown, _workspaceId: string, request: { readonly path: string }) {
-        if (request.path === '.lnwjud/project-profile.json') {
+        if (request.path === '.unified-mpc/project-profile.json') {
           if (workspaceProfile === undefined) return err(appError('FILE_NOT_FOUND', 'missing profile'));
           return ok({ path: request.path, content: JSON.stringify(workspaceProfile), startLine: 1, endLine: 1 });
         }

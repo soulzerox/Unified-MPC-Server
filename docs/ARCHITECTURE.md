@@ -67,7 +67,7 @@ The monorepo contains 21 focused packages and applications:
 | Category | Path | Package | Responsibility |
 |---|---|---|---|
 | **Applications** | `apps/cli` | `@unified-mpc/cli` | Standalone native CLI binary (`unified-mpc`) |
-| | `apps/web` | `@unified-mpc/web` | Local Web Control Plane SPA & Fastify/HTTP server |
+| | `apps/web` | `@unified-mpc/web` | Local Web Control Plane SPA & native `node:http` server |
 | | `apps/cf-gateway` | `@unified-mpc/cf-gateway` | Decoupled Cloudflare Tunnel & ChatGPT Web companion |
 | **Extensions & Ingestion** | `packages/extensions` | `@unified-mpc/extensions` | Multi-client discovery, bifurcated installer, zero-artifact pruner, IDE policy sync |
 | **MCP & Runtime** | `packages/mcp-server` | `@unified-mpc/mcp-server` | Core MCP server, two-tier catalog, security policies, Ponytail runtime |

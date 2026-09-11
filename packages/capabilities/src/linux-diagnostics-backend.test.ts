@@ -7,17 +7,17 @@ describe('LinuxDiagnosticsCapabilityBackend', () => {
     const backend = new LinuxDiagnosticsCapabilityBackend({
       runImpl: async (executable: string, args: readonly string[]): Promise<{ stdout: string; stderr: string }> => {
         calls.push({ executable, args });
-        return { stdout: '{"__REALTIME_TIMESTAMP":"123","MESSAGE":"ok","SYSLOG_IDENTIFIER":"lnwjud","_PID":42,"PRIORITY":4}\n', stderr: '' };
+        return { stdout: '{"__REALTIME_TIMESTAMP":"123","MESSAGE":"ok","SYSLOG_IDENTIFIER":"unified-mpc","_PID":42,"PRIORITY":4}\n', stderr: '' };
       },
     });
 
-    await expect(backend.execute({ action: 'logs', service: 'lnwjud', max_events: 3, since: '2026-08-30T00:00:00Z' })).resolves.toMatchObject({
+    await expect(backend.execute({ action: 'logs', service: 'unified-mpc', max_events: 3, since: '2026-08-30T00:00:00Z' })).resolves.toMatchObject({
       ok: true,
-      value: { available: true, ready: true, backend: 'linux-journal', count: 1, events: [{ provider: 'lnwjud', id: 42, message: 'ok' }] },
+      value: { available: true, ready: true, backend: 'linux-journal', count: 1, events: [{ provider: 'unified-mpc', id: 42, message: 'ok' }] },
     });
     expect(calls).toEqual([{
       executable: 'journalctl',
-      args: ['--no-pager', '--output=json', '-n', '3', '--user', '-t', 'lnwjud', '--since', '2026-08-30T00:00:00.000Z'],
+      args: ['--no-pager', '--output=json', '-n', '3', '--user', '-t', 'unified-mpc', '--since', '2026-08-30T00:00:00.000Z'],
     }]);
   });
 
@@ -26,8 +26,8 @@ describe('LinuxDiagnosticsCapabilityBackend', () => {
     const backend = new LinuxDiagnosticsCapabilityBackend({
       runImpl: async (executable: string, args: readonly string[]): Promise<{ stdout: string; stderr: string }> => { calls.push({ executable, args }); return { stdout: 'active', stderr: '' }; },
     });
-    await expect(backend.execute({ action: 'service', service: 'lnwjud-tunnel.service' })).resolves.toMatchObject({ ok: true, value: { backend: 'systemd-user', service: 'lnwjud-tunnel.service' } });
-    expect(calls).toEqual([{ executable: 'systemctl', args: ['--user', 'status', 'lnwjud-tunnel.service', '--no-pager', '--plain'] }]);
+    await expect(backend.execute({ action: 'service', service: 'unified-mpc-tunnel.service' })).resolves.toMatchObject({ ok: true, value: { backend: 'systemd-user', service: 'unified-mpc-tunnel.service' } });
+    expect(calls).toEqual([{ executable: 'systemctl', args: ['--user', 'status', 'unified-mpc-tunnel.service', '--no-pager', '--plain'] }]);
     await expect(backend.execute({ action: 'service', service: '$(touch /tmp/pwned)' })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(calls).toHaveLength(1);
   });

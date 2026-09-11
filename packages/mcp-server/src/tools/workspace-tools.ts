@@ -11,7 +11,7 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'workspace_list',
-      description: 'List registered project workspaces available to lnwjud. Legacy explicitly registered drive roots may also appear as kind=machine_root.',
+      description: 'List registered project workspaces available to unified-mpc. Legacy explicitly registered drive roots may also appear as kind=machine_root.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceListSchema,

@@ -6,7 +6,7 @@ export interface ReplacementRecoveryBackup {
 }
 
 /**
- * A provider can fail after lnwjud has already captured the target pre-image.
+ * A provider can fail after unified-mpc has already captured the target pre-image.
  * Preserve the original error semantics while making that recovery artifact
  * discoverable to the caller. The backup is intentionally not deleted here.
  */

@@ -14,7 +14,7 @@ afterEach(async () => {
 
 describe('SqliteAuditRepository', () => {
   it('persists sanitized audit metadata through the audit migration', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-audit-db-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-audit-db-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.db'));
     const repository = new SqliteAuditRepository(database);
@@ -37,7 +37,7 @@ describe('SqliteAuditRepository', () => {
   });
 
   it('round-trips session scope and applies workspace/session filters before LIMIT', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-audit-scope-db-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-audit-scope-db-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.db'));
     const repository = new SqliteAuditRepository(database);
@@ -68,7 +68,7 @@ describe('SqliteAuditRepository', () => {
   }, 20_000);
 
   it('preserves legacy null session scope during migration and can query it explicitly', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-audit-legacy-db-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-audit-legacy-db-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.db'));
     const repository = new SqliteAuditRepository(database);
@@ -85,7 +85,7 @@ describe('SqliteAuditRepository', () => {
   });
 
   it('batch-searches retained target detail by call id, event id, and completed reference', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-audit-detail-search-db-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-audit-detail-search-db-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.db'));
     const repository = new SqliteAuditRepository(database);

@@ -13,7 +13,7 @@ afterEach(async () => {
 
 describe('WorkspaceInfoService.register', () => {
   it('registers an explicit absolute project without an automatically generated machine root', async () => {
-    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-register-direct-'));
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-register-direct-'));
     temporaryRoots.push(projectRoot);
     const projectRealRoot = await realpath(projectRoot);
 
@@ -37,7 +37,7 @@ describe('WorkspaceInfoService.register', () => {
   });
 
   it('registers a project under whichever drive-root machine root owns it and is idempotent', async () => {
-    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-register-'));
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-register-'));
     temporaryRoots.push(projectRoot);
     const machineRoot = path.parse(projectRoot).root;
     if (!/^[A-Za-z]:\\$/.test(machineRoot)) return;
@@ -69,7 +69,7 @@ describe('WorkspaceInfoService.register', () => {
     const alternateDrive = machineRoot[0]?.toUpperCase() === 'Z' ? 'Y' : 'Z';
     const outside = await service.register(actor, {
       parentWorkspaceId: machine.value.id,
-      path: `${alternateDrive}:\\outside-lnwjud`,
+      path: `${alternateDrive}:\\outside-unified-mpc`,
     });
     expect(outside).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
   });

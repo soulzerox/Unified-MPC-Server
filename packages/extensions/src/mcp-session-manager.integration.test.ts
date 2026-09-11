@@ -8,7 +8,7 @@ async function connectFixture(era: 'legacy' | 'modern'): ReturnType<typeof defau
   return defaultMcpClientFactory.connect({
     command: process.execPath,
     args: [fixturePath],
-    env: { LNWJUD_EXTERNAL_MCP_FIXTURE_ERA: era },
+    env: { UNIFIED_MPC_EXTERNAL_MCP_FIXTURE_ERA: era },
   });
 }
 

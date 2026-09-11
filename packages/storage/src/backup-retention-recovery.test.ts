@@ -13,9 +13,9 @@ afterEach(async () => {
 
 describe('recoverable backup retention', () => {
   it('rotates an expired backup out of the active list without destroying its restore path', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-retention-recovery-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-retention-recovery-'));
     temporaryRoots.push(root);
-    const databaseFile = path.join(root, 'lnwjud.sqlite');
+    const databaseFile = path.join(root, 'unified-mpc.sqlite');
     const backupDirectory = path.join(root, 'backups');
     const database = new SqliteDatabase(databaseFile, { backupDirectory });
     database.connection.exec('CREATE TABLE retention_fixture (value TEXT NOT NULL);');

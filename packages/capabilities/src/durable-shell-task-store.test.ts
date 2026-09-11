@@ -29,7 +29,7 @@ describe('durable shell background tasks', () => {
   });
 
   it.skipIf(process.platform === 'win32')('cancels the detached child group before retiring its durable worker', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-groups-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-groups-'));
     temporaryRoots.push(root);
     const backend = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks') });
     const started = await backend.execute({
@@ -67,7 +67,7 @@ describe('durable shell background tasks', () => {
   }, 15000);
 
   it('survives a backend/runtime replacement and returns logs and result by task id', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-shell-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-'));
     temporaryRoots.push(root);
     const taskStateDirectory = path.join(root, '.tasks');
     const firstRuntime = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
@@ -99,7 +99,7 @@ describe('durable shell background tasks', () => {
   });
 
   it('does not overwrite a very fast durable completion back to running', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-shell-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-'));
     temporaryRoots.push(root);
     const backend = new ShellCapabilityBackend({
       allowedRoots: [root],
@@ -143,7 +143,7 @@ describe('durable shell background tasks', () => {
   });
 
   it('finalizes when the command exits even if a detached descendant keeps inherited stdio open', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-shell-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-'));
     temporaryRoots.push(root);
     const backend = new ShellCapabilityBackend({
       allowedRoots: [root],
@@ -186,7 +186,7 @@ describe('durable shell background tasks', () => {
   }, 20000);
 
   it('cancels a durable task from a replacement backend', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-shell-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-'));
     temporaryRoots.push(root);
     const taskStateDirectory = path.join(root, '.tasks');
     const firstRuntime = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
@@ -214,7 +214,7 @@ describe('durable shell background tasks', () => {
   });
 
   it('keeps a durable auto task running when the original MCP caller aborts after submission', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-shell-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-'));
     temporaryRoots.push(root);
     const taskStateDirectory = path.join(root, '.tasks');
     const backend = new ShellCapabilityBackend({
@@ -246,7 +246,7 @@ describe('durable shell background tasks', () => {
   });
 
   it('caps concurrent durable workers so many chats cannot exhaust a Windows 10/11 machine with child consoles', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-shell-cap-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-cap-'));
     temporaryRoots.push(root);
     const taskStateDirectory = path.join(root, '.tasks');
     const store = new DurableShellTaskStore(taskStateDirectory, { maxConcurrentTasks: 1 });

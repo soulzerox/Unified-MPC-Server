@@ -18,7 +18,7 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'skills_list',
-      description: 'List the union of bundled skills and every discovered machine-global or active-workspace skill from Cursor, Claude, Agents, Codex, the Codex plugin cache, GitHub workspace roots, and lnwjud settings. Nested and symlinked skill collections are included. Filter with query or source.',
+      description: 'List the union of bundled skills and every discovered machine-global or active-workspace skill from Cursor, Claude, Agents, Codex, the Codex plugin cache, GitHub workspace roots, and unified-mpc settings. Nested and symlinked skill collections are included. Filter with query or source.',
       ...readOnlyInspection,
       inputSchema: skillsListSchema,
       handler: async (input) => context.services.extensions === undefined
@@ -30,7 +30,7 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'skills_read',
-      description: 'Read a local skill SKILL.md (or a relative file inside the skill folder). Prefer the source-qualified id returned by skills_list; an unambiguous bare name or $name is also accepted. Follow the skill instructions with lnwjud tools and mcp_call.',
+      description: 'Read a local skill SKILL.md (or a relative file inside the skill folder). Prefer the source-qualified id returned by skills_list; an unambiguous bare name or $name is also accepted. Follow the skill instructions with unified-mpc tools and mcp_call.',
       ...readOnlyInspection,
       inputSchema: skillsReadSchema,
       handler: async (input) => context.services.extensions === undefined

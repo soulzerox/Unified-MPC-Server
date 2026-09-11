@@ -231,7 +231,7 @@ describe('upgrade runtime', () => {
       });
     }
 
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-plugin-registry-'));
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-plugin-registry-'));
     try {
       const persistent = new UpgradeRuntimeService({ runtimeStatePath: path.join(directory, 'runtime.json') }, actor);
       await expect(persistent.execute('plugin_install', { name: 'safe-plugin', source: 'local-test-registry', version: '1.2.3' })).resolves.toMatchObject({
@@ -281,7 +281,7 @@ describe('upgrade runtime', () => {
   });
 
   it('persists redacted session state and reports task execution unavailable truthfully', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-runtime-'));
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-'));
     const statePath = path.join(directory, 'runtime.json');
     const first = new UpgradeRuntimeService({ runtimeStatePath: statePath }, actor);
     await first.execute('session_checkpoint', { summary: 'inspect logs', token: 'must-not-be-retained' });
@@ -359,7 +359,7 @@ describe('upgrade runtime', () => {
   it('validates Ponytail workspace overrides before project profile persistence', async () => {
     const runtime = new UpgradeRuntimeService({
       file: {
-        async writeFile(): Promise<ReturnType<typeof ok>> { return ok({ path: '.lnwjud/project-profile.json' }); },
+        async writeFile(): Promise<ReturnType<typeof ok>> { return ok({ path: '.unified-mpc/project-profile.json' }); },
       } as McpApplicationServices['file'],
     }, actor);
 

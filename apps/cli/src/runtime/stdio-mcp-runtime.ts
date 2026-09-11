@@ -278,7 +278,7 @@ export function resolveStdioCheckpointKey(configured: Uint8Array | undefined = u
     return Buffer.from(configured);
   }
   const encoded = process.env.UNIFIED_MPC_CHECKPOINT_KEY_BASE64?.trim()
-    ?? process.env.LNWJUD_CHECKPOINT_KEY_BASE64?.trim();
+    ?? process.env.UNIFIED_MPC_CHECKPOINT_KEY_BASE64?.trim();
   if (encoded !== undefined && encoded.length > 0) {
     const key = Buffer.from(encoded, 'base64');
     if (key.byteLength !== 32 || key.toString('base64') !== encoded) throw new Error('UNIFIED_MPC_CHECKPOINT_KEY_BASE64 must decode to 32 bytes');
@@ -336,7 +336,7 @@ function createStdioCapabilityService(
     dataPath,
     workspaceRootsProvider,
     unrestricted,
-    configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.UNIFIED_MPC_CAPABILITY_ROOTS ?? process.env.LNWJUD_CAPABILITY_ROOTS), ...configuredRootsProvider(), restrictedRoot],
+    configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.UNIFIED_MPC_CAPABILITY_ROOTS ?? process.env.UNIFIED_MPC_CAPABILITY_ROOTS), ...configuredRootsProvider(), restrictedRoot],
     synchronousWaitSecondsProvider,
   });
   return { service: runtime.service, shell: runtime.shell };

@@ -2,7 +2,7 @@ export const APP_NAME = 'Unified-MPC-Server';
 export const APP_VERSION = '1.0.0';
 export { isUnrestricted, unrestrictedFromEnv, unrestrictedFromSetting, UNRESTRICTED_SETTING_KEY, type ProcessEnvLike } from './unrestricted.js';
 
-export { resolveDataPath, resolveLnwjudDataPath, type DataPathEnvironment } from './data-path.js';
+export { resolveDataPath, type DataPathEnvironment } from './data-path.js';
 export {
   createPlatformProfile,
   currentPlatformProfile,

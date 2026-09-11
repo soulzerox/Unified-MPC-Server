@@ -36,7 +36,7 @@ describe('ProjectDetector', () => {
   });
 
   it('prefers npm when only package-lock is present and does not execute package code', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-project-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-project-'));
     temporaryRoots.push(root);
     await writeFile(path.join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node test.js' } }), 'utf8');
     await writeFile(path.join(root, 'package-lock.json'), '{}', 'utf8');
@@ -48,7 +48,7 @@ describe('ProjectDetector', () => {
   });
 
   it('detects a Node project with no scripts without inventing commands', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-project-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-project-'));
     temporaryRoots.push(root);
     await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'no-scripts' }), 'utf8');
 

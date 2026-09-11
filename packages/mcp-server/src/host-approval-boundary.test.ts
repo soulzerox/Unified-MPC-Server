@@ -7,7 +7,7 @@ import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalP
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 
 const actor = { clientId: 'host-approval', clientName: 'host-approval-test' };
-const activeScope = async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: path.resolve(tmpdir(), 'lnwjud-approval-fixture') });
+const activeScope = async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: path.resolve(tmpdir(), 'unified-mpc-approval-fixture') });
 const balancedProfile = (): PermissionProfile => permissionProfiles.balanced;
 
 describe('mandatory independent host approval', () => {
@@ -67,8 +67,8 @@ describe('mandatory independent host approval', () => {
   });
 
   it.each([
-    ['scheduler run', 'scheduler', { action: 'run', task_name: 'LnwjudTask', userConfirmed: true }],
-    ['scheduler delete', 'scheduler', { action: 'delete', task_name: 'LnwjudTask', userConfirmed: true }],
+    ['scheduler run', 'scheduler', { action: 'run', task_name: 'UnifiedMpcTask', userConfirmed: true }],
+    ['scheduler delete', 'scheduler', { action: 'delete', task_name: 'UnifiedMpcTask', userConfirmed: true }],
     ['hook removal', 'hook_remove', { name: 'audit', userConfirmed: true }],
     ['worktree removal', 'git_worktree_remove', { workspaceId: 'workspace-a', worktreePath: '.worktrees/agent-1', dryRun: false, userConfirmed: true }],
     ['self-heal apply', 'self_heal_apply', { workspaceId: 'workspace-a', planId: 'reviewed-plan', dryRun: false, userConfirmed: true }],

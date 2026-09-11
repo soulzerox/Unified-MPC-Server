@@ -13,7 +13,7 @@ afterEach(async () => {
 
 describe('WorkspaceQueryService', () => {
   it('returns a bounded tree for a registered workspace', async () => {
-    const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-query-'));
+    const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-query-'));
     temporaryRoots.push(rawRoot);
     const root = await realpath(rawRoot);
     await mkdir(path.join(root, 'src'));

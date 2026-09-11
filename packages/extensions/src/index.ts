@@ -49,7 +49,6 @@ export {
 } from './installer.js';
 export {
   PrunerService,
-  terminateProcess,
   cleanOrphanedArtifacts,
   type PruneSkillInput,
   type PruneSkillResult,

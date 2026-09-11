@@ -18,7 +18,7 @@ function settingsWithMockServer(): typeof DEFAULT_EXTENSIONS_SETTINGS {
 
 describe('LocalExtensionsService MCP bridge', () => {
   it('includes a packaged bundled-skill root without hiding global or workspace skills', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-bundled-skills-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-skills-'));
     try {
       const home = path.join(root, 'home');
       const workspace = path.join(root, 'workspace');
@@ -26,7 +26,6 @@ describe('LocalExtensionsService MCP bridge', () => {
       for (const [skillRoot, name] of [
         [path.join(home, '.agents', 'skills', 'global-skill'), 'global-skill'],
         [path.join(workspace, '.agents', 'skills', 'workspace-skill'), 'workspace-skill'],
-        [path.join(bundled, 'lnwjud-scheduled-continuation'), 'lnwjud-scheduled-continuation'],
         [path.join(bundled, 'ponytail'), 'ponytail'],
         [path.join(bundled, 'ponytail-review'), 'ponytail-review'],
         [path.join(bundled, 'ponytail-audit'), 'ponytail-audit'],
@@ -49,7 +48,6 @@ describe('LocalExtensionsService MCP bridge', () => {
       if (!listed.ok) return;
       expect(listed.value.skills.map((skill) => skill.name).sort()).toEqual([
         'global-skill',
-        'lnwjud-scheduled-continuation',
         'ponytail',
         'ponytail-audit',
         'ponytail-debt',
@@ -68,8 +66,6 @@ describe('LocalExtensionsService MCP bridge', () => {
         await expect(service.readSkill({ skillId: `bundled:agent-skills/${skillName}` }))
           .resolves.toMatchObject({ ok: true, value: { id: `bundled:agent-skills/${skillName}`, name: skillName, trustTier: 'bundled' } });
       }
-      await expect(service.readSkill({ skillId: 'lnwjud-scheduled-continuation' }))
-        .resolves.toMatchObject({ ok: true, value: { name: 'lnwjud-scheduled-continuation' } });
       await service.close();
     } finally {
       await rm(root, { recursive: true, force: true });

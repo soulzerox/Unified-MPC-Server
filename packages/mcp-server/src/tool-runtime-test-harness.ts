@@ -31,12 +31,12 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
   return {
     sandboxRuntimeOptions: {
       platform: process.platform,
-      sandboxExecutable: '__lnwjud_runtime_contract_missing_windows_sandbox__.exe',
+      sandboxExecutable: '__unified-mpc_runtime_contract_missing_windows_sandbox__.exe',
     },
     eventLogRuntimeOptions: {
       runner: async () => ok(JSON.stringify([{
         time: '2026-09-11T00:00:00.000Z',
-        provider: 'lnwjud-test',
+        provider: 'unified-mpc-test',
         id: 1,
         level: 'Information',
         message: 'fixture event',
@@ -54,7 +54,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         const filePath = typeof request.path === 'string' ? request.path : 'README.md';
         const startLine = typeof request.startLine === 'number' ? request.startLine : 1;
         const paged = filePath === 'paged.txt';
-        const content = filePath === '.lnwjud/project-profile.json'
+        const content = filePath === '.unified-mpc/project-profile.json'
           ? '{"language":"typescript"}\n'
           : filePath === 'package.json'
             ? '{"packageManager":"pnpm@10.15.0","scripts":{"benchmark":"vitest bench"}}\n'
@@ -113,7 +113,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       if (method === 'listMcpResources') return { server: 'server-1', enabled: true, connected: true, resources: [{ uri: 'file:///resource.txt', name: 'resource' }] };
       return { called: true };
     }),
-    localProviders: () => ({ pdfProvider: '__lnwjud_missing_pdf_provider__.exe' }),
+    localProviders: () => ({ pdfProvider: '__unified-mpc_missing_pdf_provider__.exe' }),
     capabilities: {
       async execute(tool: string, input: unknown) {
         calls.push(`capabilities.${tool}`);

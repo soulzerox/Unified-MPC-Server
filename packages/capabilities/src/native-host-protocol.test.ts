@@ -50,7 +50,7 @@ describe('NativeHostProcessBridge', () => {
   it.each(['darwin', 'linux'] as const)('preserves split UTF-8 responses on %s', async (platform) => {
     const bridge = new NativeHostProcessBridge({
       platform,
-      executablePath: '/opt/lnwjud-native-host',
+      executablePath: '/opt/unified-mpc-native-host',
       terminator,
       spawnProcess: (): never => {
         const child = new FakeChild();
@@ -78,7 +78,7 @@ describe('NativeHostProcessBridge', () => {
   it('matches concurrent out-of-order responses by request id', async () => {
     const bridge = new NativeHostProcessBridge({
       platform: 'linux',
-      executablePath: '/opt/lnwjud-native-host',
+      executablePath: '/opt/unified-mpc-native-host',
       terminator,
       spawnProcess: (): never => {
         const child = new FakeChild();
@@ -96,7 +96,7 @@ describe('NativeHostProcessBridge', () => {
   it('bounds each unfinished response instead of accumulating lifetime output', async () => {
     const bridge = new NativeHostProcessBridge({
       platform: 'linux',
-      executablePath: '/opt/lnwjud-native-host',
+      executablePath: '/opt/unified-mpc-native-host',
       maxPayloadBytes: 1024,
       terminator,
       spawnProcess: (): never => {
@@ -115,7 +115,7 @@ describe('NativeHostProcessBridge', () => {
     let child: FakeChild | undefined;
     const bridge = new NativeHostProcessBridge({
       platform: 'linux',
-      executablePath: '/opt/lnwjud-native-host',
+      executablePath: '/opt/unified-mpc-native-host',
       terminator,
       spawnProcess: (): never => {
         starts += 1;
@@ -135,7 +135,7 @@ describe('NativeHostProcessBridge', () => {
     let starts = 0;
     const bridge = new NativeHostProcessBridge({
       platform: 'darwin',
-      executablePath: '/opt/lnwjud-native-host',
+      executablePath: '/opt/unified-mpc-native-host',
       maxPayloadBytes: 1024,
       terminator,
       spawnProcess: (): never => { starts += 1; return new FakeChild() as never; },
@@ -153,7 +153,7 @@ describe('NativeHostProcessBridge', () => {
     try {
       const bridge = new NativeHostProcessBridge({
         platform: 'linux',
-        executablePath: '/opt/lnwjud-native-host',
+        executablePath: '/opt/unified-mpc-native-host',
         terminator,
         spawnProcess: (_executable, _args, options): never => {
           spawnEnvironment = options.env;
@@ -178,7 +178,7 @@ describe('NativeHostProcessBridge', () => {
     const controller = new AbortController();
     const bridge = new NativeHostProcessBridge({
       platform: 'linux',
-      executablePath: '/opt/lnwjud-native-host',
+      executablePath: '/opt/unified-mpc-native-host',
       timeoutMs: 5_000,
       terminator: { stop: async (): Promise<void> => { throw new Error('still alive'); } },
       spawnProcess: (): never => {
@@ -202,7 +202,7 @@ describe('NativeHostProcessBridge', () => {
   });
 
   it('fails closed when an integrity-bound helper is changed', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-native-host-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-native-host-'));
     try {
       const helper = path.join(root, 'host');
       await writeFile(helper, 'trusted');

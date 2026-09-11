@@ -203,7 +203,7 @@ describe('CodexService', () => {
 });
 
 async function createWorkspace(): Promise<Workspace> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-codex-service-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-codex-service-'));
   roots.push(rawRoot);
   const root = await realpath(rawRoot);
   await mkdir(path.join(root, 'src'));

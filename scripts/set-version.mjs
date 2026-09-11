@@ -19,7 +19,7 @@ async function syncAllVersions() {
   const rootPkgPath = path.join(rootDir, 'package.json');
   const rootPkg = JSON.parse(await readFile(rootPkgPath, 'utf8'));
   const version = targetVersion || rootPkg.version;
-  const name = rootPkg.name || 'lnwjud';
+  const name = rootPkg.name || 'unified-mpc';
 
   console.log(`Synchronizing single source of truth for name "${name}" and version "${version}"...`);
 
@@ -112,16 +112,16 @@ async function syncAllVersions() {
       .replace(/## Current (?:version|source \/ release candidate|release): v[0-9.]+/g, `## Current version: v${version}`)
       .replace(/The v[0-9.]+ release target and runtime contract/g, 'The v' + version + ' release target and runtime contract')
       .replace(/current source\/release candidate is `v[0-9.]+`/g, 'current version is `v' + version + '`')
-      .replace(/The Windows installer for the current version is `lnwjud-Setup-[0-9.]+\.exe`/g, 'The Windows installer for the current version is `lnwjud-Setup-' + version + '.exe`')
-      .replace(/Current Windows 10\/11 x64 artifacts are `lnwjud-Setup-[0-9.]+\.exe` \(recommended installer\) and `lnwjud-Portable-[0-9.]+\.exe`/g, 'Current Windows 10/11 x64 artifacts are `lnwjud-Setup-' + version + '.exe` (recommended installer) and `lnwjud-Portable-' + version + '.exe`')
-      .replace(/If you prefer not to install the app, run `lnwjud-Portable-[0-9.]+\.exe` directly\./g, 'If you prefer not to install the app, run `lnwjud-Portable-' + version + '.exe` directly.')
-      .replace(/1\. แบบแนะนำ: ดาวน์โหลด `lnwjud-Setup-[0-9.]+\.exe` แล้วติดตั้งตามปกติ/g, '1. แบบแนะนำ: ดาวน์โหลด `lnwjud-Setup-' + version + '.exe` แล้วติดตั้งตามปกติ')
-      .replace(/2\. ถ้าไม่ต้องการติดตั้ง: ดาวน์โหลด `lnwjud-Portable-[0-9.]+\.exe` แล้วเปิดได้ทันที/g, '2. ถ้าไม่ต้องการติดตั้ง: ดาวน์โหลด `lnwjud-Portable-' + version + '.exe` แล้วเปิดได้ทันที')
-      .replace(/ถ้าใช้ `lnwjud-Setup-[0-9.]+\.exe` หรือ `lnwjud-Portable-[0-9.]+\.exe` บน Windows x64/g, 'ถ้าใช้ `lnwjud-Setup-' + version + '.exe` หรือ `lnwjud-Portable-' + version + '.exe` บน Windows x64')
-      .replace(/single-file \*\*`lnwjud-Portable-[0-9.]+\.exe`\*\*/g, 'single-file **`lnwjud-Portable-' + version + '.exe`**')
-      .replace(/validated local test installer `lnwjud-Setup-[0-9.]+\.exe`/g, 'validated local test installer `lnwjud-Setup-' + version + '.exe`')
-      .replace(/apps\/desktop\/dist\/installers\/lnwjud-Setup-[0-9.]+\.exe/g, 'apps/desktop/dist/installers/lnwjud-Setup-' + version + '.exe')
-      .replace(/apps\/desktop\/dist\/installers\/lnwjud-Portable-[0-9.]+\.exe/g, 'apps/desktop/dist/installers/lnwjud-Portable-' + version + '.exe')
+      .replace(/The Windows installer for the current version is `unified-mpc-Setup-[0-9.]+\.exe`/g, 'The Windows installer for the current version is `unified-mpc-Setup-' + version + '.exe`')
+      .replace(/Current Windows 10\/11 x64 artifacts are `unified-mpc-Setup-[0-9.]+\.exe` \(recommended installer\) and `unified-mpc-Portable-[0-9.]+\.exe`/g, 'Current Windows 10/11 x64 artifacts are `unified-mpc-Setup-' + version + '.exe` (recommended installer) and `unified-mpc-Portable-' + version + '.exe`')
+      .replace(/If you prefer not to install the app, run `unified-mpc-Portable-[0-9.]+\.exe` directly\./g, 'If you prefer not to install the app, run `unified-mpc-Portable-' + version + '.exe` directly.')
+      .replace(/1\. แบบแนะนำ: ดาวน์โหลด `unified-mpc-Setup-[0-9.]+\.exe` แล้วติดตั้งตามปกติ/g, '1. แบบแนะนำ: ดาวน์โหลด `unified-mpc-Setup-' + version + '.exe` แล้วติดตั้งตามปกติ')
+      .replace(/2\. ถ้าไม่ต้องการติดตั้ง: ดาวน์โหลด `unified-mpc-Portable-[0-9.]+\.exe` แล้วเปิดได้ทันที/g, '2. ถ้าไม่ต้องการติดตั้ง: ดาวน์โหลด `unified-mpc-Portable-' + version + '.exe` แล้วเปิดได้ทันที')
+      .replace(/ถ้าใช้ `unified-mpc-Setup-[0-9.]+\.exe` หรือ `unified-mpc-Portable-[0-9.]+\.exe` บน Windows x64/g, 'ถ้าใช้ `unified-mpc-Setup-' + version + '.exe` หรือ `unified-mpc-Portable-' + version + '.exe` บน Windows x64')
+      .replace(/single-file \*\*`unified-mpc-Portable-[0-9.]+\.exe`\*\*/g, 'single-file **`unified-mpc-Portable-' + version + '.exe`**')
+      .replace(/validated local test installer `unified-mpc-Setup-[0-9.]+\.exe`/g, 'validated local test installer `unified-mpc-Setup-' + version + '.exe`')
+      .replace(/apps\/desktop\/dist\/installers\/unified-mpc-Setup-[0-9.]+\.exe/g, 'apps/desktop/dist/installers/unified-mpc-Setup-' + version + '.exe')
+      .replace(/apps\/desktop\/dist\/installers\/unified-mpc-Portable-[0-9.]+\.exe/g, 'apps/desktop/dist/installers/unified-mpc-Portable-' + version + '.exe')
       .replace(/current v[0-9.]+ `ToolRegistry`/g, 'current v' + version + ' `ToolRegistry`')
       .replace(/## v[0-9.]+ release status/g, `## v${version} release status`)
       .replace(/Release `v[0-9.]+`/g, `Release \`v${version}\``);
@@ -136,18 +136,18 @@ async function syncAllVersions() {
   const markdownTargets = [
     ['.github/RELEASE_CHECKLIST.md', (content) => content
       .replace(/\*\*Current (?:version|release candidate):\*\* `v[0-9.]+`/g, `**Current version:** ` + '`v' + version + '`')
-      .replace(/(\*\*Current (?:version|release candidate):\*\*[^\r\n]*Windows installer `lnwjud-Setup-)[0-9.]+(\.exe`)/g, (_match, prefix, suffix) => prefix + version + suffix)
-      .replace(/(portable executable `lnwjud-Portable-)[0-9.]+(\.exe`)/g, (_match, prefix, suffix) => prefix + version + suffix)],
+      .replace(/(\*\*Current (?:version|release candidate):\*\*[^\r\n]*Windows installer `unified-mpc-Setup-)[0-9.]+(\.exe`)/g, (_match, prefix, suffix) => prefix + version + suffix)
+      .replace(/(portable executable `unified-mpc-Portable-)[0-9.]+(\.exe`)/g, (_match, prefix, suffix) => prefix + version + suffix)],
     ['docs/USAGE_TH.md', (content) => content
-      .replace(/lnwjud v[0-9.]+/g, `lnwjud v${version}`)
-      .replace(/lnwjud-Setup-[0-9.]+\.exe/g, `lnwjud-Setup-${version}.exe`)
-      .replace(/lnwjud-Portable-[0-9.]+\.exe/g, `lnwjud-Portable-${version}.exe`)],
+      .replace(/unified-mpc v[0-9.]+/g, `unified-mpc v${version}`)
+      .replace(/unified-mpc-Setup-[0-9.]+\.exe/g, `unified-mpc-Setup-${version}.exe`)
+      .replace(/unified-mpc-Portable-[0-9.]+\.exe/g, `unified-mpc-Portable-${version}.exe`)],
     ['docs/development/PACKAGING_WINDOWS.md', (content) => content
       .replace(/For v[0-9.]+:/g, `For v${version}:`)
       .replace(/current v[0-9.]+ packaging contract/g, `current v${version} packaging contract`)
-      .replace(/lnwjud-Setup-[0-9.]+\.exe/g, `lnwjud-Setup-${version}.exe`)
-      .replace(/lnwjud-Portable-[0-9.]+\.exe/g, `lnwjud-Portable-${version}.exe`)],
-    ['docs/LNWJUD_CAPABILITIES.md', (content) => content.replace(/lnwjud v[0-9.]+/g, `lnwjud v${version}`).replace(/ความสามารถหลักใน v[0-9.]+ คือ:/g, `ความสามารถหลักใน v${version} คือ:`)],
+      .replace(/unified-mpc-Setup-[0-9.]+\.exe/g, `unified-mpc-Setup-${version}.exe`)
+      .replace(/unified-mpc-Portable-[0-9.]+\.exe/g, `unified-mpc-Portable-${version}.exe`)],
+    ['docs/UNIFIED_MPC_CAPABILITIES.md', (content) => content.replace(/unified-mpc v[0-9.]+/g, `unified-mpc v${version}`).replace(/ความสามารถหลักใน v[0-9.]+ คือ:/g, `ความสามารถหลักใน v${version} คือ:`)],
     ['docs/architecture/MULTI_WORKSPACE_CONCURRENCY.md', (content) => content.replace(/current v[0-9.]+ runtime contract/g, `current v${version} runtime contract`)],
     ['docs/architecture/TOOL_CONTRACT.md', (content) => content.replace(/snapshot synchronized for `v[0-9.]+`/g, `snapshot synchronized for ` + '`v' + version + '`')],
     ['docs/architecture/UPGRADE_ARCHITECTURE.md', (content) => content.replace(/checkpoint synchronized for `v[0-9.]+`/g, `checkpoint synchronized for ` + '`v' + version + '`')],

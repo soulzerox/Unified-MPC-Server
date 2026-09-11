@@ -16,7 +16,7 @@ import { withCapabilityOwnerMetadata } from './request-scope.js';
 
 export const MODERN_TASKS_EXTENSION_ID = 'io.modelcontextprotocol/tasks';
 
-const TASK_ID_PREFIX = 'lnwjud-task-v1.';
+const TASK_ID_PREFIX = 'unified-mpc-task-v1.';
 const TASK_DESCRIPTOR_VERSION = 1;
 const MAX_TASK_ID_BYTES = 4096;
 
@@ -111,7 +111,7 @@ export class ModernTasksProtocol {
   }
 
   public async updateTask(params: { readonly taskId: string; readonly inputResponses: Record<string, unknown> }): Promise<ModernTaskCompleteResult> {
-    // lnwjud-managed shell/process tasks never enter input_required today. We
+    // unified-mpc-managed shell/process tasks never enter input_required today. We
     // still validate task ownership/existence and intentionally ignore unknown
     // response keys, matching the extension's forward-compatible update rule.
     void params.inputResponses;

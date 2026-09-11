@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 async function fixture(): Promise<{ workspace: Workspace; repository: WorkspaceRepository }> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-project-command-safety-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-project-command-safety-'));
   roots.push(rawRoot);
   const root = await realpath(rawRoot);
   const workspace: Workspace = {

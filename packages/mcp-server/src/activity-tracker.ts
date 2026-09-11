@@ -496,7 +496,7 @@ function firstString(input: Readonly<Record<string, unknown>>, keys: readonly st
 }
 
 function commandSummary(toolName: string, input: Readonly<Record<string, unknown>>): string | undefined {
-  const approved = isRecord(input.__lnwjudApprovedProjectCommand) ? input.__lnwjudApprovedProjectCommand : undefined;
+  const approved = isRecord(input.__unifiedMpcApprovedProjectCommand) ? input.__unifiedMpcApprovedProjectCommand : undefined;
   const executable = approved === undefined ? firstString(input, ['executable', 'command']) : firstString(approved, ['executable', 'command']);
   const args = approved === undefined
     ? readStringArray(input.arguments) ?? readStringArray(input.args)

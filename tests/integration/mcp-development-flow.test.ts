@@ -26,7 +26,7 @@ afterEach(async () => {
 describe('MCP development flow', () => {
   it('keeps the complete fixture workflow inside application services', async () => {
     const fixtureRoot = await createFixture();
-    const rawDatabaseRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-mcp-db-'));
+    const rawDatabaseRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-mcp-db-'));
     temporaryRoots.push(rawDatabaseRoot);
     const databaseRoot = await realpath(rawDatabaseRoot);
     const database = new SqliteDatabase(path.join(databaseRoot, 'state.sqlite'));
@@ -146,7 +146,7 @@ describe('MCP development flow', () => {
 });
 
 async function createFixture(): Promise<string> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-mcp-fixture-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-mcp-fixture-'));
   temporaryRoots.push(rawRoot);
   const root = await realpath(rawRoot);
   await mkdir(path.join(root, 'src'));
@@ -156,13 +156,13 @@ async function createFixture(): Promise<string> {
   await writeFile(path.join(root, '.env'), 'SECRET_NOT_FOR_TOOLS=hidden\n', 'utf8');
   await writeFile(path.join(root, 'project-test.mjs'), "process.stdout.write('project-test-pass\\n');\n", 'utf8');
   await writeFile(path.join(root, 'package.json'), JSON.stringify({
-    name: 'lnwjud-flow-fixture',
+    name: 'unified-mpc-flow-fixture',
     scripts: { test: 'node project-test.mjs' },
   }), 'utf8');
   await writeFile(path.join(root, 'package-lock.json'), '{}', 'utf8');
   await execFileAsync('git', ['init', '--quiet'], { cwd: root, windowsHide: true });
-  await execFileAsync('git', ['config', 'user.email', 'lnwjud-test@example.invalid'], { cwd: root, windowsHide: true });
-  await execFileAsync('git', ['config', 'user.name', 'lnwjud integration'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['config', 'user.email', 'unified-mpc-test@example.invalid'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['config', 'user.name', 'unified-mpc integration'], { cwd: root, windowsHide: true });
   await execFileAsync('git', ['add', '--', 'package.json', 'package-lock.json', 'project-test.mjs', 'src'], { cwd: root, windowsHide: true });
   await execFileAsync('git', ['commit', '--quiet', '-m', 'fixture'], { cwd: root, windowsHide: true });
   return root;

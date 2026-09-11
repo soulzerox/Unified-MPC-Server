@@ -38,7 +38,7 @@ afterEach(async () => {
 describe('Codex review flow', () => {
   it('delegates to a fake Codex executable, reviews the diff, runs the project test, and stops an owned task', async () => {
     const fixtureRoot = await createFixture();
-    const rawStateRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-codex-flow-state-'));
+    const rawStateRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-codex-flow-state-'));
     temporaryRoots.push(rawStateRoot);
     const stateRoot = await realpath(rawStateRoot);
     const fakeCodexPath = path.join(stateRoot, 'fake-codex.mjs');
@@ -143,17 +143,17 @@ function fakeCodexAdapter(fakeCodexPath: string): CodexAdapter {
 }
 
 async function createFixture(): Promise<string> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-codex-flow-fixture-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-codex-flow-fixture-'));
   temporaryRoots.push(rawRoot);
   const root = await realpath(rawRoot);
   await mkdir(path.join(root, 'src'));
   await writeFile(path.join(root, 'src', 'reviewed.ts'), 'export const reviewed = false;\n', 'utf8');
   await writeFile(path.join(root, 'project-test.mjs'), "process.stdout.write('project-test-pass\\n');\n", 'utf8');
-  await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'lnwjud-codex-fixture', scripts: { test: 'node project-test.mjs' } }), 'utf8');
+  await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'unified-mpc-codex-fixture', scripts: { test: 'node project-test.mjs' } }), 'utf8');
   await writeFile(path.join(root, 'package-lock.json'), '{}', 'utf8');
   await execFileAsync('git', ['init', '--quiet'], { cwd: root, windowsHide: true });
-  await execFileAsync('git', ['config', 'user.email', 'lnwjud-test@example.invalid'], { cwd: root, windowsHide: true });
-  await execFileAsync('git', ['config', 'user.name', 'lnwjud codex integration'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['config', 'user.email', 'unified-mpc-test@example.invalid'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['config', 'user.name', 'unified-mpc codex integration'], { cwd: root, windowsHide: true });
   await execFileAsync('git', ['add', '--', 'package.json', 'package-lock.json', 'project-test.mjs', 'src'], { cwd: root, windowsHide: true });
   await execFileAsync('git', ['commit', '--quiet', '-m', 'fixture'], { cwd: root, windowsHide: true });
   return root;

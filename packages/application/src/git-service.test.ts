@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 async function createWorkspace(): Promise<Workspace> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-git-service-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-service-'));
   temporaryRoots.push(rawRoot);
   const root = await realpath(rawRoot);
   return {
@@ -37,7 +37,7 @@ function repository(workspace: Workspace): WorkspaceRepository {
 describe('GitService', () => {
   it('accepts prohibited Git forms and an outside cwd only with trusted Full Bypass authorization', async () => {
     const workspace = await createWorkspace();
-    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-git-outside-'));
+    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-outside-'));
     temporaryRoots.push(outsideRoot);
     const calls: Array<{ readonly cwd: string; readonly args: readonly string[] }> = [];
     const adapter = {

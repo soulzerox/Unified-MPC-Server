@@ -312,7 +312,7 @@ export const defaultMcpClientFactory: McpClientFactory = {
     });
     const disposeStderrDrain = attachChildStderrDrain(transport.stderr);
     const client = new Client(
-      { name: 'lnwjud-mcp-bridge', version: '1.0.0' },
+      { name: 'unified-mpc-mcp-bridge', version: '1.0.0' },
       { versionNegotiation: { mode: 'auto' } },
     );
     try {

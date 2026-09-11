@@ -1,6 +1,9 @@
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok, err } from '@unified-mpc/domain';
-import { parseCliArgs, runCli, type CliDependencies } from './index.js';
+import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
 
 describe('CLI argument parser', () => {
   it('parses workspace, MCP, doctor, and Codex doctor commands', () => {
@@ -103,6 +106,25 @@ describe('CLI argument parser', () => {
   it('rejects ambiguous MCP transport flags', () => {
     const parsed = parseCliArgs(['mcp', '--stdio', '--http']);
     expect(parsed.ok).toBe(false);
+  });
+});
+
+describe('CLI default dependency lifecycle', () => {
+  it('does not create SQLite state while executing help', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-lazy-'));
+    const previous = process.env.UNIFIED_MPC_DATA_PATH;
+    process.env.UNIFIED_MPC_DATA_PATH = root;
+    try {
+      const output: string[] = [];
+      const code = await runCli(['help'], { ...createDefaultCliDependencies(), write: (text) => output.push(text) });
+      expect(code).toBe(0);
+      expect(output[0]).toContain('Usage: unified-mpc');
+      await expect(readdir(root)).resolves.toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previous;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

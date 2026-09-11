@@ -93,7 +93,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'move_file',
-      description: 'Move a file or directory, creating missing destination parents. With Full Bypass OFF, Full Access performs ordinary in-project moves without a confirmation prompt while conflicting or destructive forms remain policy-gated. Trusted Full Bypass skips lnwjud approval/scope checks for explicit absolute outside paths; OS/filesystem errors still apply.',
+      description: 'Move a file or directory, creating missing destination parents. With Full Bypass OFF, Full Access performs ordinary in-project moves without a confirmation prompt while conflicting or destructive forms remain policy-gated. Trusted Full Bypass skips unified-mpc approval/scope checks for explicit absolute outside paths; OS/filesystem errors still apply.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: moveFileSchema,
@@ -117,7 +117,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'delete_file',
-      description: 'Delete one file or empty directory. With Full Bypass OFF, eligible in-project targets move to Recovery Trash and exact safe targets can use scoped auto-approval; critical paths, roots, non-empty directories, ambiguous paths, and mismatched workspaces remain guarded. Trusted Full Bypass skips lnwjud approval/scope checks and permits an exact absolute outside target, which is deleted without Recovery Trash; root and non-empty-directory input guards still apply.',
+      description: 'Delete one file or empty directory. With Full Bypass OFF, eligible in-project targets move to Recovery Trash and exact safe targets can use scoped auto-approval; critical paths, roots, non-empty directories, ambiguous paths, and mismatched workspaces remain guarded. Trusted Full Bypass skips unified-mpc approval/scope checks and permits an exact absolute outside target, which is deleted without Recovery Trash; root and non-empty-directory input guards still apply.',
       permission: 'DANGEROUS',
       annotations: { readOnlyHint: false, destructiveHint: true },
       inputSchema: deleteFileSchema,
@@ -163,7 +163,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'restore_checkpoint',
-      description: 'Restore a reviewed pre-mutation checkpoint. Standard mode requires explicit confirmation; trusted Full Bypass skips the lnwjud confirmation gate. A new rollback checkpoint is created before replacing current content when the target is inside a recoverable workspace.',
+      description: 'Restore a reviewed pre-mutation checkpoint. Standard mode requires explicit confirmation; trusted Full Bypass skips the unified-mpc confirmation gate. A new rollback checkpoint is created before replacing current content when the target is inside a recoverable workspace.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: true },
       inputSchema: restoreCheckpointSchema,

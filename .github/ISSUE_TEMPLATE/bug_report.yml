@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible lnwjud problem
+description: Report a reproducible Unified-MPC problem
 title: "[Bug]: "
 labels:
   - bug
@@ -7,11 +7,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Do not post credentials, private logs, or vulnerability details here. Security-sensitive reports must follow SECURITY.md.
+        Thanks for reporting a bug. Do not post credentials, private logs, or vulnerability details here.
   - type: input
     id: version
     attributes:
-      label: lnwjud version
+      label: Unified-MPC version
       description: "Example: v4.10.0"
       placeholder: v4.x.x
     validations:

@@ -105,7 +105,7 @@ describe('durable goal MCP tools', () => {
         goalId: 'goal-1',
         continuationDirective: {
           mode: 'auto',
-          skillId: 'workspace-agents-skills/lnwjud-scheduled-continuation',
+          skillId: 'workspace-agents-skills/unified-mpc-scheduled-continuation',
           nativeTaskHostRequired: true,
           userMustPromptAgain: false,
           nextRequiredAction: 'checkpoint_then_ensure_one_cloud_successor',

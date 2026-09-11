@@ -21,7 +21,7 @@ import type { McpApplicationServices } from './tools/tool-types.js';
  * cannot become a filesystem-policy bypass.
  */
 
-const PROVIDER_ENV = 'LNWJUD_PDF_PROVIDER';
+const PROVIDER_ENV = 'UNIFIED_MPC_PDF_PROVIDER';
 const PROVIDER_CANDIDATES = ['pdftotext.exe', 'pdftotext'];
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const MAX_TEXT_CHARS = 2_000_000;

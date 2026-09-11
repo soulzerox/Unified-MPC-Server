@@ -20,10 +20,10 @@ describe('unrestrictedFromSetting', () => {
 });
 
 describe('unrestrictedFromEnv', () => {
-  it('reads LNWJUD_UNRESTRICTED', () => {
-    expect(unrestrictedFromEnv({ LNWJUD_UNRESTRICTED: '1' })).toBe(true);
-    expect(unrestrictedFromEnv({ LNWJUD_UNRESTRICTED: 'true' })).toBe(true);
-    expect(unrestrictedFromEnv({ LNWJUD_UNRESTRICTED: '0' })).toBe(false);
+  it('reads UNIFIED_MPC_UNRESTRICTED', () => {
+    expect(unrestrictedFromEnv({ UNIFIED_MPC_UNRESTRICTED: '1' })).toBe(true);
+    expect(unrestrictedFromEnv({ UNIFIED_MPC_UNRESTRICTED: 'true' })).toBe(true);
+    expect(unrestrictedFromEnv({ UNIFIED_MPC_UNRESTRICTED: '0' })).toBe(false);
     expect(unrestrictedFromEnv({})).toBe(false);
   });
 });
@@ -36,8 +36,8 @@ describe('isUnrestricted', () => {
 
   it('honors an explicit off setting or env override', () => {
     expect(isUnrestricted({}, 'false')).toBe(false);
-    expect(isUnrestricted({ LNWJUD_UNRESTRICTED: '0' }, 'true')).toBe(false);
-    expect(isUnrestricted({ LNWJUD_UNRESTRICTED: '1' }, 'false')).toBe(true);
+    expect(isUnrestricted({ UNIFIED_MPC_UNRESTRICTED: '0' }, 'true')).toBe(false);
+    expect(isUnrestricted({ UNIFIED_MPC_UNRESTRICTED: '1' }, 'false')).toBe(true);
     expect(isUnrestricted({}, settingsValueFor(true))).toBe(true);
   });
 

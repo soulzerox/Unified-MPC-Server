@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/logo/logo-256x256.png" width="140" alt="Unified-MPC-Server logo" />
-</p>
-
 <h1 align="center">Unified-MPC-Server</h1>
 
 <p align="center">
@@ -83,12 +79,23 @@ Unified-MPC-Server/
 
 | Milestone | Scope & Description | Status | Verification & Hardening Evidence |
 |---|---|---|---|
-| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Complete monorepo rename from `@lnwjud/*` to `@unified-mpc/*` across 220+ files; deletion of all Windows code/scripts; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
+| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Complete monorepo rename from `@unified-mpc/*` to `@unified-mpc/*` across 220+ files; deletion of all Windows code/scripts; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
 | **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
 | **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
 | **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards; Commit `fe6e601`. |
 | **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
 | **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
+
+---
+
+## Audit Remediation & Current UI
+
+Current remediation is based on `3c4bfdfef6885b7471f6aae8dac901b7f882d4ad`.
+
+- Seven audit findings are fixed: symlink-safe purge boundaries; server-issued web prune IDs with ownership proof; HTTP callback rejection handling; gateway start/stop generation fencing; installer/pruner target validation; lazy CLI database construction; and fail-closed checkpoint-key handling.
+- Web UI remains native HTML/TypeScript with no frontend framework. `apps/web/src/dashboard-html.ts` composes `apps/web/src/ui/tokens.ts`, `apps/web/src/ui/views.ts`, and `apps/web/src/ui/client-script.ts`.
+- Web server uses native `node:http`, binds to `127.0.0.1`, validates `Host` and `Origin`, requires `Origin` on mutations, caps request bodies at 1 MiB, and exposes opaque `serverId` values for server pruning.
+- Detailed file-level record: [`docs/AUDIT_REMEDIATION.md`](docs/AUDIT_REMEDIATION.md).
 
 ---
 

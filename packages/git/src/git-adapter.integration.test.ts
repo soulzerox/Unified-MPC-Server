@@ -31,13 +31,13 @@ describe('GitAdapter integration', () => {
 
   it('inspects a temporary repository with spaces and Unicode paths', async () => {
     if (!gitAvailable) return;
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-git-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
     temporaryRoots.push(root);
     const filename = 'space file Ω.txt';
     await writeFile(path.join(root, filename), 'initial\n', 'utf8');
     await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
     await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, windowsHide: true });
-    await execFileAsync('git', ['config', 'user.name', 'lnwjud test'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: root, windowsHide: true });
     await execFileAsync('git', ['add', '--', filename], { cwd: root, windowsHide: true });
     await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: root, windowsHide: true });
     await writeFile(path.join(root, filename), 'changed\n', 'utf8');

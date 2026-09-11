@@ -42,7 +42,7 @@ export interface WorkspaceIndexStore {
 }
 
 export class JsonWorkspaceIndexStore implements WorkspaceIndexStore {
-  public constructor(private readonly directory: string = path.join(os.tmpdir(), 'lnwjud', 'index')) {}
+  public constructor(private readonly directory: string = path.join(os.tmpdir(), 'unified-mpc', 'index')) {}
 
   public async load(workspaceId: string): Promise<WorkspaceIndexSnapshot | null> {
     try {

@@ -18,7 +18,7 @@ export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
   'Continue using unified-mpc tools until the requested outcome is complete.',
   'Do not stop, hand off, or ask the user to say "continue" merely because elapsed time has passed.',
   'Stop only when the outcome is complete, a user decision or new authority is required, or an external blocker prevents safe progress.',
-  'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled unified-mpc-scheduled-continuation (or lnwjud-scheduled-continuation) skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
+  'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled unified-mpc-scheduled-continuation skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
   'Use durable background tasks for naturally long-running commands, then keep checking them and continue the work while the current run remains active.',
 ].join(' ');
 

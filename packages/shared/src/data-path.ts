@@ -37,8 +37,6 @@ export function resolveDataPath(
   return pathApi.join(appData, 'unified-mpc');
 }
 
-/** @deprecated Alias for clean migration */
-export const resolveLnwjudDataPath = resolveDataPath;
 
 function absolutePathOrUndefined(value: string | undefined, pathApi: typeof path.posix): string | undefined {
   const trimmed = value?.trim();

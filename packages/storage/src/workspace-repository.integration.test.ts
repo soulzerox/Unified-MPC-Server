@@ -14,7 +14,7 @@ afterEach(async () => {
 
 describe('SqliteWorkspaceRepository', () => {
   it('round-trips workspaces through the initial schema', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-db-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-db-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.db'));
     const repository = new SqliteWorkspaceRepository(database);
@@ -36,7 +36,7 @@ describe('SqliteWorkspaceRepository', () => {
   });
 
   it('archives registrations outside the runtime view and restores them without deleting project data', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-workspace-archive-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-archive-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
     try {

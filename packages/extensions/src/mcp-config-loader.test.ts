@@ -15,7 +15,7 @@ afterEach(async () => {
 
 describe('McpConfigLoader', () => {
   it('discovers Cursor MCP servers and substitutes workspaceFolder', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-mcp-cfg-'));
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-mcp-cfg-'));
     temporaryRoots.push(home);
     await mkdir(path.join(home, '.cursor'), { recursive: true });
     await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
@@ -24,8 +24,8 @@ describe('McpConfigLoader', () => {
           command: 'npx',
           args: ['-y', '@playwright/mcp', '--cwd', '${workspaceFolder}'],
         },
-        lnwjud: {
-          command: 'lnwjud.exe',
+        'unified-mpc': {
+          command: 'unified-mpc.exe',
           args: ['--mcp-stdio'],
         },
       },
@@ -47,7 +47,7 @@ describe('McpConfigLoader', () => {
         }),
       }),
       expect.objectContaining({
-        name: 'lnwjud',
+        name: 'unified-mpc',
         enabled: false,
         excluded: true,
       }),
@@ -56,7 +56,7 @@ describe('McpConfigLoader', () => {
 
   it.runIf(process.platform === 'win32' || process.platform === 'darwin' || process.platform === 'linux')('discovers Claude Desktop MCP config from the current native host default location', async () => {
     const platform = process.platform as 'win32' | 'darwin' | 'linux';
-    const home = await mkdtemp(path.join(os.tmpdir(), `lnwjud-mcp-${platform}-`));
+    const home = await mkdtemp(path.join(os.tmpdir(), `unified-mpc-mcp-${platform}-`));
     temporaryRoots.push(home);
     const appData = defaultApplicationDataDirectory(platform, home, {});
     const pathApi = platform === 'win32' ? path.win32 : path.posix;

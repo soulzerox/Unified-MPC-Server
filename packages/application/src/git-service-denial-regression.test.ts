@@ -18,7 +18,7 @@ describe('GitService destructive checkout/ref regression', () => {
     ['force branch rename', ['branch', '-M', 'old', 'existing']],
     ['force branch copy', ['branch', '-C', 'source', 'existing']],
   ] as const)('denies confirmed %s before adapter dispatch', async (_label, args) => {
-    const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-git-denial-'));
+    const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-denial-'));
     temporaryRoots.push(rawRoot);
     const root = await realpath(rawRoot);
     const workspace: Workspace = {

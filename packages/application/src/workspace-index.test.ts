@@ -16,7 +16,7 @@ function fixtureRepository(workspace: Workspace): WorkspaceRepository {
 
 describe('WorkspaceIndexService', () => {
   it('indexes source and metadata paths by default while allowing an explicit ignored subtree', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-index-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-index-'));
     await mkdir(path.join(root, '.git'), { recursive: true });
     await mkdir(path.join(root, 'dist'), { recursive: true });
     await mkdir(path.join(root, 'node_modules', 'fixture'), { recursive: true });

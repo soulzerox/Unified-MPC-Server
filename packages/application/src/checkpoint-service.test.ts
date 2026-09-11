@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 async function setup(): Promise<{ workspace: Workspace; checkpoints: MemoryCheckpointRepository }> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-checkpoint-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-checkpoint-'));
   temporaryRoots.push(rawRoot);
   const root = await realpath(rawRoot);
   await mkdir(path.join(root, 'src'));

@@ -29,12 +29,12 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number = 2_000): P
 }
 
 beforeEach(() => {
-  process.env.LNWJUD_CHECKPOINT_KEY_BASE64 = TEST_CHECKPOINT_KEY;
+  process.env.UNIFIED_MPC_CHECKPOINT_KEY_BASE64 = TEST_CHECKPOINT_KEY;
 });
 
 afterEach(async () => {
   delete process.env.TUNNEL_CLIENT_PROFILE_DIR;
-  delete process.env.LNWJUD_CHECKPOINT_KEY_BASE64;
+  delete process.env.UNIFIED_MPC_CHECKPOINT_KEY_BASE64;
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, {
     recursive: true,
     force: true,
@@ -45,8 +45,8 @@ afterEach(async () => {
 
 describe('stdio MCP runtime', () => {
   it('defaults Ponytail to OFF and loads a persisted mode for direct STDIO', async () => {
-    const defaultDataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-ponytail-default-'));
-    const persistedDataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-ponytail-persisted-'));
+    const defaultDataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-ponytail-default-'));
+    const persistedDataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-ponytail-persisted-'));
     temporaryRoots.push(defaultDataPath, persistedDataPath);
 
     const defaultRuntime = createStdioMcpRuntime(defaultDataPath, workspace);
@@ -69,7 +69,7 @@ describe('stdio MCP runtime', () => {
   }, 15_000);
 
   it('wires durable goals and scheduled continuation orchestration from the same SQLite repository', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-continuation-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-continuation-'));
     temporaryRoots.push(dataPath);
     const runtime = createStdioMcpRuntime(dataPath, workspace);
     try {
@@ -81,7 +81,7 @@ describe('stdio MCP runtime', () => {
   });
 
   it('observes persisted tool availability writes from another SQLite connection without restart or duplicate unrelated notifications', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-tool-availability-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-tool-availability-'));
     temporaryRoots.push(dataPath);
     const runtime = createStdioMcpRuntime(dataPath, workspace);
     const externalDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
@@ -108,7 +108,7 @@ describe('stdio MCP runtime', () => {
   });
 
   it('does not overwrite the Desktop permission profile when using full tunnel access', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-profile-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-profile-'));
     temporaryRoots.push(dataPath);
     const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     new SqliteSettingsRepository(database).set('permission_profile', 'balanced');
@@ -124,8 +124,8 @@ describe('stdio MCP runtime', () => {
   });
 
   it('owns and cleans the tunnel-profile activity snapshot for the direct STDIO runtime', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-activity-'));
-    const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-profile-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-activity-'));
+    const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-profile-'));
     temporaryRoots.push(dataPath, profileDirectory);
     process.env.TUNNEL_CLIENT_PROFILE_DIR = profileDirectory;
 
@@ -148,9 +148,9 @@ describe('stdio MCP runtime', () => {
   });
 
   it('uses the selected stdio profile and hides broad workspaces when strict roots are enabled', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-strict-data-'));
-    const allowedRaw = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-strict-allowed-'));
-    const outsideRaw = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-strict-outside-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-strict-data-'));
+    const allowedRaw = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-strict-allowed-'));
+    const outsideRaw = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-strict-outside-'));
     temporaryRoots.push(dataPath, allowedRaw, outsideRaw);
     const allowed = await realpath(allowedRaw);
     const outside = await realpath(outsideRaw);
@@ -180,7 +180,7 @@ describe('stdio MCP runtime', () => {
   });
 
   it('keeps a shell background task alive across STDIO runtime replacement', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-durable-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-durable-'));
     temporaryRoots.push(dataPath);
     const firstRuntime = createStdioMcpRuntime(dataPath, workspace, true);
     const capabilities = firstRuntime.services.capabilities;
@@ -220,8 +220,8 @@ describe('stdio MCP runtime', () => {
   }, 15_000);
 
   it('reads durable shell task liveness after STDIO runtime replacement without treating another session as absence', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-goal-liveness-data-'));
-    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-stdio-goal-liveness-workspace-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-goal-liveness-data-'));
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-goal-liveness-workspace-'));
     temporaryRoots.push(dataPath, workspaceRoot);
     const durableWorkspace = {
       id: 'goal-liveness-workspace',

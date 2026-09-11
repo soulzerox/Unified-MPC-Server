@@ -328,7 +328,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         stepUpdates: [],
         nextAction: current.nextAction,
         blockers: current.blockers,
-        evidence: [{ kind: 'note', value: `lnwjud:desktop-ponytail-policy:${request.ponytailMode ?? 'inherit'}` }],
+        evidence: [{ kind: 'note', value: `unified-mpc:desktop-ponytail-policy:${request.ponytailMode ?? 'inherit'}` }],
         activeTaskIds: current.activeTaskIds,
         trackedTasks: current.trackedTasks ?? [],
         createdAt: request.now,
@@ -539,7 +539,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       const revision = current.revision + 1;
       const evidence = [
         ...request.evidence,
-        { kind: 'note' as const, value: `lnwjud:reconciliation:${request.reason}` },
+        { kind: 'note' as const, value: `unified-mpc:reconciliation:${request.reason}` },
       ];
       const changed = this.database.connection.prepare(`
         UPDATE goals

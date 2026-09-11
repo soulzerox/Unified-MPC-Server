@@ -10,7 +10,7 @@ const actor: FileActor = { clientId: 'admin-recovery', clientName: 'admin-recove
 
 describe('upgrade administrative recovery snapshots', () => {
   it('keeps a recoverable plugin pre-image for persistent plugin removal', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-upgrade-admin-'));
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-upgrade-admin-'));
     const runtimeStatePath = path.join(directory, 'runtime.json');
     const recoveryDirectory = path.join(directory, 'runtime.state-v2', 'recovery');
     const runtime = new UpgradeRuntimeService({ runtimeStatePath }, actor);
@@ -25,7 +25,7 @@ describe('upgrade administrative recovery snapshots', () => {
   });
 
   it('keeps a recoverable worktree-ledger pre-image when a ledger entry is removed', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-upgrade-admin-'));
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-upgrade-admin-'));
     const runtimeStatePath = path.join(directory, 'runtime.json');
     const recoveryDirectory = path.join(directory, 'runtime.state-v2', 'recovery');
     const calls: readonly string[][] = [];

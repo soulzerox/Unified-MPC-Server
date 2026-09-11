@@ -24,7 +24,7 @@ type FakeTaskState = 'running' | 'cancelled';
 function modernMeta(): Record<string, unknown> {
   return {
     [PROTOCOL_VERSION_META_KEY]: MODERN_PROTOCOL_VERSION,
-    [CLIENT_INFO_META_KEY]: { name: 'lnwjud-modern-tasks-wire-test', version: '0.1.0' },
+    [CLIENT_INFO_META_KEY]: { name: 'unified-mpc-modern-tasks-wire-test', version: '0.1.0' },
     [CLIENT_CAPABILITIES_META_KEY]: {
       extensions: { [MODERN_TASKS_EXTENSION_ID]: {} },
     },
@@ -119,7 +119,7 @@ describe('modern MCP Tasks extension over localhost HTTP', () => {
 
   it('advertises the extension and serves tools/call -> get -> update -> cancel without reviving legacy core tasks', async () => {
     const client = new Client(
-      { name: 'lnwjud-modern-tasks-http-client', version: '0.1.0' },
+      { name: 'unified-mpc-modern-tasks-http-client', version: '0.1.0' },
       {
         versionNegotiation: { mode: { pin: MODERN_PROTOCOL_VERSION } },
         capabilities: { extensions: { [MODERN_TASKS_EXTENSION_ID]: {} } },
@@ -137,7 +137,7 @@ describe('modern MCP Tasks extension over localhost HTTP', () => {
         arguments: { operation: 'run', executable: 'fake-shell-command', arguments: [] },
       })));
       expect(created).toMatchObject({ resultType: 'task', status: 'working' });
-      expect(created.taskId).toEqual(expect.stringMatching(/^lnwjud-task-v1\./));
+      expect(created.taskId).toEqual(expect.stringMatching(/^unified-mpc-task-v1\./));
       const taskId = String(created.taskId);
 
       const got = resultRecord(await sendRawRequest(transport, rawRequest('modern-get', 'tasks/get', { taskId })));

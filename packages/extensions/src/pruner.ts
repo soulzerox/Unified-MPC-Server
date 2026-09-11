@@ -1,4 +1,4 @@
-import { readFile, readdir, rm, stat, unlink } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath, rm, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -24,9 +24,7 @@ export interface PruneServerInput {
   readonly targets?: readonly InstallTarget[];
   readonly scope?: InstallScope;
   readonly workspaceRoot?: string;
-  readonly forceKill?: boolean;
   readonly purgeDataDirs?: readonly string[];
-  readonly pid?: number;
 }
 
 export interface PruneServerResult {
@@ -51,6 +49,19 @@ const ALL_TARGETS: readonly InstallTarget[] = [
   'opencode',
   'codex',
 ];
+
+function validateTargets(targets: readonly InstallTarget[] | undefined): ReturnType<typeof appError> | undefined {
+  if (!targets || targets.length === 0) return appError('INVALID_INPUT', 'At least one target must be specified');
+  const supported = new Set<string>([...ALL_TARGETS, 'all']);
+  const invalid = [...new Set(targets.filter((target) => !supported.has(target)))];
+  if (invalid.length === 0) return undefined;
+  return appError(
+    'UNSUPPORTED_TARGET',
+    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${[...ALL_TARGETS, 'all'].join(', ')}`,
+    false,
+    { invalidTargets: invalid.join(', '), supportedTargets: [...ALL_TARGETS, 'all'].join(', ') },
+  );
+}
 
 export class PrunerService {
   private readonly home: string;
@@ -170,21 +181,19 @@ export class PrunerService {
       return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped server pruning'));
     }
 
-    // Validate purgeDataDirs against path traversal and boundary violations
+    const targetError = validateTargets(input.targets ?? ['all']);
+    if (targetError !== undefined) return err(targetError);
+
+    // Validate purgeDataDirs against path traversal and symlink boundaries before mutation.
     if (input.purgeDataDirs !== undefined) {
       for (const dir of input.purgeDataDirs) {
-        if (!this.isSafePurgePath(dir, workspaceRoot)) {
+        if (!(await this.isSafePurgePath(dir, workspaceRoot))) {
           return err(appError('PERMISSION_DENIED', `Unsafe purge data directory outside allowed boundaries: "${dir}"`));
         }
       }
     }
 
     let processTerminated = false;
-
-    // Terminate attached process if PID provided
-    if (input.pid !== undefined) {
-      processTerminated = await terminateProcess(input.pid, input.forceKill ? 0 : 3000);
-    }
 
     // Drop session if sessionManager available
     if (this.sessionManager !== undefined) {
@@ -209,7 +218,8 @@ export class PrunerService {
     if (input.purgeDataDirs !== undefined) {
       for (const dir of input.purgeDataDirs) {
         try {
-          const s = await stat(dir);
+          const s = await lstat(dir);
+          if (s.isSymbolicLink()) continue;
           if (s.isDirectory() || s.isFile()) {
             await rm(dir, { recursive: true, force: true });
             removedPaths.push(dir);
@@ -228,7 +238,7 @@ export class PrunerService {
     });
   }
 
-  private isSafePurgePath(dir: string, workspaceRoot?: string): boolean {
+  private async isSafePurgePath(dir: string, workspaceRoot?: string): Promise<boolean> {
     const trimmed = dir.trim();
     if (trimmed.length === 0) return false;
     const resolved = path.resolve(trimmed);
@@ -237,23 +247,36 @@ export class PrunerService {
     // Never allow root or dangerous system directories
     if (resolved === rootDir || resolved === '/') return false;
     const DANGEROUS_SYSTEM_DIRS = ['/etc', '/usr', '/bin', '/sbin', '/lib', '/boot', '/dev', '/proc', '/sys', '/var', '/root'];
-    if (DANGEROUS_SYSTEM_DIRS.some((d) => resolved === d || resolved.startsWith(d + path.sep))) {
-      return false;
-    }
+    if (DANGEROUS_SYSTEM_DIRS.some((d) => resolved === d || resolved.startsWith(d + path.sep))) return false;
 
     // Never allow wiping home or workspace directly
     if (resolved === path.resolve(this.home)) return false;
     if (resolved === path.resolve(this.appData)) return false;
     if (workspaceRoot !== undefined && resolved === path.resolve(workspaceRoot)) return false;
 
-    // Must be strictly inside home, appData, or workspace
     const allowedParents = [
       path.resolve(this.home),
       path.resolve(this.appData),
       ...(workspaceRoot ? [path.resolve(workspaceRoot)] : []),
     ];
+    if (!allowedParents.some((parent) => resolved.startsWith(parent + path.sep))) return false;
 
-    return allowedParents.some((parent) => resolved.startsWith(parent + path.sep));
+    // lstat every existing component. realpath/stat would follow a hostile parent symlink.
+    let current = resolved;
+    while (true) {
+      try {
+        const metadata = await lstat(current);
+        if (metadata.isSymbolicLink()) return false;
+        await realpath(current);
+      } catch (error: unknown) {
+        if (!isMissingPath(error)) return false;
+      }
+      if (current === rootDir) break;
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    return true;
   }
 
   private serverTargetConfigFile(
@@ -308,6 +331,10 @@ export class PrunerService {
   }
 }
 
+function isMissingPath(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
 async function purgeServerFromConfigFile(configFile: string, serverName: string): Promise<boolean> {
   try {
     const raw = await readFile(configFile, 'utf8');
@@ -335,34 +362,6 @@ async function purgeServerFromConfigFile(configFile: string, serverName: string)
   } catch {
     return false;
   }
-}
-
-export async function terminateProcess(pid: number, timeoutMs = 3000): Promise<boolean> {
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch (error: unknown) {
-    if (typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === 'ESRCH') {
-      return true;
-    }
-    return false;
-  }
-
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      process.kill(pid, 0);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    } catch {
-      return true;
-    }
-  }
-
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch {
-    // Process might already be dead
-  }
-  return true;
 }
 
 export async function cleanOrphanedArtifacts(dirs: readonly string[]): Promise<readonly string[]> {

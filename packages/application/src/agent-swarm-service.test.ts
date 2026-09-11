@@ -24,7 +24,7 @@ function managed(codexTaskId: string, state: ManagedProcess['state'] = 'running'
     processId: `process-${codexTaskId}`,
     executable: 'codex',
     args: ['exec'],
-    cwd: 'E:\\lnwjud',
+    cwd: 'E:\\unified-mpc',
     state,
     startedAt: '2026-08-31T00:00:00.000Z',
     ...(state === 'exited' ? { finishedAt: '2026-08-31T00:00:01.000Z', exitCode: 0 } : {}),
@@ -32,7 +32,7 @@ function managed(codexTaskId: string, state: ManagedProcess['state'] = 'running'
 }
 
 async function fixture(codex: AgentSwarmCodexPort): Promise<{ database: SqliteDatabase; repository: SqliteAgentSwarmRepository; service: AgentSwarmService }> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-agent-swarm-service-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-agent-swarm-service-'));
   temporaryRoots.push(root);
   const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
   const repository = new SqliteAgentSwarmRepository(database);

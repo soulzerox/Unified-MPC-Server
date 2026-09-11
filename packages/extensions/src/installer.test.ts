@@ -162,6 +162,23 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     }
   });
 
+  it('rejects unsupported targets instead of reporting a no-op success', async () => {
+    const installer = new InstallerService({ homeDir: '/tmp/unified-mpc-installer-test' });
+    const result = await installer.installServer({
+      name: 'fixture',
+      transport: 'stdio',
+      command: 'node',
+      targets: ['not-a-target' as never],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('UNSUPPORTED_TARGET');
+      expect(result.error.message).toContain('not-a-target');
+      expect(result.error.message).toContain('antigravity');
+    }
+  });
+
   it('rejects stdio server when command is missing', async () => {
     const installer = new InstallerService();
     const result = await installer.installServer({

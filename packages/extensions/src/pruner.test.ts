@@ -227,6 +227,28 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     await expect(stat(dataDir)).rejects.toThrow();
   });
 
+  it('rejects purge paths that traverse a symlink outside an allowed root', async () => {
+    const { symlink } = await import('node:fs/promises');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-symlink-boundary-test-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const outside = path.join(root, 'outside');
+    const victim = path.join(outside, 'victim');
+    await mkdir(home, { recursive: true });
+    await mkdir(victim, { recursive: true });
+    await symlink(outside, path.join(home, 'link'));
+
+    const result = await new PrunerService({ homeDir: home }).pruneServer({
+      name: 'fixture',
+      targets: ['antigravity'],
+      purgeDataDirs: [path.join(home, 'link', 'victim')],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('PERMISSION_DENIED');
+    await expect(stat(victim)).resolves.toBeDefined();
+  });
+
   it('scans and purges broken dangling symlinks', async () => {
     const { symlink } = await import('node:fs/promises');
     const { cleanOrphanedArtifacts } = await import('./pruner.js');

@@ -13,10 +13,10 @@ afterEach(async () => {
 });
 
 describe('SqliteDatabase WAL', () => {
-  it('opens in WAL mode so desktop and stdio MCP can share lnwjud.sqlite', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-wal-'));
+  it('opens in WAL mode so desktop and stdio MCP can share unified-mpc.sqlite', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-wal-'));
     temporaryRoots.push(root);
-    const filename = path.join(root, 'lnwjud.sqlite');
+    const filename = path.join(root, 'unified-mpc.sqlite');
     const writer = new SqliteDatabase(filename);
     const mode = writer.connection.prepare('PRAGMA journal_mode;').get() as { journal_mode?: string } | undefined;
     expect(mode?.journal_mode?.toLowerCase()).toBe('wal');
@@ -26,7 +26,7 @@ describe('SqliteDatabase WAL', () => {
       id: 'event-mcp-1',
       timestamp: new Date().toISOString(),
       actorId: 'cli-mcp-stdio',
-      actorName: 'lnwjud cli MCP',
+      actorName: 'unified-mpc cli MCP',
       action: 'mcp_tool:read_file',
       resultCode: 'SUCCESS',
       durationMs: 3,
@@ -42,18 +42,18 @@ describe('SqliteDatabase WAL', () => {
   });
 
   it('automatically creates parent directory when database path does not exist yet', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-dir-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-dir-'));
     temporaryRoots.push(root);
-    const filename = path.join(root, 'nested', 'deep', 'lnwjud.sqlite');
+    const filename = path.join(root, 'nested', 'deep', 'unified-mpc.sqlite');
     const database = new SqliteDatabase(filename);
     expect(database.connection.prepare('SELECT 1 as val').get()).toEqual({ val: 1 });
     database.close();
   });
 
   it('does not resurrect a database after its owner closes it', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-closed-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-closed-'));
     temporaryRoots.push(root);
-    const database = new SqliteDatabase(path.join(root, 'lnwjud.sqlite'));
+    const database = new SqliteDatabase(path.join(root, 'unified-mpc.sqlite'));
     expect(database.connection.prepare('SELECT 1 as val').get()).toEqual({ val: 1 });
     database.close();
     database.close();

@@ -45,7 +45,7 @@ These invariants must hold in any correct implementation. An agent that violates
 | Directory | Purpose |
 |---|---|
 | `apps/cli/` | Native CLI binary (`unified-mpc`) providing headless operations for terminal agents. |
-| `apps/web/` | Fastify local web control plane serving the Obsidian Telemetry Dashboard on `http://127.0.0.1:18765/`. |
+| `apps/web/` | Native `node:http` local web control plane serving the modular Obsidian Telemetry Dashboard on `http://127.0.0.1:18765/`. |
 | `apps/cf-gateway/` | Decoupled companion gateway managing `cloudflared tunnel` and OAuth for ChatGPT Web remote sessions. Optional — core server works without it. |
 | `packages/extensions/` | Downstream MCP child process multiplexer, dynamic bifurcated installer, zero-artifact pruner, and IDE synchronizer. |
 | `packages/mcp-server/` | Host MCP server runtime implementing Ponytail engineering modes, security policies, and the Two-Tier Tool Catalog. |
@@ -129,7 +129,7 @@ These components exist in the codebase from the lnwjud upstream but are **not ac
 | Language Server Protocol | `packages/mcp-server/src/lsp-runtime.ts` | Disabled — not exposed as MCP tool in v1.0.0. |
 | Agent Swarm Orchestration | `packages/application/src/agent-swarm-service.ts` | Present but not externally advertised in v1.0.0. |
 | Upgrade Runtime (auto-update) | `packages/mcp-server/src/upgrade-runtime.ts` | Operator-triggered only. Never runs autonomously in v1.0.0. |
-| Scheduled Continuation | `packages/application/src/scheduled-continuation-service.ts` | Inherited from lnwjud. Review and rename before exposing in v2. |
+| Scheduled Continuation | `packages/application/src/scheduled-continuation-service.ts` | Unified-MPC durable continuation service; not externally advertised in v1. |
 
 ---
 
@@ -239,18 +239,16 @@ Comprehensive host-environment dogfooding and smoke testing verified all runtime
 ## 11. Web Control Plane SPA Reactivity, Residual Naming Purge & Diagnosing-Bugs Loop (Completed)
 
 1. **Option 1: Interactive Reactive Web Control Plane SPA (`apps/web`)**:
-   - Built pure vanilla JS client-side reactivity layer inside `apps/web/src/dashboard-html.ts` with zero external dependencies.
-   - Live telemetry polling for server status (`/api/status`) and gateway bridge status (`/api/chatgpt-gateway/status`).
-   - One-click "Sync All Policies" trigger firing `POST /api/policies/sync` with live UI notification.
-   - Interactive modal workflows for bifurcated dynamic ingestion:
-     - "Install Skill" modal posting to `/api/skills/install` with name, source, targets, and scope.
-     - "Install MCP Server" modal posting to `/api/servers/install` with transport (stdio/sse/http), command, args, and targets.
-   - Hard-gated "Connect ChatGPT Web" button enforcing `BRIDGE_HEALTHY` readiness before enabling user connection.
-   - Validated via TDD test suite in `apps/web/src/dashboard-html.test.ts` (5/5 passing). All 3 test files in `@unified-mpc/web` pass 100% (23/23 tests).
+   - Kept UI dependency-free and modular: `dashboard-html.ts` composes `ui/tokens.ts`, `ui/views.ts`, and `ui/client-script.ts`.
+   - Live telemetry polling covers `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, and `/api/chatgpt-gateway/status`.
+   - Policy sync and bifurcated install/prune actions call the real REST routes, not mock state.
+   - Server pruning uses a server-issued opaque `serverId`; raw PID input is rejected.
+   - Host/Origin checks, mutation Origin requirements, 1 MiB body limits, and route failure handling are covered by `apps/web/src/web-server.test.ts`.
+   - Detailed remediation record: `docs/AUDIT_REMEDIATION.md`.
 
 2. **Option 2: Residual `lnwjud` Purge & Skill Modernization**:
    - Created `.agents/skills/unified-mpc-scheduled-continuation/SKILL.md` aligned with 100% Linux Ubuntu runtime and POSIX commands (`gh run watch <RUN_ID> -i 20 --exit-status`).
-   - Retained `.agents/skills/lnwjud-scheduled-continuation/` as a backward-compatible alias for existing tests and fixtures.
+   - Removed obsolete legacy scheduled-continuation alias; only `.agents/skills/unified-mpc-scheduled-continuation/` remains.
    - Cleaned `AGENTS.md` removing Windows PowerShell snippets, enforcing Linux POSIX commands, updating skill pointers, and replacing `lnwjud approval gates` with `unified-mpc approval gates`.
    - Modernized `packages/mcp-server/src/server.ts` instructions.
    - Modernized `.env.example` to use `UNIFIED_MPC_*` variables and Linux POSIX paths (`~/.local/share/unified-mpc`).

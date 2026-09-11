@@ -32,6 +32,7 @@ export class GatewayService {
   private readonly localPort: number;
   private readonly tunnelHostname: string;
   private readonly tunnelProvider: (() => Promise<string>) | undefined;
+  private startGeneration = 0;
 
   public constructor(options: GatewayServiceOptions = {}) {
     this.localPort = options.localPort ?? 18765;
@@ -62,22 +63,28 @@ export class GatewayService {
       });
     }
 
+    const generation = ++this.startGeneration;
     this.state = 'INITIALIZING';
     this.lastError = undefined;
 
     try {
-      if (this.tunnelProvider) {
-        this.tunnelUrl = await this.tunnelProvider();
-      } else {
-        this.tunnelUrl = `https://${randomUUID().slice(0, 8)}.${this.tunnelHostname}`;
+      const tunnelUrl = this.tunnelProvider
+        ? await this.tunnelProvider()
+        : `https://${randomUUID().slice(0, 8)}.${this.tunnelHostname}`;
+      if (generation !== this.startGeneration || this.state !== 'INITIALIZING') {
+        return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
       }
+      this.tunnelUrl = tunnelUrl;
       this.latencyMs = 12; // Initial ping latency
       this.state = 'BRIDGE_HEALTHY';
       return ok({
-        tunnelUrl: this.tunnelUrl,
+        tunnelUrl,
         localPort: this.localPort,
       });
     } catch (error) {
+      if (generation !== this.startGeneration || this.state !== 'INITIALIZING') {
+        return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
+      }
       this.state = 'ERROR';
       this.lastError = error instanceof Error ? error.message : String(error);
       return err(appError('INTERNAL_ERROR', `Failed to initialize bridge tunnel: ${this.lastError}`));
@@ -85,6 +92,7 @@ export class GatewayService {
   }
 
   public async stop(): Promise<Result<void>> {
+    this.startGeneration += 1;
     this.state = 'STOPPED';
     this.tunnelUrl = undefined;
     this.leaseToken = undefined;

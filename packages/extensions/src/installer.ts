@@ -57,6 +57,19 @@ const ALL_TARGETS: readonly InstallTarget[] = [
   'codex',
 ];
 
+function validateTargets(targets: readonly InstallTarget[] | undefined): ReturnType<typeof appError> | undefined {
+  if (!targets || targets.length === 0) return appError('INVALID_INPUT', 'At least one target must be specified');
+  const supported = new Set<string>([...ALL_TARGETS, 'all']);
+  const invalid = [...new Set(targets.filter((target) => !supported.has(target)))];
+  if (invalid.length === 0) return undefined;
+  return appError(
+    'UNSUPPORTED_TARGET',
+    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${[...ALL_TARGETS, 'all'].join(', ')}`,
+    false,
+    { invalidTargets: invalid.join(', '), supportedTargets: [...ALL_TARGETS, 'all'].join(', ') },
+  );
+}
+
 export class InstallerService {
   private readonly home: string;
   private readonly appData: string;
@@ -77,9 +90,8 @@ export class InstallerService {
     ) {
       return err(appError('INVALID_INPUT', `Invalid skill name: "${input.name}"`));
     }
-    if (!input.targets || input.targets.length === 0) {
-      return err(appError('INVALID_INPUT', 'At least one target must be specified'));
-    }
+    const targetError = validateTargets(input.targets);
+    if (targetError !== undefined) return err(targetError);
 
     const resolvedSource = path.resolve(input.source);
     let sourceSkillFile: string;
@@ -201,9 +213,8 @@ export class InstallerService {
     ) {
       return err(appError('INVALID_INPUT', `Invalid server name: "${input.name}"`));
     }
-    if (!input.targets || input.targets.length === 0) {
-      return err(appError('INVALID_INPUT', 'At least one target must be specified'));
-    }
+    const targetError = validateTargets(input.targets);
+    if (targetError !== undefined) return err(targetError);
 
     if (input.transport === 'stdio') {
       if (!input.command || input.command.trim().length === 0) {

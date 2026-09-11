@@ -12,7 +12,7 @@ afterEach(async () => {
 
 describe('AtomicFileWriter', () => {
   it('writes through a temporary file in the target directory and replaces the target', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-write-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-write-'));
     temporaryRoots.push(root);
     const target = path.join(root, 'file.txt');
     const result = await new AtomicFileWriter().write(target, 'new content\n');
@@ -22,7 +22,7 @@ describe('AtomicFileWriter', () => {
   });
 
   it('creates missing nested parent directories before writing', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-write-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-write-'));
     temporaryRoots.push(root);
     const target = path.join(root, 'docs', 'superpowers', 'plans', 'plan.md');
     const result = await new AtomicFileWriter().write(target, 'nested\n');

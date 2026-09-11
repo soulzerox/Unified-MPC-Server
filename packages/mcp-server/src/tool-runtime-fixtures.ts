@@ -357,7 +357,7 @@ export const PHASE_34_TO_46_TOOL_RUNTIME_FIXTURES = {
   docx_merge: service({ workspaceId, file_path: 'package.json', merge_paths: ['tsconfig.json'], target_path: 'runtime-contract-output.docx' }, 'workspaceInfo.info'),
   self_heal_plan: service({}, 'capabilities.shell'),
   self_heal_apply: service({}, 'capabilities.shell'),
-  skills_import: service({ workspaceId, source_path: '.agents/skills/lnwjud-scheduled-continuation/SKILL.md' }, 'file.readFile'),
+  skills_import: service({ workspaceId, source_path: '.agents/skills/unified-mpc-scheduled-continuation/SKILL.md' }, 'file.readFile'),
   agent_swarm_run: service({ operation: 'list', workspaceId }, 'agentSwarm.list'),
 } as const satisfies Readonly<Record<string, ToolRuntimeFixture>>;
 

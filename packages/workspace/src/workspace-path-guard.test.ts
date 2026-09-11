@@ -9,7 +9,7 @@ import { WorkspacePathGuard } from './workspace-path-guard.js';
 const temporaryRoots: string[] = [];
 
 async function createWorkspace(): Promise<Workspace> {
-  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-workspace-'));
+  const rawRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-'));
   temporaryRoots.push(rawRoot);
   const rootPath = await realpath(rawRoot);
   await mkdir(path.join(rootPath, 'src'));
@@ -122,7 +122,7 @@ describe('WorkspacePathGuard', () => {
 
   it('allows only explicit absolute outside paths under per-invocation Full Bypass', async () => {
     const workspace = await createWorkspace();
-    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-outside-'));
+    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-outside-'));
     temporaryRoots.push(outsideRoot);
     const outsideFile = path.join(outsideRoot, 'proof.txt');
     const outsideNewFile = path.join(outsideRoot, 'new.txt');

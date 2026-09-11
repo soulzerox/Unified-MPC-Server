@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ActivityTracker } from './activity-tracker.js';
 import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
-import { LNWJUD_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
+import { UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
 
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
 
@@ -44,7 +44,7 @@ describe('MCP localhost HTTP transport', () => {
     expect(handle.endpoint.pathname).toBe('/mcp');
 
     const client = new Client(
-      { name: 'lnwjud-http-test-client', version: '0.1.0' },
+      { name: 'unified-mpc-http-test-client', version: '0.1.0' },
       { versionNegotiation: { mode: { pin: '2026-07-28' } } },
     );
     const transport = new StreamableHTTPClientTransport(handle.endpoint);
@@ -330,11 +330,11 @@ describe('MCP localhost HTTP transport', () => {
   });
 
   it('serves a loopback identity document that Doctor can distinguish from an unrelated listener', async () => {
-    const identityUrl = new URL(LNWJUD_MCP_IDENTITY_PATH, handle.endpoint);
+    const identityUrl = new URL(UNIFIED_MPC_MCP_IDENTITY_PATH, handle.endpoint);
     const response = await fetch(identityUrl);
 
     expect(response.status).toBe(200);
-    expect(response.headers.get('x-lnwjud-service')).toBe('desktop-mcp');
+    expect(response.headers.get('x-unified-mpc-service')).toBe('desktop-mcp');
     await expect(response.json()).resolves.toMatchObject({ product: 'Unified-MPC-Server', service: 'desktop-mcp', protocol: 1 });
   });
 

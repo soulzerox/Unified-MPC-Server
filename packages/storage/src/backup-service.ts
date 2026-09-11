@@ -643,9 +643,9 @@ function quarantineHostBoundFiles(databaseFilename: string, backupIdValue: strin
   const defaultCandidates = [
     path.join(dataDirectory, 'checkpoint-master.key'),
     path.join(dataDirectory, 'checkpoint-master.key.migration.json'),
-    path.join(dataDirectory, 'lnwjud.runtime.secret'),
-    path.join(dataDirectory, 'tunnel-client', 'lnwjud.runtime.secret'),
-    path.join(dataDirectory, 'tunnel-client', 'lnwjud.oauth.session.secret'),
+    path.join(dataDirectory, 'unified-mpc.runtime.secret'),
+    path.join(dataDirectory, 'tunnel-client', 'unified-mpc.runtime.secret'),
+    path.join(dataDirectory, 'tunnel-client', 'unified-mpc.oauth.session.secret'),
     path.join(dataDirectory, 'remote-mcp', 'oauth-state.secret'),
     path.join(dataDirectory, 'remote-mcp', 'ngrok-authtoken.secret'),
   ];
@@ -653,8 +653,8 @@ function quarantineHostBoundFiles(databaseFilename: string, backupIdValue: strin
   // userData. Its OAuth sibling belongs to that same profile even if the API
   // key itself does not exist (OAuth-only accounts).
   const tunnelSessions = (configuredPaths ?? [])
-    .filter((candidate) => path.basename(candidate) === 'lnwjud.runtime.secret')
-    .map((candidate) => path.join(path.dirname(candidate), 'lnwjud.oauth.session.secret'));
+    .filter((candidate) => path.basename(candidate) === 'unified-mpc.runtime.secret')
+    .map((candidate) => path.join(path.dirname(candidate), 'unified-mpc.oauth.session.secret'));
   const candidates = [...new Set([...(configuredPaths ?? []), ...defaultCandidates, ...tunnelSessions])];
   const moved: string[] = [];
   for (const candidate of candidates) {

@@ -49,7 +49,7 @@ export interface ProcessServiceDependencies {
   readonly defaultTimeoutMsProvider?: () => number;
   /** Full-access mode can broaden executable policy and allow an explicitly absolute cwd outside the selected workspace. */
   readonly unrestricted?: boolean;
-  /** Full-profile Bypass All skips lnwjud command/profile authorization while retaining exact process ownership. */
+  /** Full-profile Bypass All skips unified-mpc command/profile authorization while retaining exact process ownership. */
   readonly authorizationBypassProvider?: () => boolean;
 }
 

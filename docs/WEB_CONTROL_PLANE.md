@@ -49,14 +49,8 @@ Returns general operational health and gateway status.
 {
   "status": "healthy",
   "gateway": {
-    "state": "DISCONNECTED",
-    "tunnelUrl": null,
-    "localPort": 18765,
-    "metrics": {
-      "requestsTotal": 0,
-      "errorsTotal": 0,
-      "activeConnections": 0
-    }
+    "state": "STOPPED",
+    "localPort": 18765
   }
 }
 ```
@@ -106,13 +100,17 @@ Triggers synchronization of rules and configuration files across IDE environment
 
 ### 3. Remote Gateway & Bridge State Machine
 
-The gateway manages secure remote bridges (such as Cloudflare Named Tunnels) with a strict five-state deterministic state machine:
+The gateway manages secure remote bridges with the states implemented by `GatewayService`:
 
 ```
-[DISCONNECTED] ---> [CONNECTING] ---> [BRIDGE_HEALTHY] ---> [DRAINING] ---> [DISCONNECTED]
-                           |                 |
-                           +--------> [ERROR]<+
+[STOPPED] ---> [INITIALIZING] ---> [BRIDGE_HEALTHY] ---> [SESSION_CONNECTED]
+    ^                 |                    |
+    +-----------------+--------------------+
+                      |
+                    [ERROR]
 ```
+
+`stop()` invalidates pending starts and returns the service to `STOPPED`. A stale asynchronous start cannot restore `BRIDGE_HEALTHY`.
 
 #### State Machine Invariant
 Connecting a client session via `/api/chatgpt-web/connect` is strictly gated. The bridge **must** be in the `BRIDGE_HEALTHY` state; attempting connection in any other state returns `412 Precondition Failed`.
@@ -121,7 +119,7 @@ Connecting a client session via `/api/chatgpt-web/connect` is strictly gated. Th
 Returns current bridge state, active tunnel URL, and telemetry.
 
 #### `POST /api/chatgpt-gateway/start`
-Starts the tunnel and transitions state from `DISCONNECTED` -> `CONNECTING` -> `BRIDGE_HEALTHY`.
+Starts the tunnel and transitions state from `STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY`.
 
 - **Response `200 OK`**:
 ```json
@@ -133,33 +131,32 @@ Starts the tunnel and transitions state from `DISCONNECTED` -> `CONNECTING` -> `
 ```
 
 #### `POST /api/chatgpt-gateway/stop`
-Gracefully drains existing connections and tears down the tunnel process.
+Invalidates pending starts and session lease state, then returns the gateway to `STOPPED`.
 
 - **Response `200 OK`**:
 ```json
 {
   "ok": true,
-  "state": "DISCONNECTED"
+  "state": "STOPPED"
 }
 ```
 
 #### `GET /api/chatgpt-web/connect`
-Initiates a gated session token handshake.
+Initiates a gated session lease handshake. A loopback `Origin` header is required.
 
 - **Precondition**: `state === "BRIDGE_HEALTHY"`
 - **Response `200 OK`**:
 ```json
 {
-  "sessionToken": "cf-session-98a72b14c7",
-  "bridgeUrl": "https://mcp-gateway-preview.example.com/mcp",
-  "expiresAt": "2026-09-12T00:00:00Z"
+  "leaseToken": "lease_opaque-id",
+  "tunnelUrl": "https://mcp-gateway-preview.example.com"
 }
 ```
 - **Response `412 Precondition Failed`**:
 ```json
 {
   "error": "Bridge must be in BRIDGE_HEALTHY state before connecting ChatGPT Web",
-  "state": "DISCONNECTED"
+  "state": "STOPPED"
 }
 ```
 
@@ -174,23 +171,21 @@ Installs an agent skill markdown bundle (`SKILL.md` + companion assets).
 ```json
 {
   "name": "my-skill",
-  "skillContent": "---\nname: my-skill\ndescription: Demo skill\n---\n# My Skill\nInstructions...",
-  "target": "antigravity",
+  "source": "/mnt/workspace_data/skill-source",
+  "targets": ["antigravity"],
   "scope": "workspace",
-  "workspaceDir": "/mnt/workspace_data/project",
-  "companionFiles": [
-    {
-      "relativePath": "scripts/helper.sh",
-      "content": "#!/usr/bin/env bash\necho 'Helper'"
-    }
-  ]
+  "workspaceRoot": "/mnt/workspace_data/project"
 }
 ```
 - **Response `200 OK`**:
 ```json
 {
   "ok": true,
-  "installedPath": "/mnt/workspace_data/project/.agents/skills/my-skill/SKILL.md"
+  "value": {
+    "name": "my-skill",
+    "installedPaths": ["/mnt/workspace_data/project/.gemini/skills/my-skill/SKILL.md"],
+    "targets": ["antigravity"]
+  }
 }
 ```
 
@@ -201,7 +196,7 @@ Configures a new MCP server in the target IDE configuration.
 ```json
 {
   "name": "custom-sqlite",
-  "target": "cursor",
+  "targets": ["cursor"],
   "transport": "stdio",
   "command": "npx",
   "args": ["-y", "mcp-server-sqlite", "--db", "/var/data/app.db"],
@@ -215,7 +210,11 @@ Configures a new MCP server in the target IDE configuration.
 ```json
 {
   "ok": true,
-  "targetFile": "/home/user/.cursor/mcp.json"
+  "value": {
+    "name": "custom-sqlite",
+    "targets": ["cursor"],
+    "updatedConfigFiles": ["/home/user/.cursor/mcp.json"]
+  }
 }
 ```
 
@@ -230,23 +229,25 @@ Safely purges skill directories across target clients.
 ```json
 {
   "name": "obsolete-skill",
-  "target": "all",
+  "targets": ["all"],
   "scope": "workspace",
-  "workspaceDir": "/mnt/workspace_data/project"
+  "workspaceRoot": "/mnt/workspace_data/project"
 }
 ```
 
 #### `POST /api/servers/prune`
-Removes server definitions from target configuration files without destroying unrelated keys or comments.
+Removes server definitions from target configuration files without destroying unrelated keys or comments. The route does not accept caller-supplied names or PIDs. First call `GET /api/servers`; send its server-issued opaque `serverId` as ownership proof.
 
 - **Request Body**:
 ```json
 {
-  "name": "deprecated-server",
-  "target": "all",
+  "serverId": "server_opaque-id",
+  "targets": ["all"],
   "scope": "global"
 }
 ```
+
+Unknown IDs, raw PID-only requests, and requests without a mutation `Origin` are rejected with `403 Forbidden`.
 
 ---
 

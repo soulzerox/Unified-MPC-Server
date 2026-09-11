@@ -123,7 +123,7 @@ describe('CodexDiscovery', () => {
   });
 
   it('preserves ENOENT from a direct spawn failure', async () => {
-    const missingExecutable = path.join(os.tmpdir(), `lnwjud-missing-codex-${process.pid}-${Date.now()}.exe`);
+    const missingExecutable = path.join(os.tmpdir(), `unified-mpc-missing-codex-${process.pid}-${Date.now()}.exe`);
 
     const result = await new DirectCodexCommandRunner().run(missingExecutable, ['--version']);
 
@@ -132,7 +132,7 @@ describe('CodexDiscovery', () => {
 
   it('executes a Windows .cmd Codex shim through ComSpec instead of spawning the batch file directly', async () => {
     if (process.platform !== 'win32') return;
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-codex-cmd-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-codex-cmd-'));
     try {
       const shim = path.join(root, 'codex.cmd');
       await writeFile(shim, '@echo off\r\nif "%~1"=="--version" echo codex 9.9.9\r\n', 'utf8');
@@ -148,7 +148,7 @@ describe('CodexDiscovery', () => {
 
   it('prefers Windows executable extensions over an extensionless shim', async () => {
     if (process.platform !== 'win32') return;
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-codex-resolver-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-codex-resolver-'));
     try {
       await writeFile(path.join(root, 'codex'), '#!/usr/bin/env bash\n', 'utf8');
       await writeFile(path.join(root, 'codex.cmd'), '@echo off\r\n', 'utf8');

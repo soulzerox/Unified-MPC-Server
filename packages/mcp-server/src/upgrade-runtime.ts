@@ -1244,9 +1244,9 @@ export class UpgradeRuntimeService {
     const normalizedPath = normalizedHostPath.split(pathApi.sep).join('/');
     const scopedRelativePath = !absolutePath
       && !normalizedPath.split('/').some((part) => part === '..')
-      && (normalizedPath.startsWith('.worktrees/') || normalizedPath.startsWith('.lnwjud/worktrees/'));
+      && (normalizedPath.startsWith('.worktrees/') || normalizedPath.startsWith('.unified-mpc/worktrees/'));
     if (!scopedRelativePath && !(absolutePath && isFullBypassAuthorization(authorization))) {
-      return err(appError('PATH_OUTSIDE_WORKSPACE', 'Git worktree path must remain under .worktrees or .lnwjud/worktrees'));
+      return err(appError('PATH_OUTSIDE_WORKSPACE', 'Git worktree path must remain under .worktrees or .unified-mpc/worktrees'));
     }
     const ref = readString(input, 'ref') ?? 'HEAD';
     if (ref.includes('\0') || ref.length > 256) return err(appError('INVALID_INPUT', 'Git worktree ref is invalid'));
@@ -1457,7 +1457,7 @@ export class UpgradeRuntimeService {
     if (workspaceId === undefined) return err(appError('INVALID_INPUT', `${name} requires workspaceId`));
     const file = this.services.file;
     if (file === undefined) return ok(truthfulUnavailable(name, 'needs_setup', ['workspace file service']));
-    const profilePath = '.lnwjud/project-profile.json';
+    const profilePath = '.unified-mpc/project-profile.json';
     if (name === 'project_profile_get') {
       const loaded = await file.readFile(this.actor, workspaceId, { path: profilePath }, authorization);
       if (!loaded.ok) {
@@ -1676,7 +1676,7 @@ export class UpgradeRuntimeService {
         available: true,
         ready: false,
         executed: false,
-        requirements: ['Start the lnwjud managed browser before using browser context tools.'],
+        requirements: ['Start the unified-mpc managed browser before using browser context tools.'],
         runtimeStatus: status.value,
       });
     }

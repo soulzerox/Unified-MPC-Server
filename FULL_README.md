@@ -1,8 +1,4 @@
-> **Expanded reference:** this file preserves the long-form README and historical release detail. For the current concise overview, installation links, and active release-candidate status, start with [README.md](README.md). Historical version-specific sections below are intentionally retained.
-
-<p align="center">
-  <img src="assets/logo/logo-256x256.png" width="160" alt="lnwjud logo" />
-</p>
+> **Historical reference:** this file preserves legacy `lnwjud` platform, release, and compatibility detail. It is not the current Unified-MPC runtime contract. For current scope, installation, security behavior, and verification, use [README.md](README.md), [SPEC.md](SPEC.md), [CONTEXT.md](CONTEXT.md), and [docs/AUDIT_REMEDIATION.md](docs/AUDIT_REMEDIATION.md).
 
 <h1 align="center">lnwjud</h1>
 
@@ -1806,12 +1802,7 @@ not want to publish a personal email address should configure a GitHub-provided
 
 ## Community and contribution
 
-- [Contributing guide](CONTRIBUTING.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Security Policy](SECURITY.md)
 - [Issue tracker](https://github.com/engasnm111/lnwjud/issues)
-
-Please use the security policy instead of public issues for vulnerability details.
 ## Development and verification
 
 ```powershell

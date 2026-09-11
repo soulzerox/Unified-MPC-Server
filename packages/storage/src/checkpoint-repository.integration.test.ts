@@ -52,7 +52,7 @@ describe('SqliteCheckpointRepository', () => {
     await repository.insert(checkpoint);
 
     const row = database.connection.prepare('SELECT files_json FROM checkpoints WHERE id = ?').get(checkpoint.id) as { files_json?: string } | undefined;
-    expect(row?.files_json).toMatch(/^lnwjud:checkpoint:v1:/);
+    expect(row?.files_json).toMatch(/^unified-mpc:checkpoint:v1:/);
     expect(row?.files_json).not.toContain('sensitive-checkpoint-marker');
     await expect(repository.get(checkpoint.id)).resolves.toEqual(checkpoint);
     database.close();
@@ -72,7 +72,7 @@ describe('SqliteCheckpointRepository', () => {
     await expect(repository.get(checkpoint.id)).resolves.toEqual(checkpoint);
 
     const row = database.connection.prepare('SELECT files_json FROM checkpoints WHERE id = ?').get(checkpoint.id) as { files_json?: string } | undefined;
-    expect(row?.files_json).toMatch(/^lnwjud:checkpoint:v1:/);
+    expect(row?.files_json).toMatch(/^unified-mpc:checkpoint:v1:/);
     expect(row?.files_json).not.toContain('legacy-plaintext-marker');
     database.close();
   });
@@ -94,7 +94,7 @@ describe('SqliteCheckpointRepository', () => {
 });
 
 async function temporaryRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-checkpoint-db-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-checkpoint-db-'));
   temporaryRoots.push(root);
   return root;
 }

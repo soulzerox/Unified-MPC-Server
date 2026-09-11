@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 async function fixture(): Promise<{ root: string; filename: string; workspace: Workspace }> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-goal-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-'));
   temporaryRoots.push(root);
   return {
     root,

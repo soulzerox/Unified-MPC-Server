@@ -340,22 +340,26 @@ async function runMcpLaunch(
 }
 
 export function createDefaultCliDependencies(): CliDependencies {
-  const dataPath = resolveDataPathFromShared();
-  fs.mkdirSync(dataPath, { recursive: true });
-  const database = new SqliteDatabase(path.join(dataPath, 'storage.sqlite'));
-  const workspaceRepo = new SqliteWorkspaceRepository(database);
-  const workspaceService = new WorkspaceService(workspaceRepo);
+  let workspaceService: WorkspaceService | undefined;
+  const getWorkspaceService = (): WorkspaceService => {
+    if (workspaceService !== undefined) return workspaceService;
+    const dataPath = resolveDataPathFromShared();
+    fs.mkdirSync(dataPath, { recursive: true });
+    const database = new SqliteDatabase(path.join(dataPath, 'storage.sqlite'));
+    workspaceService = new WorkspaceService(new SqliteWorkspaceRepository(database));
+    return workspaceService;
+  };
 
   return {
     status: async (): Promise<CliStatus> => {
-      const workspaces = await workspaceService.list();
+      const workspaces = await getWorkspaceService().list();
       return { workspaceCount: workspaces.length };
     },
     workspaceAdd: async (rootPath: string): Promise<Result<Workspace>> => {
-      return workspaceService.add(path.basename(rootPath), rootPath);
+      return getWorkspaceService().add(path.basename(rootPath), rootPath);
     },
     workspaceList: async (): Promise<readonly Workspace[]> => {
-      return workspaceService.list();
+      return getWorkspaceService().list();
     },
     mcpStdio: async (): Promise<Result<{ readonly handle: CliServerHandle }>> => {
       return err(appError('INTERNAL_ERROR', 'Direct stdio MCP launch requires mcp-stdio runner'));

@@ -13,11 +13,11 @@ afterEach(async () => {
 
 describe('mcp activity log file', () => {
   it('resolves the activity log under the shared data path', () => {
-    expect(mcpActivityLogPath('C:\\Users\\me\\AppData\\Roaming\\lnwjud')).toMatch(/mcp-activity\.log$/);
+    expect(mcpActivityLogPath('C:\\Users\\me\\AppData\\Roaming\\unified-mpc')).toMatch(/mcp-activity\.log$/);
   });
 
   it('writes started and completed NDJSON lines that Live Logs can tail', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-activity-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-activity-'));
     temporaryRoots.push(root);
     const filePath = mcpActivityLogPath(root);
     const tracker = new ActivityTracker(createFileActivitySink(filePath));

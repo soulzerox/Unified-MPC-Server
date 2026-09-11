@@ -178,4 +178,32 @@ Following the Matt Pocock `/diagnosing-bugs` and `/scaffold-exercises` TDD workf
    - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
    - Full monorepo `corepack pnpm test` passes 100% across all 21 packages.
 
+---
+
+## 9. Codebase Hygiene & Legacy Bloat Removal (Option 1 — Completed)
+
+Following the Matt Pocock `/improve-codebase-architecture` and `ponytail-audit` workflow, the codebase was systematically purged of all legacy `lnwjud` residue to achieve a pure, zero-debt Linux Ubuntu architecture (Commit `58352f4`):
+
+1. **Purged Legacy Scripts (8 files deleted)**:
+   - Eliminated Electron startup and cleanup scripts (`scripts/diagnose-electron-startup.mjs`, `scripts/electron-startup-cleanup.mjs`).
+   - Eliminated macOS smoke/verification scripts (`scripts/stage-macos-smoke-app.sh`, `scripts/verify-macos-release.sh`).
+   - Eliminated legacy release packager and platform scripts (`scripts/collect-release-assets.mjs`, `scripts/verify-platform-release.mjs`, `scripts/verify-linux-release.sh`, `scripts/update-runtime-dependencies.mjs`).
+   - Removed empty directory `scripts/lib/`.
+2. **Purged macOS Swift Native Host (13 files deleted)**:
+   - Completely deleted `native/macos-host/` (`Package.swift`, `Sources/`, `Tests/`), retaining solely the Linux Rust host (`native/linux-host`).
+3. **Purged Obsolete Multi-Platform Test Suites (21 files deleted)**:
+   - Deleted `tests/packaging/` (Electron packaging, macOS notarization, AppImage layout).
+   - Deleted `tests/release/` (tests asserting on `apps/desktop`, `.ps1` files, and `lnwjud.exe`).
+   - Deleted `tests/integration/cross-platform-release-scenarios.test.ts` and `platform-composition.test.ts`.
+   - Verified remaining integration tests: `codex-review-flow.test.ts` and `mcp-development-flow.test.ts` pass 100%.
+4. **Purged Obsolete GitHub Actions Workflows (3 files deleted, 1 rewritten)**:
+   - Deleted `dev-installer.yml` (Windows installer), `release.yml` (Electron release), and `runtime-dependency-update.yml`.
+   - Rewrote `.github/workflows/ci.yml` to a clean Linux Ubuntu 24.04 CI pipeline (Node 22, pnpm, typecheck, lint, package tests, root integration tests, build, and CLI binary execution).
+5. **Standardized Runtime Environment & CLI Usability**:
+   - Cleaned `.gitignore` removing all legacy `apps/desktop`, `native/macos-host`, and `lnwjud` lines.
+   - Enforced `UNIFIED_MPC_*` environment variables across `packages/capabilities` (`UNIFIED_MPC_BROWSER_*`), `packages/shared` (`UNIFIED_MPC_UNRESTRICTED`), and `apps/cli` (`UNIFIED_MPC_ALLOWED_ROOTS`, `UNIFIED_MPC_CHECKPOINT_KEY_BASE64`).
+   - Added `--help`, `-h`, `help` usage dispatcher to `apps/cli/src/index.ts` returning exit code 0.
+   - Verified full monorepo typecheck clean (0 errors) and 100% tests passing across all 21 packages.
+
+
 

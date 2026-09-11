@@ -311,6 +311,13 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Verified via subprocess e2e smoketests (`milestone-6-e2e.test.ts`).
    - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
    - Full monorepo `corepack pnpm test` passes 100% across all 21 packages.
+7. **Codebase Hygiene & Legacy Bloat Removal (Option 1)**:
+   - Eliminated 50 residual legacy files (-5,673 lines of code) across `scripts/`, `native/macos-host/`, and `tests/packaging/` & `tests/release/`.
+   - Replaced multi-platform CI workflows with native Ubuntu 24.04 pipeline (`.github/workflows/ci.yml`).
+   - Cleaned `.gitignore` removing all legacy `apps/desktop` and `lnwjud` references.
+   - Standardized runtime environment variables to `UNIFIED_MPC_*` across `capabilities`, `shared`, and `cli`.
+   - Added user-friendly CLI `--help`, `-h`, and `help` commands returning exit code 0.
+   - Preserved active integration test suites (`mcp-development-flow.test.ts`, `codex-review-flow.test.ts`) passing 100%.
 
 ---
 
@@ -338,6 +345,9 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
 4. `apps/web`:
    - `web-server.test.ts`: Route tests for status, bifurcated installation, pruning, and 412 status on `/api/chatgpt-web/connect`.
    - `milestone-5-stress.test.ts`: Origin policy tests (403), 1MB payload limit (413), and 50 concurrent requests stress test.
+5. `tests/integration`:
+   - `mcp-development-flow.test.ts`: End-to-end fixture workflow verifying application services.
+   - `codex-review-flow.test.ts`: Codex review delegation, diff inspection, and background task management.
 
 ### Prior Art
 - Test patterns from `packages/extensions/src/extensions-service.test.ts` and `mcp-session-manager.integration.test.ts`.

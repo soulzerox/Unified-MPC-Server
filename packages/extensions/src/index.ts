@@ -25,3 +25,16 @@ export {
   createLocalExtensionsService,
   type CreateLocalExtensionsOptions,
 } from './create-local-extensions.js';
+export {
+  IdeSyncService,
+  DEFAULT_POLICIES,
+  POLICY_BLOCK_START,
+  POLICY_BLOCK_END,
+  replaceOrAppendPolicyBlock,
+  writeAtomic,
+  type IdeSyncOptions,
+  type PolicyEntry,
+  type PolicyPriority,
+  type SyncTarget,
+} from './ide-sync.js';
+

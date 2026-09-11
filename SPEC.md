@@ -86,20 +86,26 @@ Unified-MPC-Server/
 - **Electron Elimination**: `apps/desktop` is completely removed. All management interfaces run via the local loopback web control plane (`http://127.0.0.1:18765/`) and the native CLI (`unified-mpc`).
 - **Node.js Native SQLite**: Built for Node `>=22.0.0` leveraging built-in `node:sqlite` (`DatabaseSync`), eliminating compilation of native C++ bindings for SQLite.
 
-### 2. Antigravity Ecosystem Integration
+### 2. Universal Multi-Client Ecosystem Integration
 
-The discovery and sync subsystem (`packages/extensions`) natively supports Google Antigravity across all four form factors (VS Code Extension, Antigravity IDE, CLI `agy`, and Desktop):
+The discovery, aggregation, and policy sync subsystem (`packages/extensions`) acts as a unified hub across all primary AI coding clients and IDEs on Linux Ubuntu:
 
-- **MCP Configuration Roots**:
-  - Global: `~/.gemini/config/mcp_config.json` (primary) and `~/.gemini/antigravity/mcp_config.json` (fallback).
-  - Workspace: `<workspace>/.gemini/mcp.json` and `<workspace>/.gemini/config/mcp_config.json`.
-- **Skill Discovery Roots**:
-  - User Global: `~/.gemini/config/skills/` and `~/.gemini/skills/`.
-  - Antigravity Built-in: `~/.gemini/antigravity/builtin/skills/`.
-  - Workspace: `<workspace>/.gemini/skills/` and `<workspace>/.agents/skills/`.
-- **Rule Synchronization**:
-  - Global Policy: Synchronized to `~/.gemini/config/GEMINI.md` and `~/.gemini/antigravity/rules/mcp-policy.md`.
-  - Workspace Policy: Synchronized to `<workspace>/GEMINI.md` and `<workspace>/.gemini/rules/mcp-policy.md`.
+#### Client Integration Matrix
+
+| Client | Form Factors Supported | MCP Config Discovery | Skill Discovery Roots | Rule / Policy Sync Target |
+|---|---|---|---|---|
+| **Google Antigravity** | VS Code Extension, Antigravity IDE, CLI `agy`, Desktop | `~/.gemini/config/mcp_config.json`<br>`<workspace>/.gemini/mcp.json` | `~/.gemini/config/skills/`<br>`~/.gemini/skills/`<br>`~/.gemini/antigravity/builtin/skills/`<br>`<workspace>/.gemini/skills/` | `~/.gemini/config/GEMINI.md`<br>`<workspace>/GEMINI.md`<br>`~/.gemini/antigravity/rules/mcp-policy.md` |
+| **Cline** | CLI (`~/.cline/`),<br>VS Code Extension | `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`<br>`<workspace>/.cline/mcp.json` | `~/.cline/skills/`<br>`<workspace>/.cline/skills/` | `.clinerules` (block replacement)<br>`~/.cline/rules/` |
+| **OpenCode** | CLI, VS Code Extension, Standalone | `~/.config/opencode/opencode.jsonc`<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md` (project root)<br>`~/.config/opencode/AGENTS.md` |
+| **Freebuff** | Standalone Desktop (`~/.config/freebuff-desktop/`) | Loopback MCP or project state | `.agents/skills/`<br>`<workspace>/skills/` | `AGENTS.md` (root `injectAgentsMd`) |
+| **Cursor** | Editor / IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`<workspace>/.cursor/skills/` | `.cursor/rules/00-mandatory-policy.mdc` |
+| **Claude** | Claude Desktop, Claude Code CLI | `~/.config/Claude/claude_desktop_config.json` | `~/.claude/skills/`<br>`<workspace>/.claude/skills/` | `~/.claude/CLAUDE.md`<br>`<workspace>/CLAUDE.md` |
+| **Oh My Pi (OMP)** | CLI / Terminal Agent | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
+| **Codex CLI** | CLI Tool | Standard Codex Engine | `~/.codex/skills/`<br>`~/.codex/plugins/cache/` | `AGENTS.md` |
+
+- **Unified Downstream Multiplexer (`McpConfigLoader`)**: Ingests server definitions from all configured client configs, canonicalizes server names, filters self-references, and mounts them into the local runtime.
+- **Universal Skill Catalog (`SkillCatalog`)**: Discovers and indexes markdown skill manuals across all client skill roots, providing unified listing and content retrieval.
+- **Cross-Client Policy Synchronizer (`IdeSyncService`)**: Compiles P1–P7 tool execution priorities and guardrails, pushing atomic updates across all client rule files simultaneously.
 
 ### 3. Bifurcated Dynamic Ingestion Engine (`packages/extensions/src/installer.ts`)
 

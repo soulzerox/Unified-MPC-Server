@@ -59,30 +59,49 @@ These invariants must hold in any correct implementation. An agent that violates
 
 ## 4. Supported IDE & Agent Form Factors
 
+Unified-MPC-Server natively discovers downstream servers, aggregates skills, and synchronizes rules/policies across all major AI coding clients on Linux Ubuntu:
+
 1. **Google Antigravity**:
    - Surfaces: VS Code Extension, Antigravity IDE, CLI `agy`, and Desktop.
    - MCP Server Config: `~/.gemini/config/mcp_config.json` (primary), `~/.gemini/antigravity/mcp_config.json` (fallback).
    - Workspace Config: `<workspace>/.gemini/mcp.json`.
    - Skill Folders: `~/.gemini/config/skills/`, `~/.gemini/skills/`, `~/.gemini/antigravity/builtin/skills/`, `<workspace>/.gemini/skills/`, `<workspace>/.agents/skills/`.
-   - Rules: `~/.gemini/config/GEMINI.md`, `~/.gemini/antigravity/rules/`.
-2. **Cursor**:
-   - Config: `~/.cursor/mcp.json` or `<workspace>/.cursor/mcp.json`.
-   - Skills: `~/.cursor/skills/`, `<workspace>/.cursor/skills/`.
-   - Rules: `<workspace>/.cursor/rules/00-policy.mdc`.
-3. **Claude Desktop & Code**:
-   - Config: Claude Desktop config (`~/.config/Claude/claude_desktop_config.json` or `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json` on Linux; `~/Library/Application Support/Claude/` on macOS).
-   - Skills: `~/.claude/skills/`.
-4. **OpenCode**:
-   - Config: `~/.config/opencode/opencode.jsonc` or `.json`.
-   - Rules: `AGENTS.md` in project root.
-5. **Oh My Pi (OMP)**:
-   - Config: `~/.omp/config.json`.
+   - Rules: `~/.gemini/config/GEMINI.md`, `~/.gemini/antigravity/rules/mcp-policy.md`, `<workspace>/GEMINI.md`.
+2. **Cline**:
+   - Surfaces: CLI (`~/.cline/`), VS Code Extension (`saoudrizwan.claude-dev`).
+   - MCP Server Config: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`, `<workspace>/.cline/mcp.json`.
+   - Skill Folders: `~/.cline/skills/` (global catalog with 40+ skills), `<workspace>/.cline/skills/`, `<workspace>/.agents/skills/`.
+   - Rules: `<workspace>/.clinerules` (managed via `<!-- MCP-POLICY-START -->` and `<!-- MCP-POLICY-END -->` block replacement), `~/.cline/rules/`.
+3. **OpenCode**:
+   - Surfaces: CLI, VS Code Extension, Standalone Desktop.
+   - MCP Server Config: `~/.config/opencode/opencode.jsonc`, `~/.config/opencode/opencode.json`, `<workspace>/.opencode/mcp.json`.
+   - Skill Folders: `~/.config/opencode/skill/`, `<workspace>/.opencode/skills/`.
+   - Rules: `AGENTS.md` (project root), `~/.config/opencode/AGENTS.md`.
+4. **Freebuff**:
+   - Surfaces: Standalone Desktop (`~/.config/freebuff-desktop/` state and preferences).
+   - MCP Server Config: Loopback MCP or project state.
+   - Skill Folders: `<workspace>/.agents/skills/`, `<workspace>/skills/`.
+   - Rules: `AGENTS.md` (project root, read when `injectAgentsMd: true`).
+5. **Cursor**:
+   - Surfaces: Cursor IDE.
+   - MCP Server Config: `~/.cursor/mcp.json`, `<workspace>/.cursor/mcp.json`.
+   - Skill Folders: `~/.cursor/skills/`, `<workspace>/.cursor/skills/`.
+   - Rules: `<workspace>/.cursor/rules/00-mandatory-policy.mdc`.
+6. **Claude Desktop & Code**:
+   - Surfaces: Claude Desktop, Claude Code CLI.
+   - MCP Server Config: `~/.config/Claude/claude_desktop_config.json` (Linux XDG), `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json`.
+   - Skill Folders: `~/.claude/skills/`, `<workspace>/.claude/skills/`.
+   - Rules: `~/.claude/CLAUDE.md`, `<workspace>/CLAUDE.md`.
+7. **Oh My Pi (OMP)**:
+   - Surfaces: CLI / Terminal Agent.
+   - MCP Server Config: `~/.omp/config.json`.
+   - Skill Folders: `~/.omp/skills/`, `<workspace>/.omp/skills/`.
    - Rules: `.omp/system.md`.
-6. **Cline / Roo Code**:
-   - Rules: `.clinerules`.
-   - Skills: `<workspace>/.agents/skills/`.
-7. **OpenAI Codex CLI**:
+8. **OpenAI Codex CLI**:
+   - Surfaces: CLI Tool.
    - Adapter: `packages/codex/` (`codex-discovery.ts`).
+   - Skill Folders: `~/.codex/skills/`, `~/.codex/plugins/cache/`.
+   - Rules: `AGENTS.md`.
 
 ---
 

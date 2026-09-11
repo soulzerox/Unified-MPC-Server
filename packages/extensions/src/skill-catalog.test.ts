@@ -155,6 +155,60 @@ Use one native successor.
     ]);
   });
 
+  it('discovers skills across all universal client roots (Antigravity, Cline, OpenCode, Freebuff, OMP)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-multi-client-skills-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+
+    const testRoots = [
+      // Antigravity
+      [path.join(home, '.gemini', 'config', 'skills', 'antigravity-config-skill'), 'antigravity-config-skill', 'antigravity-config-skills'],
+      [path.join(home, '.gemini', 'skills', 'antigravity-user-skill'), 'antigravity-user-skill', 'antigravity-skills'],
+      [path.join(home, '.gemini', 'antigravity', 'builtin', 'skills', 'antigravity-builtin-skill'), 'antigravity-builtin-skill', 'antigravity-builtin-skills'],
+      [path.join(workspace, '.gemini', 'skills', 'antigravity-ws-skill'), 'antigravity-ws-skill', 'workspace-antigravity-skills'],
+      // Cline
+      [path.join(home, '.cline', 'skills', 'cline-global-skill'), 'cline-global-skill', 'cline-skills'],
+      [path.join(workspace, '.cline', 'skills', 'cline-ws-skill'), 'cline-ws-skill', 'workspace-cline-skills'],
+      // OpenCode
+      [path.join(home, '.config', 'opencode', 'skill', 'opencode-global-skill'), 'opencode-global-skill', 'opencode-config-skill'],
+      [path.join(workspace, '.opencode', 'skills', 'opencode-ws-skill'), 'opencode-ws-skill', 'workspace-opencode-skills'],
+      // Freebuff / generic workspace skills
+      [path.join(workspace, 'skills', 'freebuff-ws-skill'), 'freebuff-ws-skill', 'workspace-root-skills'],
+      // Oh My Pi
+      [path.join(home, '.omp', 'skills', 'omp-global-skill'), 'omp-global-skill', 'omp-skills'],
+      [path.join(workspace, '.omp', 'skills', 'omp-ws-skill'), 'omp-ws-skill', 'workspace-omp-skills'],
+    ] as const;
+
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+
+    for (const [skillRoot, name] of testRoots) {
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(
+        path.join(skillRoot, 'SKILL.md'),
+        `---\nname: ${name}\ndescription: Test skill for ${name}\n---\n# ${name}\nBody content\n`,
+        'utf8',
+      );
+    }
+
+    const catalog = new SkillCatalog({
+      homeDir: home,
+      workspaceRoot: workspace,
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+    });
+
+    const listed = await catalog.list();
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+
+    for (const [, name, expectedSource] of testRoots) {
+      const found = listed.value.skills.find((s) => s.name === name);
+      expect(found, `Expected to find skill: ${name}`).toBeDefined();
+      expect(found?.source).toBe(expectedSource);
+    }
+  });
+
   it('reads an unambiguous skill by bare or dollar-prefixed name', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-skill-alias-'));
     temporaryRoots.push(home);

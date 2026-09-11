@@ -27,16 +27,67 @@ export class McpConfigLoader {
       : defaultApplicationDataDirectory(platform, home, environment);
     const discovered: DiscoveredMcpServer[] = [];
 
+    // Cursor global
     await this.loadFile(
       discovered,
       pathApi.join(home, '.cursor', 'mcp.json'),
       'cursor',
     );
+
+    // Claude Desktop global
     await this.loadFile(
       discovered,
       pathApi.join(appData, 'Claude', 'claude_desktop_config.json'),
       'claude-desktop',
     );
+
+    // Antigravity global
+    await this.loadFile(
+      discovered,
+      pathApi.join(home, '.gemini', 'config', 'mcp_config.json'),
+      'antigravity-config',
+    );
+    await this.loadFile(
+      discovered,
+      pathApi.join(home, '.gemini', 'antigravity', 'mcp_config.json'),
+      'antigravity-fallback',
+    );
+
+    // Cline global (VS Code extension settings)
+    await this.loadFile(
+      discovered,
+      pathApi.join(appData, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+      'cline-vscode',
+    );
+    if (appData !== pathApi.join(home, '.config')) {
+      await this.loadFile(
+        discovered,
+        pathApi.join(home, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+        'cline-vscode',
+      );
+    }
+
+    // OpenCode global
+    await this.loadFile(discovered, pathApi.join(appData, 'opencode', 'opencode.jsonc'), 'opencode-config');
+    await this.loadFile(discovered, pathApi.join(appData, 'opencode', 'opencode.json'), 'opencode-config');
+    if (appData !== pathApi.join(home, '.config')) {
+      await this.loadFile(discovered, pathApi.join(home, '.config', 'opencode', 'opencode.jsonc'), 'opencode-config');
+      await this.loadFile(discovered, pathApi.join(home, '.config', 'opencode', 'opencode.json'), 'opencode-config');
+    }
+
+    // Oh My Pi (OMP) global
+    await this.loadFile(discovered, pathApi.join(home, '.omp', 'config.json'), 'omp-config');
+
+    // Workspace configs
+    const workspaceRoot = this.options.workspaceRoot?.trim();
+    if (workspaceRoot !== undefined && workspaceRoot.length > 0) {
+      await this.loadFile(discovered, pathApi.join(workspaceRoot, '.gemini', 'mcp.json'), 'workspace-antigravity');
+      await this.loadFile(discovered, pathApi.join(workspaceRoot, '.cline', 'mcp.json'), 'workspace-cline');
+      await this.loadFile(discovered, pathApi.join(workspaceRoot, '.opencode', 'mcp.json'), 'workspace-opencode');
+      await this.loadFile(discovered, pathApi.join(workspaceRoot, '.omp', 'mcp.json'), 'workspace-omp');
+      await this.loadFile(discovered, pathApi.join(workspaceRoot, '.cursor', 'mcp.json'), 'workspace-cursor');
+      await this.loadFile(discovered, pathApi.join(workspaceRoot, '.claude', 'mcp.json'), 'workspace-claude');
+    }
 
     for (const [name, config] of Object.entries(this.options.settings.extraMcpServers)) {
       discovered.push(this.toServer(name, 'unified-mpc-settings', config));
@@ -48,7 +99,8 @@ export class McpConfigLoader {
   private async loadFile(target: DiscoveredMcpServer[], filePath: string, source: string): Promise<void> {
     try {
       const raw = await readFile(filePath, 'utf8');
-      const parsed: unknown = JSON.parse(raw);
+      const cleanJson = stripJsonComments(raw);
+      const parsed: unknown = JSON.parse(cleanJson);
       if (typeof parsed !== 'object' || parsed === null) return;
       const record = parsed as Record<string, unknown>;
       const servers = (record.mcpServers ?? record.mcp) as unknown;
@@ -154,3 +206,10 @@ function dedupeServers(servers: readonly DiscoveredMcpServer[]): readonly Discov
   }
   return [...byName.values()];
 }
+
+export function stripJsonComments(content: string): string {
+  return content.replace(/\\"|"(?:[^"\\]|\\.)*"|(\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)/g, (match, group) => {
+    return group ? '' : match;
+  });
+}
+

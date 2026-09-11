@@ -119,16 +119,43 @@ export class SkillCatalog {
       ? path.join(home, '.codex')
       : path.resolve(configuredCodexHome);
     const defaults: { readonly source: string; readonly path: string }[] = [
+      // Antigravity (global)
+      { source: 'antigravity-config-skills', path: path.join(home, '.gemini', 'config', 'skills') },
+      { source: 'antigravity-skills', path: path.join(home, '.gemini', 'skills') },
+      { source: 'antigravity-builtin-skills', path: path.join(home, '.gemini', 'antigravity', 'builtin', 'skills') },
+      // Cline (global)
+      { source: 'cline-skills', path: path.join(home, '.cline', 'skills') },
+      // OpenCode (global)
+      { source: 'opencode-config-skill', path: path.join(home, '.config', 'opencode', 'skill') },
+      { source: 'opencode-config-skills', path: path.join(home, '.config', 'opencode', 'skills') },
+      // Oh My Pi (global)
+      { source: 'omp-skills', path: path.join(home, '.omp', 'skills') },
+      // Cursor (global)
       { source: 'cursor-skills-cursor', path: path.join(home, '.cursor', 'skills-cursor') },
       { source: 'cursor-skills', path: path.join(home, '.cursor', 'skills') },
+      // Claude (global)
       { source: 'claude-skills', path: path.join(home, '.claude', 'skills') },
+      // Agents (global)
       { source: 'agents-skills', path: path.join(home, '.agents', 'skills') },
+      // Codex (global)
       { source: 'codex-skills', path: path.join(codexHome, 'skills') },
       { source: 'codex-plugin-skills', path: path.join(codexHome, 'plugins', 'cache') },
     ];
     const workspaceRoot = this.options.workspaceRoot?.trim();
     if (workspaceRoot !== undefined && workspaceRoot.length > 0) {
       defaults.push(
+        // Antigravity (workspace)
+        { source: 'workspace-antigravity-skills', path: path.join(workspaceRoot, '.gemini', 'skills') },
+        // Cline (workspace)
+        { source: 'workspace-cline-skills', path: path.join(workspaceRoot, '.cline', 'skills') },
+        // OpenCode (workspace)
+        { source: 'workspace-opencode-skills', path: path.join(workspaceRoot, '.opencode', 'skills') },
+        { source: 'workspace-opencode-skill', path: path.join(workspaceRoot, '.opencode', 'skill') },
+        // Oh My Pi (workspace)
+        { source: 'workspace-omp-skills', path: path.join(workspaceRoot, '.omp', 'skills') },
+        // Freebuff / generic workspace skills
+        { source: 'workspace-root-skills', path: path.join(workspaceRoot, 'skills') },
+        // Cursor, Claude, Agents, Codex, GitHub (workspace)
         { source: 'workspace-cursor-skills', path: path.join(workspaceRoot, '.cursor', 'skills') },
         { source: 'workspace-cursor-skills-cursor', path: path.join(workspaceRoot, '.cursor', 'skills-cursor') },
         { source: 'workspace-claude-skills', path: path.join(workspaceRoot, '.claude', 'skills') },

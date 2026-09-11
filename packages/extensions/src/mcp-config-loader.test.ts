@@ -198,4 +198,90 @@ describe('McpConfigLoader', () => {
     expect(exclusionReason(' bad server ', { command: 'node' })).toContain('stable external namespace');
     expect(exclusionReason('', { command: 'node' })).toContain('stable external namespace');
   });
+
+  it('discovers downstream MCP servers across all universal clients (Antigravity, Cline, OpenCode, OMP, workspace)', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mcp-multi-discovery-'));
+    temporaryRoots.push(home);
+    const workspace = path.join(home, 'workspace');
+    await mkdir(workspace, { recursive: true });
+
+    // 1. Antigravity global
+    const agConfigDir = path.join(home, '.gemini', 'config');
+    await mkdir(agConfigDir, { recursive: true });
+    await writeFile(path.join(agConfigDir, 'mcp_config.json'), JSON.stringify({
+      mcpServers: { 'antigravity-global-server': { command: 'node', args: ['ag-server.js'] } },
+    }), 'utf8');
+
+    // 2. Antigravity workspace
+    const agWsDir = path.join(workspace, '.gemini');
+    await mkdir(agWsDir, { recursive: true });
+    await writeFile(path.join(agWsDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'antigravity-ws-server': { command: 'node', args: ['ag-ws.js'] } },
+    }), 'utf8');
+
+    // 3. Cline global (VS Code settings)
+    const clineConfigDir = path.join(home, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings');
+    await mkdir(clineConfigDir, { recursive: true });
+    await writeFile(path.join(clineConfigDir, 'cline_mcp_settings.json'), JSON.stringify({
+      mcpServers: { 'cline-global-server': { command: 'node', args: ['cline-server.js'] } },
+    }), 'utf8');
+
+    // 4. Cline workspace
+    const clineWsDir = path.join(workspace, '.cline');
+    await mkdir(clineWsDir, { recursive: true });
+    await writeFile(path.join(clineWsDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'cline-ws-server': { command: 'node', args: ['cline-ws.js'] } },
+    }), 'utf8');
+
+    // 5. OpenCode global (JSONC with comment)
+    const opencodeConfigDir = path.join(home, '.config', 'opencode');
+    await mkdir(opencodeConfigDir, { recursive: true });
+    await writeFile(path.join(opencodeConfigDir, 'opencode.jsonc'), `// OpenCode configuration\n{\n  "mcpServers": {\n    "opencode-global-server": {\n      "command": "node",\n      "args": ["opencode-server.js"]\n    }\n  }\n}\n`, 'utf8');
+
+    // 6. OpenCode workspace
+    const opencodeWsDir = path.join(workspace, '.opencode');
+    await mkdir(opencodeWsDir, { recursive: true });
+    await writeFile(path.join(opencodeWsDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'opencode-ws-server': { command: 'node', args: ['opencode-ws.js'] } },
+    }), 'utf8');
+
+    // 7. OMP global
+    const ompConfigDir = path.join(home, '.omp');
+    await mkdir(ompConfigDir, { recursive: true });
+    await writeFile(path.join(ompConfigDir, 'config.json'), JSON.stringify({
+      mcpServers: { 'omp-global-server': { command: 'node', args: ['omp-server.js'] } },
+    }), 'utf8');
+
+    // 8. Workspace Cursor & Claude
+    const cursorWsDir = path.join(workspace, '.cursor');
+    await mkdir(cursorWsDir, { recursive: true });
+    await writeFile(path.join(cursorWsDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'cursor-ws-server': { command: 'node', args: ['cursor-ws.js'] } },
+    }), 'utf8');
+
+    const claudeWsDir = path.join(workspace, '.claude');
+    await mkdir(claudeWsDir, { recursive: true });
+    await writeFile(path.join(claudeWsDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'claude-ws-server': { command: 'node', args: ['claude-ws.js'] } },
+    }), 'utf8');
+
+    const loader = new McpConfigLoader({
+      homeDir: home,
+      workspaceRoot: workspace,
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+    });
+
+    const discovered = await loader.discover();
+    const discoveredNames = discovered.map((s) => s.name);
+
+    expect(discoveredNames).toContain('antigravity-global-server');
+    expect(discoveredNames).toContain('antigravity-ws-server');
+    expect(discoveredNames).toContain('cline-global-server');
+    expect(discoveredNames).toContain('cline-ws-server');
+    expect(discoveredNames).toContain('opencode-global-server');
+    expect(discoveredNames).toContain('opencode-ws-server');
+    expect(discoveredNames).toContain('omp-global-server');
+    expect(discoveredNames).toContain('cursor-ws-server');
+    expect(discoveredNames).toContain('claude-ws-server');
+  });
 });

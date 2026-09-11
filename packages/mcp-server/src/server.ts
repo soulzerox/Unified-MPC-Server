@@ -15,16 +15,16 @@ import { BUNDLED_PONYTAIL_SKILL_ID, PonytailActivationLedger } from './ponytail-
 import { actorForRequestScope, type McpRequestScope } from './request-scope.js';
 
 export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
-  'Continue using lnwjud tools until the requested outcome is complete.',
+  'Continue using unified-mpc tools until the requested outcome is complete.',
   'Do not stop, hand off, or ask the user to say "continue" merely because elapsed time has passed.',
   'Stop only when the outcome is complete, a user decision or new authority is required, or an external blocker prevents safe progress.',
-  'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled lnwjud-scheduled-continuation skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
+  'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled unified-mpc-scheduled-continuation (or lnwjud-scheduled-continuation) skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
   'Use durable background tasks for naturally long-running commands, then keep checking them and continue the work while the current run remains active.',
 ].join(' ');
 
 export function buildMcpInstructions(ponytailMode: PonytailMode = DEFAULT_PONYTAIL_MODE): string {
   if (ponytailMode === 'off') return MCP_OUTCOME_DRIVEN_INSTRUCTIONS;
-  return `${MCP_OUTCOME_DRIVEN_INSTRUCTIONS} For coding tasks, the global lnwjud Ponytail policy is ${ponytailMode.toUpperCase()}. Load the exact bundled skill ${BUNDLED_PONYTAIL_SKILL_ID} before the first code mutation and follow it at the selected intensity. Workspace or durable-goal overrides are resolved at execution time and may change the effective mode. Do not substitute workspace/user copies. If the user explicitly asks to stop Ponytail or return to normal mode, call ponytail_session with suppressed=true for the active workspace/goal; use suppressed=false to resume without changing persisted settings. Ponytail is subordinate to lnwjud security, approvals, durable goals, recovery, compatibility, observability, required tests, release verification, project rules, and explicit user instructions.`;
+  return `${MCP_OUTCOME_DRIVEN_INSTRUCTIONS} For coding tasks, the global unified-mpc Ponytail policy is ${ponytailMode.toUpperCase()}. Load the exact bundled skill ${BUNDLED_PONYTAIL_SKILL_ID} before the first code mutation and follow it at the selected intensity. Workspace or durable-goal overrides are resolved at execution time and may change the effective mode. Do not substitute workspace/user copies. If the user explicitly asks to stop Ponytail or return to normal mode, call ponytail_session with suppressed=true for the active workspace/goal; use suppressed=false to resume without changing persisted settings. Ponytail is subordinate to unified-mpc security, approvals, durable goals, recovery, compatibility, observability, required tests, release verification, project rules, and explicit user instructions.`;
 }
 
 export interface McpServerOptions {

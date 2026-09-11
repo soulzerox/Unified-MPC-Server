@@ -74,4 +74,20 @@ describe('scheduled continuation skill contract', () => {
     expect(skill).toContain('browser/DOM automation');
     expect(skill).not.toMatch(/Automations(?:\.|:)/i);
   });
+
+  it('documents unified-mpc-scheduled-continuation native watchdog contract', async () => {
+    const skill = await readFile(
+      path.resolve(import.meta.dirname, '../../../.agents/skills/unified-mpc-scheduled-continuation/SKILL.md'),
+      'utf8',
+    );
+
+    expect(skill).toContain('name: unified-mpc-scheduled-continuation');
+    expect(skill).toMatch(/description: Use when/);
+    expect(skill).toContain('hourly recurring');
+    expect(skill).toContain('intervalMinutes=60');
+    expect(skill).toContain('600 seconds');
+    expect(skill).toContain('Recurring cadence: **60 minutes**');
+    expect(skill).toContain('`claim_scheduled_continuation` must be the **first connected unified-mpc action');
+    expect(skill).toContain('unified-mpc `scheduler`');
+  });
 });

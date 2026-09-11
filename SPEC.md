@@ -326,6 +326,27 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Verified Local Web Control Plane (`http://127.0.0.1:18765/`) endpoints, Obsidian dashboard HTML, 412 hard gating invariant, and 403 loopback origin enforcement.
    - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
    - Full monorepo `corepack pnpm test` and root `npx vitest run tests/` pass 100%.
+9. **Interactive Reactive Web Control Plane SPA (Option 1 — TDD)**:
+   - Built zero-dependency vanilla JS reactivity engine in `apps/web/src/dashboard-html.ts` matching Obsidian dark token styling.
+   - Wired live client-side telemetry polling (`/api/status`, `/api/chatgpt-gateway/status`), policy synchronization (`POST /api/policies/sync`), modal forms for bifurcated skill installation (`POST /api/skills/install`) and server installation (`POST /api/servers/install`), and client-side gated "Connect ChatGPT Web" button.
+   - Developed under strict TDD: created test suite `apps/web/src/dashboard-html.test.ts` asserting DOM scripts, endpoints, modals, and gating logic (5/5 tests passing).
+   - Package verification: all 3 test files in `@unified-mpc/web` passed 100% (23/23 tests).
+10. **Residual `lnwjud` Purge & Unified-MPC Skill Modernization (Option 2 — TDD)**:
+   - Created `.agents/skills/unified-mpc-scheduled-continuation/SKILL.md` targeting pure Linux POSIX `gh run watch` and Unified-MPC runtime rules, keeping `.agents/skills/lnwjud-scheduled-continuation/` as a backward-compatible alias.
+   - Cleaned `AGENTS.md` removing residual Windows PowerShell examples, enforcing POSIX native commands, updating skill pointers, and replacing `lnwjud approval gates` with `unified-mpc approval gates`.
+   - Updated `packages/mcp-server/src/server.ts` instructions to reference unified-mpc tools and modern skill contracts.
+   - Modernized `.env.example` to use `UNIFIED_MPC_*` environment variables and Linux POSIX paths (`~/.local/share/unified-mpc`).
+   - Added unit test contract in `packages/mcp-server/src/scheduled-continuation-skill-contract.test.ts` (2/2 tests passing).
+11. **Comprehensive Monorepo Stress Test & Diagnosing-Bugs Verification**:
+   - Monorepo full typecheck (`corepack pnpm typecheck` / `tsc --build`) passes with 0 errors across all 21 packages.
+   - Monorepo full test suite (`npx vitest run`): 195 test files, 1,785 tests passed, 0 failures.
+   - Root integration test suite (`tests/`): `mcp-development-flow.test.ts` (1/1) and `codex-review-flow.test.ts` (1/1) passing 100%.
+   - Milestone 6 CLI E2E tests: `apps/cli/src/milestone-6-e2e.test.ts` (6/6 passing).
+   - Milestone 5 Web stress tests: `apps/web/src/milestone-5-stress.test.ts` (12/12 passing).
+   - Milestone 2 & 3 extensions stress tests: `milestone-2-stress.test.ts` (7/7) & `milestone-3-stress.test.ts` (6/6 passing).
+   - Milestone 1 Linux foundation tests: `packages/shared/src/linux-foundation.test.ts` (3/3 passing).
+   - Milestone 4 Pruner tests: `packages/extensions/src/pruner.test.ts` (11/11 passing).
+   - Zero bugs detected across all modules; 100% green.
 
 ---
 

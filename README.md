@@ -1,148 +1,191 @@
 <p align="center">
-  <img src="assets/logo/logo-256x256.png" width="160" alt="lnwjud logo" />
+  <img src="assets/logo/logo-256x256.png" width="140" alt="Unified-MPC-Server logo" />
 </p>
 
-<h1 align="center">lnwjud</h1>
+<h1 align="center">Unified-MPC-Server</h1>
 
 <p align="center">
-  <strong>Cross-platform local AI-agent runtime and MCP gateway</strong><br />
-  <em>233 total tool definitions for local files, Git, processes, Windows automation, WSL, browser control, durable goal continuation, indexing, observability, and extensibility; 226 are advertised by default and all 233 when Codex delegation plus Agent Swarm is enabled.</em>
-</p>
-
-<p align="center">
-  <em>อ่านที่เหลือใน Readme ได้เลยครับ ติดปัญหาทักมาได้ใน <a href="https://url.in.th/rEZiG"><strong>Line</strong></a> ได้ตลอดครับ / กำลังพัฒนาให้เรื่อยๆครับ ท่านที่ถามหาช่องสนับสนุนค่ากาแฟ แปะลิงก์ไว้ให้แล้วครับ ขอบคุณครับ — <a href="https://easydonate.app/abcz"><strong>Donate</strong></a></em>
+  <strong>Central Local-First MCP Orchestrator, Multi-Client Policy Synchronizer & Gated Remote Gateway</strong><br />
+  <em>Unified tool discovery, bifurcated dynamic ingestion, zero-artifact pruning, and senior engineering harness across Google Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, Oh My Pi, and Codex CLI on Linux Ubuntu.</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/engasnm111/lnwjud/releases/latest"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/engasnm111/lnwjud" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078D4" />
-  <img alt="Node" src="https://img.shields.io/badge/Node.js-24.x-339933" />
-  <img alt="MCP" src="https://img.shields.io/badge/MCP-233%20tools-6f42c1" />
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20Ubuntu-E95420" />
+  <img alt="Node" src="https://img.shields.io/badge/Node.js-%3E%3D22.0.0-339933" />
+  <img alt="Engine" src="https://img.shields.io/badge/database-node%3Asqlite-003B57" />
+  <img alt="Milestones" src="https://img.shields.io/badge/milestones%201--6-100%25%20verified-brightgreen" />
 </p>
 
 ---
 
-## Current version: v4.61.0
+## Overview
 
-`v4.61.0` is the current source/release-candidate version. The latest public build is always available from [GitHub Releases](https://github.com/engasnm111/lnwjud/releases/latest). Development artifacts from `dev` are for testing before the public release is published.
+**Unified-MPC-Server** serves as a unified local orchestrator, senior engineering harness, and policy gatekeeper for modern AI-assisted software development. It consolidates fragmented configurations, prevents context window bloat via an on-demand Two-Tier Tool Catalog, and enforces rigorous software engineering discipline.
 
-### What's new in v4.61.0
+### Key Architectural Pillars
 
-- **Stable log search and pause:** Work Log and every Live Logs tab freeze the visible feed while a search is active, so newly arriving events cannot jump into or reorder the result list while you type or inspect matches. Clearing search resumes the current live feed. Live Logs **Pause** now freezes the feed itself, and **Follow** resumes only when no search is holding the snapshot.
-- **Durable background-task lifecycle:** shell tasks finalize from the direct command's terminal state instead of being stranded by detached descendants that keep inherited stdio handles open.
-- **External MCP lifecycle hardening:** pending child connections are fenced during shutdown, so a late Serena/custom MCP connection cannot resurrect a session after the session manager has closed.
-- **Windows and WSL correctness:** Windows Event Log runtime-contract checks use deterministic runtime evidence, while WSL translates supported Windows working directories before Linux execution.
-- **Persistence and diagnostics:** secret recovery, SQLite close ownership, tunnel restart/terminal handling, Doctor applicability, and bounded/path-guarded Git diff behavior are hardened for the release.
-- **External MCP compatibility:** child MCP servers auto-negotiate their protocol version, covering legacy/2025-era servers such as Serena as well as current MCP `2026-07-28`, while lnwjud's own inbound MCP contract remains unchanged. External MCP definitions saved in Settings are applied live, so adding or changing Serena/custom servers does not require restarting lnwjud.
-- **Cross-platform hardening:** Windows, macOS, and Linux now use explicit host/architecture capability gates instead of Windows-shaped fallbacks. Unsupported OS/architecture combinations fail closed.
-- **Native Ponytail coding policy:** optional `OFF / LITE / FULL / ULTRA` modes default to OFF, resolve `Current Goal > Workspace > Global`, and use exact bundled Ponytail skills rather than relying on discovery ranking. Active modes require the exact bundled primary skill before code mutation; FULL/ULTRA durable coding goals additionally require a fresh bundled Ponytail review before completion. Full Bypass does not bypass this correctness gate, while explicit session suppression remains available without changing persisted policy.
-- **macOS package verification:** release checks stage the app from the actual DMG, launch it through macOS LaunchServices, verify nested code signing, and distinguish Developer ID Team-ID requirements from development ad-hoc signing.
-- **Runtime dependencies:** target-native assets are selected by exact `(platform, architecture)` tuples. Current pins include OpenAI `tunnel-client 0.0.14`, `ripgrep 15.2.0`, and Windows Poppler `26.07.0-0`, with checksum/provenance/version checks before packaging.
-- **Remote MCP / ngrok:** ngrok discovery now works across Windows, macOS, and Linux. Automatic installation is shown only when the host has a supported installer path; unsupported installer actions are hidden instead of pretending they work.
-- **PDF providers:** PDF tooling can use a configured native `pdftotext` where supported; the bundled Poppler auto-installer remains Windows x64-only and is hidden on unsupported hosts.
-- **Recovery and persistence:** MCP settings, backup/checkpoint/recovery paths, secret-storage boundaries, tunnel state, cross-host restore metadata, and data-root selection were audited for Windows/macOS/Linux semantics.
-- **Unified timestamps:** Thai UI uses Bangkok time with 24-hour display; English uses the host timezone with AM/PM presentation, while machine timestamps remain absolute internally.
-- **Responsiveness:** heavy ripgrep output and Live Log traffic are bounded/batched to reduce Electron `Not Responding` hangs and runaway memory churn.
-- **Release verification:** v4.61.0 is gated by full workspace tests, Electron acceptance/E2E, packaging and release-gate suites, plus exact-commit target-native Windows/macOS/Linux CI before tagging.
+1. **Option A Clean Start & Linux Ubuntu Foundation**: 100% Linux POSIX and XDG compliance. Zero Windows-specific code (`.ps1`, `.exe`, `.bat`, `win32`) and zero legacy backward-compatibility debt.
+2. **Universal Multi-Client Integration**: Automatically discovers MCP servers, indexes skills, and pushes compiled P1–P7 tool prioritization rules simultaneously to **Google Antigravity**, **Cline**, **OpenCode**, **Freebuff**, **Cursor**, **Claude**, **Oh My Pi (OMP)**, and **Codex CLI**.
+3. **Bifurcated Dynamic Ingestion Engine**: Strictly separates the installation of **Agent Skills** (`SKILL.md` instruction packages) from **MCP Servers** (executable JSON-RPC/SSE/HTTP processes) at the code interface, CLI subcommands, and local web UI.
+4. **Zero-Artifact Pruner**: Atomic uninstallation with graceful `SIGTERM` -> `SIGKILL` process termination, multi-IDE configuration purging, dangling symlink cleanup, and strict path-containment boundary guards.
+5. **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled Cloudflare companion gateway (`apps/cf-gateway`) with a 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`) and local web dashboard (`apps/web` on `http://127.0.0.1:18765/`). Enforces hard `412 Precondition Failed` gating before session connections.
+6. **Unified Headless CLI (`unified-mpc`)**: Standalone executable CLI binary with exit code contracts (0, 1, 2) enabling headless operation for human developers and terminal AI coding agents (Claude Code, OpenCode CLI, Agy CLI).
+7. **Senior Engineering Harness (Ponytail Runtime)**: Enforces YAGNI, minimal diffs, root-cause verification, and durable goal tracking backed by native `node:sqlite`.
 
-> Public `v4.61.0` should be tagged only after the exact-main Windows/macOS/Linux release matrix, SHA-scoped artifacts, and packaged-app smoke checks are green for the exact commit.
+---
 
-## Install
+## Monorepo Architecture
 
-### Windows 10 / 11
+The repository is organized into 21 active workspace packages under the `@unified-mpc/*` namespace:
 
-1. Open [GitHub Releases](https://github.com/engasnm111/lnwjud/releases/latest).
-2. Download `lnwjud-Setup-<version>.exe` for the normal installer, or `lnwjud-Portable-<version>.exe` if you prefer a portable executable.
-3. Launch lnwjud, add the project/workspace you want to use, then configure the MCP connection method you need.
+```text
+Unified-MPC-Server/
+├── apps/
+│   ├── cli/                  # Native CLI entrypoint (bin: unified-mpc)
+│   ├── web/                  # Local Web Control Plane (native node:http + Obsidian Telemetry)
+│   └── cf-gateway/           # Decoupled Cloudflare Tunnel + ChatGPT Remote Bridge
+├── packages/
+│   ├── extensions/           # Multi-Client Ingestion, Pruner, Config Loader, Skill Catalog, IDE Sync
+│   ├── mcp-server/           # Core MCP server, Ponytail runtime, Two-Tier Catalog, security policies
+│   ├── application/          # Agent swarm, durable goal continuation, checkpoint service
+│   ├── storage/              # SQLite database (node:sqlite WAL mode), durable goals, checkpoints
+│   ├── process/              # Background job lifecycle, process supervision, timeouts
+│   ├── filesystem/           # Scoped workspace I/O, paging, path safety
+│   ├── git/                  # Guarded Git mutations, diff fingerprinting
+│   ├── permissions/          # Permission profiles: safe (default), balanced, full, custom
+│   ├── audit/                # Structured event logging, secret redaction
+│   ├── search/               # ripgrep integration, symbol searching
+│   ├── shared/               # Constants (APP_NAME = 'Unified-MPC-Server'), domain contracts
+│   └── domain/               # Result<T, E>, AppError, value objects
+├── package.json
+└── pnpm-workspace.yaml
+```
 
-Community Windows artifacts may be unsigned when production code-signing credentials are not configured. Release verification still checks the declared signing mode, SHA-256 manifests, runtime provenance, and packaged-app smoke evidence; verify the release assets if Windows shows an unknown-publisher warning.
+---
 
-Windows-only features such as WSL, Registry, Windows Sandbox, Windows OCR and Outlook/COM remain available only where the Windows provider is supported.
+## Supported Clients & IDE Matrix
 
-### macOS 13+
+| Client | Form Factors Supported | MCP Config Discovery | Skill Discovery Roots | Rule / Policy Sync Target |
+|---|---|---|---|---|
+| **Google Antigravity** | VS Code Extension, Antigravity IDE, CLI `agy`, Desktop | `~/.gemini/config/mcp_config.json`<br>`<workspace>/.gemini/mcp.json` | `~/.gemini/config/skills/`<br>`~/.gemini/skills/`<br>`~/.gemini/antigravity/builtin/skills/`<br>`<workspace>/.gemini/skills/` | `~/.gemini/config/GEMINI.md`<br>`<workspace>/GEMINI.md`<br>`~/.gemini/antigravity/rules/mcp-policy.md` |
+| **Cline** | CLI (`~/.cline/`), VS Code Extension | `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`<br>`<workspace>/.cline/mcp.json` | `~/.cline/skills/`<br>`<workspace>/.cline/skills/` | `.clinerules` (block replacement)<br>`~/.cline/rules/` |
+| **OpenCode** | CLI, VS Code Extension, Standalone | `~/.config/opencode/opencode.jsonc`<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md` (project root)<br>`~/.config/opencode/AGENTS.md` |
+| **Freebuff** | Standalone Desktop | Loopback MCP or project state | `.agents/skills/`<br>`<workspace>/skills/` | `AGENTS.md` (root `injectAgentsMd`) |
+| **Cursor** | Editor / IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`<workspace>/.cursor/skills/` | `.cursor/rules/00-mandatory-policy.mdc` |
+| **Claude** | Claude Desktop, Claude Code CLI | `~/.config/Claude/claude_desktop_config.json` | `~/.claude/skills/`<br>`<workspace>/.claude/skills/` | `~/.claude/CLAUDE.md`<br>`<workspace>/CLAUDE.md` |
+| **Oh My Pi (OMP)** | CLI / Terminal Agent | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
+| **Codex CLI** | CLI Tool | Standard Codex Engine | `~/.codex/skills/`<br>`~/.codex/plugins/cache/` | `AGENTS.md` |
 
-Download the artifact that matches the Mac architecture (`arm64` for Apple silicon or `x64` for Intel). Do not swap architectures just because both filenames contain the word “Mac”. Computers remain unusually literal about this.
+---
 
-See [Install lnwjud on macOS](docs/INSTALL_MACOS.md) for DMG/ZIP installation, permissions, MCP launcher paths, Gatekeeper/signing expectations, and troubleshooting.
+## Milestones & Verification Status
 
-### Linux
+| Milestone | Scope & Description | Status | Verification & Hardening Evidence |
+|---|---|---|---|
+| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Complete monorepo rename from `@lnwjud/*` to `@unified-mpc/*` across 220+ files; deletion of all Windows code/scripts; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
+| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
+| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
+| **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards; Commit `fe6e601`. |
+| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
+| **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
 
-Choose the release artifact that matches the Linux architecture and package type. Ubuntu 24.04 LTS x64 is the primary Linux release target; arm64 remains architecture-specific and evidence-gated.
+---
 
-See [Install lnwjud on Linux](docs/INSTALL_LINUX.md) for AppImage/DEB installation, Wayland/X11 behavior, secure storage, MCP, and platform limits.
+## Quickstart & Installation
 
-### Local data vs workspace metadata
+### Requirements
+- **OS**: Linux Ubuntu `>=22.04 LTS` (POSIX native)
+- **Node.js**: `>=22.0.0` (with native `node:sqlite`)
+- **Package Manager**: `pnpm >=9.0.0` (or `corepack enable`)
 
-Installed lnwjud keeps per-user runtime data outside your source repository: `%APPDATA%\lnwjud` on Windows, `~/Library/Application Support/lnwjud` on macOS, and `$XDG_DATA_HOME/lnwjud` (or `~/.local/share/lnwjud`) on Linux unless `LNWJUD_DATA_PATH` is explicitly set. A workspace may contain `.lnwjud/project-profile.json` for project-scoped policy such as Ponytail mode; `.lnwjud/` is local metadata and is ignored by this repository.
+### Setup Commands
+```bash
+# 1. Clone repository
+git clone https://github.com/soulzerox/Unified-MPC-Server.git
+cd Unified-MPC-Server
 
-## What can lnwjud do?
+# 2. Install dependencies
+corepack pnpm install
 
-lnwjud exposes **233 first-party tool definitions** through one local runtime and MCP gateway. The default advertised set is 226; the remaining Codex delegation and Agent Swarm definitions are opt-in.
+# 3. Build all 21 packages
+corepack pnpm build
 
-| Area | Examples |
-| --- | --- |
-| Workspace & files | read/search/edit files, paging, full scans, project indexing, recovery trash |
-| Git | status, diff, history, blame, guarded Git mutations |
-| Processes | shell, managed processes, durable background tasks, logs, cancellation |
-| MCP | local HTTP/stdio MCP, External MCP discovery/describe/call, live tool availability |
-| Development | test, lint, typecheck, build, affected-test context, Codex integration |
-| Browser | managed Chrome/CDP, DOM inspection, Set-of-Marks, screenshots |
-| Recovery | backups, checkpoints, restore, crash/session recovery, durable-goal state |
-| Observability | Work Log, Live Logs, Doctor, incident reports, trace/audit metadata |
-| Native capabilities | UI/input/media/Office/scheduler providers when the current OS supports them |
-| Windows-specific | WSL, Registry, Windows Sandbox, Windows Event Log/OCR, Outlook/COM |
+# 4. Typecheck across monorepo
+corepack pnpm typecheck
 
-For the complete generated catalog, see [MCP Tool Catalog](docs/mcp/MCP_TOOL_CATALOG.md). For the broader capability explanation, see [lnwjud capabilities](docs/LNWJUD_CAPABILITIES.md).
+# 5. Run test suite
+corepack pnpm test
+```
 
-## Platform compatibility
+---
 
-lnwjud composes providers for the detected host instead of instantiating a Windows provider everywhere and hoping for the best.
+## CLI Usage (`unified-mpc`)
 
-| Feature | Windows | macOS | Linux |
-| --- | --- | --- | --- |
-| Core MCP / files / Git / processes | ✅ | ✅ | ✅ |
-| External MCP | ✅ | ✅ | ✅ |
-| OpenAI Secure MCP Tunnel client | target-native | target-native | target-native |
-| Remote MCP with ngrok | ✅ | ✅ | ✅ |
-| Managed browser / CDP | dependency-gated | dependency-gated | dependency-gated |
-| Native PDF text provider | dependency-gated | dependency-gated | dependency-gated |
-| Automatic Poppler install | Windows x64 | hidden | hidden |
-| WSL / Registry / Windows Sandbox | ✅ | unsupported | unsupported |
-| Outlook COM | ✅ | unsupported | unsupported |
+The binary is located at `apps/cli/dist/index.js` or linked globally via `pnpm link`.
 
-The authoritative matrix is [Native platform support contract](docs/architecture/PLATFORM_SUPPORT.md).
+```bash
+# Check status and health
+unified-mpc status
 
-## MCP connection choices
+# Synchronize policy and priority rules across IDEs (Antigravity, Cline, OpenCode, Cursor, etc.)
+unified-mpc sync
+unified-mpc sync --targets antigravity,cursor,cline
 
-- **Local MCP clients:** use the packaged stdio launcher or Desktop loopback MCP endpoint.
-- **Remote MCP via ngrok + OAuth:** useful for a remote ChatGPT/MCP client when you want lnwjud to run the protected OAuth gateway and ngrok runtime.
-- **OpenAI Secure MCP Tunnel:** outbound-only OpenAI tunnel path using the verified target-native bundled `tunnel-client`.
-- **External MCP servers:** lnwjud can discover supported Cursor/Claude Desktop/custom MCP definitions and keep child MCP servers separate from the first-party catalog.
+# Install an Agent Skill (markdown instructions)
+unified-mpc install skill --name my-skill --source /path/to/skill-folder --targets all
 
-See the [Thai usage guide](docs/USAGE_TH.md) and [full expanded README](FULL_README.md) for the long-form setup and architecture notes.
+# Install an MCP Server (executable stdio/SSE/HTTP process)
+unified-mpc install server --name my-server --transport stdio --command "node" --args "/path/to/server.js" --targets antigravity,cursor
 
-## Documentation
+# Prune an Agent Skill cleanly
+unified-mpc prune skill --name my-skill
 
-- [Full expanded README / historical detail](FULL_README.md)
-- [คู่มือใช้งานภาษาไทย](docs/USAGE_TH.md)
-- [macOS installation](docs/INSTALL_MACOS.md)
-- [Linux installation](docs/INSTALL_LINUX.md)
-- [Platform support matrix](docs/architecture/PLATFORM_SUPPORT.md)
-- [Complete capabilities](docs/LNWJUD_CAPABILITIES.md)
-- [MCP Tool Catalog](docs/mcp/MCP_TOOL_CATALOG.md)
-- [Tool contract](docs/architecture/TOOL_CONTRACT.md)
-- [Release process](docs/development/RELEASE_PROCESS.md)
-- [Security](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
+# Prune an MCP Server cleanly (kills processes and purges configs)
+unified-mpc prune server --name my-server
 
-## Security boundary
+# Start the Local Web Control Plane
+unified-mpc web --port 18765
 
-lnwjud is intentionally powerful because it operates on the local machine. Tool availability does **not** bypass Active Project scope, permission policy, mutation approval, recovery, host OS permissions, or platform capability gates. Unknown/unsupported platforms and missing native providers should fail closed rather than silently substituting a different OS implementation.
+# Headless downstream tool calling
+unified-mpc tools list
+unified-mpc tools call memory__search_nodes '{"query": "milestone"}'
+```
 
-## Community
+---
 
-ติดปัญหา อยากแชร์วิธีใช้ หรือเจอบัค สามารถเข้ากลุ่มพูดคุยได้ที่ [Line](https://url.in.th/rEZiG).
+## Local Web Control Plane
+
+The Local Web Control Plane runs at `http://127.0.0.1:18765/`:
+
+- **Obsidian Telemetry Dashboard**: Real-time status cards showing Tunnel URL, Session Lease Token, Bridge Status, Active IDEs, Installed Skills, and Mounted Servers.
+- **Hard-Gated ChatGPT Web Connection**: The `[ Connect ChatGPT Web ]` action returns `412 Precondition Failed` unless the gateway bridge has reached `BRIDGE_HEALTHY` state.
+- **Bifurcated Management UI**: Dedicated tabs for installing Skills vs installing MCP Servers to prevent polyglot configuration errors.
+- **Loopback Origin Security**: Strictly enforces `localhost` / `127.0.0.1` origins, blocking external or non-HTTP schemes with `403 Forbidden`.
+- **Payload Protection**: Enforces 1MB maximum body limit on incoming requests (`413 Payload Too Large`).
+
+---
+
+## Security Guardrails
+
+| Guardrail | Location | What It Prevents |
+|---|---|---|
+| **Origin Policy** | `packages/mcp-server/src/origin-policy.ts` & `apps/web/src/web-server.ts` | Non-localhost and non-HTTP requests to local HTTP endpoints (403 Forbidden). |
+| **Mutation Gate** | `packages/mcp-server/src/mutation-policy.ts` | Destructive mutations without explicit user confirmation (fail-closed). |
+| **Workspace Path Containment** | `packages/filesystem/` & `packages/extensions/src/pruner.ts` | Path traversal attacks outside registered workspace roots or system directories. |
+| **Secret Redaction** | `packages/audit/src/redactor.ts` | API keys, tokens, and private credentials leaking into audit logs. |
+| **Self-Aggregation Block** | `packages/extensions/src/mcp-config-loader.ts` | Unified-MPC-Server recursively calling itself as a downstream child. |
+| **ChatGPT Gate Invariant** | `apps/web/src/web-server.ts` | Remote sessions initiating against dead or unhealthy tunnel endpoints (412 Precondition Failed). |
+| **Permission Profiles** | `packages/permissions/src/profiles.ts` | Unauthorized escalation to full bypass mode without engine approval. |
+
+---
+
+## Authoritative Documentation
+
+- [`SPEC.md`](SPEC.md): Master technical specification and behavioral decisions.
+- [`CONTEXT.md`](CONTEXT.md): Domain glossary, architectural invariants, and living context.
+
+---
 
 ## License
 

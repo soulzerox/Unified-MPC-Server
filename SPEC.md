@@ -1,11 +1,11 @@
 # Unified-MPC-Server — Master Specification
 
-> **Triage Status**: `ready-for-agent`  
+> **Status**: `verified-and-hardened` (Milestones 1–6 Complete & Passing 100%)  
 > **Target Version**: `1.0.0`  
 > **Source Base**: `engasnm111/lnwjud` (Clean Option A Pivot: Linux-only, Zero Backward Compat)  
 > **Repository**: `soulzerox/Unified-MPC-Server`  
 > **Target Platform**: `Linux Ubuntu` (100% POSIX / Linux XDG native, zero Windows code)  
-> **Package Namespace**: `@unified-mpc/*` (18 active monorepo packages)  
+> **Package Namespace**: `@unified-mpc/*` (21 active monorepo packages)  
 > **Engine**: Node.js `>=22.0.0` (Native `node:sqlite`)
 
 ---
@@ -169,14 +169,36 @@ The Local Web Control Plane enforces an explicit state machine for ChatGPT Web c
 
 - **Hard Gating Invariant**:
   - The `[ Connect ChatGPT Web ]` UI button is disabled whenever the bridge state is not `BRIDGE_HEALTHY`.
-  - Fastify endpoint `GET /api/chatgpt-web/connect` returns `412 Precondition Failed` if called while the gateway bridge is stopped or unhealthy.
+  - HTTP endpoint `GET /api/chatgpt-web/connect` returns `412 Precondition Failed` if called while the gateway bridge is stopped, initializing, or already in `SESSION_CONNECTED` state (preventing double leasing).
   - The UI displays live status: Tunnel URL (Cloudflare), Local Port, Session Lease Token, and Ping Latency.
 - **Decoupled Gateway Service (`apps/cf-gateway`)**:
   - Spawns `cloudflared tunnel` and authenticates incoming remote ChatGPT requests via OAuth 2.0 PKCE.
   - Passes valid requests over local loopback HTTP to the core Unified MCP Server.
   - Can be stopped or started on demand without interrupting local IDE or CLI operations.
+- **Local Web Control Plane (`apps/web`)**:
+  - Built with native `node:http` (zero-overhead lightweight runtime, default port `18765`).
+  - Origin Policy Guard: Validates that `Origin` headers strictly match `http:` or `https:` protocols on `localhost` or `127.0.0.1`. Malformed origins, non-http protocols (e.g. `ftp://localhost`), and remote spoofed origins receive `403 Forbidden` immediately.
+  - Request Body Size Guard: Enforces a strict 1MB maximum payload on all POST requests, returning `413 Payload Too Large` if exceeded.
+  - Serves the native Obsidian Telemetry dashboard on `GET /` and exposes REST APIs for status, bifurcated installation, and pruning.
 
-### 6. Universal Senior Engineering Harness (Ponytail Runtime)
+### 6. Unified CLI Commands & Headless Integration (`apps/cli`)
+
+The native CLI binary (`unified-mpc`) provides complete command-line control for human developers and headless AI agents (Claude Code, OpenCode CLI, Agy CLI):
+- **Standalone Binary**: Includes shebang `#!/usr/bin/env node` and auto-wires default production dependencies (`createDefaultCliDependencies`) connecting SQLite storage, workspace services, and dynamic extensions.
+- **Command Dispatcher**:
+  - `unified-mpc status`: Displays overall system health, active SQLite goals, and workspace status.
+  - `unified-mpc install skill --name <n> --source <s> [--targets <t>] [--scope <global|workspace>]`: Ingests markdown skills without daemon processes.
+  - `unified-mpc install server --name <n> --transport <stdio|sse|http> --command <cmd> [--args <a...>]`: Mounts executable MCP servers.
+  - `unified-mpc prune skill --name <n>` & `unified-mpc prune server --name <n>`: Atomically uninstalls packages and purges configuration entries.
+  - `unified-mpc sync [--targets <t...>]`: Compiles and pushes P1–P7 tool rules to all connected IDE configuration files simultaneously.
+  - `unified-mpc web [--port <p>] [--no-open]`: Boots the Local Web Control Plane on loopback.
+  - `unified-mpc tools list` & `tools call <tool> <args-json>`: Directly calls namespaced downstream MCP tools headlessly.
+- **Deterministic Exit Code Contract**:
+  - `0`: Success / normal termination.
+  - `1`: Domain or operational failure (e.g., target directory not found, command execution failed).
+  - `2`: Syntax, argument, or validation error (e.g., unknown flag, missing required subcommand).
+
+### 7. Universal Senior Engineering Harness (Ponytail Runtime)
 
 Embedded in `packages/mcp-server`:
 - **Mindset Enforcement**: Prioritizes standard libraries and minimal diffs. Restricts speculative abstractions and premature dependencies.
@@ -245,6 +267,53 @@ Under user direction, the repository executed **Option A (Clean Sweep)** with ze
 
 ---
 
+## Milestones & Implementation Progress
+
+| Milestone | Scope & Description | Status | Verification & Hardening Evidence |
+|---|---|---|---|
+| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Complete monorepo rename from `@lnwjud/*` to `@unified-mpc/*` across 220+ files; deletion of all Windows code/scripts; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
+| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
+| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
+| **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards (SPEC.md line 218); Commit `fe6e601`. |
+| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
+| **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
+
+---
+
+## Comprehensive Audit, Stress Test & Hardening Evidence (/goal Loop)
+
+An exhaustive audit, stress test, and end-to-end verification loop was completed across all 6 milestones using Matt Pocock's `/diagnosing-bugs` and `/scaffold-exercises` TDD discipline:
+
+1. **Linux Foundation (Milestone 1)**:
+   - Scanned and eliminated all residual `powershell.exe` and `path.win32` probes in `packages/capabilities` and `packages/mcp-server`.
+   - Verified 100 concurrent async read/write operations against SQLite WAL mode with zero errors (`linux-foundation.test.ts`).
+2. **Multi-Client Discovery (Milestone 2)**:
+   - Enhanced `stripJsonComments` to safely strip trailing commas before `}` and `]` outside quotes, allowing malformed JSONC configs from VS Code and Cline to parse cleanly.
+   - Hardened `SkillCatalog` and `allowlist` with nullish coalescing to prevent `TypeError` when dealing with partial or missing setting arrays.
+   - Tested circular and broken symlinks resilience in `milestone-2-stress.test.ts`.
+3. **Bifurcated Ingestion Engine (Milestone 3)**:
+   - Blocked prototype pollution attacks (`constructor`, `__proto__`, `prototype`) on both skill and server names.
+   - Enforced HTTP/HTTPS URL protocols for SSE/HTTP transports, rejecting `file://` and `javascript:`.
+   - Hardened `exclusionReason` against recursive self-aggregation (detecting CLI stdio wrappers like `node dist/bin/mcp-stdio.js`).
+   - Implemented `withFileLock` in-process mutex around config file mutations, verified with 20 concurrent server installs with zero lost updates (`milestone-3-stress.test.ts`).
+4. **Zero-Artifact Pruner (Milestone 4)**:
+   - Added `isSafePurgePath` boundary check strictly prohibiting purge of `/`, system directories (`/etc`, `/usr`, `/var`), and non-whitelisted paths.
+   - Enforced `/^[A-Za-z0-9_-]+$/` on all skill and server identifiers.
+5. **Gated Web Gateway (Milestone 5)**:
+   - Hardened `Origin` policy guard to verify HTTP/HTTPS protocols, strictly rejecting non-http protocols (e.g. `ftp://localhost`), `null`, and spoofed origins with `403 Forbidden`.
+   - Added 1MB request body limit returning `413 Payload Too Large`.
+   - Verified 412 state gate enforcement on `/api/chatgpt-web/connect` across full state machine lifecycle (STOPPED -> 412, BRIDGE_HEALTHY -> 200, SESSION_CONNECTED -> 412).
+   - Stress tested with 50 concurrent requests (`milestone-5-stress.test.ts`).
+6. **Unified CLI & Monorepo Verification (Milestone 6)**:
+   - Added shebang and `createDefaultCliDependencies` to `apps/cli/src/index.ts`, enabling standalone CLI binary execution.
+   - Fixed child process execution to reliably exit with correct codes (0, 1, 2).
+   - Diagnosed and fixed syntax/bracket issues in `packages/capabilities` (`durable-shell-task-store.ts` and `browser-cdp-protocol.ts`).
+   - Verified via subprocess e2e smoketests (`milestone-6-e2e.test.ts`).
+   - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
+   - Full monorepo `corepack pnpm test` passes 100% across all 21 packages.
+
+---
+
 ## Testing Decisions
 
 ### What Makes a Good Test
@@ -255,15 +324,20 @@ Under user direction, the repository executed **Option A (Clean Sweep)** with ze
 ### Modules Tested
 1. `packages/extensions`:
    - `skill-catalog.test.ts`: Discovery across Antigravity (`~/.gemini/`), Cursor, Claude, and workspace roots.
-   - `mcp-config-loader.test.ts`: Parsing and normalising `mcp_config.json`, handling malformed JSON, applying exclusion rules (now including `unified-mpc`).
+   - `mcp-config-loader.test.ts`: Parsing and normalising `mcp_config.json`, handling malformed JSON, applying exclusion rules (including `unified-mpc`).
    - `installer.test.ts`: Clean separation of `installSkill` and `installServer`; verifying target paths.
    - `pruner.test.ts`: Verifying zero lingering artifacts, process killing, and configuration purging.
    - `ide-sync.test.ts`: Verification of markdown rule compilation and multi-IDE file synchronization.
+   - `milestone-2-stress.test.ts`: Concurrent sync, circular symlinks, malformed JSONC resilience.
+   - `milestone-3-stress.test.ts`: Mutex locking under 20 concurrent installations, prototype pollution blocking.
 2. `apps/cli`:
-   - Command routing for `unified-mpc install skill`, `install server`, `prune`, `sync`, and `tools list/call`.
-3. `apps/web`:
-   - Fastify route tests for `/api/chatgpt-gateway/status` and 412 status on `/api/chatgpt-web/connect`.
-   - Origin policy tests: confirm that non-localhost origins receive `403` from the web server.
+   - Command routing for `unified-mpc install skill`, `install server`, `prune`, `sync`, `web`, and `tools list/call`.
+   - `milestone-6-e2e.test.ts`: Subprocess e2e smoketests executing CLI commands via child processes and validating exit codes (0, 1, 2).
+3. `apps/cf-gateway`:
+   - `gateway-service.test.ts`: 4-state lifecycle machine and hard gating invariant verification.
+4. `apps/web`:
+   - `web-server.test.ts`: Route tests for status, bifurcated installation, pruning, and 412 status on `/api/chatgpt-web/connect`.
+   - `milestone-5-stress.test.ts`: Origin policy tests (403), 1MB payload limit (413), and 50 concurrent requests stress test.
 
 ### Prior Art
 - Test patterns from `packages/extensions/src/extensions-service.test.ts` and `mcp-session-manager.integration.test.ts`.

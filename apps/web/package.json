@@ -1,0 +1,27 @@
+{
+  "name": "@unified-mpc/web",
+  "version": "4.61.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": {
+        "development": "./src/index.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "dependencies": {
+    "@unified-mpc/cf-gateway": "workspace:*",
+    "@unified-mpc/domain": "workspace:*",
+    "@unified-mpc/extensions": "workspace:*",
+    "@unified-mpc/shared": "workspace:*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --outDir dist"
+  },
+  "license": "MIT"
+}

@@ -2,6 +2,8 @@
   "files": [],
   "references": [
     { "path": "./apps/cli" },
+    { "path": "./apps/cf-gateway" },
+    { "path": "./apps/web" },
     { "path": "./packages/domain" },
     { "path": "./packages/capabilities" },
     { "path": "./packages/extensions" },

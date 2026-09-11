@@ -51,6 +51,15 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/debug@4.1.13)(@types/node@22.20.2)
 
+  apps/cf-gateway:
+    dependencies:
+      '@unified-mpc/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@unified-mpc/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+
   apps/cli:
     dependencies:
       '@unified-mpc/application':
@@ -86,6 +95,21 @@ importers:
       '@unified-mpc/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace
+
+  apps/web:
+    dependencies:
+      '@unified-mpc/cf-gateway':
+        specifier: workspace:*
+        version: link:../cf-gateway
+      '@unified-mpc/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@unified-mpc/extensions':
+        specifier: workspace:*
+        version: link:../../packages/extensions
+      '@unified-mpc/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
 
   packages/application:
     dependencies:

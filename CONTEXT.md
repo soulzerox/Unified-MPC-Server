@@ -137,10 +137,45 @@ These components exist in the codebase from the lnwjud upstream but are **not ac
 
 | Milestone | Scope | Status | Verification & Evidence |
 |---|---|---|---|
-| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Monorepo namespace `@unified-mpc/*` rename across 220+ files; complete Windows code and script deletion; POSIX XDG runtime; zero backward compatibility. | ✅ **Completed** | Full test suite passed across all packages; Commit `4d52fe2`. |
-| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Completed** | 38/38 tests in `packages/extensions`; monorepo typecheck clean; Commit `3fcf6e6`. |
-| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Completed** | 7/7 tests passing in `packages/extensions/src/installer.test.ts`; 45/45 package tests; typecheck clean. |
-| **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Completed** | 6/6 tests passing in `packages/extensions/src/pruner.test.ts`; 51/51 package tests; typecheck clean. |
-| **Milestone 5** | **Gated ChatGPT Web Gateway & Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Completed** | 5/5 tests in `apps/cf-gateway`; 6/6 tests in `apps/web`; full monorepo typecheck clean. |
-| **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Completed** | 69/69 tests passing in `apps/cli`; full monorepo typecheck clean; 100% test pass across all 21 packages. |
+| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Monorepo namespace `@unified-mpc/*` rename across 220+ files; complete Windows code and script deletion; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
+| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
+| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
+| **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards (SPEC.md line 218); Commit `fe6e601`. |
+| **Milestone 5** | **Gated ChatGPT Web Gateway & Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
+| **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
+
+---
+
+## 8. Comprehensive Audit, Stress Test & Hardening Report (/goal Loop)
+
+Following the Matt Pocock `/diagnosing-bugs` and `/scaffold-exercises` TDD workflow, an exhaustive audit loop was executed across all 6 milestones with zero skipping:
+
+1. **Linux Foundation (Milestone 1)**:
+   - Scanned and eliminated all residual `powershell.exe` and `path.win32` probes in `packages/capabilities` and `packages/mcp-server`.
+   - Verified 100 concurrent async read/write operations against SQLite WAL mode with zero errors (`linux-foundation.test.ts`).
+2. **Multi-Client Discovery (Milestone 2)**:
+   - Enhanced `stripJsonComments` to safely strip trailing commas before `}` and `]` outside quotes, allowing malformed JSONC configs from VS Code and Cline to parse cleanly.
+   - Hardened `SkillCatalog` and `allowlist` with nullish coalescing to prevent `TypeError` when dealing with partial or missing setting arrays.
+   - Tested circular and broken symlinks resilience in `milestone-2-stress.test.ts`.
+3. **Bifurcated Ingestion Engine (Milestone 3)**:
+   - Blocked prototype pollution attacks (`constructor`, `__proto__`, `prototype`) on both skill and server names.
+   - Enforced HTTP/HTTPS URL protocols for SSE/HTTP transports, rejecting `file://` and `javascript:`.
+   - Hardened `exclusionReason` against recursive self-aggregation (detecting CLI stdio wrappers like `node dist/bin/mcp-stdio.js`).
+   - Implemented `withFileLock` in-process mutex around config file mutations, verified with 20 concurrent server installs with zero lost updates (`milestone-3-stress.test.ts`).
+4. **Zero-Artifact Pruner (Milestone 4)**:
+   - Added `isSafePurgePath` boundary check strictly prohibiting purge of `/`, system directories (`/etc`, `/usr`, `/var`), and non-whitelisted paths.
+   - Enforced `/^[A-Za-z0-9_-]+$/` on all skill and server identifiers.
+5. **Gated Web Gateway (Milestone 5)**:
+   - Hardened `Origin` policy guard to verify HTTP/HTTPS protocols, strictly rejecting non-http protocols (e.g. `ftp://localhost`), `null`, and spoofed origins with `403 Forbidden`.
+   - Added 1MB request body limit returning `413 Payload Too Large`.
+   - Verified 412 state gate enforcement on `/api/chatgpt-web/connect` across full state machine lifecycle (STOPPED -> 412, BRIDGE_HEALTHY -> 200, SESSION_CONNECTED -> 412).
+   - Stress tested with 50 concurrent requests (`milestone-5-stress.test.ts`).
+6. **Unified CLI & Monorepo Verification (Milestone 6)**:
+   - Added shebang and `createDefaultCliDependencies` to `apps/cli/src/index.ts`, enabling standalone CLI binary execution.
+   - Fixed child process execution to reliably exit with correct codes (0, 1, 2).
+   - Diagnosed and fixed syntax/bracket issues in `packages/capabilities` (`durable-shell-task-store.ts` and `browser-cdp-protocol.ts`).
+   - Verified via subprocess e2e smoketests (`milestone-6-e2e.test.ts`).
+   - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
+   - Full monorepo `corepack pnpm test` passes 100% across all 21 packages.
+
 

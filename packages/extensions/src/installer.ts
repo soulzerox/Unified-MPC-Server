@@ -5,6 +5,7 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { parseSkillMarkdown } from './skill-catalog.js';
 import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
 import { writeAtomic } from './ide-sync.js';
+import { withConfigMutationTransaction } from './config-mutation-lock.js';
 
 export type InstallTarget = 'antigravity' | 'cursor' | 'claude' | 'codex' | 'cline' | 'opencode' | 'all';
 export type InstallScope = 'global' | 'workspace';
@@ -209,6 +210,7 @@ export class InstallerService {
     const serverName = input.name.trim();
     if (
       serverName.length === 0 ||
+      !/^[A-Za-z0-9_-]+$/.test(serverName) ||
       ['constructor', '__proto__', 'prototype'].includes(serverName.toLowerCase())
     ) {
       return err(appError('INVALID_INPUT', `Invalid server name: "${input.name}"`));
@@ -216,6 +218,9 @@ export class InstallerService {
     const targetError = validateTargets(input.targets);
     if (targetError !== undefined) return err(targetError);
 
+    if (input.transport !== 'stdio' && input.transport !== 'sse' && input.transport !== 'http') {
+      return err(appError('INVALID_INPUT', `Unsupported transport: "${String(input.transport)}"`));
+    }
     if (input.transport === 'stdio') {
       if (!input.command || input.command.trim().length === 0) {
         return err(appError('INVALID_INPUT', 'Command is required for stdio transport'));
@@ -244,6 +249,9 @@ export class InstallerService {
     }
 
     const scope: InstallScope = input.scope ?? 'global';
+    if (scope !== 'global' && scope !== 'workspace') {
+      return err(appError('INVALID_INPUT', `Unsupported install scope: "${String(input.scope)}"`));
+    }
     const workspaceRoot = input.workspaceRoot?.trim() ?? this.workspace;
 
     if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
@@ -262,14 +270,20 @@ export class InstallerService {
     }
 
     const resolvedTargets = this.expandTargets(input.targets);
+    const configFiles = resolvedTargets
+      .map((target) => this.serverTargetConfigFile(target, scope, workspaceRoot))
+      .filter((configFile): configFile is string => configFile !== undefined);
     const updatedConfigFiles: string[] = [];
 
-    for (const target of resolvedTargets) {
-      const configFile = this.serverTargetConfigFile(target, scope, workspaceRoot);
-      if (configFile === undefined) continue;
-
-      await injectServerIntoConfigFile(configFile, serverName, serverEntry);
-      updatedConfigFiles.push(configFile);
+    try {
+      await withConfigMutationTransaction(configFiles, async () => {
+        for (const configFile of configFiles) {
+          await injectServerIntoConfigFile(configFile, serverName, serverEntry);
+          updatedConfigFiles.push(configFile);
+        }
+      });
+    } catch (error: unknown) {
+      return err(appError('INTERNAL_ERROR', `Failed to update server config: ${error instanceof Error ? error.message : String(error)}`));
     }
 
     return ok({
@@ -332,55 +346,38 @@ export class InstallerService {
   }
 }
 
-const configFileLocks = new Map<string, Promise<void>>();
-
-async function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
-  const currentLock = configFileLocks.get(file) ?? Promise.resolve();
-  let release: () => void;
-  const newLock = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  configFileLocks.set(file, newLock);
-  try {
-    await currentLock;
-    return await fn();
-  } finally {
-    release!();
-    if (configFileLocks.get(file) === newLock) {
-      configFileLocks.delete(file);
-    }
-  }
-}
-
 async function injectServerIntoConfigFile(
   configFile: string,
   serverName: string,
   serverEntry: Record<string, unknown>,
 ): Promise<void> {
-  return withFileLock(configFile, async () => {
-    let doc: Record<string, unknown> = { mcpServers: {} };
-    try {
-      const raw = await readFile(configFile, 'utf8');
-      const cleanJson = stripJsonComments(raw);
-      const parsed: unknown = JSON.parse(cleanJson);
-      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-        doc = parsed as Record<string, unknown>;
-      }
-    } catch {
-      doc = { mcpServers: {} };
+  let doc: Record<string, unknown> = { mcpServers: {} };
+  try {
+    const raw = await readFile(configFile, 'utf8');
+    const cleanJson = stripJsonComments(raw);
+    const parsed: unknown = JSON.parse(cleanJson);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Configuration root must be an object');
     }
+    doc = parsed as Record<string, unknown>;
+  } catch (error: unknown) {
+    if (!isMissingPath(error)) throw error;
+  }
 
-    const serversKey = typeof doc.mcp === 'object' && doc.mcp !== null && !Array.isArray(doc.mcp) ? 'mcp' : 'mcpServers';
-    let serversObj = doc[serversKey];
-    if (typeof serversObj !== 'object' || serversObj === null || Array.isArray(serversObj)) {
-      serversObj = {};
-      doc[serversKey] = serversObj;
-    }
+  const serversKey = typeof doc.mcp === 'object' && doc.mcp !== null && !Array.isArray(doc.mcp) ? 'mcp' : 'mcpServers';
+  let serversObj = doc[serversKey];
+  if (typeof serversObj !== 'object' || serversObj === null || Array.isArray(serversObj)) {
+    serversObj = {};
+    doc[serversKey] = serversObj;
+  }
 
-    (serversObj as Record<string, unknown>)[serverName] = serverEntry;
+  (serversObj as Record<string, unknown>)[serverName] = serverEntry;
 
-    const content = `${JSON.stringify(doc, null, 2)}\n`;
-    await writeAtomic(configFile, content);
-  });
+  const content = `${JSON.stringify(doc, null, 2)}\n`;
+  await writeAtomic(configFile, content);
+}
+
+function isMissingPath(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
 }
 

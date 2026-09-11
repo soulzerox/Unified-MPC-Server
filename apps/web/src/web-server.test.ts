@@ -1,4 +1,7 @@
 import { request as httpRequest } from 'node:http';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
@@ -205,6 +208,61 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       body: '{',
     });
     expect(malformed.status).toBe(400);
+  });
+
+  it('rejects unregistered workspace mutations and caller-supplied purge paths', async () => {
+    const workspace = '/tmp/unregistered-workspace';
+    const skill = await fetch(`http://127.0.0.1:${port}/api/skills/prune`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ name: 'fixture', scope: 'workspace', workspaceRoot: workspace, targets: ['cursor'] }),
+    });
+    expect(skill.status).toBe(403);
+
+    const serverCatalog = {
+      discover: async () => [{ name: 'owned-server', source: 'fixture', enabled: true, excluded: false, config: { command: 'node' } }],
+    } as unknown as McpConfigLoader;
+    const ownedServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog });
+    await ownedServer.listen();
+    try {
+      const listed = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers`);
+      const server = (await listed.json()).servers[0];
+      const prune = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers/prune`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${ownedServer.port}` },
+        body: JSON.stringify({ serverId: server.serverId, purgeDataDirs: ['/tmp'] }),
+      });
+      expect(prune.status).toBe(403);
+    } finally {
+      await ownedServer.close();
+    }
+  });
+
+  it('rejects skill source traversal and symlink escape from registered workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-confinement-'));
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'web-outside-'));
+    await mkdir(path.join(root, 'skill'), { recursive: true });
+    await writeFile(path.join(root, 'skill', 'SKILL.md'), '---\nname: fixture\ndescription: fixture\n---\n', 'utf8');
+    await writeFile(path.join(outside, 'SKILL.md'), '---\nname: fixture\ndescription: outside\n---\n', 'utf8');
+    await symlink(outside, path.join(root, 'escape'));
+    const confined = new ControlPlaneServer({ port: 0, gateway, workspaceRoots: [root] });
+    await confined.listen();
+    try {
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${confined.port}` };
+      const traversal = await fetch(`http://127.0.0.1:${confined.port}/api/skills/install`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ name: 'fixture', source: path.join(root, '..', path.basename(outside)), targets: ['cursor'] }),
+      });
+      expect(traversal.status).toBe(403);
+      const symlinkEscape = await fetch(`http://127.0.0.1:${confined.port}/api/skills/install`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ name: 'fixture', source: path.join(root, 'escape'), targets: ['cursor'] }),
+      });
+      expect(symlinkEscape.status).toBe(403);
+    } finally {
+      await confined.close();
+      await Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]);
+    }
   });
 
   it('returns policy table on GET /api/policies', async () => {

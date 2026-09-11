@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
+import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
@@ -19,6 +21,7 @@ import {
 
 export interface ControlPlaneServerOptions {
   readonly port?: number;
+  readonly workspaceRoots?: readonly string[];
   readonly gateway?: GatewayService;
   readonly installer?: InstallerService;
   readonly pruner?: PrunerService;
@@ -42,6 +45,7 @@ export interface TelemetryLogEntry {
 export class ControlPlaneServer {
   private readonly server: HttpServer;
   private readonly configuredPort: number;
+  private readonly workspaceRoots: ReadonlySet<string>;
   private boundPort = 0;
   private readonly gateway: GatewayService;
   private readonly installer: InstallerService;
@@ -63,6 +67,7 @@ export class ControlPlaneServer {
 
   public constructor(options: ControlPlaneServerOptions = {}) {
     this.configuredPort = options.port ?? 18765;
+    this.workspaceRoots = new Set((options.workspaceRoots ?? [process.cwd()]).map((root) => path.resolve(root.trim())).filter((root) => root.length > 0));
     this.gateway = options.gateway ?? new GatewayService({ localPort: this.configuredPort });
     this.installer = options.installer ?? new InstallerService();
     this.pruner = options.pruner ?? new PrunerService();
@@ -261,7 +266,16 @@ export class ControlPlaneServer {
         sendJsonError(res, 400, 'Bad Request: skill install fields are invalid');
         return;
       }
-      const result = await this.installer.installSkill(body as unknown as InstallSkillInput);
+      const authorization = await this.authorizeWorkspaceMutation(body, body.source);
+      if (!authorization.ok) {
+        sendJsonError(res, authorization.status, authorization.message);
+        return;
+      }
+      const input: InstallSkillInput = {
+        ...body as unknown as InstallSkillInput,
+        ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
+      };
+      const result = await this.installer.installSkill(input);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Install skill '${body.name}': ${result.ok ? 'OK' : 'FAILED'}`);
       res.writeHead(result.ok ? 200 : httpStatusForResult(result), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -275,7 +289,16 @@ export class ControlPlaneServer {
         sendJsonError(res, 400, 'Bad Request: server install fields are invalid');
         return;
       }
-      const result = await this.installer.installServer(body as unknown as InstallServerInput);
+      const authorization = await this.authorizeWorkspaceMutation(body);
+      if (!authorization.ok) {
+        sendJsonError(res, authorization.status, authorization.message);
+        return;
+      }
+      const input: InstallServerInput = {
+        ...body as unknown as InstallServerInput,
+        ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
+      };
+      const result = await this.installer.installServer(input);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Install server '${body.name}': ${result.ok ? 'OK' : 'FAILED'}`);
       res.writeHead(result.ok ? 200 : httpStatusForResult(result), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -290,7 +313,15 @@ export class ControlPlaneServer {
         sendJsonError(res, 400, 'Bad Request: skill prune fields are invalid');
         return;
       }
-      const result = await this.pruner.pruneSkill(body as unknown as PruneSkillInput);
+      const authorization = await this.authorizeWorkspaceMutation(body);
+      if (!authorization.ok) {
+        sendJsonError(res, authorization.status, authorization.message);
+        return;
+      }
+      const result = await this.pruner.pruneSkill({
+        ...body as unknown as PruneSkillInput,
+        ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
+      });
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Prune skill '${body.name}': ${result.ok ? 'OK' : 'FAILED'}`);
       res.writeHead(result.ok ? 200 : httpStatusForResult(result), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -309,12 +340,19 @@ export class ControlPlaneServer {
         sendJsonError(res, 403, 'Unknown or expired server ID');
         return;
       }
+      if (body.purgeDataDirs !== undefined) {
+        sendJsonError(res, 403, 'Caller-supplied purgeDataDirs are not allowed');
+        return;
+      }
+      const authorization = await this.authorizeWorkspaceMutation(body);
+      if (!authorization.ok) {
+        sendJsonError(res, authorization.status, authorization.message);
+        return;
+      }
       const input: PruneServerInput = {
         name: registered.name,
         targets: Array.isArray(body.targets) ? body.targets as NonNullable<PruneServerInput['targets']> : ['all'],
-        ...(typeof body.scope === 'string' ? { scope: body.scope as NonNullable<PruneServerInput['scope']> } : {}),
-        ...(typeof body.workspaceRoot === 'string' ? { workspaceRoot: body.workspaceRoot } : {}),
-        ...(Array.isArray(body.purgeDataDirs) ? { purgeDataDirs: body.purgeDataDirs.filter((entry): entry is string => typeof entry === 'string') } : {}),
+        ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
       };
       const result = await this.pruner.pruneServer(input);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Prune server '${registered.name}': ${result.ok ? 'OK' : 'FAILED'}`);
@@ -359,6 +397,49 @@ export class ControlPlaneServer {
       return;
     }
     sendJsonError(res, 500, error instanceof Error ? error.message : 'Internal server error');
+  }
+
+  private async authorizeWorkspaceMutation(body: Record<string, unknown>, source?: unknown): Promise<
+    | { readonly ok: true; readonly scope: 'global' }
+    | { readonly ok: true; readonly scope: 'workspace'; readonly workspaceRoot: string }
+    | { readonly ok: false; readonly status: 400 | 403; readonly message: string }
+  > {
+    const scope = body.scope ?? 'global';
+    if (scope !== 'global' && scope !== 'workspace') {
+      return { ok: false, status: 400, message: 'Invalid mutation scope' };
+    }
+    if (scope === 'global') {
+      if (body.workspaceRoot !== undefined) {
+        return { ok: false, status: 403, message: 'workspaceRoot is allowed only for registered workspace mutations' };
+      }
+      if (source !== undefined) {
+        if (typeof source !== 'string' || !(await this.isRegisteredPath(source))) {
+          return { ok: false, status: 403, message: 'Skill source must resolve inside a registered workspace root' };
+        }
+      }
+      return { ok: true, scope: 'global' };
+    }
+    if (typeof body.workspaceRoot !== 'string' || body.workspaceRoot.trim().length === 0) {
+      return { ok: false, status: 403, message: 'Registered workspaceRoot required for workspace mutations' };
+    }
+    const workspaceRoot = path.resolve(body.workspaceRoot.trim());
+    if (!this.workspaceRoots.has(workspaceRoot)) {
+      return { ok: false, status: 403, message: 'workspaceRoot is not registered with control plane' };
+    }
+    if (source !== undefined && (typeof source !== 'string' || !(await this.isRegisteredPath(source)))) {
+      return { ok: false, status: 403, message: 'Skill source must resolve inside a registered workspace root' };
+    }
+    return { ok: true, scope: 'workspace', workspaceRoot };
+  }
+
+  private async isRegisteredPath(candidate: string): Promise<boolean> {
+    try {
+      const resolved = path.resolve(candidate.trim());
+      const canonical = await realpath(resolved);
+      return [...this.workspaceRoots].some((root) => canonical === root || canonical.startsWith(`${root}${path.sep}`));
+    } catch {
+      return false;
+    }
   }
 }
 

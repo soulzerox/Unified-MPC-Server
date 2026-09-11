@@ -194,6 +194,59 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     }
   });
 
+  it('rejects invalid server identifiers, transports, and scopes at runtime', async () => {
+    const installer = new InstallerService();
+    const cases = [
+      { name: 'bad/name', transport: 'stdio', command: 'node', targets: ['cursor'] },
+      { name: 'fixture', transport: 'ws', url: 'https://example.com', targets: ['cursor'] },
+      { name: 'fixture', transport: 'stdio', command: 'node', targets: ['cursor'], scope: 'machine' },
+    ] as const;
+    for (const input of cases) {
+      const result = await installer.installServer(input as never);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('INVALID_INPUT');
+    }
+  });
+
+  it('fails closed instead of replacing malformed config with an empty config', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-malformed-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const cursorDir = path.join(home, '.cursor');
+    await mkdir(cursorDir, { recursive: true });
+    const configFile = path.join(cursorDir, 'mcp.json');
+    await writeFile(configFile, '{ malformed', 'utf8');
+
+    const result = await new InstallerService({ homeDir: home }).installServer({
+      name: 'fixture', transport: 'stdio', command: 'node', targets: ['cursor'], scope: 'global',
+    });
+    expect(result.ok).toBe(false);
+    expect(await readFile(configFile, 'utf8')).toBe('{ malformed');
+  });
+
+  it('rolls back earlier target config writes when a later target fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-rollback-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const appData = path.join(home, '.config');
+    const claudeFile = path.join(appData, 'Claude', 'claude_desktop_config.json');
+    await mkdir(path.dirname(claudeFile), { recursive: true });
+    await writeFile(claudeFile, '{ malformed', 'utf8');
+
+    const cursorFile = path.join(home, '.cursor', 'mcp.json');
+    const result = await new InstallerService({ homeDir: home, appDataDir: appData }).installServer({
+      name: 'rollback-server',
+      transport: 'stdio',
+      command: 'node',
+      targets: ['cursor', 'claude'],
+      scope: 'global',
+    });
+
+    expect(result.ok).toBe(false);
+    await expect(readFile(cursorFile, 'utf8')).rejects.toThrow();
+    expect(await readFile(claudeFile, 'utf8')).toBe('{ malformed');
+  });
+
   it('installs stdio server into global target configs (antigravity, cursor, claude, cline, opencode)', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'installer-srv-test-'));
     temporaryRoots.push(root);

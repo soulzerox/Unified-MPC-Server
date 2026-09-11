@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { InstallerService } from './installer.js';
 import { PrunerService } from './pruner.js';
 import type { McpSessionManager } from './mcp-session-manager.js';
 
@@ -114,6 +115,15 @@ describe('PrunerService - Skill Pruning Pipeline', () => {
         expect(result.error.code).toBe('INVALID_INPUT');
       }
     }
+  });
+
+  it('rejects unsupported skill targets instead of reporting success', async () => {
+    const result = await new PrunerService({ homeDir: '/tmp' }).pruneSkill({
+      name: 'fixture',
+      targets: ['unknown' as never],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('UNSUPPORTED_TARGET');
   });
 });
 
@@ -349,9 +359,26 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.updatedConfigFiles).toHaveLength(2);
-
     const agConfig = JSON.parse(await readFile(path.join(agDir, 'mcp.json'), 'utf8'));
     expect(agConfig.mcpServers['ws-server']).toBeUndefined();
+  });
+
+  it('fails closed and preserves malformed server config', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-malformed-config-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const configFile = path.join(home, '.cursor', 'mcp.json');
+    await mkdir(path.dirname(configFile), { recursive: true });
+    await writeFile(configFile, '{ malformed', 'utf8');
+
+    const result = await new PrunerService({ homeDir: home }).pruneServer({
+      name: 'fixture',
+      targets: ['cursor'],
+      scope: 'global',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(await readFile(configFile, 'utf8')).toBe('{ malformed');
   });
 
   it('drops server session from McpSessionManager during pruning', async () => {
@@ -381,6 +408,74 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     if (!result.ok) return;
     expect(droppedServerName).toBe('active-session-server');
     expect(result.value.processTerminated).toBe(true);
+  });
+
+  it('fails closed when session termination fails', async () => {
+    const sessionManager = { dropServer: async (): Promise<void> => { throw new Error('termination failed'); } };
+    const result = await new PrunerService({ sessionManager: sessionManager as unknown as McpSessionManager }).pruneServer({
+      name: 'active-session-server',
+      targets: ['antigravity'],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('fails closed and restores config when session termination fails after config purge', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-session-rollback-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const configFile = path.join(home, '.cursor', 'mcp.json');
+    await mkdir(path.dirname(configFile), { recursive: true });
+    const original = JSON.stringify({ mcpServers: { 'active-session-server': { command: 'node' } } });
+    await writeFile(configFile, original, 'utf8');
+    const sessionManager = { dropServer: async (): Promise<void> => { throw new Error('termination failed'); } };
+
+    const result = await new PrunerService({
+      homeDir: home,
+      sessionManager: sessionManager as unknown as McpSessionManager,
+    }).pruneServer({ name: 'active-session-server', targets: ['cursor'], scope: 'global' });
+
+    expect(result.ok).toBe(false);
+    expect(await readFile(configFile, 'utf8')).toBe(original);
+  });
+
+  it('serializes concurrent install and prune mutations without losing updates', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mutation-lock-test-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const cursorDir = path.join(home, '.cursor');
+    const configFile = path.join(cursorDir, 'mcp.json');
+    await mkdir(cursorDir, { recursive: true });
+
+    const existingServers = Object.fromEntries(
+      Array.from({ length: 10 }, (_, index) => [`old-${index}`, { command: 'old' }]),
+    );
+    await writeFile(configFile, JSON.stringify({ mcpServers: existingServers }), 'utf8');
+
+    const installer = new InstallerService({ homeDir: home });
+    const pruner = new PrunerService({ homeDir: home });
+    const operations = [
+      ...Array.from({ length: 10 }, (_, index) => installer.installServer({
+        name: `new-${index}`,
+        transport: 'stdio' as const,
+        command: 'node',
+        targets: ['cursor' as const],
+      })),
+      ...Array.from({ length: 10 }, (_, index) => pruner.pruneServer({
+        name: `old-${index}`,
+        targets: ['cursor' as const],
+        scope: 'global' as const,
+      })),
+    ];
+
+    const results = await Promise.all(operations);
+    expect(results.every((result) => result.ok)).toBe(true);
+    const content = JSON.parse(await readFile(configFile, 'utf8')) as { mcpServers: Record<string, unknown> };
+    expect(Object.keys(content.mcpServers)).toHaveLength(10);
+    for (let index = 0; index < 10; index += 1) {
+      expect(content.mcpServers[`new-${index}`]).toBeDefined();
+      expect(content.mcpServers[`old-${index}`]).toBeUndefined();
+    }
   });
 });
 

@@ -6,6 +6,7 @@ import type { InstallScope, InstallTarget } from './installer.js';
 import { stripJsonComments } from './mcp-config-loader.js';
 import { writeAtomic } from './ide-sync.js';
 import type { McpSessionManager } from './mcp-session-manager.js';
+import { withConfigMutationTransaction } from './config-mutation-lock.js';
 
 export interface PruneSkillInput {
   readonly name: string;
@@ -89,6 +90,9 @@ export class PrunerService {
       return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped skill pruning'));
     }
 
+    const targetError = validateTargets(input.targets ?? ['all']);
+    if (targetError !== undefined) return err(targetError);
+
     const targets = this.expandTargets(input.targets ?? ['all']);
     const removedPaths: string[] = [];
 
@@ -102,8 +106,9 @@ export class PrunerService {
           await rm(targetDir, { recursive: true, force: true });
           removedPaths.push(targetDir);
         }
-      } catch {
-        // Path does not exist, ignore (idempotent)
+      } catch (error: unknown) {
+        if (isMissingPath(error)) continue;
+        return err(appError('INTERNAL_ERROR', `Failed to remove skill path '${targetDir}': ${error instanceof Error ? error.message : String(error)}`));
       }
     }
 
@@ -193,41 +198,41 @@ export class PrunerService {
       }
     }
 
+    const targets = this.expandTargets(input.targets ?? ['all']);
+    const configFiles = targets
+      .map((target) => this.serverTargetConfigFile(target, scope, workspaceRoot))
+      .filter((configFile): configFile is string => configFile !== undefined);
+    const updatedConfigFiles: string[] = [];
+    const removedPaths: string[] = [];
     let processTerminated = false;
 
-    // Drop session if sessionManager available
-    if (this.sessionManager !== undefined) {
-      await this.sessionManager.dropServer(serverName).catch(() => undefined);
-      processTerminated = true;
-    }
-
-    const targets = this.expandTargets(input.targets ?? ['all']);
-    const updatedConfigFiles: string[] = [];
-
-    for (const target of targets) {
-      const configFile = this.serverTargetConfigFile(target, scope, workspaceRoot);
-      if (configFile === undefined) continue;
-
-      const modified = await purgeServerFromConfigFile(configFile, serverName);
-      if (modified) {
-        updatedConfigFiles.push(configFile);
-      }
-    }
-
-    const removedPaths: string[] = [];
-    if (input.purgeDataDirs !== undefined) {
-      for (const dir of input.purgeDataDirs) {
-        try {
-          const s = await lstat(dir);
-          if (s.isSymbolicLink()) continue;
-          if (s.isDirectory() || s.isFile()) {
-            await rm(dir, { recursive: true, force: true });
-            removedPaths.push(dir);
+    try {
+      await withConfigMutationTransaction(configFiles, async () => {
+        for (const configFile of configFiles) {
+          if (await purgeServerFromConfigFile(configFile, serverName)) {
+            updatedConfigFiles.push(configFile);
           }
-        } catch {
-          // Ignore if already deleted
         }
-      }
+
+        if (input.purgeDataDirs !== undefined) {
+          for (const dir of input.purgeDataDirs) {
+            const s = await lstat(dir);
+            if (s.isSymbolicLink()) continue;
+            if (s.isDirectory() || s.isFile()) {
+              await rm(dir, { recursive: true, force: true });
+              removedPaths.push(dir);
+            }
+          }
+        }
+
+        // Terminate session only after filesystem mutations succeed; config rollback cannot restore a process.
+        if (this.sessionManager !== undefined) {
+          await this.sessionManager.dropServer(serverName);
+          processTerminated = true;
+        }
+      });
+    } catch (error: unknown) {
+      return err(appError('INTERNAL_ERROR', `Failed to prune server '${serverName}': ${error instanceof Error ? error.message : String(error)}`));
     }
 
     return ok({
@@ -340,7 +345,9 @@ async function purgeServerFromConfigFile(configFile: string, serverName: string)
     const raw = await readFile(configFile, 'utf8');
     const cleanJson = stripJsonComments(raw);
     const parsed: unknown = JSON.parse(cleanJson);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Configuration root must be an object');
+    }
     const doc = parsed as Record<string, unknown>;
 
     let modified = false;
@@ -359,8 +366,9 @@ async function purgeServerFromConfigFile(configFile: string, serverName: string)
       await writeAtomic(configFile, `${JSON.stringify(doc, null, 2)}\n`);
     }
     return modified;
-  } catch {
-    return false;
+  } catch (error: unknown) {
+    if (isMissingPath(error)) return false;
+    throw error;
   }
 }
 

@@ -29,9 +29,9 @@ export class NodeBrowserCdpProtocol implements BrowserCdpProtocol {
 
   public constructor(options: BrowserCdpProtocolOptions = {}) {
     this.platform = options.platform ?? process.platform;
-    this.port = options.port ?? readPort(process.env.LNWJUD_BROWSER_CDP_PORT);
-    this.profileDir = options.profileDir ?? process.env.LNWJUD_BROWSER_PROFILE ?? path.join(os.tmpdir(), 'lnwjud-browser-profile');
-    this.chromeExecutable = options.chromeExecutable ?? process.env.LNWJUD_BROWSER_EXECUTABLE;
+    this.port = options.port ?? readPort(process.env.UNIFIED_MPC_BROWSER_CDP_PORT ?? process.env.LNWJUD_BROWSER_CDP_PORT);
+    this.profileDir = options.profileDir ?? process.env.UNIFIED_MPC_BROWSER_PROFILE ?? process.env.LNWJUD_BROWSER_PROFILE ?? path.join(os.tmpdir(), 'unified-mpc-browser-profile');
+    this.chromeExecutable = options.chromeExecutable ?? process.env.UNIFIED_MPC_BROWSER_EXECUTABLE ?? process.env.LNWJUD_BROWSER_EXECUTABLE;
     this.terminator = options.terminator ?? (isSupportedBrowserPlatform(this.platform)
       ? createProcessTreeTerminator(this.platform)
       : unsupportedBrowserTerminator());

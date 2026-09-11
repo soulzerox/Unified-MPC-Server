@@ -52,6 +52,7 @@ export * from './commands/web.js';
 export * from './commands/tools.js';
 
 export type CliCommand =
+  | { readonly kind: 'help' }
   | { readonly kind: 'status' }
   | { readonly kind: 'workspace-add'; readonly rootPath: string }
   | { readonly kind: 'workspace-list' }
@@ -96,6 +97,7 @@ export interface CliDependencies {
 }
 
 export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
+  if (args.length === 0 || args[0] === '--help' || args[0] === '-h' || args[0] === 'help') return ok({ kind: 'help' });
   if (args.length === 1 && args[0] === 'status') return ok({ kind: 'status' });
   if (args[0] === 'doctor' && args.length === 1) return ok({ kind: 'doctor' });
   if (args[0] === 'codex' && args[1] === 'doctor' && args.length === 2) return ok({ kind: 'codex-doctor' });
@@ -119,6 +121,25 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   }
 
   switch (parsed.value.kind) {
+    case 'help': {
+      write(`Usage: unified-mpc <command> [options]
+
+Commands:
+  status                                 Display overall system and workspace status
+  sync [--targets <t...>]                Synchronize P1-P7 policy rules across IDEs
+  install skill --name <n> --source <s>  Install an agent skill
+  install server --name <n> ...          Install an executable MCP server
+  prune skill --name <n>                 Prune an installed skill
+  prune server --name <n>                Prune an installed MCP server
+  web [--port <p>] [--host <h>]          Start the Local Web Control Plane
+  tools list                             List available downstream MCP tools
+  tools call <tool> <args-json>          Call a downstream MCP tool headlessly
+  workspace add <path>                   Register a workspace root
+  workspace list                         List registered workspaces
+  doctor                                 Run system health checks
+  help, --help, -h                       Display this help message`);
+      return 0;
+    }
     case 'status': {
       const status = await dependencies.status();
       write(`workspaces: ${status.workspaceCount}`);

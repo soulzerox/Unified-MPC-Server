@@ -27,7 +27,7 @@ describe('mcp http command', () => {
       createServerOptions: (selectedWorkspace) => ({
         port: 0,
         services: {},
-        actor: { clientId: selectedWorkspace.id, clientName: 'lnwjud-cli' },
+        actor: { clientId: selectedWorkspace.id, clientName: 'unified-mpc-cli' },
       }),
       starter,
     });

@@ -5,19 +5,7 @@ node_modules/
 # Build & Compilation
 dist/
 build/
-!apps/desktop/build/
-!apps/desktop/build/**
-apps/desktop/build/*.cjs
-apps/desktop/build/*.cmd
-apps/desktop/build/*.mjs
-apps/desktop/build/*.sh
-apps/desktop/build/*.exe
 native/linux-host/target/
-native/macos-host/.build/
-native/windows-secret-migrator/bin/
-native/windows-secret-migrator/obj/
-native/windows-ocr/bin/
-native/windows-ocr/obj/
 *.tsbuildinfo
 *.tsbuildinfo.*
 *.last-run.json
@@ -41,7 +29,9 @@ id_ed25519*
 credentials.json
 
 # Local Databases & Storage
-.lnwjud/
+.unified-mpc/
+.unified-mpc-recovery/
+.unified-mpc-trash/
 *.db
 *.db-*
 *.sqlite
@@ -49,7 +39,6 @@ credentials.json
 
 # Logs & Diagnostics
 *.log
-lnwjud-*-logs.txt
 logs/
 diagnostics/
 
@@ -88,10 +77,6 @@ docs/development/*
 !docs/NATIVE_PROVIDER_DEVELOPMENT.md
 !docs/INSTALL_MACOS.md
 !docs/INSTALL_LINUX.md
-apps/desktop/build/packaged-runtime-evidence.json
-apps/desktop/build/platform-verification-*.json
-apps/desktop/build/capability-bridge/
-apps/desktop/build/native-host/
 !docs/benchmarks/
 docs/benchmarks/*
 !docs/benchmarks/BASELINE.md
@@ -111,8 +96,4 @@ docs/benchmarks/*
 *.swo
 .DS_Store
 Thumbs.db
-lnwjud-incident.json
 .codegraph
-apps/desktop/build/tunnel-client/
-apps/desktop/build/runtime-tools/
-apps/desktop/build/vendor/

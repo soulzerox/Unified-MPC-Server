@@ -43,7 +43,7 @@ export class StrictWorkspaceRepository implements WorkspaceRepository {
 }
 
 export async function canonicalizeAllowedRoots(roots: readonly string[], platform: NodeJS.Platform = process.platform): Promise<readonly string[]> {
-  if (roots.length === 0) throw new Error('Strict root mode requires at least one explicit --allowed-root or LNWJUD_ALLOWED_ROOTS entry');
+  if (roots.length === 0) throw new Error('Strict root mode requires at least one explicit --allowed-root or UNIFIED_MPC_ALLOWED_ROOTS entry');
   const canonical: string[] = [];
   const seen = new Set<string>();
   for (const input of roots) {

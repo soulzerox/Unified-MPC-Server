@@ -26,7 +26,7 @@ describe('mcp stdio command', () => {
       resolver: { resolve: async () => ok(workspace) },
       createServerOptions: (selectedWorkspace) => ({
         services: {},
-        actor: { clientId: selectedWorkspace.id, clientName: 'lnwjud-cli' },
+        actor: { clientId: selectedWorkspace.id, clientName: 'unified-mpc-cli' },
       }),
       starter,
     });

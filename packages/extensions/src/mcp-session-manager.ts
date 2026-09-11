@@ -154,6 +154,10 @@ export class McpSessionManager {
     }
   }
 
+  public async dropServer(server: string): Promise<void> {
+    await this.drop(server);
+  }
+
   public async close(): Promise<void> {
     this.closed = true;
     if (this.idleTimer !== undefined) clearInterval(this.idleTimer);

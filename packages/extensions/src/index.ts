@@ -47,5 +47,16 @@ export {
   type InstallServerResult,
   type InstallerServiceOptions,
 } from './installer.js';
+export {
+  PrunerService,
+  terminateProcess,
+  cleanOrphanedArtifacts,
+  type PruneSkillInput,
+  type PruneSkillResult,
+  type PruneServerInput,
+  type PruneServerResult,
+  type PrunerServiceOptions,
+} from './pruner.js';
+
 
 

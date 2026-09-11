@@ -1,4 +1,4 @@
-﻿import { execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -273,8 +273,7 @@ export async function currentSharedActivityOwner(): Promise<SharedActivityOwner>
 
 export async function probeProcessStart(pid: number, options: ProcessProbeOptions = {}): Promise<ProcessProbeResult> {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 2_147_483_647) return { state: 'unverifiable', reason: 'invalid_pid' };
-  const platform = options.platform ?? process.platform;
-  const runProbe = options.runProbe ?? (platform === 'win32' ? runWindowsProcessProbe : runPosixProcessProbe);
+  const runProbe = options.runProbe ?? runPosixProcessProbe;
   const timeoutMs = positiveInteger(options.timeoutMs, DEFAULT_PROCESS_PROBE_TIMEOUT_MS);
   const attempts = Math.min(3, positiveInteger(options.attempts, DEFAULT_PROCESS_PROBE_ATTEMPTS));
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -481,16 +480,6 @@ async function restoreSnapshot(quarantinePath: string, snapshotPath: string): Pr
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === 'object' && error !== null && ['EEXIST', 'EPERM'].includes(String((error as NodeJS.ErrnoException).code ?? ''));
-}
-
-async function runWindowsProcessProbe(pid: number, timeoutMs: number): Promise<string> {
-  const { stdout } = await execFileAsync('powershell.exe', [
-    '-NoProfile',
-    '-NonInteractive',
-    '-Command',
-    `$ErrorActionPreference='Stop'; try{$p=Get-Process -Id ${pid} -ErrorAction Stop}catch{if($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenId,*'){'GONE';exit 0};throw}; 'LIVE|' + $p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ',[Globalization.CultureInfo]::InvariantCulture)`,
-  ], { windowsHide: true, encoding: 'utf8', timeout: timeoutMs });
-  return stdout;
 }
 
 async function runPosixProcessProbe(pid: number, timeoutMs: number): Promise<string> {

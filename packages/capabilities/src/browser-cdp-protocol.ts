@@ -161,20 +161,7 @@ export class NodeBrowserCdpProtocol implements BrowserCdpProtocol {
         path.posix.join(process.env.HOME ?? '', '.local', 'bin', 'google-chrome'),
       ];
       return candidates.find((candidate) => candidate.length > 0 && this.executableExists(candidate));
-    }
-    if (this.platform !== 'win32') return undefined;
-    const localAppData = process.env.LOCALAPPDATA;
-    const programFiles = process.env.ProgramFiles;
-    const programFilesX86 = process.env['ProgramFiles(x86)'];
-    const candidates = [
-      localAppData === undefined ? undefined : path.win32.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      programFiles === undefined ? undefined : path.win32.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      programFilesX86 === undefined ? undefined : path.win32.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      localAppData === undefined ? undefined : path.win32.join(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-      programFiles === undefined ? undefined : path.win32.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-      programFilesX86 === undefined ? undefined : path.win32.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    ];
-    return candidates.find((candidate): candidate is string => candidate !== undefined && this.executableExists(candidate));
+    return undefined;
   }
 }
 

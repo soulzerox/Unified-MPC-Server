@@ -12,7 +12,7 @@ export type {
 export { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 export { isServerEnabled, isSkillRootEnabled, parseExtensionsSettings } from './allowlist.js';
 export { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
-export { McpConfigLoader, exclusionReason, normalizeLaunchConfig } from './mcp-config-loader.js';
+export { McpConfigLoader, exclusionReason, normalizeLaunchConfig, stripJsonComments } from './mcp-config-loader.js';
 export {
   McpSessionManager,
   defaultMcpClientFactory,

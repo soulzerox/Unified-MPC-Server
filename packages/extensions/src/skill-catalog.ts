@@ -167,7 +167,7 @@ export class SkillCatalog {
     for (const bundled of this.options.bundledRoots ?? []) {
       defaults.push({ source: `bundled:${path.basename(bundled)}`, path: path.resolve(bundled) });
     }
-    for (const extra of [...this.options.settings.extraSkillRoots, ...(this.options.extraRoots ?? [])]) {
+    for (const extra of [...(this.options.settings?.extraSkillRoots ?? []), ...(this.options.extraRoots ?? [])]) {
       defaults.push({ source: `extra:${path.basename(extra)}`, path: path.resolve(extra) });
     }
     return defaults;
@@ -258,7 +258,7 @@ async function findSkillFiles(root: string): Promise<readonly string[]> {
 async function walkForSkills(current: string, results: string[], visited: Set<string>): Promise<void> {
   const canonical = await safeRealpath(current);
   if (canonical === undefined) return;
-  const visitKey = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+  const visitKey = canonical;
   if (visited.has(visitKey)) return;
   visited.add(visitKey);
 

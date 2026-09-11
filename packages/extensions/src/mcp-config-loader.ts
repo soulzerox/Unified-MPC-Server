@@ -208,8 +208,11 @@ function dedupeServers(servers: readonly DiscoveredMcpServer[]): readonly Discov
 }
 
 export function stripJsonComments(content: string): string {
-  return content.replace(/\\"|"(?:[^"\\]|\\.)*"|(\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)/g, (match, group) => {
+  const withoutComments = content.replace(/\\"|"(?:[^"\\]|\\.)*"|(\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)/g, (match, group) => {
     return group ? '' : match;
+  });
+  return withoutComments.replace(/\\"|"(?:[^"\\]|\\.)*"|(,\s*([}\]]))/g, (match, group, closing) => {
+    return group ? closing : match;
   });
 }
 

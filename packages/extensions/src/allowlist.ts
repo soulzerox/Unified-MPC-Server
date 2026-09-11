@@ -22,16 +22,19 @@ export function parseExtensionsSettings(raw: string | null | undefined): Extensi
 
 export function isServerEnabled(name: string, settings: ExtensionsSettings): boolean {
   const normalized = name.trim().toLowerCase();
-  if (settings.disabledServers.some((entry) => entry.trim().toLowerCase() === normalized)) return false;
-  if (settings.mode === 'allowlist') {
-    return settings.enabledServers.some((entry) => entry.trim().toLowerCase() === normalized);
+  const disabled = settings?.disabledServers ?? [];
+  if (disabled.some((entry) => entry.trim().toLowerCase() === normalized)) return false;
+  if (settings?.mode === 'allowlist') {
+    const enabled = settings?.enabledServers ?? [];
+    return enabled.some((entry) => entry.trim().toLowerCase() === normalized);
   }
   return true;
 }
 
 export function isSkillRootEnabled(rootPath: string, settings: ExtensionsSettings): boolean {
   const normalized = normalizePathKey(rootPath);
-  return !settings.disabledSkillRoots.some((entry) => normalizePathKey(entry) === normalized);
+  const disabled = settings?.disabledSkillRoots ?? [];
+  return !disabled.some((entry) => normalizePathKey(entry) === normalized);
 }
 
 function stringArray(value: unknown): readonly string[] {

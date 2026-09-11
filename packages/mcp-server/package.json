@@ -1,0 +1,37 @@
+{
+  "name": "@unified-mpc/mcp-server",
+  "version": "4.61.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": {
+        "development": "./src/index.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "dependencies": {
+    "@unified-mpc/application": "workspace:*",
+    "@unified-mpc/audit": "workspace:*",
+    "@unified-mpc/capabilities": "workspace:*",
+    "@unified-mpc/domain": "workspace:*",
+    "@unified-mpc/extensions": "workspace:*",
+    "@unified-mpc/permissions": "workspace:*",
+    "@unified-mpc/process": "workspace:*",
+    "@unified-mpc/search": "workspace:*",
+    "@unified-mpc/shared": "workspace:*",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.2.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "scripts": {
+    "test": "corepack pnpm@10.15.0 --filter @unified-mpc/domain build && corepack pnpm@10.15.0 --filter @unified-mpc/shared build && corepack pnpm@10.15.0 --filter @unified-mpc/process build && corepack pnpm@10.15.0 --filter @unified-mpc/capabilities build && corepack pnpm@10.15.0 --filter @unified-mpc/extensions build && corepack pnpm@10.15.0 build && vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --outDir dist"
+  },
+  "license": "MIT"
+}

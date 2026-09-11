@@ -1,0 +1,36 @@
+{
+  "name": "unified-mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "type": "module",
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --build",
+    "test": "corepack pnpm -r --if-present test",
+    "build": "corepack pnpm -r --if-present build",
+    "start": "corepack pnpm --filter @unified-mpc/cli build && node apps/cli/dist/index.js",
+    "cli": "node apps/cli/dist/index.js",
+    "docs:tools": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.33.0",
+    "@unified-mpc/application": "workspace:*",
+    "@unified-mpc/audit": "workspace:*",
+    "@unified-mpc/codex": "workspace:*",
+    "@unified-mpc/domain": "workspace:*",
+    "@unified-mpc/mcp-server": "workspace:*",
+    "@unified-mpc/process": "workspace:*",
+    "@unified-mpc/storage": "workspace:*",
+    "@unified-mpc/workspace": "workspace:*",
+    "@types/node": "^22.0.0",
+    "eslint": "9.33.0",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.67.0",
+    "vitest": "3.2.4"
+  },
+  "license": "MIT"
+}

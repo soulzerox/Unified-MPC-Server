@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible lnwjud problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not post credentials, private logs, or vulnerability details here. Security-sensitive reports must follow SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: lnwjud version
+      description: "Example: v4.10.0"
+      placeholder: v4.x.x
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2 / Windows Server 2025
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Desktop UI
+        - MCP / Secure MCP Tunnel
+        - Files / workspace
+        - Git
+        - Processes / shell
+        - WSL
+        - Browser / desktop automation
+        - Logs / observability
+        - Installer / updater
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and the result you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Run ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Redact tokens, credentials, private paths/data, and unrelated personal information.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for duplicates.
+          required: true
+        - label: This report does not contain secrets, credentials, or private vulnerability details.
+          required: true

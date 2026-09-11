@@ -1,0 +1,28 @@
+{
+  "name": "@unified-mpc/shared",
+  "version": "4.61.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": {
+        "development": "./src/index.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./date-time-display": {
+      "types": "./src/date-time-display.ts",
+      "import": {
+        "development": "./src/date-time-display.ts",
+        "default": "./dist/date-time-display.js"
+      }
+    }
+  },
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "build": "node ../../scripts/clean-ts-output.mjs dist && tsc --outDir dist"
+  },
+  "license": "MIT"
+}

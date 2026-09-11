@@ -1,0 +1,35 @@
+{
+  "name": "@unified-mpc/application",
+  "version": "4.61.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": {
+        "development": "./src/index.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "dependencies": {
+    "@unified-mpc/domain": "workspace:*",
+    "@unified-mpc/codex": "workspace:*",
+    "@unified-mpc/audit": "workspace:*",
+    "@unified-mpc/filesystem": "workspace:*",
+    "@unified-mpc/git": "workspace:*",
+    "@unified-mpc/permissions": "workspace:*",
+    "@unified-mpc/process": "workspace:*",
+    "@unified-mpc/project": "workspace:*",
+    "@unified-mpc/search": "workspace:*",
+    "@unified-mpc/shared": "workspace:*",
+    "@unified-mpc/storage": "workspace:*",
+    "@unified-mpc/workspace": "workspace:*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --outDir dist"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@unified-mpc/cli",
+  "version": "4.61.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "unified-mpc": "./dist/index.js",
+    "unified-mcp": "./dist/index.js"
+  },
+  "dependencies": {
+    "@unified-mpc/application": "workspace:*",
+    "@unified-mpc/audit": "workspace:*",
+    "@unified-mpc/capabilities": "workspace:*",
+    "@unified-mpc/codex": "workspace:*",
+    "@unified-mpc/domain": "workspace:*",
+    "@unified-mpc/extensions": "workspace:*",
+    "@unified-mpc/mcp-server": "workspace:*",
+    "@unified-mpc/permissions": "workspace:*",
+    "@unified-mpc/shared": "workspace:*",
+    "@unified-mpc/storage": "workspace:*",
+    "@unified-mpc/workspace": "workspace:*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --outDir dist"
+  },
+  "license": "MIT"
+}

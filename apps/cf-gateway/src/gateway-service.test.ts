@@ -62,3 +62,4 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     expect(gateway.canConnectSession()).toBe(false);
   });
 });
+

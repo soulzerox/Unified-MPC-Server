@@ -103,3 +103,4 @@ export async function runPruneServer(
 ): Promise<Result<PruneServerResult>> {
   return service.pruneServer(input);
 }
+

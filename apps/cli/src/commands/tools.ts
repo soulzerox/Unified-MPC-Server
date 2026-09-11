@@ -60,3 +60,4 @@ export async function runToolsCall(
     return err(appError('INTERNAL_ERROR', `Failed to execute tool ${name}: ${message}`));
   }
 }
+

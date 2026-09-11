@@ -170,3 +170,4 @@ export function renderDashboardHtml(): string {
 </body>
 </html>`;
 }
+

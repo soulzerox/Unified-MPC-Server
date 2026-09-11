@@ -39,3 +39,4 @@ describe('web CLI command', () => {
     });
   });
 });
+

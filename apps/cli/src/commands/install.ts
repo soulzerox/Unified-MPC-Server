@@ -167,3 +167,4 @@ export async function runInstallServer(
 ): Promise<Result<InstallServerResult>> {
   return service.installServer(input);
 }
+

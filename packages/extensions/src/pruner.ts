@@ -71,8 +71,8 @@ export class PrunerService {
       return err(appError('INVALID_INPUT', `Invalid skill name: "${input.name}"`));
     }
 
-    const scope: InstallScope = input.scope ?? 'global';
     const workspaceRoot = input.workspaceRoot?.trim() ?? this.workspace;
+    const scope: InstallScope = input.scope ?? (workspaceRoot !== undefined && workspaceRoot.length > 0 ? 'workspace' : 'global');
 
     if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
       return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped skill pruning'));
@@ -163,8 +163,8 @@ export class PrunerService {
       return err(appError('INVALID_INPUT', `Invalid server name: "${input.name}"`));
     }
 
-    const scope: InstallScope = input.scope ?? 'global';
     const workspaceRoot = input.workspaceRoot?.trim() ?? this.workspace;
+    const scope: InstallScope = input.scope ?? (workspaceRoot !== undefined && workspaceRoot.length > 0 ? 'workspace' : 'global');
 
     if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
       return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped server pruning'));

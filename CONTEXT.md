@@ -205,5 +205,34 @@ Following the Matt Pocock `/improve-codebase-architecture` and `ponytail-audit` 
    - Added `--help`, `-h`, `help` usage dispatcher to `apps/cli/src/index.ts` returning exit code 0.
    - Verified full monorepo typecheck clean (0 errors) and 100% tests passing across all 21 packages.
 
+---
+
+## 10. Real-World Host Dogfooding & Live Smoke Testing (Option 2 — Completed)
+
+Comprehensive host-environment dogfooding and smoke testing verified all runtime entrypoints and subsystems in a live Linux environment:
+
+1. **CLI Runtime & Tool Execution**:
+   - Wired `ToolRegistry` from `@unified-mpc/mcp-server` into default CLI dependencies (`apps/cli/src/index.ts`).
+   - Verified `unified-mpc status` (exit code 0, workspace inventory).
+   - Verified `unified-mpc doctor` (exit code 0, operational database pass).
+   - Verified `unified-mpc tools list` (enumerates all downstream tools) and `unified-mpc tools call tool_categories '{}'` (executes live tool returning structured JSON).
+2. **Dynamic Ingestion & Pruning Lifecycle**:
+   - Installed test skill `dogfood-test-skill` into workspace (`.gemini/skills/dogfood-test-skill/SKILL.md`) via CLI.
+   - Identified and fixed scope resolution in `PrunerService` (`packages/extensions/src/pruner.ts`) and `apps/cli/src/commands/prune.ts`: auto-infer `scope: 'workspace'` when `--workspace` is specified and support explicit `--scope`.
+   - Pruned skill verifying 100% removal with zero lingering files.
+   - Installed test server `dogfood-sqlite` into workspace `.gemini/mcp.json` and pruned it, confirming clean entry removal while preserving valid JSON syntax.
+3. **Multi-IDE Policy Synchronization**:
+   - Synchronized mandatory P1-P7 policy rules across `.cursor/rules/00-mandatory-policy.mdc`, `.clinerules`, `~/.cline/rules/mcp-policy.md`, `~/.gemini/antigravity/rules/mcp-policy.md`, `GEMINI.md`, and `AGENTS.md`.
+   - Verified strict idempotency: repeated executions maintain exactly one policy block without duplication.
+4. **Local Web Control Plane**:
+   - Refactored `apps/cli/src/index.ts` daemon lifecycle so the web process remains running until SIGINT/SIGTERM.
+   - Probed `GET /`: Returned 200 OK with Obsidian Telemetry dashboard HTML.
+   - Probed `GET /api/chatgpt-gateway/status`: Returned 200 OK (`{"state":"STOPPED","localPort":18765}`).
+   - Probed `GET /api/chatgpt-web/connect`: Returned 412 Precondition Failed, enforcing the bridge health invariant.
+   - Probed foreign `Origin`: Returned 403 Forbidden (`Origin not allowed: loopback only`).
+   - Probed loopback `Origin`: Returned 200 OK with CORS headers.
+   - Probed `GET /api/policies`: Returned 200 OK with full P1-P7 policy payload.
+   - Verified clean graceful shutdown on termination.
+
 
 

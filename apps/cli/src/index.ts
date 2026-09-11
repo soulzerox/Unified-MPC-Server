@@ -8,6 +8,7 @@ import type { DoctorReport } from '@unified-mpc/application';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   IdeSyncService,
   InstallerService,
@@ -88,7 +89,7 @@ export interface CliDependencies {
   installServer?(input: InstallServerInput): Promise<Result<InstallServerResult>>;
   pruneSkill?(input: PruneSkillInput): Promise<Result<PruneSkillResult>>;
   pruneServer?(input: PruneServerInput): Promise<Result<PruneServerResult>>;
-  sync?(targets?: readonly SyncTarget[]): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
+  sync?(targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
   web?(options?: { host?: string; port?: number }): Promise<Result<WebRunResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
@@ -227,10 +228,11 @@ Commands:
       return 0;
     }
     case 'sync': {
+      const command = parsed.value;
       const syncService = dependencies.sync !== undefined
-        ? { sync: dependencies.sync }
-        : new IdeSyncService(parsed.value.workspaceRoot !== undefined ? { workspaceRoot: parsed.value.workspaceRoot } : {});
-      const result = await runSync(syncService, parsed.value.targets);
+        ? { sync: (targets?: readonly SyncTarget[]) => dependencies.sync!(targets, command.workspaceRoot) }
+        : new IdeSyncService(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {});
+      const result = await runSync(syncService, command.targets);
       if (!result.ok) {
         writeError(result.error.message);
         return 1;
@@ -377,8 +379,24 @@ export function createDefaultCliDependencies(): CliDependencies {
     installServer: async (input) => new InstallerService().installServer(input),
     pruneSkill: async (input) => new PrunerService().pruneSkill(input),
     pruneServer: async (input) => new PrunerService().pruneServer(input),
-    sync: async (targets) => new IdeSyncService().sync(targets),
+    sync: async (targets, workspaceRoot) => new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
     web: async (options) => runWeb(options),
+    toolsList: async () => {
+      const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
+      return registry.list().map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+      }));
+    },
+    toolsCall: async (name, args) => {
+      const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
+      const response = await registry.invoke(name, args);
+      if (response.isError) {
+        const errorText = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+        return err(appError('INTERNAL_ERROR', errorText || `Tool ${name} failed`));
+      }
+      return ok(response);
+    },
   };
 }
 
@@ -400,7 +418,18 @@ try {
 if (isDirectlyExecuted) {
   const deps = createDefaultCliDependencies();
   runCli(process.argv.slice(2), deps).then((exitCode) => {
-    process.exit(exitCode);
+    if (exitCode !== 0) {
+      process.exit(exitCode);
+    }
+    const cmd = process.argv[2];
+    if (cmd !== 'web') {
+      process.exit(0);
+    }
+    const shutdown = () => {
+      process.exit(0);
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
   }).catch((err) => {
     process.stderr.write(`Fatal CLI error: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);

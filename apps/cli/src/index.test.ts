@@ -201,6 +201,25 @@ describe('CLI execution dispatcher', () => {
     expect(output[0]).toContain('Synchronized policy across 1 file(s)');
   });
 
+  it('executes sync command forwarding workspaceRoot', async () => {
+    let capturedTargets: readonly any[] | undefined;
+    let capturedWorkspace: string | undefined;
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      sync: async (targets, workspaceRoot) => {
+        capturedTargets = targets;
+        capturedWorkspace = workspaceRoot;
+        return ok({ updatedFiles: ['/tmp/test/AGENTS.md'] });
+      },
+      write: () => {},
+    };
+
+    const code = await runCli(['sync', '--targets', 'cline', '--workspace', '/custom/workspace'], deps);
+    expect(code).toBe(0);
+    expect(capturedTargets).toEqual(['cline']);
+    expect(capturedWorkspace).toBe('/custom/workspace');
+  });
+
   it('executes web command', async () => {
     const output: string[] = [];
     const deps: CliDependencies = {

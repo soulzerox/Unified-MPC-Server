@@ -318,6 +318,14 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Standardized runtime environment variables to `UNIFIED_MPC_*` across `capabilities`, `shared`, and `cli`.
    - Added user-friendly CLI `--help`, `-h`, and `help` commands returning exit code 0.
    - Preserved active integration test suites (`mcp-development-flow.test.ts`, `codex-review-flow.test.ts`) passing 100%.
+8. **Real-World Host Dogfooding & Live Smoke Testing (Option 2)**:
+   - Wired live `ToolRegistry` into CLI headless tool execution (`unified-mpc tools list` and `unified-mpc tools call`).
+   - Fixed `PrunerService` and CLI prune commands to correctly handle workspace-scoped pruning with auto-inferred scope.
+   - Validated live dynamic ingestion and pruning lifecycle for both skills and servers.
+   - Confirmed live policy sync idempotency across 7 IDE target files.
+   - Verified Local Web Control Plane (`http://127.0.0.1:18765/`) endpoints, Obsidian dashboard HTML, 412 hard gating invariant, and 403 loopback origin enforcement.
+   - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
+   - Full monorepo `corepack pnpm test` and root `npx vitest run tests/` pass 100%.
 
 ---
 

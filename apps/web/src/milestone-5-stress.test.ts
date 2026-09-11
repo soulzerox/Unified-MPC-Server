@@ -83,6 +83,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Origin: `http://127.0.0.1:${port}`,
         },
         body: JSON.stringify({ hugeData }),
       });
@@ -96,14 +97,14 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
     it('enforces 412 in STOPPED, transitions to 200 in BRIDGE_HEALTHY, and returns 412 once SESSION_CONNECTED', async () => {
       // 1. Initially STOPPED -> must be 412
       expect(gateway.status().state).toBe('STOPPED');
-      const resStopped = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`);
+      const resStopped = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
       expect(resStopped.status).toBe(412);
 
       // 2. Start bridge -> transitions to BRIDGE_HEALTHY -> connect succeeds with 200
       await gateway.start();
       expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
 
-      const resConnected = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`);
+      const resConnected = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
       expect(resConnected.status).toBe(200);
       const connData = await resConnected.json();
       expect(connData.leaseToken).toBeDefined();
@@ -111,7 +112,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
 
       // 3. Once connected, state is SESSION_CONNECTED -> subsequent connect must return 412!
       expect(gateway.status().state).toBe('SESSION_CONNECTED');
-      const resSecond = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`);
+      const resSecond = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
       expect(resSecond.status).toBe(412);
       const secondBody = await resSecond.json();
       expect(secondBody.state).toBe('SESSION_CONNECTED');
@@ -119,7 +120,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       // 4. Stop bridge -> state returns to STOPPED -> connect must return 412
       await gateway.stop();
       expect(gateway.status().state).toBe('STOPPED');
-      const resStoppedAgain = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`);
+      const resStoppedAgain = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
       expect(resStoppedAgain.status).toBe(412);
     });
   });

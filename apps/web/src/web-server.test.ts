@@ -1,7 +1,15 @@
+import { request as httpRequest } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
-import { InstallerService, PrunerService, IdeSyncService, SkillCatalog, DEFAULT_EXTENSIONS_SETTINGS } from '@unified-mpc/extensions';
+import {
+  InstallerService,
+  McpConfigLoader,
+  PrunerService,
+  IdeSyncService,
+  SkillCatalog,
+  DEFAULT_EXTENSIONS_SETTINGS,
+} from '@unified-mpc/extensions';
 
 describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   let server: ControlPlaneServer;
@@ -52,6 +60,47 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(res.status).toBe(403);
   });
 
+  it('rejects mutation requests without an Origin header', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/servers/prune`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverId: 'server_missing_origin' }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects requests with a foreign Host header even when Origin is loopback', async () => {
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = httpRequest({
+        hostname: '127.0.0.1',
+        port,
+        path: '/api/status',
+        headers: {
+          Host: 'evil.example',
+          Origin: `http://127.0.0.1:${port}`,
+        },
+      }, (response) => {
+        response.resume();
+        response.once('end', () => resolve(response.statusCode ?? 0));
+      });
+      request.once('error', reject);
+      request.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it('rejects raw PID pruning input without a server-issued ownership proof', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/servers/prune`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: `http://127.0.0.1:${port}`,
+      },
+      body: JSON.stringify({ name: 'fixture', pid: process.pid }),
+    });
+    expect(res.status).toBe(403);
+  });
+
   it('allows loopback localhost origins', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/status`, {
       headers: { Origin: `http://127.0.0.1:${port}` },
@@ -64,7 +113,9 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   it('enforces hard gating: GET /api/chatgpt-web/connect returns 412 Precondition Failed when bridge is STOPPED', async () => {
     expect(gateway.status().state).toBe('STOPPED');
 
-    const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`);
+    const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, {
+      headers: { Origin: `http://127.0.0.1:${port}` },
+    });
     expect(res.status).toBe(412);
     const body = await res.json();
     expect(body.error).toContain('Bridge must be in BRIDGE_HEALTHY state');
@@ -74,11 +125,86 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     await gateway.start();
     expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
 
-    const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`);
+    const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, {
+      headers: { Origin: `http://127.0.0.1:${port}` },
+    });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.leaseToken).toBeDefined();
     expect(body.tunnelUrl).toBeDefined();
+  });
+
+  it('lists servers with opaque IDs and prunes by ownership proof, never request PID', async () => {
+    let captured: Record<string, unknown> | undefined;
+    const serverCatalog = {
+      discover: async () => [{
+        name: 'owned-server',
+        source: 'fixture',
+        enabled: true,
+        excluded: false,
+        config: { command: 'node' },
+      }],
+    } as unknown as McpConfigLoader;
+    const pruner = {
+      pruneServer: async (input: Record<string, unknown>) => {
+        captured = input;
+        return {
+          ok: true as const,
+          value: { name: String(input.name), updatedConfigFiles: [], processTerminated: false, removedPaths: [] },
+        };
+      },
+    } as unknown as PrunerService;
+    const ownedServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog, pruner });
+    await ownedServer.listen();
+    try {
+      const listed = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers`);
+      expect(listed.status).toBe(200);
+      const server = (await listed.json()).servers[0];
+      expect(server.serverId).toMatch(/^server_/);
+      expect(server).not.toHaveProperty('pid');
+
+      const pruned = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers/prune`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: `http://127.0.0.1:${ownedServer.port}`,
+        },
+        body: JSON.stringify({ serverId: server.serverId, pid: process.pid }),
+      });
+      expect(pruned.status).toBe(200);
+      expect(captured).toEqual({ name: 'owned-server', targets: ['all'] });
+    } finally {
+      await ownedServer.close();
+    }
+  });
+
+  it('returns 500 for a route dependency rejection and remains available', async () => {
+    const failingCatalog = { discover: async () => { throw new Error('synthetic catalog failure'); } } as unknown as McpConfigLoader;
+    const failingServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog: failingCatalog });
+    await failingServer.listen();
+    try {
+      const failed = await fetch(`http://127.0.0.1:${failingServer.port}/api/servers`);
+      expect(failed.status).toBe(500);
+      const healthy = await fetch(`http://127.0.0.1:${failingServer.port}/api/status`);
+      expect(healthy.status).toBe(200);
+    } finally {
+      await failingServer.close();
+    }
+  });
+
+  it('returns 422 for unsupported install targets and 400 for malformed JSON', async () => {
+    const unsupported = await fetch(`http://127.0.0.1:${port}/api/servers/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ name: 'fixture', transport: 'stdio', command: 'node', targets: ['unknown'] }),
+    });
+    expect(unsupported.status).toBe(422);
+    const malformed = await fetch(`http://127.0.0.1:${port}/api/servers/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: '{',
+    });
+    expect(malformed.status).toBe(400);
   });
 
   it('returns policy table on GET /api/policies', async () => {
@@ -87,6 +213,17 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const data = await res.json();
     expect(Array.isArray(data.policies)).toBe(true);
     expect(data.policies.some((p: { priority: string }) => p.priority === 'P1')).toBe(true);
+  });
+
+  it('returns recorded telemetry events on GET /api/logs', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/logs`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(Array.isArray(data.logs)).toBe(true);
+    expect(data.logs.length).toBeGreaterThan(0);
+    expect(data.logs[0]).toHaveProperty('time');
+    expect(data.logs[0]).toHaveProperty('level');
+    expect(data.logs[0]).toHaveProperty('msg');
   });
 });
 

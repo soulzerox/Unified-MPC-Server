@@ -35,9 +35,46 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('/api/servers/install');
   });
 
+  it('contains live inventory and opaque-ID prune workflows', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('/api/servers');
+    expect(html).toContain('/api/skills');
+    expect(html).toContain('/api/servers/prune');
+    expect(html).toContain('/api/skills/prune');
+    expect(html).toContain('serverId');
+    expect(html).toContain('prune-server-btn');
+    expect(html).not.toContain('pid:');
+  });
+
   it('enforces gated connect button logic matching BRIDGE_HEALTHY in client script', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('BRIDGE_HEALTHY');
     expect(html).toContain('connect-btn');
+  });
+
+  it('renders modular tab navigation views for all subsystems', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('id="view-dashboard"');
+    expect(html).toContain('id="view-servers"');
+    expect(html).toContain('id="view-skills"');
+    expect(html).toContain('id="view-install"');
+    expect(html).toContain('id="view-policies"');
+    expect(html).toContain('id="view-chatgpt"');
+    expect(html).toContain('id="view-logs"');
+  });
+
+  it('embeds the museum-grade canvas topology visualizer', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('topology-canvas-container');
+    expect(html).toContain('canvas-svg');
+    expect(html).toContain('Obsidian Control Plane Topology');
+    expect(html).toContain('UNIFIED CONTROL');
+  });
+
+  it('wires real-time telemetry log terminal and /api/logs', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('terminal-box');
+    expect(html).toContain('terminal-log-body');
+    expect(html).toContain('/api/logs');
   });
 });

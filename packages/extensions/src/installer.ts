@@ -70,8 +70,15 @@ export class InstallerService {
 
   public async installSkill(input: InstallSkillInput): Promise<Result<InstallSkillResult>> {
     const skillName = input.name.trim();
-    if (skillName.length === 0 || !/^[A-Za-z0-9_-]+$/.test(skillName)) {
+    if (
+      skillName.length === 0 ||
+      !/^[A-Za-z0-9_-]+$/.test(skillName) ||
+      ['constructor', '__proto__', 'prototype'].includes(skillName.toLowerCase())
+    ) {
       return err(appError('INVALID_INPUT', `Invalid skill name: "${input.name}"`));
+    }
+    if (!input.targets || input.targets.length === 0) {
+      return err(appError('INVALID_INPUT', 'At least one target must be specified'));
     }
 
     const resolvedSource = path.resolve(input.source);
@@ -188,8 +195,14 @@ export class InstallerService {
 
   public async installServer(input: InstallServerInput): Promise<Result<InstallServerResult>> {
     const serverName = input.name.trim();
-    if (serverName.length === 0) {
-      return err(appError('INVALID_INPUT', 'Server name must not be empty'));
+    if (
+      serverName.length === 0 ||
+      ['constructor', '__proto__', 'prototype'].includes(serverName.toLowerCase())
+    ) {
+      return err(appError('INVALID_INPUT', `Invalid server name: "${input.name}"`));
+    }
+    if (!input.targets || input.targets.length === 0) {
+      return err(appError('INVALID_INPUT', 'At least one target must be specified'));
     }
 
     if (input.transport === 'stdio') {
@@ -199,6 +212,14 @@ export class InstallerService {
     } else {
       if (!input.url || input.url.trim().length === 0) {
         return err(appError('INVALID_INPUT', 'URL is required for SSE/HTTP transport'));
+      }
+      try {
+        const parsedUrl = new URL(input.url);
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+          return err(appError('INVALID_INPUT', `Invalid URL protocol: "${parsedUrl.protocol}". Only HTTP and HTTPS are supported.`));
+        }
+      } catch {
+        return err(appError('INVALID_INPUT', `Malformed URL: "${input.url}"`));
       }
     }
 
@@ -300,33 +321,55 @@ export class InstallerService {
   }
 }
 
+const configFileLocks = new Map<string, Promise<void>>();
+
+async function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const currentLock = configFileLocks.get(file) ?? Promise.resolve();
+  let release: () => void;
+  const newLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  configFileLocks.set(file, newLock);
+  try {
+    await currentLock;
+    return await fn();
+  } finally {
+    release!();
+    if (configFileLocks.get(file) === newLock) {
+      configFileLocks.delete(file);
+    }
+  }
+}
+
 async function injectServerIntoConfigFile(
   configFile: string,
   serverName: string,
   serverEntry: Record<string, unknown>,
 ): Promise<void> {
-  let doc: Record<string, unknown> = { mcpServers: {} };
-  try {
-    const raw = await readFile(configFile, 'utf8');
-    const cleanJson = stripJsonComments(raw);
-    const parsed: unknown = JSON.parse(cleanJson);
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      doc = parsed as Record<string, unknown>;
+  return withFileLock(configFile, async () => {
+    let doc: Record<string, unknown> = { mcpServers: {} };
+    try {
+      const raw = await readFile(configFile, 'utf8');
+      const cleanJson = stripJsonComments(raw);
+      const parsed: unknown = JSON.parse(cleanJson);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        doc = parsed as Record<string, unknown>;
+      }
+    } catch {
+      doc = { mcpServers: {} };
     }
-  } catch {
-    doc = { mcpServers: {} };
-  }
 
-  const serversKey = typeof doc.mcp === 'object' && doc.mcp !== null && !Array.isArray(doc.mcp) ? 'mcp' : 'mcpServers';
-  let serversObj = doc[serversKey];
-  if (typeof serversObj !== 'object' || serversObj === null || Array.isArray(serversObj)) {
-    serversObj = {};
-    doc[serversKey] = serversObj;
-  }
+    const serversKey = typeof doc.mcp === 'object' && doc.mcp !== null && !Array.isArray(doc.mcp) ? 'mcp' : 'mcpServers';
+    let serversObj = doc[serversKey];
+    if (typeof serversObj !== 'object' || serversObj === null || Array.isArray(serversObj)) {
+      serversObj = {};
+      doc[serversKey] = serversObj;
+    }
 
-  (serversObj as Record<string, unknown>)[serverName] = serverEntry;
+    (serversObj as Record<string, unknown>)[serverName] = serverEntry;
 
-  const content = `${JSON.stringify(doc, null, 2)}\n`;
-  await writeAtomic(configFile, content);
+    const content = `${JSON.stringify(doc, null, 2)}\n`;
+    await writeAtomic(configFile, content);
+  });
 }
 

@@ -102,6 +102,18 @@ describe('PrunerService - Skill Pruning Pipeline', () => {
     if (!result.ok) return;
     expect(result.value.removedPaths).toEqual([]);
   });
+
+  it('rejects invalid skill names and path traversal attempts with INVALID_INPUT', async () => {
+    const pruner = new PrunerService({ homeDir: '/tmp' });
+    const cases = ['', '   ', '../../etc', 'invalid/name', 'skill name', 'name$*'];
+    for (const name of cases) {
+      const result = await pruner.pruneSkill({ name, targets: ['antigravity'] });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_INPUT');
+      }
+    }
+  });
 });
 
 describe('PrunerService - Server Pruning Pipeline', () => {
@@ -195,7 +207,7 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-cleanup-test-'));
     temporaryRoots.push(root);
     const home = path.join(root, 'home');
-    const dataDir = path.join(root, 'runtime-data');
+    const dataDir = path.join(home, 'runtime-data');
     await mkdir(home, { recursive: true });
     await mkdir(dataDir, { recursive: true });
     await writeFile(path.join(dataDir, 'cache.bin'), 'data', 'utf8');
@@ -244,6 +256,108 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     // Valid link remains
     const validStat = await lstat(validLink);
     expect(validStat.isSymbolicLink()).toBe(true);
+  });
+
+  it('rejects invalid server names and path traversal attempts with INVALID_INPUT', async () => {
+    const pruner = new PrunerService({ homeDir: '/tmp' });
+    const cases = ['', '   ', '../../etc', 'invalid/name', 'server name', 'name$*'];
+    for (const name of cases) {
+      const result = await pruner.pruneServer({ name, targets: ['antigravity'] });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_INPUT');
+      }
+    }
+  });
+
+  it('rejects unsafe purgeDataDirs outside allowed root boundaries (path traversal guard)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-guard-test-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const safeDataDir = path.join(home, '.config', 'my-server-data');
+    await mkdir(safeDataDir, { recursive: true });
+
+    const pruner = new PrunerService({ homeDir: home });
+
+    // Attempting to purge unsafe paths (system root, /etc, parent traversal, home itself)
+    const unsafePaths = ['/etc', '/usr', '/', home, path.join(home, '..')];
+    for (const unsafePath of unsafePaths) {
+      const result = await pruner.pruneServer({
+        name: 'test-server',
+        targets: ['antigravity'],
+        purgeDataDirs: [unsafePath],
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('PERMISSION_DENIED');
+      }
+    }
+  });
+
+  it('purges server entry from workspace configs when scope is workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-ws-srv-test-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+
+    // Create workspace config files for antigravity and cursor
+    const agDir = path.join(workspace, '.gemini');
+    await mkdir(agDir, { recursive: true });
+    await writeFile(path.join(agDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'ws-server': { command: 'node' } },
+    }), 'utf8');
+
+    const cursorDir = path.join(workspace, '.cursor');
+    await mkdir(cursorDir, { recursive: true });
+    await writeFile(path.join(cursorDir, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'ws-server': { command: 'node' } },
+    }), 'utf8');
+
+    const pruner = new PrunerService({ homeDir: home, workspaceRoot: workspace });
+    const result = await pruner.pruneServer({
+      name: 'ws-server',
+      targets: ['antigravity', 'cursor'],
+      scope: 'workspace',
+      workspaceRoot: workspace,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.updatedConfigFiles).toHaveLength(2);
+
+    const agConfig = JSON.parse(await readFile(path.join(agDir, 'mcp.json'), 'utf8'));
+    expect(agConfig.mcpServers['ws-server']).toBeUndefined();
+  });
+
+  it('drops server session from McpSessionManager during pruning', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-session-test-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    await mkdir(home, { recursive: true });
+
+    let droppedServerName: string | undefined;
+    const fakeSessionManager = {
+      dropServer: async (name: string) => {
+        droppedServerName = name;
+      },
+    };
+
+    const pruner = new PrunerService({
+      homeDir: home,
+      sessionManager: fakeSessionManager as any,
+    });
+
+    const result = await pruner.pruneServer({
+      name: 'active-session-server',
+      targets: ['antigravity'],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(droppedServerName).toBe('active-session-server');
+    expect(result.value.processTerminated).toBe(true);
   });
 });
 

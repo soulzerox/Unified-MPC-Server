@@ -67,8 +67,8 @@ export class PrunerService {
 
   public async pruneSkill(input: PruneSkillInput): Promise<Result<PruneSkillResult>> {
     const skillName = input.name.trim();
-    if (skillName.length === 0) {
-      return err(appError('INVALID_INPUT', 'Skill name must not be empty'));
+    if (skillName.length === 0 || !/^[A-Za-z0-9_-]+$/.test(skillName)) {
+      return err(appError('INVALID_INPUT', `Invalid skill name: "${input.name}"`));
     }
 
     const scope: InstallScope = input.scope ?? 'global';
@@ -159,8 +159,24 @@ export class PrunerService {
 
   public async pruneServer(input: PruneServerInput): Promise<Result<PruneServerResult>> {
     const serverName = input.name.trim();
-    if (serverName.length === 0) {
-      return err(appError('INVALID_INPUT', 'Server name must not be empty'));
+    if (serverName.length === 0 || !/^[A-Za-z0-9_-]+$/.test(serverName)) {
+      return err(appError('INVALID_INPUT', `Invalid server name: "${input.name}"`));
+    }
+
+    const scope: InstallScope = input.scope ?? 'global';
+    const workspaceRoot = input.workspaceRoot?.trim() ?? this.workspace;
+
+    if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped server pruning'));
+    }
+
+    // Validate purgeDataDirs against path traversal and boundary violations
+    if (input.purgeDataDirs !== undefined) {
+      for (const dir of input.purgeDataDirs) {
+        if (!this.isSafePurgePath(dir, workspaceRoot)) {
+          return err(appError('PERMISSION_DENIED', `Unsafe purge data directory outside allowed boundaries: "${dir}"`));
+        }
+      }
     }
 
     let processTerminated = false;
@@ -174,13 +190,6 @@ export class PrunerService {
     if (this.sessionManager !== undefined) {
       await this.sessionManager.dropServer(serverName).catch(() => undefined);
       processTerminated = true;
-    }
-
-    const scope: InstallScope = input.scope ?? 'global';
-    const workspaceRoot = input.workspaceRoot?.trim() ?? this.workspace;
-
-    if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
-      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped server pruning'));
     }
 
     const targets = this.expandTargets(input.targets ?? ['all']);
@@ -217,6 +226,34 @@ export class PrunerService {
       processTerminated,
       removedPaths,
     });
+  }
+
+  private isSafePurgePath(dir: string, workspaceRoot?: string): boolean {
+    const trimmed = dir.trim();
+    if (trimmed.length === 0) return false;
+    const resolved = path.resolve(trimmed);
+    const rootDir = path.parse(resolved).root;
+
+    // Never allow root or dangerous system directories
+    if (resolved === rootDir || resolved === '/') return false;
+    const DANGEROUS_SYSTEM_DIRS = ['/etc', '/usr', '/bin', '/sbin', '/lib', '/boot', '/dev', '/proc', '/sys', '/var', '/root'];
+    if (DANGEROUS_SYSTEM_DIRS.some((d) => resolved === d || resolved.startsWith(d + path.sep))) {
+      return false;
+    }
+
+    // Never allow wiping home or workspace directly
+    if (resolved === path.resolve(this.home)) return false;
+    if (resolved === path.resolve(this.appData)) return false;
+    if (workspaceRoot !== undefined && resolved === path.resolve(workspaceRoot)) return false;
+
+    // Must be strictly inside home, appData, or workspace
+    const allowedParents = [
+      path.resolve(this.home),
+      path.resolve(this.appData),
+      ...(workspaceRoot ? [path.resolve(workspaceRoot)] : []),
+    ];
+
+    return allowedParents.some((parent) => resolved.startsWith(parent + path.sep));
   }
 
   private serverTargetConfigFile(

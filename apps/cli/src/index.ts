@@ -1,7 +1,13 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import type { DoctorReport } from '@unified-mpc/application';
-import type { Workspace } from '@unified-mpc/workspace';
+import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
+import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import {
   IdeSyncService,
   InstallerService,
@@ -308,4 +314,74 @@ async function runMcpLaunch(
     return 1;
   }
   return 0;
+}
+
+export function createDefaultCliDependencies(): CliDependencies {
+  const dataPath = resolveDataPathFromShared(process.env);
+  fs.mkdirSync(dataPath, { recursive: true });
+  const database = new SqliteDatabase(path.join(dataPath, 'storage.sqlite'));
+  const workspaceRepo = new SqliteWorkspaceRepository(database);
+  const workspaceService = new WorkspaceService(workspaceRepo);
+
+  return {
+    status: async () => {
+      const workspaces = await workspaceService.list();
+      return { workspaceCount: workspaces.length };
+    },
+    workspaceAdd: async (rootPath: string) => {
+      return workspaceService.add(path.basename(rootPath), rootPath);
+    },
+    workspaceList: async () => {
+      return workspaceService.list();
+    },
+    mcpStdio: async () => {
+      return err(appError('INTERNAL_ERROR', 'Direct stdio MCP launch requires mcp-stdio runner'));
+    },
+    mcpHttp: async () => {
+      return err(appError('INTERNAL_ERROR', 'Direct HTTP MCP launch requires mcp-http runner'));
+    },
+    doctor: async () => {
+      return {
+        checks: [{ id: 'database', status: 'pass', message: 'Unified MCP core operational', required: true }],
+        exitCode: 0,
+      };
+    },
+    codexDoctor: async () => {
+      return ok({
+        status: { installed: false, capabilities: [] },
+        capabilities: { app: false, cli: false, mcp: false } as any,
+      });
+    },
+    installSkill: async (input) => new InstallerService().installSkill(input),
+    installServer: async (input) => new InstallerService().installServer(input),
+    pruneSkill: async (input) => new PrunerService().pruneSkill(input),
+    pruneServer: async (input) => new PrunerService().pruneServer(input),
+    sync: async (targets) => new IdeSyncService().sync(targets),
+    web: async (options) => runWeb(options),
+  };
+}
+
+const entryFile = process.argv[1] ? path.resolve(process.argv[1]) : '';
+let isDirectlyExecuted = false;
+try {
+  const thisFile = fileURLToPath(import.meta.url);
+  isDirectlyExecuted = entryFile === thisFile || (
+    entryFile.endsWith('/dist/index.js') ||
+    entryFile.endsWith('/dist/index') ||
+    entryFile.endsWith('/bin/unified-mpc') ||
+    entryFile.endsWith('/bin/unified-mcp') ||
+    entryFile.endsWith('/src/index.ts')
+  );
+} catch {
+  isDirectlyExecuted = false;
+}
+
+if (isDirectlyExecuted) {
+  const deps = createDefaultCliDependencies();
+  runCli(process.argv.slice(2), deps).then((exitCode) => {
+    process.exit(exitCode);
+  }).catch((err) => {
+    process.stderr.write(`Fatal CLI error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
 }

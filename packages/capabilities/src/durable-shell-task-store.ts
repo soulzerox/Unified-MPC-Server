@@ -552,6 +552,9 @@ async function probeProcessIdentity(pid: number, platform: NodeJS.Platform): Pro
       process.kill(pid, 0);
     } catch (error: unknown) {
       if (typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === 'ESRCH') {
+        return { state: 'gone' };
+      }
+    }
     const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'stat='], {
       encoding: 'utf8', timeout: 3_500, maxBuffer: 16 * 1024,
     });

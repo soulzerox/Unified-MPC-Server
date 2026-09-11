@@ -161,6 +161,7 @@ export class NodeBrowserCdpProtocol implements BrowserCdpProtocol {
         path.posix.join(process.env.HOME ?? '', '.local', 'bin', 'google-chrome'),
       ];
       return candidates.find((candidate) => candidate.length > 0 && this.executableExists(candidate));
+    }
     return undefined;
   }
 }

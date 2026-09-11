@@ -21,6 +21,8 @@ export function toSpawnInvocation(
   _options: WindowsSpawnOptions = {},
   _platform: NodeJS.Platform = process.platform,
 ): Result<SpawnInvocation> {
+  void _options;
+  void _platform;
   if (executable.trim().length === 0 || args.some((arg) => typeof arg !== 'string')) {
     return err(appError('INVALID_INPUT', 'Executable and args are required'));
   }

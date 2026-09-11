@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type Result } from '@unified-mpc/domain';
 import type { PruneSkillInput, PruneServerInput, PruneSkillResult, PruneServerResult } from '@unified-mpc/extensions';
 import { runPruneSkill, runPruneServer, parsePruneSkillArgs, parsePruneServerArgs } from './prune.js';
 
@@ -18,13 +18,13 @@ describe('prune CLI commands', () => {
     });
 
     it('parses specific targets', () => {
-      const parsed = parsePruneSkillArgs(['my-skill', '--targets', 'antigravity,cursor']);
+      const parsed = parsePruneSkillArgs(['my-skill', '--targets', 'cursor,claude']);
       expect(parsed).toEqual({
         ok: true,
         value: {
           kind: 'prune-skill',
           name: 'my-skill',
-          targets: ['antigravity', 'cursor'],
+          targets: ['cursor', 'claude'],
         },
       });
     });
@@ -76,7 +76,7 @@ describe('prune CLI commands', () => {
         removedPaths: ['/home/user/.gemini/antigravity/skills/my-skill'],
       };
       const service = {
-        pruneSkill: async (input: PruneSkillInput) => {
+        pruneSkill: async (input: PruneSkillInput): Promise<Result<PruneSkillResult, unknown>> => {
           capturedInput = input;
           return ok(fakeResult);
         },
@@ -103,7 +103,7 @@ describe('prune CLI commands', () => {
         removedPaths: [],
       };
       const service = {
-        pruneServer: async (input: PruneServerInput) => {
+        pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult, unknown>> => {
           capturedInput = input;
           return ok(fakeResult);
         },

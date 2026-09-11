@@ -1,4 +1,4 @@
-import { lstat, readFile, readdir, rm, stat, unlink } from 'node:fs/promises';
+import { readFile, readdir, rm, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -359,7 +359,9 @@ export async function terminateProcess(pid: number, timeoutMs = 3000): Promise<b
 
   try {
     process.kill(pid, 'SIGKILL');
-  } catch {}
+  } catch {
+    // Process might already be dead
+  }
   return true;
 }
 

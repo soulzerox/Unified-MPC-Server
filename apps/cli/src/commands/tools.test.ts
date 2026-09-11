@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type Result } from '@unified-mpc/domain';
 import { runToolsList, runToolsCall, parseToolsArgs } from './tools.js';
 
 describe('tools CLI commands', () => {
@@ -36,7 +36,17 @@ describe('tools CLI commands', () => {
       });
     });
 
-    it('rejects tools call with invalid json args', () => {
+    it('returns error on missing subcommand', () => {
+      const parsed = parseToolsArgs([]);
+      expect(parsed.ok).toBe(false);
+    });
+
+    it('returns error on missing tool name for call', () => {
+      const parsed = parseToolsArgs(['call']);
+      expect(parsed.ok).toBe(false);
+    });
+
+    it('returns error on invalid json arguments', () => {
       const parsed = parseToolsArgs(['call', 'echo', '{invalid json']);
       expect(parsed.ok).toBe(false);
     });
@@ -49,7 +59,7 @@ describe('tools CLI commands', () => {
         { name: 'write_file', description: 'Write file contents' },
       ];
       const service = {
-        list: () => fakeTools,
+        list: (): Array<{ name: string; description: string }> => fakeTools,
       };
 
       const result = await runToolsList(service);
@@ -62,7 +72,7 @@ describe('tools CLI commands', () => {
       let executedTool = '';
       let executedArgs: Record<string, unknown> | undefined;
       const service = {
-        execute: async (name: string, input: unknown) => {
+        execute: async (name: string, input: unknown): Promise<Result<{ result: string }, unknown>> => {
           executedTool = name;
           executedArgs = input as Record<string, unknown>;
           return ok({ result: 'success' });

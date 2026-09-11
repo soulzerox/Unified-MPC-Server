@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SkillCatalog, McpConfigLoader, IdeSyncService, stripJsonComments } from './index.js';
+import { SkillCatalog, IdeSyncService, stripJsonComments } from './index.js';
 
 const temporaryRoots: string[] = [];
 
@@ -80,12 +80,16 @@ describe('Milestone 2 - Stress Test & Edge Case Audit', () => {
       await mkdir(loopDir, { recursive: true });
       try {
         await symlink(loopDir, path.join(loopDir, 'recursive-link'));
-      } catch {}
+      } catch {
+        // Ignored on platforms lacking symlink permission
+      }
 
       // Broken symlink
       try {
         await symlink(path.join(root, 'non-existent'), path.join(agSkillsDir, 'broken-skill'));
-      } catch {}
+      } catch {
+        // Ignored on platforms lacking symlink permission
+      }
 
       const catalog = new SkillCatalog({
         homeDir: home,

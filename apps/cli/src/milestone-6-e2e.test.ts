@@ -56,9 +56,10 @@ describe('Milestone 6 - Unified CLI End-to-End Smoketest', () => {
     try {
       await execFileAsync('node', [CLI_BIN, 'non-existent-cmd']);
       expect.fail('Expected command to fail with exit code 2');
-    } catch (error: any) {
-      expect(error.code).toBe(2);
-      expect(error.stderr).toContain('Unknown unified-mpc command');
+    } catch (error: unknown) {
+      const execError = error as { code?: number; stderr?: string };
+      expect(execError.code).toBe(2);
+      expect(execError.stderr).toContain('Unknown unified-mpc command');
     }
   });
 
@@ -66,9 +67,10 @@ describe('Milestone 6 - Unified CLI End-to-End Smoketest', () => {
     try {
       await execFileAsync('node', [CLI_BIN, 'install']);
       expect.fail('Expected command to fail with exit code 2');
-    } catch (error: any) {
-      expect(error.code).toBe(2);
-      expect(error.stderr).toContain('Usage: unified-mpc install');
+    } catch (error: unknown) {
+      const execError = error as { code?: number; stderr?: string };
+      expect(execError.code).toBe(2);
+      expect(execError.stderr).toContain('Usage: unified-mpc install');
     }
   });
 

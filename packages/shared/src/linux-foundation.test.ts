@@ -31,7 +31,7 @@ describe('Milestone 1 - Linux-Only Foundation & SQLite Concurrency Stress Test',
     const count = 100;
 
     for (let i = 0; i < count; i += 1) {
-      operations.push((async () => {
+      operations.push((async (): Promise<void> => {
         const key = `key_${i}`;
         const val = `value_${i}_${Date.now()}`;
         insertStmt.run(key, val, Date.now());

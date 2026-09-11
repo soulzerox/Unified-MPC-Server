@@ -202,7 +202,7 @@ describe('CLI execution dispatcher', () => {
   });
 
   it('executes sync command forwarding workspaceRoot', async () => {
-    let capturedTargets: readonly any[] | undefined;
+    let capturedTargets: readonly string[] | undefined;
     let capturedWorkspace: string | undefined;
     const deps: CliDependencies = {
       ...baseDependencies,

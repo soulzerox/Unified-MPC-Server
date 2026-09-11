@@ -12,7 +12,7 @@ describe('EventLogCapabilityBackend', () => {
 
     const failing = new EventLogCapabilityBackend({
       platform: 'linux',
-      portableRunner: async () => ({ ok: false as const, error: { code: 'PROCESS_TIMEOUT' as const, message: 'timeout', recoverable: true } }),
+      portableRunner: async (): Promise<Result<string>> => ({ ok: false as const, error: { code: 'PROCESS_TIMEOUT' as const, message: 'timeout', recoverable: true } }),
     });
     await expect(failing.execute({ operation: 'query', provider: 'my-app' })).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });

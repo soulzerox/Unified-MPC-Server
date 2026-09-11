@@ -3,7 +3,6 @@ import { BrowserCdpBackend } from './browser-cdp-backend.js';
 import { NodeBrowserCdpProtocol } from './browser-cdp-protocol.js';
 import { HealthCapabilityBackend } from './health-backend.js';
 import { LocalCapabilityService, type CapabilityBackend } from './local-capability-service.js';
-import { SchedulerCapabilityBackend } from './scheduler-backend.js';
 import { ShellCapabilityBackend } from './shell-backend.js';
 import { WebFetchCapabilityBackend } from './web-fetch-backend.js';
 import { UnavailableCapabilityBackend } from './unavailable-backend.js';

@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { PrunerService, type PruneSkillInput } from './pruner.js';
+import { PrunerService } from './pruner.js';
+import type { McpSessionManager } from './mcp-session-manager.js';
 
 const temporaryRoots: string[] = [];
 
@@ -339,14 +340,14 @@ describe('PrunerService - Server Pruning Pipeline', () => {
 
     let droppedServerName: string | undefined;
     const fakeSessionManager = {
-      dropServer: async (name: string) => {
+      dropServer: async (name: string): Promise<void> => {
         droppedServerName = name;
       },
     };
 
     const pruner = new PrunerService({
       homeDir: home,
-      sessionManager: fakeSessionManager as any,
+      sessionManager: fakeSessionManager as unknown as McpSessionManager,
     });
 
     const result = await pruner.pruneServer({

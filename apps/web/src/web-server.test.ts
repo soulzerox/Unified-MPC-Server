@@ -86,7 +86,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(Array.isArray(data.policies)).toBe(true);
-    expect(data.policies.some((p: any) => p.priority === 'P1')).toBe(true);
+    expect(data.policies.some((p: { priority: string }) => p.priority === 'P1')).toBe(true);
   });
 });
 

@@ -42,7 +42,7 @@ import {
 } from './commands/prune.js';
 import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
 import { parseWebArgs, runWeb, type WebCommand, type WebRunResult } from './commands/web.js';
-import { parseToolsArgs, runToolsList, runToolsCall, type ToolsCommand, type ToolSummary } from './commands/tools.js';
+import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/tools.js';
 
 export { formatDoctorReport } from './commands/doctor.js';
 export { createStdioMcpRuntime, type StdioMcpRuntime } from './runtime/stdio-mcp-runtime.js';
@@ -230,7 +230,7 @@ Commands:
     case 'sync': {
       const command = parsed.value;
       const syncService = dependencies.sync !== undefined
-        ? { sync: (targets?: readonly SyncTarget[]) => dependencies.sync!(targets, command.workspaceRoot) }
+        ? { sync: (targets?: readonly SyncTarget[]): Promise<Result<{ readonly updatedFiles: readonly string[] }>> => dependencies.sync!(targets, command.workspaceRoot) }
         : new IdeSyncService(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {});
       const result = await runSync(syncService, command.targets);
       if (!result.ok) {
@@ -340,55 +340,56 @@ async function runMcpLaunch(
 }
 
 export function createDefaultCliDependencies(): CliDependencies {
-  const dataPath = resolveDataPathFromShared(process.env);
+  const dataPath = resolveDataPathFromShared();
   fs.mkdirSync(dataPath, { recursive: true });
   const database = new SqliteDatabase(path.join(dataPath, 'storage.sqlite'));
   const workspaceRepo = new SqliteWorkspaceRepository(database);
   const workspaceService = new WorkspaceService(workspaceRepo);
 
   return {
-    status: async () => {
+    status: async (): Promise<CliStatus> => {
       const workspaces = await workspaceService.list();
       return { workspaceCount: workspaces.length };
     },
-    workspaceAdd: async (rootPath: string) => {
+    workspaceAdd: async (rootPath: string): Promise<Result<Workspace>> => {
       return workspaceService.add(path.basename(rootPath), rootPath);
     },
-    workspaceList: async () => {
+    workspaceList: async (): Promise<readonly Workspace[]> => {
       return workspaceService.list();
     },
-    mcpStdio: async () => {
+    mcpStdio: async (): Promise<Result<{ readonly handle: CliServerHandle }>> => {
       return err(appError('INTERNAL_ERROR', 'Direct stdio MCP launch requires mcp-stdio runner'));
     },
-    mcpHttp: async () => {
+    mcpHttp: async (): Promise<Result<{ readonly handle: CliServerHandle }>> => {
       return err(appError('INTERNAL_ERROR', 'Direct HTTP MCP launch requires mcp-http runner'));
     },
-    doctor: async () => {
+    doctor: async (): Promise<DoctorReport> => {
       return {
         checks: [{ id: 'database', status: 'pass', message: 'Unified MCP core operational', required: true }],
         exitCode: 0,
       };
     },
-    codexDoctor: async () => {
+    codexDoctor: async (): Promise<Result<CodexDiscoveryResult>> => {
       return ok({
         status: { installed: false, capabilities: [] },
-        capabilities: { app: false, cli: false, mcp: false } as any,
+        capabilities: { instructionMode: null, names: [] },
       });
     },
-    installSkill: async (input) => new InstallerService().installSkill(input),
-    installServer: async (input) => new InstallerService().installServer(input),
-    pruneSkill: async (input) => new PrunerService().pruneSkill(input),
-    pruneServer: async (input) => new PrunerService().pruneServer(input),
-    sync: async (targets, workspaceRoot) => new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
-    web: async (options) => runWeb(options),
-    toolsList: async () => {
+    installSkill: async (input: InstallSkillInput): Promise<Result<InstallSkillResult>> => new InstallerService().installSkill(input),
+    installServer: async (input: InstallServerInput): Promise<Result<InstallServerResult>> => new InstallerService().installServer(input),
+    pruneSkill: async (input: PruneSkillInput): Promise<Result<PruneSkillResult>> => new PrunerService().pruneSkill(input),
+    pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult>> => new PrunerService().pruneServer(input),
+    sync: async (targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>> =>
+      new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
+    web: async (options?: { host?: string; port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
+    toolsList: async (): Promise<readonly ToolSummary[]> => {
       const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
       return registry.list().map((tool) => ({
         name: tool.name,
         description: tool.description,
       }));
     },
-    toolsCall: async (name, args) => {
+    toolsCall: async (name: string, args: Record<string, unknown>): Promise<Result<unknown>> => {
       const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
       const response = await registry.invoke(name, args);
       if (response.isError) {
@@ -425,7 +426,7 @@ if (isDirectlyExecuted) {
     if (cmd !== 'web') {
       process.exit(0);
     }
-    const shutdown = () => {
+    const shutdown = (): void => {
       process.exit(0);
     };
     process.once('SIGINT', shutdown);

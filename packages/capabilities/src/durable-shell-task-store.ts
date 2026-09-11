@@ -545,7 +545,8 @@ type PortableProcessProbe =
   | { readonly state: 'gone' }
   | { readonly state: 'unverifiable'; readonly reason: string };
 
-async function probeProcessIdentity(pid: number, platform: NodeJS.Platform): Promise<PortableProcessProbe> {
+async function probeProcessIdentity(pid: number, _platform?: NodeJS.Platform): Promise<PortableProcessProbe> {
+  void _platform;
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2_147_483_647) return { state: 'unverifiable', reason: 'invalid_pid' };
   try {
     try {
@@ -563,15 +564,6 @@ async function probeProcessIdentity(pid: number, platform: NodeJS.Platform): Pro
     if (isProcessProbeNotFound(error)) return { state: 'gone' };
     return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
   }
-}
-
-function parsePortableProcessProbe(value: string): PortableProcessProbe {
-  const trimmed = value.trim();
-  if (trimmed === 'GONE') return { state: 'gone' };
-  if (!trimmed.startsWith('LIVE|')) return { state: 'unverifiable', reason: 'invalid_probe_response' };
-  const startedAt = trimmed.slice(5);
-  const parsed = Date.parse(startedAt);
-  return Number.isFinite(parsed) ? { state: 'live', processStartedAt: new Date(parsed).toISOString() } : { state: 'unverifiable', reason: 'invalid_start_time' };
 }
 
 export function parsePosixProcessProbe(value: string): PortableProcessProbe {

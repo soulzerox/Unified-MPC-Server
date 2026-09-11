@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { InstallerService, type InstallServerInput, type InstallSkillInput } from './index.js';
+import { InstallerService, type InstallServerInput } from './index.js';
 
 const temporaryRoots: string[] = [];
 

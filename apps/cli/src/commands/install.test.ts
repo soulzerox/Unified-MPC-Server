@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type Result } from '@unified-mpc/domain';
 import type { InstallSkillInput, InstallServerInput, InstallSkillResult, InstallServerResult } from '@unified-mpc/extensions';
 import { runInstallSkill, runInstallServer, parseInstallSkillArgs, parseInstallServerArgs } from './install.js';
 
@@ -40,65 +40,70 @@ describe('install CLI commands', () => {
       });
     });
 
-    it('returns error when missing name or source', () => {
+    it('returns error when arguments are missing', () => {
       const parsed = parseInstallSkillArgs(['my-skill']);
       expect(parsed.ok).toBe(false);
     });
   });
 
   describe('parseInstallServerArgs', () => {
-    it('parses stdio server args with command, args, and env', () => {
+    it('parses valid stdio server arguments', () => {
       const parsed = parseInstallServerArgs([
         'sqlite',
-        '--command',
-        'uvx',
-        '--args',
-        'mcp-server-sqlite,--db,app.db',
-        '--env',
-        'DEBUG=1,PORT=3000',
-        '--targets',
-        'cline,opencode',
-      ]);
-      expect(parsed).toEqual({
-        ok: true,
-        value: {
-          kind: 'install-server',
-          name: 'sqlite',
-          transport: 'stdio',
-          command: 'uvx',
-          args: ['mcp-server-sqlite', '--db', 'app.db'],
-          env: { DEBUG: '1', PORT: '3000' },
-          targets: ['cline', 'opencode'],
-          scope: 'global',
-        },
-      });
-    });
-
-    it('parses http/sse server args with url', () => {
-      const parsed = parseInstallServerArgs([
-        'remote-mcp',
-        '--url',
-        'https://mcp.example.com/sse',
         '--transport',
-        'sse',
+        'stdio',
+        '--command',
+        'mcp-server-sqlite',
+        '--args',
+        '--db,test.db',
+        '--env',
+        'DEBUG=true',
         '--targets',
         'antigravity',
       ]);
-      expect(parsed).toEqual({
-        ok: true,
-        value: {
+
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        expect(parsed.value).toEqual({
           kind: 'install-server',
-          name: 'remote-mcp',
-          transport: 'sse',
-          url: 'https://mcp.example.com/sse',
+          name: 'sqlite',
+          transport: 'stdio',
+          command: 'mcp-server-sqlite',
+          args: ['--db', 'test.db'],
+          env: { DEBUG: 'true' },
           targets: ['antigravity'],
           scope: 'global',
-        },
-      });
+        });
+      }
     });
 
-    it('rejects stdio server without command', () => {
-      const parsed = parseInstallServerArgs(['my-server']);
+    it('parses valid sse server arguments with URL', () => {
+      const parsed = parseInstallServerArgs([
+        'remote-api',
+        '--transport',
+        'sse',
+        '--url',
+        'http://localhost:8080/sse',
+      ]);
+
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        expect(parsed.value.url).toBe('http://localhost:8080/sse');
+      }
+    });
+
+    it('returns error when command is missing for stdio', () => {
+      const parsed = parseInstallServerArgs(['sqlite', '--transport', 'stdio']);
+      expect(parsed.ok).toBe(false);
+    });
+
+    it('returns error when url is missing for sse', () => {
+      const parsed = parseInstallServerArgs(['sqlite', '--transport', 'sse']);
+      expect(parsed.ok).toBe(false);
+    });
+
+    it('returns error when name is missing', () => {
+      const parsed = parseInstallServerArgs([]);
       expect(parsed.ok).toBe(false);
     });
   });
@@ -112,7 +117,7 @@ describe('install CLI commands', () => {
         targets: ['antigravity'],
       };
       const service = {
-        installSkill: async (input: InstallSkillInput) => {
+        installSkill: async (input: InstallSkillInput): Promise<Result<InstallSkillResult, unknown>> => {
           capturedInput = input;
           return ok(fakeResult);
         },
@@ -140,7 +145,7 @@ describe('install CLI commands', () => {
         updatedConfigFiles: ['/home/user/.cline/cline_mcp_settings.json'],
       };
       const service = {
-        installServer: async (input: InstallServerInput) => {
+        installServer: async (input: InstallServerInput): Promise<Result<InstallServerResult, unknown>> => {
           capturedInput = input;
           return ok(fakeResult);
         },

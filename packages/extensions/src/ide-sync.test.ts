@@ -106,6 +106,7 @@ describe('IdeSyncService', () => {
     // First sync
     await service.sync(['cline']);
     const firstContent = await readFile(path.join(workspace, '.clinerules'), 'utf8');
+    expect(firstContent).toContain('<!-- MCP-POLICY-START -->');
 
     // Second sync with custom policy
     const customService = new IdeSyncService({

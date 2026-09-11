@@ -8,6 +8,11 @@ import {
   InstallerService,
   PrunerService,
   SkillCatalog,
+  type InstallSkillInput,
+  type InstallServerInput,
+  type PruneSkillInput,
+  type PruneServerInput,
+  type SyncTarget,
 } from '@unified-mpc/extensions';
 
 export interface ControlPlaneServerOptions {
@@ -122,7 +127,8 @@ export class ControlPlaneServer {
     if (pathname === '/api/policies/sync' && req.method === 'POST') {
       const body = await parseRequestBody(req, res);
       if (body === undefined) return;
-      const targets = Array.isArray(body?.targets) ? body.targets : ['all'];
+      const parsedBody = body as { targets?: readonly SyncTarget[] } | null;
+      const targets = Array.isArray(parsedBody?.targets) ? parsedBody.targets : ['all'];
       const result = await this.ideSync.sync(targets);
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -178,7 +184,7 @@ export class ControlPlaneServer {
     if (pathname === '/api/skills/install' && req.method === 'POST') {
       const body = await parseRequestBody(req, res);
       if (body === undefined) return;
-      const result = await this.installer.installSkill(body);
+      const result = await this.installer.installSkill(body as InstallSkillInput);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
       return;
@@ -187,7 +193,7 @@ export class ControlPlaneServer {
     if (pathname === '/api/servers/install' && req.method === 'POST') {
       const body = await parseRequestBody(req, res);
       if (body === undefined) return;
-      const result = await this.installer.installServer(body);
+      const result = await this.installer.installServer(body as InstallServerInput);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
       return;
@@ -197,7 +203,7 @@ export class ControlPlaneServer {
     if (pathname === '/api/skills/prune' && req.method === 'POST') {
       const body = await parseRequestBody(req, res);
       if (body === undefined) return;
-      const result = await this.pruner.pruneSkill(body);
+      const result = await this.pruner.pruneSkill(body as PruneSkillInput);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
       return;
@@ -206,7 +212,7 @@ export class ControlPlaneServer {
     if (pathname === '/api/servers/prune' && req.method === 'POST') {
       const body = await parseRequestBody(req, res);
       if (body === undefined) return;
-      const result = await this.pruner.pruneServer(body);
+      const result = await this.pruner.pruneServer(body as PruneServerInput);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
       return;
@@ -220,11 +226,12 @@ export class ControlPlaneServer {
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB limit
 
-async function parseRequestBody(req: IncomingMessage, res: ServerResponse): Promise<any | undefined> {
+async function parseRequestBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
   try {
     return await readJsonBody(req);
-  } catch (err: any) {
-    if (err?.message === 'PAYLOAD_TOO_LARGE') {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === 'PAYLOAD_TOO_LARGE') {
       res.writeHead(413, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Payload Too Large: body exceeds 1MB limit' }));
       return undefined;
@@ -235,7 +242,7 @@ async function parseRequestBody(req: IncomingMessage, res: ServerResponse): Prom
   }
 }
 
-async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<any> {
+async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let raw = '';
     let size = 0;

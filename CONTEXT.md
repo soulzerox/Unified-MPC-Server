@@ -130,3 +130,17 @@ These components exist in the codebase from the lnwjud upstream but are **not ac
 | Agent Swarm Orchestration | `packages/application/src/agent-swarm-service.ts` | Present but not externally advertised in v1.0.0. |
 | Upgrade Runtime (auto-update) | `packages/mcp-server/src/upgrade-runtime.ts` | Operator-triggered only. Never runs autonomously in v1.0.0. |
 | Scheduled Continuation | `packages/application/src/scheduled-continuation-service.ts` | Inherited from lnwjud. Review and rename before exposing in v2. |
+
+---
+
+## 7. Milestones & Implementation Progress
+
+| Milestone | Scope | Status | Verification & Evidence |
+|---|---|---|---|
+| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Monorepo namespace `@unified-mpc/*` rename across 220+ files; complete Windows code and script deletion; POSIX XDG runtime; zero backward compatibility. | ✅ **Completed** | Full test suite passed across all packages; Commit `4d52fe2`. |
+| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Completed** | 38/38 tests in `packages/extensions`; monorepo typecheck clean; Commit `3fcf6e6`. |
+| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Completed** | 7/7 tests passing in `packages/extensions/src/installer.test.ts`; 45/45 package tests; typecheck clean. |
+| **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL; config purging across all IDEs; orphaned file/symlink purging. | ⏳ Planned | TDD in `packages/extensions/src/pruner.ts`. |
+| **Milestone 5** | **Gated ChatGPT Web Gateway & Web Control Plane**: Fastify endpoints, 412 state machine gating on `BRIDGE_HEALTHY`, cloudflared tunnel integration, Obsidian-themed telemetry UI. | ⏳ Planned | TDD in `apps/web` & `apps/cf-gateway`. |
+| **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune`, `sync`, `tools call/list`; e2e system verification. | ⏳ Planned | TDD in `apps/cli`. |
+

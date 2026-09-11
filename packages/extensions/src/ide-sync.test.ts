@@ -133,3 +133,4 @@ describe('IdeSyncService', () => {
     expect(secondContent).toContain('custom-tool');
   });
 });
+

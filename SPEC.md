@@ -112,7 +112,7 @@ The discovery, aggregation, and policy sync subsystem (`packages/extensions`) ac
 To eliminate the conflation of Skills and MCP Servers, the installer is strictly bifurcated at the interface level into two independent pipelines:
 
 ```typescript
-export type InstallTarget = 'antigravity' | 'cursor' | 'claude' | 'codex' | 'vscode' | 'opencode' | 'all';
+export type InstallTarget = 'antigravity' | 'cursor' | 'claude' | 'codex' | 'cline' | 'opencode' | 'all';
 
 export interface InstallSkillInput {
   readonly name: string;

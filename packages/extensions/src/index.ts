@@ -37,4 +37,15 @@ export {
   type PolicyPriority,
   type SyncTarget,
 } from './ide-sync.js';
+export {
+  InstallerService,
+  type InstallTarget,
+  type InstallScope,
+  type InstallSkillInput,
+  type InstallSkillResult,
+  type InstallServerInput,
+  type InstallServerResult,
+  type InstallerServiceOptions,
+} from './installer.js';
+
 

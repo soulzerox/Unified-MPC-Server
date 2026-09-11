@@ -17,7 +17,8 @@
     { "path": "../../packages/permissions" },
     { "path": "../../packages/storage" },
     { "path": "../../packages/workspace" },
-    { "path": "../../packages/mcp-server" }
+    { "path": "../../packages/mcp-server" },
+    { "path": "../web" }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]

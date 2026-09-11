@@ -21,5 +21,5 @@ export function runWorkspaceList(service: Pick<WorkspaceCommandService, 'list'>)
 
 function displayNameForPath(rootPath: string): string {
   const trimmed = rootPath.trim().replace(/[\\/]+$/, '');
-  return path.win32.basename(trimmed) || path.basename(trimmed) || 'workspace';
+  return path.basename(trimmed) || 'workspace';
 }

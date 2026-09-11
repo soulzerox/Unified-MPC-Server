@@ -18,7 +18,8 @@
     "@unified-mpc/permissions": "workspace:*",
     "@unified-mpc/shared": "workspace:*",
     "@unified-mpc/storage": "workspace:*",
-    "@unified-mpc/workspace": "workspace:*"
+    "@unified-mpc/workspace": "workspace:*",
+    "@unified-mpc/web": "workspace:*"
   },
   "scripts": {
     "test": "vitest run",

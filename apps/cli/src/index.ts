@@ -2,10 +2,48 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { Workspace } from '@unified-mpc/workspace';
+import {
+  IdeSyncService,
+  InstallerService,
+  PrunerService,
+  type InstallServerInput,
+  type InstallServerResult,
+  type InstallSkillInput,
+  type InstallSkillResult,
+  type PruneServerInput,
+  type PruneServerResult,
+  type PruneSkillInput,
+  type PruneSkillResult,
+  type SyncTarget,
+} from '@unified-mpc/extensions';
 import { formatDoctorReport } from './commands/doctor.js';
+import {
+  parseInstallSkillArgs,
+  parseInstallServerArgs,
+  runInstallSkill,
+  runInstallServer,
+  type InstallSkillCommand,
+  type InstallServerCommand,
+} from './commands/install.js';
+import {
+  parsePruneSkillArgs,
+  parsePruneServerArgs,
+  runPruneSkill,
+  runPruneServer,
+  type PruneSkillCommand,
+  type PruneServerCommand,
+} from './commands/prune.js';
+import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
+import { parseWebArgs, runWeb, type WebCommand, type WebRunResult } from './commands/web.js';
+import { parseToolsArgs, runToolsList, runToolsCall, type ToolsCommand, type ToolSummary } from './commands/tools.js';
 
 export { formatDoctorReport } from './commands/doctor.js';
 export { createStdioMcpRuntime, type StdioMcpRuntime } from './runtime/stdio-mcp-runtime.js';
+export * from './commands/install.js';
+export * from './commands/prune.js';
+export * from './commands/sync.js';
+export * from './commands/web.js';
+export * from './commands/tools.js';
 
 export type CliCommand =
   | { readonly kind: 'status' }
@@ -14,7 +52,14 @@ export type CliCommand =
   | { readonly kind: 'mcp-stdio'; readonly workspaceReference?: string }
   | { readonly kind: 'mcp-http'; readonly workspaceReference?: string }
   | { readonly kind: 'doctor' }
-  | { readonly kind: 'codex-doctor' };
+  | { readonly kind: 'codex-doctor' }
+  | InstallSkillCommand
+  | InstallServerCommand
+  | PruneSkillCommand
+  | PruneServerCommand
+  | SyncCommand
+  | WebCommand
+  | ToolsCommand;
 
 export interface CliServerHandle {
   close(): Promise<void>;
@@ -32,6 +77,14 @@ export interface CliDependencies {
   mcpHttp(workspaceReference?: string): Promise<Result<{ readonly handle: CliServerHandle }>>;
   doctor(): Promise<DoctorReport>;
   codexDoctor(): Promise<Result<CodexDiscoveryResult>>;
+  installSkill?(input: InstallSkillInput): Promise<Result<InstallSkillResult>>;
+  installServer?(input: InstallServerInput): Promise<Result<InstallServerResult>>;
+  pruneSkill?(input: PruneSkillInput): Promise<Result<PruneSkillResult>>;
+  pruneServer?(input: PruneServerInput): Promise<Result<PruneServerResult>>;
+  sync?(targets?: readonly SyncTarget[]): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
+  web?(options?: { host?: string; port?: number }): Promise<Result<WebRunResult>>;
+  toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
+  toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
   readonly write?: (text: string) => void;
   readonly writeError?: (text: string) => void;
 }
@@ -42,6 +95,11 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'codex' && args[1] === 'doctor' && args.length === 2) return ok({ kind: 'codex-doctor' });
   if (args[0] === 'workspace') return parseWorkspaceArgs(args);
   if (args[0] === 'mcp') return parseMcpArgs(args);
+  if (args[0] === 'install') return parseInstallArgs(args.slice(1));
+  if (args[0] === 'prune') return parsePruneArgs(args.slice(1));
+  if (args[0] === 'sync') return parseSyncArgs(args.slice(1));
+  if (args[0] === 'web') return parseWebArgs(args.slice(1));
+  if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
   return err(appError('INVALID_INPUT', 'Unknown unified-mpc command'));
 }
 
@@ -93,6 +151,106 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       write(result.value.status.installed ? 'Codex available' : 'Codex not installed (optional)');
       return 0;
     }
+    case 'install-skill': {
+      const installer = dependencies.installSkill !== undefined
+        ? { installSkill: dependencies.installSkill }
+        : new InstallerService();
+      const result = await runInstallSkill(installer, parsed.value);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(`Installed skill "${result.value.name}" to: ${result.value.installedPaths.join(', ')}`);
+      return 0;
+    }
+    case 'install-server': {
+      const installer = dependencies.installServer !== undefined
+        ? { installServer: dependencies.installServer }
+        : new InstallerService();
+      const result = await runInstallServer(installer, parsed.value);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(`Installed server "${result.value.name}" into: ${result.value.updatedConfigFiles.join(', ')}`);
+      return 0;
+    }
+    case 'prune-skill': {
+      const pruner = dependencies.pruneSkill !== undefined
+        ? { pruneSkill: dependencies.pruneSkill }
+        : new PrunerService();
+      const result = await runPruneSkill(pruner, parsed.value);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(`Pruned skill "${result.value.name}" from: ${result.value.removedPaths.join(', ')}`);
+      return 0;
+    }
+    case 'prune-server': {
+      const pruner = dependencies.pruneServer !== undefined
+        ? { pruneServer: dependencies.pruneServer }
+        : new PrunerService();
+      const result = await runPruneServer(pruner, parsed.value);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(`Pruned server "${result.value.name}" from: ${result.value.updatedConfigFiles.join(', ')}`);
+      return 0;
+    }
+    case 'sync': {
+      const syncService = dependencies.sync !== undefined
+        ? { sync: dependencies.sync }
+        : new IdeSyncService(parsed.value.workspaceRoot !== undefined ? { workspaceRoot: parsed.value.workspaceRoot } : {});
+      const result = await runSync(syncService, parsed.value.targets);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(`Synchronized policy across ${result.value.updatedFiles.length} file(s):`);
+      for (const file of result.value.updatedFiles) {
+        write(`  - ${file}`);
+      }
+      return 0;
+    }
+    case 'web': {
+      const launch = dependencies.web ?? runWeb;
+      const result = await launch({ host: parsed.value.host, port: parsed.value.port });
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(`Control Plane running on ${result.value.url}`);
+      return 0;
+    }
+    case 'tools-list': {
+      const listFn = dependencies.toolsList;
+      if (listFn === undefined) {
+        writeError('Tools service not available');
+        return 1;
+      }
+      const tools = await listFn();
+      for (const tool of tools) {
+        write(`${tool.name}\t${tool.description ?? ''}`);
+      }
+      if (tools.length === 0) write('No tools registered');
+      return 0;
+    }
+    case 'tools-call': {
+      const callFn = dependencies.toolsCall;
+      if (callFn === undefined) {
+        writeError('Tools service not available');
+        return 1;
+      }
+      const result = await callFn(parsed.value.toolName, parsed.value.args);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      write(typeof result.value === 'string' ? result.value : JSON.stringify(result.value, null, 2));
+      return 0;
+    }
   }
 }
 
@@ -119,6 +277,24 @@ function parseMcpArgs(args: readonly string[]): Result<CliCommand> {
   }
   if (kind === undefined) return err(appError('INVALID_INPUT', 'Choose an MCP transport with --stdio or --http'));
   return workspaceReference === undefined ? ok({ kind }) : ok({ kind, workspaceReference });
+}
+
+function parseInstallArgs(args: readonly string[]): Result<InstallSkillCommand | InstallServerCommand> {
+  if (args.length === 0) {
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc install skill <name> <source> | install server <name> [options]'));
+  }
+  if (args[0] === 'skill') return parseInstallSkillArgs(args.slice(1));
+  if (args[0] === 'server') return parseInstallServerArgs(args.slice(1));
+  return err(appError('INVALID_INPUT', 'Usage: unified-mpc install skill <name> <source> | install server <name> [options]'));
+}
+
+function parsePruneArgs(args: readonly string[]): Result<PruneSkillCommand | PruneServerCommand> {
+  if (args.length === 0) {
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc prune skill <name> | prune server <name> [options]'));
+  }
+  if (args[0] === 'skill') return parsePruneSkillArgs(args.slice(1));
+  if (args[0] === 'server') return parsePruneServerArgs(args.slice(1));
+  return err(appError('INVALID_INPUT', 'Usage: unified-mpc prune skill <name> | prune server <name> [options]'));
 }
 
 async function runMcpLaunch(

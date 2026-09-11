@@ -92,6 +92,9 @@ importers:
       '@unified-mpc/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@unified-mpc/web':
+        specifier: workspace:*
+        version: link:../web
       '@unified-mpc/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace

@@ -1,5 +1,5 @@
 export const APP_NAME = 'Unified-MPC-Server';
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '4.61.0';
 
 export const ipcChannels = {
   listWorkspaces: 'unified-mpc:list-workspaces',

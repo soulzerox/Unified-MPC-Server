@@ -371,7 +371,7 @@ export function renderDashboardViewsHtml(): string {
 
       <div style="background: var(--surface-2); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 18px; margin-bottom: 24px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <span style="font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase;">Active Tunnel URL</span>
+          <span style="font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase;">ChatGPT MCP URL</span>
           <span id="chatgpt-view-tunnel-badge" class="badge badge-state mono">Inactive</span>
         </div>
         <div id="chatgpt-view-tunnel-url" class="mono" style="font-size: 13px; color: var(--text-primary); word-break: break-all;">

@@ -95,7 +95,7 @@ The monorepo contains 21 focused packages and applications:
 Unified-MPC-Server enforces strict defensive guardrails:
 
 1. **Loopback-Only Origin Policy**:
-   The Local Web Control Plane (`http://127.0.0.1:18765/`) and MCP HTTP endpoint strictly require loopback origins (`http://localhost:*` or `http://127.0.0.1:*`). Any foreign or non-HTTP origin receives an immediate `403 Forbidden`.
+   The Local Web Control Plane (`http://127.0.0.1:3000/`) and MCP HTTP endpoint (`127.0.0.1:18765`) default to loopback. Public MCP access requires explicit hostname/origin allowlists; foreign values receive `403 Forbidden`.
 2. **Fail-Closed Mutation Policy**:
    Tools are categorized into `READ`, `WRITE`, `EXECUTE`, and `DANGEROUS`. Any unrecognized or unclassified tool call fails closed.
 3. **Workspace Boundary Path Guards**:

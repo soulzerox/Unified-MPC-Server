@@ -68,7 +68,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/mnt/workspace_data/Unified MCP Server
-ExecStart=/usr/bin/node /mnt/workspace_data/Unified MCP Server/apps/cli/dist/index.js web --port 18765
+ExecStart=/usr/bin/node /mnt/workspace_data/Unified MCP Server/apps/cli/dist/index.js web --port 3000
 Restart=always
 RestartSec=5
 KillMode=process

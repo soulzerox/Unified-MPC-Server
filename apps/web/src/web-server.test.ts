@@ -15,12 +15,14 @@ import {
 } from '@unified-mpc/extensions';
 
 describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
+  const capabilityToken = 'test-capability-token';
+  const gatewayOptions = { localPort: 0, tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => ({ url: 'https://fixture.example.trycloudflare.com', stop: async (): Promise<void> => {} }), healthProbe: async (): Promise<number> => 200 };
   let server: ControlPlaneServer;
   let gateway: GatewayService;
   let port: number;
 
   beforeEach(async () => {
-    gateway = new GatewayService({ localPort: 0 });
+    gateway = new GatewayService(gatewayOptions);
     const installer = new InstallerService();
     const pruner = new PrunerService();
     const ideSync = new IdeSyncService();
@@ -33,6 +35,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       pruner,
       ideSync,
       skillCatalog,
+      capabilityToken,
     });
 
     await server.listen();
@@ -54,6 +57,55 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(html).toContain('Skills');
     expect(html).toContain('Install');
     expect(html).toContain('Policies');
+  });
+
+  it('requires startup capability for mutations and does not expose it in status or logs', async () => {
+    const denied = await fetch(`http://127.0.0.1:${port}/api/chatgpt-gateway/start`, {
+      method: 'POST', headers: { Origin: `http://127.0.0.1:${port}` },
+    });
+    expect(denied.status).toBe(401);
+    const status = await fetch(`http://127.0.0.1:${port}/api/status`);
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`);
+    expect(await status.text()).not.toContain(capabilityToken);
+    expect(await logs.text()).not.toContain(capabilityToken);
+  });
+
+  it('rejects wrong capability values', async () => {
+    const denied = await fetch(`http://127.0.0.1:${port}/api/chatgpt-gateway/stop`, {
+      method: 'POST', headers: { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': 'wrong' },
+    });
+    expect(denied.status).toBe(401);
+  });
+
+  it('rotates capability on restart and accepts dashboard cookie', async () => {
+    const first = await fetch(`http://127.0.0.1:${port}/`);
+    const cookie = first.headers.get('set-cookie');
+    expect(cookie).toContain('unified_mpc_capability=');
+    const allowed = await fetch(`http://127.0.0.1:${port}/api/chatgpt-gateway/stop`, {
+      method: 'POST',
+      headers: { Origin: `http://127.0.0.1:${port}`, Cookie: cookie!.split(';')[0]! },
+    });
+    expect(allowed.status).toBe(200);
+  });
+
+  it('rejects a capability cookie issued by a previous server process', async () => {
+    const first = new ControlPlaneServer({ port: 0, gateway });
+    await first.listen();
+    const landing = await fetch(`http://127.0.0.1:${first.port}/`);
+    const oldCookie = landing.headers.get('set-cookie')!.split(';')[0]!;
+    await first.close();
+
+    const second = new ControlPlaneServer({ port: 0, gateway });
+    await second.listen();
+    try {
+      const denied = await fetch(`http://127.0.0.1:${second.port}/api/chatgpt-gateway/stop`, {
+        method: 'POST',
+        headers: { Origin: `http://127.0.0.1:${second.port}`, Cookie: oldCookie },
+      });
+      expect(denied.status).toBe(401);
+    } finally {
+      await second.close();
+    }
   });
 
   it('blocks non-localhost origins with 403 Forbidden (Origin Policy Guard)', async () => {
@@ -95,10 +147,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   it('rejects raw PID pruning input without a server-issued ownership proof', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/servers/prune`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Origin: `http://127.0.0.1:${port}`,
-      },
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
       body: JSON.stringify({ name: 'fixture', pid: process.pid }),
     });
     expect(res.status).toBe(403);
@@ -106,7 +155,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
 
   it('allows loopback localhost origins', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/status`, {
-      headers: { Origin: `http://127.0.0.1:${port}` },
+      headers: { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
     });
     expect(res.status).toBe(200);
     const data = await res.json();
@@ -117,7 +166,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(gateway.status().state).toBe('STOPPED');
 
     const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, {
-      headers: { Origin: `http://127.0.0.1:${port}` },
+      headers: { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
     });
     expect(res.status).toBe(412);
     const body = await res.json();
@@ -129,12 +178,13 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
 
     const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, {
-      headers: { Origin: `http://127.0.0.1:${port}` },
+      headers: { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.leaseToken).toBeDefined();
     expect(body.tunnelUrl).toBeDefined();
+    expect(body.mcpUrl).toBe('https://fixture.example.trycloudflare.com/mcp');
   });
 
   it('lists servers with opaque IDs and prunes by ownership proof, never request PID', async () => {
@@ -157,7 +207,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         };
       },
     } as unknown as PrunerService;
-    const ownedServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog, pruner });
+    const ownedServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog, pruner, capabilityToken });
     await ownedServer.listen();
     try {
       const listed = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers`);
@@ -168,10 +218,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
 
       const pruned = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers/prune`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: `http://127.0.0.1:${ownedServer.port}`,
-        },
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${ownedServer.port}`, 'x-unified-mpc-capability': capabilityToken },
         body: JSON.stringify({ serverId: server.serverId, pid: process.pid }),
       });
       expect(pruned.status).toBe(200);
@@ -183,7 +230,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
 
   it('returns 500 for a route dependency rejection and remains available', async () => {
     const failingCatalog = { discover: async () => { throw new Error('synthetic catalog failure'); } } as unknown as McpConfigLoader;
-    const failingServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog: failingCatalog });
+    const failingServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog: failingCatalog, capabilityToken });
     await failingServer.listen();
     try {
       const failed = await fetch(`http://127.0.0.1:${failingServer.port}/api/servers`);
@@ -198,13 +245,13 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   it('returns 422 for unsupported install targets and 400 for malformed JSON', async () => {
     const unsupported = await fetch(`http://127.0.0.1:${port}/api/servers/install`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
       body: JSON.stringify({ name: 'fixture', transport: 'stdio', command: 'node', targets: ['unknown'] }),
     });
     expect(unsupported.status).toBe(422);
     const malformed = await fetch(`http://127.0.0.1:${port}/api/servers/install`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
       body: '{',
     });
     expect(malformed.status).toBe(400);
@@ -214,7 +261,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const workspace = '/tmp/unregistered-workspace';
     const skill = await fetch(`http://127.0.0.1:${port}/api/skills/prune`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
       body: JSON.stringify({ name: 'fixture', scope: 'workspace', workspaceRoot: workspace, targets: ['cursor'] }),
     });
     expect(skill.status).toBe(403);
@@ -222,14 +269,14 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const serverCatalog = {
       discover: async () => [{ name: 'owned-server', source: 'fixture', enabled: true, excluded: false, config: { command: 'node' } }],
     } as unknown as McpConfigLoader;
-    const ownedServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog });
+    const ownedServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog, capabilityToken });
     await ownedServer.listen();
     try {
       const listed = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers`);
       const server = (await listed.json()).servers[0];
       const prune = await fetch(`http://127.0.0.1:${ownedServer.port}/api/servers/prune`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${ownedServer.port}` },
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${ownedServer.port}`, 'x-unified-mpc-capability': capabilityToken },
         body: JSON.stringify({ serverId: server.serverId, purgeDataDirs: ['/tmp'] }),
       });
       expect(prune.status).toBe(403);
@@ -245,10 +292,10 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     await writeFile(path.join(root, 'skill', 'SKILL.md'), '---\nname: fixture\ndescription: fixture\n---\n', 'utf8');
     await writeFile(path.join(outside, 'SKILL.md'), '---\nname: fixture\ndescription: outside\n---\n', 'utf8');
     await symlink(outside, path.join(root, 'escape'));
-    const confined = new ControlPlaneServer({ port: 0, gateway, workspaceRoots: [root] });
+    const confined = new ControlPlaneServer({ port: 0, gateway, workspaceRoots: [root], capabilityToken });
     await confined.listen();
     try {
-      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${confined.port}` };
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${confined.port}`, 'x-unified-mpc-capability': capabilityToken };
       const traversal = await fetch(`http://127.0.0.1:${confined.port}/api/skills/install`, {
         method: 'POST', headers,
         body: JSON.stringify({ name: 'fixture', source: path.join(root, '..', path.basename(outside)), targets: ['cursor'] }),

@@ -2,7 +2,7 @@
 
 **Scope:** Unified MCP Server audit remediation and functional web control plane
 **Accepted base:** `2040fd6cc31d9e6bc99e7578e762991d74313764`
-**Status:** web and extension mutation slice remediated; gateway, CLI, release-policy, and reporting-channel gaps remain open
+**Status:** core security and gateway contract remediated; live Cloudflare and release evidence remain pending
 
 ## Findings fixed
 
@@ -29,6 +29,9 @@
 - Server pruning requires server-issued `serverId`; caller-supplied `name`/`pid` is not accepted.
 - Workspace-scoped web mutations require an exact root registered by `ControlPlaneServer`; skill sources must resolve inside a registered root.
 - Web server pruning rejects caller-supplied `purgeDataDirs`; global scope remains server-selected and workspace scope remains explicit.
+- Web mutations use startup-rotated capability cookie/header with constant-time comparison; status/logs never expose token.
+- Gateway uses real `cloudflared` process lifecycle, MCP identity probe, measured latency, explicit `/mcp` URL, named-tunnel configuration, and cleanup on failure/stop.
+- MCP HTTP public access requires explicit hostname/origin allowlists; defaults remain loopback-only.
 
 ## Legacy cleanup
 
@@ -58,4 +61,4 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - Extension transaction regression: `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 79 tests passed, `EXIT_CODE=0`; covers shared install/prune serialization, config rollback, and malformed-config fail-closed behavior.
 - Extension transaction implementation uses one in-process lock; cross-process writers remain outside this slice.
 - Config rollback restores captured config bytes and removes newly created config files when a transaction fails; it cannot restore data already removed by `purgeDataDirs` after a partial deletion.
-- Remaining open gaps: real Cloudflare tunnel/health contract, CLI `--host`/`doctor`, release checklist link/platform scope, vulnerability-reporting channel, checkpoint-parent permissions, external MCP handshake, PID identity/descendant shutdown, release packaging, and tracked reproducible audit evidence.
+- Remaining open gaps: `cloudflared` absent on audit host, real external ChatGPT Web evidence, GitHub CI confirmation, package/reproducibility evidence, checkpoint-parent permissions, external MCP handshake, PID identity/descendant shutdown, and cross-process config locking.

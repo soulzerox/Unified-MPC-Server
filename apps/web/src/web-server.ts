@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import path from 'node:path';
@@ -21,6 +21,7 @@ import {
 
 export interface ControlPlaneServerOptions {
   readonly port?: number;
+  readonly gatewayLocalPort?: number;
   readonly workspaceRoots?: readonly string[];
   readonly gateway?: GatewayService;
   readonly installer?: InstallerService;
@@ -28,6 +29,8 @@ export interface ControlPlaneServerOptions {
   readonly ideSync?: IdeSyncService;
   readonly skillCatalog?: SkillCatalog;
   readonly serverCatalog?: McpConfigLoader;
+  /** Test-only override; production generates a fresh token on every startup. */
+  readonly capabilityToken?: string;
 }
 
 interface RegisteredServer {
@@ -48,6 +51,7 @@ export class ControlPlaneServer {
   private readonly workspaceRoots: ReadonlySet<string>;
   private boundPort = 0;
   private readonly gateway: GatewayService;
+  private readonly ownsGateway: boolean;
   private readonly installer: InstallerService;
   private readonly pruner: PrunerService;
   private readonly ideSync: IdeSyncService;
@@ -55,6 +59,7 @@ export class ControlPlaneServer {
   private readonly serverCatalog: McpConfigLoader;
   private readonly serverRegistry = new Map<string, RegisteredServer>();
   private readonly telemetryLogs: TelemetryLogEntry[] = [];
+  private readonly capabilityToken: Buffer;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
     const now = new Date();
@@ -66,14 +71,16 @@ export class ControlPlaneServer {
   }
 
   public constructor(options: ControlPlaneServerOptions = {}) {
-    this.configuredPort = options.port ?? 18765;
+    this.configuredPort = options.port ?? configuredPort('UNIFIED_MPC_WEB_PORT', 3000);
     this.workspaceRoots = new Set((options.workspaceRoots ?? [process.cwd()]).map((root) => path.resolve(root.trim())).filter((root) => root.length > 0));
-    this.gateway = options.gateway ?? new GatewayService({ localPort: this.configuredPort });
+    this.ownsGateway = options.gateway === undefined;
+    this.gateway = options.gateway ?? new GatewayService({ localPort: options.gatewayLocalPort ?? configuredPort('UNIFIED_MPC_PORT', 18765) });
     this.installer = options.installer ?? new InstallerService();
     this.pruner = options.pruner ?? new PrunerService();
     this.ideSync = options.ideSync ?? new IdeSyncService();
     this.skillCatalog = options.skillCatalog ?? new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
     this.serverCatalog = options.serverCatalog ?? new McpConfigLoader({ settings: DEFAULT_EXTENSIONS_SETTINGS });
+    this.capabilityToken = Buffer.from(options.capabilityToken ?? randomBytes(32).toString('hex'), 'utf8');
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
 
@@ -101,9 +108,10 @@ export class ControlPlaneServer {
   }
 
   public async close(): Promise<void> {
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       this.server.close((err) => (err ? reject(err) : resolve()));
     });
+    if (this.ownsGateway) await this.gateway.stop();
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -121,6 +129,12 @@ export class ControlPlaneServer {
     if (originRequired && origin === undefined) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Origin header required for mutations' }));
+      return;
+    }
+    const mutation = (req.method !== 'GET' && req.method !== 'HEAD') || requestPath === '/api/chatgpt-web/connect';
+    if (mutation && !this.hasCapability(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Capability authorization required' }));
       return;
     }
     if (origin) {
@@ -155,7 +169,11 @@ export class ControlPlaneServer {
 
     // 2. Static Dashboard HTML
     if (pathname === '/' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Set-Cookie': `unified_mpc_capability=${encodeURIComponent(this.capabilityToken.toString('utf8'))}; HttpOnly; SameSite=Strict; Path=/`,
+      });
       res.end(renderDashboardHtml());
       return;
     }
@@ -366,6 +384,16 @@ export class ControlPlaneServer {
     res.end(JSON.stringify({ error: 'Endpoint not found' }));
   }
 
+  private hasCapability(req: IncomingMessage): boolean {
+    const cookie = req.headers.cookie?.match(/(?:^|;\s*)unified_mpc_capability=([^;]+)/)?.[1];
+    const presented = req.headers['x-unified-mpc-capability'] ?? cookie;
+    if (typeof presented !== 'string') return false;
+    let decoded: string;
+    try { decoded = decodeURIComponent(presented); } catch { return false; }
+    const candidate = Buffer.from(decoded, 'utf8');
+    return candidate.length === this.capabilityToken.length && timingSafeEqual(candidate, this.capabilityToken);
+  }
+
   private async listRegisteredServers(): Promise<readonly (RegisteredServer & { readonly enabled: boolean; readonly excluded: boolean; readonly exclusionReason?: string; readonly command: string })[]> {
     const discovered = await this.serverCatalog.discover();
     const activeKeys = new Set<string>();
@@ -476,6 +504,13 @@ function httpStatusForResult(result: { readonly ok: boolean; readonly error?: { 
 }
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB limit
+
+function configuredPort(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value.trim().length === 0) return fallback;
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 0 && port <= 65_535 ? port : fallback;
+}
 
 async function parseRequestBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
   try {

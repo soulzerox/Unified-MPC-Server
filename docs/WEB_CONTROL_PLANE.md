@@ -6,12 +6,12 @@ The Web Control Plane provides a lightweight, reactive, zero-CDN local dashboard
 
 ## Architecture & Server Topology
 
-The Control Plane is implemented in `apps/web/src/web-server.ts` as a Node.js HTTP server. By default, it binds strictly to the loopback interface (`127.0.0.1:18765`), ensuring zero external network exposure unless explicitly forwarded.
+The Control Plane is implemented in `apps/web/src/web-server.ts` as a Node.js HTTP server. By default, it binds strictly to loopback (`127.0.0.1:3000`). MCP HTTP runs separately on `127.0.0.1:18765`; Cloudflare forwards only MCP HTTP.
 
 ```
 +-------------------------------------------------------------+
 |              Web Browser / Local Dashboard                  |
-|               (http://127.0.0.1:18765/)                     |
+|               (http://127.0.0.1:3000/)                      |
 +------------------------------+------------------------------+
                                | HTTP / JSON REST API
                                v
@@ -31,7 +31,7 @@ The Control Plane is implemented in `apps/web/src/web-server.ts` as a Node.js HT
 
 ### Security & Origin Policy Guard
 
-1. **Loopback Only**: All requests with an `Origin` header are checked against `http://127.0.0.1`, `https://127.0.0.1`, `http://localhost`, or `https://localhost`. Any external origin receives a `403 Forbidden`.
+1. **Loopback and capability**: Control-plane requests require loopback `Host`/`Origin` plus startup capability cookie/header. MCP HTTP stays loopback-only unless explicit public hostname/origin allowlists are configured.
 2. **Payload Protection**: Incoming request bodies are capped at 1 MB (`MAX_BODY_BYTES = 1024 * 1024`). Payloads exceeding this return `413 Payload Too Large`.
 3. **Zero CDN Dependencies**: The SPA UI (`renderDashboardHtml()`) is 100% self-contained HTML/CSS/JS without third-party CDN scripts, fonts, or tracking beacons.
 
@@ -116,7 +116,7 @@ The gateway manages secure remote bridges with the states implemented by `Gatewa
 Connecting a client session via `/api/chatgpt-web/connect` is strictly gated. The bridge **must** be in the `BRIDGE_HEALTHY` state; attempting connection in any other state returns `412 Precondition Failed`.
 
 #### `GET /api/chatgpt-gateway/status`
-Returns current bridge state, active tunnel URL, and telemetry.
+Returns current bridge state, tunnel URL, explicit MCP `/mcp` URL, measured health latency, and telemetry. Capability token and lease token never appear in status.
 
 #### `POST /api/chatgpt-gateway/start`
 Starts the tunnel and transitions state from `STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY`.
@@ -247,7 +247,7 @@ Removes server definitions from target configuration files without destroying un
 }
 ```
 
-Unknown IDs, raw PID-only requests, and requests without a mutation `Origin` are rejected with `403 Forbidden`.
+Unknown IDs, raw PID-only requests, requests without mutation `Origin`, and requests without startup capability are rejected.
 
 ---
 
@@ -256,12 +256,19 @@ Unknown IDs, raw PID-only requests, and requests without a mutation `Origin` are
 Run the web dashboard from the CLI:
 
 ```bash
-# Default port 18765
+# Web control plane default port 3000
 pnpm cli web
 
 # Custom port
 pnpm cli web --port 8080
 ```
 
-Open your browser to `http://127.0.0.1:18765/` to view the real-time telemetry gauges, server list, and interactive management tools.
+Open `http://127.0.0.1:3000/` to view telemetry and controls. Start MCP HTTP separately:
+
+```bash
+UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http
+unified-mpc web --port 3000
+```
+
+For real ChatGPT Web access, install `cloudflared` or set `UNIFIED_MPC_CLOUDFLARED_BIN`. Quick tunnels are transient. Stable named tunnels additionally require `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME`, `UNIFIED_MPC_CLOUDFLARE_TUNNEL_TOKEN`, `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`, `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES`, and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS`. Copy dashboard `mcpUrl` into ChatGPT Web connector.
 

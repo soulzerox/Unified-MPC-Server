@@ -131,7 +131,7 @@ pnpm cli tools exec --name bash --input '{"command": "uname -a"}'
 ## 4. ระบบ Web Control Plane และ Dashboard
 
 เมื่อสั่งรัน `pnpm cli web` ระบบจะเปิดหน้าต่าง Web Dashboard ที่:
-👉 **`http://127.0.0.1:18765/`**
+👉 **`http://127.0.0.1:3000/`**
 
 ### ฟีเจอร์หลักบน Web Control Plane
 1. **Real-time Telemetry**: สังเกตการณ์สถานะหน่วยความจำ (RSS/Heap), Uptime, และ Traffic ของ MCP requests.

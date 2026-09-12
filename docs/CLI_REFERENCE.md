@@ -106,10 +106,10 @@ unified-mpc sync --workspace /home/user/my-project
 Launches the local reactive Web Control Plane SPA daemon on loopback HTTP.
 ```bash
 # Syntax
-unified-mpc web [--host <ip>] [--port <number>]
+unified-mpc web [--port <number>]
 
-# Default: http://127.0.0.1:18765/
-unified-mpc web --port 18765
+# Default: http://127.0.0.1:3000/
+unified-mpc web --port 3000
 ```
 
 ---

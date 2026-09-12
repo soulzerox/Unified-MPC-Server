@@ -1,7 +1,7 @@
 # Unified-MPC-Server — Master Specification
 
-> **Status**: `verified-and-hardened` (Milestones 1–6 Complete & Passing 100%)  
-> **Target Version**: `1.0.0`  
+> **Status**: `audit-remediation-in-progress` (core targeted verification passes; live/release evidence pending)
+> **Target Version**: `4.61.0`
 > **Source Base**: `engasnm111/lnwjud` (Clean Option A Pivot: Linux-only, Zero Backward Compat)  
 > **Repository**: `soulzerox/Unified-MPC-Server`  
 > **Target Platform**: `Linux Ubuntu` (100% POSIX / Linux XDG native, zero Windows code)  
@@ -28,7 +28,7 @@ Modern AI-assisted software engineering involves multiple fragmented developer i
 
 1. **Single Source of Truth**: Aggregates and synchronizes MCP servers, skill catalogs, and execution rules across Google Antigravity, Cursor, Claude, OpenCode, Oh My Pi, and Cline from one local engine.
 2. **Bifurcated Dynamic Ingestion & Zero-Artifact Pruner**: Completely bifurcates the installation of **Skills** (`SKILL.md` instruction packages) from **MCP Servers** (executable tools) at the code interface, CLI subcommands, and local web UI, paired with an atomic pruner that leaves zero orphaned files or dead processes.
-3. **Gated ChatGPT Web Integration**: Provides a local web control plane (`apps/web` on `http://127.0.0.1:18765/`) with an enforced state machine gate—ensuring the ChatGPT Web MCP server bridge is active and verified healthy before enabling web client connection.
+3. **Gated ChatGPT Web Integration**: Provides local web control plane (`apps/web` on `http://127.0.0.1:3000/` by default) and separate MCP HTTP runtime (`127.0.0.1:18765`) with an enforced gate before returning a verified public `/mcp` URL.
 4. **Senior Engineering Harness (Ponytail Runtime)**: Embeds pragmatic engineering principles (YAGNI, root-cause diagnosis, review gates) and durable task continuation backed by local SQLite goals, eliminating manual `/handoff` rituals.
 5. **Two-Tier On-Demand Tool Catalog**: Advertises only essential core tools in the active context, dynamically activating specialized tools via lightweight catalog queries to preserve LLM token limits.
 
@@ -83,7 +83,7 @@ Unified-MPC-Server/
 └── pnpm-workspace.yaml
 ```
 
-- **Electron Elimination**: `apps/desktop` is completely removed. All management interfaces run via the local loopback web control plane (`http://127.0.0.1:18765/`) and the native CLI (`unified-mpc`).
+- **Electron Elimination**: `apps/desktop` is completely removed. Management interfaces run via local loopback web control plane (`http://127.0.0.1:3000/`) and native CLI (`unified-mpc`).
 - **Node.js Native SQLite**: Built for Node `>=22.0.0` leveraging built-in `node:sqlite` (`DatabaseSync`), eliminating compilation of native C++ bindings for SQLite.
 
 ### 2. Universal Multi-Client Ecosystem Integration
@@ -218,7 +218,7 @@ Embedded in `packages/mcp-server`:
 These guardrails exist in the inherited codebase and **must be preserved** during all adaptations:
 
 ### 1. HTTP Origin Policy (localhost-only)
-- `packages/mcp-server/src/origin-policy.ts` enforces that the local HTTP server (`http://127.0.0.1:18765/`) only accepts requests from localhost origins.
+- `packages/mcp-server/src/origin-policy.ts` defaults MCP HTTP to localhost origins; named Cloudflare deployments require explicit hostname/origin allowlists.
 - Requests with `Origin: http://evil.example` receive `403 Forbidden` immediately.
 - This guardrail must not be weakened when adding the `apps/web` control plane. The web control plane is loopback-only; all public access routes through `apps/cf-gateway` with authentication.
 
@@ -275,7 +275,7 @@ Under user direction, the repository executed **Option A (Clean Sweep)** with ze
 | **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
 | **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
 | **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards (SPEC.md line 218); Commit `fe6e601`. |
-| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
+| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: `apps/cf-gateway` owns real Cloudflare lifecycle and MCP identity health; `apps/web` binds loopback web control plane at `http://127.0.0.1:3000/` by default; MCP HTTP remains at `127.0.0.1:18765`; capability auth and 412 session gate protect connection flow. | ⚠️ **Implemented; live tunnel evidence pending** | Web/gateway/MCP security targeted tests pass; live Cloudflare requires installed `cloudflared`, configured MCP runtime, explicit public allowlist, and operator credentials. |
 | **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
 
 ---
@@ -310,7 +310,7 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Diagnosed and fixed syntax/bracket issues in `packages/capabilities` (`durable-shell-task-store.ts` and `browser-cdp-protocol.ts`).
    - Verified via subprocess e2e smoketests (`milestone-6-e2e.test.ts`).
    - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
-   - Full monorepo `corepack pnpm test` passes 100% across all 21 packages.
+   - Historical full-suite result is provenance only; current release requires rerunning after audit changes.
 7. **Codebase Hygiene & Legacy Bloat Removal (Option 1)**:
    - Eliminated 50 residual legacy files (-5,673 lines of code) across `scripts/`, `native/macos-host/`, and `tests/packaging/` & `tests/release/`.
    - Replaced multi-platform CI workflows with native Ubuntu 24.04 pipeline (`.github/workflows/ci.yml`).
@@ -323,9 +323,9 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Fixed `PrunerService` and CLI prune commands to correctly handle workspace-scoped pruning with auto-inferred scope.
    - Validated live dynamic ingestion and pruning lifecycle for both skills and servers.
    - Confirmed live policy sync idempotency across 7 IDE target files.
-   - Verified Local Web Control Plane (`http://127.0.0.1:18765/`) endpoints, Obsidian dashboard HTML, 412 hard gating invariant, and 403 loopback origin enforcement.
+   - Verified Local Web Control Plane (`http://127.0.0.1:3000/` default) endpoints, capability auth, 412 gate, and loopback origin enforcement.
    - Full monorepo `corepack pnpm typecheck` (`tsc --build`) passes with 0 errors across all 21 packages.
-   - Full monorepo `corepack pnpm test` and root `npx vitest run tests/` pass 100%.
+   - Historical full-suite claims require current rerun; unavailable CI status is not asserted.
 9. **Interactive Reactive Web Control Plane SPA (Option 1 — TDD)**:
    - Kept zero-dependency vanilla HTML/TypeScript UI, with `apps/web/src/dashboard-html.ts` composing `ui/tokens.ts`, `ui/views.ts`, and `ui/client-script.ts`.
    - Wired live telemetry and management routes: `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, `/api/chatgpt-gateway/status`, policy sync, bifurcated install/prune, and gated `GET /api/chatgpt-web/connect`.
@@ -347,7 +347,7 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Milestone 2 & 3 extensions stress tests: `milestone-2-stress.test.ts` (7/7) & `milestone-3-stress.test.ts` (6/6 passing).
    - Milestone 1 Linux foundation tests: `packages/shared/src/linux-foundation.test.ts` (3/3 passing).
    - Milestone 4 Pruner tests: `packages/extensions/src/pruner.test.ts` (11/11 passing).
-   - Zero bugs detected across all modules; 100% green.
+   - No zero-bug or 100%-verified claim until live tunnel, packaging, reproducibility, and CI evidence is captured.
 
 ---
 
@@ -391,11 +391,11 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
 - **Electron Native Bundling**: Building desktop `.deb`, `.dmg`, or `.exe` installer packages for Electron. (The platform is dedicated to CLI + Web Control Plane).
 - **Public Cloud Hosting**: Deploying the Unified MCP Server as a multi-tenant public SaaS. (This is strictly a local-first, single-user developer tool).
 - **Automated Upstream Git Merges**: Automatic auto-merging of upstream `engasnm111/lnwjud` changes into active production branches without developer review.
-- **Computer Vision / Screen Capture**: The `computer-use-service.ts` (set-of-marks, DOM CDP, accessibility) exists in the inherited codebase but is not part of the v1.0.0 adaptation scope.
-- **LSP Integration**: `lsp-runtime.ts` exists in the inherited codebase. Language Server Protocol features are out of scope for v1.0.0 and must not be enabled by default.
-- **Agent Swarm Orchestration**: `agent-swarm-service.ts` provides multi-agent coordination. This is a future feature; it must not be exposed as an MCP tool in v1.0.0 without explicit security review and a dedicated User Story.
+- **Computer Vision / Screen Capture**: `computer-use-service.ts` is not part of the `4.61.0` adaptation scope.
+- **LSP Integration**: `lsp-runtime.ts` is out of scope for `4.61.0` and must not be enabled by default.
+- **Agent Swarm Orchestration**: `agent-swarm-service.ts` remains future scope and needs explicit security review before MCP exposure.
 - **Windows Platform & Tooling**: Completely removed from the project. No PowerShell scripts, Windows executables, WSB sandbox manifests, or win32 platform branches exist in the repository. The target platform is 100% Linux Ubuntu.
-- **Upgrade Runtime Auto-Update**: `upgrade-runtime.ts` is operator-triggered only. Never runs unsupervised in v1.0.0.
+- **Upgrade Runtime Auto-Update**: `upgrade-runtime.ts` is operator-triggered only. Never runs unsupervised in `4.61.0`.
 
 ---
 

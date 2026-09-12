@@ -376,7 +376,7 @@ export function getClientScriptJs(): string {
 
           // Visual Gateway view elements
           const viewTunnelUrl = document.getElementById('chatgpt-view-tunnel-url');
-          if (viewTunnelUrl) viewTunnelUrl.textContent = data.tunnelUrl || 'None';
+          if (viewTunnelUrl) viewTunnelUrl.textContent = data.mcpUrl || 'None';
           const viewTunnelBadge = document.getElementById('chatgpt-view-tunnel-badge');
           if (viewTunnelBadge) {
             viewTunnelBadge.textContent = data.tunnelUrl ? 'Active Tunnel' : 'No Tunnel';

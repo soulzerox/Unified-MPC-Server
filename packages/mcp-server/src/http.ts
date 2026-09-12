@@ -5,6 +5,7 @@ import {
   hostHeaderValidationResponse,
   isLegacyRequest,
   localhostAllowedHostnames,
+  localhostAllowedOrigins,
   WebStandardStreamableHTTPServerTransport,
   isJSONRPCErrorResponse,
   isJSONRPCRequest,
@@ -31,6 +32,8 @@ export interface McpHttpServerOptions extends McpServerOptions {
   readonly port: number;
   readonly maxBodyBytes?: number;
   readonly originPolicy?: OriginPolicy;
+  readonly allowedHostnames?: readonly string[];
+  readonly allowedOrigins?: readonly string[];
 }
 
 export interface McpHttpServerAddress {
@@ -302,6 +305,7 @@ async function handleRequest(
   handler: McpHttpHandler,
   originPolicy: OriginPolicy,
   maxBodyBytes: number,
+  allowedHostnames: readonly string[],
 ): Promise<void> {
   const requestedPath = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
   if (requestedPath !== '/mcp' && requestedPath !== UNIFIED_MPC_MCP_IDENTITY_PATH) {
@@ -316,7 +320,7 @@ async function handleRequest(
   }
 
   const fetchRequest = toFetchRequest(request, read.body);
-  const rejected = hostHeaderValidationResponse(fetchRequest, localhostAllowedHostnames())
+  const rejected = hostHeaderValidationResponse(fetchRequest, [...allowedHostnames])
     ?? originPolicy.validate(fetchRequest);
   if (rejected !== undefined) {
     await writeFetchResponse(response, rejected);
@@ -372,9 +376,10 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0) throw new Error('MCP HTTP body limit must be positive');
 
   const handler = createSessionfulMcpHandler(options);
-  const originPolicy = options.originPolicy ?? createOriginPolicy();
+  const allowedHostnames = options.allowedHostnames ?? localhostAllowedHostnames();
+  const originPolicy = options.originPolicy ?? createOriginPolicy(options.allowedOrigins ?? localhostAllowedOrigins());
   const server = createServer((request, response) => {
-    void handleRequest(request, response, handler, originPolicy, maxBodyBytes).catch((error: unknown) => {
+    void handleRequest(request, response, handler, originPolicy, maxBodyBytes, allowedHostnames).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();

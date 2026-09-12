@@ -90,7 +90,7 @@ export interface CliDependencies {
   pruneSkill?(input: PruneSkillInput): Promise<Result<PruneSkillResult>>;
   pruneServer?(input: PruneServerInput): Promise<Result<PruneServerResult>>;
   sync?(targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
-  web?(options?: { host?: string; port?: number }): Promise<Result<WebRunResult>>;
+  web?(options?: { port?: number }): Promise<Result<WebRunResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
   readonly write?: (text: string) => void;
@@ -132,7 +132,7 @@ Commands:
   install server --name <n> ...          Install an executable MCP server
   prune skill --name <n>                 Prune an installed skill
   prune server --name <n>                Prune an installed MCP server
-  web [--port <p>] [--host <h>]          Start the Local Web Control Plane
+  web [--port <p>]                       Start the Local Web Control Plane
   tools list                             List available downstream MCP tools
   tools call <tool> <args-json>          Call a downstream MCP tool headlessly
   workspace add <path>                   Register a workspace root
@@ -245,7 +245,7 @@ Commands:
     }
     case 'web': {
       const launch = dependencies.web ?? runWeb;
-      const result = await launch({ host: parsed.value.host, port: parsed.value.port });
+      const result = await launch({ port: parsed.value.port });
       if (!result.ok) {
         writeError(result.error.message);
         return 1;
@@ -385,7 +385,7 @@ export function createDefaultCliDependencies(): CliDependencies {
     pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult>> => new PrunerService().pruneServer(input),
     sync: async (targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>> =>
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
-    web: async (options?: { host?: string; port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
+    web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
       const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
       return registry.list().map((tool) => ({

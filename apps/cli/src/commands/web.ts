@@ -4,7 +4,6 @@ import type { CliServerHandle } from '../index.js';
 
 export interface WebCommand {
   readonly kind: 'web';
-  readonly host: string;
   readonly port: number;
 }
 
@@ -14,8 +13,7 @@ export interface WebRunResult {
 }
 
 export function parseWebArgs(args: readonly string[]): Result<WebCommand> {
-  let host = '127.0.0.1';
-  let port = 18765;
+  let port = 3000;
 
   for (let i = 0; i < args.length; i += 1) {
     const flag = args[i];
@@ -26,30 +24,28 @@ export function parseWebArgs(args: readonly string[]): Result<WebCommand> {
       }
       port = parsedPort;
       i += 1;
-    } else if (flag === '--host' && args[i + 1] !== undefined) {
-      host = args[i + 1]!.trim();
-      i += 1;
+    } else if (flag === '--host') {
+      return err(appError('INVALID_INPUT', 'Web control plane binds to 127.0.0.1; --host is not supported'));
     }
   }
 
   return ok({
     kind: 'web',
-    host,
     port,
   });
 }
 
 export async function runWeb(
-  options: { port?: number; host?: string } = {},
+  options: { port?: number } = {},
   serverOptions?: ControlPlaneServerOptions,
 ): Promise<Result<WebRunResult>> {
   try {
     const server = new ControlPlaneServer({
       ...serverOptions,
-      port: options.port ?? 18765,
+      port: options.port ?? 3000,
     });
     await server.listen();
-    const url = `http://${options.host ?? '127.0.0.1'}:${server.port}`;
+    const url = `http://127.0.0.1:${server.port}`;
     return ok({
       handle: server,
       url,

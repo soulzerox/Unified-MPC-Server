@@ -81,7 +81,6 @@ describe('CLI argument parser', () => {
       ok: true,
       value: {
         kind: 'web',
-        host: '127.0.0.1',
         port: 18765,
       },
     });
@@ -248,7 +247,7 @@ describe('CLI execution dispatcher', () => {
       ...baseDependencies,
       web: async (options) => ok({
         handle: { close: async () => {} },
-        url: `http://${options?.host ?? '127.0.0.1'}:${options?.port ?? 18765}`,
+        url: `http://127.0.0.1:${options?.port ?? 3000}`,
       }),
       write: (text) => output.push(text),
     };

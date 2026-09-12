@@ -10,12 +10,13 @@ import {
 } from '@unified-mpc/extensions';
 
 describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web Control Plane)', () => {
+  const capabilityToken = 'stress-capability-token';
   let server: ControlPlaneServer;
   let gateway: GatewayService;
   let port: number;
 
   beforeEach(async () => {
-    gateway = new GatewayService({ localPort: 0 });
+    gateway = new GatewayService({ localPort: 0, tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => ({ url: 'https://fixture.example.trycloudflare.com', stop: async (): Promise<void> => {} }), healthProbe: async (): Promise<number> => 200 });
     const installer = new InstallerService();
     const pruner = new PrunerService();
     const ideSync = new IdeSyncService();
@@ -28,6 +29,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       pruner,
       ideSync,
       skillCatalog,
+      capabilityToken,
     });
 
     await server.listen();
@@ -84,6 +86,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
         headers: {
           'Content-Type': 'application/json',
           Origin: `http://127.0.0.1:${port}`,
+          'x-unified-mpc-capability': capabilityToken,
         },
         body: JSON.stringify({ hugeData }),
       });
@@ -97,14 +100,15 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
     it('enforces 412 in STOPPED, transitions to 200 in BRIDGE_HEALTHY, and returns 412 once SESSION_CONNECTED', async () => {
       // 1. Initially STOPPED -> must be 412
       expect(gateway.status().state).toBe('STOPPED');
-      const resStopped = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
+      const authHeaders = { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken };
+      const resStopped = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
       expect(resStopped.status).toBe(412);
 
       // 2. Start bridge -> transitions to BRIDGE_HEALTHY -> connect succeeds with 200
       await gateway.start();
       expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
 
-      const resConnected = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
+      const resConnected = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
       expect(resConnected.status).toBe(200);
       const connData = await resConnected.json();
       expect(connData.leaseToken).toBeDefined();
@@ -112,7 +116,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
 
       // 3. Once connected, state is SESSION_CONNECTED -> subsequent connect must return 412!
       expect(gateway.status().state).toBe('SESSION_CONNECTED');
-      const resSecond = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
+      const resSecond = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
       expect(resSecond.status).toBe(412);
       const secondBody = await resSecond.json();
       expect(secondBody.state).toBe('SESSION_CONNECTED');
@@ -120,7 +124,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       // 4. Stop bridge -> state returns to STOPPED -> connect must return 412
       await gateway.stop();
       expect(gateway.status().state).toBe('STOPPED');
-      const resStoppedAgain = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: { Origin: `http://127.0.0.1:${port}` } });
+      const resStoppedAgain = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
       expect(resStoppedAgain.status).toBe(412);
     });
   });
@@ -130,7 +134,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       await gateway.start();
 
       const requests = Array.from({ length: 50 }, () =>
-        fetch(`http://127.0.0.1:${port}/api/chatgpt-gateway/status`)
+        fetch(`http://127.0.0.1:${port}/api/chatgpt-gateway/status`, { headers: { 'x-unified-mpc-capability': capabilityToken } })
       );
 
       const responses = await Promise.all(requests);
@@ -152,7 +156,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
 
       const mixedRequests = Array.from({ length: 30 }, (_, i) => {
         const endpoint = endpoints[i % endpoints.length];
-        return fetch(`http://127.0.0.1:${port}${endpoint}`);
+        return fetch(`http://127.0.0.1:${port}${endpoint}`, { headers: { 'x-unified-mpc-capability': capabilityToken } });
       });
 
       const responses = await Promise.all(mixedRequests);

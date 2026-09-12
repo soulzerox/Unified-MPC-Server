@@ -10,7 +10,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20Ubuntu-E95420" />
   <img alt="Node" src="https://img.shields.io/badge/Node.js-%3E%3D22.0.0-339933" />
   <img alt="Engine" src="https://img.shields.io/badge/database-node%3Asqlite-003B57" />
-  <img alt="Milestones" src="https://img.shields.io/badge/milestones%201--6-100%25%20verified-brightgreen" />
+  <img alt="Milestones" src="https://img.shields.io/badge/milestones%201--6-audit%20in%20progress-yellow" />
 </p>
 
 ---
@@ -25,7 +25,7 @@
 2. **Universal Multi-Client Integration**: Automatically discovers MCP servers, indexes skills, and pushes compiled P1–P7 tool prioritization rules simultaneously to **Google Antigravity**, **Cline**, **OpenCode**, **Freebuff**, **Cursor**, **Claude**, **Oh My Pi (OMP)**, and **Codex CLI**.
 3. **Bifurcated Dynamic Ingestion Engine**: Strictly separates the installation of **Agent Skills** (`SKILL.md` instruction packages) from **MCP Servers** (executable JSON-RPC/SSE/HTTP processes) at the code interface, CLI subcommands, and local web UI.
 4. **Zero-Artifact Pruner**: Atomic uninstallation with graceful `SIGTERM` -> `SIGKILL` process termination, multi-IDE configuration purging, dangling symlink cleanup, and strict path-containment boundary guards.
-5. **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled Cloudflare companion gateway (`apps/cf-gateway`) with a 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`) and local web dashboard (`apps/web` on `http://127.0.0.1:18765/`). Enforces hard `412 Precondition Failed` gating before session connections.
+5. **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled Cloudflare companion gateway (`apps/cf-gateway`) with a 4-state lifecycle machine and local web dashboard (`apps/web`, default `http://127.0.0.1:3000/`). MCP bridge defaults to `127.0.0.1:18765`; ChatGPT receives explicit `/mcp` URL only after health verification.
 6. **Unified Headless CLI (`unified-mpc`)**: Standalone executable CLI binary with exit code contracts (0, 1, 2) enabling headless operation for human developers and terminal AI coding agents (Claude Code, OpenCode CLI, Agy CLI).
 7. **Senior Engineering Harness (Ponytail Runtime)**: Enforces YAGNI, minimal diffs, root-cause verification, and durable goal tracking backed by native `node:sqlite`.
 
@@ -83,7 +83,7 @@ Unified-MPC-Server/
 | **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
 | **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
 | **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards; Commit `fe6e601`. |
-| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
+| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: native `node:http` control plane, startup capability auth, real `cloudflared` process lifecycle, MCP identity health probe, explicit `/mcp` URL, and 412 session gate. | ⚠️ **Implemented; live tunnel evidence pending** | Web/gateway targeted tests pass; live Cloudflare requires installed `cloudflared`, configured MCP HTTP runtime, public allowlist, and operator credentials. |
 | **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
 
 ---
@@ -151,8 +151,11 @@ unified-mpc prune skill --name my-skill
 # Prune an MCP Server cleanly (kills processes and purges configs)
 unified-mpc prune server --name my-server
 
+# Start the MCP HTTP runtime for local/tunnel access
+UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http
+
 # Start the Local Web Control Plane
-unified-mpc web --port 18765
+unified-mpc web --port 3000
 
 # Headless downstream tool calling
 unified-mpc tools list
@@ -163,13 +166,23 @@ unified-mpc tools call memory__search_nodes '{"query": "milestone"}'
 
 ## Local Web Control Plane
 
-The Local Web Control Plane runs at `http://127.0.0.1:18765/`:
+The Local Web Control Plane runs at `http://127.0.0.1:3000/` by default. MCP HTTP runs separately at `http://127.0.0.1:18765/mcp`:
 
-- **Obsidian Telemetry Dashboard**: Real-time status cards showing Tunnel URL, Session Lease Token, Bridge Status, Active IDEs, Installed Skills, and Mounted Servers.
+- **Obsidian Telemetry Dashboard**: Real-time status cards showing tunnel/MCP URL, bridge status, active IDEs, installed skills, and mounted servers.
 - **Hard-Gated ChatGPT Web Connection**: The `[ Connect ChatGPT Web ]` action returns `412 Precondition Failed` unless the gateway bridge has reached `BRIDGE_HEALTHY` state.
 - **Bifurcated Management UI**: Dedicated tabs for installing Skills vs installing MCP Servers to prevent polyglot configuration errors.
 - **Loopback Origin Security**: Strictly enforces `localhost` / `127.0.0.1` origins, blocking external or non-HTTP schemes with `403 Forbidden`.
 - **Payload Protection**: Enforces 1MB maximum body limit on incoming requests (`413 Payload Too Large`).
+
+### ChatGPT Web setup
+
+1. Start real MCP HTTP runtime: `UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http`.
+2. Start dashboard: `unified-mpc web --port 3000`.
+3. Open dashboard, start gateway, wait for `BRIDGE_HEALTHY`.
+4. Copy displayed `ChatGPT MCP URL` (`https://.../mcp`) into ChatGPT Web connector.
+5. For stable URL, set `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME`, `UNIFIED_MPC_CLOUDFLARE_TUNNEL_TOKEN`, `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`, `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES`, and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS`.
+
+No `cloudflared` binary, MCP workspace, public URL, or credentials means no live ChatGPT Web connection.
 
 ---
 

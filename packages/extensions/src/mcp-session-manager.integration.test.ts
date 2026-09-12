@@ -1,8 +1,13 @@
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { defaultMcpClientFactory } from './mcp-session-manager.js';
 
 const fixturePath = fileURLToPath(new URL('../tests/fixtures/external-mcp-server.mjs', import.meta.url));
+
+afterEach(() => {
+  delete process.env.UNIFIED_MPC_EXTERNAL_MCP_FIXTURE_ERA;
+  delete process.env.UNIFIED_MPC_EXTERNAL_MCP_SECRET;
+});
 
 async function connectFixture(era: 'legacy' | 'modern'): ReturnType<typeof defaultMcpClientFactory.connect> {
   return defaultMcpClientFactory.connect({
@@ -17,7 +22,7 @@ describe('default External MCP client protocol negotiation', () => {
     const session = await connectFixture('legacy');
     try {
       await expect(session.listTools()).resolves.toEqual([
-        expect.objectContaining({ name: 'legacy_ping' }),
+        expect.objectContaining({ name: 'legacy_ping', description: 'legacy external MCP fixture' }),
       ]);
     } finally {
       await session.close();
@@ -29,6 +34,18 @@ describe('default External MCP client protocol negotiation', () => {
     try {
       await expect(session.listTools()).resolves.toEqual([
         expect.objectContaining({ name: 'modern_ping' }),
+      ]);
+    } finally {
+      await session.close();
+    }
+  }, 20_000);
+
+  it('does not inherit host secrets into external MCP children', async () => {
+    process.env.UNIFIED_MPC_EXTERNAL_MCP_SECRET = 'not-for-child';
+    const session = await connectFixture('legacy');
+    try {
+      await expect(session.listTools()).resolves.toEqual([
+        expect.objectContaining({ name: 'legacy_ping', description: 'legacy external MCP fixture' }),
       ]);
     } finally {
       await session.close();

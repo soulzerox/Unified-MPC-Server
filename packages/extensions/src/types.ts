@@ -102,6 +102,8 @@ export interface ExtensionsService {
     readonly server: string;
     readonly tool: string;
     readonly arguments?: Readonly<Record<string, unknown>>;
+    readonly descriptorFingerprint?: string;
+    readonly catalogFingerprint?: string;
   }, signal?: AbortSignal): Promise<Result<unknown>>;
   close(): Promise<void>;
 }

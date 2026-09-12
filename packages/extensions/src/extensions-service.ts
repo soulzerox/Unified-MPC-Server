@@ -131,6 +131,8 @@ export class LocalExtensionsService implements ExtensionsService {
     readonly server: string;
     readonly tool: string;
     readonly arguments?: Readonly<Record<string, unknown>>;
+    readonly descriptorFingerprint?: string;
+    readonly catalogFingerprint?: string;
   }, signal?: AbortSignal): Promise<Result<unknown>> {
     if (isAborted(signal)) return cancelledMcpCall();
     const server = await this.findServer(input.server);
@@ -142,12 +144,21 @@ export class LocalExtensionsService implements ExtensionsService {
     if (server.value.excluded) {
       return err(appError('PERMISSION_DENIED', server.value.exclusionReason ?? `MCP server is excluded: ${input.server}`));
     }
+    if (input.descriptorFingerprint === undefined || input.catalogFingerprint === undefined) {
+      return err(appError('PERMISSION_REQUIRED', 'Describe external MCP server and provide current contract fingerprints before calling it'));
+    }
+    const descriptorFingerprint = fingerprintExternalMcpValue({ source: server.value.source, config: server.value.config });
+    if (input.descriptorFingerprint !== descriptorFingerprint) {
+      return err(appError('CONFLICT', `External MCP contract fingerprint changed for ${server.value.name}; describe the server again before calling it`));
+    }
+    const expected = input.catalogFingerprint === undefined ? {} : { catalogFingerprint: input.catalogFingerprint };
     return this.sessions.call(
       server.value.name,
       server.value.config,
       input.tool,
       input.arguments ?? {},
       signal,
+      expected,
     );
   }
 

@@ -788,7 +788,6 @@ export class FileService {
     try {
       const payload = await lstat(payloadPath);
       if (payload.isDirectory() !== metadata.isDirectory) return err(appError('INVALID_INPUT', 'Recovery payload type does not match metadata'));
-      await writeFsFile(metadataPath, JSON.stringify({ ...metadata, state: 'restored' }, null, 2), 'utf8');
       if (destination.value.exists && kind === 'replacement_backup') {
         if (payload.isDirectory()) return err(appError('INVALID_INPUT', 'Replacement backups must contain a file'));
         const destinationPath = destination.value.realPath ?? destination.value.absolutePath;
@@ -798,6 +797,7 @@ export class FileService {
         const rollback = await this.copyToRecoveryTrash(workspaceId, destination.value.relativePath, destinationPath, 'replacement_backup');
         if (!rollback.ok) return rollback;
         await copyFile(payloadPath, destinationPath);
+        await writeFsFile(metadataPath, JSON.stringify({ ...metadata, state: 'restored' }, null, 2), 'utf8');
         await rm(recoveryBase, { recursive: true, force: true });
         return ok({
           recoveryId: request.recoveryId,
@@ -813,6 +813,7 @@ export class FileService {
         else await copyFile(payloadPath, destination.value.absolutePath, fsConstants.COPYFILE_EXCL);
         await rm(payloadPath, { recursive: payload.isDirectory(), force: false });
       }
+      await writeFsFile(metadataPath, JSON.stringify({ ...metadata, state: 'restored' }, null, 2), 'utf8');
       await rm(recoveryBase, { recursive: true, force: true });
       return ok({ recoveryId: request.recoveryId, path: destination.value.relativePath });
     } catch (error: unknown) {

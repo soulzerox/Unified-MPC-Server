@@ -118,7 +118,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   ponytail_session: service({ workspaceId, suppressed: true }, 'file.readFile'),
   mcp_list: service({}, 'extensions.listMcpServers'),
   mcp_describe: service({ server: 'server-1' }, 'extensions.describeMcpServer'),
-  mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, userConfirmed: true }, 'extensions.callMcpTool'),
+  mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, descriptorFingerprint: '0'.repeat(64), catalogFingerprint: '0'.repeat(64), userConfirmed: true }, 'extensions.callMcpTool'),
   workspace_context: service({ workspaceId, query: 'smoke' }, 'search.searchText'),
   workspace_context_continue: service({ continuationToken: 'context-token' }, 'file.readFile', 'workspace_context'),
   workspace_full_scan: service({ workspaceId }, 'search.searchFiles'),

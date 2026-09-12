@@ -31,7 +31,7 @@ body:
     id: safety
     attributes:
       label: Security / compatibility considerations
-      description: Note any effect on workspace boundaries, permissions, destructive actions, MCP compatibility, storage, or Windows support.
+      description: Note any effect on workspace boundaries, permissions, destructive actions, MCP compatibility, storage, or Linux distribution/runtime support.
   - type: checkboxes
     id: checks
     attributes:

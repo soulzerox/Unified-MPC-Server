@@ -36,6 +36,9 @@ interface PendingConnection {
   readonly promise: Promise<ManagedSession>;
 }
 
+const MAX_EXTERNAL_MCP_ARGUMENT_BYTES = 1 * 1024 * 1024;
+const MAX_EXTERNAL_MCP_RESULT_BYTES = 8 * 1024 * 1024;
+
 export class McpSessionManager {
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly pendingConnections = new Map<string, PendingConnection>();
@@ -124,24 +127,36 @@ export class McpSessionManager {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
+    expected: { readonly catalogFingerprint?: string } = {},
   ): Promise<Result<unknown>> {
     let managed: ManagedSession | undefined;
     try {
       if (isAborted(signal)) return cancelledCall();
+      if (jsonByteLength(args) > MAX_EXTERNAL_MCP_ARGUMENT_BYTES) {
+        return err(appError('INVALID_INPUT', `Child MCP arguments exceed ${MAX_EXTERNAL_MCP_ARGUMENT_BYTES} bytes`));
+      }
       managed = await this.ensure(server, config, signal);
       const activeManaged = managed;
       if (isAborted(signal)) return cancelledCall();
       await this.refreshCatalog(server, activeManaged, signal);
+      if (expected.catalogFingerprint !== undefined && expected.catalogFingerprint !== activeManaged.catalogFingerprint) {
+        return err(appError('CONFLICT', `External MCP contract fingerprint changed for ${server}; describe the server again before calling it`));
+      }
       const declaredTool = activeManaged.tools.find((entry) => entry.name === tool);
       if (declaredTool === undefined) {
         return err(appError('INVALID_INPUT', `Child MCP tool is not declared by ${server}: ${tool}`));
       }
+      const inputError = validateDeclaredInput(declaredTool, args);
+      if (inputError !== undefined) return err(appError('INVALID_INPUT', `Child MCP input schema mismatch for ${server}/${tool}: ${inputError}`));
       const result = await withTimeout(
         (callSignal) => this.enqueue(activeManaged, () => activeManaged.session.callTool(tool, args, callSignal)),
         this.callTimeoutMs,
         `Timed out calling ${server}/${tool}`,
         signal,
       );
+      if (jsonByteLength(result) > MAX_EXTERNAL_MCP_RESULT_BYTES) {
+        return err(appError('INVALID_INPUT', `Child MCP result exceeds ${MAX_EXTERNAL_MCP_RESULT_BYTES} bytes`));
+      }
       const outputError = validateDeclaredOutput(declaredTool, result);
       if (outputError !== undefined) return err(appError('INVALID_INPUT', `Child MCP output schema mismatch for ${server}/${tool}: ${outputError}`));
       activeManaged.lastUsedAt = Date.now();
@@ -478,6 +493,10 @@ function validateDeclaredOutput(tool: McpToolSummary, result: unknown): string |
   return validateJsonSchemaSubset(tool.outputSchema, resultRecord.structuredContent, '$');
 }
 
+function validateDeclaredInput(tool: McpToolSummary, args: Readonly<Record<string, unknown>>): string | undefined {
+  return tool.inputSchema === undefined ? undefined : validateJsonSchemaSubset(tool.inputSchema, args, '$');
+}
+
 function validateJsonSchemaSubset(schema: unknown, value: unknown, path: string): string | undefined {
   if (!isPlainRecord(schema)) return undefined;
   if (Array.isArray(schema.allOf)) {
@@ -561,6 +580,11 @@ function stableJson(value: unknown): string {
     .join(',')}}`;
 }
 
+function jsonByteLength(value: unknown): number {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? 0 : Buffer.byteLength(serialized, 'utf8');
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -572,6 +596,13 @@ function sanitizeError(error: unknown): string {
 
 function definedEnv(environment: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(environment).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    Object.entries(environment)
+      .filter(([key, value]) => typeof value === 'string' && isSafeExternalEnvironmentKey(key))
+      .map(([key, value]) => [key, value as string]),
   );
+}
+
+function isSafeExternalEnvironmentKey(key: string): boolean {
+  return /^(?:PATH|Path|HOME|USERPROFILE|TMP|TEMP|SystemRoot|WINDIR|LANG|LC_[A-Z_]+)$/.test(key)
+    && !/(?:TOKEN|SECRET|PASSWORD|API[_-]?KEY|PRIVATE[_-]?KEY)/i.test(key);
 }

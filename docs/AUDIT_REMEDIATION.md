@@ -2,7 +2,7 @@
 
 **Scope:** Unified MCP Server audit remediation and functional web control plane
 **Accepted base:** `596078b`
-**Status:** P0/P1 guardrails updated; live Cloudflare/ChatGPT Web evidence and Rust toolchain remain pending
+**Status:** P0/P1 guardrails updated; live Cloudflare/ChatGPT Web evidence and release verification remain pending
 
 ## Findings fixed
 
@@ -53,6 +53,9 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 
 ### Current focused verification
 
+- Recovery and External MCP TDD slice: application 27/27, extension bridge 18/18, external stdio integration 3/3, MCP approval/runtime contracts 300+/300+, `EXIT_CODE=0`.
+- External MCP calls require current descriptor/catalog fingerprints, validate declared input/output schemas, bound arguments/results, and use a safe inherited environment; host approval carries fingerprint evidence.
+- Recovery restore writes `state: restored` only after payload replacement/rename succeeds; runtime shutdown awaits `recoveryReady`.
 - `corepack pnpm --filter @unified-mpc/web test` — 3 test files, 36 tests passed, `EXIT_CODE=0`.
 - `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 79 tests passed, `EXIT_CODE=0`.
 - `corepack pnpm --filter @unified-mpc/web typecheck` — passed, `EXIT_CODE=0`.
@@ -62,19 +65,20 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - Extension transaction regression: `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 81 tests passed, `EXIT_CODE=0`; covers Recovery Trash, rollback, OS-lock self-check, shared install/prune serialization, config rollback, and malformed-config fail-closed behavior.
 - Extension transaction uses an OS lock keyed by config set plus an in-process queue; acquisition times out fail-closed rather than reclaiming a possibly reused PID's lock. `node scripts/test-config-mutation-lock.mjs` verifies two separate processes serialize.
 - Purge data moves into Recovery Trash with a recovery ID before completion. Session/config failure restores moved paths when possible; errors expose `recoveryStatus` as `partial` or `rollback_failed`.
-- Release gate is `corepack pnpm release:verify`; local Rust verification remains blocked when `cargo` is unavailable. External MCP fixtures cover legacy and modern child handshakes; live ChatGPT Web and Cloudflare evidence remain operator-gated.
+- Release gate is `corepack pnpm release:verify`; Rust and live ChatGPT Web/Cloudflare evidence remain operator-gated until verified on this host.
 
 ## Current remediation delta
 
 - Workspace-scoped pruner recovery records now use Recovery Center layout and version-2 metadata when an explicit `workspaceId` is supplied. Global prune records retain legacy metadata; runtime wiring must supply a registered workspace identity before those records can appear in Recovery Center.
-- Recovery metadata is written before payload rename. A crash can leave an orphan record, but it cannot leave moved payload without metadata; startup reconciliation and orphan presentation remain open.
+- Recovery metadata is written before payload rename and promoted to `restored` only after restore side effects succeed. Startup reconciliation remains report-only and blocks unsafe entries; orphan payloads are preserved for operator recovery.
+- External MCP execution is fail-closed without current descriptor/catalog fingerprints. Child calls enforce declared input/output schema checks, 1 MiB argument and 8 MiB result limits, and a safe inherited environment allowlist.
 - Config mutation lock uses a per-acquisition owner file and removes only its own owner record. Cross-process serialization self-check passes.
 - Checkpoint key storage validates and hardens every existing parent ancestor and requires key file mode `0600`.
 - `release:verify` prints and validates exact `HEAD`, rejects dirty trees, and accepts optional `RELEASE_EXPECTED_SHA`. CI actions are pinned to immutable commit SHAs.
 
 ## Remaining release blockers
 
-- `cargo` is absent in current environment; Rust release stage cannot run.
+- `rustup` is installed user-locally, but stable compiler download is blocked by host proxy/network (`InvalidContentType`); `cargo test --manifest-path native/linux-host/Cargo.toml --locked` remains unrun.
 - `gh` is absent; exact GitHub Actions run evidence cannot be collected locally.
 - Live Cloudflare tunnel and ChatGPT Web acceptance remain unrun.
-- Recovery startup reconciliation and explicit external-MCP allowlist/approval/drift policy remain open.
+- Recovery startup reconciliation is intentionally report-only; unsafe/orphan records block runtime startup and remain operator-visible.

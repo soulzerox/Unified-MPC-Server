@@ -115,6 +115,10 @@ export interface HostMutationApprovalRequest {
   readonly summary: string;
   readonly workspaceId?: string;
   readonly workspaceRoot?: string;
+  readonly externalMcpContract?: {
+    readonly descriptorFingerprint: string;
+    readonly catalogFingerprint?: string;
+  };
 }
 
 const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
@@ -452,6 +456,16 @@ export class ToolRegistry {
             summary: summarizeMutationForApproval(tool.name, approvalExecutionInput, activeWorkspaceScope),
             ...(mutationWorkspaceId === undefined ? {} : { workspaceId: mutationWorkspaceId }),
             ...(activeWorkspaceScope === null ? {} : { workspaceRoot: activeWorkspaceScope.rootPath }),
+            ...(tool.name !== 'mcp_call' || !isRecord(approvalExecutionInput)
+              || typeof approvalExecutionInput.descriptorFingerprint !== 'string'
+              || typeof approvalExecutionInput.catalogFingerprint !== 'string'
+              ? {}
+              : {
+                  externalMcpContract: {
+                    descriptorFingerprint: approvalExecutionInput.descriptorFingerprint,
+                    catalogFingerprint: approvalExecutionInput.catalogFingerprint,
+                  },
+                }),
           });
         } catch {
           hostApproved = false;

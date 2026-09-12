@@ -42,6 +42,8 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
           server: input.server,
           tool: input.tool,
           ...(input.arguments === undefined ? {} : { arguments: input.arguments }),
+          ...(input.descriptorFingerprint === undefined ? {} : { descriptorFingerprint: input.descriptorFingerprint }),
+          ...(input.catalogFingerprint === undefined ? {} : { catalogFingerprint: input.catalogFingerprint }),
         }, signal),
     }),
   ];

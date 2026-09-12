@@ -16,6 +16,15 @@ function settingsWithMockServer(): typeof DEFAULT_EXTENSIONS_SETTINGS {
   };
 }
 
+async function currentMockContract(service: LocalExtensionsService): Promise<{ readonly descriptorFingerprint: string; readonly catalogFingerprint: string }> {
+  const described = await service.describeMcpServer({ server: 'mock' });
+  if (!described.ok) throw new Error('MCP description failed');
+  return {
+    descriptorFingerprint: described.value.provenance.descriptorFingerprint,
+    catalogFingerprint: described.value.provenance.catalogFingerprint,
+  };
+}
+
 describe('LocalExtensionsService MCP bridge', () => {
   it('includes a packaged bundled-skill root without hiding global or workspace skills', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-skills-'));
@@ -111,7 +120,10 @@ describe('LocalExtensionsService MCP bridge', () => {
       value: { server: 'mock', connected: true, resources: [{ uri: 'file:///docs/readme.md', name: 'README', mimeType: 'text/markdown' }] },
     });
 
-    const called = await service.callMcpTool({ server: 'mock', tool: 'ping', arguments: { n: 1 } });
+    const called = await service.callMcpTool({
+      server: 'mock', tool: 'ping', arguments: { n: 1 },
+      ...(await currentMockContract(service)),
+    });
     expect(called.ok).toBe(true);
     expect(calls).toEqual(['ping:{"n":1}']);
 
@@ -192,10 +204,121 @@ describe('LocalExtensionsService MCP bridge', () => {
       clientFactory: { connect: async (): Promise<McpClientSession> => session },
     });
 
-    await expect(service.callMcpTool({ server: 'mock', tool: 'ping' })).resolves.toMatchObject({
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) })).resolves.toMatchObject({
       ok: false,
       error: { code: 'INVALID_INPUT', message: expect.stringContaining('output schema mismatch') },
     });
+    await service.close();
+  });
+
+  it('rejects child arguments that violate a declared external input schema before dispatch', async (): Promise<void> => {
+    let calls = 0;
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => ({
+        listTools: async () => [{
+          name: 'ping', description: 'Ping tool',
+          inputSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'number' } }, additionalProperties: false },
+        }],
+        listResources: async () => [],
+        callTool: async (): Promise<{ readonly content: readonly [] }> => { calls += 1; return { content: [] }; },
+        close: async () => undefined,
+      }) },
+    });
+
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', arguments: {}, ...await currentMockContract(service) }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('input schema mismatch') } });
+    expect(calls).toBe(0);
+    await service.close();
+  });
+
+  it('rejects a call carrying a stale external MCP contract fingerprint before child dispatch', async (): Promise<void> => {
+    let calls = 0;
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => { calls += 1; return { content: [] }; },
+      close: async () => undefined,
+    };
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => session },
+    });
+
+    const described = await service.describeMcpServer({ server: 'mock' });
+    if (!described.ok) throw new Error('MCP description failed');
+    await expect(service.callMcpTool({
+      server: 'mock',
+      tool: 'ping',
+      descriptorFingerprint: described.value.provenance.descriptorFingerprint,
+      catalogFingerprint: '0'.repeat(64),
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', message: expect.stringContaining('contract fingerprint') },
+    });
+    expect(calls).toBe(0);
+    await service.close();
+  });
+
+  it('fails closed when an external MCP call has no contract fingerprints', async (): Promise<void> => {
+    let calls = 0;
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => ({
+        listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+        listResources: async () => [],
+        callTool: async (): Promise<{ readonly content: readonly [] }> => { calls += 1; return { content: [] }; },
+        close: async () => undefined,
+      }) },
+    });
+
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
+    expect(calls).toBe(0);
+    await service.close();
+  });
+
+  it('rejects oversized external MCP arguments before child dispatch', async (): Promise<void> => {
+    let calls = 0;
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => ({
+        listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+        listResources: async () => [],
+        callTool: async (): Promise<{ readonly content: readonly [] }> => { calls += 1; return { content: [] }; },
+        close: async () => undefined,
+      }) },
+    });
+
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', arguments: { payload: 'x'.repeat(1024 * 1024 + 1) }, ...await currentMockContract(service) }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('arguments exceed') } });
+    expect(calls).toBe(0);
+    await service.close();
+  });
+
+  it('rejects oversized external MCP results after child dispatch', async (): Promise<void> => {
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => ({
+        listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+        listResources: async () => [],
+        callTool: async (): Promise<{ readonly content: readonly { readonly type: string; readonly text: string }[] }> => ({ content: [{ type: 'text', text: 'x'.repeat(8 * 1024 * 1024 + 1) }] }),
+        close: async () => undefined,
+      }) },
+    });
+
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('result exceeds') } });
     await service.close();
   });
 
@@ -303,7 +426,7 @@ describe('LocalExtensionsService MCP bridge', () => {
     });
     const controller = new AbortController();
 
-    const pending = service.callMcpTool({ server: 'mock', tool: 'ping' }, controller.signal);
+    const pending = service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) }, controller.signal);
     await started;
     controller.abort();
 

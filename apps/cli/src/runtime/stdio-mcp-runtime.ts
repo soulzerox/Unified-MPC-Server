@@ -271,6 +271,7 @@ export function createStdioMcpRuntime(
     toolAvailabilityService,
     close: async (): Promise<void> => {
       stopToolAvailabilityWatch();
+      await recoveryReady.catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);
       await workspaceIndex.close().catch(() => undefined);

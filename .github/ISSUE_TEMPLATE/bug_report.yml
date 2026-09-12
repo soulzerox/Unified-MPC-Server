@@ -28,12 +28,12 @@ body:
     attributes:
       label: Area
       options:
-        - Desktop UI
+        - Web Control Plane
         - MCP / Secure MCP Tunnel
         - Files / workspace
         - Git
         - Processes / shell
-        - WSL
+        - Linux interoperability
         - Browser / desktop automation
         - Logs / observability
         - Installer / updater

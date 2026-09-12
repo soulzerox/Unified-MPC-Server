@@ -60,7 +60,7 @@ rl.on('line', (line) => {
         : {}),
       tools: [{
         name: era === 'modern' ? 'modern_ping' : 'legacy_ping',
-        description: `${era} external MCP fixture`,
+        description: `${era} external MCP fixture${process.env.UNIFIED_MPC_EXTERNAL_MCP_SECRET === undefined ? '' : '-secret-seen'}`,
         inputSchema: { type: 'object', additionalProperties: false },
       }],
     });

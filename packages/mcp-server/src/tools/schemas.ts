@@ -575,5 +575,7 @@ export const mcpCallSchema = z.object({
   server: z.string().trim().min(1).max(256),
   tool: z.string().trim().min(1).max(256),
   arguments: z.record(z.string(), z.unknown()).optional(),
+  descriptorFingerprint: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  catalogFingerprint: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   userConfirmed: z.boolean().optional(),
 }).strict();

@@ -50,6 +50,28 @@ describe('opaque mutation native approval summaries', () => {
     expect(summary.length).toBeLessThanOrEqual(8_192);
   });
 
+  it('binds host approval evidence to supplied external MCP contract fingerprints', async () => {
+    const requests: HostMutationApprovalRequest[] = [];
+    const registry = new ToolRegistry({
+      extensions: {
+        async callMcpTool(): Promise<Result<{ ok: boolean }>> { return ok({ ok: true }); },
+      } as McpApplicationServices['extensions'],
+    }, actor, {
+      activeWorkspaceScopeProvider,
+      profileProvider: balancedProfile,
+      hostMutationApprovalProvider: async (request): Promise<boolean> => { requests.push(request); return false; },
+    });
+
+    await registry.invoke('mcp_call', {
+      server: 'child-server', tool: 'mutate', arguments: {},
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true,
+    });
+
+    expect(requests[0]).toMatchObject({ externalMcpContract: {
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64),
+    } });
+  });
+
   it('shows canonical Codex workspace, redacted instruction and opaque warning while bounding long summaries', async () => {
     const requests: HostMutationApprovalRequest[] = [];
     let runs = 0;

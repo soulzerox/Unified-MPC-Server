@@ -56,6 +56,7 @@ export interface StdioMcpRuntime {
   readonly extensions: ExtensionsService;
   readonly activityTracker: ActivityTracker;
   readonly activityReady: Promise<void>;
+  readonly recoveryReady: Promise<void>;
   readonly profileProvider: () => PermissionProfile;
   readonly allowAiDeleteProvider: () => boolean;
   readonly destructivePolicyProvider: () => DestructiveAutoApprovalPolicy;
@@ -131,6 +132,11 @@ export function createStdioMcpRuntime(
     protectCriticalFiles: (): boolean => !fullBypassAll && destructivePolicyProvider().protectCriticalFiles,
     recoverableDelete: (): boolean => destructivePolicyProvider().recoverableDelete,
     recoveryTrashRoot: path.join(dataPath, 'recovery-trash'),
+  });
+  const recoveryReady = fileService.reconcileRecoveryItemsForWorkspace(workspace).then((result) => {
+    if (!result.ok) throw new Error(result.error.message);
+    const unsafe = result.value.entries.filter((entry) => entry.state !== 'moved');
+    if (unsafe.length > 0) throw new Error(`Recovery reconciliation found unsafe entries: ${unsafe.length}`);
   });
   const gitService = new GitService(workspaceRepository);
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
@@ -255,6 +261,7 @@ export function createStdioMcpRuntime(
     extensions,
     activityTracker,
     activityReady,
+    recoveryReady,
     profileProvider,
     allowAiDeleteProvider,
     destructivePolicyProvider,

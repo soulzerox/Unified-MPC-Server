@@ -396,6 +396,89 @@ describe('FileService writes', () => {
     expect((await readFile(path.join(recoveryRoot, workspace.id, rollback.recoveryId, 'payload'))).equals(replaced)).toBe(true);
   });
 
+  it('reconciles prepared, moved, orphaned, and corrupt Recovery Trash records without mutating them', async () => {
+    const workspace = await createWorkspace();
+    const recoveryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-recovery-reconcile-'));
+    temporaryRoots.push(recoveryRoot);
+    const workspaceRoot = path.join(recoveryRoot, workspace.id);
+    const preparedId = '11111111-1111-4111-8111-111111111111';
+    const movedId = '22222222-2222-4222-8222-222222222222';
+    const orphanedId = '33333333-3333-4333-8333-333333333333';
+    const corruptId = '44444444-4444-4444-8444-444444444444';
+    const metadata = (recoveryId: string, state: string, isDirectory = false): string => JSON.stringify({
+      version: 2,
+      kind: 'deleted',
+      state,
+      recoveryId,
+      workspaceId: workspace.id,
+      relativePath: path.join('src', `${recoveryId}.txt`),
+      deletedAt: new Date(0).toISOString(),
+      isDirectory,
+    });
+    await mkdir(path.join(workspaceRoot, preparedId), { recursive: true });
+    await writeFile(path.join(workspaceRoot, preparedId, 'metadata.json'), metadata(preparedId, 'prepared'), 'utf8');
+    await mkdir(path.join(workspaceRoot, movedId), { recursive: true });
+    await writeFile(path.join(workspaceRoot, movedId, 'metadata.json'), metadata(movedId, 'moved'), 'utf8');
+    await writeFile(path.join(workspaceRoot, movedId, 'payload'), 'moved', 'utf8');
+    await mkdir(path.join(workspaceRoot, orphanedId), { recursive: true });
+    await writeFile(path.join(workspaceRoot, orphanedId, 'payload'), 'orphaned', 'utf8');
+    await mkdir(path.join(workspaceRoot, corruptId), { recursive: true });
+    await writeFile(path.join(workspaceRoot, corruptId, 'metadata.json'), '{not-json', 'utf8');
+
+    const service = new FileService(repository(workspace), undefined, undefined, { recoveryTrashRoot: recoveryRoot });
+    const result = await service.reconcileRecoveryItems(workspace.id);
+
+    expect(result).toMatchObject({ ok: true, value: {
+      workspaceId: workspace.id,
+      entries: [
+        { recoveryId: preparedId, state: 'prepared' },
+        { recoveryId: movedId, state: 'moved' },
+        { recoveryId: orphanedId, state: 'orphaned' },
+        { recoveryId: corruptId, state: 'corrupt' },
+      ],
+    } });
+    await expect(readFile(path.join(workspaceRoot, preparedId, 'metadata.json'), 'utf8')).resolves.toContain('"state":"prepared"');
+    await expect(readFile(path.join(workspaceRoot, movedId, 'payload'), 'utf8')).resolves.toBe('moved');
+    await expect(readFile(path.join(workspaceRoot, orphanedId, 'payload'), 'utf8')).resolves.toBe('orphaned');
+  });
+
+  it('reports legacy global Recovery Trash records as orphaned without deleting payloads', async () => {
+    const workspace = await createWorkspace();
+    const recoveryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-recovery-legacy-'));
+    temporaryRoots.push(recoveryRoot);
+    const legacyBase = path.join(recoveryRoot, '55555555-5555-4555-8555-555555555555');
+    await mkdir(path.join(legacyBase, 'payload'), { recursive: true });
+    await writeFile(path.join(legacyBase, 'metadata.json'), JSON.stringify({
+      recoveryId: path.basename(legacyBase),
+      originalPath: '/legacy/data',
+    }), 'utf8');
+    await writeFile(path.join(legacyBase, 'payload', 'state.json'), 'legacy', 'utf8');
+
+    const service = new FileService(repository(workspace), undefined, undefined, { recoveryTrashRoot: recoveryRoot });
+    await expect(service.reconcileRecoveryItemsForWorkspace(workspace)).resolves.toMatchObject({ ok: true, value: {
+      entries: [{ recoveryId: path.basename(legacyBase), state: 'orphaned' }],
+    } });
+    await expect(readFile(path.join(legacyBase, 'payload', 'state.json'), 'utf8')).resolves.toBe('legacy');
+  });
+
+  it('refuses to restore a recovery record that is not in moved state', async () => {
+    const workspace = await createWorkspace();
+    const recoveryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-recovery-state-'));
+    temporaryRoots.push(recoveryRoot);
+    const recoveryId = '66666666-6666-4666-8666-666666666666';
+    const recoveryBase = path.join(recoveryRoot, workspace.id, recoveryId);
+    await mkdir(recoveryBase, { recursive: true });
+    await writeFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify({
+      version: 2, kind: 'deleted', state: 'prepared', recoveryId, workspaceId: workspace.id,
+      relativePath: path.join('src', 'not-ready.txt'), deletedAt: new Date(0).toISOString(), isDirectory: false,
+    }), 'utf8');
+    await writeFile(path.join(recoveryBase, 'payload'), 'not-ready', 'utf8');
+
+    const service = new FileService(repository(workspace), undefined, undefined, { recoveryTrashRoot: recoveryRoot });
+    await expect(service.restoreDeletedFile(actor, workspace.id, { recoveryId, userConfirmed: true }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: 'Recovery item is not ready for restore' } });
+  });
+
   it('writes a nested file by creating missing parent directories', async () => {
 
     const workspace = await createWorkspace();

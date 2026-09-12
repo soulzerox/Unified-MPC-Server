@@ -184,6 +184,19 @@ export interface RecoveryItemList {
   readonly items: readonly RecoveryItem[];
 }
 
+export type RecoveryReconciliationState = 'prepared' | 'moved' | 'restored' | 'orphaned' | 'corrupt';
+
+export interface RecoveryReconciliationEntry {
+  readonly recoveryId: string;
+  readonly state: RecoveryReconciliationState;
+  readonly reason?: string;
+}
+
+export interface RecoveryReconciliationResult {
+  readonly workspaceId: string;
+  readonly entries: readonly RecoveryReconciliationEntry[];
+}
+
 export interface PrepareExternalFileMutationRequest {
   /** Existing read-only inputs consumed by the external mutation provider. */
   readonly sourcePaths?: readonly string[];
@@ -684,11 +697,12 @@ export class FileService {
     const recoveryId = randomUUID();
     const recoveryBase = path.join(this.recoveryTrashRoot!, workspaceId, recoveryId);
     const recoveryPath = path.join(recoveryBase, 'payload');
+    const metadata: RecoveryMetadata = {
+      version: 2, kind: 'deleted', state: 'prepared', recoveryId, workspaceId, relativePath, deletedAt: new Date().toISOString(), isDirectory,
+    };
     try {
       await mkdir(recoveryBase, { recursive: true });
-      await writeFsFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify({
-        version: 2, kind: 'deleted', recoveryId, workspaceId, relativePath, deletedAt: new Date().toISOString(), isDirectory,
-      }, null, 2), 'utf8');
+      await writeFsFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8');
       try {
         await rename(targetPath, recoveryPath);
       } catch (error: unknown) {
@@ -697,6 +711,7 @@ export class FileService {
         else await copyFile(targetPath, recoveryPath, fsConstants.COPYFILE_EXCL);
         await rm(targetPath, { recursive: isDirectory, force: false });
       }
+      await writeFsFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify({ ...metadata, state: 'moved' }, null, 2), 'utf8');
       return ok({ id: recoveryId, path: recoveryPath });
     } catch (error: unknown) {
       return err(mapNodeFsError(error, 'Recoverable deletion failed'));
@@ -712,12 +727,14 @@ export class FileService {
     const recoveryId = randomUUID();
     const recoveryBase = path.join(this.recoveryTrashRoot!, workspaceId, recoveryId);
     const recoveryPath = path.join(recoveryBase, 'payload');
+    const metadata: RecoveryMetadata = {
+      version: 2, kind, state: 'prepared', recoveryId, workspaceId, relativePath, deletedAt: new Date().toISOString(), isDirectory: false,
+    };
     try {
       await mkdir(recoveryBase, { recursive: true });
-      await writeFsFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify({
-        version: 2, kind, recoveryId, workspaceId, relativePath, deletedAt: new Date().toISOString(), isDirectory: false,
-      }, null, 2), 'utf8');
+      await writeFsFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8');
       await copyFile(targetPath, recoveryPath, fsConstants.COPYFILE_EXCL);
+      await writeFsFile(path.join(recoveryBase, 'metadata.json'), JSON.stringify({ ...metadata, state: 'moved' }, null, 2), 'utf8');
       return ok({ id: recoveryId, path: recoveryPath });
     } catch (error: unknown) {
       return err(mapNodeFsError(error, 'Replacement backup failed'));
@@ -747,15 +764,16 @@ export class FileService {
     let metadata: RecoveryMetadata;
     try {
       const parsed: unknown = JSON.parse(await readFsFile(metadataPath, 'utf8'));
-      if (!isRecoveryMetadata(parsed)
-        || parsed.recoveryId !== request.recoveryId
-        || parsed.workspaceId !== workspaceId) {
+      if (!isTrustedRecoveryMetadata(parsed, request.recoveryId, workspaceId)) {
         return err(appError('INVALID_INPUT', 'Recovery metadata is invalid'));
       }
       metadata = parsed;
     } catch (error: unknown) {
       if (nodeErrorCode(error) === 'ENOENT') return err(appError('FILE_NOT_FOUND', 'Recovery item was not found'));
       return err(mapNodeFsError(error, 'Recovery metadata could not be read'));
+    }
+    if (metadata.state !== undefined && metadata.state !== 'moved') {
+      return err(appError('INVALID_INPUT', 'Recovery item is not ready for restore'));
     }
     if (isAborted(signal)) return cancelledFileMutation();
     const destination = await this.guard.resolveForWrite(workspace, metadata.relativePath, authorization);
@@ -770,6 +788,7 @@ export class FileService {
     try {
       const payload = await lstat(payloadPath);
       if (payload.isDirectory() !== metadata.isDirectory) return err(appError('INVALID_INPUT', 'Recovery payload type does not match metadata'));
+      await writeFsFile(metadataPath, JSON.stringify({ ...metadata, state: 'restored' }, null, 2), 'utf8');
       if (destination.value.exists && kind === 'replacement_backup') {
         if (payload.isDirectory()) return err(appError('INVALID_INPUT', 'Replacement backups must contain a file'));
         const destinationPath = destination.value.realPath ?? destination.value.absolutePath;
@@ -823,7 +842,7 @@ export class FileService {
         const recoveryBase = path.join(workspaceRoot, recoveryEntry.name);
         try {
           const parsed: unknown = JSON.parse(await readFsFile(path.join(recoveryBase, 'metadata.json'), 'utf8'));
-          if (!isRecoveryMetadata(parsed)) continue;
+          if (!isTrustedRecoveryMetadata(parsed, recoveryEntry.name, workspaceEntry.name)) continue;
           const deletedAtMs = Date.parse(parsed.deletedAt);
           if (!Number.isFinite(deletedAtMs) || deletedAtMs >= cutoffMs) continue;
           await rm(recoveryBase, { recursive: true, force: true });
@@ -855,7 +874,7 @@ export class FileService {
       const recoveryBase = path.join(workspaceRecoveryRoot, entry.name);
       try {
         const parsed: unknown = JSON.parse(await readFsFile(path.join(recoveryBase, 'metadata.json'), 'utf8'));
-        if (!isRecoveryMetadata(parsed) || parsed.workspaceId !== workspace.id || parsed.recoveryId !== entry.name) continue;
+        if (!isTrustedRecoveryMetadata(parsed, entry.name, workspace.id)) continue;
         let payloadAvailable = false;
         try {
           const payload = await lstat(path.join(recoveryBase, 'payload'));
@@ -878,6 +897,98 @@ export class FileService {
     }
     items.sort((left, right) => right.deletedAt.localeCompare(left.deletedAt));
     return ok({ recoveryTrashRoot: this.recoveryTrashRoot, items });
+  }
+
+  public async reconcileRecoveryItems(workspaceId: string): Promise<Result<RecoveryReconciliationResult>> {
+    const workspace = await this.workspaces.get(workspaceId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
+    return this.reconcileRecoveryItemsForWorkspace(workspace);
+  }
+
+  public async reconcileRecoveryItemsForWorkspace(workspace: Workspace): Promise<Result<RecoveryReconciliationResult>> {
+    if (this.recoveryTrashRoot === undefined) return ok({ workspaceId: workspace.id, entries: [] });
+    let rootEntries;
+    try {
+      rootEntries = await readdir(this.recoveryTrashRoot, { withFileTypes: true });
+    } catch (error: unknown) {
+      if (nodeErrorCode(error) === 'ENOENT') return ok({ workspaceId: workspace.id, entries: [] });
+      return err(mapNodeFsError(error, 'Recovery Trash could not be reconciled'));
+    }
+    const reconciled: RecoveryReconciliationEntry[] = [];
+    for (const entry of rootEntries) {
+      if (!entry.isDirectory() || entry.name === workspace.id) continue;
+      const recoveryBase = path.join(this.recoveryTrashRoot, entry.name);
+      try {
+        const parsed: unknown = JSON.parse(await readFsFile(path.join(recoveryBase, 'metadata.json'), 'utf8'));
+        reconciled.push({ recoveryId: entry.name, state: 'orphaned', reason: isRecoveryMetadata(parsed)
+          ? 'Recovery record is outside workspace-scoped layout'
+          : 'Legacy global Recovery Trash metadata is invalid' });
+      } catch (error: unknown) {
+        if (nodeErrorCode(error) === 'ENOENT') {
+          try {
+            await lstat(path.join(recoveryBase, 'payload'));
+          } catch (payloadError: unknown) {
+            if (nodeErrorCode(payloadError) === 'ENOENT') continue;
+          }
+        }
+        reconciled.push({
+          recoveryId: entry.name,
+          state: nodeErrorCode(error) === 'ENOENT' ? 'orphaned' : 'corrupt',
+          reason: 'Legacy global Recovery Trash record is not trusted',
+        });
+      }
+    }
+    const workspaceRecoveryRoot = path.join(this.recoveryTrashRoot, workspace.id);
+    let entries;
+    try {
+      entries = await readdir(workspaceRecoveryRoot, { withFileTypes: true });
+    } catch (error: unknown) {
+      if (nodeErrorCode(error) === 'ENOENT') {
+        reconciled.sort((left, right) => left.recoveryId.localeCompare(right.recoveryId));
+        return ok({ workspaceId: workspace.id, entries: reconciled });
+      }
+      return err(mapNodeFsError(error, 'Recovery Trash could not be reconciled'));
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const recoveryBase = path.join(workspaceRecoveryRoot, entry.name);
+      const payloadPath = path.join(recoveryBase, 'payload');
+      let payload: Awaited<ReturnType<typeof lstat>> | undefined;
+      try {
+        payload = await lstat(payloadPath);
+      } catch (error: unknown) {
+        if (nodeErrorCode(error) !== 'ENOENT') {
+          reconciled.push({ recoveryId: entry.name, state: 'corrupt', reason: 'Recovery payload could not be inspected' });
+          continue;
+        }
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readFsFile(path.join(recoveryBase, 'metadata.json'), 'utf8'));
+      } catch (error: unknown) {
+        reconciled.push({
+          recoveryId: entry.name,
+          state: nodeErrorCode(error) === 'ENOENT' ? 'orphaned' : 'corrupt',
+          reason: nodeErrorCode(error) === 'ENOENT' ? 'Recovery metadata is missing' : 'Recovery metadata is invalid',
+        });
+        continue;
+      }
+      if (!isTrustedRecoveryMetadata(parsed, entry.name, workspace.id)) {
+        reconciled.push({ recoveryId: entry.name, state: 'corrupt', reason: 'Recovery metadata does not match workspace contract' });
+        continue;
+      }
+      if (payload === undefined) {
+        reconciled.push({ recoveryId: entry.name, state: parsed.state ?? 'prepared', reason: 'Recovery payload is missing' });
+        continue;
+      }
+      if (payload.isDirectory() !== parsed.isDirectory) {
+        reconciled.push({ recoveryId: entry.name, state: 'corrupt', reason: 'Recovery payload type does not match metadata' });
+        continue;
+      }
+      reconciled.push({ recoveryId: entry.name, state: parsed.state ?? 'moved' });
+    }
+    reconciled.sort((left, right) => left.recoveryId.localeCompare(right.recoveryId));
+    return ok({ workspaceId: workspace.id, entries: reconciled });
   }
 
   private async prepareTransfer(
@@ -981,6 +1092,7 @@ function resultPath(resolved: ResolvedWorkspacePath): string {
 interface RecoveryMetadata {
   readonly version: 1 | 2;
   readonly kind?: RecoveryItemKind;
+  readonly state?: Extract<RecoveryReconciliationState, 'prepared' | 'moved' | 'restored'>;
   readonly recoveryId: string;
   readonly workspaceId: string;
   readonly relativePath: string;
@@ -998,6 +1110,14 @@ function isRecoveryMetadata(value: unknown): value is RecoveryMetadata {
     && typeof record.deletedAt === 'string'
     && typeof record.isDirectory === 'boolean'
     && (record.version === 1 || record.kind === 'deleted' || record.kind === 'replacement_backup');
+}
+
+function isTrustedRecoveryMetadata(value: unknown, recoveryId: string, workspaceId: string): value is RecoveryMetadata {
+  if (!isRecoveryMetadata(value)) return false;
+  if (value.recoveryId !== recoveryId || value.workspaceId !== workspaceId) return false;
+  if (path.isAbsolute(value.relativePath) || value.relativePath.split(/[\\/]+/).includes('..')) return false;
+  if (!Number.isFinite(Date.parse(value.deletedAt))) return false;
+  return value.state === undefined || value.state === 'prepared' || value.state === 'moved' || value.state === 'restored';
 }
 
 function recoveryKind(metadata: RecoveryMetadata): RecoveryItemKind {

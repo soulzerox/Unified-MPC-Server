@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -223,10 +223,12 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     await mkdir(dataDir, { recursive: true });
     await writeFile(path.join(dataDir, 'cache.bin'), 'data', 'utf8');
 
-    const pruner = new PrunerService({ homeDir: home });
+    const pruner = new PrunerService({ homeDir: home, workspaceId: 'workspace-1' });
     const result = await pruner.pruneServer({
       name: 'cached-server',
       targets: ['antigravity'],
+      scope: 'workspace',
+      workspaceRoot: home,
       purgeDataDirs: [dataDir],
     });
 
@@ -248,9 +250,11 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     await mkdir(victim, { recursive: true });
     await symlink(outside, path.join(home, 'link'));
 
-    const result = await new PrunerService({ homeDir: home }).pruneServer({
+    const result = await new PrunerService({ homeDir: home, workspaceId: 'workspace-1' }).pruneServer({
       name: 'fixture',
       targets: ['antigravity'],
+      scope: 'workspace',
+      workspaceRoot: home,
       purgeDataDirs: [path.join(home, 'link', 'victim')],
     });
 
@@ -310,7 +314,7 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     const safeDataDir = path.join(home, '.config', 'my-server-data');
     await mkdir(safeDataDir, { recursive: true });
 
-    const pruner = new PrunerService({ homeDir: home });
+    const pruner = new PrunerService({ homeDir: home, workspaceId: 'workspace-1' });
 
     // Attempting to purge unsafe paths (system root, /etc, parent traversal, home itself)
     const unsafePaths = ['/etc', '/usr', '/', home, path.join(home, '..')];
@@ -318,6 +322,8 @@ describe('PrunerService - Server Pruning Pipeline', () => {
       const result = await pruner.pruneServer({
         name: 'test-server',
         targets: ['antigravity'],
+        scope: 'workspace',
+        workspaceRoot: home,
         purgeDataDirs: [unsafePath],
       });
       expect(result.ok).toBe(false);
@@ -327,7 +333,7 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     }
   });
 
-  it('moves purge data into recovery trash before reporting success', async () => {
+  it('rejects recoverable server pruning without a workspace identity', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-test-'));
     temporaryRoots.push(root);
     const home = path.join(root, 'home');
@@ -342,11 +348,20 @@ describe('PrunerService - Server Pruning Pipeline', () => {
       purgeDataDirs: [dataDir],
     });
 
-    expect(result).toMatchObject({ ok: true, value: { recoveryStatus: 'completed', recoveryIds: [expect.any(String)] } });
-    await expect(stat(dataDir)).rejects.toThrow();
-    const recoveryEntries = await readdir(recoveryRoot);
-    expect(recoveryEntries).toHaveLength(1);
-    await expect(stat(path.join(recoveryRoot, recoveryEntries[0], 'payload', 'state.json'))).resolves.toBeDefined();
+    expect(result).toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
+    await expect(stat(dataDir)).resolves.toBeDefined();
+  });
+
+  it('rejects recoverable server pruning without workspace scope and root', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-scope-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    await mkdir(dataDir, { recursive: true });
+    const result = await new PrunerService({ homeDir: root, workspaceId: 'workspace-1' }).pruneServer({
+      name: 'fixture', targets: ['antigravity'], purgeDataDirs: [dataDir],
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
+    await expect(stat(dataDir)).resolves.toBeDefined();
   });
 
   it('writes workspace-scoped recovery metadata when workspace identity is provided', async () => {
@@ -374,7 +389,7 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     if (!result.ok) return;
     const recoveryBase = path.join(recoveryRoot, 'workspace-1', result.value.recoveryIds[0]!);
     await expect(readFile(path.join(recoveryBase, 'metadata.json'), 'utf8')).resolves.toMatchObject(
-      /"version": 2[\s\S]*"workspaceId": "workspace-1"[\s\S]*"relativePath":/,
+      /"version": 2[\s\S]*"workspaceId": "workspace-1"[\s\S]*"state": "moved"[\s\S]*"relativePath":/,
     );
     await expect(stat(path.join(recoveryBase, 'payload', 'state.json'))).resolves.toBeDefined();
   });
@@ -409,8 +424,9 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     const result = await new PrunerService({
       homeDir: home,
       recoveryTrashRoot: path.join(root, 'recovery-trash'),
+      workspaceId: 'workspace-1',
       sessionManager: { dropServer: async (): Promise<void> => { throw new Error('stop failed'); } } as unknown as McpSessionManager,
-    }).pruneServer({ name: 'fixture', targets: ['antigravity'], purgeDataDirs: [dataDir] });
+    }).pruneServer({ name: 'fixture', targets: ['antigravity'], scope: 'workspace', workspaceRoot: home, purgeDataDirs: [dataDir] });
 
     expect(result).toMatchObject({ ok: false, error: { details: { recoveryStatus: 'partial' } } });
     expect(await readFile(path.join(dataDir, 'state.json'), 'utf8')).toBe('preserve me');

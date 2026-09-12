@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -75,6 +75,21 @@ describe('stdio MCP runtime', () => {
     try {
       expect(runtime.services.goals).toBeDefined();
       expect(runtime.services.scheduledContinuations).toBeDefined();
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('fails startup readiness when Recovery Trash contains corrupt workspace metadata', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-recovery-reconcile-'));
+    temporaryRoots.push(dataPath);
+    const recoveryBase = path.join(dataPath, 'recovery-trash', workspace.id, '11111111-1111-4111-8111-111111111111');
+    await mkdir(recoveryBase, { recursive: true });
+    await writeFile(path.join(recoveryBase, 'metadata.json'), '{not-json', 'utf8');
+
+    const runtime = createStdioMcpRuntime(dataPath, workspace);
+    try {
+      await expect(runtime.recoveryReady).rejects.toThrow('Recovery reconciliation found unsafe entries');
     } finally {
       await runtime.close();
     }

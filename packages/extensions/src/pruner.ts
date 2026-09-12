@@ -195,8 +195,12 @@ export class PrunerService {
     if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
       return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root is required for workspace-scoped server pruning'));
     }
-    if (scope === 'workspace' && input.purgeDataDirs !== undefined && input.purgeDataDirs.length > 0 && this.workspaceId === undefined) {
-      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace identity is required for recoverable workspace server pruning'));
+    if (input.purgeDataDirs !== undefined && input.purgeDataDirs.length > 0 && this.workspaceId === undefined) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace identity is required for recoverable server pruning'));
+    }
+    if (input.purgeDataDirs !== undefined && input.purgeDataDirs.length > 0
+      && (scope !== 'workspace' || workspaceRoot === undefined || workspaceRoot.length === 0)) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace scope and root are required for recoverable server pruning'));
     }
     const recoveryWorkspaceRoot = workspaceRoot ?? this.workspace;
 
@@ -237,25 +241,23 @@ export class PrunerService {
             if (s.isSymbolicLink()) continue;
             if (s.isDirectory() || s.isFile()) {
               const recoveryId = randomUUID();
-              const recoveryDir = this.workspaceId === undefined
-                ? path.join(this.recoveryTrashRoot, recoveryId)
-                : path.join(this.recoveryTrashRoot, this.workspaceId, recoveryId);
+              const recoveryDir = path.join(this.recoveryTrashRoot, this.workspaceId!, recoveryId);
               const recoveryPath = path.join(recoveryDir, 'payload');
               await mkdir(recoveryDir, { recursive: true, mode: 0o700 });
-              const metadata = this.workspaceId === undefined
-                ? { recoveryId, originalPath: dir }
-                : {
-                    version: 2,
-                    kind: 'deleted' as const,
-                    recoveryId,
-                    workspaceId: this.workspaceId,
-                    relativePath: path.relative(recoveryWorkspaceRoot!, dir),
-                    deletedAt: new Date().toISOString(),
-                    isDirectory: s.isDirectory(),
-                  };
+              const metadata = {
+                version: 2,
+                kind: 'deleted' as const,
+                state: 'prepared' as const,
+                recoveryId,
+                workspaceId: this.workspaceId!,
+                relativePath: path.relative(recoveryWorkspaceRoot!, dir),
+                deletedAt: new Date().toISOString(),
+                isDirectory: s.isDirectory(),
+              };
               await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
               await rename(dir, recoveryPath);
               movedData.push({ source: dir, recoveryPath });
+              await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify({ ...metadata, state: 'moved' })}\n`, { mode: 0o600 });
               recoveryIds.push(recoveryId);
               removedPaths.push(dir);
             }

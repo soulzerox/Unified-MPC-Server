@@ -38,6 +38,7 @@ async function main(): Promise<void> {
 
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined));
   await runtime.activityReady;
+  await runtime.recoveryReady;
   const publicHostnames = envList('UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES');
   const publicOrigins = envList('UNIFIED_MPC_MCP_ALLOWED_ORIGINS');
   const handle = await startMcpHttp({

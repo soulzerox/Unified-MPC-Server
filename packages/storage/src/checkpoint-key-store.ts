@@ -46,6 +46,7 @@ export class CheckpointKeyStore {
     try {
       const metadata = await lstat(this.options.filePath);
       if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error('Protected checkpoint key is not a trusted regular file');
+      if ((metadata.mode & 0o777) !== 0o600) throw new Error('Protected checkpoint key has unsafe permissions');
       encrypted = await readFile(this.options.filePath, 'utf8');
     } catch (error: unknown) {
       if (isMissingFile(error)) return null;
@@ -103,19 +104,16 @@ async function ensurePrivateParent(directory: string): Promise<void> {
   let current = root;
   for (const component of absolute.slice(root.length).split(path.sep).filter(Boolean)) {
     current = path.join(current, component);
-    const isFinalParent = current === absolute;
     try {
       const metadata = await lstat(current);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('Checkpoint key parent is not a trusted directory');
-      if (isFinalParent && !isTrustedSharedAncestor(current, metadata) && typeof process.getuid === 'function' && metadata.uid !== process.getuid()) throw new Error('Checkpoint key parent has an unexpected owner');
-      if (!isFinalParent && (metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('Checkpoint key parent is world-writable');
+      if (!isTrustedSharedAncestor(current, metadata) && typeof process.getuid === 'function') {
+        if (metadata.uid !== process.getuid()) throw new Error('Checkpoint key parent has an unexpected owner');
+        if ((metadata.mode & 0o077) !== 0) await chmod(current, 0o700);
+      }
     } catch (error: unknown) {
       if (!isMissingFile(error)) throw error;
       await mkdir(current, { mode: 0o700 });
-    }
-    if (isFinalParent) {
-      const metadata = await lstat(current);
-      if (!isTrustedSharedAncestor(current, metadata)) await chmod(current, 0o700);
     }
   }
 }

@@ -349,6 +349,56 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     await expect(stat(path.join(recoveryRoot, recoveryEntries[0], 'payload', 'state.json'))).resolves.toBeDefined();
   });
 
+  it('writes workspace-scoped recovery metadata when workspace identity is provided', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-workspace-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(home, '.config', 'server-data');
+    const recoveryRoot = path.join(root, 'recovery-trash');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(path.join(dataDir, 'state.json'), '{"safe":true}\n', 'utf8');
+
+    const result = await new PrunerService({
+      homeDir: home,
+      recoveryTrashRoot: recoveryRoot,
+      workspaceId: 'workspace-1',
+    }).pruneServer({
+      name: 'fixture',
+      targets: ['antigravity'],
+      workspaceRoot: home,
+      scope: 'workspace',
+      purgeDataDirs: [dataDir],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const recoveryBase = path.join(recoveryRoot, 'workspace-1', result.value.recoveryIds[0]!);
+    await expect(readFile(path.join(recoveryBase, 'metadata.json'), 'utf8')).resolves.toMatchObject(
+      /"version": 2[\s\S]*"workspaceId": "workspace-1"[\s\S]*"relativePath":/,
+    );
+    await expect(stat(path.join(recoveryBase, 'payload', 'state.json'))).resolves.toBeDefined();
+  });
+
+  it('rejects workspace data recovery without an explicit workspace identity', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-missing-workspace-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(home, '.config', 'server-data');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(path.join(dataDir, 'state.json'), '{"safe":true}\n', 'utf8');
+
+    const result = await new PrunerService({ homeDir: home }).pruneServer({
+      name: 'fixture',
+      targets: ['antigravity'],
+      workspaceRoot: home,
+      scope: 'workspace',
+      purgeDataDirs: [dataDir],
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
+    await expect(stat(dataDir)).resolves.toBeDefined();
+  });
+
   it('restores moved data when session termination fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-rollback-'));
     temporaryRoots.push(root);

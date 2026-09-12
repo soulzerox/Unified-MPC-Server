@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { open, readFile, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { writeAtomic } from './ide-sync.js';
@@ -50,10 +50,13 @@ async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(`${process.pid}\n`, 'utf8');
-      await handle.close();
-      return async (): Promise<void> => { await unlink(lockPath).catch(() => undefined); };
+      await mkdir(lockPath, { mode: 0o700 });
+      const ownerPath = path.join(lockPath, `${process.pid}-${randomUUID()}.owner`);
+      await writeFile(ownerPath, `${process.pid}\n`, { mode: 0o600 });
+      return async (): Promise<void> => {
+        await unlink(ownerPath).catch(() => undefined);
+        await rmdir(lockPath).catch(() => undefined);
+      };
     } catch (error: unknown) {
       if (!isAlreadyExists(error)) throw error;
       if (Date.now() >= deadline) throw new Error(`Timed out acquiring config mutation lock: ${lockPath}`);

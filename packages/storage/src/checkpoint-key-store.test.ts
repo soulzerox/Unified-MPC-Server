@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, rm, mkdtemp, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rm, mkdtemp, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -41,6 +41,25 @@ describe('CheckpointKeyStore', () => {
         filePath: path.join(linkParent, 'checkpoint-master.key'),
         secretProtector: protector,
       }).loadOrCreate()).rejects.toThrow(/trusted|symlink|directory/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('hardens every existing checkpoint parent and the key file mode', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-checkpoint-key-ancestors-'));
+    try {
+      const nested = path.join(root, 'shared', 'nested');
+      await mkdir(nested, { recursive: true, mode: 0o777 });
+      await chmod(path.join(root, 'shared'), 0o775);
+      await chmod(nested, 0o775);
+      const filePath = path.join(nested, 'checkpoint-master.key');
+      const protector = createExplicitKeySecretProtector(Buffer.alloc(32, 14));
+      await new CheckpointKeyStore({ filePath, secretProtector: protector }).loadOrCreate();
+
+      expect((await stat(path.join(root, 'shared'))).mode & 0o777).toBe(0o700);
+      expect((await stat(nested)).mode & 0o777).toBe(0o700);
+      expect((await stat(filePath)).mode & 0o777).toBe(0o600);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -122,6 +141,7 @@ describe('CheckpointKeyStore', () => {
     try {
       const filePath = path.join(root, 'checkpoint-master.key');
       await writeFile(filePath, 'safe:v1:not-base64', 'utf8');
+      await chmod(filePath, 0o600);
       const protector = createExplicitKeySecretProtector(Buffer.alloc(32, 12));
 
       await expect(new CheckpointKeyStore({ filePath, secretProtector: protector }).loadOrCreate())
@@ -139,6 +159,7 @@ describe('CheckpointKeyStore', () => {
     try {
       const filePath = path.join(root, 'checkpoint-master.key');
       await writeFile(filePath, 'foreign:v2:ciphertext', 'utf8');
+      await chmod(filePath, 0o600);
 
       const protector = createExplicitKeySecretProtector(Buffer.alloc(32, 9));
       const store = new CheckpointKeyStore({ filePath, secretProtector: protector });

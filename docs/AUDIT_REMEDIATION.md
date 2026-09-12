@@ -1,8 +1,8 @@
 # Audit Remediation Record
 
 **Scope:** Unified MCP Server audit remediation and functional web control plane
-**Accepted base:** `1ccc780` plus current remediation working tree
-**Status:** audit remediation implemented; live Cloudflare/ChatGPT Web evidence and Rust toolchain remain pending
+**Accepted base:** `596078b`
+**Status:** P0/P1 guardrails updated; live Cloudflare/ChatGPT Web evidence and Rust toolchain remain pending
 
 ## Findings fixed
 
@@ -63,3 +63,18 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - Extension transaction uses an OS lock keyed by config set plus an in-process queue; acquisition times out fail-closed rather than reclaiming a possibly reused PID's lock. `node scripts/test-config-mutation-lock.mjs` verifies two separate processes serialize.
 - Purge data moves into Recovery Trash with a recovery ID before completion. Session/config failure restores moved paths when possible; errors expose `recoveryStatus` as `partial` or `rollback_failed`.
 - Release gate is `corepack pnpm release:verify`; local Rust verification remains blocked when `cargo` is unavailable. External MCP fixtures cover legacy and modern child handshakes; live ChatGPT Web and Cloudflare evidence remain operator-gated.
+
+## Current remediation delta
+
+- Workspace-scoped pruner recovery records now use Recovery Center layout and version-2 metadata when an explicit `workspaceId` is supplied. Global prune records retain legacy metadata; runtime wiring must supply a registered workspace identity before those records can appear in Recovery Center.
+- Recovery metadata is written before payload rename. A crash can leave an orphan record, but it cannot leave moved payload without metadata; startup reconciliation and orphan presentation remain open.
+- Config mutation lock uses a per-acquisition owner file and removes only its own owner record. Cross-process serialization self-check passes.
+- Checkpoint key storage validates and hardens every existing parent ancestor and requires key file mode `0600`.
+- `release:verify` prints and validates exact `HEAD`, rejects dirty trees, and accepts optional `RELEASE_EXPECTED_SHA`. CI actions are pinned to immutable commit SHAs.
+
+## Remaining release blockers
+
+- `cargo` is absent in current environment; Rust release stage cannot run.
+- `gh` is absent; exact GitHub Actions run evidence cannot be collected locally.
+- Live Cloudflare tunnel and ChatGPT Web acceptance remain unrun.
+- Recovery startup reconciliation and explicit external-MCP allowlist/approval/drift policy remain open.

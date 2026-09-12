@@ -1,4 +1,5 @@
-import { lstat, readFile, readdir, realpath, rm, stat, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -33,6 +34,8 @@ export interface PruneServerResult {
   readonly updatedConfigFiles: readonly string[];
   readonly processTerminated: boolean;
   readonly removedPaths: readonly string[];
+  readonly recoveryStatus: 'completed';
+  readonly recoveryIds: readonly string[];
 }
 
 export interface PrunerServiceOptions {
@@ -40,6 +43,7 @@ export interface PrunerServiceOptions {
   readonly appDataDir?: string;
   readonly workspaceRoot?: string;
   readonly sessionManager?: McpSessionManager;
+  readonly recoveryTrashRoot?: string;
 }
 
 const ALL_TARGETS: readonly InstallTarget[] = [
@@ -69,12 +73,14 @@ export class PrunerService {
   private readonly appData: string;
   private readonly workspace: string | undefined;
   private readonly sessionManager: McpSessionManager | undefined;
+  private readonly recoveryTrashRoot: string;
 
   public constructor(options: PrunerServiceOptions = {}) {
     this.home = options.homeDir ?? os.homedir();
     this.appData = options.appDataDir?.trim() ?? path.join(this.home, '.config');
     this.workspace = options.workspaceRoot?.trim();
     this.sessionManager = options.sessionManager;
+    this.recoveryTrashRoot = options.recoveryTrashRoot ?? path.join(this.home, '.unified-mpc', 'recovery-trash');
   }
 
   public async pruneSkill(input: PruneSkillInput): Promise<Result<PruneSkillResult>> {
@@ -204,7 +210,10 @@ export class PrunerService {
       .filter((configFile): configFile is string => configFile !== undefined);
     const updatedConfigFiles: string[] = [];
     const removedPaths: string[] = [];
+    const recoveryIds: string[] = [];
+    const movedData: Array<{ readonly source: string; readonly recoveryPath: string }> = [];
     let processTerminated = false;
+    let recoveryStatus: 'partial' | 'rollback_failed' = 'partial';
 
     try {
       await withConfigMutationTransaction(configFiles, async () => {
@@ -219,7 +228,14 @@ export class PrunerService {
             const s = await lstat(dir);
             if (s.isSymbolicLink()) continue;
             if (s.isDirectory() || s.isFile()) {
-              await rm(dir, { recursive: true, force: true });
+              const recoveryId = randomUUID();
+              const recoveryDir = path.join(this.recoveryTrashRoot, recoveryId);
+              const recoveryPath = path.join(recoveryDir, 'payload');
+              await mkdir(recoveryDir, { recursive: true, mode: 0o700 });
+              await rename(dir, recoveryPath);
+              movedData.push({ source: dir, recoveryPath });
+              await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify({ recoveryId, originalPath: dir })}\n`, { mode: 0o600 });
+              recoveryIds.push(recoveryId);
               removedPaths.push(dir);
             }
           }
@@ -232,7 +248,21 @@ export class PrunerService {
         }
       });
     } catch (error: unknown) {
-      return err(appError('INTERNAL_ERROR', `Failed to prune server '${serverName}': ${error instanceof Error ? error.message : String(error)}`));
+      try {
+        for (const moved of [...movedData].reverse()) {
+          await mkdir(path.dirname(moved.source), { recursive: true });
+          await rename(moved.recoveryPath, moved.source);
+          await rm(path.dirname(moved.recoveryPath), { recursive: true, force: true });
+        }
+      } catch {
+        recoveryStatus = 'rollback_failed';
+      }
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to prune server '${serverName}': ${error instanceof Error ? error.message : String(error)}`,
+        recoveryStatus !== 'rollback_failed',
+        { recoveryStatus },
+      ));
     }
 
     return ok({
@@ -240,6 +270,8 @@ export class PrunerService {
       updatedConfigFiles,
       processTerminated,
       removedPaths,
+      recoveryStatus: 'completed',
+      recoveryIds,
     });
   }
 

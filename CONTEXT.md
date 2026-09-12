@@ -12,7 +12,7 @@
 - **Skill**: An agent instruction set consisting of markdown documentation (`SKILL.md`), optional prompt guidelines, and supporting scripts. Skills teach agents *how* to behave and execute workflows. Skills never spawn standalone background daemon processes.
 - **MCP Server**: An executable process providing tools and resources adhering to the Model Context Protocol over stdio, SSE, or HTTP. MCP servers supply *what* capabilities are available to execute.
 - **Bifurcated Installer**: An architectural separation ensuring that Skill ingestion and MCP Server mounting are separate, strongly-typed operations across interfaces, CLI commands, and UI screens. The split is enforced at the type level — `InstallSkillInput` and `InstallServerInput` share zero fields.
-- **Zero-Artifact Pruner**: An atomic uninstallation transaction that cleanly shuts down child processes, wipes package files, and purges all target configuration references without leaving dangling state.
+- **Zero-Artifact Pruner**: A recoverable uninstallation transaction that cleanly shuts down child processes, purges target configuration references, and moves approved data paths into Recovery Trash before completion. Failed follow-up mutations restore moved data when possible and report recovery status.
 - **Gated ChatGPT Web Connection**: A state machine requirement on the local web control plane (`apps/web`) ensuring the remote MCP server bridge/gateway (`apps/cf-gateway`) is active, tunneled, and healthy before permitting a client session to initiate.
 - **Ponytail Runtime**: A senior software engineering harness enforcing the YAGNI principle, minimal diff footprints, root-cause debugging, and review gates across model actions. Has four intensity modes: `OFF`, `LITE`, `FULL` (default), `ULTRA`.
 - **Two-Tier Tool Catalog**: An on-demand tool exposition pattern where only core essential tools are permanently kept in the model's active context window, while hundreds of specialized tools are discovered via `catalog_list` and invoked via `call_tool_dynamic`.
@@ -37,6 +37,7 @@ These invariants must hold in any correct implementation. An agent that violates
 9. **Electron Is Gone**: `apps/desktop` must never be re-introduced. All UI lives in `apps/web` on loopback or the native CLI.
 10. **Linux Ubuntu Target (Zero Windows Code)**: The runtime platform is 100% Linux Ubuntu (POSIX and Linux XDG). No PowerShell scripts, Windows binaries (`.exe`), WSB sandbox manifests, or `win32` platform branches exist or may be added.
 11. **Clean Namespace & Zero Backward Compat**: All workspace packages exclusively reside under `@unified-mpc/*`. No legacy `@lnwjud/*` aliases, shims, or fallback directory checks are retained.
+12. **Mutation Recovery**: Destructive extension data removal must use Recovery Trash; config mutation transactions use an OS lock so separate processes cannot interleave snapshots and writes. Checkpoint key parents must be owner-controlled, mode `0700`, and free of symlink components.
 
 ---
 

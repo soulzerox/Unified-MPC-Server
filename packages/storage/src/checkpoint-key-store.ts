@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { assertSecretPlaintext, type SecretProtector } from '@unified-mpc/shared';
 
@@ -29,7 +29,7 @@ export class CheckpointKeyStore {
 
     const generated = randomBytes(this.byteLength);
     const encrypted = await this.options.secretProtector.encrypt('checkpoint_master_key', generated.toString('base64'));
-    await mkdir(path.dirname(path.resolve(this.options.filePath)), { recursive: true });
+    await ensurePrivateParent(path.dirname(path.resolve(this.options.filePath)));
     try {
       await writeExclusive(this.options.filePath, encrypted);
       return generated;
@@ -79,7 +79,7 @@ async function writeExclusive(filePath: string, contents: string): Promise<void>
 
 async function writeAtomic(filePath: string, contents: string): Promise<void> {
   const absolutePath = path.resolve(filePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await ensurePrivateParent(path.dirname(absolutePath));
   const temporaryPath = `${absolutePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
     await writeExclusive(temporaryPath, contents);
@@ -95,4 +95,31 @@ function isMissingFile(error: unknown): boolean {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
+}
+
+async function ensurePrivateParent(directory: string): Promise<void> {
+  const absolute = path.resolve(directory);
+  const root = path.parse(absolute).root;
+  let current = root;
+  for (const component of absolute.slice(root.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    const isFinalParent = current === absolute;
+    try {
+      const metadata = await lstat(current);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('Checkpoint key parent is not a trusted directory');
+      if (isFinalParent && !isTrustedSharedAncestor(current, metadata) && typeof process.getuid === 'function' && metadata.uid !== process.getuid()) throw new Error('Checkpoint key parent has an unexpected owner');
+      if (!isFinalParent && (metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('Checkpoint key parent is world-writable');
+    } catch (error: unknown) {
+      if (!isMissingFile(error)) throw error;
+      await mkdir(current, { mode: 0o700 });
+    }
+    if (isFinalParent) {
+      const metadata = await lstat(current);
+      if (!isTrustedSharedAncestor(current, metadata)) await chmod(current, 0o700);
+    }
+  }
+}
+
+function isTrustedSharedAncestor(directory: string, metadata: { readonly mode: number }): boolean {
+  return directory === '/tmp' && (metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) !== 0;
 }

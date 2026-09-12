@@ -1,4 +1,4 @@
-import { readFile, readdir, rm, mkdtemp, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rm, mkdtemp, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -17,6 +17,30 @@ describe('CheckpointKeyStore', () => {
       expect(second).toEqual(first);
       expect(await readFile(filePath, 'utf8')).toMatch(/^safe:v1:/);
       expect((await readFile(filePath, 'utf8'))).not.toContain(first.toString('base64'));
+      expect((await stat(root)).mode & 0o777).toBe(0o700);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a private key parent and rejects a symlinked key parent', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-checkpoint-key-parent-'));
+    try {
+      const nested = path.join(root, 'private', 'nested');
+      const filePath = path.join(nested, 'checkpoint-master.key');
+      const protector = createExplicitKeySecretProtector(Buffer.alloc(32, 13));
+      await new CheckpointKeyStore({ filePath, secretProtector: protector }).loadOrCreate();
+      expect((await stat(nested)).mode & 0o777).toBe(0o700);
+      expect((await lstat(nested)).isSymbolicLink()).toBe(false);
+
+      const outside = path.join(root, 'outside');
+      await mkdir(outside);
+      const linkParent = path.join(root, 'link-parent');
+      await symlink(outside, linkParent);
+      await expect(new CheckpointKeyStore({
+        filePath: path.join(linkParent, 'checkpoint-master.key'),
+        secretProtector: protector,
+      }).loadOrCreate()).rejects.toThrow(/trusted|symlink|directory/i);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

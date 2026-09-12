@@ -101,6 +101,8 @@ describe('prune CLI commands', () => {
         updatedConfigFiles: ['/home/user/.cline/cline_mcp_settings.json'],
         processTerminated: true,
         removedPaths: [],
+        recoveryStatus: 'completed',
+        recoveryIds: [],
       };
       const service = {
         pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult, unknown>> => {

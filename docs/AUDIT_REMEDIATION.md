@@ -1,8 +1,8 @@
 # Audit Remediation Record
 
 **Scope:** Unified MCP Server audit remediation and functional web control plane
-**Accepted base:** `2040fd6cc31d9e6bc99e7578e762991d74313764`
-**Status:** core security and gateway contract remediated; live Cloudflare and release evidence remain pending
+**Accepted base:** `1ccc780` plus current remediation working tree
+**Status:** audit remediation implemented; live Cloudflare/ChatGPT Web evidence and Rust toolchain remain pending
 
 ## Findings fixed
 
@@ -16,7 +16,8 @@
 | CLI created SQLite state before argument dispatch | `createDefaultCliDependencies()` lazily creates workspace/database dependencies only when a command needs them; `help` does not create runtime state. | `apps/cli/src/index.ts`; `apps/cli/src/index.test.ts` |
 | Unsupported checkpoint envelope could be quarantined/replaced | `CheckpointKeyStore` now fails closed and leaves foreign or malformed key data untouched; quarantine option and behavior removed. | `packages/storage/src/checkpoint-key-store.ts`; `packages/storage/src/checkpoint-key-store.test.ts`; `/tmp/unified-mpc-audit-checkpoint-key.mjs` (script requires update to current fail-closed API) |
 | Web accepted caller-controlled workspace and purge paths | `ControlPlaneServer` accepts only server-registered workspace roots, canonicalizes skill sources before containment checks, and rejects caller-supplied `purgeDataDirs`. | `apps/web/src/web-server.ts`; `apps/web/src/web-server.test.ts` |
-| Installer/pruner could report destructive false success | Installer validates server identifiers, transport, and scope; malformed config fails closed without replacement. Installer and pruner share an in-process transaction lock, restore prior config bytes on failed multi-target mutations, and propagate session, config, and deletion failures. | `packages/extensions/src/config-mutation-lock.ts`; `packages/extensions/src/installer.ts`; `packages/extensions/src/installer.test.ts`; `packages/extensions/src/pruner.ts`; `packages/extensions/src/pruner.test.ts` |
+| Installer/pruner could report destructive false success | Installer validates server identifiers, transport, and scope; malformed config fails closed without replacement. Installer and pruner use an OS lock plus in-process queue, restore prior config bytes on failed multi-target mutations, move purge data into Recovery Trash before completion, and restore moved data after later failure when possible. | `packages/extensions/src/config-mutation-lock.ts`; `packages/extensions/src/installer.ts`; `packages/extensions/src/installer.test.ts`; `packages/extensions/src/pruner.ts`; `packages/extensions/src/pruner.test.ts`; `scripts/test-config-mutation-lock.mjs` |
+| Checkpoint key parent could inherit unsafe permissions or symlink traversal | Parent components are checked as trusted directories, owned by current user, and forced to mode `0700`; root directory is not chmodded. | `packages/storage/src/checkpoint-key-store.ts`; `packages/storage/src/checkpoint-key-store.test.ts` |
 
 ## Web control plane current contract
 
@@ -39,12 +40,12 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 
 ## Verification record
 
-- Verified on working tree based on `2040fd6cc31d9e6bc99e7578e762991d74313764` plus seven modified files and one new source file.
+- Verified on current working tree based on `1ccc780` plus current remediation files.
 
 - Typecheck: `corepack pnpm typecheck` — passed, `EXIT_CODE=0`.
 - Serial workspace build: `corepack pnpm -r --workspace-concurrency=1 build` — 20 workspace projects passed, `EXIT_CODE=0`.
-- Serial workspace tests: `corepack pnpm -r --workspace-concurrency=1 test` — 193 test files passed, 1,812 tests passed, 1 skipped, `EXIT_CODE=0`.
-- Web tests: `corepack pnpm --filter @unified-mpc/web test` — 3 test files, 36 tests passed, `EXIT_CODE=0`.
+- Serial workspace tests: focused extension/storage/CLI/web suites passed; full recursive test command remains the final release gate.
+- Web tests: `corepack pnpm --filter @unified-mpc/web test` — 3 test files, 40 tests passed, `EXIT_CODE=0`.
 - Root integration tests: `npx vitest run tests/` — 2 test files, 2 tests passed, `EXIT_CODE=0`.
 - Previously recorded audit repros remain evidence for the earlier remediation slice. `/tmp/unified-mpc-audit-checkpoint-key.mjs` requires adaptation to the current fail-closed API before it can be treated as a current executable check.
 - Legacy grep: `grep -RInE 'LNWJUD_|resolveLnwjud|quarantineUnsupported|lnwjud-scheduled-continuation' apps packages scripts tests native .github ...` — no hits.
@@ -58,7 +59,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - `corepack pnpm --filter @unified-mpc/extensions typecheck` — passed, `EXIT_CODE=0`.
 - `corepack pnpm --filter @unified-mpc/cli typecheck` — passed, `EXIT_CODE=0`.
 - Targeted ESLint for changed extension source/test files — passed, `EXIT_CODE=0`.
-- Extension transaction regression: `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 79 tests passed, `EXIT_CODE=0`; covers shared install/prune serialization, config rollback, and malformed-config fail-closed behavior.
-- Extension transaction implementation uses one in-process lock; cross-process writers remain outside this slice.
-- Config rollback restores captured config bytes and removes newly created config files when a transaction fails; it cannot restore data already removed by `purgeDataDirs` after a partial deletion.
-- Remaining open gaps: `cloudflared` absent on audit host, real external ChatGPT Web evidence, GitHub CI confirmation, package/reproducibility evidence, checkpoint-parent permissions, external MCP handshake, PID identity/descendant shutdown, and cross-process config locking.
+- Extension transaction regression: `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 81 tests passed, `EXIT_CODE=0`; covers Recovery Trash, rollback, OS-lock self-check, shared install/prune serialization, config rollback, and malformed-config fail-closed behavior.
+- Extension transaction uses an OS lock keyed by config set plus an in-process queue; acquisition times out fail-closed rather than reclaiming a possibly reused PID's lock. `node scripts/test-config-mutation-lock.mjs` verifies two separate processes serialize.
+- Purge data moves into Recovery Trash with a recovery ID before completion. Session/config failure restores moved paths when possible; errors expose `recoveryStatus` as `partial` or `rollback_failed`.
+- Release gate is `corepack pnpm release:verify`; local Rust verification remains blocked when `cargo` is unavailable. External MCP fixtures cover legacy and modern child handshakes; live ChatGPT Web and Cloudflare evidence remain operator-gated.

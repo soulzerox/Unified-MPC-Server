@@ -40,32 +40,12 @@ jobs:
         shell: bash
         run: corepack pnpm install --frozen-lockfile
 
-      - name: Typecheck all 21 packages
+      - name: Run unified release verification
         shell: bash
-        run: corepack pnpm typecheck
-
-      - name: Run lint
-        shell: bash
-        run: corepack pnpm lint
-
-      - name: Run package test suites
-        shell: bash
-        run: corepack pnpm test
-
-      - name: Run root integration test suites
-        shell: bash
-        run: npx vitest run tests/
-
-      - name: Build all packages
-        shell: bash
-        run: corepack pnpm build
+        run: corepack pnpm release:verify
 
       - name: Verify CLI binary execution
         shell: bash
         run: |
           node apps/cli/dist/index.js --help
           node apps/cli/dist/index.js status
-
-      - name: Test Linux native host (Rust)
-        shell: bash
-        run: cargo test --manifest-path native/linux-host/Cargo.toml --locked

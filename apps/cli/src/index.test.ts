@@ -197,6 +197,8 @@ describe('CLI execution dispatcher', () => {
         updatedConfigFiles: ['/home/user/.cline/cline_mcp_settings.json'],
         processTerminated: true,
         removedPaths: [],
+        recoveryStatus: 'completed',
+        recoveryIds: [],
       }),
       write: (text) => output.push(text),
     };

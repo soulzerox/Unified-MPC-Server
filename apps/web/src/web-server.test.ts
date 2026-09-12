@@ -203,7 +203,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         captured = input;
         return {
           ok: true as const,
-          value: { name: String(input.name), updatedConfigFiles: [], processTerminated: false, removedPaths: [] },
+          value: { name: String(input.name), updatedConfigFiles: [], processTerminated: false, removedPaths: [], recoveryStatus: 'completed', recoveryIds: [] },
         };
       },
     } as unknown as PrunerService;

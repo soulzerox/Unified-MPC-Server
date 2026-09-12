@@ -82,6 +82,8 @@ unified-mpc prune server <name> [--targets <targets>] [--scope global|workspace]
 unified-mpc prune server sqlite --targets cline,opencode
 ```
 
+Data purge moves approved paths into Recovery Trash before success. Successful results include `recoveryStatus: "completed"` and `recoveryIds`; later failure reports `recoveryStatus` as `partial` or `rollback_failed`.
+
 ---
 
 ## 4. Policy Synchronization Command

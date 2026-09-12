@@ -13,6 +13,7 @@
     "test": "corepack pnpm -r --if-present test",
     "build": "corepack pnpm -r --if-present build",
     "version:check": "node scripts/check-version-consistency.mjs",
+    "release:verify": "node scripts/release-verify.mjs",
     "start": "corepack pnpm --filter @unified-mpc/cli build && node apps/cli/dist/index.js",
     "cli": "node apps/cli/dist/index.js",
     "docs:tools": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs",

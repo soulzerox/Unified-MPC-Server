@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -325,6 +325,45 @@ describe('PrunerService - Server Pruning Pipeline', () => {
         expect(result.error.code).toBe('PERMISSION_DENIED');
       }
     }
+  });
+
+  it('moves purge data into recovery trash before reporting success', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-test-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(home, '.config', 'server-data');
+    const recoveryRoot = path.join(root, 'recovery-trash');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(path.join(dataDir, 'state.json'), '{"safe":true}\n', 'utf8');
+
+    const result = await new PrunerService({ homeDir: home, recoveryTrashRoot: recoveryRoot }).pruneServer({
+      name: 'fixture',
+      targets: ['antigravity'],
+      purgeDataDirs: [dataDir],
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { recoveryStatus: 'completed', recoveryIds: [expect.any(String)] } });
+    await expect(stat(dataDir)).rejects.toThrow();
+    const recoveryEntries = await readdir(recoveryRoot);
+    expect(recoveryEntries).toHaveLength(1);
+    await expect(stat(path.join(recoveryRoot, recoveryEntries[0], 'payload', 'state.json'))).resolves.toBeDefined();
+  });
+
+  it('restores moved data when session termination fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-recovery-rollback-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(home, '.config', 'server-data');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(path.join(dataDir, 'state.json'), 'preserve me', 'utf8');
+    const result = await new PrunerService({
+      homeDir: home,
+      recoveryTrashRoot: path.join(root, 'recovery-trash'),
+      sessionManager: { dropServer: async (): Promise<void> => { throw new Error('stop failed'); } } as unknown as McpSessionManager,
+    }).pruneServer({ name: 'fixture', targets: ['antigravity'], purgeDataDirs: [dataDir] });
+
+    expect(result).toMatchObject({ ok: false, error: { details: { recoveryStatus: 'partial' } } });
+    expect(await readFile(path.join(dataDir, 'state.json'), 'utf8')).toBe('preserve me');
   });
 
   it('purges server entry from workspace configs when scope is workspace', async () => {

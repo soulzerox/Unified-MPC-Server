@@ -6,7 +6,7 @@ This checklist records Linux release acceptance evidence. No external release-pr
 
 Run verification from Linux repository root. Every stage must fail fast; `git diff --check` must pass. No packaging, publishing, tag, or release claim without current evidence.
 
-Required commands: `corepack pnpm version:check`, `corepack pnpm typecheck`, `corepack pnpm lint`, `corepack pnpm test`, `corepack pnpm build`, and `cargo test --manifest-path native/linux-host/Cargo.toml --locked`.
+Required command: `corepack pnpm release:verify`. It runs version consistency, typecheck, lint, all tests, build, root integration tests, diff whitespace checks, cross-process lock self-check, and Rust tests. Missing Rust tooling is a release blocker.
 
 Secrets never appear in logs, release evidence, or tracked files. Cloudflare tokens and capability cookies stay operator-local.
 
@@ -14,11 +14,11 @@ Secrets never appear in logs, release evidence, or tracked files. Cloudflare tok
 
 - Workspace traversal and junction/reparse-point tests pass without broadening the configured path boundary.
 - Secret-file policy and log/incident redaction tests pass; release evidence must never contain credentials or tokens.
-- AV-sensitive secret-code tests pass: compiled Desktop output and packaged runtime evidence contain no legacy PowerShell secret modules, stale DPAPI imports, `unified-mpc-node.exe`, or `unified-mpc-mcp-stdio.cjs`.
+- Compiled Linux runtime evidence contains no unsupported platform-specific artifacts or secret material.
 - MCP local HTTP and STDIO transport tests pass, including protocol-only stdout and production handshake coverage.
 - External MCP client negotiation is compatibility-driven rather than pinned to unified-mpc's inbound protocol: real stdio fixtures must prove both a legacy/2025-era child and a modern `2026-07-28` child connect through the production External MCP client factory, while unified-mpc's own inbound/local MCP `2026-07-28` contract remains unchanged. Release preparation also performs a local installed-Serena smoke when Serena is present; its absence is not a CI dependency.
 - Remote MCP OAuth DCR accepts ChatGPT-style metadata, validates `client_secret_post` credentials at the token endpoint, and returns explicit 4xx errors for malformed or unsupported registration metadata.
-- OpenAI Secure Tunnel targets the Desktop loopback HTTP MCP (`sample_mcp_remote_no_auth`) rather than a separate headless stdio runtime, preserving the Desktop profile and Desktop Full Bypass state. Active Project scope/native approval remain enforced when Desktop Full Bypass is OFF.
+- OpenAI Secure Tunnel targets the loopback HTTP MCP runtime; Active Project scope/native approval remain enforced when Full Bypass is OFF.
 - Persistent-tunnel acceptance preserves one saved tunnel identity across managed-runtime loss, Desktop/local-MCP rebinding, update/reinstall startup, and detached-runtime handoff; transient retry is capped but unbounded in count, while auth/operator failures do not tight-loop.
 - The installed official tunnel client capability probe must show managed `runtimes connect/status/stop` plus health/readiness/control-plane-poll support. Strict zero-downtime may be claimed only if a ready-before-retire overlap primitive is actually proven; otherwise the product must display the capability limitation.
 - Linux release packages must use the configured `cloudflared` binary or an explicitly verified operator-provided binary. No silent system fallback in packaged release.
@@ -33,7 +33,7 @@ Secrets never appear in logs, release evidence, or tracked files. Cloudflare tok
 - Tool catalog synchronization passes with 233 total definitions, 226 advertised by default, and all 233 advertised with the six opt-in `codex_*` delegation tools plus `agent_swarm_run` enabled. Hard Settings/runtime eligibility must outrank per-tool overrides: a stale `enabled` preference cannot expose Codex-family tools while Codex Delegation is OFF, and a system-ineligible/setup-required tool must not present a misleading usable enable action. The Tools UI switch reflects `effectiveExposed`, uses a disabled `Setup first / ตั้งค่าก่อน` state when prerequisites are unsatisfied, while ready tools still support persisted disable/re-enable. Tools/Doctor share one cached requirement snapshot, all six readiness states are covered, permission deny projects `blocked`, and selected recheck updates both surfaces. External MCP tools whose server connection and `tools/list` discovery succeed project `ready` transport/catalog status, while child-server permission, profile, cancellation, and dry-run metadata remain explicitly undeclared/unverified instead of inheriting first-party claims.
 - Ponytail acceptance remains covered by its own package tests; this checklist records only current Linux release evidence.
 - Readiness probes remain side-effect-free: no tool invocation, project-file creation, project command, input control, or Office-document open is used to prove availability. Remediation URLs/commands/settings targets are main-process allowlisted rather than renderer-controlled.
-- Remediation acceptance proves Managed Browser can be started directly from Tools/Doctor and PDF Provider setup downloads the pinned Poppler archive, verifies SHA-256 before extraction, installs it under app data, and configures `pdftotext.exe` automatically; manual provider configuration remains supported.
+- Remediation acceptance proves browser tooling can be started directly from Tools/Doctor and PDF Provider setup verifies any configured Linux PDF utility before use; manual provider configuration remains supported.
 - Issue-first Doctor acceptance covers required `fail` and `unknown` startup blocking, optional failure non-blocking behavior, affected-tool listing, remediation actions, passed-check collapsing, and selected recheck recovery.
 - Desktop and direct STDIO Full Bypass toggles are independent, default OFF, appear only in the Full Access (Unrestricted) card, and are effective only with the matching Full profile. Header/audit evidence identifies the active transport mode.
 - Full Bypass integration tests prove always-confirm families and inner process/document/Sandbox/upgrade runtimes dispatch without chat/host/profile/command/scope approval, including explicit absolute outside paths, while caller input is not rewritten to `userConfirmed: true`. Durable rolling-goal ownership is not an approval gate: when a live scheduled-goal mutation fence exists, the current `goalLease` is still required and stale/missing proof must fail before handler execution; when no rolling fence exists, ordinary Full Bypass remains lease-free.
@@ -48,7 +48,7 @@ Secrets never appear in logs, release evidence, or tracked files. Cloudflare tok
 - `cloudflared` tunnel smoke verifies real URL, MCP identity health, measured latency, and graceful stop.
 - MCP public hostname/origin allowlist tests prove exact allowlist behavior; wildcard access is forbidden.
 - `unified-mpc-mcp-http` starts real MCP Streamable HTTP runtime against `unified-mpc.sqlite`.
-- No Windows/macOS packaged-app smoke is in Linux-only release scope.
+- No non-Linux packaged-app smoke is in Linux-only release scope.
 
 ## Manual clean-machine evidence
 

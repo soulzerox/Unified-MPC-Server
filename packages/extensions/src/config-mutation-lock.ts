@@ -1,4 +1,7 @@
-import { readFile, unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { open, readFile, unlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { writeAtomic } from './ide-sync.js';
 
 interface FileSnapshot {
@@ -7,8 +10,9 @@ interface FileSnapshot {
 }
 
 let mutationQueue = Promise.resolve();
+const LOCK_RETRY_MS = 25;
+const LOCK_TIMEOUT_MS = 30_000;
 
-// ponytail: one in-process lock keeps install/prune transactions consistent; use per-root or OS locks if throughput or multi-process mutation becomes required.
 export async function withConfigMutationTransaction<T>(
   files: readonly string[],
   operation: () => Promise<T>,
@@ -20,7 +24,10 @@ export async function withConfigMutationTransaction<T>(
   });
 
   await previous;
+  const lockPath = mutationLockPath(files);
+  let releaseFileLock: (() => Promise<void>) | undefined;
   try {
+    releaseFileLock = await acquireFileLock(lockPath);
     const snapshots = await Promise.all(files.map(captureFile));
     try {
       return await operation();
@@ -29,7 +36,29 @@ export async function withConfigMutationTransaction<T>(
       throw error;
     }
   } finally {
+    await releaseFileLock?.();
     release();
+  }
+}
+
+function mutationLockPath(files: readonly string[]): string {
+  const key = createHash('sha256').update([...files].sort().join('\0')).digest('hex');
+  return path.join(os.tmpdir(), `unified-mpc-config-${key}.lock`);
+}
+
+async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const handle = await open(lockPath, 'wx', 0o600);
+      await handle.writeFile(`${process.pid}\n`, 'utf8');
+      await handle.close();
+      return async (): Promise<void> => { await unlink(lockPath).catch(() => undefined); };
+    } catch (error: unknown) {
+      if (!isAlreadyExists(error)) throw error;
+      if (Date.now() >= deadline) throw new Error(`Timed out acquiring config mutation lock: ${lockPath}`);
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+    }
   }
 }
 
@@ -56,4 +85,8 @@ async function restoreFile(snapshot: FileSnapshot): Promise<void> {
 
 function isMissingPath(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'EEXIST';
 }

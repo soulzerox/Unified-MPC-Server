@@ -265,7 +265,7 @@ Authoritative in-repository references:
   policy classes, and compatibility rules; the 233-definition complete index below comes from the live runtime registry.
 - [Upgrade architecture](docs/architecture/UPGRADE_ARCHITECTURE.md) — v4 runtime
   architecture and additive gateway design.
-- [Release process](docs/development/RELEASE_PROCESS.md) — canonical `dev -> PR -> main CI -> tag -> Release -> dev sync` sequence, exact-SHA artifact rule, and failure handling.
+- [Release checklist](.github/RELEASE_CHECKLIST.md) — current Linux verification commands, evidence requirements, and failure handling.
 - [Roadmap phase status](docs/architecture/ROADMAP_PHASE_STATUS.md) — completed
   implementation phases.
 
@@ -1805,24 +1805,13 @@ not want to publish a personal email address should configure a GitHub-provided
 - [Issue tracker](https://github.com/engasnm111/lnwjud/issues)
 ## Development and verification
 
-```powershell
-corepack pnpm@10.15.0 lint
-corepack pnpm@10.15.0 typecheck
-corepack pnpm@10.15.0 test
-corepack pnpm@10.15.0 test:integration
-corepack pnpm@10.15.0 test:packaging
-corepack pnpm@10.15.0 build
-corepack pnpm@10.15.0 package:windows
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1
+This file is historical reference. Current Linux verification runs from repository root:
+
+```bash
+corepack pnpm release:verify
 ```
 
-Electron end-to-end tests:
-
-```powershell
-corepack pnpm@10.15.0 test:e2e
-```
-
-Use `git diff --check` before committing. For publishing, follow the canonical [release process](docs/development/RELEASE_PROCESS.md): the exact commit on `main` runs the Windows and target-native macOS/Linux gates, creates SHA-scoped artifacts for every release target, and the tag-triggered Release workflow reuses those artifacts without rebuilding.
+See [.github/RELEASE_CHECKLIST.md](.github/RELEASE_CHECKLIST.md) for release evidence and manual operator checks. `cargo` is required for Rust verification; missing tooling blocks release claims.
 
 ## Repository layout
 

@@ -40,7 +40,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 
 ## Verification record
 
-- Verified on clean commit `87490224909aec5c992394251468f6e567c2dfff`.
+- Verified on clean commit `23fb400d4cdc0a5bbb48c1dc0eb7b45e350dbf1f`.
 
 - Typecheck: `corepack pnpm typecheck` — passed, `EXIT_CODE=0`.
 - Serial workspace build: `corepack pnpm -r --workspace-concurrency=1 build` — 20 workspace projects passed, `EXIT_CODE=0`.

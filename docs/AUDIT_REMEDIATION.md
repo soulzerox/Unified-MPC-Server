@@ -2,7 +2,7 @@
 
 **Scope:** Unified MCP Server audit remediation and functional web control plane
 **Accepted base:** `596078b`
-**Status:** P0/P1 guardrails updated; live Cloudflare/ChatGPT Web evidence and release verification remain pending
+**Status:** P0/P1 guardrails updated; local release verification passed; live Cloudflare/ChatGPT Web evidence remains pending
 
 ## Findings fixed
 
@@ -40,11 +40,11 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 
 ## Verification record
 
-- Verified on current working tree based on `1ccc780` plus current remediation files.
+- Verified on clean commit `87490224909aec5c992394251468f6e567c2dfff`.
 
 - Typecheck: `corepack pnpm typecheck` — passed, `EXIT_CODE=0`.
 - Serial workspace build: `corepack pnpm -r --workspace-concurrency=1 build` — 20 workspace projects passed, `EXIT_CODE=0`.
-- Serial workspace tests: focused extension/storage/CLI/web suites passed; full recursive test command remains the final release gate.
+- Serial workspace tests: `corepack pnpm test` passed; full recursive workspace test command completed as part of the release gate.
 - Web tests: `corepack pnpm --filter @unified-mpc/web test` — 3 test files, 40 tests passed, `EXIT_CODE=0`.
 - Root integration tests: `npx vitest run tests/` — 2 test files, 2 tests passed, `EXIT_CODE=0`.
 - Previously recorded audit repros remain evidence for the earlier remediation slice. `/tmp/unified-mpc-audit-checkpoint-key.mjs` requires adaptation to the current fail-closed API before it can be treated as a current executable check.
@@ -65,7 +65,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - Extension transaction regression: `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 81 tests passed, `EXIT_CODE=0`; covers Recovery Trash, rollback, OS-lock self-check, shared install/prune serialization, config rollback, and malformed-config fail-closed behavior.
 - Extension transaction uses an OS lock keyed by config set plus an in-process queue; acquisition times out fail-closed rather than reclaiming a possibly reused PID's lock. `node scripts/test-config-mutation-lock.mjs` verifies two separate processes serialize.
 - Purge data moves into Recovery Trash with a recovery ID before completion. Session/config failure restores moved paths when possible; errors expose `recoveryStatus` as `partial` or `rollback_failed`.
-- Release gate is `corepack pnpm release:verify`; Rust and live ChatGPT Web/Cloudflare evidence remain operator-gated until verified on this host.
+- Release gate `corepack pnpm release:verify` passed locally on the exact clean commit; live ChatGPT Web/Cloudflare evidence remains operator-gated.
 
 ## Current remediation delta
 
@@ -78,7 +78,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 
 ## Remaining release blockers
 
-- `rustup` is installed user-locally, but the local stable toolchain has a missing compiler manifest. Reinstalling it is blocked by host proxy/network (`InvalidContentType`); `cargo test --manifest-path native/linux-host/Cargo.toml --locked` remains unrun. CI now installs the repository toolchain before `release:verify`.
+- Rust blocker resolved locally: stable `rustc 1.98.1 (48a229cea 2026-09-01)` was reinstalled, and `cargo test --manifest-path native/linux-host/Cargo.toml --locked` passed with 39/39 tests. Earlier repair hit host proxy/network `InvalidContentType`; a future reinstall must stop on that error rather than bypass Rust verification. CI now installs the repository toolchain before `release:verify`.
 - `gh` is absent; exact GitHub Actions run evidence cannot be collected locally.
 - Live Cloudflare tunnel and ChatGPT Web acceptance remain unrun.
 - Recovery startup reconciliation is intentionally report-only; unsafe/orphan records block runtime startup and remain operator-visible.

@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
+import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
@@ -35,6 +36,7 @@ export interface ControlPlaneServerOptions {
   readonly capabilityToken?: string;
   readonly settingsRepository?: Pick<SqliteSettingsRepository, 'get' | 'set' | 'delete'>;
   readonly secretStore?: SecretStore;
+  readonly cloudflareReconciler?: CloudflareTunnelReconciler;
   readonly closeSettings?: () => void;
 }
 
@@ -44,6 +46,11 @@ const SETTING_KEYS = Object.freeze({
   allowedHostnames: 'mcp_allowed_hostnames',
   allowedOrigins: 'mcp_allowed_origins',
   tokenConfigured: 'cloudflare_tunnel_token_configured',
+  accountId: 'cloudflare_account_id',
+  zoneName: 'cloudflare_zone_name',
+  originUrl: 'cloudflare_origin_url',
+  remoteTunnelId: 'cloudflare_remote_tunnel_id',
+  apiTokenConfigured: 'cloudflare_api_token_configured',
 });
 
 interface RegisteredServer {
@@ -75,6 +82,7 @@ export class ControlPlaneServer {
   private readonly capabilityToken: Buffer;
   private readonly settingsRepository: Pick<SqliteSettingsRepository, 'get' | 'set' | 'delete'> | undefined;
   private readonly secretStore: SecretStore | undefined;
+  private readonly cloudflareReconciler: CloudflareTunnelReconciler;
   private readonly closeSettings: (() => void) | undefined;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
@@ -99,6 +107,7 @@ export class ControlPlaneServer {
     this.capabilityToken = Buffer.from(options.capabilityToken ?? randomBytes(32).toString('hex'), 'utf8');
     this.settingsRepository = options.settingsRepository;
     this.secretStore = options.secretStore;
+    this.cloudflareReconciler = options.cloudflareReconciler ?? new CloudflareTunnelReconciler();
     this.closeSettings = options.closeSettings;
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
@@ -285,6 +294,21 @@ export class ControlPlaneServer {
       return;
     }
 
+    if (pathname === '/api/cloudflare/reconcile' && req.method === 'POST') {
+      await this.reconcileCloudflare(req, res);
+      return;
+    }
+
+    if (pathname === '/api/cloudflare/status' && req.method === 'GET') {
+      if (this.settingsRepository === undefined) {
+        sendJsonError(res, 503, 'Settings persistence is unavailable');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ settings: await this.publicSettings(), gateway: this.gateway.status() }));
+      return;
+    }
+
     // HARD GATING INVARIANT on /api/chatgpt-web/connect
     if (pathname === '/api/chatgpt-web/connect' && req.method === 'POST') {
       if (!this.gateway.canConnectSession()) {
@@ -446,7 +470,95 @@ export class ControlPlaneServer {
       allowedHostnames: splitList(settings.get(SETTING_KEYS.allowedHostnames)),
       allowedOrigins: splitList(settings.get(SETTING_KEYS.allowedOrigins)),
       tunnelTokenConfigured: settings.get(SETTING_KEYS.tokenConfigured) === 'true',
+      accountId: settings.get(SETTING_KEYS.accountId),
+      zoneName: settings.get(SETTING_KEYS.zoneName),
+      originUrl: settings.get(SETTING_KEYS.originUrl),
+      remoteTunnelId: settings.get(SETTING_KEYS.remoteTunnelId),
+      cloudflareApiTokenConfigured: settings.get(SETTING_KEYS.apiTokenConfigured) === 'true',
     };
+  }
+
+  private async reconcileCloudflare(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.settingsRepository === undefined || this.secretStore === undefined) {
+      sendJsonError(res, 503, 'Settings persistence and secure secret storage are required');
+      return;
+    }
+    const body = await parseRequestBody(req, res);
+    if (body === undefined || !isObject(body)) return;
+    const previousConfiguration = this.gateway.configuration();
+    const previousGatewayState = this.gateway.status().state;
+    const previousSettings = new Map<string, string | null>([
+      [SETTING_KEYS.accountId, this.settingsRepository.get(SETTING_KEYS.accountId)],
+      [SETTING_KEYS.zoneName, this.settingsRepository.get(SETTING_KEYS.zoneName)],
+      [SETTING_KEYS.tunnelName, this.settingsRepository.get(SETTING_KEYS.tunnelName)],
+      [SETTING_KEYS.publicUrl, this.settingsRepository.get(SETTING_KEYS.publicUrl)],
+      [SETTING_KEYS.originUrl, this.settingsRepository.get(SETTING_KEYS.originUrl)],
+      [SETTING_KEYS.allowedHostnames, this.settingsRepository.get(SETTING_KEYS.allowedHostnames)],
+      [SETTING_KEYS.allowedOrigins, this.settingsRepository.get(SETTING_KEYS.allowedOrigins)],
+      [SETTING_KEYS.remoteTunnelId, this.settingsRepository.get(SETTING_KEYS.remoteTunnelId)],
+      [SETTING_KEYS.apiTokenConfigured, this.settingsRepository.get(SETTING_KEYS.apiTokenConfigured)],
+      [SETTING_KEYS.tokenConfigured, this.settingsRepository.get(SETTING_KEYS.tokenConfigured)],
+    ]);
+    let previousApiToken: string | null = null;
+    let previousTunnelToken: string | null = null;
+    let secretSnapshotReady = false;
+    let runtimeChanged = false;
+    try {
+      previousApiToken = await this.secretStore.get('cloudflare_api_token');
+      previousTunnelToken = await this.secretStore.get('cloudflare_tunnel_token');
+      secretSnapshotReady = true;
+      const apiToken = readOptionalString(body.apiToken, 'apiToken') ?? await this.secretStore.get('cloudflare_api_token');
+      const setup: CloudflareTunnelSetup = {
+        accountId: readRequiredString(body.accountId, 'accountId'),
+        zoneName: readRequiredString(body.zoneName, 'zoneName'),
+        tunnelName: readRequiredString(body.tunnelName, 'tunnelName'),
+        publicUrl: readRequiredString(body.publicUrl, 'publicUrl'),
+        originUrl: readRequiredString(body.originUrl, 'originUrl'),
+      };
+      const allowlists = {
+        hostnames: serializeList(body.allowedHostnames, 'allowedHostnames'),
+        origins: serializeList(body.allowedOrigins, 'allowedOrigins'),
+      };
+      if (apiToken === undefined || apiToken === null) throw new Error('Cloudflare API token is required');
+
+      const result = await this.cloudflareReconciler.reconcile(apiToken, setup);
+      const applied = await this.gateway.applyConfiguration({ publicUrl: setup.publicUrl, tunnelToken: result.tunnelToken });
+      if (!applied.ok) throw new Error(applied.error.message);
+      runtimeChanged = true;
+      const started = await this.gateway.start();
+      if (!started.ok) throw new Error(started.error.message);
+
+      this.settingsRepository.set(SETTING_KEYS.accountId, setup.accountId.trim());
+      this.settingsRepository.set(SETTING_KEYS.zoneName, setup.zoneName.trim());
+      this.settingsRepository.set(SETTING_KEYS.tunnelName, setup.tunnelName.trim());
+      this.settingsRepository.set(SETTING_KEYS.publicUrl, setup.publicUrl.trim());
+      this.settingsRepository.set(SETTING_KEYS.originUrl, setup.originUrl.trim());
+      this.settingsRepository.set(SETTING_KEYS.allowedHostnames, allowlists.hostnames);
+      this.settingsRepository.set(SETTING_KEYS.allowedOrigins, allowlists.origins);
+      this.settingsRepository.set(SETTING_KEYS.remoteTunnelId, result.tunnelId);
+      await this.secretStore.set('cloudflare_api_token', apiToken);
+      await this.secretStore.set('cloudflare_tunnel_token', result.tunnelToken);
+      this.settingsRepository.set(SETTING_KEYS.apiTokenConfigured, 'true');
+      this.settingsRepository.set(SETTING_KEYS.tokenConfigured, 'true');
+      this.recordLog('SUCCESS', 'Cloudflare tunnel reconciled and gateway healthy');
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, settings: await this.publicSettings(), gateway: this.gateway.status() }));
+    } catch (error) {
+      if (runtimeChanged) {
+        await this.gateway.stop().catch(() => undefined);
+        await this.gateway.applyConfiguration(previousConfiguration).catch(() => undefined);
+        if ((previousGatewayState === 'BRIDGE_HEALTHY' || previousGatewayState === 'SESSION_CONNECTED') && previousConfiguration.publicUrl !== undefined && (previousConfiguration.tunnelName !== undefined || previousConfiguration.tunnelToken !== undefined)) {
+          await this.gateway.start().catch(() => undefined);
+        }
+      }
+      for (const [key, value] of previousSettings) writeOptional(this.settingsRepository, key, value ?? undefined);
+      if (secretSnapshotReady) {
+        await restoreSecret(this.secretStore, 'cloudflare_api_token', previousApiToken);
+        await restoreSecret(this.secretStore, 'cloudflare_tunnel_token', previousTunnelToken);
+      }
+      this.recordLog('ERROR', 'Cloudflare tunnel reconcile failed');
+      sendJsonError(res, 400, error instanceof Error ? error.message : 'Cloudflare tunnel reconcile failed');
+    }
   }
 
   private async updateSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -532,7 +644,7 @@ export class ControlPlaneServer {
     const configured = settings.get(SETTING_KEYS.tokenConfigured) === 'true';
     const token = configured ? await this.secretStore?.get('cloudflare_tunnel_token') : null;
     return {
-      ...(settings.get(SETTING_KEYS.tunnelName) ? { tunnelName: settings.get(SETTING_KEYS.tunnelName)! } : {}),
+      ...(token ? {} : settings.get(SETTING_KEYS.tunnelName) ? { tunnelName: settings.get(SETTING_KEYS.tunnelName)! } : {}),
       ...(settings.get(SETTING_KEYS.publicUrl) ? { publicUrl: settings.get(SETTING_KEYS.publicUrl)! } : {}),
       ...(token ? { tunnelToken: token } : {}),
     };
@@ -656,6 +768,12 @@ function readOptionalString(value: unknown, field: string): string | undefined {
   return value.trim();
 }
 
+function readRequiredString(value: unknown, field: string): string {
+  const result = readOptionalString(value, field);
+  if (result === undefined || result.length === 0) throw new Error(`${field} is required`);
+  return result;
+}
+
 function serializeList(value: unknown, field: string): string {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim().length === 0)) throw new Error(`${field} must be a non-empty string list`);
   const normalized = [...new Set(value.map((item) => (item as string).trim()))];
@@ -666,6 +784,11 @@ function serializeList(value: unknown, field: string): string {
 function writeOptional(settings: Pick<SqliteSettingsRepository, 'set' | 'delete'>, key: string, value: string | undefined): void {
   if (value === undefined) settings.delete(key);
   else settings.set(key, value);
+}
+
+async function restoreSecret(secretStore: SecretStore, key: string, value: string | null): Promise<void> {
+  if (value === null) await secretStore.delete(key).catch(() => undefined);
+  else await secretStore.set(key, value).catch(() => undefined);
 }
 
 function httpStatusForResult(result: { readonly ok: boolean; readonly error?: { readonly code: string } }): number {

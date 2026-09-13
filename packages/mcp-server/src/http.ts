@@ -34,8 +34,8 @@ export interface McpHttpServerOptions extends McpServerOptions {
   readonly originPolicy?: OriginPolicy;
   readonly allowedHostnames?: readonly string[];
   readonly allowedOrigins?: readonly string[];
-  readonly allowedHostnamesProvider?: () => readonly string[];
-  readonly allowedOriginsProvider?: () => readonly string[];
+  readonly allowedHostnamesProvider?: () => readonly string[] | undefined;
+  readonly allowedOriginsProvider?: () => readonly string[] | undefined;
 }
 
 export interface McpHttpServerAddress {
@@ -381,7 +381,7 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
   const allowedHostnames = options.allowedHostnamesProvider ?? ((): readonly string[] => options.allowedHostnames ?? localhostAllowedHostnames());
   const server = createServer((request, response) => {
     const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(options.allowedOriginsProvider?.() ?? options.allowedOrigins ?? localhostAllowedOrigins());
-    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames()).catch((error: unknown) => {
+    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames() ?? localhostAllowedHostnames()).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();

@@ -340,13 +340,17 @@ export function renderDashboardViewsHtml(): string {
         <button class="btn btn-secondary btn-sm" id="settings-refresh-btn" type="button">Reload</button>
       </div>
       <form id="gateway-settings-form">
-        <div class="form-group"><label for="settings-tunnel-name">Named Tunnel Name</label><input class="form-control mono" id="settings-tunnel-name" type="text" placeholder="unified-mpc"></div>
-        <div class="form-group"><label for="settings-public-url">Public URL</label><input class="form-control mono" id="settings-public-url" type="url" placeholder="https://mcp.example.com"></div>
-        <div class="form-group"><label for="settings-tunnel-token">Tunnel Token <span class="mono">(write-only)</span></label><input class="form-control mono" id="settings-tunnel-token" type="password" autocomplete="new-password" placeholder="Stored in Linux Secret Service"></div>
-        <div class="form-group"><label for="settings-allowed-hostnames">Allowed MCP Hostnames</label><input class="form-control mono" id="settings-allowed-hostnames" type="text" placeholder="mcp.example.com"></div>
-        <div class="form-group"><label for="settings-allowed-origins">Allowed MCP Origins</label><input class="form-control mono" id="settings-allowed-origins" type="text" placeholder="https://mcp.example.com"></div>
-        <button class="btn" type="submit">Validate & Apply Settings</button>
-        <span id="settings-token-status" class="badge badge-state mono">Token not configured</span>
+        <p style="font-size: 13px; color: var(--text-secondary);">Enter Cloudflare account and hostname values. System creates or reuses tunnel, configures ingress and DNS, stores credentials in Linux Secret Service, starts cloudflared, then verifies bridge health.</p>
+        <div class="form-group"><label for="settings-account-id">Cloudflare Account ID</label><input class="form-control mono" id="settings-account-id" type="text" required autocomplete="off" placeholder="32-character account ID"></div>
+        <div class="form-group"><label for="settings-zone-name">Cloudflare Zone Name</label><input class="form-control mono" id="settings-zone-name" type="text" required autocomplete="off" placeholder="example.com"></div>
+        <div class="form-group"><label for="settings-tunnel-name">Named Tunnel Name</label><input class="form-control mono" id="settings-tunnel-name" type="text" required autocomplete="off" placeholder="Enter tunnel name"></div>
+        <div class="form-group"><label for="settings-public-url">Public URL</label><input class="form-control mono" id="settings-public-url" type="url" required placeholder="https://your-host.example.com"></div>
+        <div class="form-group"><label for="settings-origin-url">Local MCP Origin</label><input class="form-control mono" id="settings-origin-url" type="url" required placeholder="http://127.0.0.1:&lt;mcp-port&gt;"></div>
+        <div class="form-group"><label for="settings-api-token">Cloudflare API Token <span class="mono">(write-only)</span></label><input class="form-control mono" id="settings-api-token" type="password" autocomplete="new-password" placeholder="Stored in Linux Secret Service"></div>
+        <div class="form-group"><label for="settings-allowed-hostnames">Allowed MCP Hostnames</label><input class="form-control mono" id="settings-allowed-hostnames" type="text" required placeholder="Enter allowed hostname(s)"></div>
+        <div class="form-group"><label for="settings-allowed-origins">Allowed MCP Origins</label><input class="form-control mono" id="settings-allowed-origins" type="text" required placeholder="https://your-hostname"></div>
+        <button class="btn" type="submit">Validate, Configure & Start</button>
+        <span id="settings-token-status" class="badge badge-state mono">Credentials not configured</span>
       </form>
     </div>
     <div class="card">

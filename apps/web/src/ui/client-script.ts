@@ -434,8 +434,11 @@ export function getClientScriptJs(): string {
           const data = await res.json();
           const settings = data.settings || {};
           for (const [id, value] of [
+            ['settings-account-id', settings.accountId || ''],
+            ['settings-zone-name', settings.zoneName || ''],
             ['settings-tunnel-name', settings.tunnelName || ''],
             ['settings-public-url', settings.publicUrl || ''],
+            ['settings-origin-url', settings.originUrl || ''],
             ['settings-allowed-hostnames', (settings.allowedHostnames || []).join(', ')],
             ['settings-allowed-origins', (settings.allowedOrigins || []).join(', ')],
           ]) {
@@ -443,7 +446,7 @@ export function getClientScriptJs(): string {
             if (field) field.value = value;
           }
           const tokenStatus = document.getElementById('settings-token-status');
-          if (tokenStatus) tokenStatus.textContent = settings.tunnelTokenConfigured ? 'Token configured' : 'Token not configured';
+          if (tokenStatus) tokenStatus.textContent = settings.cloudflareApiTokenConfigured && settings.tunnelTokenConfigured ? 'Credentials configured' : 'Credentials not configured';
         } catch (err) { logEvent('WARN', 'Settings unavailable: ' + err.message); }
       }
 
@@ -451,19 +454,22 @@ export function getClientScriptJs(): string {
         event.preventDefault();
         const csv = (id) => document.getElementById(id)?.value.split(',').map((value) => value.trim()).filter(Boolean) || [];
         const body = {
+          accountId: document.getElementById('settings-account-id')?.value || '',
+          zoneName: document.getElementById('settings-zone-name')?.value || '',
           tunnelName: document.getElementById('settings-tunnel-name')?.value || '',
           publicUrl: document.getElementById('settings-public-url')?.value || '',
+          originUrl: document.getElementById('settings-origin-url')?.value || '',
           allowedHostnames: csv('settings-allowed-hostnames'),
           allowedOrigins: csv('settings-allowed-origins'),
         };
-        const token = document.getElementById('settings-tunnel-token')?.value || '';
-        if (token) body.tunnelToken = token;
+        const token = document.getElementById('settings-api-token')?.value || '';
+        if (token) body.apiToken = token;
         try {
-          const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const res = await fetch('/api/cloudflare/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           const result = await res.json();
-          if (!res.ok || !result.ok) throw new Error(result.error?.message || result.error || 'Settings update failed');
-          document.getElementById('settings-tunnel-token').value = '';
-          showToast('Gateway settings applied');
+          if (!res.ok || !result.ok) throw new Error(result.error?.message || result.error || 'Cloudflare setup failed');
+          document.getElementById('settings-api-token').value = '';
+          showToast('Cloudflare tunnel configured and gateway healthy');
           loadSettings();
           loadGatewayStatus();
         } catch (err) { showToast('Settings failed: ' + err.message, true); logEvent('ERROR', 'Settings update failed: ' + err.message); }

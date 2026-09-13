@@ -35,9 +35,6 @@ async function main(): Promise<void> {
   const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
   const settings = new SqliteSettingsRepository(database);
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
-  const publicHostnames = settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES');
-  const publicOrigins = settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS');
-  database.close();
 
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined));
   await runtime.activityReady;
@@ -56,8 +53,8 @@ async function main(): Promise<void> {
     activeWorkspaceScopeProvider: runtime.activeWorkspaceScopeProvider,
     toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
-    ...(publicHostnames === undefined ? {} : { allowedHostnames: publicHostnames }),
-    ...(publicOrigins === undefined ? {} : { allowedOrigins: publicOrigins }),
+    allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
+    allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),
   });
   process.stderr.write(`Unified-MPC MCP HTTP ready endpoint=${handle.endpoint.href} identity=${new URL('/_unified-mpc/identity', handle.endpoint).href}\n`);
 
@@ -67,6 +64,7 @@ async function main(): Promise<void> {
     closing = true;
     await handle.close().catch(() => undefined);
     await runtime.close().catch(() => undefined);
+    database.close();
     process.exit(0);
   };
   process.once('SIGINT', () => { void close(); });

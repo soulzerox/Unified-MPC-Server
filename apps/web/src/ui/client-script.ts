@@ -452,8 +452,12 @@ export function getClientScriptJs(): string {
             const field = document.getElementById(id);
             if (field) field.value = value;
           }
+          const tokenField = document.getElementById('settings-api-token');
+          if (tokenField) {
+            tokenField.placeholder = settings.cloudflareApiTokenConfigured ? 'Saved in Linux Secret Service — leave blank to reuse' : 'Paste Cloudflare API token (stored in Linux Secret Service)';
+          }
           const tokenStatus = document.getElementById('settings-token-status');
-          if (tokenStatus) tokenStatus.textContent = settings.cloudflareApiTokenConfigured && settings.tunnelTokenConfigured ? 'Credentials configured' : 'Credentials not configured';
+          if (tokenStatus) tokenStatus.textContent = settings.cloudflareApiTokenConfigured && settings.tunnelTokenConfigured ? 'Credentials saved — leave token blank to reuse' : 'Credentials not configured';
         } catch (err) { logEvent('WARN', 'Settings unavailable: ' + err.message); }
       }
 

@@ -2,208 +2,305 @@
 
 <p align="center">
   <strong>Central Local-First MCP Orchestrator, Multi-Client Policy Synchronizer & Gated Remote Gateway</strong><br />
-  <em>Unified tool discovery, bifurcated dynamic ingestion, zero-artifact pruning, and senior engineering harness across Google Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, Oh My Pi, and Codex CLI on Linux Ubuntu.</em>
+  <em>Universal tool discovery, bifurcated dynamic ingestion, zero-artifact pruning, and senior engineering harness across Google Antigravity, Cursor, Claude Code, Cline, OpenCode, Freebuff, Oh My Pi, and Codex CLI on Linux Ubuntu.</em>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20Ubuntu-E95420" />
   <img alt="Node" src="https://img.shields.io/badge/Node.js-%3E%3D22.0.0-339933" />
-  <img alt="Engine" src="https://img.shields.io/badge/database-node%3Asqlite-003B57" />
-  <img alt="Milestones" src="https://img.shields.io/badge/milestones%201--6-audit%20in%20progress-yellow" />
+  <img alt="Engine" src="https://img.shields.io/badge/database-node%3Asqlite%20WAL-003B57" />
+  <img alt="Multi-Client" src="https://img.shields.io/badge/clients-8%20AI%20IDEs-8A2BE2" />
+  <img alt="Architecture" src="https://img.shields.io/badge/monorepo-21%20packages-007acc" />
 </p>
 
 ---
 
 ## Overview
 
-**Unified-MPC-Server** serves as a unified local orchestrator, senior engineering harness, and policy gatekeeper for modern AI-assisted software development. It consolidates fragmented configurations, prevents context window bloat via an on-demand Two-Tier Tool Catalog, and enforces rigorous software engineering discipline.
+**Unified-MPC-Server** is an enterprise-grade, local-first Model Context Protocol (MCP) orchestrator and senior engineering harness designed natively for **Linux Ubuntu**. It serves as the single source of truth for tool routing, agent skills, execution policies, and IDE synchronization across the entire modern AI coding ecosystem.
 
-### Key Architectural Pillars
+By replacing fragmented configurations, fragile scripts, and disparate client rules with a centralized, high-performance engine, Unified-MPC-Server eliminates model confusion, prevents context window bloat, enforces software engineering discipline, and safely bridges local tools to cloud-based AI clients.
 
-1. **Option A Clean Start & Linux Ubuntu Foundation**: 100% Linux POSIX and XDG compliance. Zero Windows-specific code (`.ps1`, `.exe`, `.bat`, `win32`) and zero legacy backward-compatibility debt.
-2. **Universal Multi-Client Integration**: Automatically discovers MCP servers, indexes skills, and pushes compiled P1–P7 tool prioritization rules simultaneously to **Google Antigravity**, **Cline**, **OpenCode**, **Freebuff**, **Cursor**, **Claude**, **Oh My Pi (OMP)**, and **Codex CLI**.
-3. **Bifurcated Dynamic Ingestion Engine**: Strictly separates the installation of **Agent Skills** (`SKILL.md` instruction packages) from **MCP Servers** (executable JSON-RPC/SSE/HTTP processes) at the code interface, CLI subcommands, and local web UI.
-4. **Zero-Artifact Pruner**: Atomic uninstallation with graceful `SIGTERM` -> `SIGKILL` process termination, multi-IDE configuration purging, dangling symlink cleanup, and strict path-containment boundary guards.
-5. **Gated ChatGPT Web Gateway & Local Web Control Plane**: Decoupled Cloudflare companion gateway (`apps/cf-gateway`) with a 4-state lifecycle machine and local web dashboard (`apps/web`, default `http://127.0.0.1:3000/`). MCP bridge defaults to `127.0.0.1:18765`; ChatGPT receives explicit `/mcp` URL only after health verification.
-6. **Unified Headless CLI (`unified-mpc`)**: Standalone executable CLI binary with exit code contracts (0, 1, 2) enabling headless operation for human developers and terminal AI coding agents (Claude Code, OpenCode CLI, Agy CLI).
-7. **Senior Engineering Harness (Ponytail Runtime)**: Enforces YAGNI, minimal diffs, root-cause verification, and durable goal tracking backed by native `node:sqlite`.
+```mermaid
+graph TD
+    subgraph Clients["Connected AI Clients & IDEs"]
+        AG["Google Antigravity<br/>(IDE, Extension, agy CLI)"]
+        CR["Cursor IDE"]
+        CL["Claude Code & Desktop"]
+        OC["OpenCode"]
+        CN["Cline"]
+        FB["Freebuff"]
+        OM["Oh My Pi (OMP)"]
+        CX["Codex CLI"]
+    end
+
+    subgraph Entrypoints["Unified-MPC Interfaces"]
+        CLI["apps/cli<br/>(binary: unified-mpc)"]
+        WEB["apps/web<br/>(Control Plane :3000)"]
+        STDIO["Stdio MCP Server<br/>(Host-connected)"]
+        HTTP["Loopback HTTP MCP<br/>(Streamable HTTP :18765)"]
+    end
+
+    subgraph CoreEngine["Core Orchestration Engine (21 Monorepo Packages)"]
+        EXT["packages/extensions<br/>(Ingestion, Pruner, IdeSync)"]
+        MCP["packages/mcp-server<br/>(Two-Tier Catalog, Ponytail, Security)"]
+        APP["packages/application<br/>(Durable Goals, Checkpoints)"]
+        STORE["packages/storage<br/>(node:sqlite WAL Engine)"]
+        CAP["packages/capabilities<br/>(Linux Shell, Process Supervision)"]
+        FS["packages/filesystem<br/>(Path Containment, Scoped I/O)"]
+        PERM["packages/permissions<br/>(Safe / Balanced / Full Bypass)"]
+        AUDIT["packages/audit<br/>(Cryptographic Secret Redactor)"]
+    end
+
+    subgraph Gateway["Remote ChatGPT Companion"]
+        CFG["apps/cf-gateway<br/>(Decoupled Cloudflare Tunnel Companion)"]
+        CW["ChatGPT Web / Remote Clients"]
+    end
+
+    Clients -->|Direct Invocation / Compiled Rules| Entrypoints
+    Entrypoints --> CoreEngine
+    CW -.->|Encrypted HTTPS Tunnel| CFG
+    CFG -->|Verified Loopback HTTP| HTTP
+```
 
 ---
 
-## Monorepo Architecture
+## Core System Capabilities
 
-The repository is organized into 21 active workspace packages under the `@unified-mpc/*` namespace:
+### 1. Universal Multi-Client IDE Hub & Policy Sync
+- **Single Source of Truth**: Centrally manages tools, skills, and execution rules across **8 major AI developer environments**: Google Antigravity, Cursor, Claude Code / Desktop, Cline, OpenCode, Freebuff, Oh My Pi (OMP), and Codex CLI.
+- **Atomic Block Injection**: Automatically compiles and injects system instructions into target rule files (`GEMINI.md`, `.cursor/rules/`, `CLAUDE.md`, `.clinerules`, `AGENTS.md`) using bounded markers (`<!-- MCP-POLICY-START -->` ... `<!-- MCP-POLICY-END -->`). All user-defined rules outside the markers remain untouched.
+- **Zero Drift**: Ensures every AI client operating on your repository adheres to identical tool routing, workspace boundaries, and coding standards.
 
-```text
-Unified-MPC-Server/
-├── apps/
-│   ├── cli/                  # Native CLI entrypoint (bin: unified-mpc)
-│   ├── web/                  # Local Web Control Plane (native node:http + Obsidian Telemetry)
-│   └── cf-gateway/           # Decoupled Cloudflare Tunnel + ChatGPT Remote Bridge
-├── packages/
-│   ├── extensions/           # Multi-Client Ingestion, Pruner, Config Loader, Skill Catalog, IDE Sync
-│   ├── mcp-server/           # Core MCP server, Ponytail runtime, Two-Tier Catalog, security policies
-│   ├── application/          # Agent swarm, durable goal continuation, checkpoint service
-│   ├── storage/              # SQLite database (node:sqlite WAL mode), durable goals, checkpoints
-│   ├── process/              # Background job lifecycle, process supervision, timeouts
-│   ├── filesystem/           # Scoped workspace I/O, paging, path safety
-│   ├── git/                  # Guarded Git mutations, diff fingerprinting
-│   ├── permissions/          # Permission profiles: safe (default), balanced, full, custom
-│   ├── audit/                # Structured event logging, secret redaction
-│   ├── search/               # ripgrep integration, symbol searching
-│   ├── shared/               # Constants (APP_NAME = 'Unified-MPC-Server'), domain contracts
-│   └── domain/               # Result<T, E>, AppError, value objects
-├── package.json
-└── pnpm-workspace.yaml
-```
+### 2. Mandatory P1–P7 Tool Execution Priority Standard
+Prevents agent hallucination, erratic tool choices, and context window exhaustion by enforcing a deterministic, step-by-step tool invocation hierarchy:
+
+| Priority | Resource / Server | Role & Execution Directive | Enforcement |
+|---|---|---|---|
+| **P1** | **`memory`** (Knowledge Graph) | **Realtime Working Memory**: Work-log of the active task. Read before starting, record state at every critical step in real-time, link relations at completion. | **Mandatory (Realtime)** |
+| **P2** | **`thai-rag-mcp`** | **Persistent Long-Term Memory & Local RAG**: 100% Local RAG. Recall past preferences/decisions before answering; remember permanent knowledge; `code_search` before opening whole files. | **Mandatory (Every Session)** |
+| **P3** | **`godkiller`** | **Code Intel & Safety Pre-check**: Mode orchestration (`gk_route`), structural symbol search (`gk_code`), and blast radius impact analysis (`gk_task`) before any code modification. | **Mandatory (Pre-mutation)** |
+| **P4** | **`sequentialthinking`** | **Structured Multi-Step Reasoning**: Hypothesis generation, step-by-step analysis, and thought revision for complex architecture, root-cause diagnosis, or multi-file refactoring. | On-Demand (Complex tasks) |
+| **P5** | **`context7`** | **Live Docs & Exact SDK APIs**: Fetches current, version-accurate documentation and code examples before writing code against external libraries or APIs. | On-Demand (External APIs) |
+| **P6** | **`filesystem`** | **Batch & Cross-Project Operations**: Recursive directory trees, batch file reading, and cross-repository file management. | On-Demand (Batch operations) |
+| **P7** | **`ui-skills`** | **UI/UX & Frontend Standards**: Component patterns, CSS layout best practices, and responsive design guidelines. | On-Demand (Frontend/UI) |
+| **Fallback** | **Built-in Native Tools** | Fallback for single-file workspace edits or when no specialized MCP tool exists. | Last Resort |
+
+### 3. Two-Tier Context Preservation Catalog
+- **LLM Context Optimization**: Traditional MCP gateways flood the AI model's context window with dozens of massive tool schemas, inflating token costs and causing instruction distraction.
+- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets (e.g. Codex delegation, Agent Swarms, AST parsers, upgrade catalogs) on demand.
+
+### 4. Bifurcated Dynamic Ingestion Engine
+- **Strict Boundary Separation**: Eliminates polyglot configuration errors by enforcing a rigid architectural split between:
+  - **Agent Skills**: Markdown instruction packages (`SKILL.md`) that guide agent behavior.
+  - **MCP Servers**: Executable JSON-RPC / SSE / Streamable HTTP processes that provide executable tools.
+- **Dedicated Workflows**: Separate validation pipelines and CLI subcommands (`unified-mpc install skill` vs `unified-mpc install server`), preventing corrupted server configs or misrouted skills.
+
+### 5. Zero-Artifact Atomic Pruner
+- **Graceful Process Termination**: Halts running server processes with orderly `SIGTERM` signalling followed by bounded escalation to `SIGKILL`.
+- **Multi-IDE Config Cleanup**: Purges uninstalled server blocks and skill links from all registered IDE configuration files simultaneously.
+- **Path Traversal Guards**: Verifies file boundaries before deletion (`isSafePurgePath`), cleaning up dangling symlinks, caches, and runtime data without risking system directories.
+
+### 6. Durable Autonomous Goal Engine & Checkpoints
+- **Native SQLite WAL Storage**: Powered by Node.js built-in `node:sqlite` in Write-Ahead Logging (WAL) mode—requiring zero external databases, native C++ compilation, or heavyweight daemons.
+- **Goal Continuation**: Allows AI agents to execute complex, multi-turn goals autonomously across session boundaries with goal leases and fencing tokens.
+- **Checkpoint State Machine**: Records point-in-time workspace snapshots and transaction journals, enabling safe rollbacks if an agent goes off course.
+- **Task Supervisor**: Differentiates between `blocking_job` (tasks that affect execution liveness) and `supporting_service` (background daemons), preventing zombie processes.
+
+### 7. Hard-Gated Cloudflare Gateway for ChatGPT Web
+- **Outbound-Only Tunnel Companion**: Decoupled `apps/cf-gateway` companion establishes an outbound encrypted HTTPS tunnel via Cloudflare, eliminating the need to expose inbound ports on your host.
+- **4-State Lifecycle Machine**: Coordinates transitions through `DISCONNECTED` $\to$ `TUNNEL_STARTING` $\to$ `BRIDGE_PROBING` $\to$ `BRIDGE_HEALTHY`.
+- **Fail-Closed 412 Gate**: The gateway returns `412 Precondition Failed` if the local MCP endpoint fails its health probe, ensuring external AI clients (like ChatGPT Web) are never connected to a dead, stale, or misconfigured bridge.
+
+### 8. Senior Engineering Harness (Ponytail Runtime)
+- **Built-in Engineering Discipline**: Enforces the **Ponytail** development philosophy directly at the tool registry layer.
+- **YAGNI & Minimalism**: Prompts agents to reach for standard libraries before external dependencies, write minimal diffs, and question unnecessary abstractions.
+- **Pre-mutation Verification**: Requires blast radius evaluation and root-cause evidence before destructive edits or refactors are committed.
+
+### 9. Zero-Overhead Local Web Control Plane
+- **Native HTTP Dashboard**: Zero-framework, ultra-fast Web Control Plane (`apps/web`) running at `http://127.0.0.1:3000/`.
+- **Obsidian Telemetry**: Real-time monitoring cards for active bridges, Cloudflare tunnels, installed skills, mounted MCP servers, and connected IDEs.
+- **Security by Default**: Enforces loopback `Host` and `Origin` validation, requires ownership tokens for pruning mutations, and enforces a strict 1 MiB body payload limit.
+
+### 10. Unified Headless CLI (`unified-mpc`)
+- **Developer & Agent Friendly**: Standalone executable CLI binary with deterministic POSIX exit codes (`0` for success, `1` for operational errors, `2` for syntax/argument errors).
+- **Headless Automation**: Designed for seamless integration into CI pipelines, shell scripts, and terminal-based coding agents (Claude Code, OpenCode CLI, Agy CLI).
 
 ---
 
 ## Supported Clients & IDE Matrix
 
-| Client | Form Factors Supported | MCP Config Discovery | Skill Discovery Roots | Rule / Policy Sync Target |
+| Client / Environment | Supported Form Factors | Configuration Path | Skill Discovery Roots | Rule / Policy Sync Target |
 |---|---|---|---|---|
-| **Google Antigravity** | VS Code Extension, Antigravity IDE, CLI `agy`, Desktop | `~/.gemini/config/mcp_config.json`<br>`<workspace>/.gemini/mcp.json` | `~/.gemini/config/skills/`<br>`~/.gemini/skills/`<br>`~/.gemini/antigravity/builtin/skills/`<br>`<workspace>/.gemini/skills/` | `~/.gemini/config/GEMINI.md`<br>`<workspace>/GEMINI.md`<br>`~/.gemini/antigravity/rules/mcp-policy.md` |
-| **Cline** | CLI (`~/.cline/`), VS Code Extension | `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`<br>`<workspace>/.cline/mcp.json` | `~/.cline/skills/`<br>`<workspace>/.cline/skills/` | `.clinerules` (block replacement)<br>`~/.cline/rules/` |
-| **OpenCode** | CLI, VS Code Extension, Standalone | `~/.config/opencode/opencode.jsonc`<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md` (project root)<br>`~/.config/opencode/AGENTS.md` |
-| **Freebuff** | Standalone Desktop | Loopback MCP or project state | `.agents/skills/`<br>`<workspace>/skills/` | `AGENTS.md` (root `injectAgentsMd`) |
-| **Cursor** | Editor / IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`<workspace>/.cursor/skills/` | `.cursor/rules/00-mandatory-policy.mdc` |
+| **Google Antigravity** | VS Code Extension, Antigravity IDE, `agy` CLI | `~/.gemini/config/mcp_config.json`<br>`<workspace>/.gemini/mcp.json` | `~/.gemini/config/skills/`<br>`<workspace>/.gemini/skills/` | `~/.gemini/config/GEMINI.md`<br>`<workspace>/GEMINI.md` |
+| **Cursor** | Cursor IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`<workspace>/.cursor/skills/` | `.cursor/rules/00-mandatory-policy.mdc` |
 | **Claude** | Claude Desktop, Claude Code CLI | `~/.config/Claude/claude_desktop_config.json` | `~/.claude/skills/`<br>`<workspace>/.claude/skills/` | `~/.claude/CLAUDE.md`<br>`<workspace>/CLAUDE.md` |
-| **Oh My Pi (OMP)** | CLI / Terminal Agent | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
+| **Cline** | VS Code Extension, Cline CLI | `~/.config/Code/.../cline_mcp_settings.json`<br>`<workspace>/.cline/mcp.json` | `~/.cline/skills/`<br>`<workspace>/.cline/skills/` | `.clinerules`<br>`~/.cline/rules/` |
+| **OpenCode** | CLI, VS Code Extension | `~/.config/opencode/opencode.jsonc`<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md`<br>`~/.config/opencode/AGENTS.md` |
+| **Freebuff** | Desktop Agent | Loopback HTTP or workspace state | `.agents/skills/`<br>`<workspace>/skills/` | `AGENTS.md` |
+| **Oh My Pi (OMP)** | Terminal Agent CLI | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
 | **Codex CLI** | CLI Tool | Standard Codex Engine | `~/.codex/skills/`<br>`~/.codex/plugins/cache/` | `AGENTS.md` |
-
----
-
-## Milestones & Verification Status
-
-| Milestone | Scope & Description | Status | Verification & Hardening Evidence |
-|---|---|---|---|
-| **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Complete monorepo rename from `@unified-mpc/*` to `@unified-mpc/*` across 220+ files; deletion of all Windows code/scripts; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
-| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
-| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
-| **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards; Commit `fe6e601`. |
-| **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: native `node:http` control plane, startup capability auth, real `cloudflared` process lifecycle, MCP identity health probe, explicit `/mcp` URL, and 412 session gate. | ⚠️ **Implemented; live tunnel evidence pending** | Web/gateway targeted tests pass; live Cloudflare requires installed `cloudflared`, configured MCP HTTP runtime, public allowlist, and operator credentials. |
-| **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
-
----
-
-## Audit Remediation & Current UI
-
-Current remediation is based on `3c4bfdfef6885b7471f6aae8dac901b7f882d4ad`.
-
-- Seven audit findings are fixed: symlink-safe purge boundaries; server-issued web prune IDs with ownership proof; HTTP callback rejection handling; gateway start/stop generation fencing; installer/pruner target validation; lazy CLI database construction; and fail-closed checkpoint-key handling.
-- Web UI remains native HTML/TypeScript with no frontend framework. `apps/web/src/dashboard-html.ts` composes `apps/web/src/ui/tokens.ts`, `apps/web/src/ui/views.ts`, and `apps/web/src/ui/client-script.ts`.
-- Web server uses native `node:http`, binds to `127.0.0.1`, validates `Host` and `Origin`, requires `Origin` on mutations, caps request bodies at 1 MiB, and exposes opaque `serverId` values for server pruning.
-- Detailed file-level record: [`docs/AUDIT_REMEDIATION.md`](docs/AUDIT_REMEDIATION.md).
 
 ---
 
 ## Quickstart & Installation
 
 ### Requirements
-- **OS**: Linux Ubuntu `>=22.04 LTS` (POSIX native)
+- **Operating System**: Linux Ubuntu `>=22.04 LTS` (POSIX native)
 - **Node.js**: `>=22.0.0` (with native `node:sqlite`)
-- **Package Manager**: `pnpm >=9.0.0` (or `corepack enable`)
+- **Package Manager**: `pnpm >=10.0.0` (or via `corepack enable`)
 
-### Setup Commands
+### Setup
+
 ```bash
 # 1. Clone repository
 git clone https://github.com/soulzerox/Unified-MPC-Server.git
 cd Unified-MPC-Server
 
-# 2. Install dependencies
-corepack pnpm install
+# 2. Enable corepack and install dependencies
+corepack enable
+pnpm install
 
 # 3. Build all 21 packages
-corepack pnpm build
+pnpm build
 
-# 4. Typecheck across monorepo
-corepack pnpm typecheck
-
-# 5. Run test suite
-corepack pnpm test
+# 4. Run system diagnostic
+pnpm cli doctor
 ```
 
 ---
 
-## CLI Usage (`unified-mpc`)
+## CLI Reference (`unified-mpc`)
 
-The binary is located at `apps/cli/dist/index.js` or linked globally via `pnpm link`.
+The binary can be invoked directly via `pnpm cli <command>` or linked globally as `unified-mpc`:
 
 ```bash
-# Check status and health
+# Display system overview, configurations, and gateway status
 unified-mpc status
+unified-mpc status --json
 
-# Synchronize policy and priority rules across IDEs (Antigravity, Cline, OpenCode, Cursor, etc.)
+# Run comprehensive system diagnostics and path permission checks
+unified-mpc doctor
+
+# Synchronize P1–P7 policies and MCP server lists across all IDEs
 unified-mpc sync
 unified-mpc sync --targets antigravity,cursor,cline
 
 # Install an Agent Skill (markdown instructions)
 unified-mpc install skill --name my-skill --source /path/to/skill-folder --targets all
 
-# Install an MCP Server (executable stdio/SSE/HTTP process)
-unified-mpc install server --name my-server --transport stdio --command "node" --args "/path/to/server.js" --targets antigravity,cursor
+# Install an executable MCP Server
+unified-mpc install server --name sqlite-db \
+  --transport stdio \
+  --command npx \
+  --args "-y mcp-server-sqlite --db /tmp/dev.db" \
+  --targets antigravity,cursor
 
-# Prune an Agent Skill cleanly
+# Atomically prune a Skill
 unified-mpc prune skill --name my-skill
 
-# Prune an MCP Server cleanly (kills processes and purges configs)
-unified-mpc prune server --name my-server
+# Atomically prune an MCP Server (terminates process and purges IDE configs)
+unified-mpc prune server --name sqlite-db
 
-# Start the MCP HTTP runtime for local/tunnel access
-UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http
-
-# Start the Local Web Control Plane
+# Launch the Local Web Control Plane
 unified-mpc web --port 3000
 
-# Headless downstream tool calling
+# Start the Streamable HTTP MCP runtime
+UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http
+
+# Direct tool inspection and execution
 unified-mpc tools list
-unified-mpc tools call memory__search_nodes '{"query": "milestone"}'
+unified-mpc tools call memory__search_nodes '{"query": "capabilities"}'
 ```
 
 ---
 
-## Local Web Control Plane
+## Local Web Control Plane & ChatGPT Web Pairing
 
-The Local Web Control Plane runs at `http://127.0.0.1:3000/` by default. MCP HTTP runs separately at `http://127.0.0.1:18765/mcp`:
+The Local Web Control Plane runs at `http://127.0.0.1:3000/` and provides an intuitive management interface alongside the Streamable HTTP MCP endpoint at `http://127.0.0.1:18765/mcp`.
 
-- **Obsidian Telemetry Dashboard**: Real-time status cards showing tunnel/MCP URL, bridge status, active IDEs, installed skills, and mounted servers.
-- **Hard-Gated ChatGPT Web Connection**: The `[ Connect ChatGPT Web ]` action returns `412 Precondition Failed` unless the gateway bridge has reached `BRIDGE_HEALTHY` state.
-- **Bifurcated Management UI**: Dedicated tabs for installing Skills vs installing MCP Servers to prevent polyglot configuration errors.
-- **Loopback Origin Security**: Strictly enforces `localhost` / `127.0.0.1` origins, blocking external or non-HTTP schemes with `403 Forbidden`.
-- **Payload Protection**: Enforces 1MB maximum body limit on incoming requests (`413 Payload Too Large`).
+1. **Launch MCP HTTP**: `UNIFIED_MPC_WORKSPACE=/path/to/project unified-mpc-mcp-http` — the path must be the registered **project directory**, not a filesystem mount root.
+2. **Launch Dashboard**: `unified-mpc web --port 3000`
+3. **Open Dashboard**: Navigate to `http://127.0.0.1:3000/` in your browser.
+4. **Configure the Cloudflare tunnel** (Gateway Configuration): enter Account ID, Zone Name (registrable domain, e.g. `example.com`), Tunnel Name, Public URL (HTTPS origin), Local MCP Origin (loopback **without a path** — Cloudflare ingress forwards the incoming request path unchanged, e.g. `http://127.0.0.1:18765`), API token, and the hostname/origin allowlists, then click **Validate, Configure & Start**. The system resolves or creates the named tunnel, configures ingress, upserts DNS, stores both tokens in the Linux Secret Service, starts `cloudflared`, and probes bridge health.
+5. **Re-run without retyping**: non-secret settings persist as soon as you submit — even a failed attempt keeps the form prefilled. The API token is saved after the first successful configure; afterwards leave the token field blank to reuse the stored one (paste a new token only when rotating it).
+6. **Connect ChatGPT**: once `BRIDGE_HEALTHY` is reached, copy the verified `mcpUrl` (e.g. `https://gpt-bridge.example.com/mcp`) into ChatGPT Web's custom connector (Settings → Apps & Connectors → enable Developer mode → Create, authentication: none).
 
-### ChatGPT Web setup
+> [!IMPORTANT]
+> The gateway strictly enforces health invariants. Any attempt to connect while the bridge is non-operational returns `412 Precondition Failed`, protecting your remote session from silent disconnects.
 
-1. Start real MCP HTTP runtime: `UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http`.
-2. Start dashboard: `unified-mpc web --port 3000`.
-3. Open dashboard, start gateway, wait for `BRIDGE_HEALTHY`.
-4. Copy displayed `ChatGPT MCP URL` (`https://.../mcp`) into ChatGPT Web connector.
-5. For stable URL, set non-secret `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME` and `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`; save tunnel token through `POST /api/settings` so Linux Secret Service stores it. Set `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES` and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS` for exact public exposure consent.
+### Keeping it running across reboots (systemd user services)
 
-No `cloudflared` binary, MCP workspace, public URL, or credentials means no live ChatGPT Web connection.
+Both long-running processes can be managed as systemd **user** services (enable `loginctl enable-linger $USER` so they start at boot without a login):
+
+- `unified-mpc-mcp-http.service` — runs `apps/cli/dist/bin/mcp-http.js` through a small wrapper that exports `UNIFIED_MPC_WORKSPACE`, `UNIFIED_MPC_PORT`, and the `PATH` (use the actual nvm node path if node is not `/usr/bin/node`).
+- `unified-mpc-web.service` — runs `unified-mpc web`.
+
+Two pitfalls that bite under systemd:
+
+- `UNIFIED_MPC_WORKSPACE` must point at the **project directory**; a filesystem mount root is rejected ("POSIX filesystem mount root cannot be registered as a project").
+- Include `~/.local/bin` in the service `PATH` — the default `cloudflared` install location is there; a missing entry makes the tunnel spawn fail and the health probe returns HTTP 530.
+
+After a reboot the two services start automatically, but the gateway itself needs one click of **Start Gateway** (or a re-submit of Gateway Configuration) because `cloudflared` is spawned by the dashboard process.
 
 ---
 
-## Security Guardrails
+## Enterprise Security Guardrails
 
-| Guardrail | Location | What It Prevents |
+| Guardrail | Enforcement Point | Threat Mitigated |
 |---|---|---|
-| **Origin Policy** | `packages/mcp-server/src/origin-policy.ts` & `apps/web/src/web-server.ts` | Non-localhost and non-HTTP requests to local HTTP endpoints (403 Forbidden). |
-| **Mutation Gate** | `packages/mcp-server/src/mutation-policy.ts` | Destructive mutations without explicit user confirmation (fail-closed). |
-| **Workspace Path Containment** | `packages/filesystem/` & `packages/extensions/src/pruner.ts` | Path traversal attacks outside registered workspace roots or system directories. |
-| **Secret Redaction** | `packages/audit/src/redactor.ts` | API keys, tokens, and private credentials leaking into audit logs. |
-| **Self-Aggregation Block** | `packages/extensions/src/mcp-config-loader.ts` | Unified-MPC-Server recursively calling itself as a downstream child. |
-| **ChatGPT Gate Invariant** | `apps/web/src/web-server.ts` | Remote sessions initiating against dead or unhealthy tunnel endpoints (412 Precondition Failed). |
-| **Permission Profiles** | `packages/permissions/src/profiles.ts` | Unauthorized escalation to full bypass mode without engine approval. |
+| **Loopback Origin Policy** | `packages/mcp-server/` & `apps/web/` | Blocks DNS rebinding and cross-site HTTP requests (403 Forbidden). |
+| **Fail-Closed Mutation Policy** | `packages/mcp-server/src/mutation-policy.ts` | Prevents unauthorized file writes, deletes, or command execution without explicit mode approval. |
+| **Workspace Path Containment** | `packages/filesystem/` & `packages/extensions/` | Blocks path traversal (`../`) attacks outside authorized project workspace boundaries. |
+| **Cryptographic Secret Redaction** | `packages/audit/src/redactor.ts` | Automatically sanitizes API tokens, private keys, and passwords from logs and activity journals. |
+| **Self-Aggregation Block** | `packages/extensions/src/mcp-config-loader.ts` | Prevents infinite loops caused by Unified-MPC-Server discovering and invoking itself as a child. |
+| **Permission Profiles** | `packages/permissions/src/profiles.ts` | Enforces tiered capability access (`safe` default, `balanced`, and audited `full` bypass). |
+
+---
+
+## Monorepo Architecture
+
+The repository contains 21 active workspace packages under the `@unified-mpc/*` namespace:
+
+```text
+Unified-MPC-Server/
+├── apps/
+│   ├── cli/                  # Native CLI entrypoint (binary: unified-mpc)
+│   ├── web/                  # Local Web Control Plane (native node:http + Obsidian Telemetry)
+│   └── cf-gateway/           # Decoupled Cloudflare Tunnel companion for ChatGPT Web
+├── packages/
+│   ├── extensions/           # Multi-Client Ingestion, Pruner, Config Loader, Skill Catalog, IDE Sync
+│   ├── mcp-server/           # Core MCP server, Ponytail runtime, Two-Tier Catalog, Security policies
+│   ├── application/          # Durable goal continuation, checkpoint service, agent swarm
+│   ├── storage/              # SQLite database engine (node:sqlite WAL mode), transaction store
+│   ├── capabilities/         # Linux process execution, shell task store, system probes, CDP
+│   ├── filesystem/           # Scoped workspace I/O, path containment, patch applier
+│   ├── process/              # Background process lifecycle, ring buffers, process supervision
+│   ├── git/                  # Guarded Git mutations, diff fingerprinting, stash rollback
+│   ├── permissions/          # Permission profiles (safe, balanced, full bypass)
+│   ├── audit/                # Structured event logging with cryptographic secret redaction
+│   ├── search/               # ripgrep integration, structural symbol searching
+│   ├── workspace/            # Workspace boundary manager, secret detection
+│   ├── project/              # Project type and toolchain detection
+│   ├── codex/                # Codex CLI delegation adapter and discovery
+│   ├── ipc-contracts/        # IPC message schemas and serialization
+│   ├── shared/               # Shared constants, environment resolution, domain contracts
+│   └── domain/               # Result<T, E>, AppError, domain entities, value objects
+├── package.json
+└── pnpm-workspace.yaml
+```
 
 ---
 
 ## Authoritative Documentation
 
-- [`SPEC.md`](SPEC.md): Master technical specification and behavioral decisions.
-- [`CONTEXT.md`](CONTEXT.md): Domain glossary, architectural invariants, and living context.
+- [`SPEC.md`](SPEC.md): Master technical specification and behavioral invariants.
+- [`CONTEXT.md`](CONTEXT.md): Living architectural context and domain glossary.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): In-depth system architecture and package dependency graph.
+- [`docs/USAGE_TH.md`](docs/USAGE_TH.md): Comprehensive user manual in Thai (คู่มือภาษาไทย).
+- [`docs/MULTI_CLIENT_SYNC.md`](docs/MULTI_CLIENT_SYNC.md): Multi-client synchronization protocol and block injection details.
+- [`docs/WEB_CONTROL_PLANE.md`](docs/WEB_CONTROL_PLANE.md): Web Control Plane architecture and API documentation.
 
 ---
 

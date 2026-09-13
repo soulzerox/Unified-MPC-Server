@@ -37,4 +37,24 @@ describe('SecretToolSecretStore', () => {
     await expect(store.set('bad key', 'value')).rejects.toThrow(/invalid/i);
     await expect(store.set('valid', ' ')).rejects.toThrow(/empty/i);
   });
+
+  it('treats secret-tool exit code 1 as missing secret, not lookup failure', async () => {
+    const notFound = Object.assign(new Error('secret-tool exited with code 1'), { secretToolExitCode: 1 });
+    const store = new SecretToolSecretStore({
+      run: async (args): Promise<string> => {
+        if (args[0] === 'lookup' || args[0] === 'clear') throw notFound;
+        return '';
+      },
+    });
+    await expect(store.get('cloudflare_api_token')).resolves.toBeNull();
+    await expect(store.delete('cloudflare_api_token')).resolves.toBeUndefined();
+
+    const otherFailure = Object.assign(new Error('secret-tool exited with code 2'), { secretToolExitCode: 2 });
+    const failing = new SecretToolSecretStore({
+      run: async (): Promise<string> => {
+        throw otherFailure;
+      },
+    });
+    await expect(failing.get('any_key')).rejects.toThrow(/lookup failed/);
+  });
 });

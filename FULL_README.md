@@ -71,6 +71,13 @@ capabilities are additive.
 - Audits MCP discovery/config naming, recovery/checkpoint/backup paths, secure-storage boundaries, tunnel profile paths, executable resolution, browser/CDP paths, and tool/provider composition for target-platform semantics.
 - Extends deterministic cross-platform release scenarios beyond the original 100-case baseline to a growing 350+ scenario suite, in addition to full workspace, packaging, release-gate, and native CI validation.
 
+### Working tree (post-v4.61.0): Cloudflare tunnel & dashboard hardening
+
+- Fixes the Linux Secret Service integration: `secret-tool lookup/clear` exit code 1 (item missing) is now treated as "not stored" instead of a lookup failure, so first-time Cloudflare configuration no longer fails with a misleading "Linux Secret Service lookup failed".
+- Hardens the Cloudflare tunnel reconciler: non-OK API responses surface the real Cloudflare error codes/messages, pasted API tokens are normalized (a `Bearer ` prefix and whitespace are stripped, charset validated), Local MCP Origin must be a path-free loopback URL because Cloudflare ingress forbids origin paths (API error 1056), and origin URLs are normalized without a trailing slash.
+- Improves Gateway Configuration UX: user-entered non-secret settings persist immediately even when reconcile fails so the form stays prefilled; the Cloudflare API token is stored after the first successful configure and can be left blank on later runs to reuse the stored secret; the UI shows token-reuse hints.
+- Documents systemd user-service autostart for MCP HTTP + dashboard (nvm node path, project-directory workspace, `~/.local/bin` on `PATH` for `cloudflared`) and the one-click gateway start required after a reboot.
+
 ### Historical: What's new in v4.56.2
 
 - Fixes External MCP protocol compatibility by auto-negotiating child-server protocol versions instead of requiring every external server to support MCP `2026-07-28`; legacy/2025-era servers such as Serena and modern `2026-07-28` servers are both covered by real stdio regression tests.

@@ -38,7 +38,7 @@ export class CloudflareTunnelReconciler {
   }
 
   public async reconcile(apiToken: string, setup: CloudflareTunnelSetup): Promise<CloudflareTunnelResult> {
-    const token = requireNonEmpty(apiToken, 'Cloudflare API token');
+    const token = normalizeApiToken(apiToken);
     const normalized = normalizeSetup(setup);
     const headers = {
       Authorization: `Bearer ${token}`,
@@ -158,7 +158,10 @@ export class CloudflareTunnelReconciler {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (!response.ok) throw new Error(`Cloudflare API failed while attempting to ${operation} (HTTP ${response.status})`);
+    if (!response.ok) {
+      const detail = await describeCloudflareError(response);
+      throw new Error(`Cloudflare API failed while attempting to ${operation} (HTTP ${response.status}${detail ? `: ${detail}` : ''})`);
+    }
     let parsed: CloudflareResponse<T>;
     try {
       parsed = await response.json() as CloudflareResponse<T>;
@@ -168,6 +171,25 @@ export class CloudflareTunnelReconciler {
     if (parsed.success !== true) throw new Error(`Cloudflare API rejected request while attempting to ${operation}`);
     return parsed;
   }
+}
+
+async function describeCloudflareError(response: Response): Promise<string> {
+  try {
+    const parsed = await response.json() as { readonly errors?: ReadonlyArray<{ readonly code?: number; readonly message?: string }> };
+    const messages = (parsed.errors ?? [])
+      .map((error) => (typeof error.code === 'number' ? `${error.code}: ${error.message ?? ''}` : error.message ?? ''))
+      .filter((message) => message.trim().length > 0);
+    return messages.join('; ').slice(0, 300);
+  } catch {
+    return '';
+  }
+}
+
+/** Strips accidental "Bearer " prefix and whitespace so a pasted token cannot produce HTTP 400 (invalid headers). */
+function normalizeApiToken(value: string): string {
+  const token = requireNonEmpty(value, 'Cloudflare API token').replace(/^Bearer\s+/iu, '').replace(/\s+/gu, '');
+  if (!/^[A-Za-z0-9._-]+$/u.test(token)) throw new Error('Cloudflare API token contains invalid characters');
+  return token;
 }
 
 function normalizeSetup(setup: CloudflareTunnelSetup): CloudflareTunnelSetup {
@@ -206,7 +228,8 @@ function normalizeOriginUrl(value: string): string {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash || !isLoopback(url.hostname)) {
     throw new Error('Local MCP origin must be an HTTP(S) loopback URL without credentials or query data');
   }
-  return url.toString();
+  if (url.pathname !== '/') throw new Error('Local MCP origin must not include a path — Cloudflare ingress forwards the same path as the incoming request (use e.g. http://127.0.0.1:18765, not http://127.0.0.1:18765/mcp)');
+  return url.origin;
 }
 
 function isLoopback(hostname: string): boolean {

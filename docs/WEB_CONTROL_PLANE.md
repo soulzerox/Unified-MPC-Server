@@ -272,6 +272,15 @@ unified-mpc web --port 3000
 
 For real ChatGPT Web access, install `cloudflared` or set `UNIFIED_MPC_CLOUDFLARED_BIN`. Quick tunnels are transient. Stable named tunnels use non-secret `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME` plus `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`; save token through `POST /api/settings`, which writes Linux Secret Service and never returns token. `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES` and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS` are exact allowlists, not wildcards. Copy dashboard `mcpUrl` into ChatGPT Web connector.
 
+#### `POST /api/cloudflare/reconcile`
+Validates the user-entered Cloudflare tunnel configuration against the live Cloudflare API, creates or reuses the named tunnel, configures ingress and DNS, stores both tokens in the Linux Secret Service, starts `cloudflared`, and probes bridge health.
+
+- **`apiToken` is optional**: omit it (or send an empty string) to reuse the token previously stored in the Secret Service. A provided token replaces the stored one; a `Bearer ` prefix and surrounding whitespace are stripped automatically before use. Tokens are never returned by any endpoint.
+- **User-entered non-secret settings persist immediately on submission** (account ID, zone name, tunnel name, public URL, origin URL, allowlists), so a failed attempt keeps the settings form prefilled. Only runtime/credential identity (`remoteTunnelId`, token-configured flags) and stored secrets roll back on failure.
+- **Validation enforced up front**: Public URL must be an HTTPS origin without path/query/credentials; Local MCP Origin must be an HTTP(S) loopback URL **without a path** — Cloudflare ingress forbids origin paths (API error `1056`) and forwards the incoming request path unchanged; origin URLs are normalized to strip the trailing slash.
+- **Cloudflare API failures surface real error codes/messages** (e.g. `HTTP 400: 6111: Invalid format for Authorization header` for malformed Bearer tokens) instead of a bare HTTP status.
+
+
 #### `POST /api/chatgpt-web/disconnect`
 Clears current session lease. Session leases also expire automatically, and every process restart invalidates prior leases.
 

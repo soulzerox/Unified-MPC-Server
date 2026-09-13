@@ -487,14 +487,9 @@ export class ControlPlaneServer {
     if (body === undefined || !isObject(body)) return;
     const previousConfiguration = this.gateway.configuration();
     const previousGatewayState = this.gateway.status().state;
+    // Failure rollback covers runtime/credential identity only; user-entered desired
+    // values persist so the settings form stays prefilled across failed attempts.
     const previousSettings = new Map<string, string | null>([
-      [SETTING_KEYS.accountId, this.settingsRepository.get(SETTING_KEYS.accountId)],
-      [SETTING_KEYS.zoneName, this.settingsRepository.get(SETTING_KEYS.zoneName)],
-      [SETTING_KEYS.tunnelName, this.settingsRepository.get(SETTING_KEYS.tunnelName)],
-      [SETTING_KEYS.publicUrl, this.settingsRepository.get(SETTING_KEYS.publicUrl)],
-      [SETTING_KEYS.originUrl, this.settingsRepository.get(SETTING_KEYS.originUrl)],
-      [SETTING_KEYS.allowedHostnames, this.settingsRepository.get(SETTING_KEYS.allowedHostnames)],
-      [SETTING_KEYS.allowedOrigins, this.settingsRepository.get(SETTING_KEYS.allowedOrigins)],
       [SETTING_KEYS.remoteTunnelId, this.settingsRepository.get(SETTING_KEYS.remoteTunnelId)],
       [SETTING_KEYS.apiTokenConfigured, this.settingsRepository.get(SETTING_KEYS.apiTokenConfigured)],
       [SETTING_KEYS.tokenConfigured, this.settingsRepository.get(SETTING_KEYS.tokenConfigured)],
@@ -507,7 +502,8 @@ export class ControlPlaneServer {
       previousApiToken = await this.secretStore.get('cloudflare_api_token');
       previousTunnelToken = await this.secretStore.get('cloudflare_tunnel_token');
       secretSnapshotReady = true;
-      const apiToken = readOptionalString(body.apiToken, 'apiToken') ?? await this.secretStore.get('cloudflare_api_token');
+      const providedApiToken = readOptionalString(body.apiToken, 'apiToken');
+      const apiToken = providedApiToken !== undefined && providedApiToken.length > 0 ? providedApiToken : await this.secretStore.get('cloudflare_api_token');
       const setup: CloudflareTunnelSetup = {
         accountId: readRequiredString(body.accountId, 'accountId'),
         zoneName: readRequiredString(body.zoneName, 'zoneName'),
@@ -519,7 +515,18 @@ export class ControlPlaneServer {
         hostnames: serializeList(body.allowedHostnames, 'allowedHostnames'),
         origins: serializeList(body.allowedOrigins, 'allowedOrigins'),
       };
-      if (apiToken === undefined || apiToken === null) throw new Error('Cloudflare API token is required');
+      if (apiToken === undefined || apiToken === null || apiToken.length === 0) throw new Error('Cloudflare API token is required — enter a new token or keep the previously saved one');
+
+      // Persist the user-entered desired configuration before contacting Cloudflare so a
+      // failed attempt never forces re-typing the whole form. Secrets and runtime
+      // identity are still rolled back on failure.
+      this.settingsRepository.set(SETTING_KEYS.accountId, setup.accountId.trim());
+      this.settingsRepository.set(SETTING_KEYS.zoneName, setup.zoneName.trim());
+      this.settingsRepository.set(SETTING_KEYS.tunnelName, setup.tunnelName.trim());
+      this.settingsRepository.set(SETTING_KEYS.publicUrl, setup.publicUrl.trim());
+      this.settingsRepository.set(SETTING_KEYS.originUrl, setup.originUrl.trim());
+      this.settingsRepository.set(SETTING_KEYS.allowedHostnames, allowlists.hostnames);
+      this.settingsRepository.set(SETTING_KEYS.allowedOrigins, allowlists.origins);
 
       const result = await this.cloudflareReconciler.reconcile(apiToken, setup);
       const applied = await this.gateway.applyConfiguration({ publicUrl: setup.publicUrl, tunnelToken: result.tunnelToken });
@@ -533,7 +540,7 @@ export class ControlPlaneServer {
       this.settingsRepository.set(SETTING_KEYS.allowedHostnames, allowlists.hostnames);
       this.settingsRepository.set(SETTING_KEYS.allowedOrigins, allowlists.origins);
       this.settingsRepository.set(SETTING_KEYS.remoteTunnelId, result.tunnelId);
-      await this.secretStore.set('cloudflare_api_token', apiToken);
+      if (providedApiToken !== undefined && providedApiToken.length > 0) await this.secretStore.set('cloudflare_api_token', apiToken);
       await this.secretStore.set('cloudflare_tunnel_token', result.tunnelToken);
       this.settingsRepository.set(SETTING_KEYS.apiTokenConfigured, 'true');
       this.settingsRepository.set(SETTING_KEYS.tokenConfigured, 'true');

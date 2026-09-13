@@ -34,6 +34,7 @@ export class SecretToolSecretStore implements SecretStore {
     } catch (error: unknown) {
       if (isSecretToolNotFound(error)) throw new Error('Linux Secret Service is unavailable: secret-tool was not found');
       if (error instanceof Error && /No secret found/i.test(error.message)) return null;
+      if (isMissingSecret(error)) return null;
       throw new Error('Linux Secret Service lookup failed');
     }
   }
@@ -56,6 +57,7 @@ export class SecretToolSecretStore implements SecretStore {
     } catch (error: unknown) {
       if (isSecretToolNotFound(error)) throw new Error('Linux Secret Service is unavailable: secret-tool was not found');
       if (error instanceof Error && /No secret found/i.test(error.message)) return;
+      if (isMissingSecret(error)) return;
       throw new Error('Linux Secret Service delete failed');
     }
   }
@@ -84,7 +86,11 @@ function runSecretTool(command: string, args: readonly string[], input?: string)
     child.once('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || `secret-tool exited with code ${code ?? 'unknown'}`));
+      else {
+        const failure = new Error(stderr || `secret-tool exited with code ${code ?? 'unknown'}`);
+        if (code !== null) Object.assign(failure, { secretToolExitCode: code });
+        reject(failure);
+      }
     });
     if (input !== undefined) child.stdin.end(input, 'utf8');
     else child.stdin.end();
@@ -93,4 +99,14 @@ function runSecretTool(command: string, args: readonly string[], input?: string)
 
 function isSecretToolNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+/** secret-tool lookup/clear exit with status 1 when the item does not exist (empty stdout/stderr). */
+function isMissingSecret(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'secretToolExitCode' in error &&
+    (error as { secretToolExitCode?: number }).secretToolExitCode === 1
+  );
 }

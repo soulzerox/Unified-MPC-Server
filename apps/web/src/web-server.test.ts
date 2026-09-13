@@ -269,6 +269,86 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     } finally { await configured.close(); }
   });
 
+  it('keeps user-submitted Cloudflare settings when reconcile fails so the form stays prefilled', async () => {
+    const settings = new Map<string, string>();
+    const secrets = new Map<string, string>();
+    const configured = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      settingsRepository: { get: (key: string): string | null => settings.get(key) ?? null, set: (key: string, value: string): void => { settings.set(key, value); }, delete: (key: string): void => { settings.delete(key); } },
+      secretStore: { get: async (key: string): Promise<string | null> => secrets.get(key) ?? null, set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); }, delete: async (key: string): Promise<void> => { secrets.delete(key); } },
+      cloudflareReconciler: { reconcile: async (): Promise<{ tunnelId: string; tunnelToken: string; zoneId: string; hostname: string }> => { throw new Error('Cloudflare zone was not found or is not active'); } } as never,
+    });
+    await configured.listen();
+    try {
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${configured.port}`, 'x-unified-mpc-capability': capabilityToken };
+      const response = await fetch(`http://127.0.0.1:${configured.port}/api/cloudflare/reconcile`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          accountId: '0123456789abcdef0123456789abcdef',
+          zoneName: 'example.com',
+          tunnelName: 'user-tunnel',
+          publicUrl: 'https://mcp.example.com',
+          originUrl: 'http://127.0.0.1:18765',
+          apiToken: 'user-api-token',
+          allowedHostnames: ['mcp.example.com'],
+          allowedOrigins: ['https://mcp.example.com'],
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(settings.get('cloudflare_account_id')).toBe('0123456789abcdef0123456789abcdef');
+      expect(settings.get('cloudflare_zone_name')).toBe('example.com');
+      expect(settings.get('cloudflare_tunnel_name')).toBe('user-tunnel');
+      expect(settings.get('cloudflare_public_url')).toBe('https://mcp.example.com');
+      expect(settings.get('cloudflare_origin_url')).toBe('http://127.0.0.1:18765');
+      expect(settings.get('mcp_allowed_hostnames')).toBe('mcp.example.com');
+      expect(settings.get('mcp_allowed_origins')).toBe('https://mcp.example.com');
+      expect(settings.get('cloudflare_remote_tunnel_id')).toBeUndefined();
+      expect(settings.get('cloudflare_api_token_configured')).toBeUndefined();
+      expect(secrets.size).toBe(0);
+    } finally { await configured.close(); }
+  });
+
+  it('reuses the stored Cloudflare API token when the request omits it', async () => {
+    const settings = new Map<string, string>();
+    const secrets = new Map<string, string>();
+    let capturedToken = '';
+    const configured = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      settingsRepository: { get: (key: string): string | null => settings.get(key) ?? null, set: (key: string, value: string): void => { settings.set(key, value); }, delete: (key: string): void => { settings.delete(key); } },
+      secretStore: { get: async (key: string): Promise<string | null> => secrets.get(key) ?? null, set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); }, delete: async (key: string): Promise<void> => { secrets.delete(key); } },
+      cloudflareReconciler: { reconcile: async (apiToken: string): Promise<{ tunnelId: string; tunnelToken: string; zoneId: string; hostname: string }> => { capturedToken = apiToken; return { tunnelId: 'remote-id', tunnelToken: 'runtime-token', zoneId: 'zone-id', hostname: 'mcp.example.com' }; } } as never,
+    });
+    secrets.set('cloudflare_api_token', 'stored-api-token');
+    await configured.listen();
+    try {
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${configured.port}`, 'x-unified-mpc-capability': capabilityToken };
+      const response = await fetch(`http://127.0.0.1:${configured.port}/api/cloudflare/reconcile`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          accountId: '0123456789abcdef0123456789abcdef',
+          zoneName: 'example.com',
+          tunnelName: 'user-tunnel',
+          publicUrl: 'https://mcp.example.com',
+          originUrl: 'http://127.0.0.1:18765',
+          allowedHostnames: ['mcp.example.com'],
+          allowedOrigins: ['https://mcp.example.com'],
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).not.toContain('stored-api-token');
+      expect(capturedToken).toBe('stored-api-token');
+      expect(secrets.get('cloudflare_api_token')).toBe('stored-api-token');
+      expect(secrets.get('cloudflare_tunnel_token')).toBe('runtime-token');
+      expect(settings.get('cloudflare_api_token_configured')).toBe('true');
+    } finally { await configured.close(); }
+  });
+
   it('persists Cloudflare allowlists before health probe', async () => {
     const settings = new Map<string, string>();
     const secrets = new Map<string, string>();

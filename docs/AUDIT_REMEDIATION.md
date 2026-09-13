@@ -24,7 +24,7 @@
 - `apps/web` uses native `node:http`; no frontend framework or CDN dependency.
 - `apps/web/src/dashboard-html.ts` composes `apps/web/src/ui/tokens.ts`, `apps/web/src/ui/views.ts`, and `apps/web/src/ui/client-script.ts`.
 - Listener binds to `127.0.0.1`; `Host` must be loopback.
-- Mutations and `GET /api/chatgpt-web/connect` require loopback `Origin`; foreign or malformed origins return `403`.
+- Mutations and `POST /api/chatgpt-web/connect` require loopback `Origin`; foreign or malformed origins return `403`.
 - Request bodies are capped at 1 MiB and oversized bodies return `413`.
 - ChatGPT Web connect returns `412` unless gateway state is `BRIDGE_HEALTHY`.
 - Server pruning requires server-issued `serverId`; caller-supplied `name`/`pid` is not accepted.
@@ -70,7 +70,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 ## Current remediation delta
 
 - Workspace-scoped pruner recovery records now use Recovery Center layout and version-2 metadata when an explicit `workspaceId` is supplied. Global prune records retain legacy metadata; runtime wiring must supply a registered workspace identity before those records can appear in Recovery Center.
-- Recovery metadata is written before payload rename and promoted to `restored` only after restore side effects succeed. Startup reconciliation remains report-only and blocks unsafe entries; orphan payloads are preserved for operator recovery.
+- Recovery metadata is written before payload rename and promoted to `restored` only after restore side effects succeed. Startup reconciliation is accepted as report-only: unsafe entries block startup, orphan payloads remain operator-visible, and `recoveryReady` is the runnable gate. No automatic destructive transition is permitted without provider identity evidence.
 - External MCP execution is fail-closed without current descriptor/catalog fingerprints. Child calls enforce declared input/output schema checks, 1 MiB argument and 8 MiB result limits, and a safe inherited environment allowlist.
 - Config mutation lock uses a per-acquisition owner file and removes only its own owner record. Cross-process serialization self-check passes.
 - Checkpoint key storage validates and hardens every existing parent ancestor and requires key file mode `0600`.

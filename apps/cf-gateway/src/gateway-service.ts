@@ -33,8 +33,16 @@ export interface GatewayServiceOptions {
   readonly healthAttempts?: number;
   readonly healthRetryDelayMs?: number;
   readonly tunnelStartupTimeoutMs?: number;
+  readonly sessionLeaseTtlMs?: number;
   readonly tunnelProvider?: () => Promise<TunnelHandle>;
+  readonly tunnelProviderFactory?: (configuration: GatewayTunnelConfiguration) => () => Promise<TunnelHandle>;
   readonly healthProbe?: (url: string, timeoutMs: number) => Promise<number>;
+}
+
+export interface GatewayTunnelConfiguration {
+  readonly tunnelName?: string;
+  readonly tunnelToken?: string;
+  readonly publicUrl?: string;
 }
 
 const DEFAULT_HEALTH_PATH = '/_unified-mpc/identity';
@@ -52,14 +60,15 @@ export class GatewayService {
   private readonly healthAttempts: number;
   private readonly healthRetryDelayMs: number;
   private readonly tunnelStartupTimeoutMs: number;
-  private readonly tunnelProvider: () => Promise<TunnelHandle>;
+  private readonly sessionLeaseTtlMs: number;
+  private tunnelProvider: () => Promise<TunnelHandle>;
+  private readonly tunnelProviderFactory: (configuration: GatewayTunnelConfiguration) => () => Promise<TunnelHandle>;
   private readonly healthProbe: (url: string, timeoutMs: number) => Promise<number>;
   private readonly mcpPath: string;
-  private readonly tunnelName: string | undefined;
-  private readonly tunnelToken: string | undefined;
-  private readonly publicUrl: string | undefined;
+  private configurationValue: GatewayTunnelConfiguration;
   private tunnel: TunnelHandle | undefined;
   private startGeneration = 0;
+  private sessionLeaseTimer: ReturnType<typeof setTimeout> | undefined;
 
   public constructor(options: GatewayServiceOptions = {}) {
     this.localPort = options.localPort ?? 18765;
@@ -69,10 +78,18 @@ export class GatewayService {
     this.healthAttempts = options.healthAttempts ?? 5;
     this.healthRetryDelayMs = options.healthRetryDelayMs ?? 250;
     this.tunnelStartupTimeoutMs = options.tunnelStartupTimeoutMs ?? 10_000;
-    this.tunnelName = options.tunnelName?.trim() || process.env.UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME?.trim() || undefined;
-    this.tunnelToken = options.tunnelToken?.trim() || process.env.UNIFIED_MPC_CLOUDFLARE_TUNNEL_TOKEN?.trim() || undefined;
-    this.publicUrl = options.publicUrl?.trim() || process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL?.trim() || undefined;
-    this.tunnelProvider = options.tunnelProvider ?? createCloudflaredTunnelProvider(this.localPort, this.tunnelName, this.tunnelToken, this.publicUrl, this.tunnelStartupTimeoutMs);
+    this.sessionLeaseTtlMs = options.sessionLeaseTtlMs ?? 15 * 60_000;
+    if (!Number.isInteger(this.sessionLeaseTtlMs) || this.sessionLeaseTtlMs <= 0) throw new Error('Session lease TTL must be positive');
+    this.configurationValue = normalizeConfiguration({
+      ...(options.tunnelName === undefined ? {} : { tunnelName: options.tunnelName }),
+      ...(options.tunnelToken === undefined ? {} : { tunnelToken: options.tunnelToken }),
+      ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
+    });
+    this.tunnelProviderFactory = options.tunnelProviderFactory
+      ?? (options.tunnelProvider === undefined
+        ? (configuration): (() => Promise<TunnelHandle>) => createCloudflaredTunnelProvider(this.localPort, configuration.tunnelName, configuration.tunnelToken, configuration.publicUrl, this.tunnelStartupTimeoutMs)
+        : (): (() => Promise<TunnelHandle>) => options.tunnelProvider!);
+    this.tunnelProvider = options.tunnelProvider ?? this.tunnelProviderFactory(this.configurationValue);
     this.healthProbe = options.healthProbe ?? probeHttpEndpoint;
   }
 
@@ -89,6 +106,38 @@ export class GatewayService {
 
   public canConnectSession(): boolean {
     return this.state === 'BRIDGE_HEALTHY';
+  }
+
+  public configuration(): GatewayTunnelConfiguration {
+    return { ...this.configurationValue };
+  }
+
+  public async applyConfiguration(configuration: GatewayTunnelConfiguration): Promise<Result<void>> {
+    let next: GatewayTunnelConfiguration;
+    try {
+      next = normalizeConfiguration(configuration);
+    } catch (error) {
+      return err(appError('INVALID_INPUT', error instanceof Error ? error.message : String(error)));
+    }
+    const previous = this.configurationValue;
+    const previousProvider = this.tunnelProvider;
+    const wasRunning = this.state === 'BRIDGE_HEALTHY' || this.state === 'SESSION_CONNECTED';
+    await this.stop();
+    this.configurationValue = next;
+    this.tunnelProvider = this.tunnelProviderFactory(next);
+    if (!wasRunning) return ok(undefined);
+    const started = await this.start();
+    if (started.ok) return ok(undefined);
+    this.configurationValue = previous;
+    this.tunnelProvider = previousProvider;
+    if (wasRunning) await this.start();
+    else {
+      this.state = 'STOPPED';
+      this.tunnelUrl = undefined;
+      this.latencyMs = undefined;
+      this.lastError = undefined;
+    }
+    return err(appError('CONFLICT', `Gateway configuration rejected; previous configuration restored: ${started.error.message}`));
   }
 
   public async start(): Promise<Result<{ readonly tunnelUrl: string; readonly localPort: number }>> {
@@ -153,6 +202,7 @@ export class GatewayService {
     this.state = 'STOPPED';
     this.tunnelUrl = undefined;
     this.leaseToken = undefined;
+    this.clearSessionLeaseTimer();
     this.latencyMs = undefined;
     this.lastError = undefined;
     return ok(undefined);
@@ -170,6 +220,8 @@ export class GatewayService {
 
     this.leaseToken = `lease_${randomUUID().replaceAll('-', '')}`;
     this.state = 'SESSION_CONNECTED';
+    this.clearSessionLeaseTimer();
+    this.sessionLeaseTimer = setTimeout(() => { void this.disconnectSession(); }, this.sessionLeaseTtlMs);
 
     return ok({
       leaseToken: this.leaseToken,
@@ -177,6 +229,34 @@ export class GatewayService {
       mcpUrl: new URL(this.mcpPath, this.tunnelUrl!).toString(),
     });
   }
+
+  public async disconnectSession(): Promise<Result<void>> {
+    this.clearSessionLeaseTimer();
+    this.leaseToken = undefined;
+    if (this.state === 'SESSION_CONNECTED') this.state = this.tunnelUrl === undefined ? 'STOPPED' : 'BRIDGE_HEALTHY';
+    return ok(undefined);
+  }
+
+  private clearSessionLeaseTimer(): void {
+    if (this.sessionLeaseTimer !== undefined) clearTimeout(this.sessionLeaseTimer);
+    this.sessionLeaseTimer = undefined;
+  }
+}
+
+function normalizeConfiguration(configuration: GatewayTunnelConfiguration): GatewayTunnelConfiguration {
+  const tunnelName = configuration.tunnelName?.trim() || undefined;
+  const tunnelToken = configuration.tunnelToken?.trim() || undefined;
+  const publicUrl = configuration.publicUrl?.trim() || undefined;
+  if (tunnelName !== undefined && tunnelToken !== undefined) throw new Error('Cloudflare tunnel name and token are mutually exclusive');
+  if ((tunnelName !== undefined || tunnelToken !== undefined) !== (publicUrl !== undefined)) {
+    throw new Error('Cloudflare named tunnel requires exactly one public URL');
+  }
+  if (publicUrl !== undefined) validateTunnelUrl(publicUrl);
+  return {
+    ...(tunnelName === undefined ? {} : { tunnelName }),
+    ...(tunnelToken === undefined ? {} : { tunnelToken }),
+    ...(publicUrl === undefined ? {} : { publicUrl }),
+  };
 }
 
 export function createCloudflaredTunnelProvider(localPort: number, tunnelName?: string, tunnelToken?: string, publicUrl?: string, startupTimeoutMs = 10_000): () => Promise<TunnelHandle> {
@@ -197,13 +277,14 @@ export function createCloudflaredTunnelProvider(localPort: number, tunnelName?: 
     if (publicUrl !== undefined) validateTunnelUrl(publicUrl);
     const command = process.env.UNIFIED_MPC_CLOUDFLARED_BIN?.trim() || 'cloudflared';
     const args = tunnelToken !== undefined
-      ? ['tunnel', '--no-autoupdate', 'run', '--token', tunnelToken]
+      ? ['tunnel', '--no-autoupdate', 'run']
       : tunnelName !== undefined
         ? ['tunnel', '--no-autoupdate', 'run', tunnelName]
         : ['tunnel', '--no-autoupdate', '--http-host-header', '127.0.0.1', '--url', `http://127.0.0.1:${localPort}`];
     const child = spawn(command, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      ...(tunnelToken === undefined ? {} : { env: { ...process.env, TUNNEL_TOKEN: tunnelToken } }),
     });
     let settled = false;
     let output = '';

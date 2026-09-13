@@ -11,6 +11,7 @@
     { "path": "../../packages/domain" },
     { "path": "../../packages/extensions" },
     { "path": "../../packages/shared" },
+    { "path": "../../packages/storage" },
     { "path": "../cf-gateway" }
   ],
   "include": ["src/**/*.ts"],

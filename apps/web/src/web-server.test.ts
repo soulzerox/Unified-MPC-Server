@@ -162,10 +162,11 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(data.status).toBe('healthy');
   });
 
-  it('enforces hard gating: GET /api/chatgpt-web/connect returns 412 Precondition Failed when bridge is STOPPED', async () => {
+  it('enforces hard gating: POST /api/chatgpt-web/connect returns 412 Precondition Failed when bridge is STOPPED', async () => {
     expect(gateway.status().state).toBe('STOPPED');
 
     const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, {
+      method: 'POST',
       headers: { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
     });
     expect(res.status).toBe(412);
@@ -173,11 +174,12 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(body.error).toContain('Bridge must be in BRIDGE_HEALTHY state');
   });
 
-  it('allows GET /api/chatgpt-web/connect with 200 OK when bridge is BRIDGE_HEALTHY', async () => {
+  it('allows POST /api/chatgpt-web/connect with 200 OK when bridge is BRIDGE_HEALTHY', async () => {
     await gateway.start();
     expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
 
     const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, {
+      method: 'POST',
       headers: { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
     });
     expect(res.status).toBe(200);
@@ -185,6 +187,39 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(body.leaseToken).toBeDefined();
     expect(body.tunnelUrl).toBeDefined();
     expect(body.mcpUrl).toBe('https://fixture.example.trycloudflare.com/mcp');
+  });
+
+  it('disconnects ChatGPT Web sessions with POST and leaves bridge healthy', async () => {
+    await gateway.start();
+    const headers = { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken };
+    await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { method: 'POST', headers });
+    const res = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/disconnect`, { method: 'POST', headers });
+    expect(res.status).toBe(200);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+  });
+
+  it('persists non-secret settings, masks token, and rejects invalid wildcard allowlists', async () => {
+    const settings = new Map<string, string>();
+    const secrets = new Map<string, string>();
+    const configured = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      settingsRepository: { get: (key: string): string | null => settings.get(key) ?? null, set: (key: string, value: string): void => { settings.set(key, value); }, delete: (key: string): void => { settings.delete(key); } },
+      secretStore: { get: async (key: string): Promise<string | null> => secrets.get(key) ?? null, set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); }, delete: async (key: string): Promise<void> => { secrets.delete(key); } },
+    });
+    await configured.listen();
+    try {
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${configured.port}`, 'x-unified-mpc-capability': capabilityToken };
+      const saved = await fetch(`http://127.0.0.1:${configured.port}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ publicUrl: 'https://mcp.example.com', tunnelToken: 'not-returned', allowedHostnames: ['mcp.example.com'], allowedOrigins: ['https://mcp.example.com'] }) });
+      expect(saved.status).toBe(200);
+      expect(await saved.text()).not.toContain('not-returned');
+      expect(secrets.get('cloudflare_tunnel_token')).toBe('not-returned');
+      const read = await fetch(`http://127.0.0.1:${configured.port}/api/settings`);
+      expect(await read.json()).toMatchObject({ settings: { tunnelTokenConfigured: true, allowedHostnames: ['mcp.example.com'] } });
+      const invalid = await fetch(`http://127.0.0.1:${configured.port}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ allowedHostnames: ['*'] }) });
+      expect(invalid.status).toBe(400);
+    } finally { await configured.close(); }
   });
 
   it('lists servers with opaque IDs and prunes by ownership proof, never request PID', async () => {

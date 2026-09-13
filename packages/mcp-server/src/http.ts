@@ -34,6 +34,8 @@ export interface McpHttpServerOptions extends McpServerOptions {
   readonly originPolicy?: OriginPolicy;
   readonly allowedHostnames?: readonly string[];
   readonly allowedOrigins?: readonly string[];
+  readonly allowedHostnamesProvider?: () => readonly string[];
+  readonly allowedOriginsProvider?: () => readonly string[];
 }
 
 export interface McpHttpServerAddress {
@@ -376,10 +378,10 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0) throw new Error('MCP HTTP body limit must be positive');
 
   const handler = createSessionfulMcpHandler(options);
-  const allowedHostnames = options.allowedHostnames ?? localhostAllowedHostnames();
-  const originPolicy = options.originPolicy ?? createOriginPolicy(options.allowedOrigins ?? localhostAllowedOrigins());
+  const allowedHostnames = options.allowedHostnamesProvider ?? ((): readonly string[] => options.allowedHostnames ?? localhostAllowedHostnames());
   const server = createServer((request, response) => {
-    void handleRequest(request, response, handler, originPolicy, maxBodyBytes, allowedHostnames).catch((error: unknown) => {
+    const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(options.allowedOriginsProvider?.() ?? options.allowedOrigins ?? localhostAllowedOrigins());
+    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames()).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();

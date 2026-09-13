@@ -180,7 +180,7 @@ The Local Web Control Plane runs at `http://127.0.0.1:3000/` by default. MCP HTT
 2. Start dashboard: `unified-mpc web --port 3000`.
 3. Open dashboard, start gateway, wait for `BRIDGE_HEALTHY`.
 4. Copy displayed `ChatGPT MCP URL` (`https://.../mcp`) into ChatGPT Web connector.
-5. For stable URL, set `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME`, `UNIFIED_MPC_CLOUDFLARE_TUNNEL_TOKEN`, `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`, `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES`, and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS`.
+5. For stable URL, set non-secret `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME` and `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`; save tunnel token through `POST /api/settings` so Linux Secret Service stores it. Set `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES` and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS` for exact public exposure consent.
 
 No `cloudflared` binary, MCP workspace, public URL, or credentials means no live ChatGPT Web connection.
 

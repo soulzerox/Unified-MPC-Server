@@ -16,7 +16,8 @@
     "@unified-mpc/cf-gateway": "workspace:*",
     "@unified-mpc/domain": "workspace:*",
     "@unified-mpc/extensions": "workspace:*",
-    "@unified-mpc/shared": "workspace:*"
+    "@unified-mpc/shared": "workspace:*",
+    "@unified-mpc/storage": "workspace:*"
   },
   "scripts": {
     "test": "vitest run",

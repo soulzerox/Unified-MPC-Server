@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { startMcpHttp } from '@unified-mpc/mcp-server';
 import { resolveDataPath as resolveDataPathFromShared, isUnrestricted } from '@unified-mpc/shared';
-import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
 
@@ -33,14 +33,15 @@ async function main(): Promise<void> {
   const dataPath = resolveDataPathFromShared();
   fs.mkdirSync(dataPath, { recursive: true });
   const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+  const settings = new SqliteSettingsRepository(database);
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
+  const publicHostnames = settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES');
+  const publicOrigins = settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS');
   database.close();
 
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined));
   await runtime.activityReady;
   await runtime.recoveryReady;
-  const publicHostnames = envList('UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES');
-  const publicOrigins = envList('UNIFIED_MPC_MCP_ALLOWED_ORIGINS');
   const handle = await startMcpHttp({
     port: envPort(),
     services: runtime.services,
@@ -70,6 +71,17 @@ async function main(): Promise<void> {
   };
   process.once('SIGINT', () => { void close(); });
   process.once('SIGTERM', () => { void close(); });
+}
+
+function settingList(settings: SqliteSettingsRepository, key: string, envName: string): readonly string[] | undefined {
+  const persisted = parseList(settings.get(key));
+  return persisted ?? envList(envName);
+}
+
+function parseList(value: string | null): readonly string[] | undefined {
+  if (value === null) return undefined;
+  const values = value.split(',').map((item) => item.trim()).filter(Boolean);
+  return values.length === 0 ? undefined : values;
 }
 
 main().catch((error: unknown) => {

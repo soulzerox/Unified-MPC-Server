@@ -336,6 +336,21 @@ export function renderDashboardViewsHtml(): string {
   <div class="view-panel" id="view-chatgpt">
     <div class="card">
       <div class="card-header">
+        <h2>Gateway Configuration</h2>
+        <button class="btn btn-secondary btn-sm" id="settings-refresh-btn" type="button">Reload</button>
+      </div>
+      <form id="gateway-settings-form">
+        <div class="form-group"><label for="settings-tunnel-name">Named Tunnel Name</label><input class="form-control mono" id="settings-tunnel-name" type="text" placeholder="unified-mpc"></div>
+        <div class="form-group"><label for="settings-public-url">Public URL</label><input class="form-control mono" id="settings-public-url" type="url" placeholder="https://mcp.example.com"></div>
+        <div class="form-group"><label for="settings-tunnel-token">Tunnel Token <span class="mono">(write-only)</span></label><input class="form-control mono" id="settings-tunnel-token" type="password" autocomplete="new-password" placeholder="Stored in Linux Secret Service"></div>
+        <div class="form-group"><label for="settings-allowed-hostnames">Allowed MCP Hostnames</label><input class="form-control mono" id="settings-allowed-hostnames" type="text" placeholder="mcp.example.com"></div>
+        <div class="form-group"><label for="settings-allowed-origins">Allowed MCP Origins</label><input class="form-control mono" id="settings-allowed-origins" type="text" placeholder="https://mcp.example.com"></div>
+        <button class="btn" type="submit">Validate & Apply Settings</button>
+        <span id="settings-token-status" class="badge badge-state mono">Token not configured</span>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-header">
         <h2>ChatGPT Companion Bridge — Lifecycle State Machine</h2>
         <div style="display: flex; gap: 8px;">
           <button class="btn btn-secondary btn-sm" id="chatgpt-view-refresh-btn">Check Status</button>
@@ -383,6 +398,7 @@ export function renderDashboardViewsHtml(): string {
         <button class="btn btn-secondary" id="chatgpt-view-start-btn">Start Cloudflare Gateway</button>
         <button class="btn btn-secondary" id="chatgpt-view-stop-btn">Stop Gateway</button>
         <button class="btn" id="chatgpt-view-connect-btn" disabled>Connect ChatGPT Web Session</button>
+        <button class="btn btn-danger" id="chatgpt-view-disconnect-btn">Disconnect ChatGPT Web Session</button>
       </div>
     </div>
   </div>

@@ -427,6 +427,48 @@ export function getClientScriptJs(): string {
         }
       }
 
+      async function loadSettings() {
+        try {
+          const res = await fetch('/api/settings');
+          if (!res.ok) throw new Error('Settings request failed');
+          const data = await res.json();
+          const settings = data.settings || {};
+          for (const [id, value] of [
+            ['settings-tunnel-name', settings.tunnelName || ''],
+            ['settings-public-url', settings.publicUrl || ''],
+            ['settings-allowed-hostnames', (settings.allowedHostnames || []).join(', ')],
+            ['settings-allowed-origins', (settings.allowedOrigins || []).join(', ')],
+          ]) {
+            const field = document.getElementById(id);
+            if (field) field.value = value;
+          }
+          const tokenStatus = document.getElementById('settings-token-status');
+          if (tokenStatus) tokenStatus.textContent = settings.tunnelTokenConfigured ? 'Token configured' : 'Token not configured';
+        } catch (err) { logEvent('WARN', 'Settings unavailable: ' + err.message); }
+      }
+
+      async function saveSettings(event) {
+        event.preventDefault();
+        const csv = (id) => document.getElementById(id)?.value.split(',').map((value) => value.trim()).filter(Boolean) || [];
+        const body = {
+          tunnelName: document.getElementById('settings-tunnel-name')?.value || '',
+          publicUrl: document.getElementById('settings-public-url')?.value || '',
+          allowedHostnames: csv('settings-allowed-hostnames'),
+          allowedOrigins: csv('settings-allowed-origins'),
+        };
+        const token = document.getElementById('settings-tunnel-token')?.value || '';
+        if (token) body.tunnelToken = token;
+        try {
+          const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const result = await res.json();
+          if (!res.ok || !result.ok) throw new Error(result.error?.message || result.error || 'Settings update failed');
+          document.getElementById('settings-tunnel-token').value = '';
+          showToast('Gateway settings applied');
+          loadSettings();
+          loadGatewayStatus();
+        } catch (err) { showToast('Settings failed: ' + err.message, true); logEvent('ERROR', 'Settings update failed: ' + err.message); }
+      }
+
       async function syncPolicies() {
         try {
           showToast('Syncing policies across IDE targets...');
@@ -454,7 +496,7 @@ export function getClientScriptJs(): string {
       async function connectChatGPT() {
         try {
           logEvent('INFO', 'Initiating connection to ChatGPT Web...');
-          const res = await fetch('/api/chatgpt-web/connect');
+          const res = await fetch('/api/chatgpt-web/connect', { method: 'POST' });
           if (res.status === 412) {
             const errData = await res.json();
             showToast('Hard Gate Blocked (412): ' + errData.error, true);
@@ -503,6 +545,19 @@ export function getClientScriptJs(): string {
         } catch (err) {
           showToast('Stop failed: ' + err.message, true);
           logEvent('ERROR', 'Stop gateway exception: ' + err.message);
+        }
+      }
+
+      async function disconnectChatGPT() {
+        try {
+          const res = await fetch('/api/chatgpt-web/disconnect', { method: 'POST' });
+          const result = await res.json();
+          if (!res.ok) throw new Error(result.error?.message || result.error || 'Disconnect failed');
+          showToast('ChatGPT Web session disconnected');
+          loadGatewayStatus();
+        } catch (err) {
+          showToast('Disconnect failed: ' + err.message, true);
+          logEvent('ERROR', 'Disconnect exception: ' + err.message);
         }
       }
 
@@ -622,6 +677,9 @@ export function getClientScriptJs(): string {
 
       document.getElementById('connect-btn')?.addEventListener('click', connectChatGPT);
       document.getElementById('chatgpt-view-connect-btn')?.addEventListener('click', connectChatGPT);
+      document.getElementById('chatgpt-view-disconnect-btn')?.addEventListener('click', disconnectChatGPT);
+      document.getElementById('gateway-settings-form')?.addEventListener('submit', saveSettings);
+      document.getElementById('settings-refresh-btn')?.addEventListener('click', loadSettings);
 
       document.getElementById('start-gateway-btn')?.addEventListener('click', startGateway);
       document.getElementById('chatgpt-view-start-btn')?.addEventListener('click', startGateway);
@@ -736,6 +794,7 @@ export function getClientScriptJs(): string {
       loadInventory();
       loadPolicies();
       loadGatewayStatus();
+      loadSettings();
       fetchServerLogs();
 
       setInterval(loadGatewayStatus, 5000);

@@ -119,6 +119,9 @@ importers:
       '@unified-mpc/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@unified-mpc/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
 
   packages/application:
     dependencies:

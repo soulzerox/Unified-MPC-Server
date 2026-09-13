@@ -101,14 +101,14 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       // 1. Initially STOPPED -> must be 412
       expect(gateway.status().state).toBe('STOPPED');
       const authHeaders = { Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken };
-      const resStopped = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
+      const resStopped = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { method: 'POST', headers: authHeaders });
       expect(resStopped.status).toBe(412);
 
       // 2. Start bridge -> transitions to BRIDGE_HEALTHY -> connect succeeds with 200
       await gateway.start();
       expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
 
-      const resConnected = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
+      const resConnected = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { method: 'POST', headers: authHeaders });
       expect(resConnected.status).toBe(200);
       const connData = await resConnected.json();
       expect(connData.leaseToken).toBeDefined();
@@ -116,7 +116,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
 
       // 3. Once connected, state is SESSION_CONNECTED -> subsequent connect must return 412!
       expect(gateway.status().state).toBe('SESSION_CONNECTED');
-      const resSecond = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
+      const resSecond = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { method: 'POST', headers: authHeaders });
       expect(resSecond.status).toBe(412);
       const secondBody = await resSecond.json();
       expect(secondBody.state).toBe('SESSION_CONNECTED');
@@ -124,7 +124,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       // 4. Stop bridge -> state returns to STOPPED -> connect must return 412
       await gateway.stop();
       expect(gateway.status().state).toBe('STOPPED');
-      const resStoppedAgain = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { headers: authHeaders });
+      const resStoppedAgain = await fetch(`http://127.0.0.1:${port}/api/chatgpt-web/connect`, { method: 'POST', headers: authHeaders });
       expect(resStoppedAgain.status).toBe(412);
     });
   });

@@ -14,3 +14,4 @@ export * from './checkpoint-key-store.js';
 export * from './backup-service.js';
 export * from './agent-swarm-repository.js';
 export * from './migrations/agent-swarm-migration.js';
+export * from './secret-store.js';

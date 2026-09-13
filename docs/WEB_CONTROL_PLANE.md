@@ -141,7 +141,7 @@ Invalidates pending starts and session lease state, then returns the gateway to 
 }
 ```
 
-#### `GET /api/chatgpt-web/connect`
+#### `POST /api/chatgpt-web/connect`
 Initiates a gated session lease handshake. A loopback `Origin` header is required.
 
 - **Precondition**: `state === "BRIDGE_HEALTHY"`
@@ -270,5 +270,11 @@ UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http
 unified-mpc web --port 3000
 ```
 
-For real ChatGPT Web access, install `cloudflared` or set `UNIFIED_MPC_CLOUDFLARED_BIN`. Quick tunnels are transient. Stable named tunnels additionally require `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME`, `UNIFIED_MPC_CLOUDFLARE_TUNNEL_TOKEN`, `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`, `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES`, and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS`. Copy dashboard `mcpUrl` into ChatGPT Web connector.
+For real ChatGPT Web access, install `cloudflared` or set `UNIFIED_MPC_CLOUDFLARED_BIN`. Quick tunnels are transient. Stable named tunnels use non-secret `UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME` plus `UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL`; save token through `POST /api/settings`, which writes Linux Secret Service and never returns token. `UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES` and `UNIFIED_MPC_MCP_ALLOWED_ORIGINS` are exact allowlists, not wildcards. Copy dashboard `mcpUrl` into ChatGPT Web connector.
+
+#### `POST /api/chatgpt-web/disconnect`
+Clears current session lease. Session leases also expire automatically, and every process restart invalidates prior leases.
+
+#### `GET /api/settings` / `POST /api/settings`
+Reads masked non-secret gateway settings or validates/applies new settings. SQLite stores non-secret values only. Tunnel token goes to Linux Secret Service; response exposes only `tunnelTokenConfigured: true|false`. Runtime applies candidate settings by stopping, starting, probing identity, and committing only after success; failed probes restore previous runtime settings.
 

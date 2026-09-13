@@ -169,7 +169,7 @@ Following the Matt Pocock `/diagnosing-bugs` and `/scaffold-exercises` TDD workf
 5. **Gated Web Gateway (Milestone 5)**:
    - Hardened `Origin` policy guard to verify HTTP/HTTPS protocols, strictly rejecting non-http protocols (e.g. `ftp://localhost`), `null`, and spoofed origins with `403 Forbidden`.
    - Added 1MB request body limit returning `413 Payload Too Large`.
-   - Verified 412 state gate enforcement on `/api/chatgpt-web/connect` across full state machine lifecycle (STOPPED -> 412, BRIDGE_HEALTHY -> 200, SESSION_CONNECTED -> 412).
+    - Verified 412 state gate enforcement on `POST /api/chatgpt-web/connect` across full state machine lifecycle (STOPPED -> 412, BRIDGE_HEALTHY -> 200, SESSION_CONNECTED -> 412); `POST /api/chatgpt-web/disconnect` clears lease.
    - Stress tested with 50 concurrent requests (`milestone-5-stress.test.ts`).
 6. **Unified CLI & Monorepo Verification (Milestone 6)**:
    - Added shebang and `createDefaultCliDependencies` to `apps/cli/src/index.ts`, enabling standalone CLI binary execution.
@@ -229,7 +229,7 @@ Comprehensive host-environment dogfooding and smoke testing verified all runtime
    - Refactored `apps/cli/src/index.ts` daemon lifecycle so the web process remains running until SIGINT/SIGTERM.
    - Probed `GET /`: Returned 200 OK with Obsidian Telemetry dashboard HTML.
    - Probed `GET /api/chatgpt-gateway/status`: Returned 200 OK (`{"state":"STOPPED","localPort":18765}`).
-   - Probed `GET /api/chatgpt-web/connect`: Returned 412 Precondition Failed, enforcing the bridge health invariant.
+    - Probed `POST /api/chatgpt-web/connect`: Returned 412 Precondition Failed, enforcing the bridge health invariant.
    - Probed foreign `Origin`: Returned 403 Forbidden (`Origin not allowed: loopback only`).
    - Probed loopback `Origin`: Returned 200 OK with CORS headers.
    - Probed `GET /api/policies`: Returned 200 OK with full P1-P7 policy payload.

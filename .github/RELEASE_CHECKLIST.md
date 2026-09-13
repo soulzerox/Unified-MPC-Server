@@ -9,6 +9,9 @@ Run verification from Linux repository root. Every stage must fail fast; `git di
 Required command: `corepack pnpm release:verify`. It runs version consistency, typecheck, lint, all tests, build, root integration tests, diff whitespace checks, cross-process lock self-check, and Rust tests. Rust preflight must report a usable compiler before Cargo runs; missing or incomplete Rust tooling is a release blocker.
 
 Secrets never appear in logs, release evidence, or tracked files. Cloudflare tokens and capability cookies stay operator-local.
+- Web Control Plane settings store non-secrets in `unified-mpc.sqlite`; tunnel tokens use Linux Secret Service via `secret-tool` and never enter `.env`, SQLite, logs, or API responses. Missing Secret Service fails closed.
+- Gateway settings validation is transactional: candidate config is validated, runtime is stopped/restarted and identity-probed, then persistence commits; failed probes or persistence restore prior runtime and stored settings.
+- ChatGPT Web session mutation uses `POST /api/chatgpt-web/connect`; `POST /api/chatgpt-web/disconnect`, lease TTL, and process restart invalidation are covered by tests.
 
 ## Automated evidence
 
@@ -54,6 +57,8 @@ Secrets never appear in logs, release evidence, or tracked files. Cloudflare tok
 ## Manual clean-machine evidence
 
 On clean Linux Ubuntu, start `unified-mpc-mcp-http`, verify `/_unified-mpc/identity`, start web dashboard, start gateway, copy `mcpUrl` into ChatGPT Web connector, perform one harmless tool call, then stop all processes. Record OS, commit, URL hostname only, and pass/fail. Do not record tokens.
+
+Current workspace evidence: local MCP identity startup passed; real `cloudflared` Quick Tunnel emitted hostname `monitored-suggestions-formation-premium.trycloudflare.com`, but public identity probe failed with `curl: (6) Could not resolve host`. Cloudflare public-network acceptance: **blocked by DNS/network**. ChatGPT Web connector registration and harmless-tool acceptance: **blocked; operator account access required**. No credentials recorded.
 
 Run one low-impact real Codex discovery/delegation check only in a disposable Git fixture. Do not automate provider quota consumption and do not read Codex credential files.
 

@@ -169,7 +169,7 @@ The Local Web Control Plane enforces an explicit state machine for ChatGPT Web c
 
 - **Hard Gating Invariant**:
   - The `[ Connect ChatGPT Web ]` UI button is disabled whenever the bridge state is not `BRIDGE_HEALTHY`.
-  - HTTP endpoint `GET /api/chatgpt-web/connect` returns `412 Precondition Failed` if called while the gateway bridge is stopped, initializing, or already in `SESSION_CONNECTED` state (preventing double leasing).
+  - HTTP endpoint `POST /api/chatgpt-web/connect` returns `412 Precondition Failed` if called while the gateway bridge is stopped, initializing, or already in `SESSION_CONNECTED` state (preventing double leasing). `POST /api/chatgpt-web/disconnect` clears the lease.
   - The UI displays live status: Tunnel URL (Cloudflare), Local Port, Session Lease Token, and Ping Latency.
 - **Decoupled Gateway Service (`apps/cf-gateway`)**:
   - Spawns `cloudflared tunnel` and authenticates incoming remote ChatGPT requests via OAuth 2.0 PKCE.
@@ -328,7 +328,7 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Historical full-suite claims require current rerun; unavailable CI status is not asserted.
 9. **Interactive Reactive Web Control Plane SPA (Option 1 — TDD)**:
    - Kept zero-dependency vanilla HTML/TypeScript UI, with `apps/web/src/dashboard-html.ts` composing `ui/tokens.ts`, `ui/views.ts`, and `ui/client-script.ts`.
-   - Wired live telemetry and management routes: `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, `/api/chatgpt-gateway/status`, policy sync, bifurcated install/prune, and gated `GET /api/chatgpt-web/connect`.
+    - Wired live telemetry and management routes: `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, `/api/chatgpt-gateway/status`, policy sync, bifurcated install/prune, and gated `POST /api/chatgpt-web/connect` / `POST /api/chatgpt-web/disconnect`.
    - Server pruning now accepts only server-issued opaque `serverId` ownership proof; raw PID input is rejected.
    - `ControlPlaneServer` uses native `node:http`, validates loopback `Host`/`Origin`, requires Origin on mutations, caps bodies at 1 MiB, and converts async route failures to `500` without killing the process.
    - Detailed file-level audit record: `docs/AUDIT_REMEDIATION.md`.

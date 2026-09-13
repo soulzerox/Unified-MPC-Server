@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createCloudflaredTunnelProvider, GatewayService, type TunnelHandle } from './gateway-service.js';
 
 function tunnel(url = 'https://chatgpt.example.trycloudflare.com'): TunnelHandle {
@@ -132,6 +135,63 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     await expect(createCloudflaredTunnelProvider(18765, 'name', undefined, undefined)()).rejects.toThrow('exactly one public URL');
     await expect(createCloudflaredTunnelProvider(18765, 'name', 'token', 'https://mcp.example.com')()).rejects.toThrow('mutually exclusive');
     await expect(createCloudflaredTunnelProvider(18765, undefined, undefined, 'https://mcp.example.com')()).rejects.toThrow('exactly one public URL');
+  });
+
+  it('reconfigures a running gateway and restores prior configuration after probe failure', async () => {
+    const urls = ['https://first.example.com', 'https://broken.example.com', 'https://first.example.com'];
+    const stopped: string[] = [];
+    const gateway = new GatewayService({
+      tunnelProviderFactory: (configuration) => async (): Promise<TunnelHandle> => {
+        const url = urls.shift()!;
+        return { url, stop: async (): Promise<void> => { stopped.push(configuration.publicUrl ?? 'quick'); } };
+      },
+      healthProbe: async (url): Promise<number> => url.includes('broken') ? 503 : 200,
+    });
+    expect((await gateway.start()).ok).toBe(true);
+    const result = await gateway.applyConfiguration({ tunnelName: 'new-tunnel', publicUrl: 'https://new.example.com' });
+    expect(result.ok).toBe(false);
+    expect(gateway.configuration()).toEqual({});
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+    expect(stopped.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('disconnects a session and expires a lease without stopping healthy bridge', async () => {
+    const gateway = new GatewayService({
+      sessionLeaseTtlMs: 10,
+      tunnelProvider: async (): Promise<TunnelHandle> => tunnel(),
+      healthProbe: async (): Promise<number> => 200,
+    });
+    await gateway.start();
+    await gateway.connectSession();
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+    await gateway.connectSession();
+    await gateway.disconnectSession();
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+  });
+
+  it('keeps named tunnel token out of cloudflared argv and passes it through child environment', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cloudflared-'));
+    const script = path.join(root, 'cloudflared-fixture');
+    const capture = path.join(root, 'capture');
+    const previous = process.env.UNIFIED_MPC_CLOUDFLARED_BIN;
+    await writeFile(script, `#!/bin/sh\nprintf '%s\\n' "$TUNNEL_TOKEN" > '${capture}'\nprintf '%s\\n' "$@" >> '${capture}'\nsleep 30\n`, 'utf8');
+    await chmod(script, 0o700);
+    process.env.UNIFIED_MPC_CLOUDFLARED_BIN = script;
+    try {
+      const provider = createCloudflaredTunnelProvider(18765, undefined, 'token-not-in-argv', 'https://mcp.example.com');
+      const handle = await provider();
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      const captured = await readFile(capture, 'utf8');
+      expect(captured).toContain('token-not-in-argv');
+      expect(captured).not.toContain('--token\ntoken-not-in-argv');
+      expect(captured).toContain('tunnel\n--no-autoupdate\nrun');
+      await handle.stop();
+    } finally {
+      if (previous === undefined) delete process.env.UNIFIED_MPC_CLOUDFLARED_BIN;
+      else process.env.UNIFIED_MPC_CLOUDFLARED_BIN = previous;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

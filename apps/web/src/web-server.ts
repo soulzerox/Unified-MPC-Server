@@ -4,6 +4,8 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
+import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
+import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import {
   DEFAULT_POLICIES,
   DEFAULT_EXTENSIONS_SETTINGS,
@@ -31,7 +33,18 @@ export interface ControlPlaneServerOptions {
   readonly serverCatalog?: McpConfigLoader;
   /** Test-only override; production generates a fresh token on every startup. */
   readonly capabilityToken?: string;
+  readonly settingsRepository?: Pick<SqliteSettingsRepository, 'get' | 'set' | 'delete'>;
+  readonly secretStore?: SecretStore;
+  readonly closeSettings?: () => void;
 }
+
+const SETTING_KEYS = Object.freeze({
+  tunnelName: 'cloudflare_tunnel_name',
+  publicUrl: 'cloudflare_public_url',
+  allowedHostnames: 'mcp_allowed_hostnames',
+  allowedOrigins: 'mcp_allowed_origins',
+  tokenConfigured: 'cloudflare_tunnel_token_configured',
+});
 
 interface RegisteredServer {
   readonly serverId: string;
@@ -60,6 +73,9 @@ export class ControlPlaneServer {
   private readonly serverRegistry = new Map<string, RegisteredServer>();
   private readonly telemetryLogs: TelemetryLogEntry[] = [];
   private readonly capabilityToken: Buffer;
+  private readonly settingsRepository: Pick<SqliteSettingsRepository, 'get' | 'set' | 'delete'> | undefined;
+  private readonly secretStore: SecretStore | undefined;
+  private readonly closeSettings: (() => void) | undefined;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
     const now = new Date();
@@ -81,6 +97,9 @@ export class ControlPlaneServer {
     this.skillCatalog = options.skillCatalog ?? new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
     this.serverCatalog = options.serverCatalog ?? new McpConfigLoader({ settings: DEFAULT_EXTENSIONS_SETTINGS });
     this.capabilityToken = Buffer.from(options.capabilityToken ?? randomBytes(32).toString('hex'), 'utf8');
+    this.settingsRepository = options.settingsRepository;
+    this.secretStore = options.secretStore;
+    this.closeSettings = options.closeSettings;
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
 
@@ -94,6 +113,7 @@ export class ControlPlaneServer {
   }
 
   public async listen(): Promise<void> {
+    await this.loadPersistedGatewayConfiguration();
     return new Promise((resolve, reject) => {
       this.server.on('error', reject);
       this.server.listen(this.configuredPort, '127.0.0.1', () => {
@@ -112,6 +132,7 @@ export class ControlPlaneServer {
       this.server.close((err) => (err ? reject(err) : resolve()));
     });
     if (this.ownsGateway) await this.gateway.stop();
+    this.closeSettings?.();
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -125,13 +146,13 @@ export class ControlPlaneServer {
     // Browser Origin is required for mutations; Host remains primary loopback boundary.
     const origin = req.headers.origin;
     const requestPath = new URL(req.url ?? '/', `http://127.0.0.1:${this.boundPort}`).pathname;
-    const originRequired = req.method !== 'GET' && req.method !== 'HEAD' || requestPath === '/api/chatgpt-web/connect';
+    const originRequired = req.method !== 'GET' && req.method !== 'HEAD' || requestPath === '/api/chatgpt-web/connect' || requestPath === '/api/chatgpt-web/disconnect';
     if (originRequired && origin === undefined) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Origin header required for mutations' }));
       return;
     }
-    const mutation = (req.method !== 'GET' && req.method !== 'HEAD') || requestPath === '/api/chatgpt-web/connect';
+    const mutation = (req.method !== 'GET' && req.method !== 'HEAD') || requestPath === '/api/chatgpt-web/connect' || requestPath === '/api/chatgpt-web/disconnect';
     if (mutation && !this.hasCapability(req)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Capability authorization required' }));
@@ -249,8 +270,23 @@ export class ControlPlaneServer {
       return;
     }
 
+    if (pathname === '/api/settings' && req.method === 'GET') {
+      if (this.settingsRepository === undefined) {
+        sendJsonError(res, 503, 'Settings persistence is unavailable');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ settings: await this.publicSettings() }));
+      return;
+    }
+
+    if (pathname === '/api/settings' && req.method === 'POST') {
+      await this.updateSettings(req, res);
+      return;
+    }
+
     // HARD GATING INVARIANT on /api/chatgpt-web/connect
-    if (pathname === '/api/chatgpt-web/connect' && req.method === 'GET') {
+    if (pathname === '/api/chatgpt-web/connect' && req.method === 'POST') {
       if (!this.gateway.canConnectSession()) {
         const current = this.gateway.status();
         this.recordLog('WARN', `Connect blocked by hard gate: state is ${current.state}`);
@@ -273,6 +309,14 @@ export class ControlPlaneServer {
       this.recordLog('SUCCESS', 'Connected ChatGPT Web session');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sessionResult.value));
+      return;
+    }
+
+    if (pathname === '/api/chatgpt-web/disconnect' && req.method === 'POST') {
+      const result = await this.gateway.disconnectSession();
+      this.recordLog('INFO', 'Disconnected ChatGPT Web session');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
       return;
     }
 
@@ -394,6 +438,115 @@ export class ControlPlaneServer {
     return candidate.length === this.capabilityToken.length && timingSafeEqual(candidate, this.capabilityToken);
   }
 
+  private async publicSettings(): Promise<Record<string, unknown>> {
+    const settings = this.settingsRepository!;
+    return {
+      tunnelName: settings.get(SETTING_KEYS.tunnelName),
+      publicUrl: settings.get(SETTING_KEYS.publicUrl),
+      allowedHostnames: splitList(settings.get(SETTING_KEYS.allowedHostnames)),
+      allowedOrigins: splitList(settings.get(SETTING_KEYS.allowedOrigins)),
+      tunnelTokenConfigured: settings.get(SETTING_KEYS.tokenConfigured) === 'true',
+    };
+  }
+
+  private async updateSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.settingsRepository === undefined) {
+      sendJsonError(res, 503, 'Settings persistence is unavailable');
+      return;
+    }
+    const body = await parseRequestBody(req, res);
+    if (body === undefined || !isObject(body)) return;
+    const current = await this.readGatewayConfiguration();
+    const currentSettings = await this.publicSettings();
+    const previousStored = new Map<string, string | null>([
+      [SETTING_KEYS.tunnelName, this.settingsRepository.get(SETTING_KEYS.tunnelName)],
+      [SETTING_KEYS.publicUrl, this.settingsRepository.get(SETTING_KEYS.publicUrl)],
+      [SETTING_KEYS.allowedHostnames, this.settingsRepository.get(SETTING_KEYS.allowedHostnames)],
+      [SETTING_KEYS.allowedOrigins, this.settingsRepository.get(SETTING_KEYS.allowedOrigins)],
+      [SETTING_KEYS.tokenConfigured, this.settingsRepository.get(SETTING_KEYS.tokenConfigured)],
+    ]);
+    let next: { readonly tunnelName?: string; readonly publicUrl?: string; readonly tunnelToken?: string };
+    try {
+      const tunnelName = readOptionalString(body.tunnelName, 'tunnelName');
+      const publicUrl = readOptionalString(body.publicUrl, 'publicUrl');
+      const tunnelToken = body.tunnelToken === undefined ? undefined : readOptionalString(body.tunnelToken, 'tunnelToken');
+      next = {
+        ...(tunnelName === undefined ? {} : { tunnelName }),
+        ...(publicUrl === undefined ? {} : { publicUrl }),
+        ...(tunnelToken === undefined ? {} : { tunnelToken }),
+      };
+    } catch (error) {
+      sendJsonError(res, 400, error instanceof Error ? error.message : 'Settings are invalid');
+      return;
+    }
+    const configuration: GatewayTunnelConfiguration = {
+      ...(next.tunnelName === undefined ? (current.tunnelName === undefined ? {} : { tunnelName: current.tunnelName }) : next.tunnelName === '' ? {} : { tunnelName: next.tunnelName }),
+      ...(next.publicUrl === undefined ? (current.publicUrl === undefined ? {} : { publicUrl: current.publicUrl }) : next.publicUrl === '' ? {} : { publicUrl: next.publicUrl }),
+      ...(next.tunnelToken === undefined ? (current.tunnelToken === undefined ? {} : { tunnelToken: current.tunnelToken }) : next.tunnelToken === '' ? {} : { tunnelToken: next.tunnelToken }),
+    };
+    if (next.tunnelToken !== undefined && next.tunnelToken !== '' && this.secretStore === undefined) {
+      sendJsonError(res, 503, 'Secure secret storage is unavailable');
+      return;
+    }
+    let allowedHostnames: string | undefined;
+    let allowedOrigins: string | undefined;
+    try {
+      if (body.allowedHostnames !== undefined) allowedHostnames = serializeList(body.allowedHostnames, 'allowedHostnames');
+      if (body.allowedOrigins !== undefined) allowedOrigins = serializeList(body.allowedOrigins, 'allowedOrigins');
+    } catch (error) {
+      sendJsonError(res, 400, error instanceof Error ? error.message : 'Allowlist settings are invalid');
+      return;
+    }
+    const applied = await this.gateway.applyConfiguration(configuration);
+    if (!applied.ok) {
+      res.writeHead(applied.error.code === 'INVALID_INPUT' ? 400 : 409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(applied));
+      return;
+    }
+    try {
+      const settings = this.settingsRepository;
+      writeOptional(settings, SETTING_KEYS.tunnelName, configuration.tunnelName);
+      writeOptional(settings, SETTING_KEYS.publicUrl, configuration.publicUrl);
+      if (allowedHostnames !== undefined) settings.set(SETTING_KEYS.allowedHostnames, allowedHostnames);
+      if (allowedOrigins !== undefined) settings.set(SETTING_KEYS.allowedOrigins, allowedOrigins);
+      if (next.tunnelToken !== undefined) {
+        if (this.secretStore === undefined) throw new Error('Secure secret storage is unavailable');
+        if (next.tunnelToken === '') await this.secretStore.delete('cloudflare_tunnel_token');
+        else await this.secretStore.set('cloudflare_tunnel_token', next.tunnelToken);
+        settings.set(SETTING_KEYS.tokenConfigured, next.tunnelToken === '' ? 'false' : 'true');
+      }
+    } catch (error) {
+      await this.gateway.applyConfiguration(current);
+      for (const [key, value] of previousStored) writeOptional(this.settingsRepository, key, value ?? undefined);
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Settings persistence failed' }));
+      return;
+    }
+    this.recordLog('SUCCESS', 'Runtime settings applied');
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ ok: true, settings: await this.publicSettings(), previous: currentSettings }));
+  }
+
+  private async readGatewayConfiguration(): Promise<GatewayTunnelConfiguration & { readonly tunnelToken?: string }> {
+    const settings = this.settingsRepository!;
+    const configured = settings.get(SETTING_KEYS.tokenConfigured) === 'true';
+    const token = configured ? await this.secretStore?.get('cloudflare_tunnel_token') : null;
+    return {
+      ...(settings.get(SETTING_KEYS.tunnelName) ? { tunnelName: settings.get(SETTING_KEYS.tunnelName)! } : {}),
+      ...(settings.get(SETTING_KEYS.publicUrl) ? { publicUrl: settings.get(SETTING_KEYS.publicUrl)! } : {}),
+      ...(token ? { tunnelToken: token } : {}),
+    };
+  }
+
+  private async loadPersistedGatewayConfiguration(): Promise<void> {
+    if (this.settingsRepository === undefined) return;
+    const configuration = await this.readGatewayConfiguration();
+    if (configuration.tunnelName === undefined && configuration.tunnelToken === undefined && configuration.publicUrl === undefined) return;
+    const applied = await this.gateway.applyConfiguration(configuration);
+    if (!applied.ok) throw new Error(`Persisted gateway settings rejected: ${applied.error.message}`);
+    await this.gateway.stop();
+  }
+
   private async listRegisteredServers(): Promise<readonly (RegisteredServer & { readonly enabled: boolean; readonly excluded: boolean; readonly exclusionReason?: string; readonly command: string })[]> {
     const discovered = await this.serverCatalog.discover();
     const activeKeys = new Set<string>();
@@ -491,6 +644,28 @@ function sendJsonError(res: ServerResponse, status: number, message: string): vo
   if (res.headersSent || res.writableEnded) return;
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: message }));
+}
+
+function splitList(value: string | null): readonly string[] {
+  return value === null ? [] : value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function readOptionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${field} must be a string`);
+  return value.trim();
+}
+
+function serializeList(value: unknown, field: string): string {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim().length === 0)) throw new Error(`${field} must be a non-empty string list`);
+  const normalized = [...new Set(value.map((item) => (item as string).trim()))];
+  if (normalized.some((item) => item === '*' || item.includes('*'))) throw new Error(`${field} must not contain wildcards`);
+  return normalized.join(',');
+}
+
+function writeOptional(settings: Pick<SqliteSettingsRepository, 'set' | 'delete'>, key: string, value: string | undefined): void {
+  if (value === undefined) settings.delete(key);
+  else settings.set(key, value);
 }
 
 function httpStatusForResult(result: { readonly ok: boolean; readonly error?: { readonly code: string } }): number {

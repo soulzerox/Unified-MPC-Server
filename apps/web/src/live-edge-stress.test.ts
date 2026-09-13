@@ -100,7 +100,7 @@ describe('ControlPlaneServer - live edge and stress smoke', () => {
 
   it('does not expose capability or lease secrets through gateway status', async () => {
     await gateway.start();
-    await fetch(`http://127.0.0.1:${server.port}/api/chatgpt-web/connect`, { headers: auth() });
+    await fetch(`http://127.0.0.1:${server.port}/api/chatgpt-web/connect`, { method: 'POST', headers: auth() });
     const response = await fetch(`http://127.0.0.1:${server.port}/api/chatgpt-gateway/status`);
     const body = await response.text();
     expect(body).not.toContain(capabilityToken);

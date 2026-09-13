@@ -15,6 +15,13 @@ export function getClientScriptJs(): string {
         setTimeout(() => { toast.style.display = 'none'; }, 4000);
       }
 
+      function errorMessage(data, fallback) {
+        const error = data?.error ?? data?.message;
+        if (typeof error === 'string') return error;
+        if (error && typeof error.message === 'string') return error.message;
+        return fallback;
+      }
+
       function logEvent(level, msg) {
         const now = new Date();
         const timeStr = now.toTimeString().split(' ')[0];
@@ -323,7 +330,7 @@ export function getClientScriptJs(): string {
             body: JSON.stringify({ serverId: server.serverId, targets: ['all'] }),
           });
           const result = await res.json();
-          if (!res.ok || !result.ok) throw new Error(result.error?.message || 'Server prune failed');
+          if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Server prune failed'));
           showToast('Pruned server ' + server.name);
           logEvent('SUCCESS', 'Server ' + server.name + ' pruned successfully');
           loadInventory();
@@ -343,7 +350,7 @@ export function getClientScriptJs(): string {
             body: JSON.stringify({ name: skill.name, targets: ['all'] }),
           });
           const result = await res.json();
-          if (!res.ok || !result.ok) throw new Error(result.error?.message || 'Skill prune failed');
+          if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Skill prune failed'));
           showToast('Pruned skill ' + skill.name);
           logEvent('SUCCESS', 'Skill ' + skill.name + ' pruned successfully');
           loadInventory();
@@ -467,7 +474,7 @@ export function getClientScriptJs(): string {
         try {
           const res = await fetch('/api/cloudflare/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           const result = await res.json();
-          if (!res.ok || !result.ok) throw new Error(result.error?.message || result.error || 'Cloudflare setup failed');
+          if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Cloudflare setup failed'));
           document.getElementById('settings-api-token').value = '';
           showToast('Cloudflare tunnel configured and gateway healthy');
           loadSettings();
@@ -490,8 +497,8 @@ export function getClientScriptJs(): string {
             showToast('Synchronized ' + count + ' policy files!');
             logEvent('SUCCESS', 'Successfully synchronized ' + count + ' IDE policy files');
           } else {
-            showToast('Sync failed: ' + (result.error?.message || 'Error'), true);
-            logEvent('ERROR', 'Policy sync failed: ' + (result.error?.message || 'Unknown error'));
+            showToast('Sync failed: ' + errorMessage(result, 'Error'), true);
+            logEvent('ERROR', 'Policy sync failed: ' + errorMessage(result, 'Unknown error'));
           }
         } catch (err) {
           showToast('Sync failed: ' + err.message, true);
@@ -503,10 +510,17 @@ export function getClientScriptJs(): string {
         try {
           logEvent('INFO', 'Initiating connection to ChatGPT Web...');
           const res = await fetch('/api/chatgpt-web/connect', { method: 'POST' });
+          if (res.status === 401) {
+            showToast('Dashboard session expired; reloading...', true);
+            logEvent('WARN', 'Capability expired; reloading dashboard');
+            window.location.reload();
+            return;
+          }
           if (res.status === 412) {
             const errData = await res.json();
-            showToast('Hard Gate Blocked (412): ' + errData.error, true);
-            logEvent('WARN', 'Hard Gate Blocked (412): ' + errData.error);
+            const message = errorMessage(errData, 'Bridge is not ready');
+            showToast('Hard Gate Blocked (412): ' + message, true);
+            logEvent('WARN', 'Hard Gate Blocked (412): ' + message);
             return;
           }
           const data = await res.json();
@@ -514,8 +528,8 @@ export function getClientScriptJs(): string {
             showToast('Connected to ChatGPT Web successfully!');
             logEvent('SUCCESS', 'Connected to ChatGPT Web successfully');
           } else {
-            showToast('Connection failed: ' + (data.message || 'Error'), true);
-            logEvent('ERROR', 'Connection failed: ' + (data.message || 'Unknown error'));
+            showToast('Connection failed: ' + errorMessage(data, 'Error'), true);
+            logEvent('ERROR', 'Connection failed: ' + errorMessage(data, 'Unknown error'));
           }
           loadGatewayStatus();
         } catch (err) {
@@ -530,8 +544,9 @@ export function getClientScriptJs(): string {
           logEvent('INFO', 'Dispatching gateway start request');
           const res = await fetch('/api/chatgpt-gateway/start', { method: 'POST' });
           const result = await res.json();
-          showToast(result.ok ? 'Gateway started!' : 'Failed: ' + result.error?.message, !result.ok);
-          logEvent(result.ok ? 'SUCCESS' : 'ERROR', result.ok ? 'Gateway started' : 'Gateway start failed: ' + result.error?.message);
+          const message = errorMessage(result, 'Gateway start failed');
+          showToast(result.ok ? 'Gateway started!' : 'Failed: ' + message, !result.ok);
+          logEvent(result.ok ? 'SUCCESS' : 'ERROR', result.ok ? 'Gateway started' : 'Gateway start failed: ' + message);
           loadGatewayStatus();
         } catch (err) {
           showToast('Start failed: ' + err.message, true);
@@ -558,7 +573,7 @@ export function getClientScriptJs(): string {
         try {
           const res = await fetch('/api/chatgpt-web/disconnect', { method: 'POST' });
           const result = await res.json();
-          if (!res.ok) throw new Error(result.error?.message || result.error || 'Disconnect failed');
+          if (!res.ok) throw new Error(errorMessage(result, 'Disconnect failed'));
           showToast('ChatGPT Web session disconnected');
           loadGatewayStatus();
         } catch (err) {

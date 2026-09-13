@@ -525,9 +525,6 @@ export class ControlPlaneServer {
       const applied = await this.gateway.applyConfiguration({ publicUrl: setup.publicUrl, tunnelToken: result.tunnelToken });
       if (!applied.ok) throw new Error(applied.error.message);
       runtimeChanged = true;
-      const started = await this.gateway.start();
-      if (!started.ok) throw new Error(started.error.message);
-
       this.settingsRepository.set(SETTING_KEYS.accountId, setup.accountId.trim());
       this.settingsRepository.set(SETTING_KEYS.zoneName, setup.zoneName.trim());
       this.settingsRepository.set(SETTING_KEYS.tunnelName, setup.tunnelName.trim());
@@ -540,6 +537,11 @@ export class ControlPlaneServer {
       await this.secretStore.set('cloudflare_tunnel_token', result.tunnelToken);
       this.settingsRepository.set(SETTING_KEYS.apiTokenConfigured, 'true');
       this.settingsRepository.set(SETTING_KEYS.tokenConfigured, 'true');
+
+      // Persist allowlists before probe; MCP reads them dynamically during gateway.start().
+      const started = await this.gateway.start();
+      if (!started.ok) throw new Error(started.error.message);
+
       this.recordLog('SUCCESS', 'Cloudflare tunnel reconciled and gateway healthy');
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ ok: true, settings: await this.publicSettings(), gateway: this.gateway.status() }));

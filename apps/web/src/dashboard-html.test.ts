@@ -52,6 +52,12 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('connect-btn');
   });
 
+  it('shows top-level API errors and reloads after stale capability expiry', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('const error = data?.error ?? data?.message;');
+    expect(html).toContain('Capability expired; reloading dashboard');
+  });
+
   it('renders modular tab navigation views for all subsystems', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('id="view-dashboard"');

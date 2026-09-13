@@ -269,6 +269,50 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     } finally { await configured.close(); }
   });
 
+  it('persists Cloudflare allowlists before health probe', async () => {
+    const settings = new Map<string, string>();
+    const secrets = new Map<string, string>();
+    let probeSawConfiguredHostname = false;
+    const probeGateway = new GatewayService({
+      localPort: 18765,
+      tunnelProvider: async (): Promise<{ readonly url: string; stop(): Promise<void> }> => ({
+        url: 'https://mcp.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => {
+        probeSawConfiguredHostname = settings.get('mcp_allowed_hostnames') === 'mcp.example.com';
+        return probeSawConfiguredHostname ? 200 : 403;
+      },
+    });
+    const configured = new ControlPlaneServer({
+      port: 0,
+      gateway: probeGateway,
+      capabilityToken,
+      settingsRepository: { get: (key: string): string | null => settings.get(key) ?? null, set: (key: string, value: string): void => { settings.set(key, value); }, delete: (key: string): void => { settings.delete(key); } },
+      secretStore: { get: async (key: string): Promise<string | null> => secrets.get(key) ?? null, set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); }, delete: async (key: string): Promise<void> => { secrets.delete(key); } },
+      cloudflareReconciler: { reconcile: async (): Promise<{ tunnelId: string; tunnelToken: string; zoneId: string; hostname: string }> => ({ tunnelId: 'remote-id', tunnelToken: 'runtime-token', zoneId: 'zone-id', hostname: 'mcp.example.com' }) } as never,
+    });
+    await configured.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${configured.port}/api/cloudflare/reconcile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${configured.port}`, 'x-unified-mpc-capability': capabilityToken },
+        body: JSON.stringify({
+          accountId: '0123456789abcdef0123456789abcdef',
+          zoneName: 'example.com',
+          tunnelName: 'user-tunnel',
+          publicUrl: 'https://mcp.example.com',
+          originUrl: 'http://127.0.0.1:18765',
+          apiToken: 'user-api-token',
+          allowedHostnames: ['mcp.example.com'],
+          allowedOrigins: ['https://mcp.example.com'],
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(probeSawConfiguredHostname).toBe(true);
+    } finally { await configured.close(); }
+  });
+
   it('lists servers with opaque IDs and prunes by ownership proof, never request PID', async () => {
     let captured: Record<string, unknown> | undefined;
     const serverCatalog = {

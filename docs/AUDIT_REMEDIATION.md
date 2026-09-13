@@ -78,7 +78,19 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 
 ## Remaining release blockers
 
-- `rustup` is installed user-locally, but stable compiler download is blocked by host proxy/network (`InvalidContentType`); `cargo test --manifest-path native/linux-host/Cargo.toml --locked` remains unrun.
+- `rustup` is installed user-locally, but the local stable toolchain has a missing compiler manifest. Reinstalling it is blocked by host proxy/network (`InvalidContentType`); `cargo test --manifest-path native/linux-host/Cargo.toml --locked` remains unrun. CI now installs the repository toolchain before `release:verify`.
 - `gh` is absent; exact GitHub Actions run evidence cannot be collected locally.
 - Live Cloudflare tunnel and ChatGPT Web acceptance remain unrun.
 - Recovery startup reconciliation is intentionally report-only; unsafe/orphan records block runtime startup and remain operator-visible.
+
+### Release blocker repair
+
+When `release:verify` reports a missing Rust manifest, repair the interrupted user-local installation:
+
+```sh
+rustup toolchain uninstall stable-x86_64-unknown-linux-gnu
+rustup toolchain install stable --profile minimal
+corepack pnpm release:verify
+```
+
+If installation returns `InvalidContentType`, stop. Capture the proxy/network failure, repair host egress or use a trusted pre-provisioned Rust toolchain, then rerun the command. Do not skip the Rust stage or replace it with a version claim.

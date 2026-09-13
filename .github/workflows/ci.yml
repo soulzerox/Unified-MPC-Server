@@ -36,6 +36,10 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.15.0 --activate
 
+      - name: Install Rust stable toolchain
+        shell: bash
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
       - name: Install dependencies
         shell: bash
         run: corepack pnpm install --frozen-lockfile

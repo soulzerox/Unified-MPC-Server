@@ -6,7 +6,7 @@ This checklist records Linux release acceptance evidence. No external release-pr
 
 Run verification from Linux repository root. Every stage must fail fast; `git diff --check` must pass. No packaging, publishing, tag, or release claim without current evidence.
 
-Required command: `corepack pnpm release:verify`. It runs version consistency, typecheck, lint, all tests, build, root integration tests, diff whitespace checks, cross-process lock self-check, and Rust tests. Missing Rust tooling is a release blocker.
+Required command: `corepack pnpm release:verify`. It runs version consistency, typecheck, lint, all tests, build, root integration tests, diff whitespace checks, cross-process lock self-check, and Rust tests. Rust preflight must report a usable compiler before Cargo runs; missing or incomplete Rust tooling is a release blocker.
 
 Secrets never appear in logs, release evidence, or tracked files. Cloudflare tokens and capability cookies stay operator-local.
 

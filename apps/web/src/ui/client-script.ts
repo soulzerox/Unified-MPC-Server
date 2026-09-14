@@ -304,6 +304,24 @@ export function getClientScriptJs(): string {
           const res = await mutationJson('/api/policies', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(persistablePolicies()),
+          });
+          const snapshot = await res.json();
+          if (!res.ok || !snapshot || !Array.isArray(snapshot.policies)) {
+            throw new Error(errorMessage(snapshot, 'Failed to save policies'));
+          }
+          cachedPolicies = [...snapshot.policies];
+          renderPolicyTables();
+          logEvent('SUCCESS', 'Saved ' + cachedPolicies.length + ' runtime policies in user-selected priority order');
+          if (!quiet) showToast('Policies saved');
+          return true;
+        } catch (err) {
+          if (!quiet) showToast('Save failed: ' + err.message, true);
+          logEvent('ERROR', 'Policy save failed: ' + err.message);
+          return false;
+        }
+      }
+
       async function loadInventory() {
         const serverBody = document.getElementById('server-table-body');
         const skillBody = document.getElementById('skill-table-body');

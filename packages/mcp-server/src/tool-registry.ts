@@ -38,7 +38,7 @@ import { isScopedAutoApprovalAllowed, type WorkspaceScope } from './destructive-
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
-import { TurnPersistenceLedger, type RecordTurnInput, type TurnPersistenceRole } from './turn-persistence.js';
+import { TurnPersistenceLedger, type RecordTurnInput, type TurnPersistenceMode, type TurnPersistenceRole } from './turn-persistence.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -107,8 +107,10 @@ export interface ToolRegistryOptions {
   readonly ponytailActivationLedger?: PonytailActivationLedger;
   /** Shared workspace harness/bootstrap and pre-edit authorization state for one MCP transport session. */
   readonly harnessActivationLedger?: HarnessActivationLedger;
-  /** Shared bounded turn-persistence idempotency state for transports that recreate registries per request. */
+  /** Shared bounded turn-persistence idempotency/compliance state for transports that recreate registries per request. */
   readonly turnPersistenceLedger?: TurnPersistenceLedger;
+  /** Required blocks a new correlated task until record_turn closes the prior turn; best_effort only reports violations. */
+  readonly turnPersistenceMode?: TurnPersistenceMode;
   /** Current persisted per-tool user availability snapshot. Read dynamically so one registry instance observes live changes. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
   readonly incrementalVerifier?: IncrementalVerifier;
@@ -169,6 +171,7 @@ export class ToolRegistry {
   private readonly ponytailActivation: PonytailActivationLedger;
   private readonly harnessActivation: HarnessActivationLedger;
   private readonly turnPersistence: TurnPersistenceLedger;
+  private readonly turnPersistenceMode: TurnPersistenceMode;
   private readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
   private readonly activeWorkspaceScopesProvider: (() => Promise<readonly WorkspaceScope[]>) | undefined;
   private readonly enforceActiveWorkspaceScope: boolean;
@@ -193,6 +196,7 @@ export class ToolRegistry {
     this.ponytailActivation = options.ponytailActivationLedger ?? new PonytailActivationLedger();
     this.harnessActivation = options.harnessActivationLedger ?? new HarnessActivationLedger();
     this.turnPersistence = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
+    this.turnPersistenceMode = options.turnPersistenceMode ?? 'best_effort';
     this.activeWorkspaceScopeProvider = normalizeActiveWorkspaceScopeProvider(options);
     this.activeWorkspaceScopesProvider = normalizeActiveWorkspaceScopesProvider(options);
     this.enforceActiveWorkspaceScope = options.activeWorkspaceScopesProvider !== undefined || options.activeWorkspaceScopeProvider !== undefined || options.activeProjectProvider !== undefined;
@@ -207,7 +211,7 @@ export class ToolRegistry {
       isToolExposed: (name) => this.isEffectivelyExposed(name),
       discoveryTools: () => this.allTools,
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
-      bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
+      bootstrapTaskContext: (input, signal) => this.bootstrapTaskContext(input, signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
@@ -629,7 +633,12 @@ export class ToolRegistry {
     return { kind: 'read', reason: `Parent runtime policy marks exact child MCP tool ${server}/${childTool} read-only and the live contract fingerprints match` };
   }
 
-  private async bootstrapTaskContext(signal: AbortSignal): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent }>> {
+  private async bootstrapTaskContext(input: { readonly turnId?: string }, signal: AbortSignal, trackTurn = true): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent; readonly turnPersistence: unknown }>> {
+    const scope = this.sessionId ?? this.actor.sessionId ?? this.actor.clientId;
+    let turnPersistence: unknown = { state: 'untracked', mode: this.turnPersistenceMode, reason: 'host did not supply a stable turnId' };
+    if (trackTurn && input.turnId === undefined && this.turnPersistenceMode === 'required') {
+      return err(appError('INVALID_INPUT', 'This host requires a stable turnId on task_bootstrap so completed-turn persistence can be enforced', true));
+    }
     const extensions = this.services.extensions;
     if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime policy and skill services are unavailable', true));
     const policy = await extensions.runtimePolicySnapshot();
@@ -645,7 +654,14 @@ export class ToolRegistry {
     if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
     const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
     if (!sessionStartSkill.ok) return sessionStartSkill;
-    return ok({ ready: policy.value.ready, policy: policy.value, sessionStartSkill: sessionStartSkill.value });
+    if (trackTurn && input.turnId !== undefined) {
+      const begun = this.turnPersistence.beginTurn(scope, input.turnId, this.turnPersistenceMode);
+      if (!begun.accepted) {
+        return err(appError('CONFLICT', `Previous turn ${begun.turnId} was not persisted before starting ${begun.attemptedTurnId}`, true));
+      }
+      turnPersistence = begun;
+    }
+    return ok({ ready: policy.value.ready, policy: policy.value, sessionStartSkill: sessionStartSkill.value, turnPersistence });
   }
 
   private harnessContext(workspaceId: string): HarnessActivationContext {
@@ -672,7 +688,7 @@ export class ToolRegistry {
   }
 
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const taskContext = await this.bootstrapTaskContext(signal);
+    const taskContext = await this.bootstrapTaskContext({}, signal, false);
     if (!taskContext.ok) return taskContext;
     const extensions = this.services.extensions;
     if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
@@ -845,6 +861,7 @@ export class ToolRegistry {
       return err(appError('CONFLICT', 'Turn persistence is already in flight; retry this turn after the current write settles', true));
     }
     if (claimed.length === 0) {
+      this.turnPersistence.completeTurn(scope, input.turnId);
       return ok({ turnId: input.turnId, recorded: 0, skipped, duplicate: skipped === entries.length });
     }
 
@@ -883,6 +900,7 @@ export class ToolRegistry {
         this.turnPersistence.complete(scope, input.turnId, entry.role);
         recorded += 1;
       }
+      this.turnPersistence.completeTurn(scope, input.turnId);
       return ok({ turnId: input.turnId, recorded, skipped, duplicate: false });
     } catch (error: unknown) {
       releaseClaims();

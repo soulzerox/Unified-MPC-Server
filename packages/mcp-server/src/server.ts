@@ -13,7 +13,7 @@ import { ToolRegistry, type ActiveProjectScope, type AuthorizationMode, type Hos
 import type { SetOfMarksObservationStore } from './set-of-marks-service.js';
 import { BUNDLED_PONYTAIL_SKILL_ID, PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
-import { TurnPersistenceLedger } from './turn-persistence.js';
+import { TurnPersistenceLedger, type TurnPersistenceMode } from './turn-persistence.js';
 import { actorForRequestScope, type McpRequestScope } from './request-scope.js';
 
 export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
@@ -21,7 +21,7 @@ export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
   'Do not stop, hand off, or ask the user to say "continue" merely because elapsed time has passed.',
   'Stop only when the outcome is complete, a user decision or new authority is required, or an external blocker prevents safe progress.',
   'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled unified-mpc-scheduled-continuation skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
-  'At the start of every user task, call task_bootstrap; it resolves policy_snapshot and loads ask-matt in one server-side read, then follow that skill and use policy-listed child MCP servers through mcp_describe and mcp_call when relevant without waiting for the user to name them; parent-policy read-only child tools may run without a host mutation prompt only when the supplied live contract fingerprints match, while unknown or mutating child calls preserve normal approval boundaries.',
+  'At the start of every user task, call task_bootstrap with a stable turnId when the host can correlate turns; stdio hosts require that turnId and will reject a new correlated task until the prior turn is persisted, while HTTP/Web hosts report best-effort compliance when transcript hooks are unavailable. task_bootstrap resolves policy_snapshot and loads ask-matt in one server-side read; then follow that skill and use policy-listed child MCP servers through mcp_describe and mcp_call when relevant without waiting for the user to name them; parent-policy read-only child tools may run without a host mutation prompt only when the supplied live contract fingerprints match, while unknown or mutating child calls preserve normal approval boundaries.',
   'At the end of every completed user task turn, call record_turn with a stable turnId plus the user and assistant text so the curated local RAG child can persist the interaction idempotently; never substitute a generic mutating mcp_call for turn persistence, and omit record_turn only when the host does not provide the transcript content needed to record the turn.',
   'For coding work in a registered workspace, call workspace_bootstrap before the first code mutation; it loads the workspace harness and makes mandatory child MCP readiness explicit. Before mutating each development-artifact path, call prepare_code_change for that path so required pre-edit diagnostics run before the write. For high-risk refactors, migrations, security-sensitive changes, or unclear blast radius, set runGodkillerSafetyCheck=true on prepare_code_change to add the curated optional Godkiller edit_safe analysis.',
   'Use durable background tasks for naturally long-running commands, then keep checking them and continue the work while the current run remains active.',
@@ -59,8 +59,10 @@ export interface McpServerOptions {
   readonly ponytailActivationLedger?: PonytailActivationLedger;
   /** Shared workspace-harness bootstrap/pre-edit state for transport factories that recreate MCP servers per request. */
   readonly harnessActivationLedger?: HarnessActivationLedger;
-  /** Shared bounded turn-persistence idempotency state for transport factories that recreate MCP servers per request. */
+  /** Shared bounded turn-persistence idempotency/compliance state for transport factories that recreate MCP servers per request. */
   readonly turnPersistenceLedger?: TurnPersistenceLedger;
+  /** Override host compliance mode. Defaults to required for stdio and best_effort for HTTP/unknown transports. */
+  readonly turnPersistenceMode?: TurnPersistenceMode;
   /** Current persisted per-tool availability snapshot. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
   /** Subscribes to persisted per-tool availability changes for live SDK handle toggling. */
@@ -101,6 +103,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.ponytailActivationLedger === undefined ? {} : { ponytailActivationLedger: options.ponytailActivationLedger }),
     ...(options.harnessActivationLedger === undefined ? {} : { harnessActivationLedger: options.harnessActivationLedger }),
     ...(options.turnPersistenceLedger === undefined ? {} : { turnPersistenceLedger: options.turnPersistenceLedger }),
+    turnPersistenceMode: options.turnPersistenceMode ?? (options.requestScope?.transport === 'stdio' ? 'required' : 'best_effort'),
     ...(options.toolAvailabilitySnapshotProvider === undefined ? {} : { toolAvailabilitySnapshotProvider: options.toolAvailabilitySnapshotProvider }),
     ...(options.incrementalVerifier === undefined ? {} : { incrementalVerifier: options.incrementalVerifier }),
     ...(options.setOfMarksStore === undefined ? {} : { setOfMarksStore: options.setOfMarksStore }),

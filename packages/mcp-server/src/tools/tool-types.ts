@@ -121,8 +121,8 @@ export interface McpToolContext {
   readonly discoveryTools?: () => readonly McpToolDefinition[];
   /** Session-scoped Ponytail suppression owned by the current ToolRegistry/transport ledger. */
   readonly setPonytailSessionSuppressed?: (workspaceId: string, goalId: string | undefined, suppressed: boolean) => Promise<boolean>;
-  /** Resolve live policy and load the mandatory session-start routing skill in one read-only call. */
-  readonly bootstrapTaskContext?: (signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Resolve live policy, load the mandatory session-start routing skill, and register the correlated turn when supplied. */
+  readonly bootstrapTaskContext?: (input: { readonly turnId?: string }, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Bootstrap the effective workspace engineering harness and mandatory child MCP connections. */
   readonly bootstrapWorkspaceHarness?: (workspaceId: string, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Run mandatory pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path. */

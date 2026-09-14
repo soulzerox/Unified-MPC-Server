@@ -582,6 +582,10 @@ export const skillsReadSchema = z.object({
   relativePath: z.string().min(1).max(MAX_PATH_LENGTH).optional(),
 }).strict();
 
+export const taskBootstrapSchema = z.object({
+  turnId: z.string().trim().min(1).max(256).optional(),
+}).strict();
+
 export const policySnapshotSchema = z.object({}).strict();
 
 export const mcpListSchema = z.object({}).strict();

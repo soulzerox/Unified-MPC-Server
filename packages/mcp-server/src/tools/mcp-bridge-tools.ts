@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema, recordTurnSchema } from './schemas.js';
+import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema, recordTurnSchema, taskBootstrapSchema } from './schemas.js';
 
 const installTargetSchema = z.enum(['antigravity', 'cursor', 'claude', 'codex', 'cline', 'opencode', 'all']);
 const mcpInstallSchema = z.object({
@@ -31,12 +31,12 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'task_bootstrap',
-      description: 'Resolve the live runtime policy and load the mandatory session-start routing skill (normally ask-matt) in one read-only call. Use this as the first unified-mpc action for each user task.',
+      description: 'Resolve the live runtime policy and load the mandatory session-start routing skill (normally ask-matt) in one read-only call. Supply a stable turnId when the host can correlate turns; strict hosts must persist that turn with record_turn before starting the next one.',
       ...readOnlyInspection,
-      inputSchema: policySnapshotSchema,
-      handler: async (_input, signal) => context.bootstrapTaskContext === undefined
+      inputSchema: taskBootstrapSchema,
+      handler: async (input, signal) => context.bootstrapTaskContext === undefined
         ? missingService()
-        : context.bootstrapTaskContext(signal),
+        : context.bootstrapTaskContext(input.turnId === undefined ? {} : { turnId: input.turnId }, signal),
     }),
     defineTool({
       name: 'policy_snapshot',

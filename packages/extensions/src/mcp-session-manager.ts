@@ -521,7 +521,21 @@ function validateDeclaredOutput(tool: McpToolSummary, result: unknown): string |
   return validateJsonSchemaSubset(tool.outputSchema, structuredContent, '$');
 }
 
-function reconstructLegacyStringResult(schema: unknown, result: Record<string, unknown>): { readonly result: string } | undefined {
+function reconstructLegacyStringResult(schema: unknown, result: Record<string, unknown>): unknown | undefined {
+  if (!Array.isArray(result.content) || result.content.length !== 1) return undefined;
+  const item = result.content[0];
+  if (!isPlainRecord(item) || item.type !== 'text' || typeof item.text !== 'string') return undefined;
+  const text = item.text.trim();
+  if (text.length === 0) return undefined;
+  // Generic legacy fallback: a text-only child that embeds the declared object
+  // as JSON (e.g. sequentialthinking without structuredContent).
+  if (text.startsWith('{') || text.startsWith('[')) {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      // Fall through to single-string reconstruction below.
+    }
+  }
   if (!isPlainRecord(schema) || !isPlainRecord(schema.properties)) return undefined;
   const required = Array.isArray(schema.required) ? schema.required.filter((entry): entry is string => typeof entry === 'string') : [];
   if (required.length !== 1 || required[0] !== 'result') return undefined;
@@ -529,9 +543,6 @@ function reconstructLegacyStringResult(schema: unknown, result: Record<string, u
   if (propertyNames.length !== 1 || propertyNames[0] !== 'result') return undefined;
   const resultSchema = schema.properties.result;
   if (!isPlainRecord(resultSchema) || resultSchema.type !== 'string') return undefined;
-  if (!Array.isArray(result.content) || result.content.length !== 1) return undefined;
-  const item = result.content[0];
-  if (!isPlainRecord(item) || item.type !== 'text' || typeof item.text !== 'string') return undefined;
   return { result: item.text };
 }
 

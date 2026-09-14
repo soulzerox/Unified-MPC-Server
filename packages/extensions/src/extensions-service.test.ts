@@ -251,6 +251,41 @@ describe('LocalExtensionsService MCP bridge', () => {
     await service.close();
   });
 
+  it('accepts legacy JSON-embedded text output like sequentialthinking without structuredContent', async (): Promise<void> => {
+    const session: McpClientSession = {
+      listTools: async () => [{
+        name: 'sequentialthinking',
+        description: 'Sequential thinking tool',
+        outputSchema: {
+          type: 'object',
+          required: ['thoughtNumber', 'totalThoughts', 'nextThoughtNeeded', 'branches', 'thoughtHistoryLength'],
+          properties: {
+            thoughtNumber: { type: 'number' },
+            totalThoughts: { type: 'number' },
+            nextThoughtNeeded: { type: 'boolean' },
+            branches: { type: 'array' },
+            thoughtHistoryLength: { type: 'number' },
+          },
+          additionalProperties: false,
+        },
+      }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: '{"thoughtNumber":1,"totalThoughts":2,"nextThoughtNeeded":true,"branches":[],"thoughtHistoryLength":1}' }] }),
+      close: async () => undefined,
+    };
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => session },
+    });
+
+    await expect(service.callMcpTool({ server: 'mock', tool: 'sequentialthinking', ...await currentMockContract(service) })).resolves.toMatchObject({
+      ok: true,
+    });
+    await service.close();
+  });
+
   it('accepts legacy text-only child output when a single required string result can be reconstructed safely', async (): Promise<void> => {
     const session: McpClientSession = {
       listTools: async () => [{

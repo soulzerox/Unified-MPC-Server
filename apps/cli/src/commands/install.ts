@@ -22,6 +22,7 @@ export interface InstallServerCommand {
   readonly name: string;
   readonly transport: 'stdio' | 'sse' | 'http';
   readonly command?: string;
+  readonly source?: string;
   readonly args?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
   readonly url?: string;
@@ -82,6 +83,7 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
 
   let transport: 'stdio' | 'sse' | 'http' | undefined;
   let command: string | undefined;
+  let source: string | undefined;
   let serverArgs: string[] | undefined;
   let env: Record<string, string> | undefined;
   let url: string | undefined;
@@ -94,6 +96,9 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
     const flag = args[i];
     if (flag === '--command' && args[i + 1] !== undefined) {
       command = args[i + 1]!.trim();
+      i += 1;
+    } else if (flag === '--source' && args[i + 1] !== undefined) {
+      source = args[i + 1]!.trim();
       i += 1;
     } else if (flag === '--args' && args[i + 1] !== undefined) {
       serverArgs = args[i + 1]!.split(',').map((a) => a.trim()).filter(Boolean);
@@ -131,8 +136,12 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
 
   const effectiveTransport: 'stdio' | 'sse' | 'http' = transport ?? (url !== undefined ? 'sse' : 'stdio');
 
-  if (effectiveTransport === 'stdio' && (command === undefined || command.length === 0)) {
-    return err(appError('INVALID_INPUT', 'Server with stdio transport requires --command'));
+  if (effectiveTransport === 'stdio') {
+    const hasCommand = command !== undefined && command.length > 0;
+    const hasSource = source !== undefined && source.length > 0;
+    if (hasCommand === hasSource) {
+      return err(appError('INVALID_INPUT', 'Server with stdio transport requires exactly one of --command or --source'));
+    }
   }
 
   if ((effectiveTransport === 'http' || effectiveTransport === 'sse') && (url === undefined || url.length === 0)) {
@@ -144,6 +153,7 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
     name,
     transport: effectiveTransport,
     ...(command ? { command } : {}),
+    ...(source ? { source } : {}),
     ...(serverArgs ? { args: serverArgs } : {}),
     ...(env ? { env } : {}),
     ...(url ? { url } : {}),

@@ -8,17 +8,23 @@ import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import {
-  DEFAULT_POLICIES,
   DEFAULT_EXTENSIONS_SETTINGS,
+  EXTENSIONS_SETTINGS_KEY,
   IdeSyncService,
   InstallerService,
   McpConfigLoader,
   PrunerService,
   SkillCatalog,
+  configuredPolicies,
+  parseExtensionsSettings,
+  reconcileRuntimePolicies,
+  type ExtensionsSettings,
   type InstallSkillInput,
   type InstallServerInput,
+  type PolicyEntry,
   type PruneSkillInput,
   type PruneServerInput,
+  type RuntimePolicySnapshot,
   type SyncTarget,
 } from '@unified-mpc/extensions';
 
@@ -51,6 +57,8 @@ const SETTING_KEYS = Object.freeze({
   originUrl: 'cloudflare_origin_url',
   remoteTunnelId: 'cloudflare_remote_tunnel_id',
   apiTokenConfigured: 'cloudflare_api_token_configured',
+  gatewayDesiredState: 'cloudflare_gateway_desired_state',
+  extensions: EXTENSIONS_SETTINGS_KEY,
 });
 
 interface RegisteredServer {
@@ -225,8 +233,31 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/policies' && req.method === 'GET') {
+      const snapshot = await this.policySnapshot();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ policies: DEFAULT_POLICIES }));
+      res.end(JSON.stringify(snapshot));
+      return;
+    }
+
+    if (pathname === '/api/policies' && req.method === 'POST') {
+      if (this.settingsRepository === undefined) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Persistent settings are unavailable' }));
+        return;
+      }
+      const body = await parseRequestBody(req, res);
+      if (body === undefined) return;
+      const policies = parsePolicyEntries(body);
+      if (!policies.ok) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: policies.error }));
+        return;
+      }
+      this.persistPolicies(policies.value);
+      const snapshot = await this.policySnapshot();
+      this.recordLog('SUCCESS', `Saved ${policies.value.length} runtime policies in user-selected priority order`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(snapshot));
       return;
     }
 
@@ -249,7 +280,16 @@ export class ControlPlaneServer {
       if (body === undefined) return;
       const parsedBody = body as { targets?: readonly SyncTarget[] } | null;
       const targets = Array.isArray(parsedBody?.targets) ? parsedBody.targets : ['all'];
-      const result = await this.ideSync.sync(targets);
+      const settings = this.extensionsSettings();
+      const workspaceRoot = this.workspaceRoots.values().next().value as string | undefined;
+      const syncService = this.settingsRepository === undefined
+        ? this.ideSync
+        : new IdeSyncService({
+            settings,
+            policies: configuredPolicies(settings),
+            ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+          });
+      const result = await syncService.sync(targets);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Policy sync for targets [${targets.join(', ')}]: ${result.ok ? 'OK' : 'FAILED'}`);
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -265,6 +305,7 @@ export class ControlPlaneServer {
 
     if (pathname === '/api/chatgpt-gateway/start' && req.method === 'POST') {
       const result = await this.gateway.start();
+      if (result.ok) this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `ChatGPT Gateway start: ${result.ok ? 'OK' : 'FAILED'}`);
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -273,6 +314,7 @@ export class ControlPlaneServer {
 
     if (pathname === '/api/chatgpt-gateway/stop' && req.method === 'POST') {
       const result = await this.gateway.stop();
+      this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'STOPPED');
       this.recordLog('INFO', 'ChatGPT Gateway stopped');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -493,6 +535,7 @@ export class ControlPlaneServer {
       [SETTING_KEYS.remoteTunnelId, this.settingsRepository.get(SETTING_KEYS.remoteTunnelId)],
       [SETTING_KEYS.apiTokenConfigured, this.settingsRepository.get(SETTING_KEYS.apiTokenConfigured)],
       [SETTING_KEYS.tokenConfigured, this.settingsRepository.get(SETTING_KEYS.tokenConfigured)],
+      [SETTING_KEYS.gatewayDesiredState, this.settingsRepository.get(SETTING_KEYS.gatewayDesiredState)],
     ]);
     let previousApiToken: string | null = null;
     let previousTunnelToken: string | null = null;
@@ -548,6 +591,7 @@ export class ControlPlaneServer {
       // Persist allowlists before probe; MCP reads them dynamically during gateway.start().
       const started = await this.gateway.start();
       if (!started.ok) throw new Error(started.error.message);
+      this.settingsRepository.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
 
       this.recordLog('SUCCESS', 'Cloudflare tunnel reconciled and gateway healthy');
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -648,6 +692,34 @@ export class ControlPlaneServer {
     res.end(JSON.stringify({ ok: true, settings: await this.publicSettings(), previous: currentSettings }));
   }
 
+  private extensionsSettings(): ExtensionsSettings {
+    if (this.settingsRepository === undefined) return DEFAULT_EXTENSIONS_SETTINGS;
+    return parseExtensionsSettings(this.settingsRepository.get(SETTING_KEYS.extensions));
+  }
+
+  private async policySnapshot(): Promise<RuntimePolicySnapshot> {
+    const settings = this.extensionsSettings();
+    const [servers, skillsResult] = await Promise.all([
+      this.serverCatalog.discover(),
+      this.skillCatalog.list({}),
+    ]);
+    return reconcileRuntimePolicies(settings, servers, skillsResult.ok ? skillsResult.value.skills : []);
+  }
+
+  private persistPolicies(policies: readonly PolicyEntry[]): void {
+    if (this.settingsRepository === undefined) throw new Error('Persistent settings are unavailable');
+    const current = this.extensionsSettings();
+    const mandatoryMcpServers = [...new Set(policies
+      .filter((policy) => policy.resourceType === 'server' && policy.mandatory)
+      .map((policy) => policy.resourceId))];
+    const updated: ExtensionsSettings = {
+      ...current,
+      policies,
+      mandatoryMcpServers,
+    };
+    this.settingsRepository.set(SETTING_KEYS.extensions, JSON.stringify(updated));
+  }
+
   private async readGatewayConfiguration(): Promise<GatewayTunnelConfiguration & { readonly tunnelToken?: string }> {
     const settings = this.settingsRepository!;
     const configured = settings.get(SETTING_KEYS.tokenConfigured) === 'true';
@@ -665,7 +737,27 @@ export class ControlPlaneServer {
     if (configuration.tunnelName === undefined && configuration.tunnelToken === undefined && configuration.publicUrl === undefined) return;
     const applied = await this.gateway.applyConfiguration(configuration);
     if (!applied.ok) throw new Error(`Persisted gateway settings rejected: ${applied.error.message}`);
-    await this.gateway.stop();
+    if (this.settingsRepository.get(SETTING_KEYS.gatewayDesiredState) === 'STOPPED') {
+      this.recordLog('INFO', 'Persisted ChatGPT Gateway desired state is STOPPED');
+      return;
+    }
+
+    let retryDelayMs = 1_000;
+    const restore = async (): Promise<void> => {
+      const started = await this.gateway.start();
+      if (started.ok) {
+        this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
+        this.recordLog('SUCCESS', 'Persisted ChatGPT Gateway restored automatically');
+        return;
+      }
+      this.recordLog('ERROR', `Persisted ChatGPT Gateway auto-start failed: ${started.error.message}`);
+      const retry = setTimeout(() => {
+        if (this.server.listening) void restore();
+      }, retryDelayMs);
+      retry.unref?.();
+      retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+    };
+    await restore();
   }
 
   private async listRegisteredServers(): Promise<readonly (RegisteredServer & { readonly enabled: boolean; readonly excluded: boolean; readonly exclusionReason?: string; readonly command: string })[]> {
@@ -714,10 +806,8 @@ export class ControlPlaneServer {
       if (body.workspaceRoot !== undefined) {
         return { ok: false, status: 403, message: 'workspaceRoot is allowed only for registered workspace mutations' };
       }
-      if (source !== undefined) {
-        if (typeof source !== 'string' || !(await this.isRegisteredPath(source))) {
-          return { ok: false, status: 403, message: 'Skill source must resolve inside a registered workspace root' };
-        }
+      if (source !== undefined && !(await this.isAllowedSkillSource(source))) {
+        return { ok: false, status: 403, message: 'Skill source must be an HTTPS Git URL or resolve inside a registered workspace root' };
       }
       return { ok: true, scope: 'global' };
     }
@@ -728,10 +818,23 @@ export class ControlPlaneServer {
     if (!this.workspaceRoots.has(workspaceRoot)) {
       return { ok: false, status: 403, message: 'workspaceRoot is not registered with control plane' };
     }
-    if (source !== undefined && (typeof source !== 'string' || !(await this.isRegisteredPath(source)))) {
-      return { ok: false, status: 403, message: 'Skill source must resolve inside a registered workspace root' };
+    if (source !== undefined && !(await this.isAllowedSkillSource(source))) {
+      return { ok: false, status: 403, message: 'Skill source must be an HTTPS Git URL or resolve inside a registered workspace root' };
     }
     return { ok: true, scope: 'workspace', workspaceRoot };
+  }
+
+  private async isAllowedSkillSource(candidate: unknown): Promise<boolean> {
+    if (typeof candidate !== 'string') return false;
+    try {
+      const remote = new URL(candidate.trim());
+      if (remote.protocol === 'https:' && remote.username.length === 0 && remote.password.length === 0 && remote.hostname.length > 0) {
+        return true;
+      }
+    } catch {
+      // Local paths are validated below.
+    }
+    return this.isRegisteredPath(candidate);
   }
 
   private async isRegisteredPath(candidate: string): Promise<boolean> {
@@ -759,6 +862,60 @@ function isLoopbackHost(value: string | string[] | undefined): boolean {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parsePolicyEntries(body: unknown):
+  | { readonly ok: true; readonly value: readonly PolicyEntry[] }
+  | { readonly ok: false; readonly error: string } {
+  if (!isObject(body) || !Array.isArray(body.policies)) return { ok: false, error: 'policies must be an array' };
+  if (body.policies.length > 100) return { ok: false, error: 'policies must contain at most 100 entries' };
+
+  const seenIds = new Set<string>();
+  const policies: PolicyEntry[] = [];
+  for (const [index, raw] of body.policies.entries()) {
+    if (!isObject(raw)) return { ok: false, error: `policies[${index}] must be an object` };
+    let id: string;
+    let resourceId: string;
+    let enforcement: string;
+    let directive: string;
+    try {
+      id = readRequiredString(raw.id, `policies[${index}].id`);
+      resourceId = readRequiredString(raw.resourceId, `policies[${index}].resourceId`);
+      enforcement = readRequiredString(raw.enforcement, `policies[${index}].enforcement`);
+      directive = readRequiredString(raw.directive, `policies[${index}].directive`);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : `policies[${index}] is invalid` };
+    }
+    if (id.length > 128) return { ok: false, error: `policies[${index}].id is too long` };
+    if (resourceId.length > 512) return { ok: false, error: `policies[${index}].resourceId is too long` };
+    if (enforcement.length > 128) return { ok: false, error: `policies[${index}].enforcement is too long` };
+    if (directive.length > 4096) return { ok: false, error: `policies[${index}].directive is too long` };
+    if (raw.resourceType !== 'server' && raw.resourceType !== 'skill') {
+      return { ok: false, error: `policies[${index}].resourceType must be server or skill` };
+    }
+    if (typeof raw.mandatory !== 'boolean') return { ok: false, error: `policies[${index}].mandatory must be boolean` };
+    const idKey = id.toLowerCase();
+    if (seenIds.has(idKey)) return { ok: false, error: `Duplicate policy id: ${id}` };
+    seenIds.add(idKey);
+
+    let requiredTools: readonly string[] | undefined;
+    if (raw.requiredTools !== undefined) {
+      if (!Array.isArray(raw.requiredTools) || raw.requiredTools.some((tool) => typeof tool !== 'string' || tool.trim().length === 0)) {
+        return { ok: false, error: `policies[${index}].requiredTools must be a string array` };
+      }
+      requiredTools = [...new Set(raw.requiredTools.map((tool) => (tool as string).trim()))];
+    }
+    policies.push({
+      id,
+      resourceId,
+      resourceType: raw.resourceType,
+      mandatory: raw.mandatory,
+      enforcement,
+      directive,
+      ...(requiredTools === undefined ? {} : { requiredTools }),
+    });
+  }
+  return { ok: true, value: policies };
 }
 
 function sendJsonError(res: ServerResponse, status: number, message: string): void {

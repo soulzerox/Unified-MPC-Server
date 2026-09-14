@@ -32,6 +32,7 @@ import {
 import { ALLOW_AI_DELETE_SETTING_KEY, DESTRUCTIVE_AUTO_APPROVAL_SETTING_KEY, DEFAULT_CODEX_TOOLS_ENABLED, DEFAULT_MCP_CALL_TIMEOUT_MS, DEFAULT_MCP_IDLE_TIMEOUT_MS, DEFAULT_PROCESS_TIMEOUT_MS, DEFAULT_MCP_POLL_WAIT_SECONDS, DEFAULT_PONYTAIL_MODE, DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, USER_SETTING_KEYS, parseBooleanSetting, parseCustomPermissionSettings, parseDestructiveAutoApprovalPolicy, parseIntegerSetting, parsePathList, parsePonytailMode, parseStringRecordSetting, type DestructiveAutoApprovalPolicy, type PonytailMode } from '@unified-mpc/shared';
 import {
   EXTENSIONS_SETTINGS_KEY,
+  InstallerService,
   createLocalExtensionsService,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
@@ -232,6 +233,7 @@ export function createStdioMcpRuntime(
     }),
     capabilities: capabilityRuntime.service,
     extensions,
+    installer: new InstallerService({ workspaceRoot: workspace.realRootPath }),
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
     workspaceQuery,
     projectSnapshot: new ProjectSnapshotService(workspaceRepository, {

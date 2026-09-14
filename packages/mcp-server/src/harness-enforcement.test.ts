@@ -25,9 +25,9 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
         return ok({
           ready: true,
           servers: [
-            { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'] },
-            { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'] },
-            { name: 'godkiller', required: true, connected: true, pinned: true, descriptorFingerprint: 'c'.repeat(64), catalogFingerprint: '3'.repeat(64), tools: ['gk_task'] },
+            { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'], requiredTools: ['search_nodes', 'create_entities', 'add_observations'] },
+            { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'], requiredTools: ['pre_edit_context'] },
+            { name: 'godkiller', required: true, connected: true, pinned: true, descriptorFingerprint: 'c'.repeat(64), catalogFingerprint: '3'.repeat(64), tools: ['gk_task'], requiredTools: ['gk_task'] },
           ],
         });
       },
@@ -117,6 +117,33 @@ describe('workspace engineering harness enforcement', () => {
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       isError: true,
       structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('pre_edit_context') } },
+    });
+  });
+
+  it('enforces required child capabilities declared by runtime policy instead of a hardcoded server-name map', async () => {
+    const { services } = createHarnessServices();
+    services.extensions = {
+      ...services.extensions,
+      async bootstrapMandatoryMcpServers() {
+        return ok({
+          ready: true,
+          servers: [{
+            name: 'custom-policy-server',
+            required: true,
+            connected: true,
+            pinned: true,
+            descriptorFingerprint: 'd'.repeat(64),
+            catalogFingerprint: '4'.repeat(64),
+            requiredTools: ['custom-capability'],
+            tools: [],
+          }],
+        });
+      },
+    } as typeof services.extensions;
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('custom-capability') } },
     });
   });
 

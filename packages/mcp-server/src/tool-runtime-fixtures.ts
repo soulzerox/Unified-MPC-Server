@@ -49,7 +49,7 @@ const unavailable = (
 ): ToolRuntimeFixture => ({ input, evidence: { kind: 'truthful_unavailable', unavailableStatus } });
 
 /**
- * Safe parse-valid inputs and expected delivery evidence for the 99 core tools.
+ * Safe parse-valid inputs and expected delivery evidence for the 102 core tools.
  * These are non-production fixtures: they use controlled workspace IDs, dry-run
  * inputs where available, and never point at a real user path.
  */
@@ -120,9 +120,12 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   wsl_fs: service({ operation: 'status' }, 'capabilities.wsl_fs'),
   skills_list: service({}, 'extensions.listSkills'),
   skills_read: service({ skillId: 'skill-1' }, 'extensions.readSkill'),
+  skills_install: service({ name: 'smoke-skill', source: 'https://github.com/example/smoke-skill.git', targets: ['cursor'] }, 'installer.installSkill'),
   ponytail_session: service({ workspaceId, suppressed: true }, 'file.readFile'),
+  policy_snapshot: service({}, 'extensions.runtimePolicySnapshot'),
   mcp_list: service({}, 'extensions.listMcpServers'),
   mcp_describe: service({ server: 'server-1' }, 'extensions.describeMcpServer'),
+  mcp_install: service({ name: 'smoke-server', transport: 'stdio', command: 'node', targets: ['cursor'] }, 'installer.installServer'),
   mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, descriptorFingerprint: '0'.repeat(64), catalogFingerprint: '0'.repeat(64), userConfirmed: true }, 'extensions.callMcpTool'),
   workspace_context: service({ workspaceId, query: 'smoke' }, 'search.searchText'),
   workspace_context_continue: service({ continuationToken: 'context-token' }, 'file.readFile', 'workspace_context'),

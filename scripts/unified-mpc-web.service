@@ -1,0 +1,23 @@
+[Unit]
+Description=Unified-MPC Local Web Control Plane
+Documentation=https://github.com/soulzerox/Unified-MPC-Server
+Wants=network-online.target
+Requires=unified-mpc-mcp-http.service
+After=network-online.target unified-mpc-mcp-http.service
+PartOf=unified-mpc.service
+
+[Service]
+Type=simple
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/unified-mpc/service.env
+ExecStartPre=/usr/bin/test -n ${UNIFIED_MPC_ROOT}
+ExecStart=/usr/bin/env node ${UNIFIED_MPC_ROOT}/apps/cli/dist/index.js web --port 3000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=default.target

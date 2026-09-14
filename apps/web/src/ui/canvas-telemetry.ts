@@ -97,7 +97,7 @@ export function renderCanvasTopologySvg(): string {
         <rect width="115" height="50" rx="5" fill="#111318" stroke="#1F2430" stroke-width="1" />
         <circle cx="15" cy="25" r="4" fill="#10B981" />
         <text x="26" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#E8EAED">Policies & MCP</text>
-        <text x="26" y="36" font-family="sans-serif" font-size="9" fill="#9AA0AE">P1-P7 Priorities</text>
+        <text x="26" y="36" font-family="sans-serif" font-size="9" fill="#9AA0AE">P1-Pn Runtime Policy</text>
       </g>
     </svg>
   </div>

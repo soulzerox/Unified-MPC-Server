@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,7 +11,82 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+function fixtureGitRunner(fixtureDir: string): { run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> } {
+  return {
+    async run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+      if (args[0] !== 'clone') return { exitCode: 1, stdout: '', stderr: `unsupported git command: ${args[0] ?? ''}` };
+      const destination = args.at(-1);
+      if (destination === undefined) return { exitCode: 1, stdout: '', stderr: 'missing clone destination' };
+      await cp(fixtureDir, destination, { recursive: true });
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
+  };
+}
+
 describe('InstallerService - Skill Ingestion Pipeline', () => {
+  it('materializes an HTTPS Git repository before installing a skill', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-skill-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'SKILL.md'), '---\nname: remote-skill\ndescription: Remote fixture\n---\n# Remote Skill\n', 'utf8');
+
+    const installer = new InstallerService({ homeDir: home, gitRunner: fixtureGitRunner(fixture) });
+    const result = await installer.installSkill({
+      name: 'remote-skill',
+      source: 'https://github.com/example/remote-skill.git',
+      targets: ['cursor'],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(await readFile(path.join(home, '.cursor', 'skills', 'remote-skill', 'SKILL.md'), 'utf8')).toContain('# Remote Skill');
+  });
+
+  it('does not copy Git metadata from a remote skill checkout into installed targets', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-skill-git-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    await mkdir(path.join(fixture, '.git'), { recursive: true });
+    await writeFile(path.join(fixture, 'SKILL.md'), '---\nname: remote-skill\ndescription: Remote fixture\n---\n# Remote Skill\n', 'utf8');
+    await writeFile(path.join(fixture, '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+
+    const result = await new InstallerService({ homeDir: home, gitRunner: fixtureGitRunner(fixture) }).installSkill({
+      name: 'remote-skill',
+      source: 'https://github.com/example/remote-skill.git',
+      targets: ['cursor'],
+    });
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(path.join(home, '.cursor', 'skills', 'remote-skill', '.git', 'HEAD'), 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects symlinks from untrusted remote skill repositories', async () => {
+    const { symlink } = await import('node:fs/promises');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-skill-link-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    const outside = path.join(root, 'outside.txt');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'SKILL.md'), '---\nname: remote-skill\ndescription: Remote fixture\n---\n# Remote Skill\n', 'utf8');
+    await writeFile(outside, 'outside\n', 'utf8');
+    await symlink(outside, path.join(fixture, 'outside-link'));
+
+    const result = await new InstallerService({ homeDir: home, gitRunner: fixtureGitRunner(fixture) }).installSkill({
+      name: 'remote-skill',
+      source: 'https://github.com/example/remote-skill.git',
+      targets: ['cursor'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_INPUT');
+      expect(result.error.message).toContain('symbolic links');
+    }
+  });
+
   it('returns FILE_NOT_FOUND when source does not contain SKILL.md', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'installer-test-'));
     temporaryRoots.push(root);
@@ -146,6 +221,61 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
 });
 
 describe('InstallerService - Server Ingestion Pipeline', () => {
+  it('materializes an HTTPS Git repository and derives a stdio command from package.json bin', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-server-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ name: 'remote-mcp', bin: 'server.js' }), 'utf8');
+    await writeFile(path.join(fixture, 'server.js'), '#!/usr/bin/env node\n', 'utf8');
+
+    const installer = new InstallerService({ homeDir: home, gitRunner: fixtureGitRunner(fixture) });
+    const result = await installer.installServer({
+      name: 'remote-mcp',
+      transport: 'stdio',
+      source: 'https://github.com/example/remote-mcp.git',
+      targets: ['cursor'],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.managedSourcePath).toEqual(expect.any(String));
+    const config = JSON.parse(await readFile(path.join(home, '.cursor', 'mcp.json'), 'utf8'));
+    expect(config.mcpServers['remote-mcp']).toEqual({
+      command: process.execPath,
+      args: [path.join(result.value.managedSourcePath, 'server.js')],
+      cwd: result.value.managedSourcePath,
+    });
+  });
+
+  it('fails closed for remote MCP packages that require runtime dependency installation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-server-deps-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'package.json'), JSON.stringify({
+      name: 'remote-mcp',
+      bin: 'server.js',
+      dependencies: { express: '^5.0.0' },
+    }), 'utf8');
+    await writeFile(path.join(fixture, 'server.js'), '#!/usr/bin/env node\n', 'utf8');
+
+    const result = await new InstallerService({ homeDir: home, gitRunner: fixtureGitRunner(fixture) }).installServer({
+      name: 'remote-mcp',
+      transport: 'stdio',
+      source: 'https://github.com/example/remote-mcp.git',
+      targets: ['cursor'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_INPUT');
+      expect(result.error.message).toContain('runtime dependencies');
+    }
+  });
+
   it('rejects self-aggregation attempts to install unified-mpc', async () => {
     const installer = new InstallerService();
     const result = await installer.installServer({

@@ -1,11 +1,13 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory } from './mcp-session-manager.js';
+import { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 import { SkillCatalog } from './skill-catalog.js';
 import type {
   ExtensionsService,
   ExtensionsSettings,
   McpServerListItem,
+  RuntimePolicySnapshot,
   SkillContent,
   SkillSummary,
 } from './types.js';
@@ -53,9 +55,25 @@ export class LocalExtensionsService implements ExtensionsService {
     return catalog.read(input);
   }
 
+  public async runtimePolicySnapshot(): Promise<Result<RuntimePolicySnapshot>> {
+    try {
+      const settings = this.settingsProvider();
+      const [discovered, skills] = await Promise.all([
+        this.loader().then((loader) => loader.discover()),
+        this.skillCatalog().then((catalog) => catalog.list({})),
+      ]);
+      if (!skills.ok) return err(skills.error);
+      return ok(reconcileRuntimePolicies(settings, discovered, skills.value.skills));
+    } catch (error: unknown) {
+      return err(appError('INTERNAL_ERROR', `Failed to resolve runtime policy: ${error instanceof Error ? error.message : String(error)}`, true));
+    }
+  }
+
   public async listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>> {
     const discovered = await this.loader().then((loader) => loader.discover());
-    const required = new Set(this.settingsProvider().mandatoryMcpServers.map((name) => name.trim().toLowerCase()));
+    const required = new Set(configuredPolicies(this.settingsProvider())
+      .filter((policy) => policy.resourceType === 'server' && policy.mandatory)
+      .map((policy) => policy.resourceId.trim().toLowerCase()));
     return ok({
       servers: discovered.map((server) => ({
         name: server.name,
@@ -72,16 +90,29 @@ export class LocalExtensionsService implements ExtensionsService {
   }
 
   public async bootstrapMandatoryMcpServers(signal?: AbortSignal): Promise<Result<import('./types.js').MandatoryMcpBootstrapResult>> {
-    const names = [...new Set(this.settingsProvider().mandatoryMcpServers.map((name) => name.trim()).filter(Boolean))];
-    const requiredNames = new Set(names.map((name) => name.toLowerCase()));
+    const requirements = new Map<string, { readonly name: string; readonly requiredTools: Set<string> }>();
+    for (const policy of configuredPolicies(this.settingsProvider())) {
+      if (policy.resourceType !== 'server' || !policy.mandatory) continue;
+      const name = policy.resourceId.trim();
+      if (name.length === 0) continue;
+      const key = name.toLowerCase();
+      const existing = requirements.get(key);
+      if (existing === undefined) {
+        requirements.set(key, { name, requiredTools: new Set(policy.requiredTools ?? []) });
+      } else {
+        for (const tool of policy.requiredTools ?? []) existing.requiredTools.add(tool);
+      }
+    }
+    const requiredNames = new Set(requirements.keys());
     const discovered = await this.loader().then((loader) => loader.discover());
     for (const server of discovered) {
       if (!requiredNames.has(server.name.toLowerCase())) this.sessions.unpin(server.name);
     }
-    const servers = await Promise.all(names.map(async (name) => {
-      if (isAborted(signal)) return { name, required: true as const, connected: false, pinned: false, tools: [], error: 'cancelled' };
+    const servers = await Promise.all([...requirements.values()].map(async ({ name, requiredTools }) => {
+      const requiredToolList = [...requiredTools];
+      if (isAborted(signal)) return { name, required: true as const, connected: false, pinned: false, tools: [], requiredTools: requiredToolList, error: 'cancelled' };
       const server = await this.findServer(name);
-      if (!server.ok) return { name, required: true as const, connected: false, pinned: false, tools: [], error: server.error.message };
+      if (!server.ok) return { name, required: true as const, connected: false, pinned: false, tools: [], requiredTools: requiredToolList, error: server.error.message };
       if (!server.value.enabled || server.value.excluded) {
         return {
           name,
@@ -89,6 +120,7 @@ export class LocalExtensionsService implements ExtensionsService {
           connected: false,
           pinned: false,
           tools: [],
+          requiredTools: requiredToolList,
           error: server.value.exclusionReason ?? 'required MCP server is disabled',
         };
       }
@@ -99,11 +131,12 @@ export class LocalExtensionsService implements ExtensionsService {
           connected: false,
           pinned: false,
           tools: [],
+          requiredTools: requiredToolList,
           error: `Refusing to promote workspace-scoped MCP server into the mandatory native harness: ${server.value.name}`,
         };
       }
       const described = await this.sessions.describe(server.value.name, server.value.config, signal);
-      if (!described.ok) return { name, required: true as const, connected: false, pinned: false, tools: [], error: described.error.message };
+      if (!described.ok) return { name, required: true as const, connected: false, pinned: false, tools: [], requiredTools: requiredToolList, error: described.error.message };
       this.sessions.pin(server.value.name);
       return {
         name: server.value.name,
@@ -113,6 +146,7 @@ export class LocalExtensionsService implements ExtensionsService {
         descriptorFingerprint: fingerprintExternalMcpValue({ source: server.value.source, config: server.value.config }),
         catalogFingerprint: described.value.catalogFingerprint,
         tools: described.value.tools.map((tool) => tool.name),
+        requiredTools: requiredToolList,
       };
     }));
     return ok({ ready: servers.every((server) => server.connected && server.pinned), servers });

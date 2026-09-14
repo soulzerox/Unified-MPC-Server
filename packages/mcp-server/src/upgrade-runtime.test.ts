@@ -136,6 +136,19 @@ describe('upgrade runtime', () => {
     }
   });
 
+  it('keeps mandatory workspace harness tools discoverable without a hidden tool_batch workaround', async () => {
+    const runtime = new UpgradeRuntimeService({}, actor);
+
+    for (const name of ['workspace_bootstrap', 'prepare_code_change'] as const) {
+      const search = await runtime.execute('tool_search', { query: name, limit: 20 });
+      const described = await runtime.execute('tool_describe', { name });
+
+      expect(search).toMatchObject({ ok: true, value: { matches: expect.any(Array) } });
+      if (search.ok) expect(search.value.matches.map((entry) => entry.name)).toContain(name);
+      expect(described).toMatchObject({ ok: true, value: { found: true, name } });
+    }
+  });
+
   it('excludes user-disabled tools from dynamic discovery, ranking, describe, and category counts', async () => {
     const baseline = new UpgradeRuntimeService({}, actor);
     const beforeCategories = await baseline.execute('tool_categories', {});

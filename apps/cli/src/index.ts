@@ -10,6 +10,7 @@ import { resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/share
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { ToolRegistry } from '@unified-mpc/mcp-server';
 import {
+  createLocalExtensionsService,
   IdeSyncService,
   InstallerService,
   PrunerService,
@@ -127,7 +128,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 
 Commands:
   status                                 Display overall system and workspace status
-  sync [--targets <t...>]                Synchronize P1-P7 policy rules across IDEs
+  sync [--targets <t...>]                Synchronize runtime policy rules across IDEs
   install skill --name <n> --source <s>  Install an agent skill
   install server --name <n> ...          Install an executable MCP server
   prune skill --name <n>                 Prune an installed skill
@@ -349,6 +350,11 @@ export function createDefaultCliDependencies(): CliDependencies {
     workspaceService = new WorkspaceService(new SqliteWorkspaceRepository(database));
     return workspaceService;
   };
+  let extensions: ReturnType<typeof createLocalExtensionsService> | undefined;
+  const getExtensions = (): ReturnType<typeof createLocalExtensionsService> => {
+    extensions ??= createLocalExtensionsService({ workspaceRootProvider: async (): Promise<string> => process.cwd() });
+    return extensions;
+  };
 
   return {
     status: async (): Promise<CliStatus> => {
@@ -387,14 +393,14 @@ export function createDefaultCliDependencies(): CliDependencies {
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
     web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
-      const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
+      const registry = new ToolRegistry({ extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) }, { clientId: 'cli', clientName: 'unified-mpc-cli' });
       return registry.list().map((tool) => ({
         name: tool.name,
         description: tool.description,
       }));
     },
     toolsCall: async (name: string, args: Record<string, unknown>): Promise<Result<unknown>> => {
-      const registry = new ToolRegistry({}, { clientId: 'cli', clientName: 'unified-mpc-cli' });
+      const registry = new ToolRegistry({ extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) }, { clientId: 'cli', clientName: 'unified-mpc-cli' });
       const response = await registry.invoke(name, args);
       if (response.isError) {
         const errorText = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');

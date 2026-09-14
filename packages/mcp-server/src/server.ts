@@ -20,6 +20,7 @@ export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
   'Do not stop, hand off, or ask the user to say "continue" merely because elapsed time has passed.',
   'Stop only when the outcome is complete, a user decision or new authority is required, or an external blocker prevents safe progress.',
   'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled unified-mpc-scheduled-continuation skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
+  'At the start of every user task, call policy_snapshot, load and follow ask-matt, then use policy-listed child MCP servers through mcp_describe and mcp_call when relevant without waiting for the user to name them; preserve normal approval boundaries for child side effects.',
   'For coding work in a registered workspace, call workspace_bootstrap before the first code mutation; it loads the workspace harness and makes mandatory child MCP readiness explicit. Before mutating each development-artifact path, call prepare_code_change for that path so required pre-edit diagnostics run before the write.',
   'Use durable background tasks for naturally long-running commands, then keep checking them and continue the work while the current run remains active.',
 ].join(' ');

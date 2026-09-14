@@ -9,16 +9,24 @@ describe('skills and mcp bridge tools', () => {
       listSkills: async () => ok({ skills: [{ id: 'a/b', name: 'b', description: 'd', source: 'a', rootPath: '/', skillPath: '/SKILL.md' }] }),
       readSkill: async () => ok({ id: 'a/b', name: 'b', description: 'd', source: 'a', path: '/SKILL.md', content: '# b' }),
       listMcpServers: async () => ok({ servers: [{ name: 'mock', source: 'test', enabled: true, connected: false, excluded: false, command: 'node' }] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [{ id: 'auto:server:mock', resourceId: 'mock', resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: 'Auto route', source: 'discovered', available: true }] }),
       describeMcpServer: async () => ok({ server: 'mock', enabled: true, connected: true, tools: [{ name: 'ping', description: 'Ping' }] }),
       callMcpTool: async () => ok({ content: [{ type: 'text', text: 'pong' }] }),
       close: async () => undefined,
     };
-    const registry = new ToolRegistry({ extensions }, { clientId: 'test', clientName: 'test' }, {
+    const installed: unknown[] = [];
+    const registry = new ToolRegistry({
+      extensions,
+      installer: {
+        installSkill: async (input): Promise<{ ok: true; value: { name: string; installedPaths: readonly string[]; targets: typeof input.targets } }> => { installed.push(input); return ok({ name: input.name, installedPaths: ['/tmp/SKILL.md'], targets: input.targets }); },
+        installServer: async (input): Promise<{ ok: true; value: { name: string; targets: typeof input.targets; updatedConfigFiles: readonly string[] } }> => { installed.push(input); return ok({ name: input.name, targets: input.targets, updatedConfigFiles: ['/tmp/mcp.json'] }); },
+      },
+    }, { clientId: 'test', clientName: 'test' }, {
       hostMutationApprovalProvider: async (): Promise<boolean> => true,
     });
     const tools = registry.list();
     const names = tools.map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(['skills_list', 'skills_read', 'mcp_list', 'mcp_describe', 'mcp_call']));
+    expect(names).toEqual(expect.arrayContaining(['skills_list', 'skills_read', 'skills_install', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call']));
 
     for (const name of ['skills_list', 'skills_read']) {
       const tool = tools.find((entry) => entry.name === name);
@@ -42,6 +50,24 @@ describe('skills and mcp bridge tools', () => {
     await expect(registry.invoke('skills_list', {})).resolves.toMatchObject({
       structuredContent: { skills: [expect.objectContaining({ id: 'a/b' })] },
     });
+    await expect(registry.invoke('skills_install', {
+      name: 'remote-skill',
+      source: 'https://github.com/example/remote-skill.git',
+      targets: ['cursor'],
+    })).resolves.toMatchObject({ structuredContent: { name: 'remote-skill' } });
+    await expect(registry.invoke('mcp_install', {
+      name: 'remote-mcp',
+      transport: 'stdio',
+      source: 'https://github.com/example/remote-mcp.git',
+      targets: ['cursor'],
+    })).resolves.toMatchObject({ structuredContent: { name: 'remote-mcp' } });
+    expect(installed).toEqual([
+      expect.objectContaining({ name: 'remote-skill', source: 'https://github.com/example/remote-skill.git' }),
+      expect.objectContaining({ name: 'remote-mcp', source: 'https://github.com/example/remote-mcp.git', transport: 'stdio' }),
+    ]);
+    await expect(registry.invoke('policy_snapshot', {})).resolves.toMatchObject({
+      structuredContent: { ready: true, policies: [expect.objectContaining({ id: 'auto:server:mock' })] },
+    });
     await expect(registry.invoke('mcp_call', { server: 'mock', tool: 'ping', arguments: {}, userConfirmed: true })).resolves.toMatchObject({
       structuredContent: { content: [{ type: 'text', text: 'pong' }] },
     });
@@ -53,6 +79,7 @@ describe('skills and mcp bridge tools', () => {
       listSkills: async () => ok({ skills: [] }),
       readSkill: async () => ok({ id: 'a/b', name: 'b', description: '', source: 'a', path: '/SKILL.md', content: '' }),
       listMcpServers: async () => ok({ servers: [] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [] }),
       describeMcpServer: async (_input, signal) => {
         if (signal !== undefined) observed.push(signal);
         return ok({ server: 'mock', enabled: true, connected: true, tools: [] });

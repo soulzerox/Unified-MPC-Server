@@ -8,11 +8,14 @@ export type {
   McpServerLaunchConfig,
   McpServerListItem,
   McpToolSummary,
+  ResolvedPolicyEntry,
+  RuntimePolicySnapshot,
   SkillContent,
   SkillSummary,
 } from './types.js';
 export { DEFAULT_EXTENSIONS_SETTINGS, DEFAULT_MANDATORY_MCP_SERVERS } from './types.js';
 export { isServerEnabled, isSkillRootEnabled, parseExtensionsSettings } from './allowlist.js';
+export { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 export { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
 export { McpConfigLoader, exclusionReason, normalizeLaunchConfig, stripJsonComments } from './mcp-config-loader.js';
 export {

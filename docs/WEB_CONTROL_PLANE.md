@@ -60,7 +60,7 @@ Returns general operational health and gateway status.
 ### 2. Multi-IDE Policy Management
 
 #### `GET /api/policies`
-Fetches the currently active global MCP policies and rules (e.g., P1–P7 tool ordering, memory priority, and safety limits).
+Fetches the live reconciled P1–Pn runtime policy. Semantic IDs remain stable while `priority` reflects the current user-selected execution position; availability and resolved resource information come from live discovery.
 
 - **Response `200 OK`**:
 ```json

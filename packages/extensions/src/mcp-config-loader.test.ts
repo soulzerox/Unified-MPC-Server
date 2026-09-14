@@ -192,6 +192,31 @@ describe('McpConfigLoader', () => {
     expect(exclusionReason('helper', { command: 'node' })).toBeUndefined();
   });
 
+  it('parses semantic runtime policies with arbitrary ids and required child tools', () => {
+    const settings = parseExtensionsSettings(JSON.stringify({
+      mandatoryMcpServers: [],
+      policies: [{
+        id: 'session-start:custom',
+        resourceId: 'custom',
+        resourceType: 'server',
+        mandatory: true,
+        enforcement: 'EVERY_SESSION',
+        directive: 'Use custom automatically',
+        requiredTools: ['ping'],
+      }],
+    }));
+
+    expect(settings.policies).toEqual([{
+      id: 'session-start:custom',
+      resourceId: 'custom',
+      resourceType: 'server',
+      mandatory: true,
+      enforcement: 'EVERY_SESSION',
+      directive: 'Use custom automatically',
+      requiredTools: ['ping'],
+    }]);
+  });
+
   it('excludes names that cannot form an unambiguous external MCP namespace', () => {
     expect(exclusionReason('valid-server_1', { command: 'node' })).toBeUndefined();
     expect(exclusionReason('bad/server', { command: 'node' })).toContain('stable external namespace');

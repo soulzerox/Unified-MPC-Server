@@ -89,7 +89,7 @@ Data purge moves approved paths into Recovery Trash before success. Successful r
 ## 4. Policy Synchronization Command
 
 ### `unified-mpc sync`
-Compiles global P1–P7 tool prioritization rules and synchronizes them idempotently into all connected IDE rule files.
+Compiles the persisted user-editable P1–Pn runtime policy and synchronizes it idempotently into all connected IDE rule files. Semantic policy IDs remain stable when users reorder execution positions.
 ```bash
 # Syntax
 unified-mpc sync [--targets <t1,t2,...>] [--workspace <path>]

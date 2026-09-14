@@ -195,6 +195,9 @@ importers:
       '@unified-mpc/domain':
         specifier: workspace:*
         version: link:../domain
+      '@unified-mpc/git':
+        specifier: workspace:*
+        version: link:../git
 
   packages/filesystem:
     dependencies:

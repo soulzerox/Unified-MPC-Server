@@ -16,7 +16,7 @@ export function renderDashboardViewsHtml(): string {
       </div>
       <div class="stat-chip">
         <span class="stat-label">Policies</span>
-        <span class="stat-value" id="stat-policies-count">P1-P7</span>
+        <span class="stat-value" id="stat-policies-count">P1-Pn</span>
       </div>
       <div class="stat-chip">
         <span class="stat-label">Bridge State</span>
@@ -94,7 +94,7 @@ export function renderDashboardViewsHtml(): string {
 
         <div class="card">
           <div class="card-header">
-            <h2>Policy Execution Priorities (P1–P7)</h2>
+            <h2>Policy Execution Priorities (P1–Pn)</h2>
             <button class="btn btn-secondary btn-sm" id="sync-policies-btn">Sync All Policies</button>
           </div>
           <div class="table-responsive">
@@ -289,6 +289,10 @@ export function renderDashboardViewsHtml(): string {
             <label>Executable Command</label>
             <input type="text" class="form-control mono" id="wb-server-command" placeholder="e.g. npx or uvx">
           </div>
+          <div class="form-group" id="wb-source-group">
+            <label>HTTPS Git Repository (alternative to command)</label>
+            <input type="url" class="form-control mono" id="wb-server-source" placeholder="https://github.com/example/mcp-server.git">
+          </div>
           <div class="form-group" id="wb-args-group">
             <label>Arguments (comma-separated)</label>
             <input type="text" class="form-control mono" id="wb-server-args" placeholder="e.g. -y, @modelcontextprotocol/server-sqlite">
@@ -308,24 +312,32 @@ export function renderDashboardViewsHtml(): string {
     <div class="card">
       <div class="filter-bar">
         <div>
-          <h2 style="margin-bottom: 4px;">IDE Target Policy Sync Matrix (P1–P7)</h2>
-          <p style="font-size: 12px; color: var(--text-secondary);">Enforces global MCP priority execution order and synchronizes rules across Cursor, VS Code, Windsurf, and Cline.</p>
+          <h2 style="margin-bottom: 4px;">Runtime Policy Editor (P1–Pn)</h2>
+          <p style="font-size: 12px; color: var(--text-secondary);">Semantic policy IDs stay stable while P1–Pn is derived from this editable execution order. Save first, then synchronize the same order across IDE targets.</p>
         </div>
-        <button class="btn btn-success btn-sm" id="policies-view-sync-btn">&check; Synchronize All IDE Policies</button>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button class="btn btn-secondary btn-sm" id="policy-add-btn" type="button">+ Add Policy</button>
+          <button class="btn btn-sm" id="policy-save-btn" type="button">Save Order & Policies</button>
+          <button class="btn btn-success btn-sm" id="policies-view-sync-btn" type="button">&check; Save & Sync IDE Policies</button>
+        </div>
       </div>
       <div class="table-responsive">
         <table id="policies-detailed-table">
           <thead>
             <tr>
-              <th>Priority Level</th>
-              <th>Server / Tool Resource</th>
-              <th>Role & Architecture</th>
-              <th>Enforcement Rule</th>
-              <th>Execution Directive</th>
+              <th>Priority</th>
+              <th>Policy ID</th>
+              <th>Resource</th>
+              <th>Type</th>
+              <th>Mandatory</th>
+              <th>Enforcement</th>
+              <th>Required Tools</th>
+              <th>Directive</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody id="policies-detailed-table-body">
-            <tr><td colspan="5" style="color: var(--text-muted); text-align: center;">Loading policy matrix...</td></tr>
+            <tr><td colspan="9" style="color: var(--text-muted); text-align: center;">Loading policy matrix...</td></tr>
           </tbody>
         </table>
       </div>
@@ -492,6 +504,10 @@ export function renderDashboardViewsHtml(): string {
         <div class="form-group" id="command-group">
           <label>Command (Executable)</label>
           <input type="text" class="form-control mono" id="server-command" placeholder="e.g. npx or uvx">
+        </div>
+        <div class="form-group" id="source-group">
+          <label>HTTPS Git Repository (alternative to command)</label>
+          <input type="url" class="form-control mono" id="server-source" placeholder="https://github.com/example/mcp-server.git">
         </div>
         <div class="form-group" id="args-group">
           <label>Arguments (comma-separated)</label>

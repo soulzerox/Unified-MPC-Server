@@ -1,0 +1,64 @@
+import type { DiscoveredMcpServer, ExtensionsSettings, PolicyEntry, ResolvedPolicyEntry, RuntimePolicySnapshot, SkillSummary } from './types.js';
+
+export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
+  { id: 'session-start:ask-matt', resourceId: 'ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'At the start of every user task, load and follow ask-matt before planning or acting.' },
+  { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively for current-task recall and durable progress notes.', requiredTools: ['search_nodes', 'create_entities', 'add_observations'] },
+  { id: 'pre-edit:thai-rag', resourceId: 'thai-rag-mcp', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Use local RAG and pre-edit context automatically when repository context is relevant.', requiredTools: ['pre_edit_context'] },
+  { id: 'code-safety:godkiller', resourceId: 'godkiller', resourceType: 'server', mandatory: true, enforcement: 'SAFETY_PRE_CHECK', directive: 'Use Godkiller code intelligence and safety checks before code mutations that require pre-edit diagnostics.', requiredTools: ['gk_task'] },
+  { id: 'optional:sequentialthinking', resourceId: 'sequentialthinking', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use revisable step-by-step reasoning when a complex task benefits from explicit decomposition.' },
+  { id: 'optional:context7', resourceId: 'context7', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use current version-specific library, framework, SDK, or API documentation before relying on external interfaces.' },
+  { id: 'optional:filesystem', resourceId: 'filesystem', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use cross-project or batch filesystem capabilities when ordinary workspace file tools are not sufficient.' },
+  { id: 'optional:ui-skills', resourceId: 'ui-skills', resourceType: 'skill', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use UI/UX and frontend best-practice guidance when designing or implementing user interfaces.' },
+]);
+
+export function configuredPolicies(settings: ExtensionsSettings): readonly PolicyEntry[] {
+  const legacyMandatoryNames = new Set(settings.mandatoryMcpServers.map((name) => name.trim().toLowerCase()).filter(Boolean));
+  const configured = settings.policies === undefined
+    ? DEFAULT_POLICIES.filter((policy) => policy.resourceType !== 'server' || !policy.mandatory || legacyMandatoryNames.has(policy.resourceId.trim().toLowerCase()))
+    : [...settings.policies];
+  const mandatoryServers = new Set(configured.filter((policy) => policy.resourceType === 'server' && policy.mandatory).map((policy) => policy.resourceId.trim().toLowerCase()));
+  const defaultMandatoryServers = new Map(DEFAULT_POLICIES
+    .filter((policy) => policy.resourceType === 'server' && policy.mandatory)
+    .map((policy) => [policy.resourceId.trim().toLowerCase(), policy] as const));
+  for (const rawName of settings.mandatoryMcpServers) {
+    const name = rawName.trim();
+    const key = name.toLowerCase();
+    if (name.length === 0 || mandatoryServers.has(key)) continue;
+    configured.push(defaultMandatoryServers.get(key) ?? {
+      id: `legacy:mandatory:${key}`,
+      resourceId: name,
+      resourceType: 'server',
+      mandatory: true,
+      enforcement: 'EVERY_SESSION',
+      directive: `Keep legacy mandatory child MCP server ${name} connected and available.`,
+    });
+    mandatoryServers.add(key);
+  }
+  return configured;
+}
+
+export function reconcileRuntimePolicies(settings: ExtensionsSettings, servers: readonly DiscoveredMcpServer[], skills: readonly SkillSummary[]): RuntimePolicySnapshot {
+  const configured = configuredPolicies(settings);
+  const resolved: UnprioritizedResolvedPolicyEntry[] = configured.map((policy) => resolveConfiguredPolicy(policy, servers, skills));
+  const coveredServers = new Set(configured.filter((policy) => policy.resourceType === 'server').map((policy) => policy.resourceId.trim().toLowerCase()));
+  for (const server of servers) {
+    const key = server.name.trim().toLowerCase();
+    if (!server.enabled || server.excluded || coveredServers.has(key)) continue;
+    resolved.push({ id: `auto:server:${key}`, resourceId: server.name, resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: `Inspect and use child MCP server ${server.name} automatically when its live tool catalog is relevant; do not wait for the user to name it.`, source: 'discovered', available: true, resolvedResourceId: server.name });
+  }
+  const policies: ResolvedPolicyEntry[] = resolved.map((policy, index) => ({ ...policy, priority: `P${index + 1}` }));
+  return { ready: policies.filter((policy) => policy.mandatory).every((policy) => policy.available), policies };
+}
+
+type UnprioritizedResolvedPolicyEntry = Omit<ResolvedPolicyEntry, 'priority'>;
+
+function resolveConfiguredPolicy(policy: PolicyEntry, servers: readonly DiscoveredMcpServer[], skills: readonly SkillSummary[]): UnprioritizedResolvedPolicyEntry {
+  if (policy.resourceType === 'server') {
+    const key = policy.resourceId.trim().toLowerCase();
+    const server = servers.find((entry) => entry.name.trim().toLowerCase() === key);
+    return { ...policy, source: 'configured', available: server !== undefined && server.enabled && !server.excluded, ...(server === undefined ? {} : { resolvedResourceId: server.name }) };
+  }
+  const key = policy.resourceId.trim().toLowerCase();
+  const skill = skills.find((entry) => entry.id === policy.resourceId || entry.name.trim().toLowerCase() === key);
+  return { ...policy, source: 'configured', available: skill !== undefined, ...(skill === undefined ? {} : { resolvedResourceId: skill.id }) };
+}

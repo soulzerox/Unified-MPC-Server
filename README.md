@@ -73,19 +73,23 @@ graph TD
 - **Atomic Block Injection**: Automatically compiles and injects system instructions into target rule files (`GEMINI.md`, `.cursor/rules/`, `CLAUDE.md`, `.clinerules`, `AGENTS.md`) using bounded markers (`<!-- MCP-POLICY-START -->` ... `<!-- MCP-POLICY-END -->`). All user-defined rules outside the markers remain untouched.
 - **Zero Drift**: Ensures every AI client operating on your repository adheres to identical tool routing, workspace boundaries, and coding standards.
 
-### 2. Mandatory P1–P7 Tool Execution Priority Standard
-Prevents agent hallucination, erratic tool choices, and context window exhaustion by enforcing a deterministic, step-by-step tool invocation hierarchy:
+### 2. Dynamic User-Editable P1–Pn Runtime Policy
+Prevents agent hallucination, erratic tool choices, and context window exhaustion with an ordered runtime policy that users can edit and reorder from the Web Control Plane. Semantic policy IDs remain stable while `P1`, `P2`, … `Pn` are derived execution positions, so moving a policy changes when it runs without changing its identity or breaking stored references.
 
-| Priority | Resource / Server | Role & Execution Directive | Enforcement |
-|---|---|---|---|
-| **P1** | **`memory`** (Knowledge Graph) | **Realtime Working Memory**: Work-log of the active task. Read before starting, record state at every critical step in real-time, link relations at completion. | **Mandatory (Realtime)** |
-| **P2** | **`thai-rag-mcp`** | **Persistent Long-Term Memory & Local RAG**: 100% Local RAG. Recall past preferences/decisions before answering; remember permanent knowledge; `code_search` before opening whole files. | **Mandatory (Every Session)** |
-| **P3** | **`godkiller`** | **Code Intel & Safety Pre-check**: Mode orchestration (`gk_route`), structural symbol search (`gk_code`), and blast radius impact analysis (`gk_task`) before any code modification. | **Mandatory (Pre-mutation)** |
-| **P4** | **`sequentialthinking`** | **Structured Multi-Step Reasoning**: Hypothesis generation, step-by-step analysis, and thought revision for complex architecture, root-cause diagnosis, or multi-file refactoring. | On-Demand (Complex tasks) |
-| **P5** | **`context7`** | **Live Docs & Exact SDK APIs**: Fetches current, version-accurate documentation and code examples before writing code against external libraries or APIs. | On-Demand (External APIs) |
-| **P6** | **`filesystem`** | **Batch & Cross-Project Operations**: Recursive directory trees, batch file reading, and cross-repository file management. | On-Demand (Batch operations) |
-| **P7** | **`ui-skills`** | **UI/UX & Frontend Standards**: Component patterns, CSS layout best practices, and responsive design guidelines. | On-Demand (Frontend/UI) |
-| **Fallback** | **Built-in Native Tools** | Fallback for single-file workspace edits or when no specialized MCP tool exists. | Last Resort |
+The default policy order is:
+
+| Position | Stable Policy ID | Resource / Server | Role & Execution Directive | Enforcement |
+|---|---|---|---|---|
+| **P1** | `session-start:ask-matt` | **`ask-matt`** | Load session-start engineering guidance before planning or acting on each user task. | **Mandatory (Every Session)** |
+| **P2** | `child:memory` | **`memory`** | **Realtime Working Memory** with policy-declared required child tools such as `search_nodes`, `create_entities`, and `add_observations`. | **Mandatory (Realtime)** |
+| **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | Local RAG and pre-edit context, including `pre_edit_context`, when repository context is relevant. | **Mandatory (Every Session)** |
+| **P4** | `code-safety:godkiller` | **`godkiller`** | Code intelligence and blast-radius safety checks, including `gk_task`, before guarded code mutation. | **Mandatory (Pre-mutation)** |
+| **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | Revisable step-by-step reasoning for complex tasks. | On-Demand |
+| **P6** | `optional:context7` | **`context7`** | Current version-specific library, framework, SDK, and API documentation. | On-Demand |
+| **P7** | `optional:filesystem` | **`filesystem`** | Batch and cross-project filesystem operations. | On-Demand |
+| **P8** | `optional:ui-skills` | **`ui-skills`** | UI/UX and frontend best-practice guidance. | On-Demand |
+
+The Web Control Plane can add/remove policies, edit resource/type/mandatory/enforcement/required-tools/directive fields, and move any policy to a new P-position. `POST /api/policies` persists that ordered policy array; `policy_snapshot` exposes the live reconciled view; IDE policy sync compiles the same order into bounded rule blocks. Newly discovered non-mandatory MCP servers can also appear as runtime `AUTO_ROUTE` policies without flattening child tool schemas into the top-level catalog.
 
 ### 3. Two-Tier Context Preservation Catalog
 - **LLM Context Optimization**: Traditional MCP gateways flood the AI model's context window with dozens of massive tool schemas, inflating token costs and causing instruction distraction.
@@ -188,19 +192,26 @@ unified-mpc status --json
 # Run comprehensive system diagnostics and path permission checks
 unified-mpc doctor
 
-# Synchronize P1–P7 policies and MCP server lists across all IDEs
+# Synchronize the current user-edited P1–Pn runtime policy and MCP server lists across all IDEs
 unified-mpc sync
 unified-mpc sync --targets antigravity,cursor,cline
 
-# Install an Agent Skill (markdown instructions)
+# Install an Agent Skill (local folder or HTTPS Git repository)
 unified-mpc install skill --name my-skill --source /path/to/skill-folder --targets all
+unified-mpc install skill --name remote-skill --source https://github.com/example/remote-skill.git --targets cursor
 
-# Install an executable MCP Server
+# Install an executable MCP Server from an explicit command
 unified-mpc install server --name sqlite-db \
   --transport stdio \
   --command npx \
   --args "-y mcp-server-sqlite --db /tmp/dev.db" \
   --targets antigravity,cursor
+
+# Or register a self-contained/prebuilt MCP server from an HTTPS Git repository
+unified-mpc install server --name remote-mcp \
+  --transport stdio \
+  --source https://github.com/example/remote-mcp.git \
+  --targets cursor
 
 # Atomically prune a Skill
 unified-mpc prune skill --name my-skill
@@ -237,17 +248,17 @@ The Local Web Control Plane runs at `http://127.0.0.1:3000/` and provides an int
 
 ### Keeping it running across reboots (systemd user services)
 
-Both long-running processes can be managed as systemd **user** services (enable `loginctl enable-linger $USER` so they start at boot without a login):
+The checked-in systemd **user** units under `scripts/` run the two long-lived processes with explicit readiness ordering (enable `loginctl enable-linger $USER` so the user manager starts at boot without a login):
 
-- `unified-mpc-mcp-http.service` — runs `apps/cli/dist/bin/mcp-http.js` through a small wrapper that exports `UNIFIED_MPC_WORKSPACE`, `UNIFIED_MPC_PORT`, and the `PATH` (use the actual nvm node path if node is not `/usr/bin/node`).
-- `unified-mpc-web.service` — runs `unified-mpc web`.
+- `unified-mpc-mcp-http.service` — MCP HTTP on `127.0.0.1:18765`; startup waits for `/_unified-mpc/identity` to become healthy.
+- `unified-mpc-web.service` — Web Control Plane on `127.0.0.1:3000`; `Requires/After` the MCP HTTP unit.
+- `unified-mpc.service` — compatibility aggregate for starting/stopping both units together.
 
-Two pitfalls that bite under systemd:
+Copy `scripts/unified-mpc.service.env.example` to `~/.config/unified-mpc/service.env` and set absolute `UNIFIED_MPC_ROOT`, `UNIFIED_MPC_WORKSPACE`, and `PATH` values. The workspace must point at the **project directory**, not a filesystem mount root. Keep the real `~/.local/bin` path in `PATH` when `cloudflared` is installed there; add the exact nvm/asdf/mise Node `bin` directory when required.
 
-- `UNIFIED_MPC_WORKSPACE` must point at the **project directory**; a filesystem mount root is rejected ("POSIX filesystem mount root cannot be registered as a project").
-- Include `~/.local/bin` in the service `PATH` — the default `cloudflared` install location is there; a missing entry makes the tunnel spawn fail and the health probe returns HTTP 530.
+Gateway intent also survives reboot. Successful Start/Reconcile persists `RUNNING` and the Web service automatically restores the bridge with retry/backoff. Explicit Stop persists `STOPPED` and remains stopped after restart. Legacy persisted tunnel settings with no desired-state key are recovered once and migrated to `RUNNING`; no post-reboot Start Gateway click is required for a gateway that was intentionally left running.
 
-After a reboot the two services start automatically, but the gateway itself needs one click of **Start Gateway** (or a re-submit of Gateway Configuration) because `cloudflared` is spawned by the dashboard process.
+See [`docs/DEPLOYMENT_LINUX.md`](docs/DEPLOYMENT_LINUX.md) for installation, environment-file, readiness, and Secret Service details.
 
 ---
 

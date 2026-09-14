@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { readFile, readdir } from 'node:fs/promises';
+import path from 'node:path';
 import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result } from '@unified-mpc/domain';
 import { createProcessTreeTerminator, createSpawnInvocationFactory, PathExecutableResolver, type ExecutableResolver, type ProcessTreeTerminator, type SpawnInvocationFactory } from '@unified-mpc/process';
 import {
@@ -204,7 +206,10 @@ export class RipgrepAdapter {
       return err({ code: 'INVALID_INPUT', message: 'Search query or result limit is invalid', recoverable: false });
     }
     const executable = await this.resolver.resolve('rg');
-    if (!executable.ok) return executable;
+    if (!executable.ok) {
+      if (executable.error.code !== 'EXECUTABLE_NOT_FOUND') return executable;
+      return this.searchTextFallback(request, maxResults);
+    }
     const discovery = request.discovery ?? 'automatic';
     const args = ['--json', '--no-heading', '--color', 'never', '--hidden', '--no-ignore'];
     if (discovery === 'automatic') this.appendDefaultGlobs(args);
@@ -247,7 +252,10 @@ export class RipgrepAdapter {
       return err({ code: 'INVALID_INPUT', message: 'Search result limit is invalid', recoverable: false });
     }
     const executable = await this.resolver.resolve('rg');
-    if (!executable.ok) return executable;
+    if (!executable.ok) {
+      if (executable.error.code !== 'EXECUTABLE_NOT_FOUND') return executable;
+      return this.searchFilesFallback(request, maxResults);
+    }
     const discovery = request.discovery ?? 'automatic';
     const args = ['--files', '--hidden', '--no-ignore'];
     if (discovery === 'automatic') this.appendDefaultGlobs(args);
@@ -274,6 +282,126 @@ export class RipgrepAdapter {
       .filter((entry) => discovery === 'explicit' || classifyContextPath(entry, discovery).discoverable);
     const paths = discoveredPaths.slice(0, maxResults);
     return ok({ paths, truncated: processResult.timedOut === true || processResult.stoppedEarly === true || discoveredPaths.length > maxResults });
+  }
+
+  private async searchTextFallback(request: SearchTextRequest, maxResults: number): Promise<Result<SearchTextResult>> {
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(request.query);
+      this.validateFallbackGlob(request.glob);
+    } catch (error: unknown) {
+      return err({ code: 'INVALID_INPUT', message: searchArgumentError(error instanceof Error ? error.message : ''), recoverable: false });
+    }
+    const discovery = request.discovery ?? 'automatic';
+    const matches: SearchMatch[] = [];
+    const deadline = Date.now() + SEARCH_PROCESS_TIMEOUT_MS;
+    let truncated = false;
+    try {
+      for await (const relativePath of this.walkFallbackFiles(request.rootPath, discovery, request.signal)) {
+        if (request.signal?.aborted === true || Date.now() >= deadline) {
+          truncated = true;
+          break;
+        }
+        if (!this.matchesFallbackGlob(relativePath, request.glob)) continue;
+        let content: Buffer;
+        try {
+          content = await readFile(path.join(request.rootPath, relativePath));
+        } catch {
+          continue;
+        }
+        if (content.subarray(0, Math.min(content.byteLength, 8192)).includes(0)) continue;
+        const text = content.toString('utf8');
+        const lines = text.split(/\r?\n/);
+        if (text.endsWith('\n')) lines.pop();
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+          const line = lines[lineIndex] ?? '';
+          pattern.lastIndex = 0;
+          if (!pattern.test(line)) continue;
+          if (matches.length >= maxResults) {
+            truncated = true;
+            break;
+          }
+          matches.push({ path: relativePath, line: lineIndex + 1, text: line });
+        }
+        if (truncated) break;
+      }
+    } catch (error: unknown) {
+      return err({ code: 'INTERNAL_ERROR', message: searchProcessError(error instanceof Error ? error.message : ''), recoverable: true });
+    }
+    return ok({ matches, truncated });
+  }
+
+  private async searchFilesFallback(request: SearchFilesRequest, maxResults: number): Promise<Result<SearchFilesResult>> {
+    try {
+      this.validateFallbackGlob(request.glob);
+    } catch (error: unknown) {
+      return err({ code: 'INVALID_INPUT', message: searchArgumentError(error instanceof Error ? error.message : ''), recoverable: false });
+    }
+    const discovery = request.discovery ?? 'automatic';
+    const paths: string[] = [];
+    const deadline = Date.now() + SEARCH_PROCESS_TIMEOUT_MS;
+    let truncated = false;
+    try {
+      for await (const relativePath of this.walkFallbackFiles(request.rootPath, discovery, request.signal)) {
+        if (request.signal?.aborted === true || Date.now() >= deadline) {
+          truncated = true;
+          break;
+        }
+        if (!this.matchesFallbackGlob(relativePath, request.glob)) continue;
+        if (paths.length >= maxResults) {
+          truncated = true;
+          break;
+        }
+        paths.push(relativePath);
+      }
+    } catch (error: unknown) {
+      return err({ code: 'INTERNAL_ERROR', message: searchProcessError(error instanceof Error ? error.message : ''), recoverable: true });
+    }
+    return ok({ paths, truncated });
+  }
+
+  private async *walkFallbackFiles(rootPath: string, discovery: ContextDiscoveryMode, signal?: AbortSignal): AsyncGenerator<string> {
+    const directories = [''];
+    for (let index = 0; index < directories.length; index += 1) {
+      if (signal?.aborted === true) return;
+      const relativeDirectory = directories[index] ?? '';
+      const absoluteDirectory = relativeDirectory.length === 0 ? rootPath : path.join(rootPath, relativeDirectory);
+      let entries;
+      try {
+        entries = await readdir(absoluteDirectory, { withFileTypes: true });
+      } catch (error: unknown) {
+        if (relativeDirectory.length === 0) throw error;
+        continue;
+      }
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      for (const entry of entries) {
+        const relativePath = relativeDirectory.length === 0 ? entry.name : path.join(relativeDirectory, entry.name);
+        if (entry.isDirectory()) {
+          if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
+          directories.push(relativePath);
+        } else if (entry.isFile()) {
+          if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
+          yield relativePath;
+        }
+      }
+    }
+  }
+
+  private validateFallbackGlob(glob: string | undefined): void {
+    if (glob === undefined) return;
+    const pattern = glob.startsWith('!') ? glob.slice(1) : glob;
+    if (pattern.length === 0) throw new Error('glob must not be empty');
+    path.posix.matchesGlob('', pattern);
+  }
+
+  private matchesFallbackGlob(relativePath: string, glob: string | undefined): boolean {
+    if (glob === undefined) return true;
+    const negated = glob.startsWith('!');
+    const pattern = negated ? glob.slice(1) : glob;
+    const normalizedPath = relativePath.replaceAll(path.sep, '/');
+    const candidate = pattern.includes('/') ? normalizedPath : path.posix.basename(normalizedPath);
+    const matched = path.posix.matchesGlob(candidate, pattern);
+    return negated ? !matched : matched;
   }
 
   private parseMatch(line: string): SearchMatch | null {

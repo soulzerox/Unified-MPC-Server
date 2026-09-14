@@ -128,6 +128,8 @@ interface SelfHealFix {
 
 const PRIMITIVE_SEARCH_ENTRIES: readonly SearchCatalogEntry[] = [
   primitiveEntry('workspace_list', 'List registered workspaces.', 'READ', ['workspace', 'read']),
+  primitiveEntry('workspace_bootstrap', 'Load and fingerprint the workspace engineering harness and verify mandatory child MCP readiness before code mutation.', 'READ', ['workspace', 'harness', 'bootstrap', 'code', 'read']),
+  primitiveEntry('prepare_code_change', 'Run mandatory pre-edit diagnostics and authorize one development-artifact path for the active harness session.', 'READ', ['workspace', 'harness', 'code', 'pre-edit', 'read']),
   primitiveEntry('workspace_tree', 'Read a bounded registered workspace tree.', 'READ', ['workspace', 'tree', 'read']),
   primitiveEntry('read_file', 'Read one guarded workspace file.', 'READ', ['workspace', 'file', 'read']),
   primitiveEntry('read_files', 'Read multiple guarded workspace files.', 'READ', ['workspace', 'file', 'read']),

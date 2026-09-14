@@ -1,6 +1,6 @@
 import { err, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
-import type { ExtensionsService } from '@unified-mpc/extensions';
+import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
   AgentSwarmService,
   ApplyPatchRequest,
@@ -58,6 +58,7 @@ export interface McpApplicationServices {
   readonly localProviders?: () => { readonly pdfProvider?: string; readonly lspCommands?: Readonly<Record<string, string>> };
   readonly capabilities?: CapabilityService;
   readonly extensions?: ExtensionsService;
+  readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
   readonly projectSnapshot?: ProjectSnapshotPort;

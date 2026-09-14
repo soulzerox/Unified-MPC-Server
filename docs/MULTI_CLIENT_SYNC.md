@@ -20,20 +20,24 @@ The policy engine and installer support 7 major AI developer environments native
 
 ---
 
-## The Mandatory P1–P7 Execution Priority Standard
+## The User-Editable P1–Pn Runtime Policy Standard
 
-When AI coding assistants make tool calls, random or unguided tool selection leads to context bloat, hallucinated API calls, and broken state. Unified-MPC enforces an unambiguous, deterministic execution hierarchy:
+When AI coding assistants make tool calls, random or unguided tool selection leads to context bloat, hallucinated API calls, and broken state. Unified-MPC therefore keeps an ordered runtime policy. The order is user-editable: semantic IDs identify policies permanently, while P1–Pn is derived from the current array position.
 
-| Priority | Resource ID | Type | Enforcement Tier | Mandatory | Role / Directive |
-|---|---|---|---|---|---|
-| **P1** | **`memory`** | MCP Server | `REALTIME` | ✅ YES | **Realtime Working Memory**: Work-log of active task. Read before starting, write at every critical step, link relations at completion. Never defer until task finish. |
-| **P2** | **`thai-rag-mcp`** | MCP Server | `EVERY_SESSION` | ✅ YES | **Persistent Knowledge & Local RAG**: 100% Local RAG. Recall previous decisions before answering; remember permanent facts; code_search before reading whole files. |
-| **P3** | **`godkiller`** | MCP Server | `SAFETY_PRE_CHECK` | ✅ YES | **Code Intel & Safety Pre-check**: Mode orchestration (`gk_route`), code exploration (`gk_code`), and blast radius impact analysis (`gk_task`) before any code edits. |
-| **P4** | **`sequentialthinking`** | MCP Server | `ON_DEMAND` | Optional | **Structured Reasoning**: Multi-step hypothesis testing and revision for complex architecture, root-cause diagnosis, or large refactors. |
-| **P5** | **`context7`** | MCP Server | `ON_DEMAND` | Optional | **Live Docs & Exact SDK APIs**: Query current library/SDK documentation and examples before touching external APIs or cloud services. |
-| **P6** | **`filesystem`** | MCP Server | `ON_DEMAND` | Optional | **Batch & Cross-Project Filesystem**: Batch file reads, cross-repo inspection, and recursive directory tree traversal. |
-| **P7** | **`ui-skills`** | Skill Bundle | `ON_DEMAND` | Optional | **UI/UX & Frontend Standards**: Component patterns, CSS layout best practices, and responsive design guidelines. |
-| **Fallback** | Native Built-in Tools | Fallback | `FALLBACK` | — | Used only when no appropriate MCP tool exists, or for single-file local edits in the active workspace. |
+The default order is:
+
+| Position | Stable Policy ID | Resource ID | Type | Enforcement Tier | Mandatory | Role / Directive |
+|---|---|---|---|---|---|---|
+| **P1** | `session-start:ask-matt` | **`ask-matt`** | Skill | `EVERY_SESSION` | ✅ YES | Load session-start engineering guidance before planning or acting. |
+| **P2** | `child:memory` | **`memory`** | MCP Server | `REALTIME` | ✅ YES | Realtime working memory; required child tools are policy-declared and validated at bootstrap. |
+| **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | MCP Server | `EVERY_SESSION` | ✅ YES | Local RAG and `pre_edit_context` when repository context is relevant. |
+| **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | `SAFETY_PRE_CHECK` | ✅ YES | Code intelligence and `gk_task` safety checks before guarded mutations. |
+| **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | MCP Server | `ON_DEMAND` | Optional | Structured reasoning for complex tasks. |
+| **P6** | `optional:context7` | **`context7`** | MCP Server | `ON_DEMAND` | Optional | Current library/SDK documentation and examples. |
+| **P7** | `optional:filesystem` | **`filesystem`** | MCP Server | `ON_DEMAND` | Optional | Batch and cross-project filesystem operations. |
+| **P8** | `optional:ui-skills` | **`ui-skills`** | Skill Bundle | `ON_DEMAND` | Optional | UI/UX and frontend standards. |
+
+Users can add/remove entries, edit enforcement and required-tool metadata, and reorder policies in the Web Control Plane. `policy_snapshot` returns the live reconciled P1–Pn view, including availability and auto-routed discovered resources.
 
 ---
 

@@ -93,12 +93,16 @@ export function inspectMutationOperation(
     case 'skills_list':
     case 'skills_read':
     case 'mcp_list':
+    case 'policy_snapshot':
     case 'mcp_describe':
       return read('structured read-only operation');
     case 'tool_batch':
       return read('batch dispatcher applies mutation policy independently to every child call');
     case 'workspace_register':
       return boundedWrite('workspace_register adds a validated project registration without changing project files');
+    case 'skills_install':
+    case 'mcp_install':
+      return boundedWrite(`${toolName} installs validated extension state without executing repository install scripts`);
     case 'working_memory_record':
       return boundedWrite('working_memory_record appends bounded project work-log state through the pinned memory MCP');
     case 'write_file':

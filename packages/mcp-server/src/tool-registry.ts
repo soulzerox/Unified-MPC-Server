@@ -617,13 +617,8 @@ export class ToolRegistry {
       const failed = mandatoryMcp.value.servers.filter((server) => !server.connected || !server.pinned).map((server) => server.name).join(', ');
       return err(appError('CONFLICT', `Mandatory child MCP bootstrap is not ready: ${failed || 'unknown server'}`, true));
     }
-    const requiredCapabilities: Readonly<Record<string, readonly string[]>> = {
-      memory: ['search_nodes', 'create_entities', 'add_observations'],
-      'thai-rag-mcp': ['pre_edit_context'],
-      godkiller: ['gk_task'],
-    };
     for (const server of mandatoryMcp.value.servers) {
-      const required = requiredCapabilities[server.name.toLowerCase()] ?? [];
+      const required = server.requiredTools ?? [];
       const missing = required.filter((tool) => !server.tools.includes(tool));
       if (missing.length > 0) {
         return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));

@@ -1,162 +1,135 @@
-# Ubuntu Linux Deployment & Systemd Daemonization
+# Ubuntu Linux Deployment & systemd User Services
 
-Unified-MPC-Server is built from the ground up for 100% Linux Ubuntu environments (Ubuntu 22.04 LTS & 24.04 LTS). It has zero Windows dependencies, zero Electron overhead, and adheres strictly to POSIX and Linux Standards Base (LSB) conventions.
+Unified-MPC-Server runs natively on modern Ubuntu/Debian Linux. The recommended persistent deployment uses two systemd **user** services: the Streamable HTTP MCP runtime on loopback port `18765`, and the Local Web Control Plane on loopback port `3000`.
 
----
+## 1. Requirements
 
-## 1. System Requirements & Environment
+- Ubuntu 22.04 LTS, 24.04 LTS, or a modern Debian-based distribution.
+- Node.js `>=22.0.0`.
+- Corepack + pnpm `>=10`.
+- `systemd` user services.
+- `curl` for the MCP HTTP readiness probe.
+- `cloudflared` on the Web service `PATH` when the ChatGPT bridge is enabled. `~/.local/bin` is included by the supplied unit.
+- A working Linux Secret Service when Cloudflare credentials/tunnel tokens are persisted.
 
-### Operating System & Dependencies
-- **OS**: Ubuntu Linux 22.04 LTS, 24.04 LTS, or Debian-based modern Linux distribution.
-- **Node.js**: `v20.x` or `v22.x` (LTS releases recommended).
-- **Package Manager**: `pnpm` (managed via Corepack).
-- **Init System**: `systemd` (with user session management enabled).
+Persistent application data follows XDG directories:
 
-### XDG Base Directory Layout
-All persistent data, logs, and configurations reside under standard Linux XDG directories in the user's home:
+| Purpose | Default path |
+|---|---|
+| Configuration | `~/.config/unified-mpc/` |
+| Persistent data | `~/.local/share/unified-mpc/` |
+| Logs/state | `~/.local/state/unified-mpc/` |
+| Cache | `~/.cache/unified-mpc/` |
 
-| Purpose | Default Path | Environment Variable Override |
-|---|---|---|
-| **Configuration** | `~/.config/unified-mpc/` | `$XDG_CONFIG_HOME/unified-mpc/` |
-| **Persistent Data** | `~/.local/share/unified-mpc/` | `$XDG_DATA_HOME/unified-mpc/` |
-| **Logs & State** | `~/.local/state/unified-mpc/logs/` | `$XDG_STATE_HOME/unified-mpc/logs/` |
-| **Cache** | `~/.cache/unified-mpc/` | `$XDG_CACHE_HOME/unified-mpc/` |
+## 2. Build and verify
 
----
-
-## 2. Monorepo Build & Verification
-
-Before running Unified-MPC as a system daemon, build the monorepo packages and verify health:
+From the repository root:
 
 ```bash
-# Enable Corepack and activate pnpm
 corepack enable
-corepack prepare pnpm@latest --activate
-
-# Install dependencies
 pnpm install
-
-# Build all 21 packages
 pnpm build
-
-# Run health checks
 pnpm cli doctor
 ```
 
----
+The systemd units execute the built files under `apps/cli/dist`, so rebuild before restarting the services after a source update.
 
-## 3. Systemd User Service Setup
+## 3. Install the user services
 
-Running Unified-MPC-Server as a **systemd user service** allows it to start automatically on user login, restart on unexpected termination, and output logs to `journald` without requiring `sudo` privileges.
+The repository contains three unit files:
 
-### Step 1: Create the Systemd Unit File
+- `scripts/unified-mpc-mcp-http.service` — MCP HTTP runtime, `127.0.0.1:18765`.
+- `scripts/unified-mpc-web.service` — Web Control Plane, `127.0.0.1:3000`; it requires the MCP HTTP unit and starts only after the MCP identity endpoint passes its readiness probe.
+- `scripts/unified-mpc.service` — compatibility aggregate that starts/stops both child units together.
 
-Create the user systemd directory if it does not already exist:
+Copy the units and environment template:
 
 ```bash
-mkdir -p ~/.config/systemd/user
+mkdir -p ~/.config/systemd/user ~/.config/unified-mpc
+cp scripts/unified-mpc-mcp-http.service ~/.config/systemd/user/
+cp scripts/unified-mpc-web.service ~/.config/systemd/user/
+cp scripts/unified-mpc.service ~/.config/systemd/user/
+cp scripts/unified-mpc.service.env.example ~/.config/unified-mpc/service.env
 ```
 
-Install the unit file to `~/.config/systemd/user/unified-mpc.service`:
+Edit `~/.config/unified-mpc/service.env` and set **absolute paths**:
 
 ```ini
-[Unit]
-Description=Unified-MPC-Server Daemon & Web Control Plane
-Documentation=https://github.com/soulzerox/Unified-MPC-Server
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/mnt/workspace_data/Unified MCP Server
-ExecStart=/usr/bin/node /mnt/workspace_data/Unified MCP Server/apps/cli/dist/index.js web --port 3000
-Restart=always
-RestartSec=5
-KillMode=process
-Environment=NODE_ENV=production
-Environment=PORT=18765
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths=/mnt/workspace_data/Unified MCP Server /home/qwerty/.local/share/unified-mpc /home/qwerty/.config/unified-mpc /home/qwerty/.local/state/unified-mpc
-
-[Install]
-WantedBy=default.target
+UNIFIED_MPC_ROOT=/absolute/path/to/Unified-MPC-Server
+UNIFIED_MPC_WORKSPACE=/absolute/path/to/your/project
+PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-*(Note: Adjust paths to match your local installation directory and user profile)*
+`EnvironmentFile` values are literal: do not use `~` or `$HOME`. If Node comes from nvm/asdf/mise, prepend its exact `bin` directory to `PATH`. Keep `~/.local/bin` (expanded to the real home path in `service.env`) when `cloudflared` is installed there.
 
----
+`UNIFIED_MPC_WORKSPACE` must be a real project directory, not `/`, `/mnt`, or another filesystem mount root.
 
-### Step 2: Enable Persistent Lingering
-
-By default, user services terminate when the user logs out of their SSH or desktop session. To allow the service to run persistently across reboots:
+Validate the checked-in unit syntax before installation or after edits:
 
 ```bash
-loginctl enable-linger $USER
+systemd-analyze verify \
+  scripts/unified-mpc.service \
+  scripts/unified-mpc-mcp-http.service \
+  scripts/unified-mpc-web.service
 ```
 
-Verify linger status:
+## 4. Enable boot persistence
+
+Enable lingering once so the user manager can start at boot without an interactive login:
 
 ```bash
-loginctl show-user $USER | grep Linger
-# Expected output: Linger=yes
+loginctl enable-linger "$USER"
+loginctl show-user "$USER" | grep Linger
+# Linger=yes
 ```
 
----
-
-### Step 3: Enable and Start the Service
-
-Reload systemd daemon, enable the service to start automatically on boot, and start it immediately:
+Then reload and enable the aggregate service:
 
 ```bash
-# Reload user units
 systemctl --user daemon-reload
-
-# Enable and start
 systemctl --user enable --now unified-mpc.service
+systemctl --user status unified-mpc-mcp-http.service unified-mpc-web.service
+```
 
-# Check service status
+The MCP unit waits for `http://127.0.0.1:18765/_unified-mpc/identity` before systemd considers its startup sequence complete. The Web unit is ordered after it, so the dashboard does not race a not-yet-listening MCP origin during normal boot.
+
+The units intentionally use systemd's default control-group kill behavior rather than `KillMode=process`, so spawned descendants are not orphaned when a service is stopped.
+
+## 5. Gateway desired state and reboot behavior
+
+Gateway lifecycle intent is persistent:
+
+- A successful **Start Gateway** or successful **Validate, Configure & Start** stores desired state `RUNNING`.
+- An explicit **Stop Gateway** stores desired state `STOPPED`.
+- On Web service restart/reboot, persisted configuration is applied first. `RUNNING` is automatically reconciled back to a healthy bridge with bounded retry/backoff; `STOPPED` remains stopped.
+- Legacy installations that have persisted tunnel configuration but no desired-state key are treated as `RUNNING` once, then migrated by persisting `RUNNING` after successful recovery.
+
+You therefore do **not** need to click Start Gateway after every reboot. An explicit Stop remains authoritative until the user starts/reconfigures the gateway again.
+
+If the Linux Secret Service is temporarily unavailable during early boot, the Web service may fail and systemd will retry it (`Restart=on-failure`). Unattended Cloudflare recovery still requires the stored secret service to become accessible.
+
+## 6. Operations
+
+```bash
+# Overall aggregate
 systemctl --user status unified-mpc.service
-```
-
----
-
-## 4. Operational Monitoring & Maintenance
-
-### Inspecting Service Logs
-View live, streaming logs via `journalctl`:
-
-```bash
-# Stream real-time logs
-journalctl --user -u unified-mpc.service -f
-
-# View the last 100 log lines
-journalctl --user -u unified-mpc.service -n 100 --no-pager
-```
-
-### Managing Service Lifecycle
-```bash
-# Restart the daemon
 systemctl --user restart unified-mpc.service
-
-# Stop the daemon
 systemctl --user stop unified-mpc.service
 
-# Disable auto-start
-systemctl --user disable unified-mpc.service
+# Individual services
+systemctl --user status unified-mpc-mcp-http.service
+systemctl --user status unified-mpc-web.service
+
+# Logs
+journalctl --user -u unified-mpc-mcp-http.service -f
+journalctl --user -u unified-mpc-web.service -f
 ```
 
----
+Because both child units declare `PartOf=unified-mpc.service`, stopping or restarting the aggregate propagates to the MCP and Web services.
 
-## 5. Security & Network Hardening
+## 7. Security and network notes
 
-1. **Loopback Binding**: The Web Control Plane strictly binds to `127.0.0.1`. Never bind `0.0.0.0` directly on public or shared network interfaces.
-2. **Reverse Proxy (Optional)**: If access from other machines on a private LAN is required, front the service with Nginx or Caddy utilizing Mutual TLS (mTLS) or HTTP Basic Authentication.
-3. **Firewall (UFW)**:
-   ```bash
-   # Ensure no external ingress to port 18765
-   sudo ufw status verbose
-   ```
-
+1. Both servers bind to loopback. Do not expose ports `18765` or `3000` directly on public interfaces.
+2. The Cloudflare gateway is the intended remote bridge and keeps the local MCP origin on loopback.
+3. The supplied units use `NoNewPrivileges=true`, `PrivateTmp=true`, and `ProtectSystem=full`. They deliberately do **not** make the user's home read-only because MCP coding/file tools must be able to mutate registered workspaces; application-level workspace containment and mutation policy remain the authorization boundary.
+4. Remote Skill/MCP repository installation accepts HTTPS Git sources without embedded credentials. Skill repositories reject symlinks and discard Git metadata; MCP repository installation does not run package install scripts and fails closed for packages that still require runtime dependency installation.

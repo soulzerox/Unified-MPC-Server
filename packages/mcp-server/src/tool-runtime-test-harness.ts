@@ -127,6 +127,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       return { called: true };
     }),
     localProviders: () => ({ pdfProvider: '__unified-mpc_missing_pdf_provider__.exe' }),
+    installer: serviceProxy('installer', calls, () => ({ installed: true })),
     capabilities: {
       async execute(tool: string, input: unknown) {
         calls.push(`capabilities.${tool}`);

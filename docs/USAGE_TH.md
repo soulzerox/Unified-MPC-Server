@@ -10,7 +10,7 @@ Unified-MPC-Server คือระบบบริหารจัดการ Mod
 2. [การเตรียมสภาพแวดล้อมและการติดตั้ง](#2-การเตรียมสภาพแวดล้อมและการติดตั้ง)
 3. [คู่มือคำสั่ง CLI ทั้งหมด](#3-คู่มือคำสั่ง-cli-ทั้งหมด)
 4. [ระบบ Web Control Plane และ Dashboard](#4-ระบบ-web-control-plane-และ-dashboard)
-5. [การซิงค์นโยบาย Multi-IDE และมาตรฐาน P1–P7](#5-การซิงค์นโยบาย-multi-ide-และมาตรฐาน-p1p7)
+5. [การซิงค์นโยบาย Multi-IDE และ Runtime Policy แบบ P1–Pn](#5-การซิงค์นโยบาย-multi-ide-และ-runtime-policy-แบบ-p1pn)
 6. [การตั้งค่า Service บน Ubuntu ด้วย Systemd](#6-การตั้งค่า-service-บน-ubuntu-ด้วย-systemd)
 7. [การทดสอบและการตรวจสอบความถูกต้องของระบบ](#7-การทดสอบและการตรวจสอบความถูกต้องของระบบ)
 
@@ -22,7 +22,7 @@ Unified-MPC-Server คือระบบบริหารจัดการ Mod
 - **Bifurcated Ingestion Engine**: แยกกระบวนการติดตั้งอย่างชัดเจนระหว่าง Agent Skill Markdown (`SKILL.md`) และ External MCP Server (`stdio`/`sse`/`http`).
 - **Zero-Artifact Pruning**: ลบการตั้งค่าและไฟล์ที่ไม่ได้ใช้งานอย่างสมบูรณ์แบบ ไม่ทิ้งขยะตกค้างในระบบ.
 - **Single Source of Truth Multi-IDE Sync**: ซิงค์ Rules และ MCP Config ไปยัง 7 IDE ชั้นนำ (Antigravity, Cursor, Claude Code, OpenCode, Cline, OMP, Codex).
-- **Mandatory P1–P7 Execution Priority**: กำหนดลำดับความสำคัญของ Tools ให้ Agent ทำงานอย่างแม่นยำ ไม่สับสน.
+- **User-Editable P1–Pn Runtime Policy**: ผู้ใช้แก้ไข เพิ่ม/ลบ และจัดลำดับการทำงานได้เอง โดย Policy ID คงที่ ส่วน P1–Pn คืออันดับการทำงานปัจจุบัน.
 - **Gated Remote Gateway**: ระบบเชื่อมต่อ Remote Bridge ปลอดภัยด้วย 5-State Machine และเงื่อนไข Hard Gating.
 
 ---
@@ -73,7 +73,7 @@ pnpm cli doctor
 ```
 
 ### 3.3 ซิงค์นโยบายไปยัง IDE (`sync`)
-นำเข้าและคอมไพล์นโยบาย P1–P7 ไปยังไฟล์ Rules ของ IDE ทุกตัว:
+นำเข้าและคอมไพล์ Runtime Policy แบบ P1–Pn ตามลำดับที่ผู้ใช้บันทึกไว้ไปยังไฟล์ Rules ของ IDE ทุกตัว:
 ```bash
 # ซิงค์ IDE ทั้งหมดพร้อมกัน
 pnpm cli sync
@@ -143,20 +143,24 @@ pnpm cli tools call working_memory_search '{"workspaceId":"<workspace-id>","quer
 
 ---
 
-## 5. การซิงค์นโยบาย Multi-IDE และมาตรฐาน P1–P7
+## 5. การซิงค์นโยบาย Multi-IDE และ Runtime Policy แบบ P1–Pn
 
-Unified-MPC-Server กำหนดลำดับการเรียกใช้งาน MCP Tool ตามมาตรฐานที่เข้มงวด ดังนี้:
+Unified-MPC-Server ใช้ Runtime Policy ที่ผู้ใช้แก้ไขและจัดลำดับใหม่ได้เอง โดย **Policy ID เป็นตัวตนคงที่** ส่วน **P1, P2, … Pn เป็นตำแหน่งการทำงานที่คำนวณจากลำดับปัจจุบัน** ดังนั้นการย้าย Policy จาก P4 ขึ้น P1 จะเปลี่ยนลำดับการทำงานจริงโดยไม่ทำให้ reference เดิมเสีย
 
-| ลำดับ | Resource ID | ประเภท | มาตรการบังคับ | บทบาทหน้าที่ |
-|---|---|---|---|---|
-| **P1** | **`memory`** | MCP Server | บังคับ (Realtime) | บันทึกความจำระยะสั้นและ log การทำงานก่อน-หลังทุกขั้นตอนสำคัญ |
-| **P2** | **`thai-rag-mcp`** | MCP Server | บังคับทุก Session | ระบบค้นหาข้อมูลถาวร Local RAG 100% ต้องค้นหาความจำเดิมก่อนตอบเสมอ |
-| **P3** | **`godkiller`** | MCP Server | บังคับก่อนแก้โค้ด | ประเมิน Blast Radius วางแผนโหมด และตรวจสอบความปลอดภัยของโค้ด |
-| **P4** | **`sequentialthinking`** | MCP Server | เรียกตามความจำเป็น | การคิดวิเคราะห์แบบ Step-by-Step สำหรับงานที่มีความซับซ้อนสูง |
-| **P5** | **`context7`** | MCP Server | เรียกตามความจำเป็น | ดึง Document และโค้ดตัวอย่างที่ตรงเวอร์ชันของไลบรารีภายนอก |
-| **P6** | **`filesystem`** | MCP Server | เรียกตามความจำเป็น | จัดการและอ่านไฟล์ข้ามโปรเจกต์ หรือการค้นหาแบบ Batch |
-| **P7** | **`ui-skills`** | Skill Bundle | เรียกตามความจำเป็น | แนวทางและ Best Practice สำหรับการออกแบบและพัฒนา UI/UX |
-| **Fallback** | Native Tools | Built-in | สำรองสุดท้าย | ใช้เครื่องมือพื้นฐานเฉพาะเมื่อไม่มี MCP Tool ที่เหมาะสม |
+ลำดับเริ่มต้นของระบบคือ:
+
+| ลำดับ | Policy ID | Resource ID | ประเภท | มาตรการบังคับ | บทบาทหน้าที่ |
+|---|---|---|---|---|---|
+| **P1** | `session-start:ask-matt` | **`ask-matt`** | Skill | บังคับทุก Session | โหลดคำแนะนำเริ่มงานก่อนวางแผนหรือลงมือทำ |
+| **P2** | `child:memory` | **`memory`** | MCP Server | บังคับ (Realtime) | Working Memory และตรวจ required tools ตาม policy |
+| **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | MCP Server | บังคับทุก Session | Local RAG และ `pre_edit_context` เมื่อเกี่ยวข้องกับ repository |
+| **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | บังคับก่อนแก้โค้ด | Code intelligence และ `gk_task` สำหรับ safety pre-check |
+| **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | MCP Server | ตามความจำเป็น | การคิดวิเคราะห์หลายขั้นสำหรับงานซับซ้อน |
+| **P6** | `optional:context7` | **`context7`** | MCP Server | ตามความจำเป็น | เอกสารและตัวอย่าง API/SDK ที่ตรงเวอร์ชัน |
+| **P7** | `optional:filesystem` | **`filesystem`** | MCP Server | ตามความจำเป็น | งานไฟล์แบบ Batch และข้ามโปรเจกต์ |
+| **P8** | `optional:ui-skills` | **`ui-skills`** | Skill Bundle | ตามความจำเป็น | แนวทาง UI/UX และ Frontend |
+
+ใน Web Control Plane ผู้ใช้สามารถเพิ่ม/ลบ Policy, แก้ Resource/Type/Mandatory/Enforcement/Required Tools/Directive และเปลี่ยนตำแหน่ง P ได้โดยตรง เมื่อกด Save ระบบจะเก็บ array ตามลำดับจริง และ Save & Sync จะนำลำดับเดียวกันไปสร้าง Rules ของ IDE ทุกตัว
 
 ### Runtime Harness สำหรับ ChatGPT Web
 

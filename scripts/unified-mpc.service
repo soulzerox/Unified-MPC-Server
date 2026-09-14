@@ -1,24 +1,13 @@
 [Unit]
-Description=Unified-MPC-Server Daemon & Web Control Plane
+Description=Unified-MPC-Server compatibility aggregate
 Documentation=https://github.com/soulzerox/Unified-MPC-Server
-After=network.target
+Requires=unified-mpc-mcp-http.service unified-mpc-web.service
+After=unified-mpc-mcp-http.service unified-mpc-web.service
 
 [Service]
-Type=simple
-WorkingDirectory=%h/Documents/Src Code/Unified-MPC-Server
-ExecStart=/usr/bin/env node apps/cli/dist/index.js web --port 18765
-Restart=always
-RestartSec=5
-KillMode=process
-Environment=NODE_ENV=production
-Environment=PORT=18765
-
-# Linux Security Hardening
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths=%h/.local/share/unified-mpc %h/.config/unified-mpc %h/.local/state/unified-mpc %h/.cache/unified-mpc
+Type=oneshot
+ExecStart=/usr/bin/true
+RemainAfterExit=yes
 
 [Install]
 WantedBy=default.target
-

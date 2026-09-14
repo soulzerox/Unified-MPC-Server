@@ -198,6 +198,196 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
   });
 
+  it('restores a persisted named tunnel to BRIDGE_HEALTHY when the control plane restarts', async () => {
+    const settings = new Map<string, string>([
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+    ]);
+    const secrets = new Map<string, string>([['cloudflare_tunnel_token', 'persisted-runtime-token']]);
+    const restartGateway = new GatewayService({
+      localPort: 18765,
+      tunnelProviderFactory: (configuration) => async (): Promise<{ url: string; stop: () => Promise<void> }> => ({
+        url: configuration.publicUrl ?? 'https://missing.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const restarted = new ControlPlaneServer({
+      port: 0,
+      gateway: restartGateway,
+      capabilityToken,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+      secretStore: {
+        get: async (key: string): Promise<string | null> => secrets.get(key) ?? null,
+        set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); },
+        delete: async (key: string): Promise<void> => { secrets.delete(key); },
+      },
+    });
+
+    await restarted.listen();
+    try {
+      expect(restartGateway.configuration()).toEqual({
+        publicUrl: 'https://mcp.example.com',
+        tunnelToken: 'persisted-runtime-token',
+      });
+      expect(restartGateway.status().state).toBe('BRIDGE_HEALTHY');
+      expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('persists an explicit gateway stop and keeps the bridge stopped after restart', async () => {
+    const settings = new Map<string, string>([
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+    ]);
+    const secrets = new Map<string, string>([['cloudflare_tunnel_token', 'persisted-runtime-token']]);
+    const settingsRepository = {
+      get: (key: string): string | null => settings.get(key) ?? null,
+      set: (key: string, value: string): void => { settings.set(key, value); },
+      delete: (key: string): void => { settings.delete(key); },
+    };
+    const secretStore = {
+      get: async (key: string): Promise<string | null> => secrets.get(key) ?? null,
+      set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); },
+      delete: async (key: string): Promise<void> => { secrets.delete(key); },
+    };
+    const createGateway = (): GatewayService => new GatewayService({
+      localPort: 18765,
+      tunnelProviderFactory: (configuration) => async () => ({
+        url: configuration.publicUrl ?? 'https://missing.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => 200,
+    });
+
+    const firstGateway = createGateway();
+    const first = new ControlPlaneServer({ port: 0, gateway: firstGateway, capabilityToken, settingsRepository, secretStore });
+    await first.listen();
+    try {
+      expect(firstGateway.status().state).toBe('BRIDGE_HEALTHY');
+      const stopped = await fetch(`http://127.0.0.1:${first.port}/api/chatgpt-gateway/stop`, {
+        method: 'POST',
+        headers: { Origin: `http://127.0.0.1:${first.port}`, 'x-unified-mpc-capability': capabilityToken },
+      });
+      expect(stopped.status).toBe(200);
+      expect(settings.get('cloudflare_gateway_desired_state')).toBe('STOPPED');
+    } finally {
+      await first.close();
+    }
+
+    const secondGateway = createGateway();
+    const second = new ControlPlaneServer({ port: 0, gateway: secondGateway, capabilityToken, settingsRepository, secretStore });
+    await second.listen();
+    try {
+      expect(secondGateway.configuration()).toEqual({
+        publicUrl: 'https://mcp.example.com',
+        tunnelToken: 'persisted-runtime-token',
+      });
+      expect(secondGateway.status().state).toBe('STOPPED');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('persists an explicit gateway start and restores the bridge after restart', async () => {
+    const settings = new Map<string, string>([
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+      ['cloudflare_gateway_desired_state', 'STOPPED'],
+    ]);
+    const secrets = new Map<string, string>([['cloudflare_tunnel_token', 'persisted-runtime-token']]);
+    const settingsRepository = {
+      get: (key: string): string | null => settings.get(key) ?? null,
+      set: (key: string, value: string): void => { settings.set(key, value); },
+      delete: (key: string): void => { settings.delete(key); },
+    };
+    const secretStore = {
+      get: async (key: string): Promise<string | null> => secrets.get(key) ?? null,
+      set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); },
+      delete: async (key: string): Promise<void> => { secrets.delete(key); },
+    };
+    const createGateway = (): GatewayService => new GatewayService({
+      localPort: 18765,
+      tunnelProviderFactory: (configuration) => async () => ({
+        url: configuration.publicUrl ?? 'https://missing.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => 200,
+    });
+
+    const firstGateway = createGateway();
+    const first = new ControlPlaneServer({ port: 0, gateway: firstGateway, capabilityToken, settingsRepository, secretStore });
+    await first.listen();
+    try {
+      expect(firstGateway.status().state).toBe('STOPPED');
+      const started = await fetch(`http://127.0.0.1:${first.port}/api/chatgpt-gateway/start`, {
+        method: 'POST',
+        headers: { Origin: `http://127.0.0.1:${first.port}`, 'x-unified-mpc-capability': capabilityToken },
+      });
+      expect(started.status).toBe(200);
+      expect(firstGateway.status().state).toBe('BRIDGE_HEALTHY');
+      expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
+    } finally {
+      await first.close();
+    }
+
+    const secondGateway = createGateway();
+    const second = new ControlPlaneServer({ port: 0, gateway: secondGateway, capabilityToken, settingsRepository, secretStore });
+    await second.listen();
+    try {
+      expect(secondGateway.status().state).toBe('BRIDGE_HEALTHY');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('retries persisted gateway startup when the origin is not ready yet', async () => {
+    const settings = new Map<string, string>([
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+    ]);
+    const secrets = new Map<string, string>([['cloudflare_tunnel_token', 'persisted-runtime-token']]);
+    let probes = 0;
+    const retryGateway = new GatewayService({
+      localPort: 18765,
+      healthAttempts: 1,
+      tunnelProviderFactory: (configuration) => async (): Promise<{ url: string; stop: () => Promise<void> }> => ({
+        url: configuration.publicUrl ?? 'https://missing.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => { probes += 1; return probes === 1 ? 503 : 200; },
+    });
+    const restarted = new ControlPlaneServer({
+      port: 0,
+      gateway: retryGateway,
+      capabilityToken,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+      secretStore: {
+        get: async (key: string): Promise<string | null> => secrets.get(key) ?? null,
+        set: async (key: string, value: string): Promise<void> => { secrets.set(key, value); },
+        delete: async (key: string): Promise<void> => { secrets.delete(key); },
+      },
+    });
+
+    await restarted.listen();
+    try {
+      await expect.poll(() => retryGateway.status().state, { timeout: 1_500 }).toBe('BRIDGE_HEALTHY');
+      expect(probes).toBeGreaterThanOrEqual(2);
+    } finally {
+      await restarted.close();
+    }
+  });
+
   it('persists non-secret settings, masks token, and rejects invalid wildcard allowlists', async () => {
     const settings = new Map<string, string>();
     const secrets = new Map<string, string>();
@@ -265,6 +455,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(secrets).toEqual(new Map([['cloudflare_api_token', 'user-api-token'], ['cloudflare_tunnel_token', 'runtime-token']]));
       expect(settings.get('cloudflare_account_id')).toBe('0123456789abcdef0123456789abcdef');
       expect(settings.get('cloudflare_remote_tunnel_id')).toBe('remote-id');
+      expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
       expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
     } finally { await configured.close(); }
   });
@@ -518,12 +709,110 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
+  it('accepts HTTPS Git skill sources without weakening local workspace containment', async () => {
+    let installedSource = '';
+    const installer = {
+      installSkill: async (input: { name: string; source: string; targets: readonly string[] }) => {
+        installedSource = input.source;
+        return { ok: true, value: { name: input.name, installedPaths: [], targets: input.targets } };
+      },
+    } as unknown as InstallerService;
+    const remote = new ControlPlaneServer({ port: 0, gateway, installer, capabilityToken });
+    await remote.listen();
+    try {
+      const source = 'https://github.com/example/example-skill.git';
+      const response = await fetch(`http://127.0.0.1:${remote.port}/api/skills/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${remote.port}`, 'x-unified-mpc-capability': capabilityToken },
+        body: JSON.stringify({ name: 'fixture', source, targets: ['cursor'] }),
+      });
+      expect(response.status).toBe(200);
+      expect(installedSource).toBe(source);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it('returns policy table on GET /api/policies', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/policies`);
-    expect(res.status).toBe(200);
+    expect(res.status, await res.clone().text()).toBe(200);
     const data = await res.json();
     expect(Array.isArray(data.policies)).toBe(true);
-    expect(data.policies.some((p: { priority: string }) => p.priority === 'P1')).toBe(true);
+    expect(data.policies[0]).toMatchObject({ priority: 'P1', id: 'session-start:ask-matt' });
+  });
+
+  it('persists user-edited policies in requested P1-Pn order without changing semantic ids', async () => {
+    const settings = new Map<string, string>();
+    const emptyServerCatalog = { discover: async () => [] } as unknown as McpConfigLoader;
+    const emptySkillCatalog = { list: async () => ({ ok: true, value: { skills: [] } }) } as unknown as SkillCatalog;
+    const editable = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      serverCatalog: emptyServerCatalog,
+      skillCatalog: emptySkillCatalog,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await editable.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${editable.port}/api/policies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${editable.port}`, 'x-unified-mpc-capability': capabilityToken },
+        body: JSON.stringify({ policies: [
+          { id: 'custom:second', resourceId: 'second-skill', resourceType: 'skill', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Run second skill when relevant' },
+          { id: 'custom:first', resourceId: 'first-server', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Run first server before the rest', requiredTools: ['ping'] },
+        ] }),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      const saved = await response.json();
+      expect(saved.policies.slice(0, 2)).toMatchObject([
+        { priority: 'P1', id: 'custom:second', resourceId: 'second-skill' },
+        { priority: 'P2', id: 'custom:first', resourceId: 'first-server' },
+      ]);
+
+      const persisted = JSON.parse(settings.get('extensions')!);
+      expect(persisted.policies.map((policy: { id: string }) => policy.id)).toEqual(['custom:second', 'custom:first']);
+      expect(persisted.mandatoryMcpServers).toEqual(['first-server']);
+
+      const reread = await fetch(`http://127.0.0.1:${editable.port}/api/policies`);
+      expect((await reread.json()).policies.slice(0, 2)).toMatchObject([
+        { priority: 'P1', id: 'custom:second' },
+        { priority: 'P2', id: 'custom:first' },
+      ]);
+    } finally {
+      await editable.close();
+    }
+  });
+
+  it('rejects duplicate semantic policy ids instead of saving an ambiguous order', async () => {
+    const settings = new Map<string, string>();
+    const editable = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await editable.listen();
+    try {
+      const policy = { id: 'duplicate:id', resourceId: 'mock', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Mock' };
+      const response = await fetch(`http://127.0.0.1:${editable.port}/api/policies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${editable.port}`, 'x-unified-mpc-capability': capabilityToken },
+        body: JSON.stringify({ policies: [policy, policy] }),
+      });
+      expect(response.status).toBe(400);
+      expect(settings.get('extensions')).toBeUndefined();
+    } finally {
+      await editable.close();
+    }
   });
 
   it('returns recorded telemetry events on GET /api/logs', async () => {

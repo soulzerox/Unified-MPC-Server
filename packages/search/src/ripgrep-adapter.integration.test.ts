@@ -183,6 +183,46 @@ describe('RipgrepAdapter', () => {
     });
   });
 
+  it('uses a Node filesystem fallback when ripgrep is unavailable', async () => {
+    const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const rootPath = await mkdtemp(path.join(tmpdir(), 'unified-mpc-search-'));
+    const resolver: ExecutableResolver = {
+      async resolve(): Promise<Result<string>> {
+        return {
+          ok: false,
+          error: { code: 'EXECUTABLE_NOT_FOUND', message: "Executable 'rg' was not found", recoverable: true },
+        };
+      },
+    };
+    const adapter = new RipgrepAdapter(resolver);
+
+    try {
+      await mkdir(path.join(rootPath, 'src'), { recursive: true });
+      await mkdir(path.join(rootPath, 'node_modules', 'pkg'), { recursive: true });
+      await writeFile(path.join(rootPath, 'src', 'a.ts'), 'needle alpha\nnope\nneedle beta\n', 'utf8');
+      await writeFile(path.join(rootPath, 'node_modules', 'pkg', 'index.js'), 'needle dependency\n', 'utf8');
+
+      await expect(adapter.searchText({ rootPath, query: 'needle', maxResults: 10 })).resolves.toEqual({
+        ok: true,
+        value: {
+          matches: [
+            { path: path.join('src', 'a.ts'), line: 1, text: 'needle alpha' },
+            { path: path.join('src', 'a.ts'), line: 3, text: 'needle beta' },
+          ],
+          truncated: false,
+        },
+      });
+      await expect(adapter.searchFiles({ rootPath, glob: '*.ts', maxResults: 10 })).resolves.toEqual({
+        ok: true,
+        value: { paths: [path.join('src', 'a.ts')], truncated: false },
+      });
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
   it('applies context-economy filters to automatic discovery and allows explicit enumeration', async () => {
     let receivedArgs: readonly string[] = [];
     const runner: ProcessRunner = {

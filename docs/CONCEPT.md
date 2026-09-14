@@ -100,7 +100,7 @@ Unified-MPC-Server solves this with a **Two-Tier Catalog**:
 
 ## 7. Universal Multi-Client Policy Synchronization
 
-Rather than manually editing prompt rules across 7 different editors, the `IdeSyncService` compiles global tool prioritization rules (P1–P7) and distributes them idempotently into:
+Rather than manually editing prompt rules across different editors, the `IdeSyncService` compiles the persisted user-editable runtime policy (P1–Pn) and distributes it idempotently. Semantic IDs are stable; P-positions are derived from the current execution order. Targets include:
 - Google Antigravity (`~/.gemini/antigravity/rules/mcp-policy.md`, `GEMINI.md`)
 - Cursor (`.cursor/rules/00-mandatory-policy.mdc`)
 - Claude Code (`CLAUDE.md`)

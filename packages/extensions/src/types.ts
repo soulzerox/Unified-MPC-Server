@@ -1,6 +1,30 @@
 import type { Result } from '@unified-mpc/domain';
 
 export type ExtensionsMode = 'enable_all' | 'allowlist';
+export type PolicyResourceType = 'server' | 'skill';
+export type PolicySource = 'configured' | 'discovered';
+
+export interface PolicyEntry {
+  readonly id: string;
+  readonly resourceId: string;
+  readonly resourceType: PolicyResourceType;
+  readonly mandatory: boolean;
+  readonly enforcement: 'REALTIME' | 'EVERY_SESSION' | 'SAFETY_PRE_CHECK' | 'ON_DEMAND' | 'AUTO_ROUTE' | string;
+  readonly directive: string;
+  readonly requiredTools?: readonly string[];
+}
+
+export interface ResolvedPolicyEntry extends PolicyEntry {
+  readonly priority: string;
+  readonly source: PolicySource;
+  readonly available: boolean;
+  readonly resolvedResourceId?: string;
+}
+
+export interface RuntimePolicySnapshot {
+  readonly ready: boolean;
+  readonly policies: readonly ResolvedPolicyEntry[];
+}
 
 export interface McpServerLaunchConfig {
   readonly command: string;
@@ -18,6 +42,7 @@ export interface ExtensionsSettings {
   readonly extraSkillRoots: readonly string[];
   readonly extraMcpServers: Readonly<Record<string, McpServerLaunchConfig>>;
   readonly mandatoryMcpServers: readonly string[];
+  readonly policies?: readonly PolicyEntry[];
 }
 
 export interface MandatoryMcpServerStatus {
@@ -28,6 +53,7 @@ export interface MandatoryMcpServerStatus {
   readonly descriptorFingerprint?: string;
   readonly catalogFingerprint?: string;
   readonly tools: readonly string[];
+  readonly requiredTools: readonly string[];
   readonly error?: string;
 }
 
@@ -102,6 +128,7 @@ export interface ExtensionsService {
   listSkills(input: { readonly query?: string; readonly source?: string }): Promise<Result<{ readonly skills: readonly SkillSummary[] }>>;
   readSkill(input: { readonly skillId: string; readonly relativePath?: string }): Promise<Result<SkillContent>>;
   listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>>;
+  runtimePolicySnapshot(): Promise<Result<RuntimePolicySnapshot>>;
   bootstrapMandatoryMcpServers(signal?: AbortSignal): Promise<Result<MandatoryMcpBootstrapResult>>;
   describeMcpServer(input: { readonly server: string }, signal?: AbortSignal): Promise<Result<{
     readonly server: string;

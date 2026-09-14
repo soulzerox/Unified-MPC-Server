@@ -1,4 +1,4 @@
-import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type McpServerLaunchConfig } from './types.js';
+import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type McpServerLaunchConfig, type PolicyEntry } from './types.js';
 
 export function parseExtensionsSettings(raw: string | null | undefined): ExtensionsSettings {
   if (raw === undefined || raw === null || raw.trim().length === 0) return DEFAULT_EXTENSIONS_SETTINGS;
@@ -17,6 +17,7 @@ export function parseExtensionsSettings(raw: string | null | undefined): Extensi
       mandatoryMcpServers: record.mandatoryMcpServers === undefined
         ? DEFAULT_EXTENSIONS_SETTINGS.mandatoryMcpServers
         : stringArray(record.mandatoryMcpServers),
+      ...(record.policies === undefined ? {} : { policies: policyArray(record.policies) }),
     };
   } catch {
     return DEFAULT_EXTENSIONS_SETTINGS;
@@ -43,6 +44,37 @@ export function isSkillRootEnabled(rootPath: string, settings: ExtensionsSetting
 function stringArray(value: unknown): readonly string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function policyArray(value: unknown): readonly PolicyEntry[] {
+  if (!Array.isArray(value)) return [];
+  const policies: PolicyEntry[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    const resourceId = typeof record.resourceId === 'string' ? record.resourceId.trim() : '';
+    const enforcement = typeof record.enforcement === 'string' ? record.enforcement.trim() : '';
+    const directive = typeof record.directive === 'string' ? record.directive.replace(/\s+/g, ' ').trim() : '';
+    if (
+      id.length === 0 || id.length > 128 ||
+      resourceId.length === 0 || resourceId.length > 512 ||
+      (record.resourceType !== 'server' && record.resourceType !== 'skill') ||
+      typeof record.mandatory !== 'boolean' ||
+      enforcement.length === 0 || enforcement.length > 128 ||
+      directive.length === 0 || directive.length > 4096
+    ) continue;
+    policies.push({
+      id,
+      resourceId,
+      resourceType: record.resourceType,
+      mandatory: record.mandatory,
+      enforcement,
+      directive,
+      ...(record.requiredTools === undefined ? {} : { requiredTools: stringArray(record.requiredTools).map((tool) => tool.trim()) }),
+    });
+  }
+  return policies;
 }
 
 function mcpServerMap(value: unknown): Readonly<Record<string, McpServerLaunchConfig>> {

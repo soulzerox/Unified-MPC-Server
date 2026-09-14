@@ -9,6 +9,15 @@ const ponytailSessionSchema = z.object({
   suppressed: z.boolean(),
 }).strict();
 
+const installTargetSchema = z.enum(['antigravity', 'cursor', 'claude', 'codex', 'cline', 'opencode', 'all']);
+const skillInstallSchema = z.object({
+  name: z.string().min(1),
+  source: z.string().min(1),
+  targets: z.array(installTargetSchema).min(1).default(['all']),
+  scope: z.enum(['global', 'workspace']).optional(),
+  workspaceRoot: z.string().min(1).optional(),
+}).strict();
+
 const readOnlyInspection = {
   permission: 'READ' as const,
   annotations: { readOnlyHint: true, destructiveHint: false },
@@ -38,6 +47,22 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
         : context.services.extensions.readSkill({
           skillId: input.skillId,
           ...(input.relativePath === undefined ? {} : { relativePath: input.relativePath }),
+        }),
+    }),
+    defineTool({
+      name: 'skills_install',
+      description: 'Install a validated local or HTTPS Git SKILL.md source into supported IDE skill catalogs. Remote repositories are materialized without running install scripts and are rejected when unsafe symlinks are present.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: skillInstallSchema,
+      handler: async (input) => context.services.installer === undefined
+        ? missingService()
+        : context.services.installer.installSkill({
+          name: input.name,
+          source: input.source,
+          targets: input.targets,
+          ...(input.scope === undefined ? {} : { scope: input.scope }),
+          ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
         }),
     }),
     defineTool({

@@ -2,21 +2,36 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type RuntimePolicySnapshot } from './types.js';
+import { reconcileRuntimePolicies } from './runtime-policy.js';
+import { McpConfigLoader } from './mcp-config-loader.js';
+import { SkillCatalog } from './skill-catalog.js';
 
-export type PolicyPriority = 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'P7';
+export type PolicyPriority = string;
 
 export interface PolicyEntry {
-  readonly priority: PolicyPriority;
+  readonly id: string;
+  readonly priority?: PolicyPriority;
   readonly resourceId: string;
   readonly resourceType: 'server' | 'skill';
   readonly mandatory: boolean;
   readonly enforcement: 'REALTIME' | 'EVERY_SESSION' | 'SAFETY_PRE_CHECK' | 'ON_DEMAND' | string;
   readonly directive: string;
+  readonly requiredTools?: readonly string[];
 }
 
 export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
   {
-    priority: 'P1',
+    id: 'session-start:ask-matt',
+    resourceId: 'ask-matt',
+    resourceType: 'skill',
+    mandatory: true,
+    enforcement: 'EVERY_SESSION',
+    directive: 'At the start of every user task, load and follow ask-matt before planning or acting.',
+  },
+  {
+    id: 'child:memory',
+    requiredTools: ['search_nodes', 'create_entities', 'add_observations'],
     resourceId: 'memory',
     resourceType: 'server',
     mandatory: true,
@@ -24,7 +39,8 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     directive: 'work-log ของงานปัจจุบัน (Realtime Working Memory) — อ่านก่อนเริ่ม, เขียนทุก step สำคัญ (realtime), เชื่อมโยงเมื่อจบ',
   },
   {
-    priority: 'P2',
+    id: 'pre-edit:thai-rag',
+    requiredTools: ['pre_edit_context'],
     resourceId: 'thai-rag-mcp',
     resourceType: 'server',
     mandatory: true,
@@ -32,7 +48,8 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     directive: 'ความจำถาวร · 100% Local RAG · recall ก่อนตอบเรื่องอดีต, remember ข้อมูลถาวร, code_search ก่อนอ่านไฟล์ยาว',
   },
   {
-    priority: 'P3',
+    id: 'code-safety:godkiller',
+    requiredTools: ['gk_task'],
     resourceId: 'godkiller',
     resourceType: 'server',
     mandatory: true,
@@ -40,7 +57,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     directive: 'Code Intel & Safety Pre-check · gk_route วางแผน, gk_code สำรวจโค้ด, gk_task ตรวจ blast_radius ก่อนแก้โค้ด',
   },
   {
-    priority: 'P4',
+    id: 'optional:sequentialthinking',
     resourceId: 'sequentialthinking',
     resourceType: 'server',
     mandatory: false,
@@ -48,7 +65,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     directive: 'วิเคราะห์/วางแผนแบบ step-by-step ที่ revise ได้ ก่อนเริ่ม task ซับซ้อน',
   },
   {
-    priority: 'P5',
+    id: 'optional:context7',
     resourceId: 'context7',
     resourceType: 'server',
     mandatory: false,
@@ -56,7 +73,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     directive: 'docs สดและตัวอย่างโค้ดตรงเวอร์ชันของ lib/framework/SDK/API ก่อนแตะ external API',
   },
   {
-    priority: 'P6',
+    id: 'optional:filesystem',
     resourceId: 'filesystem',
     resourceType: 'server',
     mandatory: false,
@@ -64,7 +81,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     directive: 'ไฟล์ข้ามโปรเจกต์ / batch file operations',
   },
   {
-    priority: 'P7',
+    id: 'optional:ui-skills',
     resourceId: 'ui-skills',
     resourceType: 'skill',
     mandatory: false,
@@ -82,39 +99,42 @@ export interface IdeSyncOptions {
   readonly homeDir?: string;
   readonly workspaceRoot?: string;
   readonly policies?: readonly PolicyEntry[];
+  readonly settings?: ExtensionsSettings;
 }
 
 export class IdeSyncService {
   private readonly home: string;
   private readonly workspace: string | undefined;
   private readonly policies: readonly PolicyEntry[];
+  private readonly settings: ExtensionsSettings;
 
   public constructor(options: IdeSyncOptions = {}) {
     this.home = options.homeDir ?? os.homedir();
     this.workspace = options.workspaceRoot?.trim();
     this.policies = options.policies ?? DEFAULT_POLICIES;
+    this.settings = options.settings ?? DEFAULT_EXTENSIONS_SETTINGS;
   }
 
-  public compile(): string {
+  public compile(policies: readonly PolicyEntry[] = this.policies): string {
     const lines: string[] = [
       POLICY_BLOCK_START,
-      '# MCP Server Execution Priority — Mandatory Policy',
+      '# MCP Runtime Policy — Dynamic Resource Routing',
       '',
-      '| Priority | Resource | Type | Enforcement | Mandatory |',
-      '|---|---|---|---|---|',
+      '| Priority | Policy | Resource | Type | Enforcement | Mandatory |',
+      '|---|---|---|---|---|---|',
     ];
 
-    for (const p of this.policies) {
+    for (const [index, p] of policies.entries()) {
       const mandatoryText = p.mandatory ? '✅ YES' : 'Optional';
-      lines.push(`| ${p.priority} | ${p.resourceId} | ${p.resourceType} | ${p.enforcement} | ${mandatoryText} |`);
+      lines.push(`| P${index + 1} | ${p.id} | ${p.resourceId} | ${p.resourceType} | ${p.enforcement} | ${mandatoryText} |`);
     }
 
     lines.push('');
     lines.push('## Enforcement Rules');
     lines.push('');
 
-    for (const p of this.policies) {
-      lines.push(`${p.priority}. **${p.priority} ${p.resourceId}** (${p.enforcement}): ${p.directive}`);
+    for (const [index, p] of policies.entries()) {
+      lines.push(`- **P${index + 1} · ${p.id} / ${p.resourceId}** (${p.enforcement}): ${p.directive}`);
     }
 
     lines.push('');
@@ -122,10 +142,18 @@ export class IdeSyncService {
     return lines.join('\n');
   }
 
+  public async policySnapshot(): Promise<RuntimePolicySnapshot> {
+    const settings: ExtensionsSettings = { ...this.settings, policies: this.policies };
+    const servers = await new McpConfigLoader({ settings, homeDir: this.home, ...(this.workspace === undefined ? {} : { workspaceRoot: this.workspace }) }).discover();
+    const skillsResult = await new SkillCatalog({ settings, homeDir: this.home, ...(this.workspace === undefined ? {} : { workspaceRoot: this.workspace }) }).list({});
+    const skills = skillsResult.ok ? skillsResult.value.skills : [];
+    return reconcileRuntimePolicies(settings, servers, skills);
+  }
+
   public async sync(targets: readonly SyncTarget[] = ['all']): Promise<Result<{ readonly updatedFiles: readonly string[] }>> {
     const updatedFiles: string[] = [];
     const isAll = targets.includes('all');
-    const compiled = this.compile();
+    const compiled = this.compile((await this.policySnapshot()).policies);
 
     try {
       // 1. Cursor

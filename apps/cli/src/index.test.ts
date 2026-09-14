@@ -125,6 +125,12 @@ describe('CLI default dependency lifecycle', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('wires the standalone tools facade to extension services so child MCP inspection is available', async () => {
+    const dependencies = createDefaultCliDependencies();
+    const result = await dependencies.toolsCall?.('mcp_list', {});
+    expect(result).toMatchObject({ ok: true });
+  });
 });
 
 describe('CLI execution dispatcher', () => {

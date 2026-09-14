@@ -15,6 +15,14 @@ describe('MCP Ponytail instructions', () => {
     expect(instructions).toContain('before the first code mutation');
   });
 
+  it('directs every client to resolve live policy and start with ask-matt without waiting for explicit resource names', () => {
+    const instructions = buildMcpInstructions('off');
+    expect(instructions).toContain('policy_snapshot');
+    expect(instructions).toContain('ask-matt');
+    expect(instructions).toContain('start of every user task');
+    expect(instructions).toContain('without waiting for the user to name');
+  });
+
   it.each(['lite', 'full', 'ultra'] as const)('adds a bounded exact-load directive for %s', (mode) => {
     const instructions = buildMcpInstructions(mode);
     expect(instructions).toContain(MCP_OUTCOME_DRIVEN_INSTRUCTIONS);

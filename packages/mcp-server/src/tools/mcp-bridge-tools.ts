@@ -1,5 +1,21 @@
+import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { mcpCallSchema, mcpDescribeSchema, mcpListSchema } from './schemas.js';
+import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema } from './schemas.js';
+
+const installTargetSchema = z.enum(['antigravity', 'cursor', 'claude', 'codex', 'cline', 'opencode', 'all']);
+const mcpInstallSchema = z.object({
+  name: z.string().min(1),
+  transport: z.enum(['stdio', 'sse', 'http']),
+  command: z.string().min(1).optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  url: z.string().min(1).optional(),
+  source: z.string().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+  targets: z.array(installTargetSchema).min(1).default(['all']),
+  scope: z.enum(['global', 'workspace']).optional(),
+  workspaceRoot: z.string().min(1).optional(),
+}).strict();
 
 const readOnlyInspection = {
   permission: 'READ' as const,
@@ -13,6 +29,15 @@ const opaqueChildMutation = {
 
 export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
   return [
+    defineTool({
+      name: 'policy_snapshot',
+      description: 'Return the live semantic runtime policy after reconciling configured policies with currently discovered child MCP servers and local skills. Use this at the start of each user task to route relevant capabilities without flattening child tools.',
+      ...readOnlyInspection,
+      inputSchema: policySnapshotSchema,
+      handler: async () => context.services.extensions === undefined
+        ? missingService()
+        : context.services.extensions.runtimePolicySnapshot(),
+    }),
     defineTool({
       name: 'mcp_list',
       description: 'List local MCP servers discovered from Cursor, Claude Desktop, and unified-mpc settings. This inspection is read-only and does not flatten child tools into the unified-mpc catalog.',
@@ -30,6 +55,28 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input, signal) => context.services.extensions === undefined
         ? missingService()
         : context.services.extensions.describeMcpServer({ server: input.server }, signal),
+    }),
+    defineTool({
+      name: 'mcp_install',
+      description: 'Register an MCP server for supported IDE targets. stdio accepts either an explicit command or a validated HTTPS Git repository source; SSE/HTTP accept a remote endpoint URL. Repository installs never run package install scripts.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: mcpInstallSchema,
+      handler: async (input) => context.services.installer === undefined
+        ? missingService()
+        : context.services.installer.installServer({
+          name: input.name,
+          transport: input.transport,
+          targets: input.targets,
+          ...(input.command === undefined ? {} : { command: input.command }),
+          ...(input.args === undefined ? {} : { args: input.args }),
+          ...(input.env === undefined ? {} : { env: input.env }),
+          ...(input.url === undefined ? {} : { url: input.url }),
+          ...(input.source === undefined ? {} : { source: input.source }),
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          ...(input.scope === undefined ? {} : { scope: input.scope }),
+          ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+        }),
     }),
     defineTool({
       name: 'mcp_call',

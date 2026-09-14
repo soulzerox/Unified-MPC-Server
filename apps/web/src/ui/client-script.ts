@@ -5,6 +5,7 @@ export function getClientScriptJs(): string {
       let currentLogs = [];
       let cachedServers = [];
       let cachedSkills = [];
+      let cachedPolicies = [];
 
       function showToast(message, isError = false) {
         const toast = document.getElementById('toast');
@@ -20,6 +21,16 @@ export function getClientScriptJs(): string {
         if (typeof error === 'string') return error;
         if (error && typeof error.message === 'string') return error.message;
         return fallback;
+      }
+
+      async function mutationJson(url, init) {
+        const res = await fetch(url, init);
+        if (res.status === 401) {
+          showToast('Dashboard session expired; reloading...', true);
+          logEvent('WARN', 'Capability expired; reloading dashboard');
+          window.location.reload();
+        }
+        return res;
       }
 
       function logEvent(level, msg) {
@@ -99,34 +110,18 @@ export function getClientScriptJs(): string {
           const res = await fetch('/api/policies');
           if (!res.ok) throw new Error('Policies request failed');
           const data = await res.json();
-          const tbody = document.getElementById('policy-table-body');
-          const detailedBody = document.getElementById('policies-detailed-table-body');
-          const policies = data.policies || [];
+          cachedPolicies = (data.policies || []).map((policy) => ({
+            ...policy,
+            requiredTools: Array.isArray(policy.requiredTools) ? [...policy.requiredTools] : [],
+          }));
           const countEl = document.getElementById('stat-policies-count');
-          if (countEl) countEl.textContent = 'P1-P' + policies.length;
-
-          if (policies.length === 0) {
-            if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align: center;">No policies configured</td></tr>';
-            if (detailedBody) detailedBody.innerHTML = '<tr><td colspan="5" style="text-align: center;">No policies configured</td></tr>';
-            return;
-          }
-
-          const rowsHtml = policies.map(p => {
-            const badgeClass = p.mandatory ? 'badge badge-mandatory' : 'badge badge-optional';
-            return '<tr>' +
-              '<td class="mono"><strong>' + p.priority + '</strong></td>' +
-              '<td><strong>' + p.resourceId + '</strong></td>' +
-              '<td>' + p.resourceType + '</td>' +
-              '<td><span class="' + badgeClass + '">' + p.enforcement + '</span></td>' +
-              '<td style="color: var(--text-secondary);">' + p.directive + '</td>' +
-              '</tr>';
-          }).join('');
-
-          if (tbody) tbody.innerHTML = rowsHtml;
-          if (detailedBody) detailedBody.innerHTML = rowsHtml;
+          if (countEl) countEl.textContent = cachedPolicies.length === 0 ? '0' : 'P1-P' + cachedPolicies.length;
+          renderPolicyTables();
         } catch (err) {
           const tbody = document.getElementById('policy-table-body');
-          if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="color: var(--status-offline);">Failed to load policies: ' + err.message + '</td></tr>';
+          const detailedBody = document.getElementById('policies-detailed-table-body');
+          if (tbody) tbody.replaceChildren(emptyRow(5, 'Failed to load policies: ' + err.message));
+          if (detailedBody) detailedBody.replaceChildren(emptyRow(9, 'Failed to load policies: ' + err.message));
         }
       }
 
@@ -149,6 +144,166 @@ export function getClientScriptJs(): string {
         return row;
       }
 
+      function renderPolicyTables() {
+        const summaryBody = document.getElementById('policy-table-body');
+        const detailedBody = document.getElementById('policies-detailed-table-body');
+
+        if (summaryBody) {
+          summaryBody.replaceChildren();
+          if (cachedPolicies.length === 0) {
+            summaryBody.appendChild(emptyRow(5, 'No policies configured'));
+          } else {
+            cachedPolicies.forEach((policy, index) => {
+              const row = document.createElement('tr');
+              addCell(row, 'P' + (index + 1), 'mono');
+              addCell(row, policy.resourceId);
+              addCell(row, policy.resourceType);
+              addCell(row, policy.enforcement);
+              addCell(row, policy.directive);
+              summaryBody.appendChild(row);
+            });
+          }
+        }
+
+        if (!detailedBody) return;
+        detailedBody.replaceChildren();
+        if (cachedPolicies.length === 0) {
+          detailedBody.appendChild(emptyRow(9, 'No policies configured. Add one to define P1.'));
+          return;
+        }
+
+        cachedPolicies.forEach((policy, index) => {
+          const row = document.createElement('tr');
+          const priorityCell = document.createElement('td');
+          const priorityInput = document.createElement('input');
+          priorityInput.type = 'number';
+          priorityInput.min = '1';
+          priorityInput.max = String(cachedPolicies.length);
+          priorityInput.value = String(index + 1);
+          priorityInput.className = 'form-control mono policy-priority-input';
+          priorityInput.style.width = '72px';
+          priorityInput.setAttribute('aria-label', 'Priority position for ' + policy.id);
+          priorityInput.addEventListener('change', () => {
+            const target = Math.max(1, Math.min(cachedPolicies.length, Number.parseInt(priorityInput.value, 10) || index + 1)) - 1;
+            movePolicy(index, target);
+          });
+          priorityCell.appendChild(priorityInput);
+          row.appendChild(priorityCell);
+
+          const addTextEditor = (value, field, width) => {
+            const cell = document.createElement('td');
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'form-control mono';
+            input.value = value || '';
+            if (width) input.style.minWidth = width;
+            input.addEventListener('input', () => { cachedPolicies[index] = { ...cachedPolicies[index], [field]: input.value }; });
+            cell.appendChild(input);
+            row.appendChild(cell);
+            return input;
+          };
+
+          addTextEditor(policy.id, 'id', '180px');
+          addTextEditor(policy.resourceId, 'resourceId', '160px');
+
+          const typeCell = document.createElement('td');
+          const typeSelect = document.createElement('select');
+          typeSelect.className = 'form-control';
+          for (const value of ['server', 'skill']) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value;
+            option.selected = policy.resourceType === value;
+            typeSelect.appendChild(option);
+          }
+          typeSelect.addEventListener('change', () => { cachedPolicies[index] = { ...cachedPolicies[index], resourceType: typeSelect.value }; });
+          typeCell.appendChild(typeSelect);
+          row.appendChild(typeCell);
+
+          const mandatoryCell = document.createElement('td');
+          const mandatory = document.createElement('input');
+          mandatory.type = 'checkbox';
+          mandatory.checked = policy.mandatory === true;
+          mandatory.setAttribute('aria-label', 'Mandatory policy');
+          mandatory.addEventListener('change', () => { cachedPolicies[index] = { ...cachedPolicies[index], mandatory: mandatory.checked }; });
+          mandatoryCell.appendChild(mandatory);
+          row.appendChild(mandatoryCell);
+
+          addTextEditor(policy.enforcement, 'enforcement', '130px');
+
+          const toolsCell = document.createElement('td');
+          const tools = document.createElement('input');
+          tools.type = 'text';
+          tools.className = 'form-control mono';
+          tools.style.minWidth = '180px';
+          tools.value = (policy.requiredTools || []).join(', ');
+          tools.placeholder = 'tool_a, tool_b';
+          tools.addEventListener('input', () => {
+            cachedPolicies[index] = {
+              ...cachedPolicies[index],
+              requiredTools: tools.value.split(',').map((value) => value.trim()).filter(Boolean),
+            };
+          });
+          toolsCell.appendChild(tools);
+          row.appendChild(toolsCell);
+
+          addTextEditor(policy.directive, 'directive', '280px');
+
+          const actionCell = document.createElement('td');
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'btn btn-danger btn-sm';
+          remove.textContent = 'Remove';
+          remove.addEventListener('click', () => removePolicy(index));
+          actionCell.appendChild(remove);
+          row.appendChild(actionCell);
+          detailedBody.appendChild(row);
+        });
+      }
+
+      function movePolicy(fromIndex, toIndex) {
+        if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= cachedPolicies.length || toIndex >= cachedPolicies.length) return;
+        const [policy] = cachedPolicies.splice(fromIndex, 1);
+        cachedPolicies.splice(toIndex, 0, policy);
+        renderPolicyTables();
+      }
+
+      function addPolicy() {
+        const suffix = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now().toString(36);
+        cachedPolicies.push({
+          id: 'custom:' + suffix,
+          resourceId: '',
+          resourceType: 'server',
+          mandatory: false,
+          enforcement: 'ON_DEMAND',
+          directive: 'Describe when this policy should run.',
+          requiredTools: [],
+        });
+        renderPolicyTables();
+      }
+
+      function removePolicy(index) {
+        cachedPolicies.splice(index, 1);
+        renderPolicyTables();
+      }
+
+      function persistablePolicies() {
+        return cachedPolicies.map((policy) => ({
+          id: String(policy.id || '').trim(),
+          resourceId: String(policy.resourceId || '').trim(),
+          resourceType: policy.resourceType === 'skill' ? 'skill' : 'server',
+          mandatory: policy.mandatory === true,
+          enforcement: String(policy.enforcement || '').trim(),
+          directive: String(policy.directive || '').trim(),
+          requiredTools: [...new Set((policy.requiredTools || []).map((tool) => String(tool).trim()).filter(Boolean))],
+        }));
+      }
+
+      async function savePolicies(quiet = false) {
+        try {
+          const res = await mutationJson('/api/policies', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
       async function loadInventory() {
         const serverBody = document.getElementById('server-table-body');
         const skillBody = document.getElementById('skill-table-body');
@@ -324,7 +479,7 @@ export function getClientScriptJs(): string {
         if (!window.confirm('Prune server ' + server.name + '?')) return;
         try {
           logEvent('INFO', 'Initiating server prune for ' + server.name + ' (' + server.serverId + ')');
-          const res = await fetch('/api/servers/prune', {
+          const res = await mutationJson('/api/servers/prune', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ serverId: server.serverId, targets: ['all'] }),
@@ -344,7 +499,7 @@ export function getClientScriptJs(): string {
         if (!window.confirm('Prune skill ' + skill.name + '?')) return;
         try {
           logEvent('INFO', 'Initiating skill prune for ' + skill.name);
-          const res = await fetch('/api/skills/prune', {
+          const res = await mutationJson('/api/skills/prune', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: skill.name, targets: ['all'] }),
@@ -476,7 +631,7 @@ export function getClientScriptJs(): string {
         const token = document.getElementById('settings-api-token')?.value || '';
         if (token) body.apiToken = token;
         try {
-          const res = await fetch('/api/cloudflare/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const res = await mutationJson('/api/cloudflare/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           const result = await res.json();
           if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Cloudflare setup failed'));
           document.getElementById('settings-api-token').value = '';
@@ -488,9 +643,10 @@ export function getClientScriptJs(): string {
 
       async function syncPolicies() {
         try {
+          if (!(await savePolicies(true))) return;
           showToast('Syncing policies across IDE targets...');
           logEvent('INFO', 'Synchronizing policies across IDE targets (all)');
-          const res = await fetch('/api/policies/sync', {
+          const res = await mutationJson('/api/policies/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ targets: ['all'] }),
@@ -513,7 +669,7 @@ export function getClientScriptJs(): string {
       async function connectChatGPT() {
         try {
           logEvent('INFO', 'Initiating connection to ChatGPT Web...');
-          const res = await fetch('/api/chatgpt-web/connect', { method: 'POST' });
+          const res = await mutationJson('/api/chatgpt-web/connect', { method: 'POST' });
           if (res.status === 401) {
             showToast('Dashboard session expired; reloading...', true);
             logEvent('WARN', 'Capability expired; reloading dashboard');
@@ -546,7 +702,13 @@ export function getClientScriptJs(): string {
         try {
           showToast('Starting ChatGPT Gateway...');
           logEvent('INFO', 'Dispatching gateway start request');
-          const res = await fetch('/api/chatgpt-gateway/start', { method: 'POST' });
+          const res = await mutationJson('/api/chatgpt-gateway/start', { method: 'POST' });
+          if (res.status === 401) {
+            showToast('Dashboard session expired; reloading...', true);
+            logEvent('WARN', 'Capability expired; reloading dashboard');
+            window.location.reload();
+            return;
+          }
           const result = await res.json();
           const message = errorMessage(result, 'Gateway start failed');
           showToast(result.ok ? 'Gateway started!' : 'Failed: ' + message, !result.ok);
@@ -562,7 +724,7 @@ export function getClientScriptJs(): string {
         try {
           showToast('Stopping ChatGPT Gateway...');
           logEvent('INFO', 'Dispatching gateway stop request');
-          const res = await fetch('/api/chatgpt-gateway/stop', { method: 'POST' });
+          const res = await mutationJson('/api/chatgpt-gateway/stop', { method: 'POST' });
           const result = await res.json();
           showToast('Gateway stopped');
           logEvent('INFO', 'Gateway stopped');
@@ -575,7 +737,7 @@ export function getClientScriptJs(): string {
 
       async function disconnectChatGPT() {
         try {
-          const res = await fetch('/api/chatgpt-web/disconnect', { method: 'POST' });
+          const res = await mutationJson('/api/chatgpt-web/disconnect', { method: 'POST' });
           const result = await res.json();
           if (!res.ok) throw new Error(errorMessage(result, 'Disconnect failed'));
           showToast('ChatGPT Web session disconnected');
@@ -596,7 +758,7 @@ export function getClientScriptJs(): string {
         try {
           showToast('Installing skill ' + payload.name + '...');
           logEvent('INFO', 'Installing agent skill: ' + payload.name + ' from ' + payload.source);
-          const res = await fetch('/api/skills/install', {
+          const res = await mutationJson('/api/skills/install', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -617,20 +779,21 @@ export function getClientScriptJs(): string {
         }
       }
 
-      async function submitServerInstall(name, transport, command, argsRaw, url, modalToClose) {
+      async function submitServerInstall(name, transport, command, argsRaw, url, source, modalToClose) {
         const payload = {
           name: name.trim(),
           transport,
           command: command ? command.trim() : undefined,
           args: argsRaw ? argsRaw.split(',').map(a => a.trim()).filter(Boolean) : undefined,
           url: url ? url.trim() : undefined,
+          source: source ? source.trim() : undefined,
           targets: ['all'],
           scope: 'global',
         };
         try {
           showToast('Installing server ' + payload.name + '...');
           logEvent('INFO', 'Registering MCP server: ' + payload.name + ' (' + transport + ')');
-          const res = await fetch('/api/servers/install', {
+          const res = await mutationJson('/api/servers/install', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -699,6 +862,8 @@ export function getClientScriptJs(): string {
       // Wire DOM events
       document.getElementById('sync-policies-btn')?.addEventListener('click', syncPolicies);
       document.getElementById('policies-view-sync-btn')?.addEventListener('click', syncPolicies);
+      document.getElementById('policy-add-btn')?.addEventListener('click', addPolicy);
+      document.getElementById('policy-save-btn')?.addEventListener('click', () => { void savePolicies(); });
 
       document.getElementById('connect-btn')?.addEventListener('click', connectChatGPT);
       document.getElementById('chatgpt-view-connect-btn')?.addEventListener('click', connectChatGPT);
@@ -746,19 +911,21 @@ export function getClientScriptJs(): string {
       document.getElementById('close-server-modal-btn')?.addEventListener('click', () => { if (serverModal) serverModal.style.display = 'none'; });
 
       // Transport selector toggle
-      function wireTransportToggle(selectId, urlGroupId, cmdGroupId, argsGroupId) {
+      function wireTransportToggle(selectId, urlGroupId, cmdGroupId, argsGroupId, sourceGroupId) {
         document.getElementById(selectId)?.addEventListener('change', (e) => {
           const isUrl = e.target.value === 'sse' || e.target.value === 'http';
           const urlGroup = document.getElementById(urlGroupId);
           const cmdGroup = document.getElementById(cmdGroupId);
           const argsGroup = document.getElementById(argsGroupId);
+          const sourceGroup = document.getElementById(sourceGroupId);
           if (urlGroup) urlGroup.style.display = isUrl ? 'block' : 'none';
           if (cmdGroup) cmdGroup.style.display = isUrl ? 'none' : 'block';
           if (argsGroup) argsGroup.style.display = isUrl ? 'none' : 'block';
+          if (sourceGroup) sourceGroup.style.display = isUrl ? 'none' : 'block';
         });
       }
-      wireTransportToggle('server-transport', 'url-group', 'command-group', 'args-group');
-      wireTransportToggle('wb-server-transport', 'wb-url-group', 'wb-command-group', 'wb-args-group');
+      wireTransportToggle('server-transport', 'url-group', 'command-group', 'args-group', 'source-group');
+      wireTransportToggle('wb-server-transport', 'wb-url-group', 'wb-command-group', 'wb-args-group', 'wb-source-group');
 
       // Forms
       document.getElementById('skill-form')?.addEventListener('submit', async (e) => {
@@ -786,7 +953,8 @@ export function getClientScriptJs(): string {
         const command = document.getElementById('server-command')?.value || '';
         const argsRaw = document.getElementById('server-args')?.value || '';
         const url = document.getElementById('server-url')?.value || '';
-        await submitServerInstall(name, transport, command, argsRaw, url, serverModal);
+        const source = document.getElementById('server-source')?.value || '';
+        await submitServerInstall(name, transport, command, argsRaw, url, source, serverModal);
         e.target.reset();
       });
 
@@ -797,7 +965,8 @@ export function getClientScriptJs(): string {
         const command = document.getElementById('wb-server-command')?.value || '';
         const argsRaw = document.getElementById('wb-server-args')?.value || '';
         const url = document.getElementById('wb-server-url')?.value || '';
-        await submitServerInstall(name, transport, command, argsRaw, url, null);
+        const source = document.getElementById('wb-server-source')?.value || '';
+        await submitServerInstall(name, transport, command, argsRaw, url, source, null);
         e.target.reset();
       });
 

@@ -309,12 +309,21 @@ function isPathInside(root: string, candidate: string): boolean {
 }
 
 function dedupeByPathAndDisambiguateIds(skills: readonly SkillSummary[]): readonly SkillSummary[] {
+  const preferredByPath = new Map<string, SkillSummary>();
+  for (const skill of skills) {
+    const pathKey = normalizePathKey(skill.skillPath);
+    const current = preferredByPath.get(pathKey);
+    if (current === undefined || (skill.trustTier === 'bundled' && current.trustTier !== 'bundled')) {
+      preferredByPath.set(pathKey, skill);
+    }
+  }
+
   const seenPaths = new Set<string>();
   const usedIds = new Set<string>();
   const result: SkillSummary[] = [];
   for (const skill of skills) {
     const pathKey = normalizePathKey(skill.skillPath);
-    if (seenPaths.has(pathKey)) continue;
+    if (preferredByPath.get(pathKey) !== skill || seenPaths.has(pathKey)) continue;
     seenPaths.add(pathKey);
 
     let id = skill.id;

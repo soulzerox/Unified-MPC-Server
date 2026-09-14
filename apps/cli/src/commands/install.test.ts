@@ -92,6 +92,26 @@ describe('install CLI commands', () => {
       }
     });
 
+    it('parses an HTTPS Git source as a stdio server alternative to command', () => {
+      const parsed = parseInstallServerArgs([
+        'remote-mcp',
+        '--transport',
+        'stdio',
+        '--source',
+        'https://github.com/example/remote-mcp.git',
+      ]);
+
+      expect(parsed).toMatchObject({
+        ok: true,
+        value: {
+          kind: 'install-server',
+          name: 'remote-mcp',
+          transport: 'stdio',
+          source: 'https://github.com/example/remote-mcp.git',
+        },
+      });
+    });
+
     it('returns error when command is missing for stdio', () => {
       const parsed = parseInstallServerArgs(['sqlite', '--transport', 'stdio']);
       expect(parsed.ok).toBe(false);

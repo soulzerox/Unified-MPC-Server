@@ -36,6 +36,36 @@ describe('LocalExtensionsService MCP bridge', () => {
     expect(candidates).toContain('/repo/.agents/skills');
   });
 
+  it('prefers bundled provenance when a bundled root aliases the active workspace skill root', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-alias-'));
+    try {
+      const workspace = path.join(root, 'workspace');
+      const skillDir = path.join(workspace, '.agents', 'skills', 'ponytail');
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: ponytail\ndescription: test ponytail\n---\n', 'utf8');
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        workspaceRootProvider: async (): Promise<string> => workspace,
+        bundledSkillRoots: [path.join(workspace, '.agents', 'skills')],
+      } as never);
+
+      const listed = await service.listSkills({ query: 'ponytail' });
+      expect(listed).toMatchObject({
+        ok: true,
+        value: {
+          skills: [expect.objectContaining({
+            id: 'bundled:agent-skills/ponytail',
+            trustTier: 'bundled',
+          })],
+        },
+      });
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('includes a packaged bundled-skill root without hiding global or workspace skills', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-skills-'));
     try {
@@ -217,6 +247,31 @@ describe('LocalExtensionsService MCP bridge', () => {
     await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) })).resolves.toMatchObject({
       ok: false,
       error: { code: 'INVALID_INPUT', message: expect.stringContaining('output schema mismatch') },
+    });
+    await service.close();
+  });
+
+  it('accepts legacy text-only child output when a single required string result can be reconstructed safely', async (): Promise<void> => {
+    const session: McpClientSession = {
+      listTools: async () => [{
+        name: 'ping',
+        description: 'Ping tool',
+        outputSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } }, additionalProperties: false },
+      }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'legacy-result' }] }),
+      close: async () => undefined,
+    };
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => session },
+    });
+
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) })).resolves.toMatchObject({
+      ok: true,
+      value: { content: [{ type: 'text', text: 'legacy-result' }] },
     });
     await service.close();
   });
@@ -753,6 +808,41 @@ describe('LocalExtensionsService MCP bridge', () => {
       ok: true,
       value: { servers: [expect.objectContaining({ name: 'mock', connected: true, pinned: true, required: true })] },
     });
+    await service.close();
+  });
+
+  it('reconciles auto-route policy entries when child MCP servers are installed or removed', async () => {
+    let liveSettings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      mandatoryMcpServers: [],
+      extraMcpServers: { mock: { command: 'node', args: ['mock-server.js'] } },
+      policies: [],
+    };
+    const service = new LocalExtensionsService({
+      settings: liveSettings as never,
+      settingsProvider: (): never => liveSettings as never,
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+    });
+
+    await expect(service.runtimePolicySnapshot()).resolves.toMatchObject({
+      ok: true,
+      value: {
+        policies: [expect.objectContaining({
+          id: 'auto:server:mock',
+          resourceId: 'mock',
+          resourceType: 'server',
+          enforcement: 'AUTO_ROUTE',
+          source: 'discovered',
+          available: true,
+        })],
+      },
+    });
+
+    liveSettings = { ...liveSettings, extraMcpServers: {} };
+    const afterRemoval = await service.runtimePolicySnapshot();
+    expect(afterRemoval.ok).toBe(true);
+    if (afterRemoval.ok) expect(afterRemoval.value.policies.some((policy) => policy.id === 'auto:server:mock')).toBe(false);
     await service.close();
   });
 });

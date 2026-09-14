@@ -139,7 +139,7 @@ These components exist in the codebase from the lnwjud upstream but are **not ac
 | Milestone | Scope | Status | Verification & Evidence |
 |---|---|---|---|
 | **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Monorepo namespace `@unified-mpc/*` rename across 220+ files; complete Windows code and script deletion; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
-| **Milestone 2** | **Universal Multi-Client Discovery & Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; `IdeSyncService` atomic P1–P7 markdown compiler & idempotent block sync. | ✅ **Audited & Hardened** | 63/63 tests in `packages/extensions`; JSONC trailing commas and mixed comment parsing; circular/broken symlinks resilience; concurrent multi-client sync; Commit `d5d63fa`. |
+| **Milestone 2** | **Universal Multi-Client Discovery & Dynamic Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; stable semantic policy IDs with user-editable P1–Pn execution positions; atomic/idempotent `IdeSyncService` block sync. | ✅ **Audited & Hardened** | Runtime reconciliation, reorder-safe policy compilation, policy-driven mandatory child capabilities, and multi-client sync are covered by the current extensions tests. |
 | **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
 | **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards (SPEC.md line 218); Commit `fe6e601`. |
 | **Milestone 5** | **Gated ChatGPT Web Gateway & Web Control Plane**: Decoupled `apps/cf-gateway` companion gateway with 4-state lifecycle machine (`STOPPED` -> `INITIALIZING` -> `BRIDGE_HEALTHY` -> `SESSION_CONNECTED`); native `node:http` `ControlPlaneServer` (`apps/web`) on `http://127.0.0.1:18765/`; Origin header security guard (403); 412 Precondition Failed gating on `/api/chatgpt-web/connect`; bifurcated ingestion & pruning routes; Obsidian Telemetry UI. | ✅ **Audited & Hardened** | 18/18 tests in `apps/web`; 5/5 tests in `apps/cf-gateway`; Origin HTTP/HTTPS protocol validation; 1MB body limit & 413 Payload Too Large; 50 concurrent requests; Commit `c60781e`. |
@@ -222,8 +222,9 @@ Comprehensive host-environment dogfooding and smoke testing verified all runtime
    - Identified and fixed scope resolution in `PrunerService` (`packages/extensions/src/pruner.ts`) and `apps/cli/src/commands/prune.ts`: auto-infer `scope: 'workspace'` when `--workspace` is specified and support explicit `--scope`.
    - Pruned skill verifying 100% removal with zero lingering files.
    - Installed test server `dogfood-sqlite` into workspace `.gemini/mcp.json` and pruned it, confirming clean entry removal while preserving valid JSON syntax.
-3. **Multi-IDE Policy Synchronization**:
-   - Synchronized mandatory P1-P7 policy rules across `.cursor/rules/00-mandatory-policy.mdc`, `.clinerules`, `~/.cline/rules/mcp-policy.md`, `~/.gemini/antigravity/rules/mcp-policy.md`, `GEMINI.md`, and `AGENTS.md`.
+3. **Multi-IDE Dynamic Policy Synchronization**:
+   - Synchronizes the persisted P1–Pn runtime policy across `.cursor/rules/00-mandatory-policy.mdc`, `.clinerules`, `~/.cline/rules/mcp-policy.md`, `~/.gemini/antigravity/rules/mcp-policy.md`, `GEMINI.md`, and `AGENTS.md`.
+   - P-positions are user-editable execution order; semantic policy IDs remain stable when reordered.
    - Verified strict idempotency: repeated executions maintain exactly one policy block without duplication.
 4. **Local Web Control Plane**:
    - Refactored `apps/cli/src/index.ts` daemon lifecycle so the web process remains running until SIGINT/SIGTERM.
@@ -232,7 +233,7 @@ Comprehensive host-environment dogfooding and smoke testing verified all runtime
     - Probed `POST /api/chatgpt-web/connect`: Returned 412 Precondition Failed, enforcing the bridge health invariant.
    - Probed foreign `Origin`: Returned 403 Forbidden (`Origin not allowed: loopback only`).
    - Probed loopback `Origin`: Returned 200 OK with CORS headers.
-   - Probed `GET /api/policies`: Returned 200 OK with full P1-P7 policy payload.
+   - Probed `GET /api/policies`: Returns the live reconciled P1–Pn policy snapshot; `POST /api/policies` persists user edits and reorder operations while preserving semantic IDs.
    - Verified clean graceful shutdown on termination.
 
 ---

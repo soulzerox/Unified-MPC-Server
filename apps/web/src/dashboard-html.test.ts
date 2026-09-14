@@ -25,6 +25,15 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('/api/chatgpt-web/connect');
   });
 
+  it('renders a user-editable P1-Pn policy editor with reorder and save controls', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('policy-add-btn');
+    expect(html).toContain('policy-save-btn');
+    expect(html).toContain('policy-priority-input');
+    expect(html).toContain('savePolicies');
+    expect(html).toContain("fetch('/api/policies'");
+  });
+
   it('contains interactive modal/form elements for bifurcated installation', () => {
     const html = renderDashboardHtml();
     // Skill installation modal & endpoints
@@ -33,6 +42,14 @@ describe('Dashboard HTML Reactive SPA', () => {
     // Server installation modal & endpoints
     expect(html).toContain('install-server-modal');
     expect(html).toContain('/api/servers/install');
+  });
+
+  it('accepts an HTTPS Git repository as the stdio MCP server source in both install surfaces', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('server-source');
+    expect(html).toContain('wb-server-source');
+    expect(html).toContain('source: source ? source.trim() : undefined');
+    expect(html).toContain('https://github.com/example/mcp-server.git');
   });
 
   it('contains live inventory and opaque-ID prune workflows', () => {
@@ -56,6 +73,28 @@ describe('Dashboard HTML Reactive SPA', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('const error = data?.error ?? data?.message;');
     expect(html).toContain('Capability expired; reloading dashboard');
+  });
+
+  it('routes every dashboard mutation through shared capability-expiry recovery', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('async function mutationJson(');
+    expect(html).toContain('Capability expired; reloading dashboard');
+    expect(html).toContain('window.location.reload()');
+
+    for (const endpoint of [
+      '/api/cloudflare/reconcile',
+      '/api/policies/sync',
+      '/api/chatgpt-web/connect',
+      '/api/chatgpt-gateway/start',
+      '/api/chatgpt-gateway/stop',
+      '/api/chatgpt-web/disconnect',
+      '/api/skills/install',
+      '/api/servers/install',
+      '/api/skills/prune',
+      '/api/servers/prune',
+    ]) {
+      expect(html).toContain(`mutationJson('${endpoint}'`);
+    }
   });
 
   it('renders modular tab navigation views for all subsystems', () => {

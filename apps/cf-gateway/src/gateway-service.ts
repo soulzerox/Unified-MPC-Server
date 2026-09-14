@@ -34,6 +34,11 @@ export interface GatewayServiceOptions {
   readonly healthRetryDelayMs?: number;
   readonly tunnelStartupTimeoutMs?: number;
   readonly sessionLeaseTtlMs?: number;
+  readonly healthMonitorIntervalMs?: number;
+  readonly healthFailureThreshold?: number;
+  readonly reconnectBaseDelayMs?: number;
+  readonly reconnectMaxDelayMs?: number;
+  readonly reconnectJitterRatio?: number;
   readonly tunnelProvider?: () => Promise<TunnelHandle>;
   readonly tunnelProviderFactory?: (configuration: GatewayTunnelConfiguration) => () => Promise<TunnelHandle>;
   readonly healthProbe?: (url: string, timeoutMs: number) => Promise<number>;
@@ -60,7 +65,12 @@ export class GatewayService {
   private readonly healthAttempts: number;
   private readonly healthRetryDelayMs: number;
   private readonly tunnelStartupTimeoutMs: number;
-  private readonly sessionLeaseTtlMs: number;
+  private readonly sessionLeaseTtlMs: number | undefined;
+  private readonly healthMonitorIntervalMs: number;
+  private readonly healthFailureThreshold: number;
+  private readonly reconnectBaseDelayMs: number;
+  private readonly reconnectMaxDelayMs: number;
+  private readonly reconnectJitterRatio: number;
   private tunnelProvider: () => Promise<TunnelHandle>;
   private readonly tunnelProviderFactory: (configuration: GatewayTunnelConfiguration) => () => Promise<TunnelHandle>;
   private readonly healthProbe: (url: string, timeoutMs: number) => Promise<number>;
@@ -69,6 +79,12 @@ export class GatewayService {
   private tunnel: TunnelHandle | undefined;
   private startGeneration = 0;
   private sessionLeaseTimer: ReturnType<typeof setTimeout> | undefined;
+  private healthMonitorTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private desiredRunning = false;
+  private desiredSessionConnected = false;
+  private consecutiveHealthFailures = 0;
+  private reconnectAttempt = 0;
 
   public constructor(options: GatewayServiceOptions = {}) {
     this.localPort = options.localPort ?? 18765;
@@ -78,8 +94,18 @@ export class GatewayService {
     this.healthAttempts = options.healthAttempts ?? 5;
     this.healthRetryDelayMs = options.healthRetryDelayMs ?? 250;
     this.tunnelStartupTimeoutMs = options.tunnelStartupTimeoutMs ?? 10_000;
-    this.sessionLeaseTtlMs = options.sessionLeaseTtlMs ?? 15 * 60_000;
-    if (!Number.isInteger(this.sessionLeaseTtlMs) || this.sessionLeaseTtlMs <= 0) throw new Error('Session lease TTL must be positive');
+    this.sessionLeaseTtlMs = options.sessionLeaseTtlMs;
+    this.healthMonitorIntervalMs = options.healthMonitorIntervalMs ?? 10_000;
+    this.healthFailureThreshold = options.healthFailureThreshold ?? 3;
+    this.reconnectBaseDelayMs = options.reconnectBaseDelayMs ?? 1_000;
+    this.reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? 30_000;
+    this.reconnectJitterRatio = options.reconnectJitterRatio ?? 0.2;
+    if (this.sessionLeaseTtlMs !== undefined && (!Number.isInteger(this.sessionLeaseTtlMs) || this.sessionLeaseTtlMs <= 0)) throw new Error('Session lease TTL must be positive');
+    if (!Number.isInteger(this.healthMonitorIntervalMs) || this.healthMonitorIntervalMs <= 0) throw new Error('Health monitor interval must be positive');
+    if (!Number.isInteger(this.healthFailureThreshold) || this.healthFailureThreshold <= 0) throw new Error('Health failure threshold must be positive');
+    if (!Number.isInteger(this.reconnectBaseDelayMs) || this.reconnectBaseDelayMs <= 0) throw new Error('Reconnect base delay must be positive');
+    if (!Number.isInteger(this.reconnectMaxDelayMs) || this.reconnectMaxDelayMs < this.reconnectBaseDelayMs) throw new Error('Reconnect max delay must be greater than or equal to reconnect base delay');
+    if (!Number.isFinite(this.reconnectJitterRatio) || this.reconnectJitterRatio < 0 || this.reconnectJitterRatio > 1) throw new Error('Reconnect jitter ratio must be between 0 and 1');
     this.configurationValue = normalizeConfiguration({
       ...(options.tunnelName === undefined ? {} : { tunnelName: options.tunnelName }),
       ...(options.tunnelToken === undefined ? {} : { tunnelToken: options.tunnelToken }),
@@ -121,17 +147,26 @@ export class GatewayService {
     }
     const previous = this.configurationValue;
     const previousProvider = this.tunnelProvider;
+    const wasSessionConnected = this.state === 'SESSION_CONNECTED' || this.desiredSessionConnected;
     const wasRunning = this.state === 'BRIDGE_HEALTHY' || this.state === 'SESSION_CONNECTED';
     await this.stop();
     this.configurationValue = next;
     this.tunnelProvider = this.tunnelProviderFactory(next);
     if (!wasRunning) return ok(undefined);
     const started = await this.start();
-    if (started.ok) return ok(undefined);
+    if (started.ok) {
+      if (wasSessionConnected) {
+        const connected = await this.connectSession();
+        if (!connected.ok) return err(appError('CONFLICT', `Gateway reconfigured but ChatGPT Web session could not be restored: ${connected.error.message}`));
+      }
+      return ok(undefined);
+    }
     this.configurationValue = previous;
     this.tunnelProvider = previousProvider;
-    if (wasRunning) await this.start();
-    else {
+    if (wasRunning) {
+      const restored = await this.start();
+      if (restored.ok && wasSessionConnected) await this.connectSession();
+    } else {
       this.state = 'STOPPED';
       this.tunnelUrl = undefined;
       this.latencyMs = undefined;
@@ -141,13 +176,17 @@ export class GatewayService {
   }
 
   public async start(): Promise<Result<{ readonly tunnelUrl: string; readonly localPort: number }>> {
+    this.desiredRunning = true;
+    this.clearReconnectTimer();
     if (this.state === 'BRIDGE_HEALTHY' || this.state === 'SESSION_CONNECTED') {
+      this.scheduleHealthMonitor();
       return ok({
         tunnelUrl: this.tunnelUrl!,
         localPort: this.localPort,
       });
     }
 
+    this.clearHealthMonitorTimer();
     const generation = ++this.startGeneration;
     this.state = 'INITIALIZING';
     this.lastError = undefined;
@@ -179,6 +218,10 @@ export class GatewayService {
       this.tunnel = tunnel;
       this.tunnelUrl = tunnel.url;
       this.state = 'BRIDGE_HEALTHY';
+      this.lastError = undefined;
+      this.consecutiveHealthFailures = 0;
+      this.reconnectAttempt = 0;
+      this.scheduleHealthMonitor();
       return ok({
         tunnelUrl: tunnel.url,
         localPort: this.localPort,
@@ -195,7 +238,11 @@ export class GatewayService {
   }
 
   public async stop(): Promise<Result<void>> {
+    this.desiredRunning = false;
+    this.desiredSessionConnected = false;
     this.startGeneration += 1;
+    this.clearHealthMonitorTimer();
+    this.clearReconnectTimer();
     const tunnel = this.tunnel;
     this.tunnel = undefined;
     if (tunnel !== undefined) await tunnel.stop();
@@ -203,6 +250,8 @@ export class GatewayService {
     this.tunnelUrl = undefined;
     this.leaseToken = undefined;
     this.clearSessionLeaseTimer();
+    this.consecutiveHealthFailures = 0;
+    this.reconnectAttempt = 0;
     this.latencyMs = undefined;
     this.lastError = undefined;
     return ok(undefined);
@@ -218,10 +267,15 @@ export class GatewayService {
       );
     }
 
+    this.desiredSessionConnected = true;
     this.leaseToken = `lease_${randomUUID().replaceAll('-', '')}`;
     this.state = 'SESSION_CONNECTED';
     this.clearSessionLeaseTimer();
-    this.sessionLeaseTimer = setTimeout(() => { void this.disconnectSession(); }, this.sessionLeaseTtlMs);
+    if (this.sessionLeaseTtlMs !== undefined) {
+      this.sessionLeaseTimer = setTimeout(() => { void this.disconnectSession(); }, this.sessionLeaseTtlMs);
+      this.sessionLeaseTimer.unref?.();
+    }
+    this.scheduleHealthMonitor();
 
     return ok({
       leaseToken: this.leaseToken,
@@ -231,15 +285,101 @@ export class GatewayService {
   }
 
   public async disconnectSession(): Promise<Result<void>> {
+    this.desiredSessionConnected = false;
     this.clearSessionLeaseTimer();
     this.leaseToken = undefined;
     if (this.state === 'SESSION_CONNECTED') this.state = this.tunnelUrl === undefined ? 'STOPPED' : 'BRIDGE_HEALTHY';
+    this.scheduleHealthMonitor();
     return ok(undefined);
+  }
+
+  private scheduleHealthMonitor(): void {
+    this.clearHealthMonitorTimer();
+    if (!this.desiredRunning || this.tunnelUrl === undefined || (this.state !== 'BRIDGE_HEALTHY' && this.state !== 'SESSION_CONNECTED')) return;
+    this.healthMonitorTimer = setTimeout(() => { void this.runHealthMonitor(); }, this.healthMonitorIntervalMs);
+    this.healthMonitorTimer.unref?.();
+  }
+
+  private async runHealthMonitor(): Promise<void> {
+    this.healthMonitorTimer = undefined;
+    if (!this.desiredRunning || this.tunnelUrl === undefined || (this.state !== 'BRIDGE_HEALTHY' && this.state !== 'SESSION_CONNECTED')) return;
+    let statusCode = 0;
+    try {
+      statusCode = await this.healthProbe(new URL(this.healthPath, this.tunnelUrl).toString(), this.healthTimeoutMs);
+    } catch {
+      statusCode = 0;
+    }
+    if (!this.desiredRunning || this.tunnelUrl === undefined || (this.state !== 'BRIDGE_HEALTHY' && this.state !== 'SESSION_CONNECTED')) return;
+    if (statusCode >= 200 && statusCode < 300) {
+      this.consecutiveHealthFailures = 0;
+      this.scheduleHealthMonitor();
+      return;
+    }
+    this.consecutiveHealthFailures += 1;
+    if (this.consecutiveHealthFailures < this.healthFailureThreshold) {
+      this.scheduleHealthMonitor();
+      return;
+    }
+    await this.beginRecovery(`Bridge health monitor failed with HTTP ${statusCode}`);
+  }
+
+  private async beginRecovery(message: string): Promise<void> {
+    this.clearHealthMonitorTimer();
+    this.clearSessionLeaseTimer();
+    this.leaseToken = undefined;
+    this.lastError = message;
+    this.state = 'ERROR';
+    const tunnel = this.tunnel;
+    this.tunnel = undefined;
+    this.tunnelUrl = undefined;
+    if (tunnel !== undefined) await tunnel.stop().catch(() => undefined);
+    if (!this.desiredRunning) return;
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.desiredRunning || this.reconnectTimer !== undefined) return;
+    const exponent = Math.min(this.reconnectAttempt, 16);
+    const baseDelay = Math.min(this.reconnectMaxDelayMs, this.reconnectBaseDelayMs * (2 ** exponent));
+    const jitterWindow = baseDelay * this.reconnectJitterRatio;
+    const delay = Math.max(0, Math.round(baseDelay + ((Math.random() * 2 - 1) * jitterWindow)));
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.attemptReconnect();
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
+  private async attemptReconnect(): Promise<void> {
+    if (!this.desiredRunning) return;
+    const started = await this.start();
+    if (!started.ok) {
+      if (this.desiredRunning) this.scheduleReconnect();
+      return;
+    }
+    if (this.desiredSessionConnected && this.desiredRunning && this.state === 'BRIDGE_HEALTHY') {
+      const connected = await this.connectSession();
+      if (!connected.ok && this.desiredRunning) {
+        this.lastError = connected.error.message;
+        this.scheduleReconnect();
+      }
+    }
   }
 
   private clearSessionLeaseTimer(): void {
     if (this.sessionLeaseTimer !== undefined) clearTimeout(this.sessionLeaseTimer);
     this.sessionLeaseTimer = undefined;
+  }
+
+  private clearHealthMonitorTimer(): void {
+    if (this.healthMonitorTimer !== undefined) clearTimeout(this.healthMonitorTimer);
+    this.healthMonitorTimer = undefined;
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
   }
 }
 

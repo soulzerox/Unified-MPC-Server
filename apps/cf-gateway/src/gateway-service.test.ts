@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -155,19 +155,164 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     expect(stopped.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('disconnects a session and expires a lease without stopping healthy bridge', async () => {
+  it('preserves a connected ChatGPT Web session across successful gateway reconfiguration', async () => {
     const gateway = new GatewayService({
-      sessionLeaseTtlMs: 10,
-      tunnelProvider: async (): Promise<TunnelHandle> => tunnel(),
+      healthMonitorIntervalMs: 10_000,
+      tunnelProviderFactory: (configuration) => async (): Promise<TunnelHandle> => ({
+        url: configuration.publicUrl ?? 'https://fallback.example.com',
+        stop: async (): Promise<void> => {},
+      }),
       healthProbe: async (): Promise<number> => 200,
     });
+    await gateway.applyConfiguration({ tunnelName: 'first', publicUrl: 'https://first.example.com' });
     await gateway.start();
     await gateway.connectSession();
+
+    const result = await gateway.applyConfiguration({ tunnelName: 'second', publicUrl: 'https://second.example.com' });
+
+    expect(result.ok).toBe(true);
+    expect(gateway.status()).toMatchObject({ state: 'SESSION_CONNECTED', tunnelUrl: 'https://second.example.com' });
+    await gateway.stop();
+  });
+
+  it('keeps an established ChatGPT Web session connected indefinitely by default', async () => {
+    vi.useFakeTimers();
+    try {
+      const gateway = new GatewayService({
+        tunnelProvider: async (): Promise<TunnelHandle> => tunnel(),
+        healthProbe: async (): Promise<number> => 200,
+      });
+      await gateway.start();
+      await gateway.connectSession();
+
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+
+      expect(gateway.status().state).toBe('SESSION_CONNECTED');
+      await gateway.disconnectSession();
+      expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+      await gateway.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('supports an explicitly configured finite session lease TTL', async () => {
+    vi.useFakeTimers();
+    try {
+      const gateway = new GatewayService({
+        sessionLeaseTtlMs: 10,
+        tunnelProvider: async (): Promise<TunnelHandle> => tunnel(),
+        healthProbe: async (): Promise<number> => 200,
+      });
+      await gateway.start();
+      await gateway.connectSession();
+
+      await vi.advanceTimersByTimeAsync(11);
+
+      expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+      await gateway.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('self-heals a failed bridge and restores the connected ChatGPT Web session', async () => {
+    let starts = 0;
+    let stops = 0;
+    let probes = 0;
+    const gateway = new GatewayService({
+      healthMonitorIntervalMs: 10,
+      healthFailureThreshold: 1,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 20,
+      reconnectJitterRatio: 0,
+      tunnelProviderFactory: () => async (): Promise<TunnelHandle> => {
+        starts += 1;
+        return {
+          url: 'https://chatgpt.example.trycloudflare.com',
+          stop: async (): Promise<void> => { stops += 1; },
+        };
+      },
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return probes === 2 ? 503 : 200;
+      },
+    });
+
+    await gateway.start();
+    await gateway.connectSession();
+
+    await expect.poll(() => starts, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => gateway.status().state, { timeout: 500 }).toBe('SESSION_CONNECTED');
+    expect(stops).toBeGreaterThanOrEqual(1);
+    await gateway.stop();
+  });
+
+  it('honors an explicit disconnect while bridge recovery is reconnecting', async () => {
+    let starts = 0;
+    let probes = 0;
+    let releaseReconnect: (() => void) | undefined;
+    const reconnectGate = new Promise<void>((resolve) => { releaseReconnect = resolve; });
+    const gateway = new GatewayService({
+      healthMonitorIntervalMs: 5,
+      healthFailureThreshold: 1,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 20,
+      reconnectJitterRatio: 0,
+      tunnelProviderFactory: () => async (): Promise<TunnelHandle> => {
+        starts += 1;
+        if (starts > 1) await reconnectGate;
+        return tunnel();
+      },
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return probes === 2 ? 503 : 200;
+      },
+    });
+
+    await gateway.start();
+    await gateway.connectSession();
+    await expect.poll(() => starts, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+
+    await gateway.disconnectSession();
+    releaseReconnect?.();
+
+    await expect.poll(() => gateway.status().state, { timeout: 500 }).toBe('BRIDGE_HEALTHY');
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
     expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+    await gateway.stop();
+  });
+
+  it('does not resurrect after an explicit stop races an in-flight health check', async () => {
+    let starts = 0;
+    let probes = 0;
+    let releaseMonitor: ((status: number) => void) | undefined;
+    const monitorResult = new Promise<number>((resolve) => { releaseMonitor = resolve; });
+    const gateway = new GatewayService({
+      healthMonitorIntervalMs: 5,
+      healthFailureThreshold: 1,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 20,
+      reconnectJitterRatio: 0,
+      tunnelProviderFactory: () => async (): Promise<TunnelHandle> => {
+        starts += 1;
+        return tunnel();
+      },
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return probes === 1 ? 200 : monitorResult;
+      },
+    });
+
+    await gateway.start();
     await gateway.connectSession();
-    await gateway.disconnectSession();
-    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+    await expect.poll(() => probes, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+    await gateway.stop();
+    releaseMonitor?.(503);
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(gateway.status().state).toBe('STOPPED');
+    expect(starts).toBe(1);
   });
 
   it('keeps named tunnel token out of cloudflared argv and passes it through child environment', async () => {

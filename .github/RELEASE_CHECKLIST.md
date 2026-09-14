@@ -11,7 +11,7 @@ Required command: `corepack pnpm release:verify`. It runs version consistency, t
 Secrets never appear in logs, release evidence, or tracked files. Cloudflare tokens and capability cookies stay operator-local.
 - Web Control Plane settings store non-secrets in `unified-mpc.sqlite`; tunnel tokens use Linux Secret Service via `secret-tool` and never enter `.env`, SQLite, logs, or API responses. Missing Secret Service fails closed.
 - Gateway settings validation is transactional: candidate config is validated, runtime is stopped/restarted and identity-probed, then persistence commits; failed probes or persistence restore prior runtime and stored settings.
-- ChatGPT Web session mutation uses `POST /api/chatgpt-web/connect`; `POST /api/chatgpt-web/disconnect`, lease TTL, and process restart invalidation are covered by tests.
+- ChatGPT Web session mutation uses `POST /api/chatgpt-web/connect`; long-lived default sessions, optional finite lease TTL, explicit disconnect/stop fencing, self-healing reconnect, and process restart restoration are covered by tests.
 
 ## Automated evidence
 

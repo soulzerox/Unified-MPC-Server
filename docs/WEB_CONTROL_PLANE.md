@@ -110,7 +110,7 @@ The gateway manages secure remote bridges with the states implemented by `Gatewa
                     [ERROR]
 ```
 
-`stop()` invalidates pending starts and returns the service to `STOPPED`. A stale asynchronous start cannot restore `BRIDGE_HEALTHY`.
+`stop()` invalidates pending starts, cancels health/reconnect timers, and returns the service to `STOPPED`. A stale asynchronous start or in-flight health probe cannot resurrect the bridge after an explicit stop. While running, a watchdog probes the public bridge every 10 seconds; 3 consecutive failures replace the tunnel and retry indefinitely with capped exponential backoff plus jitter (1 second base, 30 second cap). If a ChatGPT Web session was connected before the failure, it is automatically restored after the bridge returns healthy.
 
 #### State Machine Invariant
 Connecting a client session via `/api/chatgpt-web/connect` is strictly gated. The bridge **must** be in the `BRIDGE_HEALTHY` state; attempting connection in any other state returns `412 Precondition Failed`.
@@ -282,7 +282,7 @@ Validates the user-entered Cloudflare tunnel configuration against the live Clou
 
 
 #### `POST /api/chatgpt-web/disconnect`
-Clears current session lease. Session leases also expire automatically, and every process restart invalidates prior leases.
+Clears the current session lease **and** the desired connected-session intent. Sessions are long-lived by default and do not expire on a fixed TTL; callers may still opt into a finite `sessionLeaseTtlMs` when constructing `GatewayService`. A process restart invalidates the old in-memory lease, then persisted `RUNNING` gateway state restores the bridge and creates a fresh connected session automatically. After an explicit disconnect, bridge self-healing continues but recovery stops at `BRIDGE_HEALTHY` until a new connect request is made.
 
 #### `GET /api/settings` / `POST /api/settings`
 Reads masked non-secret gateway settings or validates/applies new settings. SQLite stores non-secret values only. Tunnel token goes to Linux Secret Service; response exposes only `tunnelTokenConfigured: true|false`. Runtime applies candidate settings by stopping, starting, probing identity, and committing only after success; failed probes restore previous runtime settings.

@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_POLICIES, IdeSyncService } from './ide-sync.js';
+import { configuredPolicies } from './runtime-policy.js';
+import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 
 const temporaryRoots: string[] = [];
 
@@ -41,7 +43,24 @@ describe('IdeSyncService', () => {
     expect(compiled).toContain('| P1 | session-start:ask-matt | ask-matt |');
     expect(compiled).toContain('| P2 | child:memory | memory |');
     expect(compiled).toContain('| P3 | pre-edit:thai-rag | thai-rag-mcp |');
-    expect(compiled).toContain('| P4 | code-safety:godkiller | godkiller |');
+    expect(compiled).toContain('| P4 | code-safety:godkiller | godkiller | server | ON_DEMAND | Optional |');
+    expect(DEFAULT_POLICIES.find((policy) => policy.id === 'code-safety:godkiller')).toMatchObject({
+      mandatory: false,
+      enforcement: 'ON_DEMAND',
+      requiredTools: ['gk_task'],
+    });
+  });
+
+  it('does not let the legacy mandatory server list override an explicit optional Godkiller policy', () => {
+    const policies = configuredPolicies({
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      mandatoryMcpServers: ['memory', 'thai-rag-mcp', 'godkiller'],
+    });
+    const godkillerPolicies = policies.filter((policy) => policy.resourceId === 'godkiller');
+
+    expect(godkillerPolicies).toEqual([
+      expect.objectContaining({ id: 'code-safety:godkiller', mandatory: false, enforcement: 'ON_DEMAND' }),
+    ]);
   });
 
   it('derives P1-Pn from the user-selected array order instead of renaming policy ids', () => {

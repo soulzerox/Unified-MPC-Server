@@ -125,8 +125,8 @@ export interface McpToolContext {
   readonly bootstrapTaskContext?: (signal: AbortSignal) => Promise<Result<unknown>>;
   /** Bootstrap the effective workspace engineering harness and mandatory child MCP connections. */
   readonly bootstrapWorkspaceHarness?: (workspaceId: string, signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Run mandatory pre-edit diagnostics and authorize one development-artifact path. */
-  readonly prepareCodeChange?: (workspaceId: string, filePath: string, proposedSymbol: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Run mandatory pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path. */
+  readonly prepareCodeChange?: (workspaceId: string, filePath: string, proposedSymbol: string | undefined, runGodkillerSafetyCheck: boolean, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Search the pinned native working-memory child through its curated read surface. */
   readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Create or append a work-log entity through the pinned native working-memory child. */

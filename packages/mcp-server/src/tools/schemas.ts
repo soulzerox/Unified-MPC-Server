@@ -19,6 +19,7 @@ export const prepareCodeChangeSchema = z.object({
   workspaceId: workspaceIdSchema,
   filePath: pathSchema,
   proposedSymbol: z.string().trim().max(512).optional(),
+  runGodkillerSafetyCheck: z.boolean().optional(),
 }).strict();
 export const workingMemorySearchSchema = z.object({
   workspaceId: workspaceIdSchema,

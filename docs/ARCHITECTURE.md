@@ -120,8 +120,7 @@ workspace_bootstrap(workspaceId)
         ├── read + SHA-256 fingerprint AGENTS.md (fail closed if unavailable)
         ├── discover mandatory native children
         │     ├── memory
-        │     ├── thai-rag-mcp
-        │     └── godkiller
+        │     └── thai-rag-mcp
         ├── reject workspace-scoped definitions for mandatory-native promotion
         ├── connect + pin child sessions
         ├── fingerprint child launch/catalog contracts
@@ -131,8 +130,7 @@ workspace_bootstrap(workspaceId)
 prepare_code_change(workspaceId, filePath)
         │
         ├── revalidate AGENTS.md fingerprint
-        ├── thai-rag-mcp / pre_edit_context
-        └── godkiller / gk_task(action=edit_safe)
+        └── thai-rag-mcp / pre_edit_context
               │
               ▼
       one-path authorization
@@ -143,7 +141,7 @@ prepare_code_change(workspaceId, filePath)
               └── authorization consumed after success
 ```
 
-The default mandatory set is `memory`, `thai-rag-mcp`, and `godkiller`. Bootstrap only accepts globally/user-configured child definitions for trusted mandatory promotion; a repository-controlled `.cursor/mcp.json`, `.claude/mcp.json`, or other workspace MCP file cannot replace one of these trusted children. The bootstrap also validates the capabilities the harness depends on (`memory`: `search_nodes`, `create_entities`, `add_observations`; `thai-rag-mcp`: `pre_edit_context`; `godkiller`: `gk_task`). Missing children, missing capabilities, stale contracts, or an unreadable `AGENTS.md` all fail closed.
+The default mandatory set is `memory` and `thai-rag-mcp`. Bootstrap only accepts globally/user-configured child definitions for trusted mandatory promotion; a repository-controlled `.cursor/mcp.json`, `.claude/mcp.json`, or other workspace MCP file cannot replace one of these trusted children. The bootstrap validates the capabilities the harness depends on (`memory`: `search_nodes`, `create_entities`, `add_observations`; `thai-rag-mcp`: `pre_edit_context`). Missing mandatory children, missing capabilities, stale contracts, or an unreadable `AGENTS.md` all fail closed. `godkiller` stays outside workspace readiness as an optional `ON_DEMAND` safety analyzer. For high-risk work, `prepare_code_change(..., runGodkillerSafetyCheck=true)` uses a curated parent-owned route that accepts only a non-workspace-scoped, drift-free Godkiller contract and invokes the fixed `gk_task(action=edit_safe)` operation with live fingerprints.
 
 `working_memory_search` and `working_memory_record` are curated first-party adapters over the pinned `memory` child. The child server is not flattened wholesale into the top-level MCP catalog. This keeps the ChatGPT-facing surface stable while preserving child contract fingerprints at dispatch time.
 

@@ -40,8 +40,24 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
           servers: [
             { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'], requiredTools: ['search_nodes', 'create_entities', 'add_observations'] },
             { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'], requiredTools: ['pre_edit_context'] },
-            { name: 'godkiller', required: true, connected: true, pinned: true, descriptorFingerprint: 'c'.repeat(64), catalogFingerprint: '3'.repeat(64), tools: ['gk_task'], requiredTools: ['gk_task'] },
           ],
+        });
+      },
+      async describeMcpServer(input: { server: string }) {
+        if (input.server !== 'godkiller') return err(appError('NOT_FOUND', `missing ${input.server}`));
+        return ok({
+          server: 'godkiller',
+          enabled: true,
+          connected: true,
+          provenance: {
+            source: 'antigravity-fallback',
+            trustTier: 'external',
+            namespace: 'mcp:godkiller',
+            descriptorFingerprint: 'c'.repeat(64),
+            catalogFingerprint: '3'.repeat(64),
+            drift: { detected: false, reasons: [] },
+          },
+          tools: [{ name: 'gk_task', description: 'Safety analysis', inputSchema: { type: 'object' }, qualifiedName: 'mcp:godkiller/gk_task' }],
         });
       },
       async callMcpTool(input: { server: string; tool: string }) {
@@ -84,7 +100,7 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', filePath: 'src/app.ts', proposedSymbol: 'x',
     });
     expect(prepared).toMatchObject({ structuredContent: { ready: true, filePath: 'src/app.ts' } });
-    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task']);
+    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context']);
 
     const allowed = await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 3;\n',
@@ -95,6 +111,48 @@ describe('workspace engineering harness enforcement', () => {
     await expect(registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 4;\n',
     })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } } });
+  });
+
+  it('runs the optional Godkiller safety check only when explicitly requested', async () => {
+    const { services, childCalls } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    const prepared = await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/risky.ts', proposedSymbol: 'migrateState', runGodkillerSafetyCheck: true,
+    });
+
+    expect(prepared).toMatchObject({
+      structuredContent: {
+        ready: true,
+        filePath: 'src/risky.ts',
+        checks: ['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task'],
+      },
+    });
+    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task']);
+  });
+
+  it('refuses a workspace-scoped Godkiller shadow when optional safety analysis is requested', async () => {
+    const { services, childCalls } = createHarnessServices();
+    const originalDescribe = services.extensions!.describeMcpServer.bind(services.extensions);
+    services.extensions = {
+      ...services.extensions,
+      async describeMcpServer(input: { server: string }, signal?: AbortSignal) {
+        const result = await originalDescribe(input, signal);
+        if (!result.ok || input.server !== 'godkiller') return result;
+        return ok({ ...result.value, provenance: { ...result.value.provenance, source: 'workspace-cursor' } });
+      },
+    } as typeof services.extensions;
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/risky.ts', runGodkillerSafetyCheck: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspace-scoped Godkiller') } },
+    });
+    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context']);
   });
 
   it('fails closed when the workspace AGENTS.md harness cannot be loaded', async () => {

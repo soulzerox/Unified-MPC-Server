@@ -209,11 +209,11 @@ Embedded in `packages/mcp-server` and backed by `packages/extensions`:
   - `ULTRA`: Applies the strictest bundled Ponytail policy while preserving the same authorization/security boundaries.
 - **Fail-Closed Workspace Bootstrap**:
   - `workspace_bootstrap(workspaceId)` must successfully read and SHA-256 fingerprint the workspace `AGENTS.md`; unavailable or unreadable harness content blocks readiness.
-  - The default mandatory native child MCP set is `memory`, `thai-rag-mcp`, and `godkiller`.
+  - The default mandatory native child MCP set is `memory` and `thai-rag-mcp`. `godkiller` is an optional on-demand safety analyzer and does not participate in workspace readiness by default.
   - Mandatory children are eagerly connected and pinned, launch/catalog contracts are fingerprinted, and exact required tool names are checked before readiness is recorded.
   - Workspace-scoped MCP definitions are rejected for trusted mandatory-native promotion, preventing repository-controlled config from impersonating the mandatory child set.
 - **Single-Use Code Mutation Preflight**:
-  - `prepare_code_change(workspaceId, filePath, proposedSymbol?)` revalidates `AGENTS.md`, calls `thai-rag-mcp/pre_edit_context`, and calls `godkiller/gk_task` with `action=edit_safe`.
+  - `prepare_code_change(workspaceId, filePath, proposedSymbol?, runGodkillerSafetyCheck?)` revalidates `AGENTS.md` and calls mandatory `thai-rag-mcp/pre_edit_context`. When `runGodkillerSafetyCheck=true`, the parent additionally describes the live non-workspace-scoped `godkiller` child, rejects contract drift, and invokes only `gk_task(action=edit_safe)` with the live descriptor/catalog fingerprints.
   - A successful development-artifact mutation consumes that path's prepared authorization. Repeated edits require a new preflight.
   - Any `AGENTS.md` change invalidates the bootstrap before subsequent code mutation.
 - **Curated Working Memory Surface**:

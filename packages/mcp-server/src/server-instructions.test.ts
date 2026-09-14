@@ -12,6 +12,7 @@ describe('MCP Ponytail instructions', () => {
     const instructions = buildMcpInstructions('off');
     expect(instructions).toContain('workspace_bootstrap');
     expect(instructions).toContain('prepare_code_change');
+    expect(instructions).toContain('runGodkillerSafetyCheck=true');
     expect(instructions).toContain('before the first code mutation');
   });
 

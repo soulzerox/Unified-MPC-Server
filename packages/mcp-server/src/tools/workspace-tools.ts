@@ -65,13 +65,13 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'prepare_code_change',
-      description: 'Run mandatory Thai-RAG and Godkiller pre-edit diagnostics for one development-artifact path and authorize that path for the current harness session.',
+      description: 'Run mandatory Thai-RAG pre-edit diagnostics for one development-artifact path and authorize that path for the current harness session. Set runGodkillerSafetyCheck=true to add the trusted optional Godkiller edit_safe analysis for high-risk changes.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: prepareCodeChangeSchema,
       handler: async (input, signal) => context.prepareCodeChange === undefined
         ? missingService()
-        : context.prepareCodeChange(input.workspaceId, input.filePath, input.proposedSymbol, signal),
+        : context.prepareCodeChange(input.workspaceId, input.filePath, input.proposedSymbol, input.runGodkillerSafetyCheck === true, signal),
     }),
     defineTool({
       name: 'workspace_tree',

@@ -162,7 +162,7 @@ Unified-MPC-Server ใช้ Runtime Policy ที่ผู้ใช้แก้
 | **P1** | `session-start:ask-matt` | **`ask-matt`** | Skill | บังคับทุก Session | โหลดคำแนะนำเริ่มงานก่อนวางแผนหรือลงมือทำ |
 | **P2** | `child:memory` | **`memory`** | MCP Server | บังคับ (Realtime) | Working Memory และตรวจ required tools ตาม policy |
 | **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | MCP Server | บังคับทุก Session | Local RAG และ `pre_edit_context` เมื่อเกี่ยวข้องกับ repository |
-| **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | บังคับก่อนแก้โค้ด | Code intelligence และ `gk_task` สำหรับ safety pre-check |
+| **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | ตามความจำเป็น | Safety analyzer เสริมสำหรับ refactor ใหญ่, migration, งาน security-sensitive หรือกรณีที่ blast radius ยังไม่ชัดเจน |
 | **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | MCP Server | ตามความจำเป็น | การคิดวิเคราะห์หลายขั้นสำหรับงานซับซ้อน |
 | **P6** | `optional:context7` | **`context7`** | MCP Server | ตามความจำเป็น | เอกสารและตัวอย่าง API/SDK ที่ตรงเวอร์ชัน |
 | **P7** | `optional:filesystem` | **`filesystem`** | MCP Server | ตามความจำเป็น | งานไฟล์แบบ Batch และข้ามโปรเจกต์ |
@@ -176,9 +176,9 @@ Unified-MPC-Server ใช้ Runtime Policy ที่ผู้ใช้แก้
 
 1. ก่อนแก้ source/config ครั้งแรก Client ต้องเรียก `workspace_bootstrap` พร้อม `workspaceId` ของโปรเจกต์
 2. Runtime จะอ่านและสร้าง fingerprint ของ `AGENTS.md` ถ้าไฟล์หายหรืออ่านไม่ได้ bootstrap จะ fail closed
-3. Runtime จะเชื่อมและ pin `memory`, `thai-rag-mcp`, `godkiller` และตรวจว่าแต่ละตัวมี tool ที่ harness ต้องใช้จริง
+3. Runtime จะเชื่อมและ pin เฉพาะ mandatory native MCP คือ `memory` กับ `thai-rag-mcp` และตรวจว่าแต่ละตัวมี tool ที่ harness ต้องใช้จริง ส่วน `godkiller` จะไม่เป็น dependency ของ bootstrap และจะถูกเรียกแบบ on-demand เมื่องานมีความเสี่ยงหรือ blast radius สูง
 4. MCP ที่มาจากไฟล์ใน workspace เช่น `.cursor/mcp.json` จะไม่สามารถปลอมชื่อมาทับ mandatory native MCP ได้
-5. ก่อนแก้ development artifact แต่ละ path ต้องเรียก `prepare_code_change`; ระบบจะรัน `thai-rag-mcp/pre_edit_context` และ `godkiller/gk_task` (`action=edit_safe`)
+5. ก่อนแก้ development artifact แต่ละ path ต้องเรียก `prepare_code_change`; mandatory preflight จะรัน `thai-rag-mcp/pre_edit_context` หากเป็น refactor ใหญ่, migration, งาน security-sensitive หรือ blast radius ยังไม่ชัด ให้ตั้ง `runGodkillerSafetyCheck=true` เพื่อเพิ่ม curated `godkiller/gk_task(action=edit_safe)` โดย parent จะตรวจว่าไม่ใช่ workspace-scoped shadow และ contract ไม่ drift ก่อนเรียก
 6. สิทธิ์ pre-edit ใช้ได้หนึ่ง mutation ที่สำเร็จเท่านั้น จากนั้นต้องตรวจใหม่ก่อนแก้ path เดิมอีกครั้ง
 7. ถ้า `AGENTS.md` ถูกแก้ระหว่าง session bootstrap เดิมจะถูกยกเลิกและต้องเรียก `workspace_bootstrap` ใหม่
 8. Working memory สำหรับ ChatGPT ใช้ native surface `working_memory_search` และ `working_memory_record` แทนการยก tool ทั้งหมดของ child `memory` ขึ้นมาไว้ใน top-level catalog

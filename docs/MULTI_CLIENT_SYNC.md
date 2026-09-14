@@ -31,7 +31,7 @@ The default order is:
 | **P1** | `session-start:ask-matt` | **`ask-matt`** | Skill | `EVERY_SESSION` | ✅ YES | Load session-start engineering guidance before planning or acting. |
 | **P2** | `child:memory` | **`memory`** | MCP Server | `REALTIME` | ✅ YES | Realtime working memory; required child tools are policy-declared and validated at bootstrap. |
 | **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | MCP Server | `EVERY_SESSION` | ✅ YES | Local RAG and `pre_edit_context` when repository context is relevant. |
-| **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | `SAFETY_PRE_CHECK` | ✅ YES | Code intelligence and `gk_task` safety checks before guarded mutations. |
+| **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | `ON_DEMAND` | Optional | For high-risk changes, set `runGodkillerSafetyCheck=true` on `prepare_code_change`; the parent then invokes only curated `gk_task(action=edit_safe)` after live source/drift/fingerprint validation. |
 | **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | MCP Server | `ON_DEMAND` | Optional | Structured reasoning for complex tasks. |
 | **P6** | `optional:context7` | **`context7`** | MCP Server | `ON_DEMAND` | Optional | Current library/SDK documentation and examples. |
 | **P7** | `optional:filesystem` | **`filesystem`** | MCP Server | `ON_DEMAND` | Optional | Batch and cross-project filesystem operations. |

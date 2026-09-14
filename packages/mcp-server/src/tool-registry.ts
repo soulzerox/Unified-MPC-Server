@@ -209,7 +209,7 @@ export class ToolRegistry {
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
       bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
-      prepareCodeChange: (workspaceId, filePath, proposedSymbol, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, signal),
+      prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
       recordTurn: (input, signal) => this.recordTurn(input, signal),
@@ -702,7 +702,7 @@ export class ToolRegistry {
     });
   }
 
-  private async prepareCodeChange(workspaceId: string, filePath: string, proposedSymbol: string | undefined, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+  private async prepareCodeChange(workspaceId: string, filePath: string, proposedSymbol: string | undefined, runGodkillerSafetyCheck: boolean, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const context = this.harnessContext(workspaceId);
     const state = this.harnessActivation.state(context);
     if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before prepare_code_change', true));
@@ -718,9 +718,8 @@ export class ToolRegistry {
     const extensions = this.services.extensions;
     if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
     const thai = state.mandatoryMcp.servers.find((server) => server.name === 'thai-rag-mcp');
-    const godkiller = state.mandatoryMcp.servers.find((server) => server.name === 'godkiller');
-    if (thai === undefined || godkiller === undefined || thai.descriptorFingerprint === undefined || thai.catalogFingerprint === undefined || godkiller.descriptorFingerprint === undefined || godkiller.catalogFingerprint === undefined) {
-      return err(appError('CONFLICT', 'Mandatory pre-edit MCP contracts are unavailable; run workspace_bootstrap again', true));
+    if (thai === undefined || thai.descriptorFingerprint === undefined || thai.catalogFingerprint === undefined) {
+      return err(appError('CONFLICT', 'Mandatory pre-edit MCP contract is unavailable; run workspace_bootstrap again', true));
     }
     const thaiCheck = await extensions.callMcpTool({
       server: thai.name,
@@ -730,16 +729,30 @@ export class ToolRegistry {
       catalogFingerprint: thai.catalogFingerprint,
     }, signal);
     if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
-    const godkillerCheck = await extensions.callMcpTool({
-      server: godkiller.name,
-      tool: 'gk_task',
-      arguments: { action: 'edit_safe', args: { file_path: filePath, workspace: workspaceId, ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }) }, kwargs: {} },
-      descriptorFingerprint: godkiller.descriptorFingerprint,
-      catalogFingerprint: godkiller.catalogFingerprint,
-    }, signal);
-    if (!godkillerCheck.ok) return err(appError('CONFLICT', `Godkiller pre-edit check failed: ${godkillerCheck.error.message}`, true));
+
+    const checks = ['thai-rag-mcp/pre_edit_context'];
+    if (runGodkillerSafetyCheck) {
+      const described = await extensions.describeMcpServer({ server: 'godkiller' }, signal);
+      if (!described.ok) return err(appError('CONFLICT', `Godkiller safety inspection failed: ${described.error.message}`, true));
+      if (described.value.provenance.source.startsWith('workspace-')) {
+        return err(appError('PERMISSION_DENIED', 'Refusing to use a workspace-scoped Godkiller server for curated safety analysis'));
+      }
+      if (described.value.provenance.drift.detected || !described.value.tools.some((tool) => tool.name === 'gk_task')) {
+        return err(appError('CONFLICT', 'Godkiller safety contract is unavailable or has drifted; inspect the child MCP before retrying', true));
+      }
+      const godkillerCheck = await extensions.callMcpTool({
+        server: 'godkiller',
+        tool: 'gk_task',
+        arguments: { action: 'edit_safe', args: { file_path: filePath, workspace: workspaceId, ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }) }, kwargs: {} },
+        descriptorFingerprint: described.value.provenance.descriptorFingerprint,
+        catalogFingerprint: described.value.provenance.catalogFingerprint,
+      }, signal);
+      if (!godkillerCheck.ok) return err(appError('CONFLICT', `Godkiller safety check failed: ${godkillerCheck.error.message}`, true));
+      checks.push('godkiller/gk_task');
+    }
+
     this.harnessActivation.preparePath(context, filePath);
-    return ok({ ready: true, filePath, checks: ['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task'] });
+    return ok({ ready: true, filePath, checks });
   }
 
   private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {

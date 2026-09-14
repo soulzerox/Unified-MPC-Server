@@ -143,7 +143,6 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         servers: [
           { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'] },
           { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'] },
-          { name: 'godkiller', required: true, connected: true, pinned: true, descriptorFingerprint: 'c'.repeat(64), catalogFingerprint: '3'.repeat(64), tools: ['gk_task'] },
         ],
       };
       if (method === 'callMcpTool') {

@@ -128,6 +128,14 @@ pnpm cli tools list
 pnpm cli tools call working_memory_search '{"workspaceId":"<workspace-id>","query":"current task"}'
 ```
 
+### 3.8 การยืนยัน Exact-Action สำหรับ Local STDIO / CLI / IDE
+
+Client แบบ non-Web ที่เข้า Unified-MPC ผ่าน `startMcpStdio` ใช้ trusted human approval adapter ชุดเดียวกันโดยอัตโนมัติ จึงครอบคลุม CLI, standalone local STDIO และ IDE ที่ launch Unified-MPC stdio entrypoint โดยไม่ต้องทำ adapter แยกราย IDE หาก host ฝัง provider ของตัวเองมา ระบบจะใช้ provider นั้นแทนค่าเริ่มต้น
+
+ช่องทางยืนยันถูกแยกออกจาก MCP protocol โดยเด็ดขาดและ **ไม่อ่าน MCP stdin**: Linux ใช้ `zenity`/`kdialog` เมื่อมี GUI และ fallback ไป controlling TTY, macOS ใช้ `osascript`, Windows ใช้ PowerShell/WinForms dialog หากผู้ใช้กดปฏิเสธจริงจะจบที่ Deny ทันทีและไม่วนไปถามช่องทางอื่น แต่ถ้า helper ใช้งานไม่ได้ ระบบจึงค่อย fallback ไปช่องทาง trusted ถัดไป; หากไม่มีช่องทางที่ถามมนุษย์ได้จริง mutation จะ fail closed ไม่มี environment variable สำหรับ auto-approve
+
+HTTP/Web ไม่ได้ติดตั้ง stdio approval adapter นี้โดยอัตโนมัติ ดังนั้น ChatGPT Web ยัง **ไม่รองรับ exact-action host approval** และแม้ส่ง `userConfirmed: true` ก็ไม่สามารถแทนการยืนยันจาก host ได้ mutation ที่ต้องใช้ host approval จะถูกปฏิเสธก่อน dispatch ตามเดิม ส่วน custom non-Web host สามารถส่ง `hostMutationApprovalProvider` ของตัวเองหรือใช้ `createTrustedHostMutationApprovalProvider` ที่ export จาก `@unified-mpc/mcp-server` ได้
+
 ---
 
 ## 4. ระบบ Web Control Plane และ Dashboard

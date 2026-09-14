@@ -9,13 +9,23 @@ import { PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
 import { TurnPersistenceLedger } from './turn-persistence.js';
 import { createStdioRequestScope } from './request-scope.js';
+import { createTrustedHostMutationApprovalProvider } from './trusted-host-approval.js';
 
 export interface McpStdioOptions extends McpServerOptions {
   readonly onError?: (error: Error) => void;
 }
 
+type HostMutationApprovalProvider = NonNullable<McpServerOptions['hostMutationApprovalProvider']>;
+
 export function isBenignStdioPipeError(error: Error): boolean {
   return /EPIPE|ECONNRESET|broken pipe/i.test(error.message);
+}
+
+export function resolveStdioHostMutationApprovalProvider(
+  configured: McpServerOptions['hostMutationApprovalProvider'],
+  factory: () => HostMutationApprovalProvider = createTrustedHostMutationApprovalProvider,
+): HostMutationApprovalProvider {
+  return configured ?? factory();
 }
 
 function writeStdioDiagnostic(error: Error): void {
@@ -34,10 +44,11 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
   const harnessActivationLedger = options.harnessActivationLedger ?? new HarnessActivationLedger();
   const turnPersistenceLedger = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
   const requestScope = options.requestScope ?? createStdioRequestScope();
+  const hostMutationApprovalProvider = resolveStdioHostMutationApprovalProvider(options.hostMutationApprovalProvider);
   const modernTasks = new ModernTasksProtocol(options.services, { actor: options.actor });
   const transport = createModernTasksTransport(new StdioServerTransport(), modernTasks);
   return serveStdio(
-    () => createMcpServer({ ...options, runBudgetGuard, incrementalVerifier, setOfMarksStore, ponytailActivationLedger, harnessActivationLedger, turnPersistenceLedger, legacyTasksProtocol: false, requestScope }),
+    () => createMcpServer({ ...options, hostMutationApprovalProvider, runBudgetGuard, incrementalVerifier, setOfMarksStore, ponytailActivationLedger, harnessActivationLedger, turnPersistenceLedger, legacyTasksProtocol: false, requestScope }),
     { legacy: 'reject', onerror: options.onError ?? writeStdioDiagnostic, transport },
   );
 }

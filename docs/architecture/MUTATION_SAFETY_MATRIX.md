@@ -19,7 +19,7 @@ Full Bypass does not disable schema/input validation, existence checks, task/pro
 | Auto-approvable | Saved destructive-family switches may auto-approve only exact targets proven inside the host Active Project: recoverable `delete_file`, Git rm/clean/exact restore forms, shell rm/rmdir/del, and WSL rm/rmdir. Root, critical, wildcard, recursive/broad, outside-project, and unparseable forms never gain auto-approval. |
 | Active Project | With Full Bypass OFF, user/workspace file and command mutations are bound to the host-owned Active Project. Full Bypass ON accepts explicit absolute outside targets; relative traversal remains invalid. |
 | Command policy | With Full Bypass OFF, command-bearing tools share prohibited/risky command policy. Full Bypass ON skips this unified-mpc policy; argv/schema and OS/runtime checks remain. |
-| Packaged transports | Desktop HTTP and Desktop `--mcp-stdio` install the native approval provider. Standalone CLI/HTTP/STDIO traverse the same registry policy but, without a trusted provider, deny mutations requiring host approval. |
+| Packaged transports | Every host that enters through `startMcpStdio`—packaged Desktop local STDIO, CLI, standalone STDIO, and IDE integrations that launch the Unified-MPC stdio entrypoint—installs the shared trusted human exact-action approval provider by default. A caller-supplied trusted provider still overrides that default. The provider uses an out-of-band OS dialog or controlling TTY and never consumes MCP stdin; explicit denial never falls through to another surface, while an unavailable surface may fall back and ultimately fails closed. HTTP/Web transports do **not** auto-install this provider, so ChatGPT Web and other providerless HTTP clients continue to deny mutations that require host approval. |
 
 ## Reviewed families
 
@@ -107,7 +107,7 @@ After a dispatched HTTP mutation fails/times out, the error explicitly states th
 
 | Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| list is `read`; create is `create`; run/delete are `opaque`/`delete` | required for create/run/delete | required for mutation | external/unknown Windows Task Scheduler state | no | not a workspace path mutation, but exact host action is mandatory | scheduled command creation remains opaque and cannot use host approval to bypass prohibited execution policy elsewhere | Desktop can approve; providerless mutation denies |
+| list is `read`; create is `create`; run/delete are `opaque`/`delete` | required for create/run/delete | required for mutation | external/unknown Windows Task Scheduler state | no | not a workspace path mutation, but exact host action is mandatory | scheduled command creation remains opaque and cannot use host approval to bypass prohibited execution policy elsewhere | trusted stdio/Desktop providers can approve; providerless HTTP/Web or headless hosts without a human surface deny |
 
 A scheduler mutation dispatches `schtasks.exe` once. If dispatch returns an error or cancellation after launch, the result says the outcome may be unknown, requires inspecting current task state, and says **do not retry automatically**.
 
@@ -117,7 +117,7 @@ A scheduler mutation dispatches `schtasks.exe` once. If dispatch returns an erro
 
 | Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| read modes are `read`; save/save-as/merge to target is `create` or `replace` | replacement/mutating mode requires chat confirmation | mutation requires exact host approval | yes for workspace-owned replacement: FileService prepares a replacement pre-image before native/Office dispatch | no | source/target paths are canonicalized under the matching Active Project | n/a for COM/native calls; any command-backed helper is still independently guarded | Desktop provider can approve; standalone providerless mutation denies |
+| read modes are `read`; save/save-as/merge to target is `create` or `replace` | replacement/mutating mode requires chat confirmation | mutation requires exact host approval | yes for workspace-owned replacement: FileService prepares a replacement pre-image before native/Office dispatch | no | source/target paths are canonicalized under the matching Active Project | n/a for COM/native calls; any command-backed helper is still independently guarded | trusted stdio/Desktop providers can approve; providerless HTTP/Web or headless hosts without a human surface deny |
 
 ### 11. WSL filesystem translation
 
@@ -155,7 +155,7 @@ The database runtime rejects DML/DDL such as `DELETE`, `UPDATE`, `DROP`, and mul
 
 | Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `self_heal_apply` is `opaque` at the wrapper and only executes allowlisted reviewed fixes from a fresh matching plan; `tool_batch` is `read` only when every child is read and becomes `opaque` when any child can mutate | required for mutating apply/batch child | required for every mutation; parent confirmation/approval cannot be used to escalate a child | self-heal preserves the recovery semantics of each allowlisted fix; batch recovery is the child tool's contract | no | each selected fix/child remains independently bound to the host Active Project where applicable | each command-bearing child is independently prohibited/approved; the batch wrapper cannot bypass command policy | same central registry on all transports; providerless mutation denies |
+| `self_heal_apply` is `opaque` at the wrapper and only executes allowlisted reviewed fixes from a fresh matching plan; `tool_batch` is `read` only when every child is read and becomes `opaque` when any child can mutate | required for mutating apply/batch child | required for every mutation; parent confirmation/approval cannot be used to escalate a child | self-heal preserves the recovery semantics of each allowlisted fix; batch recovery is the child tool's contract | no | each selected fix/child remains independently bound to the host Active Project where applicable | each command-bearing child is independently prohibited/approved; the batch wrapper cannot bypass command policy | same central registry on all transports; trusted stdio/Desktop providers can approve while providerless HTTP/Web or headless hosts without a human surface deny |
 
 `self_heal_apply` regenerates evidence and requires the caller's `planId` to match before applying each selected fix once. It reports `automaticDestructiveRetry: false`. `tool_batch` dispatches every child back through `ToolRegistry.invoke`: in standard mode each child keeps its own scope/confirmation/host/command checks; while the transport is in Full Bypass, each child independently recomputes the same trusted bypass mode.
 
@@ -184,5 +184,5 @@ The database runtime rejects DML/DDL such as `DELETE`, `UPDATE`, `DROP`, and mul
 
 - `packages/mcp-server/src/mutation-inventory.test.ts` asserts that every advertised `ToolRegistry` name appears in this document.
 - `tests/release/path-boundary-source-policy.test.ts` rejects reviewed authorization sources that use string-prefix path authorization.
-- Mutation/host-approval integration tests verify that standalone providerless runtimes fail closed before dispatch while Desktop provider paths can approve exact actions.
+- Mutation/host-approval integration tests verify that HTTP/Web stays providerless and fails closed before dispatch, trusted stdio hosts install an exact-action human approval provider by default, caller-supplied trusted providers remain supported, and headless stdio without any usable human surface still denies.
 - The exhaustive source inventory is rerun during Task 9 for delete primitives, replacement primitives, database mutation markers, remote HTTP mutation methods, destructive Git flags, and mirror/delete synchronization flags.

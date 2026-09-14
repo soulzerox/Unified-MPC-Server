@@ -62,6 +62,37 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
+  it('keeps HTTP/Web fail-closed when exact-action host approval is unavailable', async () => {
+    const client = new Client(
+      { name: 'http-web-fail-closed-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: 'web_fetch',
+        arguments: {
+          url: 'https://example.com/',
+          method: 'POST',
+          body: 'no network call should occur',
+          userConfirmed: true,
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: 'PERMISSION_DENIED',
+          message: expect.stringContaining('Host exact-action approval is unavailable'),
+        },
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it('shares record_turn idempotency across modern HTTP server recreation', async () => {
     const descriptorFingerprint = 'a'.repeat(64);
     const catalogFingerprint = 'b'.repeat(64);

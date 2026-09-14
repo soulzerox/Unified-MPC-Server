@@ -382,26 +382,19 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0) throw new Error('MCP HTTP body limit must be positive');
 
   const handler = createSessionfulMcpHandler(options);
-  const allowedHostnames = options.allowedHostnamesProvider ?? ((): readonly string[] => options.allowedHostnames ?? localhostAllowedHostnames());
+  const configuredHostnames = options.allowedHostnamesProvider ?? ((): readonly string[] | undefined => options.allowedHostnames);
+  const configuredOrigins = options.allowedOriginsProvider ?? ((): readonly string[] | undefined => options.allowedOrigins);
   const server = createServer((request, response) => {
-    const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(options.allowedOriginsProvider?.() ?? options.allowedOrigins ?? localhostAllowedOrigins());
-    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames() ?? localhostAllowedHostnames()).catch((error: unknown) => {
+    const allowedHostnames = [...new Set([...localhostAllowedHostnames(), ...(configuredHostnames() ?? [])])];
+    const allowedOrigins = [...new Set([...localhostAllowedOrigins(), ...(configuredOrigins() ?? [])])];
+    const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(allowedOrigins);
+    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();
     });
   });
-  let address: McpHttpServerAddress;
-  try {
-    address = await listen(server, options.port);
-  } catch (error: unknown) {
-    // Preferred fixed ports (e.g. 18765) may already be taken — fall back to ephemeral.
-    if (options.port !== 0 && isAddressInUse(error)) {
-      address = await listen(server, 0);
-    } else {
-      throw error;
-    }
-  }
+  const address = await listen(server, options.port);
   const endpoint = new URL(`http://${address.host}:${address.port}/mcp`);
 
   return {
@@ -416,6 +409,3 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
   };
 }
 
-function isAddressInUse(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'EADDRINUSE';
-}

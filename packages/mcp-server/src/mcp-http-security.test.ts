@@ -62,6 +62,44 @@ describe('MCP localhost HTTP security boundary', () => {
     }
   });
 
+  it('keeps loopback identity reachable when public allowlists are provided dynamically', async () => {
+    const publicHandle = await startMcpHttp({
+      port: 0,
+      services: {},
+      actor: { clientId: 'loopback-health-test', clientName: 'loopback-health-test' },
+      allowedHostnamesProvider: () => ['mcp.example.com'],
+      allowedOriginsProvider: () => ['https://mcp.example.com'],
+    });
+    try {
+      const identity = await fetch(new URL('/_unified-mpc/identity', publicHandle.endpoint));
+      expect(identity.status).toBe(200);
+    } finally {
+      await publicHandle.close();
+    }
+  });
+
+  it('fails closed instead of silently rebinding when a requested fixed port is occupied', async () => {
+    const first = await startMcpHttp({
+      port: 0,
+      services: {},
+      actor: { clientId: 'fixed-port-owner', clientName: 'fixed-port-owner' },
+    });
+    try {
+      const attempt = await startMcpHttp({
+        port: first.address.port,
+        services: {},
+        actor: { clientId: 'fixed-port-contender', clientName: 'fixed-port-contender' },
+      }).then(async (second) => {
+        await second.close();
+        return 'rebound' as const;
+      }).catch(() => 'rejected' as const);
+
+      expect(attempt).toBe('rejected');
+    } finally {
+      await first.close();
+    }
+  });
+
   it('rejects bodies over the configured limit', async () => {
     const response = await fetch(handle.endpoint, {
       method: 'POST',

@@ -764,7 +764,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${editable.port}`, 'x-unified-mpc-capability': capabilityToken },
         body: JSON.stringify({ policies: [
           { id: 'custom:second', resourceId: 'second-skill', resourceType: 'skill', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Run second skill when relevant' },
-          { id: 'custom:first', resourceId: 'first-server', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Run first server before the rest', requiredTools: ['ping'] },
+          { id: 'custom:first', resourceId: 'first-server', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Run first server before the rest', requiredTools: ['ping'], readOnlyTools: ['search', 'inspect'] },
         ] }),
       });
       expect(response.status, await response.clone().text()).toBe(200);
@@ -776,12 +776,13 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
 
       const persisted = JSON.parse(settings.get('extensions')!);
       expect(persisted.policies.map((policy: { id: string }) => policy.id)).toEqual(['custom:second', 'custom:first']);
+      expect(persisted.policies[1].readOnlyTools).toEqual(['search', 'inspect']);
       expect(persisted.mandatoryMcpServers).toEqual(['first-server']);
 
       const reread = await fetch(`http://127.0.0.1:${editable.port}/api/policies`);
       expect((await reread.json()).policies.slice(0, 2)).toMatchObject([
         { priority: 'P1', id: 'custom:second' },
-        { priority: 'P2', id: 'custom:first' },
+        { priority: 'P2', id: 'custom:first', readOnlyTools: ['search', 'inspect'] },
       ]);
     } finally {
       await editable.close();

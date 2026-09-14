@@ -93,6 +93,7 @@ export function inspectMutationOperation(
     case 'skills_list':
     case 'skills_read':
     case 'mcp_list':
+    case 'task_bootstrap':
     case 'policy_snapshot':
     case 'mcp_describe':
       return read('structured read-only operation');

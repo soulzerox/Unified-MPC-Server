@@ -7,9 +7,14 @@ describe('skills and mcp bridge tools', () => {
   it('registers skill and MCP inspection as read-only while mcp_call remains opaque mutation', async () => {
     const extensions: ExtensionsService = {
       listSkills: async () => ok({ skills: [{ id: 'a/b', name: 'b', description: 'd', source: 'a', rootPath: '/', skillPath: '/SKILL.md' }] }),
-      readSkill: async () => ok({ id: 'a/b', name: 'b', description: 'd', source: 'a', path: '/SKILL.md', content: '# b' }),
+      readSkill: async (input) => input.skillId === 'agents-skills/ask-matt'
+        ? ok({ id: input.skillId, name: 'ask-matt', description: 'router', source: 'agents-skills', path: '/ask-matt/SKILL.md', content: '# Ask Matt' })
+        : ok({ id: 'a/b', name: 'b', description: 'd', source: 'a', path: '/SKILL.md', content: '# b' }),
       listMcpServers: async () => ok({ servers: [{ name: 'mock', source: 'test', enabled: true, connected: false, excluded: false, command: 'node' }] }),
-      runtimePolicySnapshot: async () => ok({ ready: true, policies: [{ id: 'auto:server:mock', resourceId: 'mock', resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: 'Auto route', source: 'discovered', available: true }] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [
+        { priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt', source: 'configured', available: true },
+        { priority: 'P2', id: 'auto:server:mock', resourceId: 'mock', resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: 'Auto route', source: 'discovered', available: true },
+      ] }),
       describeMcpServer: async () => ok({ server: 'mock', enabled: true, connected: true, tools: [{ name: 'ping', description: 'Ping' }] }),
       callMcpTool: async () => ok({ content: [{ type: 'text', text: 'pong' }] }),
       close: async () => undefined,
@@ -26,7 +31,7 @@ describe('skills and mcp bridge tools', () => {
     });
     const tools = registry.list();
     const names = tools.map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(['skills_list', 'skills_read', 'skills_install', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call']));
+    expect(names).toEqual(expect.arrayContaining(['skills_list', 'skills_read', 'skills_install', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call']));
 
     for (const name of ['skills_list', 'skills_read']) {
       const tool = tools.find((entry) => entry.name === name);
@@ -65,8 +70,15 @@ describe('skills and mcp bridge tools', () => {
       expect.objectContaining({ name: 'remote-skill', source: 'https://github.com/example/remote-skill.git' }),
       expect.objectContaining({ name: 'remote-mcp', source: 'https://github.com/example/remote-mcp.git', transport: 'stdio' }),
     ]);
+    await expect(registry.invoke('task_bootstrap', {})).resolves.toMatchObject({
+      structuredContent: {
+        ready: true,
+        policy: { ready: true, policies: [expect.objectContaining({ id: 'session-start:ask-matt' }), expect.objectContaining({ id: 'auto:server:mock' })] },
+        sessionStartSkill: { id: 'agents-skills/ask-matt', name: 'ask-matt', content: '# Ask Matt' },
+      },
+    });
     await expect(registry.invoke('policy_snapshot', {})).resolves.toMatchObject({
-      structuredContent: { ready: true, policies: [expect.objectContaining({ id: 'auto:server:mock' })] },
+      structuredContent: { ready: true, policies: [expect.objectContaining({ id: 'session-start:ask-matt' }), expect.objectContaining({ id: 'auto:server:mock' })] },
     });
     await expect(registry.invoke('mcp_call', { server: 'mock', tool: 'ping', arguments: {}, userConfirmed: true })).resolves.toMatchObject({
       structuredContent: { content: [{ type: 'text', text: 'pong' }] },

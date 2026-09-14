@@ -905,6 +905,13 @@ function parsePolicyEntries(body: unknown):
       }
       requiredTools = [...new Set(raw.requiredTools.map((tool) => (tool as string).trim()))];
     }
+    let readOnlyTools: readonly string[] | undefined;
+    if (raw.readOnlyTools !== undefined) {
+      if (!Array.isArray(raw.readOnlyTools) || raw.readOnlyTools.some((tool) => typeof tool !== 'string' || tool.trim().length === 0)) {
+        return { ok: false, error: `policies[${index}].readOnlyTools must be a string array` };
+      }
+      readOnlyTools = [...new Set(raw.readOnlyTools.map((tool) => (tool as string).trim()))];
+    }
     policies.push({
       id,
       resourceId,
@@ -913,6 +920,7 @@ function parsePolicyEntries(body: unknown):
       enforcement,
       directive,
       ...(requiredTools === undefined ? {} : { requiredTools }),
+      ...(readOnlyTools === undefined ? {} : { readOnlyTools }),
     });
   }
   return { ok: true, value: policies };

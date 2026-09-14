@@ -201,6 +201,7 @@ export class ToolRegistry {
       contextEconomy,
       isToolExposed: (name) => this.isEffectivelyExposed(name),
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
+      bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, signal),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
@@ -330,7 +331,7 @@ export class ToolRegistry {
         await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, prohibitedReason);
         return response;
       }
-      let mutationDecision = inspectMutationOperation(tool.name, activeRoutedInput, tool.permission);
+      let mutationDecision = await this.resolveMutationDecision(tool.name, activeRoutedInput, tool.permission, parentSignal);
       const policy = this.destructivePolicyProvider();
       const mutationWorkspaceId = readExplicitWorkspaceId(activeRoutedInput);
       const nativePathScopeRequired = requiresNativePathScope(tool.name, activeRoutedInput);
@@ -585,6 +586,61 @@ export class ToolRegistry {
     }
   }
 
+  private async resolveMutationDecision(
+    toolName: string,
+    input: unknown,
+    permission: McpToolDefinition['permission'],
+    signal?: AbortSignal,
+  ): Promise<MutationPolicyDecision> {
+    const fallback = inspectMutationOperation(toolName, input, permission);
+    if (toolName !== 'mcp_call' || fallback.kind === 'delete' || !isRecord(input)) return fallback;
+    const server = readTrimmedString(input.server);
+    const childTool = readTrimmedString(input.tool);
+    const descriptorFingerprint = readTrimmedString(input.descriptorFingerprint);
+    const catalogFingerprint = readTrimmedString(input.catalogFingerprint);
+    const extensions = this.services.extensions;
+    if (
+      server === undefined || childTool === undefined || descriptorFingerprint === undefined || catalogFingerprint === undefined
+      || extensions === undefined || typeof extensions.runtimePolicySnapshot !== 'function' || typeof extensions.describeMcpServer !== 'function'
+    ) return fallback;
+
+    const policySnapshot = await extensions.runtimePolicySnapshot();
+    if (!policySnapshot.ok) return fallback;
+    const serverKey = server.toLowerCase();
+    const parentAllowsRead = policySnapshot.value.policies.some((policy) =>
+      policy.resourceType === 'server'
+      && policy.source === 'configured'
+      && policy.available
+      && (policy.resolvedResourceId ?? policy.resourceId).trim().toLowerCase() === serverKey
+      && policy.readOnlyTools?.includes(childTool) === true);
+    if (!parentAllowsRead) return fallback;
+
+    const described = await extensions.describeMcpServer({ server }, signal);
+    if (!described.ok || described.value.provenance.drift.detected) return fallback;
+    if (described.value.provenance.descriptorFingerprint !== descriptorFingerprint || described.value.provenance.catalogFingerprint !== catalogFingerprint) return fallback;
+    if (!described.value.tools.some((tool) => tool.name === childTool)) return fallback;
+    return { kind: 'read', reason: `Parent runtime policy marks exact child MCP tool ${server}/${childTool} read-only and the live contract fingerprints match` };
+  }
+
+  private async bootstrapTaskContext(signal: AbortSignal): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent }>> {
+    const extensions = this.services.extensions;
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime policy and skill services are unavailable', true));
+    const policy = await extensions.runtimePolicySnapshot();
+    if (!policy.ok) return policy;
+    const sessionStart = policy.value.policies.find((entry) =>
+      entry.resourceType === 'skill'
+      && entry.mandatory
+      && entry.available
+      && (entry.id === 'session-start:ask-matt' || entry.resourceId.trim().toLowerCase() === 'ask-matt'));
+    if (sessionStart?.resolvedResourceId === undefined) {
+      return err(appError('CONFLICT', 'Mandatory session-start skill ask-matt is unavailable in the live runtime policy', true));
+    }
+    if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
+    const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
+    if (!sessionStartSkill.ok) return sessionStartSkill;
+    return ok({ ready: policy.value.ready, policy: policy.value, sessionStartSkill: sessionStartSkill.value });
+  }
+
   private harnessContext(workspaceId: string): HarnessActivationContext {
     return { sessionId: this.sessionId ?? this.actor.sessionId ?? this.actor.clientId, workspaceId };
   }
@@ -609,6 +665,8 @@ export class ToolRegistry {
   }
 
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const taskContext = await this.bootstrapTaskContext(signal);
+    if (!taskContext.ok) return taskContext;
     const extensions = this.services.extensions;
     if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
     const mandatoryMcp = await extensions.bootstrapMandatoryMcpServers(signal);
@@ -632,6 +690,7 @@ export class ToolRegistry {
       agentsMdLoaded: true,
       agentsMdHash: agentsMdHash.value,
       harnessFingerprint: state.harnessFingerprint,
+      sessionStartSkill: taskContext.value.sessionStartSkill,
       mandatoryMcp: mandatoryMcp.value,
     });
   }

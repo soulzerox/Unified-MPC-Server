@@ -12,6 +12,8 @@ export interface PolicyEntry {
   readonly enforcement: 'REALTIME' | 'EVERY_SESSION' | 'SAFETY_PRE_CHECK' | 'ON_DEMAND' | 'AUTO_ROUTE' | string;
   readonly directive: string;
   readonly requiredTools?: readonly string[];
+  /** Parent-owned allowlist of exact child tools proven safe to invoke as reads when the live MCP contract fingerprints match. */
+  readonly readOnlyTools?: readonly string[];
 }
 
 export interface ResolvedPolicyEntry extends PolicyEntry {

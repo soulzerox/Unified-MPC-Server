@@ -5,9 +5,10 @@ import { HarnessActivationLedger } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 
-function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; setAgentsMd(content: string): void } {
+function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; bootstrapEvents: string[]; setAgentsMd(content: string): void } {
   const writes: string[] = [];
   const childCalls: string[] = [];
+  const bootstrapEvents: string[] = [];
   let agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
   const services = {
     file: {
@@ -21,7 +22,19 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
     },
     extensions: {
+      async runtimePolicySnapshot() {
+        bootstrapEvents.push('policy_snapshot');
+        return ok({ ready: true, policies: [{
+          priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt',
+          resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true,
+        }] });
+      },
+      async readSkill(input: { skillId: string }) {
+        bootstrapEvents.push(`skill_load:${input.skillId}`);
+        return ok({ id: input.skillId, name: 'ask-matt', description: 'Router', source: 'agents-skills', path: '/skills/ask-matt/SKILL.md', content: '# Ask Matt\nUse diagnosing-bugs for hard bugs.' });
+      },
       async bootstrapMandatoryMcpServers() {
+        bootstrapEvents.push('mandatory_mcp');
         return ok({
           ready: true,
           servers: [
@@ -38,12 +51,12 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
     },
   } as unknown as McpApplicationServices;
-  return { services, writes, childCalls, setAgentsMd(content: string): void { agentsMd = content; } };
+  return { services, writes, childCalls, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; } };
 }
 
 describe('workspace engineering harness enforcement', () => {
   it('blocks code mutation until workspace bootstrap and pre-edit checks succeed', async () => {
-    const { services, writes, childCalls } = createHarnessServices();
+    const { services, writes, childCalls, bootstrapEvents } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
 
     await expect(registry.invoke('write_file', {
@@ -57,9 +70,11 @@ describe('workspace engineering harness enforcement', () => {
         ready: true,
         agentsMdLoaded: true,
         harnessFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        sessionStartSkill: { id: 'agents-skills/ask-matt', name: 'ask-matt', content: expect.stringContaining('# Ask Matt') },
         mandatoryMcp: { ready: true },
       },
     });
+    expect(bootstrapEvents).toEqual(['policy_snapshot', 'skill_load:agents-skills/ask-matt', 'mandatory_mcp']);
 
     await expect(registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 2;\n',

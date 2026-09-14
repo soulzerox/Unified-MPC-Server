@@ -18,6 +18,7 @@ export interface PolicyEntry {
   readonly enforcement: 'REALTIME' | 'EVERY_SESSION' | 'SAFETY_PRE_CHECK' | 'ON_DEMAND' | string;
   readonly directive: string;
   readonly requiredTools?: readonly string[];
+  readonly readOnlyTools?: readonly string[];
 }
 
 export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
@@ -32,6 +33,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
   {
     id: 'child:memory',
     requiredTools: ['search_nodes', 'create_entities', 'add_observations'],
+    readOnlyTools: ['search_nodes', 'read_graph', 'open_nodes'],
     resourceId: 'memory',
     resourceType: 'server',
     mandatory: true,
@@ -41,6 +43,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
   {
     id: 'pre-edit:thai-rag',
     requiredTools: ['pre_edit_context'],
+    readOnlyTools: ['pre_edit_context', 'recall', 'code_search', 'code_context', 'index_status'],
     resourceId: 'thai-rag-mcp',
     resourceType: 'server',
     mandatory: true,
@@ -63,6 +66,7 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
     mandatory: false,
     enforcement: 'ON_DEMAND',
     directive: 'วิเคราะห์/วางแผนแบบ step-by-step ที่ revise ได้ ก่อนเริ่ม task ซับซ้อน',
+    readOnlyTools: ['sequentialthinking'],
   },
   {
     id: 'optional:context7',

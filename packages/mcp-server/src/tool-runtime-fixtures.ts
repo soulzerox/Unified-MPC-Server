@@ -49,7 +49,7 @@ const unavailable = (
 ): ToolRuntimeFixture => ({ input, evidence: { kind: 'truthful_unavailable', unavailableStatus } });
 
 /**
- * Safe parse-valid inputs and expected delivery evidence for the 102 core tools.
+ * Safe parse-valid inputs and expected delivery evidence for the 103 core tools.
  * These are non-production fixtures: they use controlled workspace IDs, dry-run
  * inputs where available, and never point at a real user path.
  */
@@ -122,6 +122,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   skills_read: service({ skillId: 'skill-1' }, 'extensions.readSkill'),
   skills_install: service({ name: 'smoke-skill', source: 'https://github.com/example/smoke-skill.git', targets: ['cursor'] }, 'installer.installSkill'),
   ponytail_session: service({ workspaceId, suppressed: true }, 'file.readFile'),
+  task_bootstrap: service({}, 'extensions.runtimePolicySnapshot'),
   policy_snapshot: service({}, 'extensions.runtimePolicySnapshot'),
   mcp_list: service({}, 'extensions.listMcpServers'),
   mcp_describe: service({ server: 'server-1' }, 'extensions.describeMcpServer'),

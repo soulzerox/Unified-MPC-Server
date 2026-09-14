@@ -30,6 +30,15 @@ const opaqueChildMutation = {
 export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
+      name: 'task_bootstrap',
+      description: 'Resolve the live runtime policy and load the mandatory session-start routing skill (normally ask-matt) in one read-only call. Use this as the first unified-mpc action for each user task.',
+      ...readOnlyInspection,
+      inputSchema: policySnapshotSchema,
+      handler: async (_input, signal) => context.bootstrapTaskContext === undefined
+        ? missingService()
+        : context.bootstrapTaskContext(signal),
+    }),
+    defineTool({
       name: 'policy_snapshot',
       description: 'Return the live semantic runtime policy after reconciling configured policies with currently discovered child MCP servers and local skills. Use this at the start of each user task to route relevant capabilities without flattening child tools.',
       ...readOnlyInspection,
@@ -80,7 +89,7 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'mcp_call',
-      description: 'Call a tool on a discovered local MCP server. Child side effects and filesystem/network scope are controlled by that child server, so standard mode treats every mcp_call as opaque mutation and requires explicit chat plus host exact-action approval. Trusted Full Bypass skips unified-mpc application approval; the child server still enforces its own policy.',
+      description: 'Call a tool on a discovered local MCP server. Standard mode fails closed as an opaque mutation unless the parent runtime policy explicitly lists this exact child tool in readOnlyTools and the supplied descriptor/catalog fingerprints match the live drift-free MCP contract; only that verified case is classified as a read without mutation approval. All other child calls preserve explicit chat plus host exact-action approval. Trusted Full Bypass skips unified-mpc application approval; the child server still enforces its own policy.',
       ...opaqueChildMutation,
       inputSchema: mcpCallSchema,
       handler: async (input, signal) => context.services.extensions === undefined

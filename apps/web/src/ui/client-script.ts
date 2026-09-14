@@ -113,6 +113,7 @@ export function getClientScriptJs(): string {
           cachedPolicies = (data.policies || []).map((policy) => ({
             ...policy,
             requiredTools: Array.isArray(policy.requiredTools) ? [...policy.requiredTools] : [],
+            readOnlyTools: Array.isArray(policy.readOnlyTools) ? [...policy.readOnlyTools] : [],
           }));
           const countEl = document.getElementById('stat-policies-count');
           if (countEl) countEl.textContent = cachedPolicies.length === 0 ? '0' : 'P1-P' + cachedPolicies.length;
@@ -296,6 +297,7 @@ export function getClientScriptJs(): string {
           enforcement: String(policy.enforcement || '').trim(),
           directive: String(policy.directive || '').trim(),
           requiredTools: [...new Set((policy.requiredTools || []).map((tool) => String(tool).trim()).filter(Boolean))],
+          readOnlyTools: [...new Set((policy.readOnlyTools || []).map((tool) => String(tool).trim()).filter(Boolean))],
         }));
       }
 

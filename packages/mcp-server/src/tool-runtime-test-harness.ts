@@ -107,7 +107,15 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       : { continuationId: 'continuation-1', status: 'scheduled', version: 1 }),
     extensions: serviceProxy('extensions', calls, (method, args) => {
       if (method === 'listSkills') return { skills: [] };
-      if (method === 'readSkill') return { id: 'skill-1', name: 'Smoke', description: 'Smoke', source: 'workspace', path: 'SKILL.md', content: '# Smoke' };
+      if (method === 'runtimePolicySnapshot') return { ready: true, policies: [{
+        priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill',
+        mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true,
+      }] };
+      if (method === 'readSkill') {
+        const request = runtimeRecord(args[0]);
+        const skillId = typeof request.skillId === 'string' ? request.skillId : 'skill-1';
+        return { id: skillId, name: skillId.includes('ask-matt') ? 'ask-matt' : 'Smoke', description: 'Smoke', source: 'workspace', path: 'SKILL.md', content: skillId.includes('ask-matt') ? '# Ask Matt' : '# Smoke' };
+      }
       if (method === 'listMcpServers') return { servers: [{ name: 'server-1' }] };
       if (method === 'describeMcpServer') return { server: 'server-1', enabled: true, connected: true, tools: [] };
       if (method === 'listMcpResources') return { server: 'server-1', enabled: true, connected: true, resources: [{ uri: 'file:///resource.txt', name: 'resource' }] };

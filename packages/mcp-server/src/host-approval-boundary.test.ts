@@ -66,6 +66,100 @@ describe('mandatory independent host approval', () => {
     expect(calls).toEqual([tool]);
   });
 
+  it('allows an exact parent-policy read-only child MCP call without native host approval', async () => {
+    const calls: string[] = [];
+    const descriptorFingerprint = 'a'.repeat(64);
+    const catalogFingerprint = 'b'.repeat(64);
+    const services = servicesWithCalls(calls);
+    services.extensions = {
+      ...services.extensions,
+      async runtimePolicySnapshot() {
+        return ok({ ready: true, policies: [{
+          priority: 'P1', id: 'child:readonly', resourceId: 'child', resolvedResourceId: 'child', resourceType: 'server',
+          mandatory: false, enforcement: 'AUTO_ROUTE', directive: 'Use safe child reads.', source: 'configured', available: true,
+          readOnlyTools: ['search'],
+        }] });
+      },
+      async describeMcpServer() {
+        return ok({
+          server: 'child', enabled: true, connected: true,
+          provenance: { source: 'test', trustTier: 'external', namespace: 'mcp:child', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
+          tools: [{ name: 'search', qualifiedName: 'mcp:child/search', description: 'Search' }],
+        });
+      },
+    } as McpApplicationServices['extensions'];
+    const registry = new ToolRegistry(services, actor, { activeWorkspaceScopeProvider: activeScope, profileProvider: balancedProfile });
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'child', tool: 'search', arguments: { query: 'needle' }, descriptorFingerprint, catalogFingerprint,
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(calls).toEqual(['mcp_call']);
+  });
+
+  it('does not let an auto-discovered policy authorize a read-only child MCP downgrade', async () => {
+    const calls: string[] = [];
+    const descriptorFingerprint = 'a'.repeat(64);
+    const catalogFingerprint = 'b'.repeat(64);
+    const services = servicesWithCalls(calls);
+    services.extensions = {
+      ...services.extensions,
+      async runtimePolicySnapshot() {
+        return ok({ ready: true, policies: [{
+          priority: 'P1', id: 'auto:server:child', resourceId: 'child', resolvedResourceId: 'child', resourceType: 'server',
+          mandatory: false, enforcement: 'AUTO_ROUTE', directive: 'Discovered child.', source: 'discovered', available: true,
+          readOnlyTools: ['search'],
+        }] });
+      },
+      async describeMcpServer() {
+        return ok({
+          server: 'child', enabled: true, connected: true,
+          provenance: { source: 'test', trustTier: 'external', namespace: 'mcp:child', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
+          tools: [{ name: 'search', qualifiedName: 'mcp:child/search', description: 'Search' }],
+        });
+      },
+    } as McpApplicationServices['extensions'];
+    const registry = new ToolRegistry(services, actor, { activeWorkspaceScopeProvider: activeScope, profileProvider: balancedProfile });
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'child', tool: 'search', arguments: {}, descriptorFingerprint, catalogFingerprint, userConfirmed: true,
+    });
+
+    expect(response).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('Host exact-action approval') } } });
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps a parent-policy child read fail-closed when the supplied live contract is stale', async () => {
+    const calls: string[] = [];
+    const services = servicesWithCalls(calls);
+    services.extensions = {
+      ...services.extensions,
+      async runtimePolicySnapshot() {
+        return ok({ ready: true, policies: [{
+          priority: 'P1', id: 'child:readonly', resourceId: 'child', resolvedResourceId: 'child', resourceType: 'server',
+          mandatory: false, enforcement: 'AUTO_ROUTE', directive: 'Use safe child reads.', source: 'configured', available: true,
+          readOnlyTools: ['search'],
+        }] });
+      },
+      async describeMcpServer() {
+        return ok({
+          server: 'child', enabled: true, connected: true,
+          provenance: { source: 'test', trustTier: 'external', namespace: 'mcp:child', descriptorFingerprint: 'c'.repeat(64), catalogFingerprint: 'd'.repeat(64), drift: { detected: false, reasons: [] } },
+          tools: [{ name: 'search', qualifiedName: 'mcp:child/search', description: 'Search' }],
+        });
+      },
+    } as McpApplicationServices['extensions'];
+    const registry = new ToolRegistry(services, actor, { activeWorkspaceScopeProvider: activeScope, profileProvider: balancedProfile });
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'child', tool: 'search', arguments: {}, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true,
+    });
+
+    expect(response).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('Host exact-action approval') } } });
+    expect(calls).toEqual([]);
+  });
+
   it.each([
     ['scheduler run', 'scheduler', { action: 'run', task_name: 'UnifiedMpcTask', userConfirmed: true }],
     ['scheduler delete', 'scheduler', { action: 'delete', task_name: 'UnifiedMpcTask', userConfirmed: true }],

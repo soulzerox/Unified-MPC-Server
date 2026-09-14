@@ -72,6 +72,7 @@ function policyArray(value: unknown): readonly PolicyEntry[] {
       enforcement,
       directive,
       ...(record.requiredTools === undefined ? {} : { requiredTools: stringArray(record.requiredTools).map((tool) => tool.trim()) }),
+      ...(record.readOnlyTools === undefined ? {} : { readOnlyTools: stringArray(record.readOnlyTools).map((tool) => tool.trim()) }),
     });
   }
   return policies;

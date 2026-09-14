@@ -17,7 +17,7 @@ import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescri
 import { createProcessTreeTerminator } from '@unified-mpc/process';
 import { normalizeProjectProfile } from '@unified-mpc/shared';
 import { hostPathApi, isAbsoluteHostPath, normalizeHostPath } from '@unified-mpc/workspace';
-import type { McpApplicationServices } from './tools/tool-types.js';
+import type { McpApplicationServices, McpToolDefinition } from './tools/tool-types.js';
 import { ContextEngine } from './context-engine.js';
 import type { ActivityTelemetrySnapshot, ActivityTracker, ToolTelemetrySnapshot } from './activity-tracker.js';
 import { ContextEconomyRuntime } from './context-economy.js';
@@ -186,6 +186,7 @@ export class UpgradeRuntimeService {
     private readonly isToolExposed: (name: string) => boolean = () => true,
     incrementalVerifier: IncrementalVerifier = new IncrementalVerifier(),
     private readonly activityTracker?: ActivityTracker,
+    private readonly discoveryTools?: () => readonly McpToolDefinition[],
   ) {
     this.actor = actor;
     this.incrementalVerifier = incrementalVerifier;
@@ -247,7 +248,7 @@ export class UpgradeRuntimeService {
         const misses = verification.misses + Math.max(0, contextEconomy.filesDelivered - contextEconomy.ledgerHits);
         const bytesSaved = verification.bytesSaved + contextEconomy.previouslySeenBytesAvoided;
         const entries = verification.entries + contextEconomy.ledgerEntries;
-        const exposedToolNames = SEARCH_CATALOG.filter((entry) => this.isToolExposed(entry.name)).map((entry) => entry.name).sort();
+        const exposedToolNames = this.searchCatalog().filter((entry) => this.isToolExposed(entry.name)).map((entry) => entry.name).sort();
         const toolCatalogKey = createHash('sha256').update(JSON.stringify(exposedToolNames)).digest('hex');
         const workspaceId = readString(input, 'workspaceId');
         let workspaceIndexKey: string | null = null;
@@ -512,6 +513,21 @@ export class UpgradeRuntimeService {
     }
   }
 
+  private searchCatalog(): readonly SearchCatalogEntry[] {
+    const registered = this.discoveryTools?.();
+    if (registered === undefined || registered.length === 0) return SEARCH_CATALOG;
+    const upgradeNames = new Set(UPGRADE_TOOL_CATALOG.map((entry) => entry.name));
+    const registryPrimitives = registered
+      .filter((tool) => !upgradeNames.has(tool.name))
+      .map((tool) => primitiveEntry(
+        tool.name,
+        tool.description,
+        tool.permission,
+        ['core', 'primitive', ...tool.name.split('_').filter(Boolean)],
+      ));
+    return dedupeSearchEntries([...registryPrimitives, ...SEARCH_CATALOG]);
+  }
+
   private searchTools(query: string, input: Record<string, unknown> = {}): Record<string, unknown> {
     const normalized = query.toLowerCase().trim();
     const queryTokens = tokenize(normalized);
@@ -521,7 +537,7 @@ export class UpgradeRuntimeService {
     const category = readString(input, 'category')?.toLowerCase();
     const route = routeIntent(query);
     const telemetry = this.activityTracker?.telemetrySnapshot();
-    const scored = SEARCH_CATALOG
+    const scored = this.searchCatalog()
       .filter((entry) => this.isToolExposed(entry.name))
       .filter((entry) => category === undefined || entry.tags.some((tag) => tag.toLowerCase() === category))
       .map((entry) => scoreToolEntry(entry, normalized, queryTokens, queryTokenSet, route, telemetry?.byTool[entry.name], telemetry))
@@ -568,7 +584,7 @@ export class UpgradeRuntimeService {
   }
 
   private describeTool(name: string | undefined): unknown {
-    const entry = SEARCH_CATALOG.find((candidate) => candidate.name === name && this.isToolExposed(candidate.name));
+    const entry = this.searchCatalog().find((candidate) => candidate.name === name && this.isToolExposed(candidate.name));
     if (entry === undefined) return { found: false, name: name ?? null };
     const upgradeEntry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === entry.name);
     if (upgradeEntry === undefined) {

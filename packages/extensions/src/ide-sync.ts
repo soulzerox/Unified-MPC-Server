@@ -2,97 +2,15 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type RuntimePolicySnapshot } from './types.js';
-import { reconcileRuntimePolicies } from './runtime-policy.js';
+import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type PolicyEntry, type RuntimePolicySnapshot } from './types.js';
+import { DEFAULT_POLICIES as RUNTIME_DEFAULT_POLICIES, reconcileRuntimePolicies } from './runtime-policy.js';
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { SkillCatalog } from './skill-catalog.js';
 
 export type PolicyPriority = string;
+export type { PolicyEntry } from './types.js';
 
-export interface PolicyEntry {
-  readonly id: string;
-  readonly priority?: PolicyPriority;
-  readonly resourceId: string;
-  readonly resourceType: 'server' | 'skill';
-  readonly mandatory: boolean;
-  readonly enforcement: 'REALTIME' | 'EVERY_SESSION' | 'SAFETY_PRE_CHECK' | 'ON_DEMAND' | string;
-  readonly directive: string;
-  readonly requiredTools?: readonly string[];
-  readonly readOnlyTools?: readonly string[];
-}
-
-export const DEFAULT_POLICIES: readonly PolicyEntry[] = [
-  {
-    id: 'session-start:ask-matt',
-    resourceId: 'ask-matt',
-    resourceType: 'skill',
-    mandatory: true,
-    enforcement: 'EVERY_SESSION',
-    directive: 'At the start of every user task, load and follow ask-matt before planning or acting.',
-  },
-  {
-    id: 'child:memory',
-    requiredTools: ['search_nodes', 'create_entities', 'add_observations'],
-    readOnlyTools: ['search_nodes', 'read_graph', 'open_nodes'],
-    resourceId: 'memory',
-    resourceType: 'server',
-    mandatory: true,
-    enforcement: 'REALTIME',
-    directive: 'work-log ของงานปัจจุบัน (Realtime Working Memory) — อ่านก่อนเริ่ม, เขียนทุก step สำคัญ (realtime), เชื่อมโยงเมื่อจบ',
-  },
-  {
-    id: 'pre-edit:thai-rag',
-    requiredTools: ['pre_edit_context'],
-    readOnlyTools: ['pre_edit_context', 'recall', 'code_search', 'code_context', 'index_status'],
-    resourceId: 'thai-rag-mcp',
-    resourceType: 'server',
-    mandatory: true,
-    enforcement: 'EVERY_SESSION',
-    directive: 'ความจำถาวร · 100% Local RAG · recall ก่อนตอบเรื่องอดีต, remember ข้อมูลถาวร, code_search ก่อนอ่านไฟล์ยาว',
-  },
-  {
-    id: 'code-safety:godkiller',
-    requiredTools: ['gk_task'],
-    resourceId: 'godkiller',
-    resourceType: 'server',
-    mandatory: true,
-    enforcement: 'SAFETY_PRE_CHECK',
-    directive: 'Code Intel & Safety Pre-check · gk_route วางแผน, gk_code สำรวจโค้ด, gk_task ตรวจ blast_radius ก่อนแก้โค้ด',
-  },
-  {
-    id: 'optional:sequentialthinking',
-    resourceId: 'sequentialthinking',
-    resourceType: 'server',
-    mandatory: false,
-    enforcement: 'ON_DEMAND',
-    directive: 'วิเคราะห์/วางแผนแบบ step-by-step ที่ revise ได้ ก่อนเริ่ม task ซับซ้อน',
-    readOnlyTools: ['sequentialthinking'],
-  },
-  {
-    id: 'optional:context7',
-    resourceId: 'context7',
-    resourceType: 'server',
-    mandatory: false,
-    enforcement: 'ON_DEMAND',
-    directive: 'docs สดและตัวอย่างโค้ดตรงเวอร์ชันของ lib/framework/SDK/API ก่อนแตะ external API',
-  },
-  {
-    id: 'optional:filesystem',
-    resourceId: 'filesystem',
-    resourceType: 'server',
-    mandatory: false,
-    enforcement: 'ON_DEMAND',
-    directive: 'ไฟล์ข้ามโปรเจกต์ / batch file operations',
-  },
-  {
-    id: 'optional:ui-skills',
-    resourceId: 'ui-skills',
-    resourceType: 'skill',
-    mandatory: false,
-    enforcement: 'ON_DEMAND',
-    directive: 'UI/UX & Frontend Best Practices & Skills เมื่อออกแบบหรือพัฒนา UI/UX',
-  },
-];
+export const DEFAULT_POLICIES: readonly PolicyEntry[] = RUNTIME_DEFAULT_POLICIES;
 
 export const POLICY_BLOCK_START = '<!-- MCP-POLICY-START -->';
 export const POLICY_BLOCK_END = '<!-- MCP-POLICY-END -->';

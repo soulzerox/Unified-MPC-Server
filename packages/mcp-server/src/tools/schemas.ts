@@ -589,6 +589,15 @@ export const mcpDescribeSchema = z.object({
   server: z.string().trim().min(1).max(256),
 }).strict();
 
+export const recordTurnSchema = z.object({
+  turnId: z.string().trim().min(1).max(256),
+  userContent: z.string().min(1).max(65_536),
+  assistantContent: z.string().min(1).max(65_536).optional(),
+  workspace: z.string().trim().max(MAX_PATH_LENGTH).optional(),
+  summary: z.string().max(8192).optional(),
+  tags: z.string().max(2048).optional(),
+}).strict();
+
 export const mcpCallSchema = z.object({
   server: z.string().trim().min(1).max(256),
   tool: z.string().trim().min(1).max(256),

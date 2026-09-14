@@ -154,16 +154,17 @@ describe('upgrade runtime', () => {
     }
   });
 
-  it('keeps mandatory workspace harness tools discoverable without a hidden tool_batch workaround', async () => {
-    const runtime = new UpgradeRuntimeService({}, actor);
+  it('keeps shared-core lifecycle and workspace harness tools discoverable through the public registry boundary', async () => {
+    const registry = new ToolRegistry({}, actor);
 
-    for (const name of ['workspace_bootstrap', 'prepare_code_change'] as const) {
-      const search = await runtime.execute('tool_search', { query: name, limit: 20 });
-      const described = await runtime.execute('tool_describe', { name });
+    for (const name of ['task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'record_turn', 'skills_list', 'skills_read', 'workspace_bootstrap', 'prepare_code_change'] as const) {
+      const search = await registry.invoke('tool_search', { query: name, limit: 20 });
+      const described = await registry.invoke('tool_describe', { name });
 
-      expect(search).toMatchObject({ ok: true, value: { matches: expect.any(Array) } });
-      if (search.ok) expect(search.value.matches.map((entry) => entry.name)).toContain(name);
-      expect(described).toMatchObject({ ok: true, value: { found: true, name } });
+      expect(search.structuredContent).toMatchObject({ matches: expect.any(Array) });
+      const matches = (search.structuredContent as { matches: Array<{ name: string }> }).matches;
+      expect(matches.map((entry) => entry.name)).toContain(name);
+      expect(described.structuredContent).toMatchObject({ found: true, name });
     }
   });
 

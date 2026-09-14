@@ -117,7 +117,26 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         return { id: skillId, name: skillId.includes('ask-matt') ? 'ask-matt' : 'Smoke', description: 'Smoke', source: 'workspace', path: 'SKILL.md', content: skillId.includes('ask-matt') ? '# Ask Matt' : '# Smoke' };
       }
       if (method === 'listMcpServers') return { servers: [{ name: 'server-1' }] };
-      if (method === 'describeMcpServer') return { server: 'server-1', enabled: true, connected: true, tools: [] };
+      if (method === 'describeMcpServer') {
+        const request = runtimeRecord(args[0]);
+        const server = typeof request.server === 'string' ? request.server : 'server-1';
+        return {
+          server,
+          enabled: true,
+          connected: true,
+          provenance: {
+            source: 'test-config',
+            trustTier: 'external',
+            namespace: `mcp:${server}`,
+            descriptorFingerprint: 'd'.repeat(64),
+            catalogFingerprint: 'e'.repeat(64),
+            drift: { detected: false, reasons: [] },
+          },
+          tools: server === 'thai-rag-mcp'
+            ? [{ name: 'remember_turn', qualifiedName: 'mcp:thai-rag-mcp/remember_turn', description: 'Remember turn' }]
+            : [],
+        };
+      }
       if (method === 'listMcpResources') return { server: 'server-1', enabled: true, connected: true, resources: [{ uri: 'file:///resource.txt', name: 'resource' }] };
       if (method === 'bootstrapMandatoryMcpServers') return {
         ready: true,

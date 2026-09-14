@@ -12,6 +12,26 @@ afterEach(async () => {
 });
 
 describe('IdeSyncService', () => {
+  it('classifies vetted optional child inspection tools as read-only without including mutations', () => {
+    const context7 = DEFAULT_POLICIES.find((policy) => policy.id === 'optional:context7');
+    const filesystem = DEFAULT_POLICIES.find((policy) => policy.id === 'optional:filesystem');
+
+    expect(context7?.readOnlyTools).toEqual(['resolve-library-id', 'query-docs']);
+    expect(filesystem?.readOnlyTools).toEqual([
+      'read_file',
+      'read_text_file',
+      'read_media_file',
+      'read_multiple_files',
+      'list_directory',
+      'list_directory_with_sizes',
+      'directory_tree',
+      'search_files',
+      'get_file_info',
+      'list_allowed_directories',
+    ]);
+    expect(filesystem?.readOnlyTools).not.toEqual(expect.arrayContaining(['write_file', 'edit_file', 'create_directory', 'move_file']));
+  });
+
   it('compiles editable P1-Pn positions while keeping semantic policy ids stable', () => {
     const service = new IdeSyncService({});
     const compiled = service.compile();

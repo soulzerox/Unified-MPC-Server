@@ -38,6 +38,7 @@ import { isScopedAutoApprovalAllowed, type WorkspaceScope } from './destructive-
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
+import { TurnPersistenceLedger, type RecordTurnInput, type TurnPersistenceRole } from './turn-persistence.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -106,6 +107,8 @@ export interface ToolRegistryOptions {
   readonly ponytailActivationLedger?: PonytailActivationLedger;
   /** Shared workspace harness/bootstrap and pre-edit authorization state for one MCP transport session. */
   readonly harnessActivationLedger?: HarnessActivationLedger;
+  /** Shared bounded turn-persistence idempotency state for transports that recreate registries per request. */
+  readonly turnPersistenceLedger?: TurnPersistenceLedger;
   /** Current persisted per-tool user availability snapshot. Read dynamically so one registry instance observes live changes. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
   readonly incrementalVerifier?: IncrementalVerifier;
@@ -165,6 +168,7 @@ export class ToolRegistry {
   private readonly ponytailModeProvider: () => PonytailMode;
   private readonly ponytailActivation: PonytailActivationLedger;
   private readonly harnessActivation: HarnessActivationLedger;
+  private readonly turnPersistence: TurnPersistenceLedger;
   private readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
   private readonly activeWorkspaceScopesProvider: (() => Promise<readonly WorkspaceScope[]>) | undefined;
   private readonly enforceActiveWorkspaceScope: boolean;
@@ -188,6 +192,7 @@ export class ToolRegistry {
     this.ponytailModeProvider = options.ponytailModeProvider ?? ((): PonytailMode => DEFAULT_PONYTAIL_MODE);
     this.ponytailActivation = options.ponytailActivationLedger ?? new PonytailActivationLedger();
     this.harnessActivation = options.harnessActivationLedger ?? new HarnessActivationLedger();
+    this.turnPersistence = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
     this.activeWorkspaceScopeProvider = normalizeActiveWorkspaceScopeProvider(options);
     this.activeWorkspaceScopesProvider = normalizeActiveWorkspaceScopesProvider(options);
     this.enforceActiveWorkspaceScope = options.activeWorkspaceScopesProvider !== undefined || options.activeWorkspaceScopeProvider !== undefined || options.activeProjectProvider !== undefined;
@@ -200,12 +205,14 @@ export class ToolRegistry {
       actor,
       contextEconomy,
       isToolExposed: (name) => this.isEffectivelyExposed(name),
+      discoveryTools: () => this.allTools,
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
       bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, signal),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
+      recordTurn: (input, signal) => this.recordTurn(input, signal),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
     const filePageEngine = new FilePageEngine(services, actor);
@@ -792,6 +799,82 @@ export class ToolRegistry {
           ...contract,
         }, signal);
     return written.ok ? written : err(appError('CONFLICT', `Working-memory write failed: ${written.error.message}`, true));
+  }
+
+  private async recordTurn(input: RecordTurnInput, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const extensions = this.services.extensions;
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
+
+    const scope = this.sessionId ?? this.actor.sessionId ?? this.actor.clientId;
+    const entries: readonly { readonly role: TurnPersistenceRole; readonly content: string }[] = [
+      { role: 'user', content: input.userContent },
+      ...(input.assistantContent === undefined ? [] : [{ role: 'assistant' as const, content: input.assistantContent }]),
+    ];
+    const claimed: Array<{ readonly role: TurnPersistenceRole; readonly content: string }> = [];
+    let skipped = 0;
+    let inFlight = 0;
+
+    for (const entry of entries) {
+      const claim = this.turnPersistence.claim(scope, input.turnId, entry.role);
+      if (claim === 'claimed') {
+        claimed.push(entry);
+        continue;
+      }
+      skipped += 1;
+      if (claim === 'in_flight') inFlight += 1;
+    }
+
+    const releaseClaims = (): void => {
+      for (const entry of claimed) this.turnPersistence.release(scope, input.turnId, entry.role);
+    };
+    if (inFlight > 0) {
+      releaseClaims();
+      return err(appError('CONFLICT', 'Turn persistence is already in flight; retry this turn after the current write settles', true));
+    }
+    if (claimed.length === 0) {
+      return ok({ turnId: input.turnId, recorded: 0, skipped, duplicate: skipped === entries.length });
+    }
+
+    try {
+      const described = await extensions.describeMcpServer({ server: 'thai-rag-mcp' }, signal);
+      if (!described.ok) {
+        releaseClaims();
+        return err(appError('CONFLICT', `Turn persistence child inspection failed: ${described.error.message}`, true));
+      }
+      if (described.value.provenance.source.startsWith('workspace-')) {
+        releaseClaims();
+        return err(appError('PERMISSION_DENIED', 'Refusing to use a workspace-scoped MCP server for curated turn persistence'));
+      }
+      const contract = {
+        descriptorFingerprint: described.value.provenance.descriptorFingerprint,
+        catalogFingerprint: described.value.provenance.catalogFingerprint,
+      };
+      let recorded = 0;
+      for (const entry of claimed) {
+        const persisted = await extensions.callMcpTool({
+          server: 'thai-rag-mcp',
+          tool: 'remember_turn',
+          arguments: {
+            role: entry.role,
+            content: entry.content,
+            ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
+            ...(input.summary === undefined ? {} : { summary: input.summary }),
+            ...(input.tags === undefined ? {} : { tags: input.tags }),
+          },
+          ...contract,
+        }, signal);
+        if (!persisted.ok) {
+          releaseClaims();
+          return err(appError('CONFLICT', `Turn persistence failed for ${entry.role}: ${persisted.error.message}`, true));
+        }
+        this.turnPersistence.complete(scope, input.turnId, entry.role);
+        recorded += 1;
+      }
+      return ok({ turnId: input.turnId, recorded, skipped, duplicate: false });
+    } catch (error: unknown) {
+      releaseClaims();
+      throw error;
+    }
   }
 
   private async validateHarnessMutation(workspaceId: string | undefined, toolName: string, input: unknown): Promise<ReturnType<typeof err> | undefined> {

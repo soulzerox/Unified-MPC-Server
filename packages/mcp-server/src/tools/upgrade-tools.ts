@@ -18,7 +18,7 @@ import {
  * evidence is tool-specific and can grow compatibly without widening inputs.
  */
 export function upgradeTools(context: McpToolContext, incrementalVerifier: IncrementalVerifier, activityTracker?: ActivityTracker): McpToolDefinition[] {
-  const runtime = new UpgradeRuntimeService(context.services, context.actor, context.contextEconomy, context.isToolExposed, incrementalVerifier, activityTracker);
+  const runtime = new UpgradeRuntimeService(context.services, context.actor, context.contextEconomy, context.isToolExposed, incrementalVerifier, activityTracker, context.discoveryTools);
   return UPGRADE_TOOL_CATALOG.filter((entry) => entry.name !== 'agent_swarm_run').map((entry) => defineTool({
     name: entry.name,
     description: entry.description,

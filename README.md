@@ -256,7 +256,7 @@ The checked-in systemd **user** units under `scripts/` run the two long-lived pr
 
 Copy `scripts/unified-mpc.service.env.example` to `~/.config/unified-mpc/service.env` and set absolute `UNIFIED_MPC_ROOT`, `UNIFIED_MPC_WORKSPACE`, and `PATH` values. The workspace must point at the **project directory**, not a filesystem mount root. Keep the real `~/.local/bin` path in `PATH` when `cloudflared` is installed there; add the exact nvm/asdf/mise Node `bin` directory when required.
 
-Gateway intent also survives reboot. Successful Start/Reconcile persists `RUNNING` and the Web service automatically restores the bridge with retry/backoff. Explicit Stop persists `STOPPED` and remains stopped after restart. Legacy persisted tunnel settings with no desired-state key are recovered once and migrated to `RUNNING`; no post-reboot Start Gateway click is required for a gateway that was intentionally left running.
+Gateway intent also survives reboot. Successful Start/Reconcile persists `RUNNING` and the Web service automatically restores the bridge with retry/backoff, then auto-connects the ChatGPT Web session after `BRIDGE_HEALTHY`. Explicit Stop persists `STOPPED` and remains stopped after restart. Legacy persisted tunnel settings with no desired-state key are recovered once and migrated to `RUNNING`; no post-reboot Start Gateway or Connect ChatGPT Web click is required for a gateway that was intentionally left running.
 
 See [`docs/DEPLOYMENT_LINUX.md`](docs/DEPLOYMENT_LINUX.md) for installation, environment-file, readiness, and Secret Service details.
 

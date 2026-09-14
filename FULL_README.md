@@ -76,7 +76,7 @@ capabilities are additive.
 - Fixes the Linux Secret Service integration: `secret-tool lookup/clear` exit code 1 (item missing) is now treated as "not stored" instead of a lookup failure, so first-time Cloudflare configuration no longer fails with a misleading "Linux Secret Service lookup failed".
 - Hardens the Cloudflare tunnel reconciler: non-OK API responses surface the real Cloudflare error codes/messages, pasted API tokens are normalized (a `Bearer ` prefix and whitespace are stripped, charset validated), Local MCP Origin must be a path-free loopback URL because Cloudflare ingress forbids origin paths (API error 1056), and origin URLs are normalized without a trailing slash.
 - Improves Gateway Configuration UX: user-entered non-secret settings persist immediately even when reconcile fails so the form stays prefilled; the Cloudflare API token is stored after the first successful configure and can be left blank on later runs to reuse the stored secret; the UI shows token-reuse hints.
-- Documents systemd user-service autostart for MCP HTTP + dashboard (nvm node path, project-directory workspace, `~/.local/bin` on `PATH` for `cloudflared`) and the one-click gateway start required after a reboot.
+- Documents systemd user-service autostart for MCP HTTP + dashboard (nvm node path, project-directory workspace, `~/.local/bin` on `PATH` for `cloudflared`); persisted gateway and ChatGPT Web session auto-connect after bridge health.
 
 ### Historical: What's new in v4.56.2
 

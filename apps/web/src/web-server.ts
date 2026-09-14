@@ -747,7 +747,12 @@ export class ControlPlaneServer {
       const started = await this.gateway.start();
       if (started.ok) {
         this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
-        this.recordLog('SUCCESS', 'Persisted ChatGPT Gateway restored automatically');
+        const connected = await this.gateway.connectSession();
+        if (!connected.ok) {
+          this.recordLog('ERROR', `Persisted ChatGPT Web auto-connect failed: ${connected.error.message}`);
+          return;
+        }
+        this.recordLog('SUCCESS', 'Persisted ChatGPT Gateway and ChatGPT Web session restored automatically');
         return;
       }
       this.recordLog('ERROR', `Persisted ChatGPT Gateway auto-start failed: ${started.error.message}`);

@@ -557,7 +557,14 @@ async function probeProcessIdentity(pid: number, _platform?: NodeJS.Platform): P
       }
     }
     const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'stat='], {
-      encoding: 'utf8', timeout: 3_500, maxBuffer: 16 * 1024,
+      encoding: 'utf8',
+      timeout: 3_500,
+      maxBuffer: 16 * 1024,
+      env: {
+        ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
+        LC_ALL: 'C',
+        LANG: 'C',
+      },
     });
     return parsePosixProcessProbe(stdout);
   } catch (error: unknown) {
@@ -770,7 +777,12 @@ function processRunning(pid) {
 
 async function processStartedAt(pid) {
   try {
-    const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 1750, maxBuffer: 16384 });
+    const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      timeout: 1750,
+      maxBuffer: 16384,
+      env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
+    });
     const value = String(result.stdout || '').trim();
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;

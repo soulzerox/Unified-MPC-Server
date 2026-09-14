@@ -12,6 +12,7 @@ import { registerModernTasksProtocol } from './modern-tasks-wire.js';
 import { ToolRegistry, type ActiveProjectScope, type AuthorizationMode, type HostMutationApprovalRequest, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 import type { SetOfMarksObservationStore } from './set-of-marks-service.js';
 import { BUNDLED_PONYTAIL_SKILL_ID, PonytailActivationLedger } from './ponytail-runtime.js';
+import { HarnessActivationLedger } from './harness-runtime.js';
 import { actorForRequestScope, type McpRequestScope } from './request-scope.js';
 
 export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
@@ -19,6 +20,7 @@ export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
   'Do not stop, hand off, or ask the user to say "continue" merely because elapsed time has passed.',
   'Stop only when the outcome is complete, a user decision or new authority is required, or an external blocker prevents safe progress.',
   'Before the first mutation of any multi-step change that includes verification, build, package, push, release preparation, or is likely to outlive the current turn, call run_goal with scheduledContinuation=auto and follow the bundled unified-mpc-scheduled-continuation skill; if such work is already in progress without an active durable goal, enroll it before the next mutation.',
+  'For coding work in a registered workspace, call workspace_bootstrap before the first code mutation; it loads the workspace harness and makes mandatory child MCP readiness explicit. Before mutating each development-artifact path, call prepare_code_change for that path so required pre-edit diagnostics run before the write.',
   'Use durable background tasks for naturally long-running commands, then keep checking them and continue the work while the current run remains active.',
 ].join(' ');
 
@@ -52,6 +54,8 @@ export interface McpServerOptions {
   readonly ponytailModeProvider?: () => PonytailMode;
   /** Shared activation/review state for transport factories that recreate MCP servers per request. */
   readonly ponytailActivationLedger?: PonytailActivationLedger;
+  /** Shared workspace-harness bootstrap/pre-edit state for transport factories that recreate MCP servers per request. */
+  readonly harnessActivationLedger?: HarnessActivationLedger;
   /** Current persisted per-tool availability snapshot. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
   /** Subscribes to persisted per-tool availability changes for live SDK handle toggling. */
@@ -90,6 +94,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.codexToolsEnabled === undefined ? {} : { codexToolsEnabled: options.codexToolsEnabled }),
     ...(options.ponytailModeProvider === undefined ? {} : { ponytailModeProvider: options.ponytailModeProvider }),
     ...(options.ponytailActivationLedger === undefined ? {} : { ponytailActivationLedger: options.ponytailActivationLedger }),
+    ...(options.harnessActivationLedger === undefined ? {} : { harnessActivationLedger: options.harnessActivationLedger }),
     ...(options.toolAvailabilitySnapshotProvider === undefined ? {} : { toolAvailabilitySnapshotProvider: options.toolAvailabilitySnapshotProvider }),
     ...(options.incrementalVerifier === undefined ? {} : { incrementalVerifier: options.incrementalVerifier }),
     ...(options.setOfMarksStore === undefined ? {} : { setOfMarksStore: options.setOfMarksStore }),

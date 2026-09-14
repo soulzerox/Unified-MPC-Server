@@ -73,7 +73,22 @@ The Ponytail harness embeds senior engineering discipline into every AI turn:
 
 ---
 
-## 5. Two-Tier On-Demand Tool Catalog
+## 5. Runtime Workspace Bootstrap & Mandatory Native Children
+
+For coding clients—especially ChatGPT Web—the engineering harness is a runtime state machine, not only a synchronized prompt file.
+
+1. `workspace_bootstrap` reads and fingerprints the registered workspace `AGENTS.md`. If the file service cannot return readable text, bootstrap fails closed.
+2. The extension layer eagerly connects and pins the mandatory native child MCPs (`memory`, `thai-rag-mcp`, `godkiller`). A workspace-scoped MCP config cannot be promoted into this trusted set.
+3. Bootstrap fingerprints child launch/catalog contracts and verifies the exact capabilities required by the native harness before declaring the workspace ready.
+4. `prepare_code_change` revalidates the `AGENTS.md` fingerprint and runs Thai-RAG `pre_edit_context` plus Godkiller `gk_task(action=edit_safe)` for one development-artifact path.
+5. A successful code mutation consumes that path authorization. A second mutation requires a fresh pre-edit check, and any `AGENTS.md` change invalidates the whole bootstrap.
+6. Working memory is exposed through the curated `working_memory_search` and `working_memory_record` first-party tools instead of flattening all child-MCP schemas into the client context.
+
+This design separates **availability**, **trust**, and **policy enforcement**: a child server merely being discoverable does not make it trusted; MCP instructions help clients choose the correct flow, while `ToolRegistry` remains the final fail-closed enforcement boundary.
+
+---
+
+## 6. Two-Tier On-Demand Tool Catalog
 
 Injecting hundreds of tool schemas into an LLM's context window exhausts token budgets and degrades reasoning accuracy.
 
@@ -83,7 +98,7 @@ Unified-MPC-Server solves this with a **Two-Tier Catalog**:
 
 ---
 
-## 6. Universal Multi-Client Policy Synchronization
+## 7. Universal Multi-Client Policy Synchronization
 
 Rather than manually editing prompt rules across 7 different editors, the `IdeSyncService` compiles global tool prioritization rules (P1–P7) and distributes them idempotently into:
 - Google Antigravity (`~/.gemini/antigravity/rules/mcp-policy.md`, `GEMINI.md`)

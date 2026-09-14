@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseExtensionsSettings } from './allowlist.js';
 import { LocalExtensionsService } from './extensions-service.js';
 import type { McpClientFactory } from './mcp-session-manager.js';
@@ -37,12 +38,15 @@ export function createLocalExtensionsService(options: CreateLocalExtensionsOptio
 export function bundledSkillRootCandidates(
   resourcesPath = (process as NodeJS.Process & { readonly resourcesPath?: string }).resourcesPath,
   executablePath = process.execPath,
+  moduleUrl = import.meta.url,
 ): readonly string[] {
+  const moduleDir = path.dirname(fileURLToPath(moduleUrl));
   const candidates = [
     typeof resourcesPath === 'string' && resourcesPath.trim().length > 0
       ? path.join(resourcesPath, 'agent-skills')
       : undefined,
     path.join(path.dirname(executablePath), 'resources', 'agent-skills'),
+    path.resolve(moduleDir, '..', '..', '..', '.agents', 'skills'),
   ].filter((candidate): candidate is string => candidate !== undefined);
   return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
 }

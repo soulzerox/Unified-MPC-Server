@@ -55,6 +55,11 @@ async function preparedInput(
   fixture: ToolRuntimeFixture,
 ): Promise<Readonly<Record<string, unknown>>> {
   switch (fixture.prepare) {
+    case 'workspace_bootstrap': {
+      const result = await executeDefinition(registry, 'workspace_bootstrap', { workspaceId: 'workspace-1' });
+      if (!result.ok) throw new Error(result.error.message);
+      return fixture.input;
+    }
     case 'workspace_context': {
       const result = await executeDefinition(registry, 'workspace_context', { workspaceId: 'workspace-1', query: 'smoke', pageSize: 1 });
       if (!result.ok) throw new Error(result.error.message);

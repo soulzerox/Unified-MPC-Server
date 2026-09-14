@@ -2,9 +2,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 import { LocalExtensionsService } from './extensions-service.js';
+import { bundledSkillRootCandidates } from './create-local-extensions.js';
 import { attachChildStderrDrain, McpSessionManager, type McpClientFactory, type McpClientSession } from './mcp-session-manager.js';
 
 function settingsWithMockServer(): typeof DEFAULT_EXTENSIONS_SETTINGS {
@@ -26,6 +27,15 @@ async function currentMockContract(service: LocalExtensionsService): Promise<{ r
 }
 
 describe('LocalExtensionsService MCP bridge', () => {
+  it('discovers the source-tree bundled skill fallback for development runs', () => {
+    const candidates = bundledSkillRootCandidates(
+      undefined,
+      '/usr/bin/node',
+      'file:///repo/packages/extensions/src/create-local-extensions.ts',
+    );
+    expect(candidates).toContain('/repo/.agents/skills');
+  });
+
   it('includes a packaged bundled-skill root without hiding global or workspace skills', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-skills-'));
     try {
@@ -590,6 +600,159 @@ describe('LocalExtensionsService MCP bridge', () => {
       value: { connected: true, tools: [expect.objectContaining({ name: 'health_check' })] },
     });
     expect(connects).toBe(2);
+    await service.close();
+  });
+
+  it('keeps pinned child MCP sessions alive past the normal idle timeout', async () => {
+    vi.useFakeTimers();
+    let closes = 0;
+    const manager = new McpSessionManager({
+      clientFactory: {
+        connect: async (): Promise<McpClientSession> => ({
+          listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+          listResources: async () => [],
+          callTool: async () => ({ content: [] }),
+          close: async (): Promise<void> => { closes += 1; },
+        }),
+      },
+      idleTimeoutMs: 25,
+    });
+
+    manager.pin('mock');
+    await expect(manager.describe('mock', { command: 'node' })).resolves.toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(manager.isConnected('mock')).toBe(true);
+    expect(closes).toBe(0);
+
+    manager.unpin('mock');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(manager.isConnected('mock')).toBe(false);
+    expect(closes).toBe(1);
+    await manager.close();
+    vi.useRealTimers();
+  });
+
+  it('unpins child MCP servers that are no longer mandatory after live settings change', async () => {
+    let liveSettings = { ...settingsWithMockServer(), mandatoryMcpServers: ['mock'] };
+    const service = new LocalExtensionsService({
+      settings: liveSettings,
+      settingsProvider: (): typeof liveSettings => liveSettings,
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: {
+        connect: async (): Promise<McpClientSession> => ({
+          listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+          listResources: async () => [],
+          callTool: async () => ({ content: [] }),
+          close: async () => undefined,
+        }),
+      },
+    });
+
+    expect((await service.bootstrapMandatoryMcpServers()).ok).toBe(true);
+    await expect(service.listMcpServers()).resolves.toMatchObject({
+      ok: true,
+      value: { servers: [expect.objectContaining({ name: 'mock', pinned: true, required: true })] },
+    });
+
+    liveSettings = { ...liveSettings, mandatoryMcpServers: [] };
+    await expect(service.bootstrapMandatoryMcpServers()).resolves.toMatchObject({ ok: true, value: { ready: true, servers: [] } });
+    await expect(service.listMcpServers()).resolves.toMatchObject({
+      ok: true,
+      value: { servers: [expect.objectContaining({ name: 'mock', pinned: false, required: false })] },
+    });
+    await service.close();
+  });
+
+  it('refuses to promote a workspace-scoped child MCP into the mandatory native harness', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-mandatory-trust-'));
+    try {
+      const workspace = path.join(root, 'workspace');
+      await mkdir(path.join(workspace, '.cursor'), { recursive: true });
+      await writeFile(path.join(workspace, '.cursor', 'mcp.json'), JSON.stringify({
+        mcpServers: { mock: { command: 'node', args: ['workspace-controlled.js'] } },
+      }), 'utf8');
+      let connects = 0;
+      const service = new LocalExtensionsService({
+        settings: { ...DEFAULT_EXTENSIONS_SETTINGS, mandatoryMcpServers: ['mock'] },
+        homeDir: path.join(root, 'home'),
+        appDataDir: path.join(root, 'config'),
+        workspaceRootProvider: async (): Promise<string> => workspace,
+        clientFactory: {
+          connect: async (): Promise<McpClientSession> => {
+            connects += 1;
+            throw new Error('workspace-scoped mandatory MCP must not launch');
+          },
+        },
+      });
+
+      await expect(service.bootstrapMandatoryMcpServers()).resolves.toMatchObject({
+        ok: true,
+        value: { ready: false, servers: [{ name: 'mock', connected: false, pinned: false, error: expect.stringContaining('workspace-scoped') }] },
+      });
+      expect(connects).toBe(0);
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves mandatory child MCP names case-insensitively to the discovered canonical server', async () => {
+    const service = new LocalExtensionsService({
+      settings: { ...settingsWithMockServer(), mandatoryMcpServers: ['MoCk'] },
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: {
+        connect: async (): Promise<McpClientSession> => ({
+          listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+          listResources: async () => [],
+          callTool: async () => ({ content: [] }),
+          close: async () => undefined,
+        }),
+      },
+    });
+    await expect(service.bootstrapMandatoryMcpServers()).resolves.toMatchObject({
+      ok: true,
+      value: { ready: true, servers: [{ name: 'mock', connected: true, pinned: true }] },
+    });
+    await service.close();
+  });
+
+  it('bootstraps configured mandatory child MCP servers and pins successful connections', async () => {
+    let connects = 0;
+    const service = new LocalExtensionsService({
+      settings: {
+        ...settingsWithMockServer(),
+        mandatoryMcpServers: ['mock'],
+      },
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: {
+        connect: async (): Promise<McpClientSession> => {
+          connects += 1;
+          return {
+            listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+            listResources: async () => [],
+            callTool: async () => ({ content: [] }),
+            close: async () => undefined,
+          };
+        },
+      },
+    });
+
+    const bootstrapped = await service.bootstrapMandatoryMcpServers();
+    expect(bootstrapped).toMatchObject({
+      ok: true,
+      value: {
+        ready: true,
+        servers: [{ name: 'mock', required: true, connected: true, pinned: true }],
+      },
+    });
+    expect(connects).toBe(1);
+    await expect(service.listMcpServers()).resolves.toMatchObject({
+      ok: true,
+      value: { servers: [expect.objectContaining({ name: 'mock', connected: true, pinned: true, required: true })] },
+    });
     await service.close();
   });
 });

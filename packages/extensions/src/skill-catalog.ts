@@ -165,7 +165,7 @@ export class SkillCatalog {
       );
     }
     for (const bundled of this.options.bundledRoots ?? []) {
-      defaults.push({ source: `bundled:${path.basename(bundled)}`, path: path.resolve(bundled) });
+      defaults.push({ source: 'bundled:agent-skills', path: path.resolve(bundled) });
     }
     for (const extra of [...(this.options.settings?.extraSkillRoots ?? []), ...(this.options.extraRoots ?? [])]) {
       defaults.push({ source: `extra:${path.basename(extra)}`, path: path.resolve(extra) });

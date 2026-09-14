@@ -105,3 +105,47 @@ Unified-MPC-Server enforces strict defensive guardrails:
 5. **Double-Leasing Prevention**:
    Remote ChatGPT Web sessions require an explicit lease token and state transition gate (`BRIDGE_HEALTHY`), preventing conflicting workers from mutating the workspace simultaneously.
 
+---
+
+## 5. Runtime Workspace Harness for ChatGPT Web
+
+The MCP transport does not rely on prompt compliance alone for coding policy. `ToolRegistry` maintains a transport-session `HarnessActivationLedger` keyed by session + workspace and enforces the following runtime sequence:
+
+```text
+ChatGPT / MCP client
+        │
+        ▼
+workspace_bootstrap(workspaceId)
+        │
+        ├── read + SHA-256 fingerprint AGENTS.md (fail closed if unavailable)
+        ├── discover mandatory native children
+        │     ├── memory
+        │     ├── thai-rag-mcp
+        │     └── godkiller
+        ├── reject workspace-scoped definitions for mandatory-native promotion
+        ├── connect + pin child sessions
+        ├── fingerprint child launch/catalog contracts
+        └── verify required tool names
+              │
+              ▼
+prepare_code_change(workspaceId, filePath)
+        │
+        ├── revalidate AGENTS.md fingerprint
+        ├── thai-rag-mcp / pre_edit_context
+        └── godkiller / gk_task(action=edit_safe)
+              │
+              ▼
+      one-path authorization
+              │
+              ▼
+        code mutation
+              │
+              └── authorization consumed after success
+```
+
+The default mandatory set is `memory`, `thai-rag-mcp`, and `godkiller`. Bootstrap only accepts globally/user-configured child definitions for trusted mandatory promotion; a repository-controlled `.cursor/mcp.json`, `.claude/mcp.json`, or other workspace MCP file cannot replace one of these trusted children. The bootstrap also validates the capabilities the harness depends on (`memory`: `search_nodes`, `create_entities`, `add_observations`; `thai-rag-mcp`: `pre_edit_context`; `godkiller`: `gk_task`). Missing children, missing capabilities, stale contracts, or an unreadable `AGENTS.md` all fail closed.
+
+`working_memory_search` and `working_memory_record` are curated first-party adapters over the pinned `memory` child. The child server is not flattened wholesale into the top-level MCP catalog. This keeps the ChatGPT-facing surface stable while preserving child contract fingerprints at dispatch time.
+
+HTTP and stdio transports share the same harness ledger across request-scoped `ToolRegistry` recreation, so bootstrap/pre-edit state follows the MCP transport session rather than one transient request object. MCP `instructions` explicitly tell coding clients to call `workspace_bootstrap` before the first code mutation and `prepare_code_change` before each development-artifact mutation; the registry still enforces both rules even if a client ignores those instructions.
+

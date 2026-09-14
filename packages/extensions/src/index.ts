@@ -3,13 +3,15 @@ export type {
   ExtensionsMode,
   ExtensionsService,
   ExtensionsSettings,
+  MandatoryMcpBootstrapResult,
+  MandatoryMcpServerStatus,
   McpServerLaunchConfig,
   McpServerListItem,
   McpToolSummary,
   SkillContent,
   SkillSummary,
 } from './types.js';
-export { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
+export { DEFAULT_EXTENSIONS_SETTINGS, DEFAULT_MANDATORY_MCP_SERVERS } from './types.js';
 export { isServerEnabled, isSkillRootEnabled, parseExtensionsSettings } from './allowlist.js';
 export { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
 export { McpConfigLoader, exclusionReason, normalizeLaunchConfig, stripJsonComments } from './mcp-config-loader.js';

@@ -117,6 +117,14 @@ export interface McpToolContext {
   readonly isToolExposed?: (name: string) => boolean;
   /** Session-scoped Ponytail suppression owned by the current ToolRegistry/transport ledger. */
   readonly setPonytailSessionSuppressed?: (workspaceId: string, goalId: string | undefined, suppressed: boolean) => Promise<boolean>;
+  /** Bootstrap the effective workspace engineering harness and mandatory child MCP connections. */
+  readonly bootstrapWorkspaceHarness?: (workspaceId: string, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Run mandatory pre-edit diagnostics and authorize one development-artifact path. */
+  readonly prepareCodeChange?: (workspaceId: string, filePath: string, proposedSymbol: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Search the pinned native working-memory child through its curated read surface. */
+  readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Create or append a work-log entity through the pinned native working-memory child. */
+  readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal) => Promise<Result<unknown>>;
 }
 
 export interface ToolConfig<T extends z.ZodType> {

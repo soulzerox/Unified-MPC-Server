@@ -22,6 +22,11 @@ export function createPosixProcessIdentityProbe(platform: NodeJS.Platform): Posi
         encoding: 'utf8',
         timeout: 1_750,
         maxBuffer: 16 * 1024,
+        env: {
+          ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
+          LC_ALL: 'C',
+          LANG: 'C',
+        },
       });
       const value = stdout.trim();
       if (value.length === 0) return null;

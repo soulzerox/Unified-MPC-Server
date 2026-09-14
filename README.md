@@ -113,10 +113,15 @@ Prevents agent hallucination, erratic tool choices, and context window exhaustio
 - **4-State Lifecycle Machine**: Coordinates transitions through `DISCONNECTED` $\to$ `TUNNEL_STARTING` $\to$ `BRIDGE_PROBING` $\to$ `BRIDGE_HEALTHY`.
 - **Fail-Closed 412 Gate**: The gateway returns `412 Precondition Failed` if the local MCP endpoint fails its health probe, ensuring external AI clients (like ChatGPT Web) are never connected to a dead, stale, or misconfigured bridge.
 
-### 8. Senior Engineering Harness (Ponytail Runtime)
+### 8. Senior Engineering Harness (Ponytail + Runtime Workspace Harness)
 - **Built-in Engineering Discipline**: Enforces the **Ponytail** development philosophy directly at the tool registry layer.
 - **YAGNI & Minimalism**: Prompts agents to reach for standard libraries before external dependencies, write minimal diffs, and question unnecessary abstractions.
-- **Pre-mutation Verification**: Requires blast radius evaluation and root-cause evidence before destructive edits or refactors are committed.
+- **Fail-Closed Workspace Bootstrap**: Coding clients call `workspace_bootstrap` before their first source/config mutation. The runtime must read and SHA-256 fingerprint the registered workspace `AGENTS.md`; a missing or unreadable harness is a blocking error, not an empty-policy fallback.
+- **Mandatory Native Child MCPs**: By default, `memory`, `thai-rag-mcp`, and `godkiller` are eagerly connected and pinned. Bootstrap verifies their exact required capabilities and fingerprints the child descriptor/catalog contracts. Workspace-scoped MCP definitions are never promoted into this trusted mandatory set.
+- **Single-Use Pre-Edit Gate**: Every development-artifact path must pass `prepare_code_change` before mutation. The gate runs `thai-rag-mcp/pre_edit_context` and `godkiller/gk_task` with `action=edit_safe`; successful authorization is consumed after one successful mutation and must be refreshed before another edit.
+- **Curated Working Memory**: ChatGPT/Web clients get stable first-party `working_memory_search` and `working_memory_record` tools rather than flattening the entire `memory` child server into the top-level MCP catalog.
+- **Policy Drift Detection**: `AGENTS.md` is re-fingerprinted before pre-edit and code-mutation dispatch. Any change invalidates the session bootstrap and requires `workspace_bootstrap` again.
+- **Bundled Skill Stability**: Ponytail runtime skills use the stable `bundled:agent-skills/*` namespace and resolve both from packaged resources and a source-checkout `.agents/skills` fallback.
 
 ### 9. Zero-Overhead Local Web Control Plane
 - **Native HTTP Dashboard**: Zero-framework, ultra-fast Web Control Plane (`apps/web`) running at `http://127.0.0.1:3000/`.
@@ -255,6 +260,7 @@ After a reboot the two services start automatically, but the gateway itself need
 | **Workspace Path Containment** | `packages/filesystem/` & `packages/extensions/` | Blocks path traversal (`../`) attacks outside authorized project workspace boundaries. |
 | **Cryptographic Secret Redaction** | `packages/audit/src/redactor.ts` | Automatically sanitizes API tokens, private keys, and passwords from logs and activity journals. |
 | **Self-Aggregation Block** | `packages/extensions/src/mcp-config-loader.ts` | Prevents infinite loops caused by Unified-MPC-Server discovering and invoking itself as a child. |
+| **Workspace Harness & Mandatory Child Trust** | `packages/mcp-server/src/harness-runtime.ts` + `packages/extensions/src/extensions-service.ts` | Requires a readable `AGENTS.md`, fingerprints policy/child contracts, rejects workspace-scoped mandatory-child impersonation, and consumes per-path pre-edit authorization after each successful code mutation. |
 | **Permission Profiles** | `packages/permissions/src/profiles.ts` | Enforces tiered capability access (`safe` default, `balanced`, and audited `full` bypass). |
 
 ---

@@ -83,7 +83,16 @@ export class PosixProcessTree implements ProcessTreeTerminator {
     } catch (error: unknown) {
       if (!isNoSuchProcess(error)) throw new Error('POSIX process-group termination could not be started', { cause: error });
     }
-    if (await this.waitForExit(child, this.termGraceMs) && !this.processIsAlive(pid) && !this.processGroupIsAlive(pid)) return;
+    const exitedAfterTerm = await this.waitForExit(child, this.termGraceMs);
+    if (exitedAfterTerm && await this.waitForTreeGone(pid, this.termGraceMs)) return;
+
+    const rootAliveAfterTerm = this.processIsAlive(pid);
+    const groupAliveAfterTerm = this.processGroupIsAlive(pid);
+    if (!rootAliveAfterTerm && !groupAliveAfterTerm) return;
+    if (!rootAliveAfterTerm && groupAliveAfterTerm) {
+      throw new Error('POSIX process group remains live after its root exited; targeted termination refused');
+    }
+    if (!groupAliveAfterTerm) throw new Error('POSIX process group could not be verified; targeted termination refused');
 
     await verifyIdentity();
     try {
@@ -91,9 +100,20 @@ export class PosixProcessTree implements ProcessTreeTerminator {
     } catch (error: unknown) {
       if (!isNoSuchProcess(error)) throw new Error('POSIX process-group escalation could not be started', { cause: error });
     }
-    if (await this.waitForExit(child, this.killGraceMs) && !this.processIsAlive(pid) && !this.processGroupIsAlive(pid)) return;
+    const exitedAfterKill = await this.waitForExit(child, this.killGraceMs);
+    if (exitedAfterKill && await this.waitForTreeGone(pid, this.killGraceMs)) return;
     if (!this.processIsAlive(pid) && !this.processGroupIsAlive(pid)) return;
     throw new Error('POSIX process-group termination could not be verified');
+  }
+
+  private async waitForTreeGone(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      if (!this.processIsAlive(pid) && !this.processGroupIsAlive(pid)) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await delay(Math.min(10, remaining));
+    }
   }
 }
 
@@ -136,6 +156,10 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boole
     child.once('exit', onExit);
     child.once('close', onExit);
   });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function isNoSuchProcess(error: unknown): boolean {

@@ -55,17 +55,67 @@ export class LocalExtensionsService implements ExtensionsService {
 
   public async listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>> {
     const discovered = await this.loader().then((loader) => loader.discover());
+    const required = new Set(this.settingsProvider().mandatoryMcpServers.map((name) => name.trim().toLowerCase()));
     return ok({
       servers: discovered.map((server) => ({
         name: server.name,
         source: server.source,
         enabled: server.enabled,
         connected: this.sessions.isConnected(server.name),
+        pinned: this.sessions.isPinned(server.name),
+        required: required.has(server.name.toLowerCase()),
         excluded: server.excluded,
         ...(server.exclusionReason === undefined ? {} : { exclusionReason: server.exclusionReason }),
         command: server.config.command,
       })),
     });
+  }
+
+  public async bootstrapMandatoryMcpServers(signal?: AbortSignal): Promise<Result<import('./types.js').MandatoryMcpBootstrapResult>> {
+    const names = [...new Set(this.settingsProvider().mandatoryMcpServers.map((name) => name.trim()).filter(Boolean))];
+    const requiredNames = new Set(names.map((name) => name.toLowerCase()));
+    const discovered = await this.loader().then((loader) => loader.discover());
+    for (const server of discovered) {
+      if (!requiredNames.has(server.name.toLowerCase())) this.sessions.unpin(server.name);
+    }
+    const servers = await Promise.all(names.map(async (name) => {
+      if (isAborted(signal)) return { name, required: true as const, connected: false, pinned: false, tools: [], error: 'cancelled' };
+      const server = await this.findServer(name);
+      if (!server.ok) return { name, required: true as const, connected: false, pinned: false, tools: [], error: server.error.message };
+      if (!server.value.enabled || server.value.excluded) {
+        return {
+          name,
+          required: true as const,
+          connected: false,
+          pinned: false,
+          tools: [],
+          error: server.value.exclusionReason ?? 'required MCP server is disabled',
+        };
+      }
+      if (server.value.source.startsWith('workspace-')) {
+        return {
+          name: server.value.name,
+          required: true as const,
+          connected: false,
+          pinned: false,
+          tools: [],
+          error: `Refusing to promote workspace-scoped MCP server into the mandatory native harness: ${server.value.name}`,
+        };
+      }
+      const described = await this.sessions.describe(server.value.name, server.value.config, signal);
+      if (!described.ok) return { name, required: true as const, connected: false, pinned: false, tools: [], error: described.error.message };
+      this.sessions.pin(server.value.name);
+      return {
+        name: server.value.name,
+        required: true as const,
+        connected: true,
+        pinned: true,
+        descriptorFingerprint: fingerprintExternalMcpValue({ source: server.value.source, config: server.value.config }),
+        catalogFingerprint: described.value.catalogFingerprint,
+        tools: described.value.tools.map((tool) => tool.name),
+      };
+    }));
+    return ok({ ready: servers.every((server) => server.connected && server.pinned), servers });
   }
 
   public async describeMcpServer(input: { readonly server: string }, signal?: AbortSignal): Promise<Result<{
@@ -188,7 +238,8 @@ export class LocalExtensionsService implements ExtensionsService {
 
   private async findServer(name: string): Promise<Result<Awaited<ReturnType<McpConfigLoader['discover']>>[number]>> {
     const discovered = await this.loader().then((loader) => loader.discover());
-    const server = discovered.find((entry) => entry.name === name);
+    const normalized = name.trim().toLowerCase();
+    const server = discovered.find((entry) => entry.name.toLowerCase() === normalized);
     if (server === undefined) return err(appError('INVALID_INPUT', `Unknown MCP server: ${name}`));
     return ok(server);
   }

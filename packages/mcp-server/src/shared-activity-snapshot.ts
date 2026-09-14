@@ -488,6 +488,11 @@ async function runPosixProcessProbe(pid: number, timeoutMs: number): Promise<str
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 16 * 1024,
+      env: {
+        ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
+        LC_ALL: 'C',
+        LANG: 'C',
+      },
     });
     const startedAt = stdout.trim();
     if (startedAt.length === 0) return 'GONE';

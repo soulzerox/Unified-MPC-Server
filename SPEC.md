@@ -1,6 +1,6 @@
 # Unified-MPC-Server — Master Specification
 
-> **Status**: `audit-remediation-in-progress` (core targeted verification passes; live/release evidence pending)
+> **Status**: `runtime-harness-hardening-verified-locally` (workspace bootstrap, mandatory child-MCP trust, pre-edit enforcement, focused/full package verification complete; final repository/push evidence is recorded separately)
 > **Target Version**: `4.61.0`
 > **Source Base**: `engasnm111/lnwjud` (Clean Option A Pivot: Linux-only, Zero Backward Compat)  
 > **Repository**: `soulzerox/Unified-MPC-Server`  
@@ -198,18 +198,30 @@ The native CLI binary (`unified-mpc`) provides complete command-line control for
   - `1`: Domain or operational failure (e.g., target directory not found, command execution failed).
   - `2`: Syntax, argument, or validation error (e.g., unknown flag, missing required subcommand).
 
-### 7. Universal Senior Engineering Harness (Ponytail Runtime)
+### 7. Universal Senior Engineering Harness (Ponytail + Runtime Workspace Harness)
 
-Embedded in `packages/mcp-server`:
+Embedded in `packages/mcp-server` and backed by `packages/extensions`:
 - **Mindset Enforcement**: Prioritizes standard libraries and minimal diffs. Restricts speculative abstractions and premature dependencies.
 - **Intensity Tiers**:
-  - `OFF`: Standard tool pass-through.
-  - `LITE`: Warnings on oversized diffs and unreferenced dependencies.
-  - `FULL` (Default): Requires unit test verification before marking steps complete; triggers over-engineering checks.
-  - `ULTRA`: Strict red-green-refactor loop; blocks changes lacking test coverage or introducing non-essential packages.
-- **Two-Tier Tool Catalog**:
-  - **Tier 1 (Core)**: 10–12 fundamental tools (`read_file`, `edit_file`, `run_command`, `git_status`, `catalog_list`, `call_tool_dynamic`).
-  - **Tier 2 (On-Demand)**: All specialized downstream tools accessible via `catalog_list` (search metadata) and `call_tool_dynamic(tool_name, args)`.
+  - `OFF`: Standard tool execution without Ponytail skill enforcement; runtime workspace safety gates remain independent.
+  - `LITE`: Bounded Ponytail guidance.
+  - `FULL`: Requires the bundled primary Ponytail skill and fresh review evidence for coding-goal completion.
+  - `ULTRA`: Applies the strictest bundled Ponytail policy while preserving the same authorization/security boundaries.
+- **Fail-Closed Workspace Bootstrap**:
+  - `workspace_bootstrap(workspaceId)` must successfully read and SHA-256 fingerprint the workspace `AGENTS.md`; unavailable or unreadable harness content blocks readiness.
+  - The default mandatory native child MCP set is `memory`, `thai-rag-mcp`, and `godkiller`.
+  - Mandatory children are eagerly connected and pinned, launch/catalog contracts are fingerprinted, and exact required tool names are checked before readiness is recorded.
+  - Workspace-scoped MCP definitions are rejected for trusted mandatory-native promotion, preventing repository-controlled config from impersonating the mandatory child set.
+- **Single-Use Code Mutation Preflight**:
+  - `prepare_code_change(workspaceId, filePath, proposedSymbol?)` revalidates `AGENTS.md`, calls `thai-rag-mcp/pre_edit_context`, and calls `godkiller/gk_task` with `action=edit_safe`.
+  - A successful development-artifact mutation consumes that path's prepared authorization. Repeated edits require a new preflight.
+  - Any `AGENTS.md` change invalidates the bootstrap before subsequent code mutation.
+- **Curated Working Memory Surface**:
+  - `working_memory_search` and `working_memory_record` expose the bounded operations needed from the pinned `memory` child without flattening the entire child tool catalog into the client context.
+- **Stable Bundled Skill Discovery**:
+  - Bundled Ponytail skills use `bundled:agent-skills/*` identifiers and resolve from packaged resources or the source-tree `.agents/skills` fallback during development.
+- **Client Guidance + Runtime Enforcement**:
+  - MCP server `instructions` direct coding clients through `workspace_bootstrap` and `prepare_code_change`, while `ToolRegistry` independently blocks non-compliant code mutation.
 
 ---
 

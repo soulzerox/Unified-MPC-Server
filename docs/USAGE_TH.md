@@ -31,7 +31,7 @@ Unified-MPC-Server คือระบบบริหารจัดการ Mod
 
 ### ข้อกำหนดของระบบ
 - **OS**: Ubuntu Linux 22.04 LTS หรือ 24.04 LTS
-- **Node.js**: เวอร์ชั่น 20.x หรือ 22.x LTS
+- **Node.js**: เวอร์ชัน `>=22.0.0` (ต้องมี `node:sqlite`)
 - **Package Manager**: pnpm (ผ่าน Corepack)
 
 ### ขั้นตอนการ Build โปรเจกต์
@@ -87,16 +87,16 @@ pnpm cli sync --targets cursor,cline,antigravity
 
 **ติดตั้ง Skill:**
 ```bash
-pnpm cli install --skill ./path/to/my-skill --target antigravity --scope workspace
+pnpm cli install skill --name my-skill --source ./path/to/my-skill --targets antigravity --scope workspace
 ```
 
 **ติดตั้ง MCP Server:**
 ```bash
-pnpm cli install --server sqlite-db \
+pnpm cli install server --name sqlite-db \
   --transport stdio \
   --command npx \
   --args "-y mcp-server-sqlite --db /tmp/test.db" \
-  --target cursor
+  --targets cursor
 ```
 
 ### 3.5 ลบส่วนขยายที่ไม่ใช้งาน (`prune`)
@@ -109,21 +109,23 @@ pnpm cli prune --server deprecated-server --target all
 ### 3.6 เริ่มต้น Web Control Plane (`web`)
 รันเซอร์เวอร์หน้าเว็บ Dashboard และ REST API สำหรับควบคุมระบบ:
 ```bash
-# รันบนพอร์ตเริ่มต้น 18765
+# Dashboard ใช้พอร์ตเริ่มต้น 3000
 pnpm cli web
 
 # รันบนพอร์ตที่กำหนดเอง
 pnpm cli web --port 8080
 ```
 
+> MCP Streamable HTTP เป็นอีก runtime หนึ่ง โดยค่าเริ่มต้นอยู่ที่ `127.0.0.1:18765/mcp` ไม่ใช่พอร์ตเดียวกับ Dashboard
+
 ### 3.7 ตรวจสอบและรัน Tools (`tools`)
-เรียกดูรายการ Tools ในระบบหรือสั่งประมวลผลคำสั่งของ Tool โดยตรง:
+เรียกดูรายการ Tools ในระบบหรือเรียก tool โดยตรงด้วย JSON arguments:
 ```bash
 # ดูรายการเครื่องมือทั้งหมด
 pnpm cli tools list
 
-# สั่ง Execute เครื่องมือ
-pnpm cli tools exec --name bash --input '{"command": "uname -a"}'
+# เรียก tool โดยชื่อและส่ง arguments เป็น JSON
+pnpm cli tools call working_memory_search '{"workspaceId":"<workspace-id>","query":"current task"}'
 ```
 
 ---
@@ -156,6 +158,21 @@ Unified-MPC-Server กำหนดลำดับการเรียกใช�
 | **P7** | **`ui-skills`** | Skill Bundle | เรียกตามความจำเป็น | แนวทางและ Best Practice สำหรับการออกแบบและพัฒนา UI/UX |
 | **Fallback** | Native Tools | Built-in | สำรองสุดท้าย | ใช้เครื่องมือพื้นฐานเฉพาะเมื่อไม่มี MCP Tool ที่เหมาะสม |
 
+### Runtime Harness สำหรับ ChatGPT Web
+
+หลังเชื่อม Unified-MPC เป็น MCP connector แล้ว การมี child MCP อยู่ในเครื่อง **ไม่ได้หมายความว่า ChatGPT จะได้สิทธิ์ใช้เป็น mandatory native โดยอัตโนมัติ** ระบบจะบังคับลำดับที่ runtime ดังนี้:
+
+1. ก่อนแก้ source/config ครั้งแรก Client ต้องเรียก `workspace_bootstrap` พร้อม `workspaceId` ของโปรเจกต์
+2. Runtime จะอ่านและสร้าง fingerprint ของ `AGENTS.md` ถ้าไฟล์หายหรืออ่านไม่ได้ bootstrap จะ fail closed
+3. Runtime จะเชื่อมและ pin `memory`, `thai-rag-mcp`, `godkiller` และตรวจว่าแต่ละตัวมี tool ที่ harness ต้องใช้จริง
+4. MCP ที่มาจากไฟล์ใน workspace เช่น `.cursor/mcp.json` จะไม่สามารถปลอมชื่อมาทับ mandatory native MCP ได้
+5. ก่อนแก้ development artifact แต่ละ path ต้องเรียก `prepare_code_change`; ระบบจะรัน `thai-rag-mcp/pre_edit_context` และ `godkiller/gk_task` (`action=edit_safe`)
+6. สิทธิ์ pre-edit ใช้ได้หนึ่ง mutation ที่สำเร็จเท่านั้น จากนั้นต้องตรวจใหม่ก่อนแก้ path เดิมอีกครั้ง
+7. ถ้า `AGENTS.md` ถูกแก้ระหว่าง session bootstrap เดิมจะถูกยกเลิกและต้องเรียก `workspace_bootstrap` ใหม่
+8. Working memory สำหรับ ChatGPT ใช้ native surface `working_memory_search` และ `working_memory_record` แทนการยก tool ทั้งหมดของ child `memory` ขึ้นมาไว้ใน top-level catalog
+
+MCP `instructions` ของ Unified-MPC จะบอก flow นี้กับ Client โดยตรง แต่ enforcement อยู่ที่ `ToolRegistry` อีกชั้น ดังนั้นแม้ Client ไม่ทำตาม prompt การแก้โค้ดก็ยังถูกบล็อกก่อน mutation
+
 เมื่อสั่ง `pnpm cli sync` ระบบจะนำตารางและข้อกำหนดนี้ไปเขียนลงในไฟล์คอนฟิกของแต่ละ IDE ภายใต้บล็อก `<!-- MCP-POLICY-START -->` ... `<!-- MCP-POLICY-END -->` โดยไม่ทับคำสั่งเดิมของผู้ใช้
 
 ---
@@ -187,7 +204,7 @@ journalctl --user -u unified-mpc.service -f
 
 ## 7. การทดสอบและการตรวจสอบความถูกต้องของระบบ
 
-ในโปรเจกต์นี้มีชุดทดสอบครอบคลุมทั้ง 21 packages รวมกว่า 195 test suites และมากกว่า 1,780 test cases:
+โปรเจกต์มีชุดทดสอบระดับ package, integration และ runtime-contract ครอบคลุม monorepo ทั้งระบบ โดยจำนวน test cases เปลี่ยนตามรุ่น จึงควรยึดผลจากคำสั่ง verification ปัจจุบันแทนตัวเลขคงที่ในเอกสาร:
 
 ```bash
 # 1. ตรวจสอบ Lint (ESLint 9 + TypeScript-ESLint)

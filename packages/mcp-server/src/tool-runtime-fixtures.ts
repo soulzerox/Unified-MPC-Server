@@ -1,6 +1,7 @@
 import type { ToolRuntimeEvidence } from './tool-delivery-contract.js';
 
 export type ToolRuntimePreparation =
+  | 'workspace_bootstrap'
   | 'workspace_context'
   | 'workspace_full_scan'
   | 'read_file_page'
@@ -48,7 +49,7 @@ const unavailable = (
 ): ToolRuntimeFixture => ({ input, evidence: { kind: 'truthful_unavailable', unavailableStatus } });
 
 /**
- * Safe parse-valid inputs and expected delivery evidence for the 93 core tools.
+ * Safe parse-valid inputs and expected delivery evidence for the 99 core tools.
  * These are non-production fixtures: they use controlled workspace IDs, dry-run
  * inputs where available, and never point at a real user path.
  */
@@ -56,8 +57,12 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   workspace_list: service({}, 'workspaceInfo.list'),
   workspace_register: service({ path: 'E:\\project' }, 'workspaceInfo.register'),
   workspace_info: service({ workspaceId }, 'workspaceInfo.info'),
+  workspace_bootstrap: service({ workspaceId }, 'extensions.bootstrapMandatoryMcpServers'),
+  prepare_code_change: service({ workspaceId, filePath: 'src/smoke.ts', proposedSymbol: 'smoke' }, 'extensions.callMcpTool', 'workspace_bootstrap'),
   workspace_tree: service({}, 'workspaceQuery.tree'),
   project_snapshot: service({ workspaceId }, 'projectSnapshot.snapshot'),
+  working_memory_search: service({ workspaceId, query: 'current smoke task' }, 'extensions.callMcpTool', 'workspace_bootstrap'),
+  working_memory_record: service({ workspaceId, name: 'goal:smoke', observations: ['smoke progress'] }, 'extensions.callMcpTool', 'workspace_bootstrap'),
   read_file: service({ workspaceId, path: 'README.md' }, 'file.readFile'),
   read_files: service({ workspaceId, files: [{ path: 'README.md' }] }, 'file.readFiles'),
   search_files: service({ workspaceId }, 'search.searchFiles'),

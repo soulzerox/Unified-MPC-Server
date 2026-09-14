@@ -8,6 +8,7 @@ import {
   type InvocationAuthorization,
   type InvocationAuthorizationMode,
   type InvocationAuthorizationSource,
+  type Result,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
 import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
@@ -36,6 +37,7 @@ import { hasExplicitUserConfirmation } from './destructive-policy.js';
 import { isScopedAutoApprovalAllowed, type WorkspaceScope } from './destructive-scope.js';
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
+import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -60,6 +62,7 @@ import { capabilityTools } from './tools/capability-tools.js';
 import { fileTools } from './tools/file-tools.js';
 import { gitTools } from './tools/git-tools.js';
 import { goalTools } from './tools/goal-tools.js';
+import { harnessTools } from './tools/harness-tools.js';
 import { mcpBridgeTools } from './tools/mcp-bridge-tools.js';
 import { processTools } from './tools/process-tools.js';
 import { sessionTools } from './tools/session-tools.js';
@@ -101,6 +104,8 @@ export interface ToolRegistryOptions {
   readonly ponytailModeProvider?: () => PonytailMode;
   /** Shared by transport-scoped server factories so exact skill activation survives per-request registry recreation. */
   readonly ponytailActivationLedger?: PonytailActivationLedger;
+  /** Shared workspace harness/bootstrap and pre-edit authorization state for one MCP transport session. */
+  readonly harnessActivationLedger?: HarnessActivationLedger;
   /** Current persisted per-tool user availability snapshot. Read dynamically so one registry instance observes live changes. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
   readonly incrementalVerifier?: IncrementalVerifier;
@@ -159,6 +164,7 @@ export class ToolRegistry {
   private readonly destructivePolicyProvider: () => DestructiveAutoApprovalPolicy;
   private readonly ponytailModeProvider: () => PonytailMode;
   private readonly ponytailActivation: PonytailActivationLedger;
+  private readonly harnessActivation: HarnessActivationLedger;
   private readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
   private readonly activeWorkspaceScopesProvider: (() => Promise<readonly WorkspaceScope[]>) | undefined;
   private readonly enforceActiveWorkspaceScope: boolean;
@@ -181,6 +187,7 @@ export class ToolRegistry {
     this.destructivePolicyProvider = options.destructivePolicyProvider ?? ((): DestructiveAutoApprovalPolicy => legacyDeletePolicy(options.allowAiDeleteProvider?.() === true));
     this.ponytailModeProvider = options.ponytailModeProvider ?? ((): PonytailMode => DEFAULT_PONYTAIL_MODE);
     this.ponytailActivation = options.ponytailActivationLedger ?? new PonytailActivationLedger();
+    this.harnessActivation = options.harnessActivationLedger ?? new HarnessActivationLedger();
     this.activeWorkspaceScopeProvider = normalizeActiveWorkspaceScopeProvider(options);
     this.activeWorkspaceScopesProvider = normalizeActiveWorkspaceScopesProvider(options);
     this.enforceActiveWorkspaceScope = options.activeWorkspaceScopesProvider !== undefined || options.activeWorkspaceScopeProvider !== undefined || options.activeProjectProvider !== undefined;
@@ -194,6 +201,10 @@ export class ToolRegistry {
       contextEconomy,
       isToolExposed: (name) => this.isEffectivelyExposed(name),
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
+      bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
+      prepareCodeChange: (workspaceId, filePath, proposedSymbol, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, signal),
+      workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
+      workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
     const filePageEngine = new FilePageEngine(services, actor);
@@ -202,6 +213,7 @@ export class ToolRegistry {
     const files = fileTools(context);
     const allBaseTools: readonly McpToolDefinition[] = [
       ...workspace,
+      ...harnessTools(context),
       ...files.slice(0, 2),
       ...searchTools(context),
       ...gitTools(context),
@@ -414,6 +426,18 @@ export class ToolRegistry {
         }
       }
       const codingMutation = mutationDecision.kind !== 'read' && isCodingMutation(tool.name, activeRoutedInput);
+      if (codingMutation) {
+        const harnessError = await this.validateHarnessMutation(
+          mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId,
+          tool.name,
+          activeRoutedInput,
+        );
+        if (harnessError !== undefined && !harnessError.ok) {
+          const response = mapError(harnessError.error);
+          await this.activity.end(callId, harnessError.error.code, Date.now() - started, harnessError.error.message);
+          return response;
+        }
+      }
       const ponytailInvocation = codingMutation
         ? await this.resolvePonytailInvocation(mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId, goalLease?.goalId)
         : undefined;
@@ -527,6 +551,13 @@ export class ToolRegistry {
         : fullBypass ? `FULL BYPASS ON — ${rawResultTargetSummary}` : rawResultTargetSummary;
       if (resultTargetSummary !== undefined) this.activity.updateTarget(callId, resultTargetSummary);
       this.rememberActivityContext(name, response, activityWorkspaceId, resultTargetSummary ?? resolvedTargetSummary);
+      if (response.isError !== true && codingMutation) {
+        const harnessWorkspaceId = mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId;
+        if (harnessWorkspaceId !== undefined) {
+          const harnessContext = this.harnessContext(harnessWorkspaceId);
+          for (const path of codeMutationPaths(name, activeRoutedInput)) this.harnessActivation.consumePath(harnessContext, path);
+        }
+      }
       await this.recordPonytailOutcome(name, activeRoutedInput, response, activityWorkspaceId, ponytailInvocation);
 
       const resultCode = response.isError === true ? readErrorCode(response) ?? 'ERROR' : 'SUCCESS';
@@ -552,6 +583,182 @@ export class ToolRegistry {
       await this.activity.end(callId, 'INTERNAL_ERROR', Date.now() - started, 'Operation failed');
       return response;
     }
+  }
+
+  private harnessContext(workspaceId: string): HarnessActivationContext {
+    return { sessionId: this.sessionId ?? this.actor.sessionId ?? this.actor.clientId, workspaceId };
+  }
+
+  private async currentAgentsMdHash(workspaceId: string): Promise<Result<string>> {
+    if (this.services.file?.readFile === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Workspace AGENTS.md cannot be loaded because the file service is unavailable', true));
+    }
+    try {
+      const loaded = await this.services.file.readFile(this.actor, workspaceId, { path: 'AGENTS.md' });
+      if (!loaded.ok) {
+        return err(appError('CONFLICT', `Workspace AGENTS.md is unavailable: ${loaded.error.message}`, true));
+      }
+      if (typeof loaded.value.content !== 'string') {
+        return err(appError('CONFLICT', 'Workspace AGENTS.md did not return readable text content', true));
+      }
+      return ok(hashHarnessText(loaded.value.content));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return err(appError('CONFLICT', `Workspace AGENTS.md could not be loaded: ${message}`, true));
+    }
+  }
+
+  private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const extensions = this.services.extensions;
+    if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
+    const mandatoryMcp = await extensions.bootstrapMandatoryMcpServers(signal);
+    if (!mandatoryMcp.ok) return mandatoryMcp;
+    if (!mandatoryMcp.value.ready) {
+      const failed = mandatoryMcp.value.servers.filter((server) => !server.connected || !server.pinned).map((server) => server.name).join(', ');
+      return err(appError('CONFLICT', `Mandatory child MCP bootstrap is not ready: ${failed || 'unknown server'}`, true));
+    }
+    const requiredCapabilities: Readonly<Record<string, readonly string[]>> = {
+      memory: ['search_nodes', 'create_entities', 'add_observations'],
+      'thai-rag-mcp': ['pre_edit_context'],
+      godkiller: ['gk_task'],
+    };
+    for (const server of mandatoryMcp.value.servers) {
+      const required = requiredCapabilities[server.name.toLowerCase()] ?? [];
+      const missing = required.filter((tool) => !server.tools.includes(tool));
+      if (missing.length > 0) {
+        return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));
+      }
+    }
+    const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
+    if (!agentsMdHash.ok) return agentsMdHash;
+    const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp.value);
+    return ok({
+      ready: true,
+      agentsMdLoaded: true,
+      agentsMdHash: agentsMdHash.value,
+      harnessFingerprint: state.harnessFingerprint,
+      mandatoryMcp: mandatoryMcp.value,
+    });
+  }
+
+  private async prepareCodeChange(workspaceId: string, filePath: string, proposedSymbol: string | undefined, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const context = this.harnessContext(workspaceId);
+    const state = this.harnessActivation.state(context);
+    if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before prepare_code_change', true));
+    const currentHash = await this.currentAgentsMdHash(workspaceId);
+    if (!currentHash.ok) {
+      this.harnessActivation.invalidate(context);
+      return currentHash;
+    }
+    if (currentHash.value !== state.agentsMdHash) {
+      this.harnessActivation.invalidate(context);
+      return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again', true));
+    }
+    const extensions = this.services.extensions;
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
+    const thai = state.mandatoryMcp.servers.find((server) => server.name === 'thai-rag-mcp');
+    const godkiller = state.mandatoryMcp.servers.find((server) => server.name === 'godkiller');
+    if (thai === undefined || godkiller === undefined || thai.descriptorFingerprint === undefined || thai.catalogFingerprint === undefined || godkiller.descriptorFingerprint === undefined || godkiller.catalogFingerprint === undefined) {
+      return err(appError('CONFLICT', 'Mandatory pre-edit MCP contracts are unavailable; run workspace_bootstrap again', true));
+    }
+    const thaiCheck = await extensions.callMcpTool({
+      server: thai.name,
+      tool: 'pre_edit_context',
+      arguments: { file_path: filePath, workspace: workspaceId, ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }) },
+      descriptorFingerprint: thai.descriptorFingerprint,
+      catalogFingerprint: thai.catalogFingerprint,
+    }, signal);
+    if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
+    const godkillerCheck = await extensions.callMcpTool({
+      server: godkiller.name,
+      tool: 'gk_task',
+      arguments: { action: 'edit_safe', args: { file_path: filePath, workspace: workspaceId, ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }) }, kwargs: {} },
+      descriptorFingerprint: godkiller.descriptorFingerprint,
+      catalogFingerprint: godkiller.catalogFingerprint,
+    }, signal);
+    if (!godkillerCheck.ok) return err(appError('CONFLICT', `Godkiller pre-edit check failed: ${godkillerCheck.error.message}`, true));
+    this.harnessActivation.preparePath(context, filePath);
+    return ok({ ready: true, filePath, checks: ['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task'] });
+  }
+
+  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const state = this.harnessActivation.state(this.harnessContext(workspaceId));
+    if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before using working memory', true));
+    const memory = state.mandatoryMcp.servers.find((server) => server.name === 'memory');
+    if (memory?.descriptorFingerprint === undefined || memory.catalogFingerprint === undefined || this.services.extensions === undefined) {
+      return err(appError('CONFLICT', 'Pinned working-memory contract is unavailable; run workspace_bootstrap again', true));
+    }
+    return this.services.extensions.callMcpTool({
+      server: memory.name,
+      tool: 'search_nodes',
+      arguments: { query },
+      descriptorFingerprint: memory.descriptorFingerprint,
+      catalogFingerprint: memory.catalogFingerprint,
+    }, signal);
+  }
+
+  private async workingMemoryRecord(
+    workspaceId: string,
+    name: string,
+    entityType: string,
+    observations: readonly string[],
+    signal: AbortSignal,
+  ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const state = this.harnessActivation.state(this.harnessContext(workspaceId));
+    if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before using working memory', true));
+    const memory = state.mandatoryMcp.servers.find((server) => server.name === 'memory');
+    if (memory?.descriptorFingerprint === undefined || memory.catalogFingerprint === undefined || this.services.extensions === undefined) {
+      return err(appError('CONFLICT', 'Pinned working-memory contract is unavailable; run workspace_bootstrap again', true));
+    }
+    const contract = {
+      descriptorFingerprint: memory.descriptorFingerprint,
+      catalogFingerprint: memory.catalogFingerprint,
+    };
+    const searched = await this.services.extensions.callMcpTool({
+      server: memory.name,
+      tool: 'search_nodes',
+      arguments: { query: name },
+      ...contract,
+    }, signal);
+    if (!searched.ok) return err(appError('CONFLICT', `Working-memory lookup failed: ${searched.error.message}`, true));
+    const structured = isRecord(searched.value) && isRecord(searched.value.structuredContent) ? searched.value.structuredContent : undefined;
+    const entities = Array.isArray(structured?.entities) ? structured.entities : [];
+    const exists = entities.some((entity) => isRecord(entity) && readTrimmedString(entity.name) === name);
+    const written = exists
+      ? await this.services.extensions.callMcpTool({
+          server: memory.name,
+          tool: 'add_observations',
+          arguments: { observations: [{ entityName: name, contents: [...observations] }] },
+          ...contract,
+        }, signal)
+      : await this.services.extensions.callMcpTool({
+          server: memory.name,
+          tool: 'create_entities',
+          arguments: { entities: [{ name, entityType, observations: [...observations] }] },
+          ...contract,
+        }, signal);
+    return written.ok ? written : err(appError('CONFLICT', `Working-memory write failed: ${written.error.message}`, true));
+  }
+
+  private async validateHarnessMutation(workspaceId: string | undefined, toolName: string, input: unknown): Promise<ReturnType<typeof err> | undefined> {
+    if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return undefined;
+    const paths = codeMutationPaths(toolName, input);
+    if (paths.length === 0) return undefined;
+    const context = this.harnessContext(workspaceId);
+    const state = this.harnessActivation.state(context);
+    if (state === undefined) return err(appError('CONFLICT', 'Workspace engineering harness is not loaded; run workspace_bootstrap before code mutation', true));
+    const currentHash = await this.currentAgentsMdHash(workspaceId);
+    if (!currentHash.ok) {
+      this.harnessActivation.invalidate(context);
+      return currentHash;
+    }
+    if (currentHash.value !== state.agentsMdHash) {
+      this.harnessActivation.invalidate(context);
+      return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again before code mutation', true));
+    }
+    const unprepared = paths.find((path) => !this.harnessActivation.isPathPrepared(context, path));
+    if (unprepared !== undefined) return err(appError('CONFLICT', `Run prepare_code_change for ${unprepared} before code mutation`, true));
+    return undefined;
   }
 
   public async setPonytailSessionSuppressed(workspaceId: string, goalId: string | undefined, suppressed: boolean): Promise<boolean> {

@@ -17,6 +17,23 @@ export interface ExtensionsSettings {
   readonly disabledSkillRoots: readonly string[];
   readonly extraSkillRoots: readonly string[];
   readonly extraMcpServers: Readonly<Record<string, McpServerLaunchConfig>>;
+  readonly mandatoryMcpServers: readonly string[];
+}
+
+export interface MandatoryMcpServerStatus {
+  readonly name: string;
+  readonly required: true;
+  readonly connected: boolean;
+  readonly pinned: boolean;
+  readonly descriptorFingerprint?: string;
+  readonly catalogFingerprint?: string;
+  readonly tools: readonly string[];
+  readonly error?: string;
+}
+
+export interface MandatoryMcpBootstrapResult {
+  readonly ready: boolean;
+  readonly servers: readonly MandatoryMcpServerStatus[];
 }
 
 export type ExtensionTrustTier = 'bundled' | 'workspace' | 'user' | 'external';
@@ -85,6 +102,7 @@ export interface ExtensionsService {
   listSkills(input: { readonly query?: string; readonly source?: string }): Promise<Result<{ readonly skills: readonly SkillSummary[] }>>;
   readSkill(input: { readonly skillId: string; readonly relativePath?: string }): Promise<Result<SkillContent>>;
   listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>>;
+  bootstrapMandatoryMcpServers(signal?: AbortSignal): Promise<Result<MandatoryMcpBootstrapResult>>;
   describeMcpServer(input: { readonly server: string }, signal?: AbortSignal): Promise<Result<{
     readonly server: string;
     readonly enabled: boolean;
@@ -113,10 +131,14 @@ export interface McpServerListItem {
   readonly source: string;
   readonly enabled: boolean;
   readonly connected: boolean;
+  readonly pinned: boolean;
+  readonly required: boolean;
   readonly excluded: boolean;
   readonly exclusionReason?: string;
   readonly command: string;
 }
+
+export const DEFAULT_MANDATORY_MCP_SERVERS = Object.freeze(['memory', 'thai-rag-mcp', 'godkiller'] as const);
 
 export const DEFAULT_EXTENSIONS_SETTINGS: ExtensionsSettings = Object.freeze({
   mode: 'enable_all',
@@ -125,4 +147,5 @@ export const DEFAULT_EXTENSIONS_SETTINGS: ExtensionsSettings = Object.freeze({
   disabledSkillRoots: Object.freeze([]),
   extraSkillRoots: Object.freeze([]),
   extraMcpServers: Object.freeze({}),
+  mandatoryMcpServers: DEFAULT_MANDATORY_MCP_SERVERS,
 });

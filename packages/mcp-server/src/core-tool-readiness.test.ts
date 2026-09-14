@@ -8,6 +8,10 @@ const actor = { clientId: 'core-readiness-test', clientName: 'core-readiness-tes
 const workspaceId = 'workspace-1';
 
 const STATEFUL_CORE_SUCCESS_TOOLS = new Set([
+  'workspace_bootstrap',
+  'prepare_code_change',
+  'working_memory_search',
+  'working_memory_record',
   'workspace_context_continue',
   'workspace_full_scan_continue',
   'read_file_page_continue',
@@ -41,13 +45,13 @@ function coreToolNames(registry: ToolRegistry): string[] {
 }
 
 describe('core tool readiness', () => {
-  it('tracks one representative contract for every core tool in the complete 233-tool inventory', () => {
+  it('tracks one representative contract for every core tool in the complete 237-tool inventory', () => {
     const registry = coreRegistry();
-    expect(registry.listAll()).toHaveLength(233);
+    expect(registry.listAll()).toHaveLength(237);
     const advertisedUpgradeCount = UPGRADE_TOOL_CATALOG.filter((entry) => entry.deliveryState !== 'feature_disabled' && entry.deliveryState !== 'planned').length;
     expect(registry.list()).toHaveLength(coreToolNames(registry).length + advertisedUpgradeCount);
     expect(UPGRADE_TOOL_CATALOG).toHaveLength(138);
-    expect(coreToolNames(registry)).toHaveLength(95);
+    expect(coreToolNames(registry)).toHaveLength(99);
     expect(Object.keys(CORE_TOOL_SMOKE_INPUTS).sort()).toEqual(coreToolNames(registry));
   });
 
@@ -81,6 +85,13 @@ describe('core tool readiness', () => {
     const calls: string[] = [];
     const registry = successRegistry(calls);
 
+    await executeParsed(registry, 'workspace_bootstrap', { workspaceId });
+    await executeParsed(registry, 'prepare_code_change', { workspaceId, filePath: 'src/smoke.ts', proposedSymbol: 'smoke' });
+    await executeParsed(registry, 'working_memory_search', { workspaceId, query: 'current smoke task' });
+    await executeParsed(registry, 'working_memory_record', { workspaceId, name: 'goal:smoke', observations: ['smoke progress'] });
+    expect(calls).toContain('extensions.bootstrapMandatoryMcpServers');
+    expect(calls.filter((entry) => entry === 'extensions.callMcpTool').length).toBeGreaterThanOrEqual(4);
+
     const context = record(await executeParsed(registry, 'workspace_context', { workspaceId, query: 'smoke', pageSize: 1 }));
     expect(context.continuationToken).toEqual(expect.any(String));
     const contextBefore = calls.length;
@@ -113,7 +124,7 @@ describe('core tool readiness', () => {
     expect(calls).toContain('capabilities.accessibility');
   });
 
-  it('keeps the exhaustive success matrix aligned with all 95 core tools', () => {
+  it('keeps the exhaustive success matrix aligned with all 99 core tools', () => {
     const registry = coreRegistry();
     const generic = Object.keys(CORE_TOOL_SMOKE_INPUTS).filter((name) => !STATEFUL_CORE_SUCCESS_TOOLS.has(name));
     expect([...generic, ...STATEFUL_CORE_SUCCESS_TOOLS].sort()).toEqual(coreToolNames(registry));

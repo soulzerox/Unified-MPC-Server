@@ -14,6 +14,9 @@ export function parseExtensionsSettings(raw: string | null | undefined): Extensi
       disabledSkillRoots: stringArray(record.disabledSkillRoots),
       extraSkillRoots: stringArray(record.extraSkillRoots),
       extraMcpServers: mcpServerMap(record.extraMcpServers),
+      mandatoryMcpServers: record.mandatoryMcpServers === undefined
+        ? DEFAULT_EXTENSIONS_SETTINGS.mandatoryMcpServers
+        : stringArray(record.mandatoryMcpServers),
     };
   } catch {
     return DEFAULT_EXTENSIONS_SETTINGS;

@@ -76,6 +76,32 @@ describe('portable process contracts', () => {
     expect(signals).toEqual([]);
   });
 
+  it('allows a briefly visible process group to settle after the owned root exits', async () => {
+    const signals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    let rootAlive = true;
+    let groupProbes = 0;
+    const child = { exitCode: null, signalCode: null, once: vi.fn(), removeListener: vi.fn() } as never;
+    const tree = new PosixProcessTree({
+      platform: 'linux',
+      processIsAlive: (): boolean => rootAlive,
+      processGroupIsAlive: (): boolean => {
+        groupProbes += 1;
+        return groupProbes < 4;
+      },
+      processStartedAt: async (): Promise<string | null> => rootAlive ? '2026-08-20T00:00:00.000Z' : null,
+      processKill: (pid, signal): void => { signals.push({ pid, signal }); },
+      waitForExit: async (): Promise<boolean> => {
+        rootAlive = false;
+        return true;
+      },
+      termGraceMs: 25,
+      killGraceMs: 25,
+    });
+
+    await expect(tree.stop(child, 4242)).resolves.toBeUndefined();
+    expect(signals).toEqual([{ pid: -4242, signal: 'SIGTERM' }]);
+  });
+
   it('does not treat a closed root as proof that its detached descendants are gone', async () => {
     const signals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
     const child = { exitCode: null, signalCode: null } as never;

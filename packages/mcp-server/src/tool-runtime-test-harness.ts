@@ -105,12 +105,25 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     scheduledContinuations: serviceProxy('scheduledContinuations', calls, (method) => method === 'authorizeWorkspaceMutation'
       ? { allowed: true }
       : { continuationId: 'continuation-1', status: 'scheduled', version: 1 }),
-    extensions: serviceProxy('extensions', calls, (method) => {
+    extensions: serviceProxy('extensions', calls, (method, args) => {
       if (method === 'listSkills') return { skills: [] };
       if (method === 'readSkill') return { id: 'skill-1', name: 'Smoke', description: 'Smoke', source: 'workspace', path: 'SKILL.md', content: '# Smoke' };
       if (method === 'listMcpServers') return { servers: [{ name: 'server-1' }] };
       if (method === 'describeMcpServer') return { server: 'server-1', enabled: true, connected: true, tools: [] };
       if (method === 'listMcpResources') return { server: 'server-1', enabled: true, connected: true, resources: [{ uri: 'file:///resource.txt', name: 'resource' }] };
+      if (method === 'bootstrapMandatoryMcpServers') return {
+        ready: true,
+        servers: [
+          { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'] },
+          { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'] },
+          { name: 'godkiller', required: true, connected: true, pinned: true, descriptorFingerprint: 'c'.repeat(64), catalogFingerprint: '3'.repeat(64), tools: ['gk_task'] },
+        ],
+      };
+      if (method === 'callMcpTool') {
+        const request = runtimeRecord(args[0]);
+        if (request.server === 'memory' && request.tool === 'search_nodes') return { structuredContent: { entities: [], relations: [] } };
+        return { called: true };
+      }
       return { called: true };
     }),
     localProviders: () => ({ pdfProvider: '__unified-mpc_missing_pdf_provider__.exe' }),

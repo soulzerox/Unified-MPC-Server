@@ -99,6 +99,8 @@ export function inspectMutationOperation(
       return read('batch dispatcher applies mutation policy independently to every child call');
     case 'workspace_register':
       return boundedWrite('workspace_register adds a validated project registration without changing project files');
+    case 'working_memory_record':
+      return boundedWrite('working_memory_record appends bounded project work-log state through the pinned memory MCP');
     case 'write_file':
       return value.overwriteExisting === true
         ? replace('write_file explicitly replaces existing file content')

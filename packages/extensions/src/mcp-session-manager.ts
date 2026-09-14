@@ -44,6 +44,7 @@ export class McpSessionManager {
   private readonly pendingConnections = new Map<string, PendingConnection>();
   private readonly lastLaunchFingerprints = new Map<string, string>();
   private readonly lastCatalogFingerprints = new Map<string, string>();
+  private readonly pinnedServers = new Set<string>();
   private readonly factory: McpClientFactory;
   private readonly callTimeoutMs: number;
   private readonly idleTimeoutMs: number;
@@ -58,6 +59,18 @@ export class McpSessionManager {
 
   public isConnected(server: string): boolean {
     return this.sessions.has(server);
+  }
+
+  public pin(server: string): void {
+    this.pinnedServers.add(server);
+  }
+
+  public unpin(server: string): void {
+    this.pinnedServers.delete(server);
+  }
+
+  public isPinned(server: string): boolean {
+    return this.pinnedServers.has(server);
   }
 
   public async describe(server: string, config: McpServerLaunchConfig, signal?: AbortSignal): Promise<Result<{
@@ -308,6 +321,7 @@ export class McpSessionManager {
   private async sweepIdle(): Promise<void> {
     const now = Date.now();
     for (const [name, managed] of this.sessions) {
+      if (this.pinnedServers.has(name)) continue;
       if (now - managed.lastUsedAt >= this.idleTimeoutMs) await this.drop(name);
     }
   }

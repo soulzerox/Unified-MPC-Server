@@ -8,6 +8,13 @@ describe('MCP Ponytail instructions', () => {
     expect(buildMcpInstructions('off')).not.toContain(BUNDLED_PONYTAIL_SKILL_ID);
   });
 
+  it('directs coding clients through workspace bootstrap and per-file pre-edit gates', () => {
+    const instructions = buildMcpInstructions('off');
+    expect(instructions).toContain('workspace_bootstrap');
+    expect(instructions).toContain('prepare_code_change');
+    expect(instructions).toContain('before the first code mutation');
+  });
+
   it.each(['lite', 'full', 'ultra'] as const)('adds a bounded exact-load directive for %s', (mode) => {
     const instructions = buildMcpInstructions(mode);
     expect(instructions).toContain(MCP_OUTCOME_DRIVEN_INSTRUCTIONS);

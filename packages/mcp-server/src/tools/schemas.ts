@@ -14,6 +14,22 @@ export const lineRangeSchema = z.object({
 }).refine((value) => value.startLine === undefined || value.endLine === undefined || value.startLine <= value.endLine, 'Line range is invalid');
 
 export const workspaceInfoSchema = z.object({ workspaceId: workspaceIdSchema }).strict();
+export const workspaceBootstrapSchema = workspaceInfoSchema;
+export const prepareCodeChangeSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  filePath: pathSchema,
+  proposedSymbol: z.string().trim().max(512).optional(),
+}).strict();
+export const workingMemorySearchSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  query: z.string().trim().min(1).max(4096),
+}).strict();
+export const workingMemoryRecordSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  name: z.string().trim().min(1).max(512),
+  entityType: z.string().trim().min(1).max(128).default('work-log'),
+  observations: z.array(z.string().trim().min(1).max(8192)).min(1).max(50),
+}).strict();
 export const workspaceTreeSchema = z.object({ workspaceId: optionalWorkspaceIdSchema, path: pathSchema.optional(), maxDepth: z.number().int().min(1).max(MAX_TREE_DEPTH).optional(), maxEntries: z.number().int().min(1).max(MAX_TREE_ENTRIES).optional() }).strict();
 export const projectSnapshotSchema = z.object({ workspaceId: workspaceIdSchema }).strict();
 export const readFileSchema = z.object({ workspaceId: optionalWorkspaceIdSchema, path: pathSchema, ...lineRangeSchema.shape }).strict().refine((value) => value.startLine === undefined || value.endLine === undefined || value.startLine <= value.endLine, 'Line range is invalid');

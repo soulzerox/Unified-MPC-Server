@@ -1,6 +1,8 @@
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import {
+  prepareCodeChangeSchema,
   projectSnapshotSchema,
+  workspaceBootstrapSchema,
   workspaceInfoSchema,
   workspaceListSchema,
   workspaceRegisterSchema,
@@ -50,6 +52,26 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input) => context.services.workspaceInfo === undefined
         ? missingService()
         : context.services.workspaceInfo.info(context.actor, input.workspaceId),
+    }),
+    defineTool({
+      name: 'workspace_bootstrap',
+      description: 'Load and fingerprint the workspace engineering harness, then eagerly connect and pin mandatory child MCP servers before code mutation.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: workspaceBootstrapSchema,
+      handler: async (input, signal) => context.bootstrapWorkspaceHarness === undefined
+        ? missingService()
+        : context.bootstrapWorkspaceHarness(input.workspaceId, signal),
+    }),
+    defineTool({
+      name: 'prepare_code_change',
+      description: 'Run mandatory Thai-RAG and Godkiller pre-edit diagnostics for one development-artifact path and authorize that path for the current harness session.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: prepareCodeChangeSchema,
+      handler: async (input, signal) => context.prepareCodeChange === undefined
+        ? missingService()
+        : context.prepareCodeChange(input.workspaceId, input.filePath, input.proposedSymbol, signal),
     }),
     defineTool({
       name: 'workspace_tree',

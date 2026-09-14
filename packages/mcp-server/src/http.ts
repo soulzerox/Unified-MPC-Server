@@ -22,6 +22,7 @@ import { maybeHandleModernTasksWireRequest, maybeTransformModernTasksWireRespons
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { RunBudgetGuard } from './run-budget.js';
 import { PonytailActivationLedger } from './ponytail-runtime.js';
+import { HarnessActivationLedger } from './harness-runtime.js';
 import { createOriginPolicy, type OriginPolicy } from './origin-policy.js';
 import { APP_NAME, APP_VERSION } from '@unified-mpc/shared';
 
@@ -205,6 +206,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   const incrementalVerifier = options.incrementalVerifier ?? new IncrementalVerifier();
   const setOfMarksStore = options.setOfMarksStore ?? new SetOfMarksObservationStore();
   const ponytailActivationLedger = options.ponytailActivationLedger ?? new PonytailActivationLedger();
+  const harnessActivationLedger = options.harnessActivationLedger ?? new HarnessActivationLedger();
   const endpointFallbackSessionId = randomUUID();
   const factory = (request?: Request): McpServer => createMcpServer({
     ...options,
@@ -212,6 +214,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     incrementalVerifier,
     setOfMarksStore,
     ponytailActivationLedger,
+    harnessActivationLedger,
     legacyTasksProtocol: false,
     requestScope: createHttpRequestScope({ ...(request === undefined ? {} : { request }), fallbackSessionId: endpointFallbackSessionId }),
   });
@@ -234,6 +237,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       incrementalVerifier,
       setOfMarksStore,
       ponytailActivationLedger,
+      harnessActivationLedger,
       legacyTasksProtocol: true,
       requestScope: createProtocolHttpRequestScope(protocolSessionId),
     });

@@ -27,6 +27,7 @@ import type {
 } from '@unified-mpc/application';
 import { z } from 'zod';
 import type { ContextEconomyRuntime } from '../context-economy.js';
+import type { RecordTurnInput } from '../turn-persistence.js';
 
 export interface WorkspaceInfoPort {
   info(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
@@ -116,6 +117,8 @@ export interface McpToolContext {
   readonly contextEconomy: ContextEconomyRuntime;
   /** Dynamic registry exposure predicate used by discovery/ranking helpers. */
   readonly isToolExposed?: (name: string) => boolean;
+  /** Live canonical tool definitions used by discovery so meta-catalogs cannot drift from the registry. */
+  readonly discoveryTools?: () => readonly McpToolDefinition[];
   /** Session-scoped Ponytail suppression owned by the current ToolRegistry/transport ledger. */
   readonly setPonytailSessionSuppressed?: (workspaceId: string, goalId: string | undefined, suppressed: boolean) => Promise<boolean>;
   /** Resolve live policy and load the mandatory session-start routing skill in one read-only call. */
@@ -128,6 +131,8 @@ export interface McpToolContext {
   readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Create or append a work-log entity through the pinned native working-memory child. */
   readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Persist one bounded interaction through the curated local RAG child. */
+  readonly recordTurn?: (input: RecordTurnInput, signal: AbortSignal) => Promise<Result<unknown>>;
 }
 
 export interface ToolConfig<T extends z.ZodType> {

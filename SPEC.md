@@ -218,10 +218,18 @@ Embedded in `packages/mcp-server` and backed by `packages/extensions`:
   - Any `AGENTS.md` change invalidates the bootstrap before subsequent code mutation.
 - **Curated Working Memory Surface**:
   - `working_memory_search` and `working_memory_record` expose the bounded operations needed from the pinned `memory` child without flattening the entire child tool catalog into the client context.
+- **Per-Task Bootstrap and Lazy Child Routing**:
+  - `task_bootstrap` is a public registry primitive and must resolve the live runtime-policy snapshot plus the configured session-start engineering skill before planning or acting on each user task.
+  - Optional child MCP servers remain lazy. A policy-declared `readOnlyTools` allowlist may bypass the host mutation prompt only after `mcp_describe` establishes matching live descriptor/catalog fingerprints. Context7 uses `resolve-library-id` and `query-docs`; Filesystem uses the explicitly reviewed read/list/search metadata surface. Unknown or mutating child calls remain opaque and retain the normal approval boundary.
+- **Completed-Turn Local RAG Persistence**:
+  - `record_turn` is a bounded parent-owned `WRITE` primitive whose destination is fixed to `thai-rag-mcp/remember_turn`; callers cannot redirect it to another child server or child tool.
+  - The parent describes the live Thai-RAG child before persistence, supplies the current descriptor/catalog fingerprints on every call, and rejects workspace-scoped child definitions from impersonating the trusted persistence target.
+  - A transport-scoped bounded idempotency ledger deduplicates one stable `turnId` per user/assistant role across request-scoped MCP server recreation. Failed or cancelled persistence releases the claim so the host can retry safely.
+  - Host transcript availability remains explicit: the MCP server records text supplied by the client and does not infer invisible ChatGPT conversation content.
 - **Stable Bundled Skill Discovery**:
   - Bundled Ponytail skills use `bundled:agent-skills/*` identifiers and resolve from packaged resources or the source-tree `.agents/skills` fallback during development.
 - **Client Guidance + Runtime Enforcement**:
-  - MCP server `instructions` direct coding clients through `workspace_bootstrap` and `prepare_code_change`, while `ToolRegistry` independently blocks non-compliant code mutation.
+  - MCP server `instructions` direct clients through `task_bootstrap` at task start, `workspace_bootstrap`/`prepare_code_change` for guarded coding work, and `record_turn` at completed turn boundaries when transcript text is available; `ToolRegistry` independently enforces the mutation and child-MCP trust boundaries.
 
 ---
 

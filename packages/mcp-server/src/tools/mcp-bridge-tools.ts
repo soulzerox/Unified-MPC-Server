@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema } from './schemas.js';
+import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema, recordTurnSchema } from './schemas.js';
 
 const installTargetSchema = z.enum(['antigravity', 'cursor', 'claude', 'codex', 'cline', 'opencode', 'all']);
 const mcpInstallSchema = z.object({
@@ -64,6 +64,23 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input, signal) => context.services.extensions === undefined
         ? missingService()
         : context.services.extensions.describeMcpServer({ server: input.server }, signal),
+    }),
+    defineTool({
+      name: 'record_turn',
+      description: 'Persist one bounded user/assistant interaction through the curated local RAG child. The child server and tool are fixed by unified-mpc; callers cannot redirect this primitive to arbitrary MCP mutations. Hosts should call this at a completed turn boundary when transcript persistence is available.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: recordTurnSchema,
+      handler: async (input, signal) => context.recordTurn === undefined
+        ? missingService()
+        : context.recordTurn({
+            turnId: input.turnId,
+            userContent: input.userContent,
+            ...(input.assistantContent === undefined ? {} : { assistantContent: input.assistantContent }),
+            ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
+            ...(input.summary === undefined ? {} : { summary: input.summary }),
+            ...(input.tags === undefined ? {} : { tags: input.tags }),
+          }, signal),
     }),
     defineTool({
       name: 'mcp_install',

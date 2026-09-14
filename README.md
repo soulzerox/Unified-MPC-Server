@@ -91,9 +91,12 @@ The default policy order is:
 
 The Web Control Plane can add/remove policies, edit resource/type/mandatory/enforcement/required-tools/directive fields, and move any policy to a new P-position. `POST /api/policies` persists that ordered policy array; `policy_snapshot` exposes the live reconciled view; IDE policy sync compiles the same order into bounded rule blocks. Newly discovered non-mandatory MCP servers can also appear as runtime `AUTO_ROUTE` policies without flattening child tool schemas into the top-level catalog.
 
+For every user task, the public `task_bootstrap` primitive resolves the live policy snapshot and session-start `ask-matt` skill in one server-side read. Optional child MCP tools remain lazy: policy-vetted read-only calls such as Context7 documentation lookups and Filesystem reads may execute through the parent without a host mutation prompt only when the supplied live descriptor/catalog fingerprints still match; unknown or mutating child calls keep the normal approval boundary.
+
 ### 3. Two-Tier Context Preservation Catalog
 - **LLM Context Optimization**: Traditional MCP gateways flood the AI model's context window with dozens of massive tool schemas, inflating token costs and causing instruction distraction.
-- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets (e.g. Codex delegation, Agent Swarms, AST parsers, upgrade catalogs) on demand.
+- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets and optional child MCP servers on demand. Mandatory workspace-harness children are pinned only after `workspace_bootstrap`; optional children connect for discovery/calls and may be released again when idle.
+- **Completed-Turn Local RAG Persistence**: `record_turn` is a bounded parent-owned write fixed to `thai-rag-mcp/remember_turn`. HTTP/stdio transports share a bounded idempotency ledger so the same stable turn ID is not persisted twice when request-scoped registries are recreated. The parent first verifies the live child contract and refuses workspace-scoped Thai-RAG shadow definitions; generic mutating `mcp_call` remains separately guarded.
 
 ### 4. Bifurcated Dynamic Ingestion Engine
 - **Strict Boundary Separation**: Eliminates polyglot configuration errors by enforcing a rigid architectural split between:

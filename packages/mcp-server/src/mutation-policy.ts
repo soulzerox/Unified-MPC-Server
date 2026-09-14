@@ -106,6 +106,8 @@ export function inspectMutationOperation(
       return boundedWrite(`${toolName} installs validated extension state without executing repository install scripts`);
     case 'working_memory_record':
       return boundedWrite('working_memory_record appends bounded project work-log state through the pinned memory MCP');
+    case 'record_turn':
+      return boundedWrite('record_turn persists bounded interaction text through the curated local RAG child');
     case 'write_file':
       return value.overwriteExisting === true
         ? replace('write_file explicitly replaces existing file content')

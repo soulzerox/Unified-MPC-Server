@@ -7,6 +7,7 @@ import { IncrementalVerifier } from './incremental-verifier.js';
 import { RunBudgetGuard } from './run-budget.js';
 import { PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
+import { TurnPersistenceLedger } from './turn-persistence.js';
 import { createStdioRequestScope } from './request-scope.js';
 
 export interface McpStdioOptions extends McpServerOptions {
@@ -31,11 +32,12 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
   const setOfMarksStore = options.setOfMarksStore ?? new SetOfMarksObservationStore();
   const ponytailActivationLedger = options.ponytailActivationLedger ?? new PonytailActivationLedger();
   const harnessActivationLedger = options.harnessActivationLedger ?? new HarnessActivationLedger();
+  const turnPersistenceLedger = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
   const requestScope = options.requestScope ?? createStdioRequestScope();
   const modernTasks = new ModernTasksProtocol(options.services, { actor: options.actor });
   const transport = createModernTasksTransport(new StdioServerTransport(), modernTasks);
   return serveStdio(
-    () => createMcpServer({ ...options, runBudgetGuard, incrementalVerifier, setOfMarksStore, ponytailActivationLedger, harnessActivationLedger, legacyTasksProtocol: false, requestScope }),
+    () => createMcpServer({ ...options, runBudgetGuard, incrementalVerifier, setOfMarksStore, ponytailActivationLedger, harnessActivationLedger, turnPersistenceLedger, legacyTasksProtocol: false, requestScope }),
     { legacy: 'reject', onerror: options.onError ?? writeStdioDiagnostic, transport },
   );
 }

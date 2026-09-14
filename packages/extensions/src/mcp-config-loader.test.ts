@@ -54,6 +54,37 @@ describe('McpConfigLoader', () => {
     ]));
   });
 
+  it('discovers remote HTTP and SSE MCP servers from client config', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-mcp-remote-'));
+    temporaryRoots.push(home);
+    await mkdir(path.join(home, '.cursor'), { recursive: true });
+    await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
+      mcpServers: {
+        'remote-http': { type: 'http', url: 'https://mcp.example.com/rpc' },
+        'remote-sse': { type: 'sse', url: 'https://mcp.example.com/events' },
+      },
+    }), 'utf8');
+
+    const servers = await new McpConfigLoader({
+      homeDir: home,
+      appDataDir: path.join(home, 'AppData', 'Roaming'),
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+    }).discover();
+
+    expect(servers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'remote-http',
+        enabled: true,
+        config: expect.objectContaining({ type: 'http', url: 'https://mcp.example.com/rpc' }),
+      }),
+      expect.objectContaining({
+        name: 'remote-sse',
+        enabled: true,
+        config: expect.objectContaining({ type: 'sse', url: 'https://mcp.example.com/events' }),
+      }),
+    ]));
+  });
+
   it.runIf(process.platform === 'win32' || process.platform === 'darwin' || process.platform === 'linux')('discovers Claude Desktop MCP config from the current native host default location', async () => {
     const platform = process.platform as 'win32' | 'darwin' | 'linux';
     const home = await mkdtemp(path.join(os.tmpdir(), `unified-mpc-mcp-${platform}-`));

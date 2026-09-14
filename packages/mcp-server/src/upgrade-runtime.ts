@@ -135,6 +135,8 @@ const PRIMITIVE_SEARCH_ENTRIES: readonly SearchCatalogEntry[] = [
   primitiveEntry('read_files', 'Read multiple guarded workspace files.', 'READ', ['workspace', 'file', 'read']),
   primitiveEntry('search_files', 'Search guarded workspace file paths.', 'READ', ['workspace', 'search', 'read']),
   primitiveEntry('search_text', 'Search guarded workspace text.', 'READ', ['workspace', 'search', 'read']),
+  primitiveEntry('skills_install', 'Install a validated local or HTTPS Git Agent Skill through the shared extension installer.', 'WRITE', ['skills', 'install', 'git', 'url']),
+  primitiveEntry('mcp_install', 'Install a stdio MCP server from a command or HTTPS Git repository, or register an HTTP/SSE endpoint, through the shared extension installer.', 'WRITE', ['mcp', 'install', 'git', 'url', 'gateway']),
   primitiveEntry('git', 'Run a guarded Git operation.', 'EXECUTE', ['git', 'execute']),
   primitiveEntry('write_file', 'Guarded text file creation or replacement with checkpoint protection; prefer over shell filesystem scripts.', 'WRITE', ['workspace', 'file', 'write', 'create', 'replace', 'text']),
   primitiveEntry('apply_patch', 'Apply a guarded workspace patch.', 'WRITE', ['workspace', 'file', 'write']),

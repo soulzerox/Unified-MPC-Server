@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Client } from '@modelcontextprotocol/client';
+import { Client, SSEClientTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { ExternalMcpContractDrift, McpResourceSummary, McpServerLaunchConfig, McpToolSummary } from './types.js';
@@ -329,17 +329,29 @@ export class McpSessionManager {
 
 export const defaultMcpClientFactory: McpClientFactory = {
   async connect(config: McpServerLaunchConfig, signal?: AbortSignal): Promise<McpClientSession> {
-    const transport = new StdioClientTransport({
-      command: config.command,
-      args: [...(config.args ?? [])],
-      ...(config.cwd === undefined ? {} : { cwd: config.cwd }),
-      env: {
-        ...definedEnv(process.env),
-        ...(config.env ?? {}),
-      },
-      stderr: 'pipe',
-    });
-    const disposeStderrDrain = attachChildStderrDrain(transport.stderr);
+    let disposeStderrDrain = (): void => undefined;
+    let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
+    if (config.type === 'http' || config.type === 'sse') {
+      if (config.url === undefined) throw new Error(`${config.type} MCP transport requires a URL`);
+      const url = new URL(config.url);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Unsupported MCP URL protocol: ${url.protocol}`);
+      transport = config.type === 'http'
+        ? new StreamableHTTPClientTransport(url)
+        : new SSEClientTransport(url);
+    } else {
+      const stdio = new StdioClientTransport({
+        command: config.command,
+        args: [...(config.args ?? [])],
+        ...(config.cwd === undefined ? {} : { cwd: config.cwd }),
+        env: {
+          ...definedEnv(process.env),
+          ...(config.env ?? {}),
+        },
+        stderr: 'pipe',
+      });
+      disposeStderrDrain = attachChildStderrDrain(stdio.stderr);
+      transport = stdio;
+    }
     const client = new Client(
       { name: 'unified-mpc-mcp-bridge', version: '1.0.0' },
       { versionNegotiation: { mode: 'auto' } },

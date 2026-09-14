@@ -34,6 +34,7 @@ export interface McpServerLaunchConfig {
   readonly env?: Readonly<Record<string, string>>;
   readonly cwd?: string;
   readonly type?: string;
+  readonly url?: string;
 }
 
 export interface ExtensionsSettings {

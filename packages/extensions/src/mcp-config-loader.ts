@@ -145,6 +145,18 @@ export function normalizeLaunchConfig(
 ): McpServerLaunchConfig | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
+  const type = typeof record.type === 'string' ? record.type.trim().toLowerCase() : undefined;
+  if (type === 'http' || type === 'sse') {
+    if (typeof record.url !== 'string' || record.url.trim().length === 0) return undefined;
+    const url = substitute(record.url, workspaceRoot, env);
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+    } catch {
+      return undefined;
+    }
+    return { command: url, type, url };
+  }
   if (typeof record.command !== 'string' || record.command.trim().length === 0) return undefined;
   const args = Array.isArray(record.args)
     ? record.args.filter((entry): entry is string => typeof entry === 'string').map((entry) => substitute(entry, workspaceRoot, env))
@@ -161,7 +173,7 @@ export function normalizeLaunchConfig(
     ...(args === undefined ? {} : { args }),
     ...(envConfig === undefined ? {} : { env: envConfig }),
     ...(typeof record.cwd === 'string' ? { cwd: substitute(record.cwd, workspaceRoot, env) } : {}),
-    ...(typeof record.type === 'string' ? { type: record.type } : {}),
+    ...(type === undefined ? {} : { type }),
   };
 }
 

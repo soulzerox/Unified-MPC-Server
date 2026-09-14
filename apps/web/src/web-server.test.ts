@@ -733,6 +733,41 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
+  it('routes WebUI MCP Git and remote endpoint installs through InstallerService', async () => {
+    const installed: unknown[] = [];
+    const installer = {
+      installServer: async (input: unknown) => {
+        installed.push(input);
+        const server = input as { name: string; targets: readonly string[] };
+        return { ok: true, value: { name: server.name, updatedConfigFiles: [], targets: server.targets } };
+      },
+    } as unknown as InstallerService;
+    const remote = new ControlPlaneServer({ port: 0, gateway, installer, capabilityToken });
+    await remote.listen();
+    try {
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${remote.port}`, 'x-unified-mpc-capability': capabilityToken };
+      const gitSource = 'https://github.com/example/example-mcp.git';
+      const gitResponse = await fetch(`http://127.0.0.1:${remote.port}/api/servers/install`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ name: 'git-mcp', transport: 'stdio', source: gitSource, targets: ['cursor'] }),
+      });
+      const endpoint = 'https://mcp.example.com/rpc';
+      const httpResponse = await fetch(`http://127.0.0.1:${remote.port}/api/servers/install`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ name: 'remote-mcp', transport: 'http', url: endpoint, targets: ['cursor'] }),
+      });
+
+      expect(gitResponse.status).toBe(200);
+      expect(httpResponse.status).toBe(200);
+      expect(installed).toEqual([
+        expect.objectContaining({ name: 'git-mcp', transport: 'stdio', source: gitSource, targets: ['cursor'] }),
+        expect.objectContaining({ name: 'remote-mcp', transport: 'http', url: endpoint, targets: ['cursor'] }),
+      ]);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it('returns policy table on GET /api/policies', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/policies`);
     expect(res.status, await res.clone().text()).toBe(200);

@@ -64,6 +64,24 @@ describe('upgrade runtime', () => {
     } });
   });
 
+  it('discovers core URL install tools through the ChatGPT-facing tool catalog without re-registering them as upgrade tools', async () => {
+    const runtime = new UpgradeRuntimeService({}, actor);
+
+    await expect(runtime.execute('tool_describe', { name: 'skills_install' })).resolves.toMatchObject({
+      ok: true,
+      value: { found: true, contractSource: 'primitive-registry', permission: 'WRITE' },
+    });
+    await expect(runtime.execute('tool_describe', { name: 'mcp_install' })).resolves.toMatchObject({
+      ok: true,
+      value: { found: true, contractSource: 'primitive-registry', permission: 'WRITE' },
+    });
+
+    const skillSearch = await runtime.execute('tool_search', { query: 'install agent skill from github url' });
+    const mcpSearch = await runtime.execute('tool_search', { query: 'install mcp server from github url' });
+    expect(skillSearch.ok && skillSearch.value.matches.some((entry) => entry.name === 'skills_install')).toBe(true);
+    expect(mcpSearch.ok && mcpSearch.value.matches.some((entry) => entry.name === 'mcp_install')).toBe(true);
+  });
+
   it('routes prompts and searches capabilities without an LLM', async () => {
     const runtime = new UpgradeRuntimeService({}, actor);
     const route = await runtime.execute('route_intent', { prompt: 'Live Logs MCP activity ไม่ขึ้น' });

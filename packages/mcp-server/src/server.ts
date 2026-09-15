@@ -61,7 +61,7 @@ export interface McpServerOptions {
   readonly harnessActivationLedger?: HarnessActivationLedger;
   /** Shared bounded turn-persistence idempotency/compliance state for transport factories that recreate MCP servers per request. */
   readonly turnPersistenceLedger?: TurnPersistenceLedger;
-  /** Override host compliance mode. Defaults to required for stdio and best_effort for HTTP/unknown transports. */
+  /** Override host compliance mode. Core defaults to required for stdio and best_effort for HTTP/unknown; legacy stdio composition may downgrade to best_effort for generic 2025-era clients. */
   readonly turnPersistenceMode?: TurnPersistenceMode;
   /** Current persisted per-tool availability snapshot. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;

@@ -72,7 +72,7 @@ function rawRequest(id: string, method: string, params: Record<string, unknown>)
   };
 }
 
-function createClientAndTransport(): { readonly client: Client; readonly transport: StdioClientTransport; diagnostics(): string } {
+function createClientAndTransport(options: { readonly legacy?: boolean } = {}): { readonly client: Client; readonly transport: StdioClientTransport; diagnostics(): string } {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fixturePath],
@@ -83,16 +83,38 @@ function createClientAndTransport(): { readonly client: Client; readonly transpo
     capturedDiagnostics += chunk.toString('utf8');
   });
   const client = new Client(
-    { name: 'unified-mpc-stdio-test-client', version: '0.1.0' },
-    {
-      versionNegotiation: { mode: { pin: MODERN_PROTOCOL_VERSION } },
-      capabilities: { extensions: { [MODERN_TASKS_EXTENSION_ID]: {} } },
-    },
+    { name: options.legacy === true ? 'cline-4.1.17-compat-test' : 'unified-mpc-stdio-test-client', version: '0.1.0' },
+    options.legacy === true
+      ? { versionNegotiation: { mode: 'legacy' } }
+      : {
+          versionNegotiation: { mode: { pin: MODERN_PROTOCOL_VERSION } },
+          capabilities: { extensions: { [MODERN_TASKS_EXTENSION_ID]: {} } },
+        },
   );
   return { client, transport, diagnostics: () => capturedDiagnostics };
 }
 
 describe('MCP stdio transport', () => {
+  it('serves Cline-compatible 2025-11-25 legacy clients without requiring modern turn correlation', async () => {
+    const { client, transport, diagnostics } = createClientAndTransport({ legacy: true });
+
+    try {
+      try {
+        await client.connect(transport);
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${detail}; child diagnostics: ${diagnostics().trim() || '[none]'}`, { cause: error });
+      }
+
+      const listed = await client.listTools();
+      expect(listed.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
+      expect(listed.tools.some((tool) => tool.name === 'task_bootstrap')).toBe(true);
+      expect(client.getServerCapabilities()?.tasks).toEqual({ list: {}, cancel: {} });
+    } finally {
+      await client.close();
+    }
+  }, 30_000);
+
   it('serves independent 2026-07-28 requests with protocol-only stdout', async () => {
     const { client, transport, diagnostics } = createClientAndTransport();
 

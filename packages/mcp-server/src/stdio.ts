@@ -48,7 +48,19 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
   const modernTasks = new ModernTasksProtocol(options.services, { actor: options.actor });
   const transport = createModernTasksTransport(new StdioServerTransport(), modernTasks);
   return serveStdio(
-    () => createMcpServer({ ...options, hostMutationApprovalProvider, runBudgetGuard, incrementalVerifier, setOfMarksStore, ponytailActivationLedger, harnessActivationLedger, turnPersistenceLedger, legacyTasksProtocol: false, requestScope }),
-    { legacy: 'reject', onerror: options.onError ?? writeStdioDiagnostic, transport },
+    (context) => createMcpServer({
+      ...options,
+      hostMutationApprovalProvider,
+      runBudgetGuard,
+      incrementalVerifier,
+      setOfMarksStore,
+      ponytailActivationLedger,
+      harnessActivationLedger,
+      turnPersistenceLedger,
+      legacyTasksProtocol: context.era === 'legacy',
+      turnPersistenceMode: options.turnPersistenceMode ?? (context.era === 'legacy' ? 'best_effort' : 'required'),
+      requestScope,
+    }),
+    { legacy: 'serve', onerror: options.onError ?? writeStdioDiagnostic, transport },
   );
 }

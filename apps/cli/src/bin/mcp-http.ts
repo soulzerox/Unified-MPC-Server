@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { startMcpHttp } from '@unified-mpc/mcp-server';
-import { resolveDataPath as resolveDataPathFromShared, isUnrestricted } from '@unified-mpc/shared';
+import { createTrustedHostMutationApprovalProvider, startMcpHttp } from '@unified-mpc/mcp-server';
+import { isUnrestricted, parseBooleanSetting, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
@@ -39,6 +39,15 @@ async function main(): Promise<void> {
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined));
   await runtime.activityReady;
   await runtime.recoveryReady;
+  const enableHostApproval = parseBooleanSetting(
+    process.env.UNIFIED_MPC_HTTP_HOST_APPROVAL
+      ?? settings.get('mcp_http_host_approval'),
+    true,
+  );
+  const hostMutationApprovalProvider = enableHostApproval
+    ? createTrustedHostMutationApprovalProvider()
+    : undefined;
+
   const handle = await startMcpHttp({
     port: envPort(),
     services: runtime.services,
@@ -55,6 +64,7 @@ async function main(): Promise<void> {
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
     allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
     allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),
+    ...(hostMutationApprovalProvider === undefined ? {} : { hostMutationApprovalProvider }),
   });
   process.stderr.write(`Unified-MPC MCP HTTP ready endpoint=${handle.endpoint.href} identity=${new URL('/_unified-mpc/identity', handle.endpoint).href}\n`);
 

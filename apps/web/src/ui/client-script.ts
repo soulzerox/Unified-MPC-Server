@@ -377,6 +377,14 @@ export function getClientScriptJs(): string {
             primaryButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, 'primary'));
             action.appendChild(primaryButton);
           }
+          const removeButton = document.createElement('button');
+          removeButton.type = 'button';
+          removeButton.className = 'btn btn-secondary btn-sm';
+          removeButton.style.marginLeft = '8px';
+          removeButton.textContent = 'Remove';
+          removeButton.title = 'Remove this project from Unified-MPC without deleting its source directory';
+          removeButton.addEventListener('click', () => removeWorkspace(workspace.id, workspace.displayName || workspace.id));
+          action.appendChild(removeButton);
           row.appendChild(action);
           body.appendChild(row);
         }
@@ -396,6 +404,23 @@ export function getClientScriptJs(): string {
         } catch (err) {
           showToast('Project update failed: ' + err.message, true);
           logEvent('ERROR', 'Workspace selection update failed: ' + err.message);
+        }
+      }
+
+      async function removeWorkspace(workspaceId, displayName) {
+        const confirmed = window.confirm('Remove "' + displayName + '" from Unified-MPC? The source directory will not be deleted.');
+        if (!confirmed) return;
+        try {
+          const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId);
+          const res = await mutationJson(endpoint, { method: 'DELETE' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(errorMessage(data, 'Project removal failed'));
+          await loadWorkspaces();
+          showToast('Project removed from Unified-MPC');
+          logEvent('SUCCESS', 'Workspace registration removed for ' + workspaceId + '; source files were not deleted');
+        } catch (err) {
+          showToast('Project removal failed: ' + err.message, true);
+          logEvent('ERROR', 'Workspace removal failed: ' + err.message);
         }
       }
 

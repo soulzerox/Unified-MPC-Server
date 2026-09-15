@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { startMcpHttp } from '@unified-mpc/mcp-server';
+import { createCrossClientHostMutationApprovalProvider, hostApprovalBrokerDirectory, startMcpHttp } from '@unified-mpc/mcp-server';
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
@@ -40,6 +40,9 @@ async function main(): Promise<void> {
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), { persistWorkspaceSelection: true });
   await runtime.activityReady;
   await runtime.recoveryReady;
+  const brokeredHostMutationApprovalProvider = createCrossClientHostMutationApprovalProvider({
+    directory: hostApprovalBrokerDirectory(dataPath),
+  });
   const handle = await startMcpHttp(createWebMcpHttpServerOptions({
     port: envPort(),
     services: runtime.services,
@@ -57,7 +60,7 @@ async function main(): Promise<void> {
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
     allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
     allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),
-  }));
+  }, brokeredHostMutationApprovalProvider));
   process.stderr.write(`Unified-MPC MCP HTTP ready endpoint=${handle.endpoint.href} identity=${new URL('/_unified-mpc/identity', handle.endpoint).href}\n`);
 
   let closing = false;

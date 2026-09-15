@@ -295,10 +295,10 @@ export function createStdioMcpRuntime(
     destructivePolicyProvider,
     activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => {
       const selected = (await activeWorkspaces())[0] ?? workspace;
-      return { workspaceId: selected.id, rootPath: selected.realRootPath };
+      return { workspaceId: selected.id, rootPath: selected.rootPath };
     },
     activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => (await activeWorkspaces())
-      .map((selected) => ({ workspaceId: selected.id, rootPath: selected.realRootPath })),
+      .map((selected) => ({ workspaceId: selected.id, rootPath: selected.rootPath })),
     codexToolsEnabled: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.codexToolsEnabled), DEFAULT_CODEX_TOOLS_ENABLED),
     ponytailMode: parsePonytailMode(settingsRepository.get(USER_SETTING_KEYS.ponytailMode), DEFAULT_PONYTAIL_MODE),
     toolAvailabilityService,

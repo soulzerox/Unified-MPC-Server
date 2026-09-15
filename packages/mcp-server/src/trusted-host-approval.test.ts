@@ -165,6 +165,27 @@ describe('trusted host exact-action approval', () => {
     expect(runCommand).toHaveBeenCalledTimes(1);
   });
 
+  it('closes the cross-client worker with the trusted host session and fails closed afterwards', async () => {
+    const closeWorker = vi.fn(async () => undefined);
+    const startBrokerWorker = vi.fn(() => ({ workerId: 'trusted-session-a', close: closeWorker }));
+    const runCommand = vi.fn(async (): Promise<HostApprovalCommandResult> => ({ status: 'approved' }));
+    const provider = createTrustedHostMutationApprovalProvider({
+      platform: 'darwin',
+      brokerDirectory: '/tmp/unified-mpc-host-approval-test',
+      startBrokerWorker,
+      runCommand,
+      ttyPrompt: async () => false,
+    });
+
+    expect(startBrokerWorker).toHaveBeenCalledTimes(1);
+    await provider.close();
+    await provider.close();
+
+    expect(closeWorker).toHaveBeenCalledTimes(1);
+    await expect(provider(request)).resolves.toBe(false);
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it('never reuses exact-action approval when no automation scope is supplied', async () => {
     const runCommand = vi.fn(async (): Promise<HostApprovalCommandResult> => ({ status: 'approved' }));
     const provider = createTrustedHostMutationApprovalProvider({

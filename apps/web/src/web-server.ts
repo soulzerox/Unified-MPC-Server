@@ -43,6 +43,7 @@ export interface WorkspaceControlPort {
   activate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
   deactivate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
   setPrimary(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
+  remove(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot | null>;
 }
 
 export interface ControlPlaneServerOptions {
@@ -251,6 +252,24 @@ export class ControlPlaneServer {
       const selection = this.workspaceControl === undefined ? null : await this.workspaceControl.selection();
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ workspaces, selection }));
+      return;
+    }
+
+    const workspaceRemovalRoute = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+    if (workspaceRemovalRoute !== null && req.method === 'DELETE') {
+      if (this.workspaceControl === undefined) {
+        sendJsonError(res, 503, 'Workspace selection service is unavailable');
+        return;
+      }
+      const workspaceId = decodeURIComponent(workspaceRemovalRoute[1]!);
+      try {
+        const selection = await this.workspaceControl.remove(workspaceId);
+        this.recordLog('SUCCESS', `Workspace registration removed: ${workspaceId}`);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ selection }));
+      } catch (error) {
+        sendJsonError(res, 400, error instanceof Error ? error.message : 'Workspace removal failed');
+      }
       return;
     }
 

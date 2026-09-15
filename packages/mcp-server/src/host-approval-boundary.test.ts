@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { ok } from '@unified-mpc/domain';
+import { appError, err, ok } from '@unified-mpc/domain';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalPolicy } from '@unified-mpc/shared';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
@@ -111,6 +111,8 @@ describe('mandatory independent host approval', () => {
       expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint, arguments: expect.objectContaining({ role: 'user', content: input.userContent, workspace: 'workspace-a' }) }),
       expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint, arguments: expect.objectContaining({ role: 'assistant', content: input.assistantContent, workspace: 'workspace-a' }) }),
     ]);
+    expect(childCalls[0]?.arguments).not.toHaveProperty('turn_id');
+    expect(childCalls[1]?.arguments).not.toHaveProperty('turn_id');
 
     const recreated = new ToolRegistry(services, actor, { ...options, sessionId: 'session-b' });
     const duplicate = await recreated.invoke('record_turn', input);
@@ -133,6 +135,74 @@ describe('mandatory independent host approval', () => {
 
     const invalid = await first.invoke('record_turn', { ...input, server: 'arbitrary-child' });
     expect(invalid).toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
+  });
+
+  it('reuses the same child turn_id after an ambiguous write response and session recreation when the live child schema supports it', async () => {
+    const descriptorFingerprint = 'a'.repeat(64);
+    const catalogFingerprint = 'b'.repeat(64);
+    const childCalls: Array<{ arguments?: Readonly<Record<string, unknown>> }> = [];
+    let attempts = 0;
+    const services = servicesWithCalls([]);
+    services.extensions = {
+      ...services.extensions,
+      async describeMcpServer() {
+        return ok({
+          server: 'thai-rag-mcp', enabled: true, connected: true,
+          provenance: { source: 'antigravity-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
+          tools: [{
+            name: 'remember_turn',
+            qualifiedName: 'mcp:thai-rag-mcp/remember_turn',
+            description: 'Remember turn',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                role: { type: 'string' },
+                content: { type: 'string' },
+                turn_id: { type: 'string' },
+              },
+              required: ['role', 'content'],
+            },
+          }],
+        });
+      },
+      async callMcpTool(input) {
+        childCalls.push(input);
+        attempts += 1;
+        return attempts === 1
+          ? err(appError('PROCESS_TIMEOUT', 'connection lost after child dispatch', true))
+          : ok({ result: 'stored' });
+      },
+    } as McpApplicationServices['extensions'];
+    const input = {
+      turnId: 'turn-ambiguous-retry',
+      userContent: 'Persist this logical turn exactly once at the child boundary.',
+      workspace: 'caller-label-is-not-the-authorization-scope',
+    };
+
+    const first = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: balancedProfile,
+      sessionId: 'session-a',
+      turnPersistenceLedger: new TurnPersistenceLedger(),
+    });
+    const firstResponse = await first.invoke('record_turn', input);
+    expect(firstResponse).toMatchObject({ isError: true });
+
+    const recreated = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: balancedProfile,
+      sessionId: 'session-b',
+      turnPersistenceLedger: new TurnPersistenceLedger(),
+    });
+    const retryResponse = await recreated.invoke('record_turn', input);
+    expect(retryResponse.isError).not.toBe(true);
+
+    expect(childCalls).toHaveLength(2);
+    const firstChildTurnId = childCalls[0]?.arguments?.turn_id;
+    const retryChildTurnId = childCalls[1]?.arguments?.turn_id;
+    expect(firstChildTurnId).toEqual(expect.any(String));
+    expect(firstChildTurnId).not.toBe('');
+    expect(retryChildTurnId).toBe(firstChildTurnId);
   });
 
   it('refuses a workspace-scoped thai-rag child for record_turn before persistence dispatch', async () => {

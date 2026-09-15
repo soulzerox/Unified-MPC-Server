@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import type { HostMutationApprovalRequest } from './tool-registry.js';
+import { startCrossClientHostApprovalWorker, type CrossClientHostApprovalWorker } from './cross-client-host-approval.js';
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const MAX_COMMAND_STDOUT_BYTES = 4_096;
@@ -26,9 +27,15 @@ export interface TrustedHostMutationApprovalOptions {
   readonly runCommand?: (request: HostApprovalCommandRequest) => Promise<HostApprovalCommandResult>;
   readonly ttyPrompt?: (message: string, platform: NodeJS.Platform) => Promise<boolean | null>;
   readonly timeoutMs?: number;
+  /** When set, this trusted local adapter also services cross-client approval requests from the shared local broker. */
+  readonly brokerDirectory?: string;
+  /** Injectable worker factory for lifecycle tests and alternate trusted host compositions. */
+  readonly startBrokerWorker?: typeof startCrossClientHostApprovalWorker;
 }
 
-export type TrustedHostMutationApprovalProvider = (request: HostMutationApprovalRequest) => Promise<boolean>;
+export type TrustedHostMutationApprovalProvider = ((request: HostMutationApprovalRequest) => Promise<boolean>) & {
+  close(): Promise<void>;
+};
 
 export function formatHostMutationApprovalMessage(request: HostMutationApprovalRequest): string {
   const lines = [
@@ -73,10 +80,14 @@ export function createTrustedHostMutationApprovalProvider(
   const timeoutMs = normalizeTimeout(options.timeoutMs);
   const sessionGrants = new Set<string>();
   let queue: Promise<void> = Promise.resolve();
+  let closed = false;
+  let brokerWorker: CrossClientHostApprovalWorker | undefined;
 
-  return async (request): Promise<boolean> => {
+  const provider = (async (request: HostMutationApprovalRequest): Promise<boolean> => {
+    if (closed) return false;
     const execute = async (): Promise<boolean> => {
       try {
+        if (closed) return false;
         const scope = request.approvalScope;
         if (scope !== undefined && sessionGrants.has(scope.id)) return true;
         const approved = await requestTrustedApproval(request, {
@@ -86,6 +97,7 @@ export function createTrustedHostMutationApprovalProvider(
           ttyPrompt,
           timeoutMs,
         });
+        if (closed) return false;
         if (approved && scope !== undefined) sessionGrants.add(scope.id);
         return approved;
       } catch {
@@ -96,7 +108,22 @@ export function createTrustedHostMutationApprovalProvider(
     const current = queue.then(execute, execute);
     queue = current.then(() => undefined, () => undefined);
     return current;
+  }) as TrustedHostMutationApprovalProvider;
+
+  provider.close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    sessionGrants.clear();
+    const worker = brokerWorker;
+    brokerWorker = undefined;
+    await worker?.close();
   };
+
+  if (options.brokerDirectory !== undefined) {
+    const startBrokerWorker = options.startBrokerWorker ?? startCrossClientHostApprovalWorker;
+    brokerWorker = startBrokerWorker({ directory: options.brokerDirectory, provider });
+  }
+  return provider;
 }
 
 interface ResolvedApprovalOptions {

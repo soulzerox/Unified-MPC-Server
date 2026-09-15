@@ -9,7 +9,9 @@ import { PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
 import { TurnPersistenceLedger } from './turn-persistence.js';
 import { createStdioRequestScope } from './request-scope.js';
-import { createTrustedHostMutationApprovalProvider } from './trusted-host-approval.js';
+import { resolveDataPath } from '@unified-mpc/shared';
+import { createTrustedHostMutationApprovalProvider, type TrustedHostMutationApprovalProvider } from './trusted-host-approval.js';
+import { hostApprovalBrokerDirectory } from './cross-client-host-approval.js';
 
 export interface McpStdioOptions extends McpServerOptions {
   readonly onError?: (error: Error) => void;
@@ -28,6 +30,25 @@ export function resolveStdioHostMutationApprovalProvider(
   return configured ?? factory();
 }
 
+export function bindStdioHostMutationApprovalLifecycle(
+  handle: StdioServerHandle,
+  ownedProvider: Pick<TrustedHostMutationApprovalProvider, 'close'> | undefined,
+): StdioServerHandle {
+  if (ownedProvider === undefined) return handle;
+  let closed = false;
+  return {
+    close: async (): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      try {
+        await handle.close();
+      } finally {
+        await ownedProvider.close();
+      }
+    },
+  };
+}
+
 function writeStdioDiagnostic(error: Error): void {
   if (isBenignStdioPipeError(error)) {
     process.stderr.write(`unified-mpc MCP stdio: peer closed (${error.message})\n`);
@@ -44,10 +65,19 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
   const harnessActivationLedger = options.harnessActivationLedger ?? new HarnessActivationLedger();
   const turnPersistenceLedger = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
   const requestScope = options.requestScope ?? createStdioRequestScope();
-  const hostMutationApprovalProvider = resolveStdioHostMutationApprovalProvider(options.hostMutationApprovalProvider);
+  let ownedHostMutationApprovalProvider: TrustedHostMutationApprovalProvider | undefined;
+  const hostMutationApprovalProvider = resolveStdioHostMutationApprovalProvider(
+    options.hostMutationApprovalProvider,
+    () => {
+      ownedHostMutationApprovalProvider = createTrustedHostMutationApprovalProvider({
+        brokerDirectory: hostApprovalBrokerDirectory(resolveDataPath()),
+      });
+      return ownedHostMutationApprovalProvider;
+    },
+  );
   const modernTasks = new ModernTasksProtocol(options.services, { actor: options.actor });
   const transport = createModernTasksTransport(new StdioServerTransport(), modernTasks);
-  return serveStdio(
+  const handle = serveStdio(
     (context) => createMcpServer({
       ...options,
       hostMutationApprovalProvider,
@@ -63,4 +93,5 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
     }),
     { legacy: 'serve', onerror: options.onError ?? writeStdioDiagnostic, transport },
   );
+  return bindStdioHostMutationApprovalLifecycle(handle, ownedHostMutationApprovalProvider);
 }

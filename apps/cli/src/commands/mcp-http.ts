@@ -26,12 +26,24 @@ const defaultStarter: McpHttpServerStarter = {
   start: startMcpHttp,
 };
 
-export type WebMcpHttpServerOptions = Omit<McpHttpServerOptions, 'hostMutationApprovalProvider'>;
+export type WebMcpHttpServerOptions = Omit<McpHttpServerOptions, 'hostMutationApprovalProvider'> & {
+  readonly hostMutationApprovalProvider?: NonNullable<McpHttpServerOptions['hostMutationApprovalProvider']>;
+};
 
-export function createWebMcpHttpServerOptions(options: McpHttpServerOptions): WebMcpHttpServerOptions {
+/**
+ * Web never inherits a direct trusted-host adapter from its upstream runtime.
+ * A broker provider must be supplied explicitly through the second argument so
+ * remote Web calls can only reach a separately connected trusted local worker.
+ */
+export function createWebMcpHttpServerOptions(
+  options: McpHttpServerOptions,
+  brokeredHostMutationApprovalProvider?: McpHttpServerOptions['hostMutationApprovalProvider'],
+): WebMcpHttpServerOptions {
   const { hostMutationApprovalProvider, ...webOptions } = options;
   void hostMutationApprovalProvider;
-  return webOptions;
+  return brokeredHostMutationApprovalProvider === undefined
+    ? webOptions
+    : { ...webOptions, hostMutationApprovalProvider: brokeredHostMutationApprovalProvider };
 }
 
 export async function runMcpHttpCommand(

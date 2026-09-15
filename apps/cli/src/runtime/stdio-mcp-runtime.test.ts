@@ -81,6 +81,28 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+  it('uses the registered host-facing root for active execution scopes when it differs from the canonical root', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-active-root-alias-'));
+    temporaryRoots.push(dataPath);
+    const aliasedWorkspace = {
+      ...workspace,
+      rootPath: '/home/qwerty/thai-rag-mcp',
+      realRootPath: '/mnt/workspace_data/thai-rag-mcp',
+    };
+    const runtime = createStdioMcpRuntime(dataPath, aliasedWorkspace);
+    try {
+      await expect(runtime.activeWorkspaceScopeProvider()).resolves.toEqual({
+        workspaceId: aliasedWorkspace.id,
+        rootPath: aliasedWorkspace.rootPath,
+      });
+      await expect(runtime.activeWorkspaceScopesProvider()).resolves.toEqual([
+        expect.objectContaining({ workspaceId: aliasedWorkspace.id, rootPath: aliasedWorkspace.rootPath }),
+      ]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('keeps completed turn idempotency and active compliance across runtime recreation without persisting in-flight claims', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-persistence-'));
     temporaryRoots.push(dataPath);

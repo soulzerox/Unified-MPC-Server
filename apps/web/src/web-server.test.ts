@@ -182,6 +182,10 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         selection = { primaryWorkspaceId: workspaceId, activeWorkspaceIds: [workspaceId, ...selection.activeWorkspaceIds.filter((id) => id !== workspaceId)] };
         return selection;
       },
+      remove: async (workspaceId: string): Promise<WebWorkspaceSelectionSnapshot | null> => {
+        if (workspaceId === 'b') selection = { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] };
+        return selection;
+      },
     };
     const projectsServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, workspaceControl });
     await projectsServer.listen();
@@ -205,6 +209,10 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       const deactivated = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/a/active`, { method: 'DELETE', headers });
       expect(deactivated.status).toBe(200);
       expect((await deactivated.json()).selection).toEqual({ primaryWorkspaceId: 'b', activeWorkspaceIds: ['b'] });
+
+      const removed = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/b`, { method: 'DELETE', headers });
+      expect(removed.status).toBe(200);
+      expect((await removed.json()).selection).toEqual({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] });
     } finally {
       await projectsServer.close();
     }

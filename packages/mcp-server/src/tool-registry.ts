@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
   appError,
@@ -913,6 +914,14 @@ export class ToolRegistry {
         descriptorFingerprint: described.value.provenance.descriptorFingerprint,
         catalogFingerprint: described.value.provenance.catalogFingerprint,
       };
+      const rememberTurnTool = described.value.tools.find((tool) => tool.name === 'remember_turn');
+      const rememberTurnInputSchema = rememberTurnTool?.inputSchema;
+      const supportsStableChildTurnId = isRecord(rememberTurnInputSchema)
+        && isRecord(rememberTurnInputSchema.properties)
+        && Object.prototype.hasOwnProperty.call(rememberTurnInputSchema.properties, 'turn_id');
+      const childTurnId = (role: TurnPersistenceRole): string => `turn_umcp_${createHash('sha256')
+        .update(JSON.stringify(['thai-rag-turn-v1', idempotencyScope, input.turnId, role]))
+        .digest('hex')}`;
       let recorded = 0;
       for (const entry of claimed) {
         const persisted = await extensions.callMcpTool({
@@ -924,6 +933,7 @@ export class ToolRegistry {
             ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
             ...(input.summary === undefined ? {} : { summary: input.summary }),
             ...(input.tags === undefined ? {} : { tags: input.tags }),
+            ...(supportsStableChildTurnId ? { turn_id: childTurnId(entry.role) } : {}),
           },
           ...contract,
         }, signal);

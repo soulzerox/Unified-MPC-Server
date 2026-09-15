@@ -26,6 +26,20 @@ describe('mcp http command', () => {
     expect(webOptions.allowedHostnames).toEqual(['mcp.example.com']);
   });
 
+  it('accepts only an explicitly brokered host approval provider for Web HTTP', () => {
+    const directProvider = async (): Promise<boolean> => true;
+    const brokerProvider = async (): Promise<boolean> => false;
+    const webOptions = createWebMcpHttpServerOptions({
+      port: 0,
+      services: {},
+      actor: { clientId: 'web-http-broker', clientName: 'web-http-broker' },
+      hostMutationApprovalProvider: directProvider,
+    }, brokerProvider);
+
+    expect(webOptions.hostMutationApprovalProvider).toBe(brokerProvider);
+    expect(webOptions.hostMutationApprovalProvider).not.toBe(directProvider);
+  });
+
   it('resolves the configured workspace and strips trusted-host approval before starting HTTP', async () => {
     let startedWith: McpServerOptions | undefined;
     const starter: McpHttpServerStarter = {

@@ -63,4 +63,23 @@ describe('WorkspaceService', () => {
     await expect(service.add('Windows path', 'C:\\Users\\alice\\project')).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(repository.inserted).toEqual([]);
   });
+
+  it('unregisters a workspace without deleting its source directory', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-service-remove-'));
+    temporaryRoots.push(parent);
+    const rootPath = path.join(parent, 'project');
+    await mkdir(rootPath);
+    await writeFile(path.join(rootPath, 'keep.txt'), 'keep source files', 'utf8');
+    const repository = repositorySpy();
+    const service = new WorkspaceService(repository);
+    const added = await service.add('Project', rootPath);
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+
+    await service.delete(added.value.id);
+
+    expect(repository.inserted).toEqual([]);
+    await expect(import('node:fs/promises').then(({ stat }) => stat(rootPath))).resolves.toMatchObject({});
+    await expect(import('node:fs/promises').then(({ readFile }) => readFile(path.join(rootPath, 'keep.txt'), 'utf8'))).resolves.toBe('keep source files');
+  });
 });

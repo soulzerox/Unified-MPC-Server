@@ -117,6 +117,13 @@ function createWorkspaceControl(
     activate: async (workspaceId) => unwrap((await requireSelection()).activate(workspaceId)),
     deactivate: async (workspaceId) => unwrap((await requireSelection()).deactivate(workspaceId)),
     setPrimary: async (workspaceId) => unwrap((await requireSelection()).setPrimary(workspaceId)),
+    remove: async (workspaceId): Promise<WebWorkspaceSelectionSnapshot | null> => {
+      const projects = await projectList();
+      if (!projects.some((project) => project.id === workspaceId)) throw new Error('Workspace is not a registered project');
+      await workspaceService.delete(workspaceId);
+      const service = await selection();
+      return service === null ? null : unwrap(service.list());
+    },
   };
 }
 

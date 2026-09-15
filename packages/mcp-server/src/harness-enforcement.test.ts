@@ -113,6 +113,31 @@ describe('workspace engineering harness enforcement', () => {
     })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } } });
   });
 
+  it('returns the preferred workspace goal as a non-leasing continuation hint during bootstrap', async () => {
+    const { services } = createHarnessServices();
+    (services as { preferredGoal?: McpApplicationServices['preferredGoal'] }).preferredGoal = {
+      get: async (workspaceId: string): Promise<{ goalId: string; goalKey: string; objective: string; currentPhase: string; updatedAt: string } | null> => workspaceId === 'workspace-1' ? {
+        goalId: 'goal-a',
+        goalKey: 'project-goals',
+        objective: 'Expose open goals in the Projects view.',
+        currentPhase: 'frontend',
+        updatedAt: '2026-09-16T01:00:00.000Z',
+      } : null,
+    };
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+
+    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
+      structuredContent: {
+        ready: true,
+        preferredGoal: {
+          goalId: 'goal-a',
+          goalKey: 'project-goals',
+          currentPhase: 'frontend',
+        },
+      },
+    });
+  });
+
   it('runs the optional Godkiller safety check only when explicitly requested', async () => {
     const { services, childCalls } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });

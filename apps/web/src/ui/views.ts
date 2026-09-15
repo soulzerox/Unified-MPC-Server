@@ -175,11 +175,12 @@ export function renderDashboardViewsHtml(): string {
               <th>Path</th>
               <th>Active</th>
               <th>Primary</th>
+              <th>Goals</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody id="projects-table-body">
-            <tr><td colspan="5" style="color: var(--text-muted); text-align: center;">Loading registered projects...</td></tr>
+            <tr><td colspan="6" style="color: var(--text-muted); text-align: center;">Loading registered projects...</td></tr>
           </tbody>
         </table>
       </div>

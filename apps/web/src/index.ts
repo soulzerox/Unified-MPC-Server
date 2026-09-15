@@ -1,6 +1,8 @@
 export {
   ControlPlaneServer,
   type ControlPlaneServerOptions,
+  type GoalControlPort,
+  type WebGoalSummary,
   type WebWorkspaceSummary,
   type WebWorkspaceSelectionSnapshot,
   type WorkspaceControlPort,

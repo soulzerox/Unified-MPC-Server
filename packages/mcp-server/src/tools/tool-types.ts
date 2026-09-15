@@ -46,6 +46,16 @@ export interface WorkspaceSelectionPort {
   setPrimary(workspaceId: string): Promise<Result<unknown>>;
 }
 
+export interface PreferredGoalPort {
+  get(workspaceId: string): Promise<{
+    readonly goalId: string;
+    readonly goalKey: string;
+    readonly objective: string;
+    readonly currentPhase: string;
+    readonly updatedAt: string;
+  } | null>;
+}
+
 export interface ProjectSnapshotPort {
   snapshot(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
 }
@@ -69,6 +79,7 @@ export interface McpApplicationServices {
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
   readonly workspaceSelection?: WorkspaceSelectionPort;
+  readonly preferredGoal?: PreferredGoalPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
   readonly projectSnapshot?: ProjectSnapshotPort;
   readonly project?: Pick<ProjectService, 'detect'>;

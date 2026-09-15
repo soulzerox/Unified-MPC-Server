@@ -105,6 +105,30 @@ describe('durable goal continuation persistence', () => {
     second.database.close();
   });
 
+  it('counts only active workspace goals for the host Projects summary', async () => {
+    const { filename, workspace } = await fixture();
+    const now = new Date('2026-08-26T00:00:00.000Z');
+    const runtime = await open(filename, workspace, () => now);
+    const created = await runtime.service.runGoal(actor('session-a'), createRequest);
+    if (!created.ok || created.value.leaseToken === undefined) throw new Error('goal create failed');
+
+    await expect(runtime.repository.countWorkspaceGoalsForHost(workspace.id)).resolves.toBe(1);
+    await expect(runtime.repository.listWorkspaceGoalsForHost(workspace.id)).resolves.toHaveLength(1);
+
+    await expect(runtime.service.finishGoal(actor('session-a'), {
+      goalId: created.value.goalId,
+      leaseToken: created.value.leaseToken,
+      expectedRevision: created.value.revision,
+      status: 'failed',
+      summary: 'Closed as failed for host goal-count verification.',
+      evidence: [],
+    })).resolves.toMatchObject({ ok: true, value: { status: 'failed' } });
+
+    await expect(runtime.repository.countWorkspaceGoalsForHost(workspace.id)).resolves.toBe(0);
+    await expect(runtime.repository.listWorkspaceGoalsForHost(workspace.id)).resolves.toEqual([]);
+    runtime.database.close();
+  });
+
   it('persists a goal Ponytail override across restart and changes it only through leased checkpoint CAS', async () => {
     const { filename, workspace } = await fixture();
     let now = new Date('2026-08-26T00:00:00.000Z');

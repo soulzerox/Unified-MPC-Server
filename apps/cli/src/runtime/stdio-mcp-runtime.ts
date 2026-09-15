@@ -260,6 +260,21 @@ export function createStdioMcpRuntime(
     },
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
     workspaceSelection,
+    preferredGoal: {
+      get: async (workspaceId) => {
+        const goalId = parseStringRecordSetting(settingsRepository.get(USER_SETTING_KEYS.preferredWorkspaceGoals))[workspaceId.toLowerCase()];
+        if (goalId === undefined) return null;
+        const goal = await goalRepository.getById(goalId);
+        if (goal === null || goal.workspaceId !== workspaceId || goal.status !== 'active') return null;
+        return {
+          goalId: goal.id,
+          goalKey: goal.goalKey,
+          objective: goal.objective,
+          currentPhase: goal.currentPhase,
+          updatedAt: goal.updatedAt,
+        };
+      },
+    },
     workspaceQuery,
     projectSnapshot: new ProjectSnapshotService(workspaceRepository, {
       projectService,

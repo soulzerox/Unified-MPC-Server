@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ControlPlaneServer, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
+import { ControlPlaneServer, type WebGoalSummary, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
   InstallerService,
@@ -213,6 +213,79 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       const removed = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/b`, { method: 'DELETE', headers });
       expect(removed.status).toBe(200);
       expect((await removed.json()).selection).toEqual({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] });
+    } finally {
+      await projectsServer.close();
+    }
+  });
+
+  it('summarizes open goals per project without eagerly loading goal details, then lazy-loads and continues one goal', async () => {
+    let selection = { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] as string[] };
+    let listOpenCalls = 0;
+    let preferredGoalId: string | null = null;
+    const goal: WebGoalSummary = {
+      goalId: 'goal-a',
+      goalKey: 'ship-project-goals',
+      objective: 'Expose unfinished durable goals in the Projects view.',
+      status: 'active',
+      currentPhase: 'frontend',
+      progress: { completed: 2, total: 4 },
+      blockers: ['Waiting for UI verification'],
+      nextAction: 'Finish the project goal drawer.',
+      steps: [
+        { id: 'inspect', title: 'Inspect current APIs', status: 'completed' },
+        { id: 'frontend', title: 'Build project goal drawer', status: 'active' },
+      ],
+      updatedAt: '2026-09-16T01:00:00.000Z',
+    };
+    const workspaceControl = {
+      list: async (): Promise<readonly WebWorkspaceSummary[]> => [
+        { id: 'a', displayName: 'Project A', rootPath: '/projects/a', realRootPath: '/projects/a' },
+      ],
+      selection: async (): Promise<WebWorkspaceSelectionSnapshot> => selection,
+      activate: async (workspaceId: string): Promise<WebWorkspaceSelectionSnapshot> => {
+        if (!selection.activeWorkspaceIds.includes(workspaceId)) selection = { ...selection, activeWorkspaceIds: [...selection.activeWorkspaceIds, workspaceId] };
+        return selection;
+      },
+      deactivate: async (): Promise<WebWorkspaceSelectionSnapshot> => selection,
+      setPrimary: async (): Promise<WebWorkspaceSelectionSnapshot> => selection,
+      remove: async (): Promise<WebWorkspaceSelectionSnapshot> => selection,
+    };
+    const goalControl = {
+      countOpen: async (workspaceId: string): Promise<number> => workspaceId === 'a' ? 1 : 0,
+      preferred: async (): Promise<string | null> => preferredGoalId,
+      listOpen: async (): Promise<readonly WebGoalSummary[]> => {
+        listOpenCalls += 1;
+        return [goal];
+      },
+      continue: async (workspaceId: string, goalId: string): Promise<WebGoalSummary> => {
+        if (workspaceId !== 'a' || goalId !== goal.goalId) throw new Error('Goal was not found');
+        preferredGoalId = goalId;
+        return goal;
+      },
+    };
+    const projectsServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, workspaceControl, goalControl });
+    await projectsServer.listen();
+    try {
+      const listed = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces`);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({
+        workspaces: [{ id: 'a', openGoalCount: 1, preferredGoalId: null }],
+      });
+      expect(listOpenCalls).toBe(0);
+
+      const goals = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/a/goals`);
+      expect(goals.status).toBe(200);
+      expect(await goals.json()).toEqual({ goals: [goal], preferredGoalId: null });
+      expect(listOpenCalls).toBe(1);
+
+      const headers = { Origin: `http://127.0.0.1:${projectsServer.port}`, 'x-unified-mpc-capability': capabilityToken };
+      const continued = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/a/goals/goal-a/continue`, { method: 'PUT', headers });
+      expect(continued.status).toBe(200);
+      expect(await continued.json()).toMatchObject({
+        goal: { goalId: 'goal-a', goalKey: 'ship-project-goals' },
+        preferredGoalId: 'goal-a',
+        selection: { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] },
+      });
     } finally {
       await projectsServer.close();
     }

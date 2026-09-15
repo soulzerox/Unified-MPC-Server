@@ -26,6 +26,17 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('/api/chatgpt-web/connect');
   });
 
+  it('renders project goals collapsed by default and lazy-loads them with Continue/Open actions', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('project-goals-toggle');
+    expect(html).toContain('loadWorkspaceGoals');
+    expect(html).toContain("'/goals'");
+    expect(html).toContain("'/continue'");
+    expect(html).toContain('goal-continue-btn');
+    expect(html).toContain('goal-open-btn');
+    expect(html).toContain('No open goals');
+  });
+
   it('renders a user-editable P1-Pn policy editor with reorder and save controls', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('policy-add-btn');

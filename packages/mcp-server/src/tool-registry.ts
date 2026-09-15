@@ -742,6 +742,12 @@ export class ToolRegistry {
     const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
     if (!agentsMdHash.ok) return agentsMdHash;
     const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp.value);
+    let preferredGoal = null;
+    try {
+      preferredGoal = await this.services.preferredGoal?.get(workspaceId) ?? null;
+    } catch {
+      preferredGoal = null;
+    }
     return ok({
       ready: true,
       agentsMdLoaded: true,
@@ -749,6 +755,7 @@ export class ToolRegistry {
       harnessFingerprint: state.harnessFingerprint,
       sessionStartSkill: taskContext.value.sessionStartSkill,
       mandatoryMcp: mandatoryMcp.value,
+      preferredGoal,
     });
   }
 

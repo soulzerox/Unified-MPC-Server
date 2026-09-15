@@ -8,6 +8,10 @@ export function getClientScriptJs(): string {
       let cachedPolicies = [];
       let cachedWorkspaces = [];
       let workspaceSelection = null;
+      const workspaceGoals = new Map();
+      const expandedWorkspaceGoals = new Set();
+      const loadingWorkspaceGoals = new Set();
+      const openGoalDetails = new Set();
 
       function showToast(message, isError = false) {
         const toast = document.getElementById('toast');
@@ -334,9 +338,13 @@ export function getClientScriptJs(): string {
           const data = await res.json();
           cachedWorkspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
           workspaceSelection = data.selection || null;
+          workspaceGoals.clear();
+          expandedWorkspaceGoals.clear();
+          loadingWorkspaceGoals.clear();
+          openGoalDetails.clear();
           renderWorkspaces();
         } catch (err) {
-          if (body) body.replaceChildren(emptyRow(5, 'Failed to load projects: ' + err.message));
+          if (body) body.replaceChildren(emptyRow(6, 'Failed to load projects: ' + err.message));
           logEvent('ERROR', 'Project refresh failed: ' + err.message);
         }
       }
@@ -346,7 +354,7 @@ export function getClientScriptJs(): string {
         if (!body) return;
         body.replaceChildren();
         if (cachedWorkspaces.length === 0) {
-          body.appendChild(emptyRow(5, 'No registered project workspaces'));
+          body.appendChild(emptyRow(6, 'No registered project workspaces'));
           return;
         }
         const activeIds = new Set(workspaceSelection?.activeWorkspaceIds || []);
@@ -354,11 +362,37 @@ export function getClientScriptJs(): string {
         for (const workspace of cachedWorkspaces) {
           const active = activeIds.has(workspace.id);
           const primary = primaryId === workspace.id;
+          const openGoalCount = Number.isFinite(Number(workspace.openGoalCount)) ? Number(workspace.openGoalCount) : 0;
           const row = document.createElement('tr');
           addCell(row, workspace.displayName || workspace.id);
           addCell(row, workspace.realRootPath || workspace.rootPath || '', 'mono');
           addCell(row, active ? 'Active' : 'Inactive');
           addCell(row, primary ? 'Primary' : '—');
+
+          const goalsCell = document.createElement('td');
+          if (openGoalCount <= 0) {
+            const noGoals = document.createElement('span');
+            noGoals.className = 'badge badge-healthy';
+            noGoals.textContent = 'No open goals';
+            goalsCell.appendChild(noGoals);
+          } else {
+            const goalsToggle = document.createElement('button');
+            goalsToggle.type = 'button';
+            goalsToggle.className = 'btn btn-secondary btn-sm project-goals-toggle';
+            goalsToggle.setAttribute('aria-expanded', expandedWorkspaceGoals.has(workspace.id) ? 'true' : 'false');
+            goalsToggle.textContent = (expandedWorkspaceGoals.has(workspace.id) ? '▾ ' : '▸ ') + openGoalCount + (openGoalCount === 1 ? ' open goal' : ' open goals');
+            goalsToggle.addEventListener('click', () => toggleWorkspaceGoals(workspace.id));
+            goalsCell.appendChild(goalsToggle);
+            if (workspace.preferredGoalId) {
+              const selected = document.createElement('span');
+              selected.className = 'badge badge-optional';
+              selected.style.marginLeft = '6px';
+              selected.textContent = 'Selected';
+              goalsCell.appendChild(selected);
+            }
+          }
+          row.appendChild(goalsCell);
+
           const action = document.createElement('td');
           const activeButton = document.createElement('button');
           activeButton.type = 'button';
@@ -387,6 +421,202 @@ export function getClientScriptJs(): string {
           action.appendChild(removeButton);
           row.appendChild(action);
           body.appendChild(row);
+
+          if (expandedWorkspaceGoals.has(workspace.id)) {
+            const goalsRow = document.createElement('tr');
+            goalsRow.className = 'project-goals-row';
+            const goalsPanelCell = document.createElement('td');
+            goalsPanelCell.colSpan = 6;
+            goalsPanelCell.appendChild(renderWorkspaceGoalsPanel(workspace));
+            goalsRow.appendChild(goalsPanelCell);
+            body.appendChild(goalsRow);
+          }
+        }
+      }
+
+      function renderWorkspaceGoalsPanel(workspace) {
+        const panel = document.createElement('div');
+        panel.className = 'project-goals-panel';
+        if (loadingWorkspaceGoals.has(workspace.id)) {
+          panel.textContent = 'Loading open goals...';
+          return panel;
+        }
+        const state = workspaceGoals.get(workspace.id);
+        if (!state) {
+          panel.textContent = 'Open goals are loaded only when this project is expanded.';
+          return panel;
+        }
+        if (state.error) {
+          panel.textContent = 'Failed to load goals: ' + state.error;
+          return panel;
+        }
+        if (!Array.isArray(state.goals) || state.goals.length === 0) {
+          panel.textContent = 'No open goals';
+          return panel;
+        }
+        for (const goal of state.goals) {
+          panel.appendChild(renderGoalCard(workspace.id, goal, state.preferredGoalId));
+        }
+        return panel;
+      }
+
+      function renderGoalCard(workspaceId, goal, preferredGoalId) {
+        const card = document.createElement('article');
+        card.className = 'project-goal-card';
+        const header = document.createElement('div');
+        header.className = 'project-goal-header';
+        const title = document.createElement('div');
+        const key = document.createElement('strong');
+        key.className = 'mono';
+        key.textContent = goal.goalKey || goal.goalId;
+        title.appendChild(key);
+        const status = document.createElement('span');
+        status.className = 'badge badge-syncing';
+        status.style.marginLeft = '8px';
+        status.textContent = goal.status || 'active';
+        title.appendChild(status);
+        if (preferredGoalId === goal.goalId) {
+          const preferred = document.createElement('span');
+          preferred.className = 'badge badge-healthy';
+          preferred.style.marginLeft = '6px';
+          preferred.textContent = 'Selected to continue';
+          title.appendChild(preferred);
+        }
+        header.appendChild(title);
+        const updated = document.createElement('span');
+        updated.className = 'project-goal-updated mono';
+        const updatedDate = new Date(goal.updatedAt);
+        updated.textContent = Number.isNaN(updatedDate.getTime()) ? '' : 'Updated ' + updatedDate.toLocaleString();
+        header.appendChild(updated);
+        card.appendChild(header);
+
+        const objective = document.createElement('p');
+        objective.className = 'project-goal-objective';
+        objective.textContent = goal.objective || 'No objective description available.';
+        card.appendChild(objective);
+
+        const metadata = document.createElement('div');
+        metadata.className = 'project-goal-meta';
+        const completed = Number(goal.progress?.completed || 0);
+        const total = Number(goal.progress?.total || 0);
+        const metadataValues = [
+          'Phase: ' + (goal.currentPhase || 'unknown'),
+          'Progress: ' + completed + ' / ' + total + ' steps',
+        ];
+        for (const value of metadataValues) {
+          const chip = document.createElement('span');
+          chip.className = 'badge badge-state';
+          chip.textContent = value;
+          metadata.appendChild(chip);
+        }
+        card.appendChild(metadata);
+
+        if (Array.isArray(goal.blockers) && goal.blockers.length > 0) {
+          const blockers = document.createElement('div');
+          blockers.className = 'project-goal-blockers';
+          blockers.textContent = 'Blockers: ' + goal.blockers.join(' • ');
+          card.appendChild(blockers);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'project-goal-actions';
+        const continueButton = document.createElement('button');
+        continueButton.type = 'button';
+        continueButton.className = 'btn btn-sm goal-continue-btn';
+        continueButton.disabled = preferredGoalId === goal.goalId;
+        continueButton.textContent = preferredGoalId === goal.goalId ? 'Selected' : 'Continue';
+        continueButton.title = 'Select this goal for workspace continuation without taking its execution lease';
+        continueButton.addEventListener('click', () => continueWorkspaceGoal(workspaceId, goal.goalId));
+        actions.appendChild(continueButton);
+
+        const detailKey = workspaceId + ':' + goal.goalId;
+        const openButton = document.createElement('button');
+        openButton.type = 'button';
+        openButton.className = 'btn btn-secondary btn-sm goal-open-btn';
+        openButton.textContent = openGoalDetails.has(detailKey) ? 'Close' : 'Open';
+        openButton.addEventListener('click', () => {
+          if (openGoalDetails.has(detailKey)) openGoalDetails.delete(detailKey);
+          else openGoalDetails.add(detailKey);
+          renderWorkspaces();
+        });
+        actions.appendChild(openButton);
+        card.appendChild(actions);
+
+        if (openGoalDetails.has(detailKey)) {
+          const details = document.createElement('div');
+          details.className = 'project-goal-details';
+          const nextAction = document.createElement('div');
+          nextAction.textContent = 'Next: ' + (goal.nextAction || 'No next action recorded');
+          details.appendChild(nextAction);
+          if (Array.isArray(goal.steps) && goal.steps.length > 0) {
+            const steps = document.createElement('ol');
+            steps.className = 'project-goal-steps';
+            for (const step of goal.steps) {
+              const item = document.createElement('li');
+              item.textContent = (step.title || step.id) + ' — ' + (step.status || 'pending');
+              steps.appendChild(item);
+            }
+            details.appendChild(steps);
+          }
+          card.appendChild(details);
+        }
+        return card;
+      }
+
+      async function toggleWorkspaceGoals(workspaceId) {
+        if (expandedWorkspaceGoals.has(workspaceId)) {
+          expandedWorkspaceGoals.delete(workspaceId);
+          renderWorkspaces();
+          return;
+        }
+        expandedWorkspaceGoals.add(workspaceId);
+        if (!workspaceGoals.has(workspaceId)) {
+          void loadWorkspaceGoals(workspaceId);
+          return;
+        }
+        renderWorkspaces();
+      }
+
+      async function loadWorkspaceGoals(workspaceId) {
+        loadingWorkspaceGoals.add(workspaceId);
+        renderWorkspaces();
+        const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goals';
+        try {
+          const res = await fetch(endpoint);
+          const data = await res.json();
+          if (!res.ok) throw new Error(errorMessage(data, 'Goal request failed'));
+          workspaceGoals.set(workspaceId, {
+            goals: Array.isArray(data.goals) ? data.goals : [],
+            preferredGoalId: data.preferredGoalId || null,
+            error: null,
+          });
+        } catch (err) {
+          workspaceGoals.set(workspaceId, { goals: [], preferredGoalId: null, error: err.message });
+          logEvent('ERROR', 'Goal refresh failed for ' + workspaceId + ': ' + err.message);
+        } finally {
+          loadingWorkspaceGoals.delete(workspaceId);
+          renderWorkspaces();
+        }
+      }
+
+      async function continueWorkspaceGoal(workspaceId, goalId) {
+        try {
+          const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goals/' + encodeURIComponent(goalId) + '/continue';
+          const res = await mutationJson(endpoint, { method: 'PUT' });
+          const data = await res.json();
+          if (!res.ok || !data.goal) throw new Error(errorMessage(data, 'Goal continuation selection failed'));
+          workspaceSelection = data.selection || workspaceSelection;
+          cachedWorkspaces = cachedWorkspaces.map((workspace) => workspace.id === workspaceId
+            ? { ...workspace, preferredGoalId: data.preferredGoalId || goalId }
+            : workspace);
+          const current = workspaceGoals.get(workspaceId);
+          if (current) workspaceGoals.set(workspaceId, { ...current, preferredGoalId: data.preferredGoalId || goalId });
+          renderWorkspaces();
+          showToast('Goal selected for continuation');
+          logEvent('SUCCESS', 'Preferred goal selected for ' + workspaceId + ': ' + (data.goal.goalKey || goalId));
+        } catch (err) {
+          showToast('Goal selection failed: ' + err.message, true);
+          logEvent('ERROR', 'Goal continuation selection failed: ' + err.message);
         }
       }
 

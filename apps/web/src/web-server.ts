@@ -37,6 +37,25 @@ export interface WebWorkspaceSelectionSnapshot {
   readonly activeWorkspaceIds: readonly string[];
 }
 
+export interface WebGoalStepSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+}
+
+export interface WebGoalSummary {
+  readonly goalId: string;
+  readonly goalKey: string;
+  readonly objective: string;
+  readonly status: 'active';
+  readonly currentPhase: string;
+  readonly progress: { readonly completed: number; readonly total: number };
+  readonly blockers: readonly string[];
+  readonly nextAction: string;
+  readonly steps: readonly WebGoalStepSummary[];
+  readonly updatedAt: string;
+}
+
 export interface WorkspaceControlPort {
   list(): Promise<readonly WebWorkspaceSummary[]>;
   selection(): Promise<WebWorkspaceSelectionSnapshot | null>;
@@ -44,6 +63,13 @@ export interface WorkspaceControlPort {
   deactivate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
   setPrimary(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
   remove(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot | null>;
+}
+
+export interface GoalControlPort {
+  countOpen(workspaceId: string): Promise<number>;
+  preferred(workspaceId: string): Promise<string | null>;
+  listOpen(workspaceId: string): Promise<readonly WebGoalSummary[]>;
+  continue(workspaceId: string, goalId: string): Promise<WebGoalSummary>;
 }
 
 export interface ControlPlaneServerOptions {
@@ -62,6 +88,7 @@ export interface ControlPlaneServerOptions {
   readonly secretStore?: SecretStore;
   readonly cloudflareReconciler?: CloudflareTunnelReconciler;
   readonly workspaceControl?: WorkspaceControlPort;
+  readonly goalControl?: GoalControlPort;
   readonly closeSettings?: () => void;
 }
 
@@ -111,6 +138,7 @@ export class ControlPlaneServer {
   private readonly secretStore: SecretStore | undefined;
   private readonly cloudflareReconciler: CloudflareTunnelReconciler;
   private readonly workspaceControl: WorkspaceControlPort | undefined;
+  private readonly goalControl: GoalControlPort | undefined;
   private readonly closeSettings: (() => void) | undefined;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
@@ -137,6 +165,7 @@ export class ControlPlaneServer {
     this.secretStore = options.secretStore;
     this.cloudflareReconciler = options.cloudflareReconciler ?? new CloudflareTunnelReconciler();
     this.workspaceControl = options.workspaceControl;
+    this.goalControl = options.goalControl;
     this.closeSettings = options.closeSettings;
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
@@ -248,10 +277,52 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/workspaces' && req.method === 'GET') {
-      const workspaces = await this.workspaceControl?.list() ?? [];
+      const registeredWorkspaces = await this.workspaceControl?.list() ?? [];
       const selection = this.workspaceControl === undefined ? null : await this.workspaceControl.selection();
+      const workspaces = await Promise.all(registeredWorkspaces.map(async (workspace) => ({
+        ...workspace,
+        openGoalCount: this.goalControl === undefined ? 0 : await this.goalControl.countOpen(workspace.id),
+        preferredGoalId: this.goalControl === undefined ? null : await this.goalControl.preferred(workspace.id),
+      })));
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ workspaces, selection }));
+      return;
+    }
+
+    const workspaceGoalsRoute = pathname.match(/^\/api\/workspaces\/([^/]+)\/goals$/);
+    if (workspaceGoalsRoute !== null && req.method === 'GET') {
+      const workspaceId = decodeURIComponent(workspaceGoalsRoute[1]!);
+      const registered = await this.workspaceControl?.list() ?? [];
+      if (!registered.some((workspace) => workspace.id === workspaceId)) {
+        sendJsonError(res, 404, 'Workspace is not a registered project');
+        return;
+      }
+      const goals = this.goalControl === undefined ? [] : await this.goalControl.listOpen(workspaceId);
+      const preferredGoalId = this.goalControl === undefined ? null : await this.goalControl.preferred(workspaceId);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ goals, preferredGoalId }));
+      return;
+    }
+
+    const workspaceGoalContinueRoute = pathname.match(/^\/api\/workspaces\/([^/]+)\/goals\/([^/]+)\/continue$/);
+    if (workspaceGoalContinueRoute !== null && req.method === 'PUT') {
+      if (this.workspaceControl === undefined || this.goalControl === undefined) {
+        sendJsonError(res, 503, 'Workspace goal service is unavailable');
+        return;
+      }
+      const workspaceId = decodeURIComponent(workspaceGoalContinueRoute[1]!);
+      const goalId = decodeURIComponent(workspaceGoalContinueRoute[2]!);
+      try {
+        const registered = await this.workspaceControl.list();
+        if (!registered.some((workspace) => workspace.id === workspaceId)) throw new Error('Workspace is not a registered project');
+        const goal = await this.goalControl.continue(workspaceId, goalId);
+        const selection = await this.workspaceControl.activate(workspaceId);
+        this.recordLog('SUCCESS', `Preferred workspace goal selected: ${workspaceId} ${goal.goalKey}`);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ goal, preferredGoalId: goal.goalId, selection }));
+      } catch (error) {
+        sendJsonError(res, 400, error instanceof Error ? error.message : 'Goal continuation selection failed');
+      }
       return;
     }
 

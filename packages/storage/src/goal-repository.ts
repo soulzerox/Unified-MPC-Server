@@ -273,6 +273,14 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     return rows.map((row) => this.toGoalRecord(this.requireGoalRow(row)));
   }
 
+  /** Desktop-host summary view. MCP callers must continue to use owner-scoped list(). */
+  public async countWorkspaceGoalsForHost(workspaceId: string): Promise<number> {
+    const row = this.database.connection.prepare(`
+      SELECT COUNT(*) AS count FROM goals WHERE workspace_id = ? AND status = 'active'
+    `).get(workspaceId) as { count?: number | bigint } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
   /** Desktop-host administration view. MCP callers must continue to use owner-scoped list(). */
   public async listWorkspaceGoalsForHost(workspaceId: string, limit = 20): Promise<readonly GoalRecord[]> {
     const boundedLimit = Math.min(100, Math.max(1, Math.trunc(limit)));

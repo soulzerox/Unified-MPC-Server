@@ -1,8 +1,27 @@
-import { ok, err, appError, type Result } from '@unified-mpc/domain';
+import { ok, err, appError, type GoalRecord, type Result } from '@unified-mpc/domain';
 import { WorkspaceSelectionService } from '@unified-mpc/application';
-import { ControlPlaneServer, type ControlPlaneServerOptions, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary, type WorkspaceControlPort } from '@unified-mpc/web';
-import { USER_SETTING_KEYS, resolveDataPath } from '@unified-mpc/shared';
-import { SecretToolSecretStore, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import {
+  ControlPlaneServer,
+  type ControlPlaneServerOptions,
+  type GoalControlPort,
+  type WebGoalSummary,
+  type WebWorkspaceSelectionSnapshot,
+  type WebWorkspaceSummary,
+  type WorkspaceControlPort,
+} from '@unified-mpc/web';
+import {
+  USER_SETTING_KEYS,
+  parseStringRecordSetting,
+  resolveDataPath,
+  serializeStringRecordSetting,
+} from '@unified-mpc/shared';
+import {
+  SecretToolSecretStore,
+  SqliteDatabase,
+  SqliteGoalRepository,
+  SqliteSettingsRepository,
+  SqliteWorkspaceRepository,
+} from '@unified-mpc/storage';
 import { WorkspaceService, isMachineRootPath } from '@unified-mpc/workspace';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
@@ -50,8 +69,10 @@ export async function runWeb(
     const settings = new SqliteSettingsRepository(database);
     const workspaceRepository = new SqliteWorkspaceRepository(database);
     const workspaceService = new WorkspaceService(workspaceRepository);
+    const goalRepository = new SqliteGoalRepository(database);
     bootstrapNonSecretSettings(settings);
     const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings);
+    const goalControl = createGoalControl(goalRepository, settings);
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
@@ -59,6 +80,7 @@ export async function runWeb(
       settingsRepository: serverOptions?.settingsRepository ?? settings,
       secretStore: serverOptions?.secretStore ?? new SecretToolSecretStore(),
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
+      goalControl: serverOptions?.goalControl ?? goalControl,
       closeSettings: (): void => {
         if (serverOptions?.closeSettings === undefined) database.close();
         serverOptions?.closeSettings?.();
@@ -127,6 +149,54 @@ function createWorkspaceControl(
   };
 }
 
+export function createGoalControl(
+  goals: Pick<SqliteGoalRepository, 'countWorkspaceGoalsForHost' | 'listWorkspaceGoalsForHost' | 'getById'>,
+  settings: Pick<SqliteSettingsRepository, 'get' | 'set'>,
+): GoalControlPort {
+  const preferredMap = (): Readonly<Record<string, string>> => parseStringRecordSetting(
+    settings.get(USER_SETTING_KEYS.preferredWorkspaceGoals),
+  );
+  const validPreferred = async (workspaceId: string): Promise<string | null> => {
+    const goalId = preferredMap()[workspaceId.toLowerCase()];
+    if (goalId === undefined) return null;
+    const goal = await goals.getById(goalId);
+    return goal !== null && goal.workspaceId === workspaceId && goal.status === 'active' ? goal.id : null;
+  };
+
+  return {
+    countOpen: async (workspaceId: string): Promise<number> => goals.countWorkspaceGoalsForHost(workspaceId),
+    preferred: validPreferred,
+    listOpen: async (workspaceId: string): Promise<readonly WebGoalSummary[]> => (await goals.listWorkspaceGoalsForHost(workspaceId, 100)).map(toWebGoalSummary),
+    continue: async (workspaceId: string, goalId: string): Promise<WebGoalSummary> => {
+      const goal = await goals.getById(goalId);
+      if (goal === null || goal.workspaceId !== workspaceId || goal.status !== 'active') {
+        throw new Error('Open goal was not found in this workspace');
+      }
+      settings.set(USER_SETTING_KEYS.preferredWorkspaceGoals, serializeStringRecordSetting({
+        ...preferredMap(),
+        [workspaceId]: goal.id,
+      }));
+      return toWebGoalSummary(goal);
+    },
+  };
+}
+
+function toWebGoalSummary(goal: GoalRecord): WebGoalSummary {
+  const completed = goal.plan.steps.filter((step) => step.status === 'completed').length;
+  return {
+    goalId: goal.id,
+    goalKey: goal.goalKey,
+    objective: goal.objective,
+    status: 'active',
+    currentPhase: goal.currentPhase,
+    progress: { completed, total: goal.plan.steps.length },
+    blockers: [...goal.blockers],
+    nextAction: goal.nextAction,
+    steps: goal.plan.steps.map((step) => ({ id: step.id, title: step.title, status: step.status })),
+    updatedAt: goal.updatedAt,
+  };
+}
+
 function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {
   const imports: readonly [string, string][] = [
     ['cloudflare_tunnel_name', 'UNIFIED_MPC_CLOUDFLARE_TUNNEL_NAME'],
@@ -140,4 +210,3 @@ function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {
     if (value) settings.set(key, value);
   }
 }
-

@@ -243,6 +243,69 @@ export const OBSIDIAN_THEME_CSS = `
   .badge-syncing { background: rgba(245, 158, 11, 0.15); color: var(--status-syncing); }
   .badge-offline { background: rgba(239, 68, 68, 0.15); color: var(--status-offline); }
 
+  .project-goals-row td {
+    padding: 0;
+    background: #0D1016;
+  }
+  .project-goals-row:hover { background: transparent; }
+  .project-goals-panel {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    color: var(--text-secondary);
+  }
+  .project-goal-card {
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    background: var(--surface-1);
+    padding: 14px;
+  }
+  .project-goal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .project-goal-updated {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .project-goal-objective {
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 10px;
+  }
+  .project-goal-meta,
+  .project-goal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+  .project-goal-actions { margin-top: 12px; }
+  .project-goal-blockers {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    background: rgba(245, 158, 11, 0.08);
+    color: #FBBF24;
+    font-size: 12px;
+  }
+  .project-goal-details {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .project-goal-steps {
+    margin: 8px 0 0 20px;
+    display: grid;
+    gap: 4px;
+  }
+
   .stats-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));

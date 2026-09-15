@@ -103,8 +103,8 @@ async function syncAllVersions() {
     // skip if missing
   }
 
-  // 8. Update concise and expanded README current-version references without rewriting release history.
-  const readmePaths = [path.join(rootDir, 'README.md'), path.join(rootDir, 'FULL_README.md')];
+  // 8. Update concise README current-version references without rewriting release history.
+  const readmePaths = [path.join(rootDir, 'README.md')];
   for (const readmePath of readmePaths) {
     try {
       let readmeContent = await readFile(readmePath, 'utf8');

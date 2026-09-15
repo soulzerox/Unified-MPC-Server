@@ -161,6 +161,35 @@ export function renderDashboardViewsHtml(): string {
     </div>
   </div>
 
+  <!-- VIEW: PROJECTS / ACTIVE WORKSPACE SET -->
+  <div class="view-panel" id="view-projects">
+    <div class="card">
+      <div class="filter-bar">
+        <div>
+          <h2 style="margin-bottom: 4px;">Projects & Active Workspace Set</h2>
+          <p style="font-size: 12px; color: var(--text-secondary);">Only registered project roots can be activated. The Primary Project is the default implicit project; active projects remain independently guarded by workspace containment.</p>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="projects-refresh-btn" type="button">Refresh</button>
+      </div>
+      <div class="table-responsive">
+        <table id="projects-table">
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Path</th>
+              <th>Active</th>
+              <th>Primary</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="projects-table-body">
+            <tr><td colspan="5" style="color: var(--text-muted); text-align: center;">Loading registered projects...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- VIEW: SERVERS VIEW -->
   <div class="view-panel" id="view-servers">
     <div class="card">

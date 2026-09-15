@@ -19,6 +19,7 @@ describe('Dashboard HTML Reactive SPA', () => {
   it('wires telemetry and policy API endpoints in script', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('/api/status');
+    expect(html).toContain('/api/workspaces');
     expect(html).toContain('/api/policies');
     expect(html).toContain('/api/policies/sync');
     expect(html).toContain('/api/chatgpt-gateway/status');

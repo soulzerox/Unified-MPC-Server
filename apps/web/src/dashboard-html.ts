@@ -23,6 +23,7 @@ ${OBSIDIAN_THEME_CSS}
     </div>
     <nav>
       <a class="active" id="nav-dashboard">Dashboard</a>
+      <a id="nav-projects">Projects</a>
       <a id="nav-servers">Servers</a>
       <a id="nav-skills">Skills</a>
       <a id="nav-install">Install</a>

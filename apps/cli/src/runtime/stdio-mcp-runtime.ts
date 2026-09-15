@@ -17,6 +17,7 @@ import {
   ProjectSnapshotService,
   SearchService,
   WorkspaceInfoService,
+  WorkspaceSelectionService,
   JsonWorkspaceIndexStore,
   WorkspaceIndexService,
   WorkspaceQueryService,
@@ -48,7 +49,7 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { isMachineRootPath, SecretPolicy, WorkspacePathGuard, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { SecretPolicy, WorkspacePathGuard, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 
 export interface StdioMcpRuntime {
@@ -62,6 +63,7 @@ export interface StdioMcpRuntime {
   readonly allowAiDeleteProvider: () => boolean;
   readonly destructivePolicyProvider: () => DestructiveAutoApprovalPolicy;
   readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope>;
+  readonly activeWorkspaceScopesProvider: () => Promise<readonly WorkspaceScope[]>;
   readonly codexToolsEnabled: boolean;
   readonly ponytailMode: PonytailMode;
   readonly toolAvailabilityService: ToolAvailabilityService;
@@ -73,6 +75,8 @@ export interface StdioMcpRuntimeOptions {
   readonly permissionProfile?: PermissionProfileName;
   readonly strictAllowedRoots?: readonly string[];
   readonly fullBypassAll?: boolean;
+  /** Persist the HTTP active-project profile so WebUI/CLI changes are visible without restart. */
+  readonly persistWorkspaceSelection?: boolean;
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
 }
@@ -92,6 +96,22 @@ export function createStdioMcpRuntime(
   const goalRepository = new SqliteGoalRepository(database);
   const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
   const settingsRepository = new SqliteSettingsRepository(database);
+  const workspaceSelection = new WorkspaceSelectionService(
+    workspaceRepository,
+    workspace.id,
+    options.persistWorkspaceSelection === true
+      ? {
+          get: (): string | null => settingsRepository.get(USER_SETTING_KEYS.httpWorkspaceSelection),
+          set: (value): void => settingsRepository.set(USER_SETTING_KEYS.httpWorkspaceSelection, value),
+        }
+      : undefined,
+  );
+  const activeWorkspaces = async (): Promise<readonly Workspace[]> => {
+    const selected = await workspaceSelection.activeWorkspaces();
+    if (!selected.ok) throw new Error(selected.error.message);
+    return selected.value;
+  };
+  const primaryWorkspaceRoot = async (): Promise<string> => (await activeWorkspaces())[0]?.realRootPath ?? workspace.realRootPath;
   const toolAvailabilityService = new ToolAvailabilityService(settingsRepository);
   const stopToolAvailabilityWatch = toolAvailabilityService.watch(250);
   const auditRepository = new SqliteAuditRepository(database);
@@ -143,7 +163,7 @@ export function createStdioMcpRuntime(
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
   const extensions = createLocalExtensionsService({
     settingsJson: settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
-    workspaceRootProvider: async (): Promise<string> => workspace.realRootPath,
+    workspaceRootProvider: primaryWorkspaceRoot,
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
     idleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
   });
@@ -153,12 +173,8 @@ export function createStdioMcpRuntime(
   });
   const agentSwarmService = new AgentSwarmService(new SqliteAgentSwarmRepository(database), codexService);
   const capabilityRuntime = createStdioCapabilityService(dataPath, workspace.realRootPath, async () => {
-    const listed = await workspaceRepository.list();
-    const roots = listed
-      .filter((entry) => !isMachineRootPath(entry.realRootPath) && !isMachineRootPath(entry.rootPath))
-      .map((entry) => entry.realRootPath);
-    if (roots.length === 0) return [workspace.realRootPath];
-    return roots;
+    const roots = (await activeWorkspaces()).map((entry) => entry.realRootPath);
+    return roots.length === 0 ? [workspace.realRootPath] : roots;
   }, effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
   const taskCancellation = new GoalTaskCancellationService([
@@ -233,8 +249,12 @@ export function createStdioMcpRuntime(
     }),
     capabilities: capabilityRuntime.service,
     extensions,
-    installer: new InstallerService({ workspaceRoot: workspace.realRootPath }),
+    installer: {
+      installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot() }).installSkill(input),
+      installServer: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot() }).installServer(input),
+    },
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
+    workspaceSelection,
     workspaceQuery,
     projectSnapshot: new ProjectSnapshotService(workspaceRepository, {
       projectService,
@@ -267,7 +287,12 @@ export function createStdioMcpRuntime(
     profileProvider,
     allowAiDeleteProvider,
     destructivePolicyProvider,
-    activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: workspace.id, rootPath: workspace.realRootPath }),
+    activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => {
+      const selected = (await activeWorkspaces())[0] ?? workspace;
+      return { workspaceId: selected.id, rootPath: selected.realRootPath };
+    },
+    activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => (await activeWorkspaces())
+      .map((selected) => ({ workspaceId: selected.id, rootPath: selected.realRootPath })),
     codexToolsEnabled: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.codexToolsEnabled), DEFAULT_CODEX_TOOLS_ENABLED),
     ponytailMode: parsePonytailMode(settingsRepository.get(USER_SETTING_KEYS.ponytailMode), DEFAULT_PONYTAIL_MODE),
     toolAvailabilityService,

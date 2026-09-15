@@ -4,10 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
-import type { DoctorReport } from '@unified-mpc/application';
+import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
-import { resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
+import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -58,6 +58,10 @@ export type CliCommand =
   | { readonly kind: 'status' }
   | { readonly kind: 'workspace-add'; readonly rootPath: string }
   | { readonly kind: 'workspace-list' }
+  | { readonly kind: 'workspace-active' }
+  | { readonly kind: 'workspace-activate'; readonly workspaceReference: string }
+  | { readonly kind: 'workspace-deactivate'; readonly workspaceReference: string }
+  | { readonly kind: 'workspace-use'; readonly workspaceReference: string }
   | { readonly kind: 'mcp-stdio'; readonly workspaceReference?: string }
   | { readonly kind: 'mcp-http'; readonly workspaceReference?: string }
   | { readonly kind: 'doctor' }
@@ -82,6 +86,10 @@ export interface CliDependencies {
   status(): Promise<CliStatus>;
   workspaceAdd(rootPath: string): Promise<Result<Workspace>>;
   workspaceList(): Promise<readonly Workspace[]>;
+  workspaceActive?(): Promise<Result<WorkspaceSelectionSnapshot>>;
+  workspaceActivate?(workspaceReference: string): Promise<Result<WorkspaceSelectionSnapshot>>;
+  workspaceDeactivate?(workspaceReference: string): Promise<Result<WorkspaceSelectionSnapshot>>;
+  workspaceUse?(workspaceReference: string): Promise<Result<WorkspaceSelectionSnapshot>>;
   mcpStdio(workspaceReference?: string): Promise<Result<{ readonly handle: CliServerHandle }>>;
   mcpHttp(workspaceReference?: string): Promise<Result<{ readonly handle: CliServerHandle }>>;
   doctor(): Promise<DoctorReport>;
@@ -138,6 +146,10 @@ Commands:
   tools call <tool> <args-json>          Call a downstream MCP tool headlessly
   workspace add <path>                   Register a workspace root
   workspace list                         List registered workspaces
+  workspace active                       Show the HTTP/ChatGPT Active Project set
+  workspace activate <id-or-path>        Activate a registered project
+  workspace deactivate <id-or-path>      Deactivate a registered project
+  workspace use <id-or-path>             Activate and make a project Primary
   doctor                                 Run system health checks
   help, --help, -h                       Display this help message`);
       return 0;
@@ -162,6 +174,14 @@ Commands:
       if (workspaces.length === 0) write('No workspaces configured');
       return 0;
     }
+    case 'workspace-active':
+      return runWorkspaceSelectionCommand(dependencies.workspaceActive, undefined, write, writeError);
+    case 'workspace-activate':
+      return runWorkspaceSelectionCommand(dependencies.workspaceActivate, parsed.value.workspaceReference, write, writeError);
+    case 'workspace-deactivate':
+      return runWorkspaceSelectionCommand(dependencies.workspaceDeactivate, parsed.value.workspaceReference, write, writeError);
+    case 'workspace-use':
+      return runWorkspaceSelectionCommand(dependencies.workspaceUse, parsed.value.workspaceReference, write, writeError);
     case 'mcp-stdio':
       return runMcpLaunch(dependencies.mcpStdio, parsed.value.workspaceReference, writeError);
     case 'mcp-http':
@@ -287,7 +307,11 @@ Commands:
 function parseWorkspaceArgs(args: readonly string[]): Result<CliCommand> {
   if (args[1] === 'add' && args.length === 3 && args[2] !== undefined) return ok({ kind: 'workspace-add', rootPath: args[2] });
   if (args[1] === 'list' && args.length === 2) return ok({ kind: 'workspace-list' });
-  return err(appError('INVALID_INPUT', 'Usage: unified-mpc workspace add <path> | workspace list'));
+  if (args[1] === 'active' && args.length === 2) return ok({ kind: 'workspace-active' });
+  if (args[1] === 'activate' && args.length === 3 && args[2] !== undefined) return ok({ kind: 'workspace-activate', workspaceReference: args[2] });
+  if (args[1] === 'deactivate' && args.length === 3 && args[2] !== undefined) return ok({ kind: 'workspace-deactivate', workspaceReference: args[2] });
+  if (args[1] === 'use' && args.length === 3 && args[2] !== undefined) return ok({ kind: 'workspace-use', workspaceReference: args[2] });
+  return err(appError('INVALID_INPUT', 'Usage: unified-mpc workspace add <path> | workspace list|active|activate|deactivate|use'));
 }
 
 function parseMcpArgs(args: readonly string[]): Result<CliCommand> {
@@ -340,15 +364,72 @@ async function runMcpLaunch(
   return 0;
 }
 
+async function runWorkspaceSelectionCommand(
+  action: (() => Promise<Result<WorkspaceSelectionSnapshot>>) | ((workspaceReference: string) => Promise<Result<WorkspaceSelectionSnapshot>>) | undefined,
+  workspaceReference: string | undefined,
+  write: (text: string) => void,
+  writeError: (text: string) => void,
+): Promise<number> {
+  if (action === undefined) {
+    writeError('Workspace selection service not available');
+    return 1;
+  }
+  const result = workspaceReference === undefined
+    ? await (action as () => Promise<Result<WorkspaceSelectionSnapshot>>)()
+    : await (action as (reference: string) => Promise<Result<WorkspaceSelectionSnapshot>>)(workspaceReference);
+  if (!result.ok) {
+    writeError(result.error.message);
+    return 1;
+  }
+  write(`primary\t${result.value.primaryWorkspaceId}`);
+  for (const id of result.value.activeWorkspaceIds) {
+    if (id !== result.value.primaryWorkspaceId) write(`active\t${id}`);
+  }
+  return 0;
+}
+
 export function createDefaultCliDependencies(): CliDependencies {
-  let workspaceService: WorkspaceService | undefined;
-  const getWorkspaceService = (): WorkspaceService => {
-    if (workspaceService !== undefined) return workspaceService;
+  let workspaceState: {
+    readonly repository: SqliteWorkspaceRepository;
+    readonly settings: SqliteSettingsRepository;
+    readonly service: WorkspaceService;
+  } | undefined;
+  const getWorkspaceState = (): NonNullable<typeof workspaceState> => {
+    if (workspaceState !== undefined) return workspaceState;
     const dataPath = resolveDataPathFromShared();
     fs.mkdirSync(dataPath, { recursive: true });
-    const database = new SqliteDatabase(path.join(dataPath, 'storage.sqlite'));
-    workspaceService = new WorkspaceService(new SqliteWorkspaceRepository(database));
-    return workspaceService;
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    const repository = new SqliteWorkspaceRepository(database);
+    workspaceState = {
+      repository,
+      settings: new SqliteSettingsRepository(database),
+      service: new WorkspaceService(repository),
+    };
+    return workspaceState;
+  };
+  const getWorkspaceService = (): WorkspaceService => getWorkspaceState().service;
+  const getWorkspaceSelection = async (): Promise<Result<WorkspaceSelectionService>> => {
+    const state = getWorkspaceState();
+    const workspaces = await state.service.list();
+    const initial = workspaces[0];
+    if (initial === undefined) return err(appError('WORKSPACE_NOT_FOUND', 'No registered project workspace is available', true));
+    return ok(new WorkspaceSelectionService(state.repository, initial.id, {
+      get: () => state.settings.get(USER_SETTING_KEYS.httpWorkspaceSelection),
+      set: (value) => state.settings.set(USER_SETTING_KEYS.httpWorkspaceSelection, value),
+    }));
+  };
+  const resolveWorkspaceReference = async (reference: string): Promise<Result<Workspace>> => {
+    const trimmed = reference.trim();
+    const workspaces = await getWorkspaceService().list();
+    const absolute = path.resolve(trimmed);
+    const workspace = workspaces.find((candidate) => candidate.id === trimmed
+      || candidate.rootPath === trimmed
+      || candidate.realRootPath === trimmed
+      || path.resolve(candidate.rootPath) === absolute
+      || path.resolve(candidate.realRootPath) === absolute);
+    return workspace === undefined
+      ? err(appError('WORKSPACE_NOT_FOUND', 'Workspace is not a registered project', true))
+      : ok(workspace);
   };
   let extensions: ReturnType<typeof createLocalExtensionsService> | undefined;
   const getExtensions = (): ReturnType<typeof createLocalExtensionsService> => {
@@ -366,6 +447,28 @@ export function createDefaultCliDependencies(): CliDependencies {
     },
     workspaceList: async (): Promise<readonly Workspace[]> => {
       return getWorkspaceService().list();
+    },
+    workspaceActive: async (): Promise<Result<WorkspaceSelectionSnapshot>> => {
+      const selection = await getWorkspaceSelection();
+      return selection.ok ? selection.value.list() : selection;
+    },
+    workspaceActivate: async (workspaceReference: string): Promise<Result<WorkspaceSelectionSnapshot>> => {
+      const [selection, workspace] = await Promise.all([getWorkspaceSelection(), resolveWorkspaceReference(workspaceReference)]);
+      if (!selection.ok) return selection;
+      if (!workspace.ok) return workspace;
+      return selection.value.activate(workspace.value.id);
+    },
+    workspaceDeactivate: async (workspaceReference: string): Promise<Result<WorkspaceSelectionSnapshot>> => {
+      const [selection, workspace] = await Promise.all([getWorkspaceSelection(), resolveWorkspaceReference(workspaceReference)]);
+      if (!selection.ok) return selection;
+      if (!workspace.ok) return workspace;
+      return selection.value.deactivate(workspace.value.id);
+    },
+    workspaceUse: async (workspaceReference: string): Promise<Result<WorkspaceSelectionSnapshot>> => {
+      const [selection, workspace] = await Promise.all([getWorkspaceSelection(), resolveWorkspaceReference(workspaceReference)]);
+      if (!selection.ok) return selection;
+      if (!workspace.ok) return workspace;
+      return selection.value.setPrimary(workspace.value.id);
     },
     mcpStdio: async (): Promise<Result<{ readonly handle: CliServerHandle }>> => {
       return err(appError('INTERNAL_ERROR', 'Direct stdio MCP launch requires mcp-stdio runner'));

@@ -28,6 +28,26 @@ import {
   type SyncTarget,
 } from '@unified-mpc/extensions';
 
+export interface WebWorkspaceSummary {
+  readonly id: string;
+  readonly displayName: string;
+  readonly rootPath: string;
+  readonly realRootPath: string;
+}
+
+export interface WebWorkspaceSelectionSnapshot {
+  readonly primaryWorkspaceId: string;
+  readonly activeWorkspaceIds: readonly string[];
+}
+
+export interface WorkspaceControlPort {
+  list(): Promise<readonly WebWorkspaceSummary[]>;
+  selection(): Promise<WebWorkspaceSelectionSnapshot | null>;
+  activate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
+  deactivate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
+  setPrimary(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
+}
+
 export interface ControlPlaneServerOptions {
   readonly port?: number;
   readonly gatewayLocalPort?: number;
@@ -43,6 +63,7 @@ export interface ControlPlaneServerOptions {
   readonly settingsRepository?: Pick<SqliteSettingsRepository, 'get' | 'set' | 'delete'>;
   readonly secretStore?: SecretStore;
   readonly cloudflareReconciler?: CloudflareTunnelReconciler;
+  readonly workspaceControl?: WorkspaceControlPort;
   readonly closeSettings?: () => void;
 }
 
@@ -91,6 +112,7 @@ export class ControlPlaneServer {
   private readonly settingsRepository: Pick<SqliteSettingsRepository, 'get' | 'set' | 'delete'> | undefined;
   private readonly secretStore: SecretStore | undefined;
   private readonly cloudflareReconciler: CloudflareTunnelReconciler;
+  private readonly workspaceControl: WorkspaceControlPort | undefined;
   private readonly closeSettings: (() => void) | undefined;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
@@ -116,6 +138,7 @@ export class ControlPlaneServer {
     this.settingsRepository = options.settingsRepository;
     this.secretStore = options.secretStore;
     this.cloudflareReconciler = options.cloudflareReconciler ?? new CloudflareTunnelReconciler();
+    this.workspaceControl = options.workspaceControl;
     this.closeSettings = options.closeSettings;
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
@@ -192,7 +215,7 @@ export class ControlPlaneServer {
         return;
       }
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     }
 
@@ -223,6 +246,44 @@ export class ControlPlaneServer {
         status: 'healthy',
         gateway: this.gateway.status(),
       }));
+      return;
+    }
+
+    if (pathname === '/api/workspaces' && req.method === 'GET') {
+      const workspaces = await this.workspaceControl?.list() ?? [];
+      const selection = this.workspaceControl === undefined ? null : await this.workspaceControl.selection();
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ workspaces, selection }));
+      return;
+    }
+
+    const workspaceRoute = pathname.match(/^\/api\/workspaces\/([^/]+)\/(active|primary)$/);
+    if (workspaceRoute !== null) {
+      if (this.workspaceControl === undefined) {
+        sendJsonError(res, 503, 'Workspace selection service is unavailable');
+        return;
+      }
+      const workspaceId = decodeURIComponent(workspaceRoute[1]!);
+      const action = workspaceRoute[2]!;
+      try {
+        let selection: WebWorkspaceSelectionSnapshot;
+        if (action === 'active' && req.method === 'PUT') {
+          selection = await this.workspaceControl.activate(workspaceId);
+        } else if (action === 'active' && req.method === 'DELETE') {
+          selection = await this.workspaceControl.deactivate(workspaceId);
+        } else if (action === 'primary' && req.method === 'PUT') {
+          selection = await this.workspaceControl.setPrimary(workspaceId);
+        } else {
+          res.writeHead(405, { 'Content-Type': 'application/json', Allow: action === 'active' ? 'PUT, DELETE' : 'PUT' });
+          res.end(JSON.stringify({ error: 'Method not allowed' }));
+          return;
+        }
+        this.recordLog('SUCCESS', `Workspace selection updated: ${workspaceId} ${action}`);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ selection }));
+      } catch (error) {
+        sendJsonError(res, 400, error instanceof Error ? error.message : 'Workspace selection failed');
+      }
       return;
     }
 

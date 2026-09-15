@@ -2,10 +2,12 @@ import { defineTool, missingService, type McpToolContext, type McpToolDefinition
 import {
   prepareCodeChangeSchema,
   projectSnapshotSchema,
+  workspaceActiveListSchema,
   workspaceBootstrapSchema,
   workspaceInfoSchema,
   workspaceListSchema,
   workspaceRegisterSchema,
+  workspaceSelectionSchema,
   workspaceTreeSchema,
 } from './schemas.js';
 
@@ -22,6 +24,46 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
         : context.services.workspaceInfo.list === undefined
           ? missingService()
           : context.services.workspaceInfo.list(context.actor),
+    }),
+    defineTool({
+      name: 'workspace_active_list',
+      description: 'Return the current ordered Active Project set. The first workspace is the Primary Project used for implicit project context.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: workspaceActiveListSchema,
+      handler: async () => context.services.workspaceSelection === undefined
+        ? missingService()
+        : context.services.workspaceSelection.list(),
+    }),
+    defineTool({
+      name: 'workspace_activate',
+      description: 'Add one already-registered project to this runtime active set without widening access to arbitrary filesystem paths.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: workspaceSelectionSchema,
+      handler: async (input) => context.services.workspaceSelection === undefined
+        ? missingService()
+        : context.services.workspaceSelection.activate(input.workspaceId),
+    }),
+    defineTool({
+      name: 'workspace_deactivate',
+      description: 'Remove one registered project from this runtime active set. At least one Active Project always remains.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: workspaceSelectionSchema,
+      handler: async (input) => context.services.workspaceSelection === undefined
+        ? missingService()
+        : context.services.workspaceSelection.deactivate(input.workspaceId),
+    }),
+    defineTool({
+      name: 'workspace_set_primary',
+      description: 'Make one registered project the Primary Project; it is activated automatically and placed first in the active set.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: workspaceSelectionSchema,
+      handler: async (input) => context.services.workspaceSelection === undefined
+        ? missingService()
+        : context.services.workspaceSelection.setPrimary(input.workspaceId),
     }),
     defineTool({
       name: 'workspace_register',

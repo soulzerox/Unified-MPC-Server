@@ -45,6 +45,10 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     workspaceInfo: serviceProxy('workspaceInfo', calls, (method) => method === 'list'
       ? [{ id: 'workspace-1', path: process.cwd(), realRootPath: process.cwd() }]
       : { id: 'workspace-1', path: process.cwd(), realRootPath: process.cwd() }),
+    workspaceSelection: serviceProxy('workspaceSelection', calls, () => ({
+      primaryWorkspaceId: 'workspace-1',
+      activeWorkspaceIds: ['workspace-1'],
+    })),
     workspaceQuery: serviceProxy('workspaceQuery', calls, () => ({ entries: [] })),
     projectSnapshot: serviceProxy('projectSnapshot', calls, () => ({ workspaceId: 'workspace-1', files: 1 })),
     project: serviceProxy('project', calls, () => ({ kind: 'node', packageManager: 'pnpm' })),

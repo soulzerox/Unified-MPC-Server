@@ -202,7 +202,7 @@ async function main(): Promise<void> {
     authorizationModeProvider: (): 'standard' | 'full_bypass' => stdioFullBypassAll ? 'full_bypass' : 'standard',
     allowAiDeleteProvider: runtime.allowAiDeleteProvider,
     destructivePolicyProvider: runtime.destructivePolicyProvider,
-    activeWorkspaceScopeProvider: runtime.activeWorkspaceScopeProvider,
+    activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
     toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
     onError: (error): void => {

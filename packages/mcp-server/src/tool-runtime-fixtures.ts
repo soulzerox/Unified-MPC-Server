@@ -55,6 +55,10 @@ const unavailable = (
  */
 export const CORE_TOOL_RUNTIME_FIXTURES = {
   workspace_list: service({}, 'workspaceInfo.list'),
+  workspace_active_list: service({}, 'workspaceSelection.list'),
+  workspace_activate: service({ workspaceId }, 'workspaceSelection.activate'),
+  workspace_deactivate: service({ workspaceId }, 'workspaceSelection.deactivate'),
+  workspace_set_primary: service({ workspaceId }, 'workspaceSelection.setPrimary'),
   workspace_register: service({ path: 'E:\\project' }, 'workspaceInfo.register'),
   workspace_info: service({ workspaceId }, 'workspaceInfo.info'),
   workspace_bootstrap: service({ workspaceId }, 'extensions.bootstrapMandatoryMcpServers'),

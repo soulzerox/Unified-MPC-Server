@@ -90,6 +90,7 @@ export function inspectMutationOperation(
     case 'list_recovery_items':
     case 'list_checkpoints':
     case 'workspace_list':
+    case 'workspace_active_list':
     case 'skills_list':
     case 'skills_read':
     case 'mcp_list':
@@ -101,6 +102,10 @@ export function inspectMutationOperation(
       return read('batch dispatcher applies mutation policy independently to every child call');
     case 'workspace_register':
       return boundedWrite('workspace_register adds a validated project registration without changing project files');
+    case 'workspace_activate':
+    case 'workspace_deactivate':
+    case 'workspace_set_primary':
+      return boundedWrite(`${toolName} changes only the registered Active Project selection state`);
     case 'skills_install':
     case 'mcp_install':
       return boundedWrite(`${toolName} installs validated extension state without executing repository install scripts`);

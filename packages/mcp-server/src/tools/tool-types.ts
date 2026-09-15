@@ -39,6 +39,13 @@ export interface WorkspaceInfoPort {
   }): Promise<Result<unknown>>;
 }
 
+export interface WorkspaceSelectionPort {
+  list(): Promise<Result<unknown>>;
+  activate(workspaceId: string): Promise<Result<unknown>>;
+  deactivate(workspaceId: string): Promise<Result<unknown>>;
+  setPrimary(workspaceId: string): Promise<Result<unknown>>;
+}
+
 export interface ProjectSnapshotPort {
   snapshot(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
 }
@@ -61,6 +68,7 @@ export interface McpApplicationServices {
   readonly extensions?: ExtensionsService;
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
+  readonly workspaceSelection?: WorkspaceSelectionPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
   readonly projectSnapshot?: ProjectSnapshotPort;
   readonly project?: Pick<ProjectService, 'detect'>;

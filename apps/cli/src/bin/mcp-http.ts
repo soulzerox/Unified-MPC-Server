@@ -36,7 +36,7 @@ async function main(): Promise<void> {
   const settings = new SqliteSettingsRepository(database);
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
 
-  const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined));
+  const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), { persistWorkspaceSelection: true });
   await runtime.activityReady;
   await runtime.recoveryReady;
   const enableHostApproval = parseBooleanSetting(
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
     authorizationModeProvider: () => 'standard',
     allowAiDeleteProvider: runtime.allowAiDeleteProvider,
     destructivePolicyProvider: runtime.destructivePolicyProvider,
-    activeWorkspaceScopeProvider: runtime.activeWorkspaceScopeProvider,
+    activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
     toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
     allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),

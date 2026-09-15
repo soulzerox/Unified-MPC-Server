@@ -1,7 +1,9 @@
 import { ok, err, appError, type Result } from '@unified-mpc/domain';
-import { ControlPlaneServer, type ControlPlaneServerOptions } from '@unified-mpc/web';
-import { resolveDataPath } from '@unified-mpc/shared';
-import { SecretToolSecretStore, SqliteDatabase, SqliteSettingsRepository } from '@unified-mpc/storage';
+import { WorkspaceSelectionService } from '@unified-mpc/application';
+import { ControlPlaneServer, type ControlPlaneServerOptions, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary, type WorkspaceControlPort } from '@unified-mpc/web';
+import { USER_SETTING_KEYS, resolveDataPath } from '@unified-mpc/shared';
+import { SecretToolSecretStore, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { WorkspaceService, isMachineRootPath } from '@unified-mpc/workspace';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
 
@@ -46,12 +48,16 @@ export async function runWeb(
     const dataPath = resolveDataPath();
     const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const settings = new SqliteSettingsRepository(database);
+    const workspaceRepository = new SqliteWorkspaceRepository(database);
+    const workspaceService = new WorkspaceService(workspaceRepository);
     bootstrapNonSecretSettings(settings);
+    const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings);
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
       settingsRepository: serverOptions?.settingsRepository ?? settings,
       secretStore: serverOptions?.secretStore ?? new SecretToolSecretStore(),
+      workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       closeSettings: (): void => {
         if (serverOptions?.closeSettings === undefined) database.close();
         serverOptions?.closeSettings?.();
@@ -72,6 +78,45 @@ export async function runWeb(
     const message = error instanceof Error ? error.message : String(error);
     return err(appError('INTERNAL_ERROR', `Failed to start control plane server: ${message}`));
   }
+}
+
+function createWorkspaceControl(
+  workspaceRepository: SqliteWorkspaceRepository,
+  workspaceService: WorkspaceService,
+  settings: SqliteSettingsRepository,
+): WorkspaceControlPort {
+  const projectList = async (): Promise<readonly WebWorkspaceSummary[]> => (await workspaceService.list())
+    .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath));
+  const selection = async (): Promise<WorkspaceSelectionService | null> => {
+    const projects = await projectList();
+    const initial = projects[0];
+    if (initial === undefined) return null;
+    return new WorkspaceSelectionService(workspaceRepository, initial.id, {
+      get: () => settings.get(USER_SETTING_KEYS.httpWorkspaceSelection),
+      set: (value) => settings.set(USER_SETTING_KEYS.httpWorkspaceSelection, value),
+    });
+  };
+  const requireSelection = async (): Promise<WorkspaceSelectionService> => {
+    const service = await selection();
+    if (service === null) throw new Error('No registered project workspace is available');
+    return service;
+  };
+  const unwrap = async <T>(result: Promise<Result<T>>): Promise<T> => {
+    const resolved = await result;
+    if (!resolved.ok) throw new Error(resolved.error.message);
+    return resolved.value;
+  };
+
+  return {
+    list: projectList,
+    selection: async (): Promise<WebWorkspaceSelectionSnapshot | null> => {
+      const service = await selection();
+      return service === null ? null : unwrap(service.list());
+    },
+    activate: async (workspaceId) => unwrap((await requireSelection()).activate(workspaceId)),
+    deactivate: async (workspaceId) => unwrap((await requireSelection()).deactivate(workspaceId)),
+    setPrimary: async (workspaceId) => unwrap((await requireSelection()).setPrimary(workspaceId)),
+  };
 }
 
 function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {

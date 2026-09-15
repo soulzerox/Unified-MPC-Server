@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ControlPlaneServer } from './web-server.js';
+import { ControlPlaneServer, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
   InstallerService,
@@ -160,6 +160,54 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.status).toBe('healthy');
+  });
+
+  it('lists registered projects and updates the shared Active Project selection through guarded workspace APIs', async () => {
+    let selection = { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] as string[] };
+    const workspaceControl = {
+      list: async (): Promise<readonly WebWorkspaceSummary[]> => [
+        { id: 'a', displayName: 'Project A', rootPath: '/projects/a', realRootPath: '/projects/a' },
+        { id: 'b', displayName: 'Project B', rootPath: '/projects/b', realRootPath: '/projects/b' },
+      ],
+      selection: async (): Promise<WebWorkspaceSelectionSnapshot> => selection,
+      activate: async (workspaceId: string): Promise<WebWorkspaceSelectionSnapshot> => {
+        if (!selection.activeWorkspaceIds.includes(workspaceId)) selection = { ...selection, activeWorkspaceIds: [...selection.activeWorkspaceIds, workspaceId] };
+        return selection;
+      },
+      deactivate: async (workspaceId: string): Promise<WebWorkspaceSelectionSnapshot> => {
+        selection = { ...selection, activeWorkspaceIds: selection.activeWorkspaceIds.filter((id) => id !== workspaceId) };
+        return selection;
+      },
+      setPrimary: async (workspaceId: string): Promise<WebWorkspaceSelectionSnapshot> => {
+        selection = { primaryWorkspaceId: workspaceId, activeWorkspaceIds: [workspaceId, ...selection.activeWorkspaceIds.filter((id) => id !== workspaceId)] };
+        return selection;
+      },
+    };
+    const projectsServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, workspaceControl });
+    await projectsServer.listen();
+    try {
+      const listed = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces`);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({
+        workspaces: [{ id: 'a' }, { id: 'b' }],
+        selection: { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] },
+      });
+
+      const headers = { Origin: `http://127.0.0.1:${projectsServer.port}`, 'x-unified-mpc-capability': capabilityToken };
+      const activated = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/b/active`, { method: 'PUT', headers });
+      expect(activated.status).toBe(200);
+      expect((await activated.json()).selection.activeWorkspaceIds).toEqual(['a', 'b']);
+
+      const primary = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/b/primary`, { method: 'PUT', headers });
+      expect(primary.status).toBe(200);
+      expect((await primary.json()).selection).toEqual({ primaryWorkspaceId: 'b', activeWorkspaceIds: ['b', 'a'] });
+
+      const deactivated = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/a/active`, { method: 'DELETE', headers });
+      expect(deactivated.status).toBe(200);
+      expect((await deactivated.json()).selection).toEqual({ primaryWorkspaceId: 'b', activeWorkspaceIds: ['b'] });
+    } finally {
+      await projectsServer.close();
+    }
   });
 
   it('enforces hard gating: POST /api/chatgpt-web/connect returns 412 Precondition Failed when bridge is STOPPED', async () => {

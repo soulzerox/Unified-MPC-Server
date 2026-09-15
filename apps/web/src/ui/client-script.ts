@@ -6,6 +6,8 @@ export function getClientScriptJs(): string {
       let cachedServers = [];
       let cachedSkills = [];
       let cachedPolicies = [];
+      let cachedWorkspaces = [];
+      let workspaceSelection = null;
 
       function showToast(message, isError = false) {
         const toast = document.getElementById('toast');
@@ -43,7 +45,7 @@ export function getClientScriptJs(): string {
       // Tab Routing
       function setTab(tabId) {
         activeTab = tabId;
-        const tabs = ['dashboard', 'servers', 'skills', 'install', 'policies', 'chatgpt', 'logs'];
+        const tabs = ['dashboard', 'projects', 'servers', 'skills', 'install', 'policies', 'chatgpt', 'logs'];
         for (const t of tabs) {
           const navEl = document.getElementById('nav-' + t);
           const panelEl = document.getElementById('view-' + t);
@@ -61,7 +63,7 @@ export function getClientScriptJs(): string {
         }
       }
 
-      const tabs = ['dashboard', 'servers', 'skills', 'install', 'policies', 'chatgpt', 'logs'];
+      const tabs = ['dashboard', 'projects', 'servers', 'skills', 'install', 'policies', 'chatgpt', 'logs'];
       for (const t of tabs) {
         const navEl = document.getElementById('nav-' + t);
         if (navEl) {
@@ -321,6 +323,79 @@ export function getClientScriptJs(): string {
           if (!quiet) showToast('Save failed: ' + err.message, true);
           logEvent('ERROR', 'Policy save failed: ' + err.message);
           return false;
+        }
+      }
+
+      async function loadWorkspaces() {
+        const body = document.getElementById('projects-table-body');
+        try {
+          const res = await fetch('/api/workspaces');
+          if (!res.ok) throw new Error('Workspace request failed');
+          const data = await res.json();
+          cachedWorkspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
+          workspaceSelection = data.selection || null;
+          renderWorkspaces();
+        } catch (err) {
+          if (body) body.replaceChildren(emptyRow(5, 'Failed to load projects: ' + err.message));
+          logEvent('ERROR', 'Project refresh failed: ' + err.message);
+        }
+      }
+
+      function renderWorkspaces() {
+        const body = document.getElementById('projects-table-body');
+        if (!body) return;
+        body.replaceChildren();
+        if (cachedWorkspaces.length === 0) {
+          body.appendChild(emptyRow(5, 'No registered project workspaces'));
+          return;
+        }
+        const activeIds = new Set(workspaceSelection?.activeWorkspaceIds || []);
+        const primaryId = workspaceSelection?.primaryWorkspaceId || '';
+        for (const workspace of cachedWorkspaces) {
+          const active = activeIds.has(workspace.id);
+          const primary = primaryId === workspace.id;
+          const row = document.createElement('tr');
+          addCell(row, workspace.displayName || workspace.id);
+          addCell(row, workspace.realRootPath || workspace.rootPath || '', 'mono');
+          addCell(row, active ? 'Active' : 'Inactive');
+          addCell(row, primary ? 'Primary' : '—');
+          const action = document.createElement('td');
+          const activeButton = document.createElement('button');
+          activeButton.type = 'button';
+          activeButton.className = active ? 'btn btn-secondary btn-sm' : 'btn btn-sm';
+          activeButton.textContent = active ? 'Deactivate' : 'Activate';
+          activeButton.disabled = primary;
+          activeButton.title = primary ? 'Choose another Primary Project before deactivating this project' : '';
+          activeButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, active ? 'deactivate' : 'activate'));
+          action.appendChild(activeButton);
+          if (!primary) {
+            const primaryButton = document.createElement('button');
+            primaryButton.type = 'button';
+            primaryButton.className = 'btn btn-secondary btn-sm';
+            primaryButton.style.marginLeft = '8px';
+            primaryButton.textContent = 'Make Primary';
+            primaryButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, 'primary'));
+            action.appendChild(primaryButton);
+          }
+          row.appendChild(action);
+          body.appendChild(row);
+        }
+      }
+
+      async function updateWorkspaceSelection(workspaceId, operation) {
+        try {
+          const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/' + (operation === 'primary' ? 'primary' : 'active');
+          const method = operation === 'deactivate' ? 'DELETE' : 'PUT';
+          const res = await mutationJson(endpoint, { method });
+          const data = await res.json();
+          if (!res.ok || !data.selection) throw new Error(errorMessage(data, 'Workspace selection failed'));
+          workspaceSelection = data.selection;
+          renderWorkspaces();
+          showToast(operation === 'primary' ? 'Primary Project updated' : 'Active Projects updated');
+          logEvent('SUCCESS', 'Workspace selection updated for ' + workspaceId + ' (' + operation + ')');
+        } catch (err) {
+          showToast('Project update failed: ' + err.message, true);
+          logEvent('ERROR', 'Workspace selection update failed: ' + err.message);
         }
       }
 
@@ -909,6 +984,7 @@ export function getClientScriptJs(): string {
       document.getElementById('refresh-skills-btn')?.addEventListener('click', loadInventory);
       document.getElementById('skills-view-refresh-btn')?.addEventListener('click', loadInventory);
       document.getElementById('chatgpt-view-refresh-btn')?.addEventListener('click', loadGatewayStatus);
+      document.getElementById('projects-refresh-btn')?.addEventListener('click', loadWorkspaces);
 
       // Search Inputs
       document.getElementById('server-search-input')?.addEventListener('input', (e) => {
@@ -1005,6 +1081,7 @@ export function getClientScriptJs(): string {
       // Initial boot
       logEvent('INFO', 'Bootstrapping Obsidian Telemetry SPA runtime');
       loadStatus();
+      loadWorkspaces();
       loadInventory();
       loadPolicies();
       loadGatewayStatus();

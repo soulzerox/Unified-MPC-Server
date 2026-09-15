@@ -15,6 +15,22 @@ describe('CLI argument parser', () => {
       ok: true,
       value: { kind: 'mcp-http', workspaceReference: 'workspace-1' },
     });
+    expect(parseCliArgs(['workspace', 'activate', 'workspace-2'])).toEqual({
+      ok: true,
+      value: { kind: 'workspace-activate', workspaceReference: 'workspace-2' },
+    });
+    expect(parseCliArgs(['workspace', 'deactivate', 'workspace-2'])).toEqual({
+      ok: true,
+      value: { kind: 'workspace-deactivate', workspaceReference: 'workspace-2' },
+    });
+    expect(parseCliArgs(['workspace', 'use', 'workspace-2'])).toEqual({
+      ok: true,
+      value: { kind: 'workspace-use', workspaceReference: 'workspace-2' },
+    });
+    expect(parseCliArgs(['workspace', 'active'])).toEqual({
+      ok: true,
+      value: { kind: 'workspace-active' },
+    });
     expect(parseCliArgs(['doctor'])).toEqual({ ok: true, value: { kind: 'doctor' } });
     expect(parseCliArgs(['codex', 'doctor'])).toEqual({ ok: true, value: { kind: 'codex-doctor' } });
   });

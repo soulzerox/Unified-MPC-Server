@@ -139,10 +139,11 @@ export class ProcessService {
     workspaceId: string,
     processId: string,
   ): Promise<Result<GoalTaskCancellationObservation>> {
+    void ownerClientId;
     const owner = this.owners.get(processId);
     if (owner === undefined) return ok({ matched: false, state: 'not_found' });
-    if (owner.actorId !== ownerClientId || owner.workspaceId !== workspaceId) {
-      return err(appError('PERMISSION_DENIED', 'Process belongs to another client or workspace'));
+    if (owner.workspaceId !== workspaceId) {
+      return err(appError('PERMISSION_DENIED', 'Process belongs to another workspace'));
     }
 
     const before = this.processManager.status(processId);
@@ -166,13 +167,11 @@ export class ProcessService {
   }
 
   public async list(actor: FileActor, workspaceId: string): Promise<Result<readonly ManagedProcess[]>> {
+    actorSessionId(actor);
     const workspace = await this.getWorkspace(workspaceId);
     if (!workspace.ok) return workspace;
     const processes = this.processManager.list?.() ?? [];
-    return ok(processes.filter((process) => {
-      const owner = this.owners.get(process.processId);
-      return owner?.actorId === actor.clientId && owner.sessionId === actorSessionId(actor) && owner.workspaceId === workspace.value.id;
-    }));
+    return ok(processes.filter((process) => this.owners.get(process.processId)?.workspaceId === workspace.value.id));
   }
 
   public async logs(actor: FileActor, workspaceId: string, processId: string, query: LogQuery): Promise<Result<ProcessLogResult>> {
@@ -293,10 +292,11 @@ export class ProcessService {
   }
 
   private authorizeHandle(actor: FileActor, workspaceId: string, processId: string): Result<void> {
+    actorSessionId(actor);
     const owner = this.owners.get(processId);
     if (owner === undefined) return err(appError('PROCESS_NOT_FOUND', 'Process was not found'));
-    if (owner.actorId !== actor.clientId || owner.sessionId !== actorSessionId(actor) || owner.workspaceId !== workspaceId) {
-      return err(appError('PERMISSION_DENIED', 'Process handle is not owned by this client and workspace'));
+    if (owner.workspaceId !== workspaceId) {
+      return err(appError('PERMISSION_DENIED', 'Process belongs to another workspace'));
     }
     return ok(undefined);
   }

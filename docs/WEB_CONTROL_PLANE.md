@@ -162,61 +162,16 @@ Initiates a gated session lease handshake. A loopback `Origin` header is require
 
 ---
 
-### 4. Extension Ingestion (Bifurcated Engine)
+### 4. Extension Installation Ownership
 
-#### `POST /api/skills/install`
-Installs an agent skill markdown bundle (`SKILL.md` + companion assets).
+The Web Control Plane is intentionally **not an installation surface**. It exposes extension inventory, policy management, health, and pruning, but it does not provide `POST /api/skills/install` or `POST /api/servers/install`; those paths return `404 Endpoint not found`.
 
-- **Request Body**:
-```json
-{
-  "name": "my-skill",
-  "source": "/mnt/workspace_data/skill-source",
-  "targets": ["antigravity"],
-  "scope": "workspace",
-  "workspaceRoot": "/mnt/workspace_data/project"
-}
-```
-- **Response `200 OK`**:
-```json
-{
-  "ok": true,
-  "value": {
-    "name": "my-skill",
-    "installedPaths": ["/mnt/workspace_data/project/.gemini/skills/my-skill/SKILL.md"],
-    "targets": ["antigravity"]
-  }
-}
-```
+Installation is owned by the Unified MCP parent runtime and is performed through the LLM-facing MCP tools:
 
-#### `POST /api/servers/install`
-Configures a new MCP server in the target IDE configuration.
+- `skills_install { name, source }` validates a local or HTTPS Git skill and installs it into the canonical parent store at `<dataDir>/extensions/skills/<name>/`.
+- `mcp_install { name, transport, ... }` registers a child server in `<dataDir>/extensions/mcp/registry.json` (and may materialize managed source versions under the parent data directory).
 
-- **Request Body**:
-```json
-{
-  "name": "custom-sqlite",
-  "targets": ["cursor"],
-  "transport": "stdio",
-  "command": "npx",
-  "args": ["-y", "mcp-server-sqlite", "--db", "/var/data/app.db"],
-  "env": {
-    "SQLITE_TIMEOUT": "5000"
-  },
-  "scope": "global"
-}
-```
-- **Response `200 OK`**:
-```json
-{
-  "ok": true,
-  "value": {
-    "name": "custom-sqlite",
-    "targets": ["cursor"],
-    "updatedConfigFiles": ["/home/user/.cursor/mcp.json"]
-  }
-}
-```
+The public LLM install schemas do not accept IDE targets, workspace scope, or workspace-root overrides. They are hard-bound to the parent-owned `unified-mpc` target, so asking the LLM to install a skill or child MCP does **not** write Cursor, Cline, Claude, Codex, Antigravity, or OpenCode configuration. Legacy/direct installer platform targets remain an explicit compatibility/export seam and are not the default LLM path.
 
 ---
 

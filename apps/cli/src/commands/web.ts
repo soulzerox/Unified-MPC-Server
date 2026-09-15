@@ -55,6 +55,7 @@ export async function runWeb(
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
+      dataDir: serverOptions?.dataDir ?? dataPath,
       settingsRepository: serverOptions?.settingsRepository ?? settings,
       secretStore: serverOptions?.secretStore ?? new SecretToolSecretStore(),
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,

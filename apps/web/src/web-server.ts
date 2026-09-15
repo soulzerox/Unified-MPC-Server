@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
@@ -11,7 +12,6 @@ import {
   DEFAULT_EXTENSIONS_SETTINGS,
   EXTENSIONS_SETTINGS_KEY,
   IdeSyncService,
-  InstallerService,
   McpConfigLoader,
   PrunerService,
   SkillCatalog,
@@ -19,10 +19,7 @@ import {
   parseExtensionsSettings,
   reconcileRuntimePolicies,
   type ExtensionsSettings,
-  type InstallSkillInput,
-  type InstallServerInput,
   type PolicyEntry,
-  type PruneSkillInput,
   type PruneServerInput,
   type RuntimePolicySnapshot,
   type SyncTarget,
@@ -52,8 +49,8 @@ export interface ControlPlaneServerOptions {
   readonly port?: number;
   readonly gatewayLocalPort?: number;
   readonly workspaceRoots?: readonly string[];
+  readonly dataDir?: string;
   readonly gateway?: GatewayService;
-  readonly installer?: InstallerService;
   readonly pruner?: PrunerService;
   readonly ideSync?: IdeSyncService;
   readonly skillCatalog?: SkillCatalog;
@@ -101,11 +98,11 @@ export class ControlPlaneServer {
   private boundPort = 0;
   private readonly gateway: GatewayService;
   private readonly ownsGateway: boolean;
-  private readonly installer: InstallerService;
-  private readonly pruner: PrunerService;
+  private readonly dataDir: string;
+  private readonly prunerOverride: PrunerService | undefined;
   private readonly ideSync: IdeSyncService;
-  private readonly skillCatalog: SkillCatalog;
-  private readonly serverCatalog: McpConfigLoader;
+  private readonly skillCatalogOverride: SkillCatalog | undefined;
+  private readonly serverCatalogOverride: McpConfigLoader | undefined;
   private readonly serverRegistry = new Map<string, RegisteredServer>();
   private readonly telemetryLogs: TelemetryLogEntry[] = [];
   private readonly capabilityToken: Buffer;
@@ -129,11 +126,11 @@ export class ControlPlaneServer {
     this.workspaceRoots = new Set((options.workspaceRoots ?? [process.cwd()]).map((root) => path.resolve(root.trim())).filter((root) => root.length > 0));
     this.ownsGateway = options.gateway === undefined;
     this.gateway = options.gateway ?? new GatewayService({ localPort: options.gatewayLocalPort ?? configuredPort('UNIFIED_MPC_PORT', 18765) });
-    this.installer = options.installer ?? new InstallerService();
-    this.pruner = options.pruner ?? new PrunerService();
+    this.dataDir = options.dataDir?.trim() || path.join(os.homedir(), '.local', 'share', 'unified-mpc');
+    this.prunerOverride = options.pruner;
     this.ideSync = options.ideSync ?? new IdeSyncService();
-    this.skillCatalog = options.skillCatalog ?? new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
-    this.serverCatalog = options.serverCatalog ?? new McpConfigLoader({ settings: DEFAULT_EXTENSIONS_SETTINGS });
+    this.skillCatalogOverride = options.skillCatalog;
+    this.serverCatalogOverride = options.serverCatalog;
     this.capabilityToken = Buffer.from(options.capabilityToken ?? randomBytes(32).toString('hex'), 'utf8');
     this.settingsRepository = options.settingsRepository;
     this.secretStore = options.secretStore;
@@ -330,7 +327,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/skills' && req.method === 'GET') {
-      const result = await this.skillCatalog.list({});
+      const result = await this.currentSkillCatalog().list({});
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.ok ? result.value : result));
       return;
@@ -447,53 +444,6 @@ export class ControlPlaneServer {
       return;
     }
 
-    // Ingestion Routes
-    if (pathname === '/api/skills/install' && req.method === 'POST') {
-      const body = await parseRequestBody(req, res);
-      if (body === undefined) return;
-      if (!isObject(body) || typeof body.name !== 'string' || typeof body.source !== 'string' || !Array.isArray(body.targets)) {
-        sendJsonError(res, 400, 'Bad Request: skill install fields are invalid');
-        return;
-      }
-      const authorization = await this.authorizeWorkspaceMutation(body, body.source);
-      if (!authorization.ok) {
-        sendJsonError(res, authorization.status, authorization.message);
-        return;
-      }
-      const input: InstallSkillInput = {
-        ...body as unknown as InstallSkillInput,
-        ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
-      };
-      const result = await this.installer.installSkill(input);
-      this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Install skill '${body.name}': ${result.ok ? 'OK' : 'FAILED'}`);
-      res.writeHead(result.ok ? 200 : httpStatusForResult(result), { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/servers/install' && req.method === 'POST') {
-      const body = await parseRequestBody(req, res);
-      if (body === undefined) return;
-      if (!isObject(body) || typeof body.name !== 'string' || typeof body.transport !== 'string' || !Array.isArray(body.targets)) {
-        sendJsonError(res, 400, 'Bad Request: server install fields are invalid');
-        return;
-      }
-      const authorization = await this.authorizeWorkspaceMutation(body);
-      if (!authorization.ok) {
-        sendJsonError(res, authorization.status, authorization.message);
-        return;
-      }
-      const input: InstallServerInput = {
-        ...body as unknown as InstallServerInput,
-        ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
-      };
-      const result = await this.installer.installServer(input);
-      this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Install server '${body.name}': ${result.ok ? 'OK' : 'FAILED'}`);
-      res.writeHead(result.ok ? 200 : httpStatusForResult(result), { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result));
-      return;
-    }
-
     // Pruning Routes
     if (pathname === '/api/skills/prune' && req.method === 'POST') {
       const body = await parseRequestBody(req, res);
@@ -507,8 +457,9 @@ export class ControlPlaneServer {
         sendJsonError(res, authorization.status, authorization.message);
         return;
       }
-      const result = await this.pruner.pruneSkill({
-        ...body as unknown as PruneSkillInput,
+      const result = await this.currentPruner().pruneSkill({
+        name: body.name,
+        targets: ['unified-mpc'],
         ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
       });
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Prune skill '${body.name}': ${result.ok ? 'OK' : 'FAILED'}`);
@@ -540,10 +491,10 @@ export class ControlPlaneServer {
       }
       const input: PruneServerInput = {
         name: registered.name,
-        targets: Array.isArray(body.targets) ? body.targets as NonNullable<PruneServerInput['targets']> : ['all'],
+        targets: ['unified-mpc'],
         ...(authorization.scope === 'workspace' ? { scope: 'workspace', workspaceRoot: authorization.workspaceRoot } : {}),
       };
-      const result = await this.pruner.pruneServer(input);
+      const result = await this.currentPruner().pruneServer(input);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Prune server '${registered.name}': ${result.ok ? 'OK' : 'FAILED'}`);
       res.writeHead(result.ok ? 200 : httpStatusForResult(result), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -758,11 +709,29 @@ export class ControlPlaneServer {
     return parseExtensionsSettings(this.settingsRepository.get(SETTING_KEYS.extensions));
   }
 
+  private currentSkillCatalog(): SkillCatalog {
+    return this.skillCatalogOverride ?? new SkillCatalog({
+      settings: this.extensionsSettings(),
+      managedRoot: path.join(this.dataDir, 'extensions', 'skills'),
+    });
+  }
+
+  private currentServerCatalog(): McpConfigLoader {
+    return this.serverCatalogOverride ?? new McpConfigLoader({
+      settings: this.extensionsSettings(),
+      dataDir: this.dataDir,
+    });
+  }
+
+  private currentPruner(): PrunerService {
+    return this.prunerOverride ?? new PrunerService({ dataDir: this.dataDir });
+  }
+
   private async policySnapshot(): Promise<RuntimePolicySnapshot> {
     const settings = this.extensionsSettings();
     const [servers, skillsResult] = await Promise.all([
-      this.serverCatalog.discover(),
-      this.skillCatalog.list({}),
+      this.currentServerCatalog().discover(),
+      this.currentSkillCatalog().list({}),
     ]);
     return reconcileRuntimePolicies(settings, servers, skillsResult.ok ? skillsResult.value.skills : []);
   }
@@ -827,7 +796,7 @@ export class ControlPlaneServer {
   }
 
   private async listRegisteredServers(): Promise<readonly (RegisteredServer & { readonly enabled: boolean; readonly excluded: boolean; readonly exclusionReason?: string; readonly command: string })[]> {
-    const discovered = await this.serverCatalog.discover();
+    const discovered = await this.currentServerCatalog().discover();
     const activeKeys = new Set<string>();
     const servers = discovered.map((server) => {
       const key = `${server.source}\0${server.name}`;

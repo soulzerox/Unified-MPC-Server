@@ -26,7 +26,6 @@ ${OBSIDIAN_THEME_CSS}
       <a id="nav-projects">Projects</a>
       <a id="nav-servers">Servers</a>
       <a id="nav-skills">Skills</a>
-      <a id="nav-install">Install</a>
       <a id="nav-policies">Policies</a>
       <a id="nav-chatgpt">ChatGPT Web</a>
       <a id="nav-logs">Logs</a>

@@ -250,12 +250,11 @@ export class GoalContinuationService {
 
   public async runGoal(actor: FileActor, request: RunGoalRequest): Promise<Result<RunGoalResult>> {
     try {
-      const ownerClientId = stableOwnerClientId(actor);
       const workspaceId = requiredBounded(request.workspaceId, 'workspaceId', 128);
       if (await this.workspaces.get(workspaceId) === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
       const goalKey = normalizeGoalKey(request.goalKey);
       const existing = await this.goals.getByKey(workspaceId, goalKey);
-      if (existing !== null && existing.ownerClientId !== ownerClientId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
+      const ownerClientId = stableOwnerClientId(actor);
       if (existing === null && request.objective === undefined) return err(appError('INVALID_INPUT', 'objective is required when creating a goal'));
 
       const objective = request.objective === undefined ? undefined : safeText(request.objective, MAX_OBJECTIVE, 'objective');
@@ -329,7 +328,7 @@ export class GoalContinuationService {
 
   public async getGoal(actor: FileActor, request: GetGoalRequest): Promise<Result<GoalSnapshot>> {
     try {
-      const ownerClientId = stableOwnerClientId(actor);
+      stableOwnerClientId(actor);
       const byId = request.goalId !== undefined;
       const byKey = request.workspaceId !== undefined || request.goalKey !== undefined;
       if (byId === byKey) return err(appError('INVALID_INPUT', 'Use goalId or workspaceId + goalKey, but not both'));
@@ -344,7 +343,6 @@ export class GoalContinuationService {
           normalizeGoalKey(request.goalKey!),
         );
       if (goal === null) return err(appError('INVALID_INPUT', 'Goal was not found'));
-      if (goal.ownerClientId !== ownerClientId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
       const snapshot = toSnapshot(goal);
       if (this.scheduledContinuations === undefined) return ok(snapshot);
       const liveContinuation = await this.scheduledContinuations.getLiveScheduledContinuation(goal.id);
@@ -363,7 +361,6 @@ export class GoalContinuationService {
       const goalId = requiredBounded(request.goalId, 'goalId', 128);
       const current = await this.goals.getById(goalId);
       if (current === null) return err(appError('INVALID_INPUT', 'Goal was not found'));
-      if (current.ownerClientId !== ownerClientId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) return err(appError('INVALID_INPUT', 'expectedRevision is invalid'));
       const stepUpdates = normalizeStepUpdates(request.stepUpdates, current.plan);
       const updatedPlan = applyStepUpdates(current.plan, stepUpdates);
@@ -404,7 +401,6 @@ export class GoalContinuationService {
       const goalId = requiredBounded(request.goalId, 'goalId', 128);
       const current = await this.goals.getById(goalId);
       if (current === null) return err(appError('INVALID_INPUT', 'Goal was not found'));
-      if (current.ownerClientId !== ownerClientId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) return err(appError('INVALID_INPUT', 'expectedRevision is invalid'));
       const now = this.now().toISOString();
       const finishRequest = {
@@ -459,11 +455,11 @@ export class GoalContinuationService {
 
   public async cancelGoal(actor: FileActor, request: CancelGoalRequest): Promise<Result<CancelGoalResult>> {
     try {
-      const ownerClientId = stableOwnerClientId(actor);
+      stableOwnerClientId(actor);
       const goalId = requiredBounded(request.goalId, 'goalId', 128);
       const current = await this.goals.getById(goalId);
       if (current === null) return err(appError('INVALID_INPUT', 'Goal was not found'));
-      if (current.ownerClientId !== ownerClientId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
+      const ownerClientId = current.ownerClientId;
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) return err(appError('INVALID_INPUT', 'expectedRevision is invalid'));
       const now = this.now().toISOString();
       const cancelled = await this.goals.cancel({
@@ -508,7 +504,7 @@ export class GoalContinuationService {
 
   public async reconcileGoals(actor: FileActor, request: ReconcileGoalsRequest): Promise<Result<ReconcileGoalsResult>> {
     try {
-      const ownerClientId = stableOwnerClientId(actor);
+      stableOwnerClientId(actor);
       const workspaceId = requiredBounded(request.workspaceId, 'workspaceId', 128);
       if (await this.workspaces.get(workspaceId) === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
       if (!Array.isArray(request.goalIds) || request.goalIds.length < 1 || request.goalIds.length > 20) {
@@ -530,7 +526,7 @@ export class GoalContinuationService {
           results.push({ goalId, disposition: 'not_active', reason: 'goal_not_found' });
           continue;
         }
-        if (current.ownerClientId !== ownerClientId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
+        const ownerClientId = current.ownerClientId;
         if (current.workspaceId !== workspaceId) {
           results.push({ goalId, goalKey: current.goalKey, disposition: 'not_active', reason: 'workspace_mismatch' });
           continue;
@@ -632,8 +628,7 @@ export class GoalContinuationService {
         if (await this.workspaces.get(workspaceId) === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
       }
       const goals = await this.goals.list({
-        ownerClientId,
-        ...(workspaceId === undefined ? {} : { workspaceId }),
+        ...(workspaceId === undefined ? { ownerClientId } : { workspaceId }),
         ...(request.status === undefined ? {} : { status: request.status }),
         limit,
       });

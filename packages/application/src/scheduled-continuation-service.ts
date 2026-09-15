@@ -313,7 +313,7 @@ export class ScheduledContinuationService {
     try {
       if ('releaseLease' in (request as object)) throw new Error('releaseLease is internal and cannot be supplied by callers');
       const goalId = required(request.goalId, 'goalId', MAX_ID);
-      const current = await this.requireOwnedGoal(actor, goalId);
+      const current = await this.requireGoal(goalId);
       if (current.status !== 'active') return err(appError('CONFLICT', 'Goal is already terminal'));
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) throw new Error('expectedRevision is invalid');
       const occurrence: ScheduledContinuationOccurrence = 'interval';
@@ -564,7 +564,7 @@ export class ScheduledContinuationService {
       if (!Number.isInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) throw new Error('leaseSeconds is out of range');
       const currentContinuation = await this.goals.getScheduledContinuation({ continuationId });
       if (currentContinuation === null) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
-      const currentGoal = await this.requireOwnedGoal(actor, currentContinuation.goalId);
+      const currentGoal = await this.requireGoal(currentContinuation.goalId);
       const claimSuccessorRequestFingerprint = createHash('sha256')
         .update(`claimed-successor-v1\0${continuationId}`)
         .digest('hex');
@@ -736,7 +736,7 @@ export class ScheduledContinuationService {
         'turn_yield_signal',
       ];
       if (!reasons.includes(request.reason)) throw new Error('reason is invalid');
-      const currentGoal = await this.requireOwnedGoal(actor, goalId);
+      const currentGoal = await this.requireGoal(goalId);
       const currentContinuation = await this.goals.getScheduledContinuation({ continuationId });
       if (currentContinuation === null) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       if (currentContinuation.goalId !== goalId) throw new GoalStateError('conflict', 'Scheduled continuation does not belong to the goal');
@@ -785,7 +785,7 @@ export class ScheduledContinuationService {
           : { goalId: required(request.goalId, 'goalId', MAX_ID), latest: true },
       );
       if (record === null) return err(appError('INVALID_INPUT', 'Scheduled continuation was not found'));
-      const goal = await this.requireOwnedGoal(actor, record.goalId);
+      const goal = await this.requireGoal(record.goalId);
       if (goal.id !== record.goalId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
       return ok(toPublicContinuation(record));
     } catch (error: unknown) {
@@ -807,9 +807,6 @@ export class ScheduledContinuationService {
       const fence = await this.goals.getWorkspaceMutationFence(boundedWorkspaceId);
       if (fence === null) return ok({ allowed: true });
       const goal = fence.goal;
-      if (goal.ownerClientId !== owner(actor)) {
-        return err(appError('CONFLICT', 'Workspace is reserved by another rolling scheduled goal owner', true));
-      }
       const nowMs = this.now().getTime();
       const expiresMs = goal.leaseExpiresAt === undefined ? Number.NaN : Date.parse(goal.leaseExpiresAt);
       if (
@@ -830,10 +827,9 @@ export class ScheduledContinuationService {
     }
   }
 
-  private async requireOwnedGoal(actor: FileActor, goalId: string): Promise<GoalRecord> {
+  private async requireGoal(goalId: string): Promise<GoalRecord> {
     const goal = await this.goals.getById(goalId);
     if (goal === null) throw new GoalStateError('not_found', 'Goal was not found');
-    if (goal.ownerClientId !== owner(actor)) throw new GoalStateError('owner_mismatch', 'Goal belongs to another client');
     return goal;
   }
 }

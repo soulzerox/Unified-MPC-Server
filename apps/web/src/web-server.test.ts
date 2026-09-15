@@ -1,5 +1,5 @@
 import { request as httpRequest } from 'node:http';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -637,7 +637,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const serverCatalog = {
       discover: async () => [{
         name: 'owned-server',
-        source: 'fixture',
+        source: 'unified-mpc-registry',
         enabled: true,
         excluded: false,
         config: { command: 'node' },
@@ -667,9 +667,62 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         body: JSON.stringify({ serverId: server.serverId, pid: process.pid }),
       });
       expect(pruned.status).toBe(200);
-      expect(captured).toEqual({ name: 'owned-server', targets: ['all'] });
+      expect(captured).toEqual({ name: 'owned-server', targets: ['unified-mpc'] });
     } finally {
       await ownedServer.close();
+    }
+  });
+
+  it('discovers canonical parent-owned resources from dataDir and applies persisted extension settings live', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-parent-inventory-'));
+    const dataDir = path.join(root, 'data');
+    const managedSkillRoot = path.join(dataDir, 'extensions', 'skills');
+    const skillDir = path.join(managedSkillRoot, 'web-parent-skill');
+    const registryDir = path.join(dataDir, 'extensions', 'mcp');
+    await mkdir(skillDir, { recursive: true });
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: web-parent-skill\ndescription: Parent-owned Web skill\n---\n# Parent\n', 'utf8');
+    await writeFile(path.join(registryDir, 'registry.json'), JSON.stringify({
+      mcpServers: { 'web-parent-server': { command: 'node', args: ['parent.js'] } },
+    }), 'utf8');
+    const settings = new Map<string, string>();
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await dynamic.listen();
+    try {
+      const initialSkills = await fetch(`http://127.0.0.1:${dynamic.port}/api/skills`);
+      expect((await initialSkills.json()).skills).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'web-parent-skill', source: 'unified-mpc-skills' }),
+      ]));
+      const initialServers = await fetch(`http://127.0.0.1:${dynamic.port}/api/servers`);
+      expect((await initialServers.json()).servers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'web-parent-server', source: 'unified-mpc-registry', enabled: true }),
+      ]));
+
+      settings.set('extensions', JSON.stringify({
+        mode: 'enable_all',
+        disabledServers: ['web-parent-server'],
+        disabledSkillRoots: [managedSkillRoot],
+      }));
+
+      const updatedSkills = await fetch(`http://127.0.0.1:${dynamic.port}/api/skills`);
+      expect((await updatedSkills.json()).skills.some((skill: { name: string }) => skill.name === 'web-parent-skill')).toBe(false);
+      const updatedServers = await fetch(`http://127.0.0.1:${dynamic.port}/api/servers`);
+      expect((await updatedServers.json()).servers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'web-parent-server', enabled: false }),
+      ]));
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -687,19 +740,16 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
-  it('returns 422 for unsupported install targets and 400 for malformed JSON', async () => {
-    const unsupported = await fetch(`http://127.0.0.1:${port}/api/servers/install`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
-      body: JSON.stringify({ name: 'fixture', transport: 'stdio', command: 'node', targets: ['unknown'] }),
-    });
-    expect(unsupported.status).toBe(422);
-    const malformed = await fetch(`http://127.0.0.1:${port}/api/servers/install`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
-      body: '{',
-    });
-    expect(malformed.status).toBe(400);
+  it('does not expose WebUI extension installation routes', async () => {
+    for (const pathname of ['/api/skills/install', '/api/servers/install']) {
+      const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}`, 'x-unified-mpc-capability': capabilityToken },
+        body: '{}',
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Endpoint not found' });
+    }
   });
 
   it('rejects unregistered workspace mutations and caller-supplied purge paths', async () => {
@@ -727,92 +777,6 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(prune.status).toBe(403);
     } finally {
       await ownedServer.close();
-    }
-  });
-
-  it('rejects skill source traversal and symlink escape from registered workspace', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'web-confinement-'));
-    const outside = await mkdtemp(path.join(os.tmpdir(), 'web-outside-'));
-    await mkdir(path.join(root, 'skill'), { recursive: true });
-    await writeFile(path.join(root, 'skill', 'SKILL.md'), '---\nname: fixture\ndescription: fixture\n---\n', 'utf8');
-    await writeFile(path.join(outside, 'SKILL.md'), '---\nname: fixture\ndescription: outside\n---\n', 'utf8');
-    await symlink(outside, path.join(root, 'escape'));
-    const confined = new ControlPlaneServer({ port: 0, gateway, workspaceRoots: [root], capabilityToken });
-    await confined.listen();
-    try {
-      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${confined.port}`, 'x-unified-mpc-capability': capabilityToken };
-      const traversal = await fetch(`http://127.0.0.1:${confined.port}/api/skills/install`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ name: 'fixture', source: path.join(root, '..', path.basename(outside)), targets: ['cursor'] }),
-      });
-      expect(traversal.status).toBe(403);
-      const symlinkEscape = await fetch(`http://127.0.0.1:${confined.port}/api/skills/install`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ name: 'fixture', source: path.join(root, 'escape'), targets: ['cursor'] }),
-      });
-      expect(symlinkEscape.status).toBe(403);
-    } finally {
-      await confined.close();
-      await Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]);
-    }
-  });
-
-  it('accepts HTTPS Git skill sources without weakening local workspace containment', async () => {
-    let installedSource = '';
-    const installer = {
-      installSkill: async (input: { name: string; source: string; targets: readonly string[] }) => {
-        installedSource = input.source;
-        return { ok: true, value: { name: input.name, installedPaths: [], targets: input.targets } };
-      },
-    } as unknown as InstallerService;
-    const remote = new ControlPlaneServer({ port: 0, gateway, installer, capabilityToken });
-    await remote.listen();
-    try {
-      const source = 'https://github.com/example/example-skill.git';
-      const response = await fetch(`http://127.0.0.1:${remote.port}/api/skills/install`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${remote.port}`, 'x-unified-mpc-capability': capabilityToken },
-        body: JSON.stringify({ name: 'fixture', source, targets: ['cursor'] }),
-      });
-      expect(response.status).toBe(200);
-      expect(installedSource).toBe(source);
-    } finally {
-      await remote.close();
-    }
-  });
-
-  it('routes WebUI MCP Git and remote endpoint installs through InstallerService', async () => {
-    const installed: unknown[] = [];
-    const installer = {
-      installServer: async (input: unknown) => {
-        installed.push(input);
-        const server = input as { name: string; targets: readonly string[] };
-        return { ok: true, value: { name: server.name, updatedConfigFiles: [], targets: server.targets } };
-      },
-    } as unknown as InstallerService;
-    const remote = new ControlPlaneServer({ port: 0, gateway, installer, capabilityToken });
-    await remote.listen();
-    try {
-      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${remote.port}`, 'x-unified-mpc-capability': capabilityToken };
-      const gitSource = 'https://github.com/example/example-mcp.git';
-      const gitResponse = await fetch(`http://127.0.0.1:${remote.port}/api/servers/install`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ name: 'git-mcp', transport: 'stdio', source: gitSource, targets: ['cursor'] }),
-      });
-      const endpoint = 'https://mcp.example.com/rpc';
-      const httpResponse = await fetch(`http://127.0.0.1:${remote.port}/api/servers/install`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ name: 'remote-mcp', transport: 'http', url: endpoint, targets: ['cursor'] }),
-      });
-
-      expect(gitResponse.status).toBe(200);
-      expect(httpResponse.status).toBe(200);
-      expect(installed).toEqual([
-        expect.objectContaining({ name: 'git-mcp', transport: 'stdio', source: gitSource, targets: ['cursor'] }),
-        expect.objectContaining({ name: 'remote-mcp', transport: 'http', url: endpoint, targets: ['cursor'] }),
-      ]);
-    } finally {
-      await remote.close();
     }
   });
 

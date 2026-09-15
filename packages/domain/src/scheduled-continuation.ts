@@ -353,6 +353,7 @@ export interface BeginGoalFencedMutationRequest {
   readonly goalId: string;
   readonly workspaceId: string;
   readonly ownerClientId: string;
+  readonly ownerSessionId: string;
   readonly leaseTokenHash: string;
   readonly leaseGeneration: number;
   readonly startedAt: string;

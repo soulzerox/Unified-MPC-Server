@@ -27,6 +27,39 @@ async function currentMockContract(service: LocalExtensionsService): Promise<{ r
 }
 
 describe('LocalExtensionsService MCP bridge', () => {
+  it('discovers parent-owned skills and child MCP servers from the canonical unified-mpc data store', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-parent-store-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const skillDir = path.join(dataDir, 'extensions', 'skills', 'parent-skill');
+      const registryDir = path.join(dataDir, 'extensions', 'mcp');
+      await mkdir(skillDir, { recursive: true });
+      await mkdir(registryDir, { recursive: true });
+      await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: parent-skill\ndescription: parent managed\n---\n# Parent Skill\n', 'utf8');
+      await writeFile(path.join(registryDir, 'registry.json'), JSON.stringify({
+        mcpServers: { 'parent-child': { command: 'node', args: ['server.js'] } },
+      }), 'utf8');
+
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        dataDir,
+      } as never);
+
+      await expect(service.listSkills({ query: 'parent-skill' })).resolves.toMatchObject({
+        ok: true,
+        value: { skills: [expect.objectContaining({ name: 'parent-skill', source: 'unified-mpc-skills', trustTier: 'user' })] },
+      });
+      await expect(service.listMcpServers()).resolves.toMatchObject({
+        ok: true,
+        value: { servers: [expect.objectContaining({ name: 'parent-child', source: 'unified-mpc-registry', enabled: true })] },
+      });
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('discovers the source-tree bundled skill fallback for development runs', () => {
     const candidates = bundledSkillRootCandidates(
       undefined,
@@ -467,6 +500,37 @@ describe('LocalExtensionsService MCP bridge', () => {
     expect(closes).toBe(1);
     expect(observedArgs).toEqual([['mock-server.js'], ['mock-server-v2.js']]);
     await service.close();
+  });
+
+  it('drops a connected child MCP session when live discovery no longer contains the server', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-child-reconcile-remove-'));
+    try {
+      let liveSettings = settingsWithMockServer();
+      let closes = 0;
+      const service = new LocalExtensionsService({
+        settings: liveSettings,
+        settingsProvider: (): typeof DEFAULT_EXTENSIONS_SETTINGS => liveSettings,
+        homeDir: path.join(root, 'home'),
+        appDataDir: path.join(root, 'appdata'),
+        clientFactory: {
+          connect: async (): Promise<McpClientSession> => ({
+            listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+            listResources: async () => [],
+            callTool: async () => ({ content: [] }),
+            close: async (): Promise<void> => { closes += 1; },
+          }),
+        },
+      });
+
+      await expect(service.describeMcpServer({ server: 'mock' })).resolves.toMatchObject({ ok: true });
+      liveSettings = DEFAULT_EXTENSIONS_SETTINGS;
+      await expect(service.listMcpServers()).resolves.toMatchObject({ ok: true, value: { servers: [] } });
+      expect(closes).toBe(1);
+      await service.close();
+      expect(closes).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('does not connect a child MCP server when the request is already cancelled', async () => {

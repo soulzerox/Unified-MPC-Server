@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
+import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { createStdioMcpRuntime } from './stdio-mcp-runtime.js';
 import { sharedActivityLeaseDirectoryPath } from '@unified-mpc/mcp-server';
@@ -80,6 +81,32 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+  it('keeps completed turn idempotency and active compliance across runtime recreation without persisting in-flight claims', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-persistence-'));
+    temporaryRoots.push(dataPath);
+
+    const firstRuntime = createStdioMcpRuntime(dataPath, workspace);
+    expect(firstRuntime.turnPersistenceLedger.beginTurn('session-a', 'turn-active', 'required')).toMatchObject({ accepted: true });
+    expect(firstRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-complete', 'user')).toBe('claimed');
+    firstRuntime.turnPersistenceLedger.complete('client-a/workspace-1', 'turn-complete', 'user');
+    expect(firstRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-in-flight', 'assistant')).toBe('claimed');
+    await firstRuntime.close();
+
+    const replacementRuntime = createStdioMcpRuntime(dataPath, workspace);
+    try {
+      expect(replacementRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-complete', 'user')).toBe('completed');
+      expect(replacementRuntime.turnPersistenceLedger.beginTurn('session-a', 'turn-next', 'required')).toMatchObject({
+        accepted: false,
+        state: 'violation',
+        turnId: 'turn-active',
+        attemptedTurnId: 'turn-next',
+      });
+      expect(replacementRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-in-flight', 'assistant')).toBe('claimed');
+    } finally {
+      await replacementRuntime.close();
+    }
+  });
+
   it('fails startup readiness when Recovery Trash contains corrupt workspace metadata', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-recovery-reconcile-'));
     temporaryRoots.push(dataPath);
@@ -117,6 +144,47 @@ describe('stdio MCP runtime', () => {
       expect(notifications).toBe(1);
     } finally {
       unsubscribe();
+      externalDatabase.close();
+      await runtime.close();
+    }
+  });
+
+  it('observes persisted extension settings writes from another SQLite connection without restart', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-extension-settings-'));
+    temporaryRoots.push(dataPath);
+    const runtime = createStdioMcpRuntime(dataPath, workspace);
+    const externalDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    const externalSettings = new SqliteSettingsRepository(externalDatabase);
+    try {
+      const before = await runtime.services.extensions.listMcpServers();
+      expect(before.ok).toBe(true);
+      if (!before.ok) throw new Error(before.error.message);
+      expect(before.value.servers.some((server) => server.name === 'cross-process-mock')).toBe(false);
+
+      externalSettings.set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+        ...DEFAULT_EXTENSIONS_SETTINGS,
+        mandatoryMcpServers: [],
+        extraMcpServers: {
+          'cross-process-mock': { command: 'node', args: ['mock-server.js'] },
+        },
+      }));
+
+      const updated = await runtime.services.extensions.listMcpServers();
+      expect(updated.ok).toBe(true);
+      if (!updated.ok) throw new Error(updated.error.message);
+      expect(updated.value.servers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'cross-process-mock', command: 'node', enabled: true }),
+      ]));
+
+      externalSettings.set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+        ...DEFAULT_EXTENSIONS_SETTINGS,
+        mandatoryMcpServers: [],
+      }));
+      const removed = await runtime.services.extensions.listMcpServers();
+      expect(removed.ok).toBe(true);
+      if (!removed.ok) throw new Error(removed.error.message);
+      expect(removed.value.servers.some((server) => server.name === 'cross-process-mock')).toBe(false);
+    } finally {
       externalDatabase.close();
       await runtime.close();
     }

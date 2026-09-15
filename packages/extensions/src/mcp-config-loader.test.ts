@@ -135,6 +135,38 @@ describe('McpConfigLoader', () => {
     ]));
   });
 
+  it('loads the canonical unified-mpc child registry with highest precedence', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-parent-registry-'));
+    temporaryRoots.push(home);
+    const dataDir = path.join(home, 'data');
+    await mkdir(path.join(home, '.cursor'), { recursive: true });
+    await mkdir(path.join(dataDir, 'extensions', 'mcp'), { recursive: true });
+    await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
+      mcpServers: { serena: { command: 'cursor-serena' } },
+    }), 'utf8');
+    await writeFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), JSON.stringify({
+      mcpServers: { serena: { command: 'parent-serena', args: ['managed'] } },
+    }), 'utf8');
+    const settings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      extraMcpServers: { serena: { command: 'settings-serena' } },
+    };
+
+    const servers = await new McpConfigLoader({
+      homeDir: home,
+      appDataDir: path.join(home, 'appdata'),
+      dataDir,
+      settings,
+    } as never).discover();
+
+    expect(servers.filter((server) => server.name === 'serena')).toEqual([
+      expect.objectContaining({
+        source: 'unified-mpc-registry',
+        config: expect.objectContaining({ command: 'parent-serena', args: ['managed'] }),
+      }),
+    ]);
+  });
+
   it('lets explicit unified-mpc settings override the same server discovered from Cursor', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-override-'));
     temporaryRoots.push(home);

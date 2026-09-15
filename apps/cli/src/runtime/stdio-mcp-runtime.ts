@@ -37,7 +37,7 @@ import {
   createLocalExtensionsService,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, TurnPersistenceLedger, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   AesGcmCheckpointCipher,
@@ -47,6 +47,7 @@ import {
   SqliteDatabase,
   SqliteGoalRepository,
   SqliteSettingsRepository,
+  SqliteTurnPersistenceRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
@@ -56,6 +57,7 @@ export interface StdioMcpRuntime {
   readonly services: McpApplicationServices;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
+  readonly turnPersistenceLedger: TurnPersistenceLedger;
   readonly activityTracker: ActivityTracker;
   readonly activityReady: Promise<void>;
   readonly recoveryReady: Promise<void>;
@@ -89,6 +91,7 @@ export function createStdioMcpRuntime(
 ): StdioMcpRuntime {
   const databaseFilename = path.join(dataPath, 'unified-mpc.sqlite');
   const database = new SqliteDatabase(databaseFilename, { backupDirectory: path.join(dataPath, 'backups') });
+  const turnPersistenceLedger = new TurnPersistenceLedger({ store: new SqliteTurnPersistenceRepository(database) });
   const rawWorkspaceRepository = new SqliteWorkspaceRepository(database);
   const workspaceRepository = options.strictAllowedRoots === undefined
     ? rawWorkspaceRepository
@@ -162,7 +165,8 @@ export function createStdioMcpRuntime(
   const gitService = new GitService(workspaceRepository);
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
   const extensions = createLocalExtensionsService({
-    settingsJson: settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
+    settingsJsonProvider: (): string | null => settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
+    dataDir: dataPath,
     workspaceRootProvider: primaryWorkspaceRoot,
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
     idleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
@@ -250,8 +254,8 @@ export function createStdioMcpRuntime(
     capabilities: capabilityRuntime.service,
     extensions,
     installer: {
-      installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot() }).installSkill(input),
-      installServer: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot() }).installServer(input),
+      installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installSkill(input),
+      installServer: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installServer(input),
     },
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
     workspaceSelection,
@@ -281,6 +285,7 @@ export function createStdioMcpRuntime(
     services,
     actor,
     extensions,
+    turnPersistenceLedger,
     activityTracker,
     activityReady,
     recoveryReady,

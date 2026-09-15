@@ -1,19 +1,24 @@
-import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { InstallerService, type InstallSkillInput } from './installer.js';
 
 const temporaryRoots: string[] = [];
+const FIXTURE_REVISION = '0123456789abcdef0123456789abcdef01234567';
 
 afterEach(async () => {
   const { rm } = await import('node:fs/promises');
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function fixtureGitRunner(fixtureDir: string): { run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> } {
+function fixtureGitRunner(
+  fixtureDir: string,
+  revision = FIXTURE_REVISION,
+): { run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> } {
   return {
     async run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+      if (args.includes('rev-parse')) return { exitCode: 0, stdout: `${revision}\n`, stderr: '' };
       if (args[0] !== 'clone') return { exitCode: 1, stdout: '', stderr: `unsupported git command: ${args[0] ?? ''}` };
       const destination = args.at(-1);
       if (destination === undefined) return { exitCode: 1, stdout: '', stderr: 'missing clone destination' };
@@ -24,6 +29,29 @@ function fixtureGitRunner(fixtureDir: string): { run(args: readonly string[]): P
 }
 
 describe('InstallerService - Skill Ingestion Pipeline', () => {
+  it('installs a skill into the canonical unified-mpc store without touching IDE catalogs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-parent-skill-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const sourceDir = path.join(root, 'source-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(path.join(sourceDir, 'SKILL.md'), '---\nname: parent-skill\ndescription: Parent-owned skill\n---\n# Parent Skill\n', 'utf8');
+
+    const result = await new InstallerService({ homeDir: home, dataDir }).installSkill({
+      name: 'parent-skill',
+      source: sourceDir,
+      targets: ['unified-mpc' as never],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.installedPaths).toEqual([path.join(dataDir, 'extensions', 'skills', 'parent-skill', 'SKILL.md')]);
+    expect(await readFile(result.value.installedPaths[0]!, 'utf8')).toContain('# Parent Skill');
+    await expect(readFile(path.join(home, '.cursor', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+    await expect(readFile(path.join(home, '.cline', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+
   it('materializes an HTTPS Git repository before installing a skill', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-skill-'));
     temporaryRoots.push(root);
@@ -221,6 +249,30 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
 });
 
 describe('InstallerService - Server Ingestion Pipeline', () => {
+  it('registers a child MCP server in the canonical unified-mpc registry without touching IDE configs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-parent-mcp-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+
+    const result = await new InstallerService({ homeDir: home, dataDir }).installServer({
+      name: 'parent-child',
+      transport: 'stdio',
+      command: 'node',
+      args: ['server.js'],
+      targets: ['unified-mpc' as never],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const registryFile = path.join(dataDir, 'extensions', 'mcp', 'registry.json');
+    expect(result.value.updatedConfigFiles).toEqual([registryFile]);
+    const registry = JSON.parse(await readFile(registryFile, 'utf8'));
+    expect(registry.mcpServers['parent-child']).toEqual({ command: 'node', args: ['server.js'] });
+    await expect(readFile(path.join(home, '.cursor', 'mcp.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(path.join(home, '.cline', 'mcp.json'), 'utf8')).rejects.toThrow();
+  });
+
   it('materializes an HTTPS Git repository and derives a stdio command from package.json bin', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-server-'));
     temporaryRoots.push(root);
@@ -247,6 +299,83 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
       args: [path.join(result.value.managedSourcePath, 'server.js')],
       cwd: result.value.managedSourcePath,
     });
+  });
+
+  it('records immutable Git provenance and an atomic current-version marker for managed child MCP source', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-server-provenance-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ name: 'remote-mcp', bin: 'server.js' }), 'utf8');
+    await writeFile(path.join(fixture, 'server.js'), '#!/usr/bin/env node\nconsole.log("v1")\n', 'utf8');
+
+    const result = await new InstallerService({ homeDir: home, dataDir, gitRunner: fixtureGitRunner(fixture) }).installServer({
+      name: 'remote-mcp',
+      transport: 'stdio',
+      source: 'https://github.com/example/remote-mcp.git',
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.value.managedSourcePath === undefined) return;
+    expect(result.value.sourceRevision).toBe(FIXTURE_REVISION);
+    expect(result.value.sourceContentSha256).toMatch(/^[a-f0-9]{64}$/);
+    const versionRoot = path.dirname(result.value.managedSourcePath);
+    const provenance = JSON.parse(await readFile(path.join(versionRoot, 'provenance.json'), 'utf8'));
+    expect(provenance).toMatchObject({
+      version: 1,
+      source: 'https://github.com/example/remote-mcp.git',
+      revision: FIXTURE_REVISION,
+      contentSha256: result.value.sourceContentSha256,
+      versionId: path.basename(versionRoot),
+    });
+    const current = JSON.parse(await readFile(path.join(dataDir, 'extensions', 'mcp', 'remote-mcp', 'current.json'), 'utf8'));
+    expect(current).toEqual(provenance);
+  });
+
+  it('retains referenced managed versions while collecting only excess unreferenced versions', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-server-retention-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ name: 'remote-mcp', bin: 'server.js' }), 'utf8');
+
+    const install = async (revisionDigit: string, label: string, targets: readonly ('cursor' | 'unified-mpc')[]): ReturnType<InstallerService['installServer']> => {
+      await writeFile(path.join(fixture, 'server.js'), `#!/usr/bin/env node\nconsole.log(${JSON.stringify(label)})\n`, 'utf8');
+      return new InstallerService({
+        homeDir: home,
+        dataDir,
+        gitRunner: fixtureGitRunner(fixture, revisionDigit.repeat(40)),
+      }).installServer({
+        name: 'remote-mcp',
+        transport: 'stdio',
+        source: 'https://github.com/example/remote-mcp.git',
+        targets,
+      });
+    };
+
+    const exported = await install('1', 'exported-v1', ['cursor']);
+    expect(exported.ok).toBe(true);
+    if (!exported.ok || exported.value.managedSourcePath === undefined) return;
+    const exportedVersionRoot = path.dirname(exported.value.managedSourcePath);
+
+    for (const [digit, label] of [['2', 'parent-v2'], ['3', 'parent-v3'], ['4', 'parent-v4'], ['5', 'parent-v5']] as const) {
+      const installed = await install(digit, label, ['unified-mpc']);
+      expect(installed.ok).toBe(true);
+    }
+
+    const versionsDirectory = path.join(dataDir, 'extensions', 'mcp', 'remote-mcp', 'versions');
+    const retained = (await readdir(versionsDirectory, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    expect(retained).toHaveLength(4);
+    expect(retained).toContain(path.basename(exportedVersionRoot));
+    const cursorConfig = await readFile(path.join(home, '.cursor', 'mcp.json'), 'utf8');
+    expect(cursorConfig).toContain(exported.value.managedSourcePath);
   });
 
   it('fails closed for remote MCP packages that require runtime dependency installation', async () => {

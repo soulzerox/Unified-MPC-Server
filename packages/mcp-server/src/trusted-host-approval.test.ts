@@ -141,4 +141,56 @@ describe('trusted host exact-action approval', () => {
     await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
     expect(maxActive).toBe(1);
   });
+
+  it('reuses one informed host approval for the full trusted automation session without time or action limits', async () => {
+    const runCommand = vi.fn(async (): Promise<HostApprovalCommandResult> => ({ status: 'approved' }));
+    const provider = createTrustedHostMutationApprovalProvider({
+      platform: 'darwin',
+      runCommand,
+      ttyPrompt: async () => false,
+    });
+    const scoped = {
+      ...request,
+      approvalScope: {
+        kind: 'automation_session' as const,
+        id: 'scope-playwright-session-a',
+        label: 'Playwright automation in workspace-1',
+      },
+    };
+
+    await expect(provider(scoped)).resolves.toBe(true);
+    for (let index = 0; index < 250; index += 1) {
+      await expect(provider({ ...scoped, summary: `matching action ${index + 2} in same session` })).resolves.toBe(true);
+    }
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it('never reuses exact-action approval when no automation scope is supplied', async () => {
+    const runCommand = vi.fn(async (): Promise<HostApprovalCommandResult> => ({ status: 'approved' }));
+    const provider = createTrustedHostMutationApprovalProvider({
+      platform: 'darwin',
+      runCommand,
+      ttyPrompt: async () => false,
+    });
+
+    await expect(provider(request)).resolves.toBe(true);
+    await expect(provider({ ...request, summary: 'another exact action' })).resolves.toBe(true);
+    expect(runCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders session-lifetime automation approval boundaries clearly', () => {
+    const message = formatHostMutationApprovalMessage({
+      ...request,
+      approvalScope: {
+        kind: 'automation_session',
+        id: 'scope-playwright-session-a',
+        label: 'Playwright automation in workspace-1',
+      },
+    });
+
+    expect(message).toContain('Automation session: Playwright automation in workspace-1');
+    expect(message).toContain('for the remainder of this trusted host session');
+    expect(message).toContain('no time or action-count limit');
+    expect(message).toContain('session, workspace, automation resource, or child contract changes');
+  });
 });

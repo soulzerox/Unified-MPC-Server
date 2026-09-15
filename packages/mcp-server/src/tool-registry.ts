@@ -118,6 +118,14 @@ export interface ToolRegistryOptions {
   readonly maxToolDurationMs?: number;
 }
 
+export interface HostMutationApprovalScope {
+  readonly kind: 'automation_session';
+  /** Opaque parent-derived identity. Any session/workspace/resource/contract change must produce a different id. */
+  readonly id: string;
+  /** Human-readable scope shown by the trusted host before the session grant is created. */
+  readonly label: string;
+}
+
 export interface HostMutationApprovalRequest {
   readonly toolName: string;
   readonly mutationKind: MutationPolicyDecision['kind'];
@@ -129,6 +137,8 @@ export interface HostMutationApprovalRequest {
     readonly descriptorFingerprint: string;
     readonly catalogFingerprint?: string;
   };
+  /** Present only for non-destructive automation actions eligible for one informed trusted-session grant. */
+  readonly approvalScope?: HostMutationApprovalScope;
 }
 
 const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
@@ -483,6 +493,14 @@ export class ToolRegistry {
           await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, message);
           return response;
         }
+        const approvalScope = deriveHostAutomationApprovalScope(
+          tool.name,
+          approvalExecutionInput,
+          mutationDecision,
+          this.actor,
+          this.sessionId,
+          mutationFenceWorkspaceId,
+        );
         let hostApproved = false;
         try {
           hostApproved = await this.hostMutationApprovalProvider({
@@ -490,8 +508,9 @@ export class ToolRegistry {
             mutationKind: mutationDecision.kind,
             reason: mutationDecision.reason,
             summary: summarizeMutationForApproval(tool.name, approvalExecutionInput, activeWorkspaceScope),
-            ...(mutationWorkspaceId === undefined ? {} : { workspaceId: mutationWorkspaceId }),
+            ...(mutationFenceWorkspaceId === undefined ? {} : { workspaceId: mutationFenceWorkspaceId }),
             ...(activeWorkspaceScope === null ? {} : { workspaceRoot: activeWorkspaceScope.rootPath }),
+            ...(approvalScope === undefined ? {} : { approvalScope }),
             ...(tool.name !== 'mcp_call' || !isRecord(approvalExecutionInput)
               || typeof approvalExecutionInput.descriptorFingerprint !== 'string'
               || typeof approvalExecutionInput.catalogFingerprint !== 'string'
@@ -633,8 +652,22 @@ export class ToolRegistry {
     return { kind: 'read', reason: `Parent runtime policy marks exact child MCP tool ${server}/${childTool} read-only and the live contract fingerprints match` };
   }
 
+  private turnComplianceScope(): string {
+    return this.sessionId ?? this.actor.sessionId ?? this.actor.clientId;
+  }
+
+  private async turnIdempotencyScope(): Promise<string> {
+    let workspaceId: string | undefined;
+    try {
+      workspaceId = (await this.activeWorkspaceScopeProvider())?.workspaceId;
+    } catch {
+      workspaceId = undefined;
+    }
+    return JSON.stringify(['client-workspace-v1', this.actor.clientId, workspaceId ?? '-']);
+  }
+
   private async bootstrapTaskContext(input: { readonly turnId?: string }, signal: AbortSignal, trackTurn = true): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent; readonly turnPersistence: unknown }>> {
-    const scope = this.sessionId ?? this.actor.sessionId ?? this.actor.clientId;
+    const scope = this.turnComplianceScope();
     let turnPersistence: unknown = { state: 'untracked', mode: this.turnPersistenceMode, reason: 'host did not supply a stable turnId' };
     if (trackTurn && input.turnId === undefined && this.turnPersistenceMode === 'required') {
       return err(appError('INVALID_INPUT', 'This host requires a stable turnId on task_bootstrap so completed-turn persistence can be enforced', true));
@@ -834,7 +867,8 @@ export class ToolRegistry {
     const extensions = this.services.extensions;
     if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
 
-    const scope = this.sessionId ?? this.actor.sessionId ?? this.actor.clientId;
+    const complianceScope = this.turnComplianceScope();
+    const idempotencyScope = await this.turnIdempotencyScope();
     const entries: readonly { readonly role: TurnPersistenceRole; readonly content: string }[] = [
       { role: 'user', content: input.userContent },
       ...(input.assistantContent === undefined ? [] : [{ role: 'assistant' as const, content: input.assistantContent }]),
@@ -844,7 +878,7 @@ export class ToolRegistry {
     let inFlight = 0;
 
     for (const entry of entries) {
-      const claim = this.turnPersistence.claim(scope, input.turnId, entry.role);
+      const claim = this.turnPersistence.claim(idempotencyScope, input.turnId, entry.role);
       if (claim === 'claimed') {
         claimed.push(entry);
         continue;
@@ -854,14 +888,14 @@ export class ToolRegistry {
     }
 
     const releaseClaims = (): void => {
-      for (const entry of claimed) this.turnPersistence.release(scope, input.turnId, entry.role);
+      for (const entry of claimed) this.turnPersistence.release(idempotencyScope, input.turnId, entry.role);
     };
     if (inFlight > 0) {
       releaseClaims();
       return err(appError('CONFLICT', 'Turn persistence is already in flight; retry this turn after the current write settles', true));
     }
     if (claimed.length === 0) {
-      this.turnPersistence.completeTurn(scope, input.turnId);
+      this.turnPersistence.completeTurn(complianceScope, input.turnId);
       return ok({ turnId: input.turnId, recorded: 0, skipped, duplicate: skipped === entries.length });
     }
 
@@ -897,10 +931,10 @@ export class ToolRegistry {
           releaseClaims();
           return err(appError('CONFLICT', `Turn persistence failed for ${entry.role}: ${persisted.error.message}`, true));
         }
-        this.turnPersistence.complete(scope, input.turnId, entry.role);
+        this.turnPersistence.complete(idempotencyScope, input.turnId, entry.role);
         recorded += 1;
       }
-      this.turnPersistence.completeTurn(scope, input.turnId);
+      this.turnPersistence.completeTurn(complianceScope, input.turnId);
       return ok({ turnId: input.turnId, recorded, skipped, duplicate: false });
     } catch (error: unknown) {
       releaseClaims();
@@ -1367,7 +1401,7 @@ export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
   'restore_deleted_file', 'restore_checkpoint', 'git', 'shell', 'wsl_exec',
   'process_start', 'process_stop', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
   'verify_incremental', 'codex_run', 'codex_stop', 'agent_swarm_run', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply',
-  'computer_use', 'dom_cdp', 'accessibility', 'input_event', 'ui_target_action', 'window',
+  'mcp_call', 'computer_use', 'dom_cdp', 'accessibility', 'input_event', 'ui_target_action', 'window',
   'clipboard', 'file_dialog', 'notification', 'web_fetch', 'scheduler',
   'office', 'audio', 'screen_record', 'docx_merge', 'office_ppt',
 ]);
@@ -1443,6 +1477,51 @@ function withGoalLeaseEnvelope(tool: McpToolDefinition): McpToolDefinition {
       if (!isRecord(parsed.value)) return err(appError('INVALID_INPUT', 'Fenced tool input must be an object'));
       return ok({ ...parsed.value, goalLease: parsedGoalLease.data });
     },
+  };
+}
+
+const NATIVE_AUTOMATION_APPROVAL_TOOLS = new Set([
+  'dom_cdp', 'computer_use', 'accessibility', 'input_event', 'ui_target_action',
+]);
+
+function deriveHostAutomationApprovalScope(
+  toolName: string,
+  input: unknown,
+  mutationDecision: MutationPolicyDecision,
+  actor: FileActor,
+  sessionId: string | undefined,
+  workspaceId: string | undefined,
+): HostMutationApprovalScope | undefined {
+  if (mutationDecision.kind !== 'opaque_mutation' || !isRecord(input)) return undefined;
+  const subject = sessionId ?? actor.sessionId;
+  if (subject === undefined || subject.trim().length === 0) return undefined;
+  let resource: string;
+  let label: string;
+
+  if (toolName === 'mcp_call') {
+    const server = readTrimmedString(input.server)?.toLowerCase();
+    const descriptorFingerprint = readTrimmedString(input.descriptorFingerprint);
+    const catalogFingerprint = readTrimmedString(input.catalogFingerprint);
+    if (server !== 'playwright' || descriptorFingerprint === undefined || catalogFingerprint === undefined) return undefined;
+    resource = `mcp:${server}:${descriptorFingerprint}:${catalogFingerprint}`;
+    label = `Playwright automation${workspaceId === undefined ? '' : ` in ${workspaceId}`}`;
+  } else {
+    if (!NATIVE_AUTOMATION_APPROVAL_TOOLS.has(toolName)) return undefined;
+    resource = `native:${toolName}`;
+    label = `${toolName} automation${workspaceId === undefined ? '' : ` in ${workspaceId}`}`;
+  }
+
+  const id = [
+    'automation-session-v1',
+    actor.clientId,
+    subject,
+    workspaceId ?? '-',
+    resource,
+  ].join('|');
+  return {
+    kind: 'automation_session',
+    id,
+    label,
   };
 }
 

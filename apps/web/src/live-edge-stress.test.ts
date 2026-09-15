@@ -125,22 +125,16 @@ describe('ControlPlaneServer - live edge and stress smoke', () => {
     expect((await response.json()).ok).toBe(true);
   });
 
-  it('returns 400 for array-shaped skill install payload', async () => {
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/skills/install`, {
-      method: 'POST',
-      headers: { ...auth(), 'Content-Type': 'application/json' },
-      body: '[]',
-    });
-    expect(response.status).toBe(400);
-  });
-
-  it('returns 400 for array-shaped server install payload', async () => {
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/servers/install`, {
-      method: 'POST',
-      headers: { ...auth(), 'Content-Type': 'application/json' },
-      body: '[]',
-    });
-    expect(response.status).toBe(400);
+  it('does not expose WebUI extension installation endpoints', async () => {
+    for (const pathname of ['/api/skills/install', '/api/servers/install']) {
+      const response = await fetch(`http://127.0.0.1:${server.port}${pathname}`, {
+        method: 'POST',
+        headers: { ...auth(), 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Endpoint not found' });
+    }
   });
 
   it('returns 400 for primitive skill prune payload', async () => {
@@ -150,25 +144,6 @@ describe('ControlPlaneServer - live edge and stress smoke', () => {
       body: '"skill-name"',
     });
     expect(response.status).toBe(400);
-  });
-
-  it('rejects prototype-pollution-shaped server install input as invalid fields', async () => {
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/servers/install`, {
-      method: 'POST',
-      headers: { ...auth(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ __proto__: { name: 'polluted' } }),
-    });
-    expect(response.status).toBe(400);
-  });
-
-  it('rejects invalid mutation scope before touching an installer', async () => {
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/servers/install`, {
-      method: 'POST',
-      headers: { ...auth(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'fixture', transport: 'stdio', targets: ['cursor'], scope: 'sideways' }),
-    });
-    expect(response.status).toBe(400);
-    expect((await response.json()).error).toBe('Invalid mutation scope');
   });
 
   it('rejects server pruning with an array payload as missing ownership proof', async () => {

@@ -42,6 +42,7 @@ export interface PrunerServiceOptions {
   readonly homeDir?: string;
   readonly appDataDir?: string;
   readonly workspaceRoot?: string;
+  readonly dataDir?: string;
   /** Recovery Center workspace identity for workspace-scoped server pruning. */
   readonly workspaceId?: string;
   readonly sessionManager?: McpSessionManager;
@@ -56,17 +57,18 @@ const ALL_TARGETS: readonly InstallTarget[] = [
   'opencode',
   'codex',
 ];
+const SUPPORTED_TARGETS: readonly InstallTarget[] = ['unified-mpc', ...ALL_TARGETS, 'all'];
 
 function validateTargets(targets: readonly InstallTarget[] | undefined): ReturnType<typeof appError> | undefined {
   if (!targets || targets.length === 0) return appError('INVALID_INPUT', 'At least one target must be specified');
-  const supported = new Set<string>([...ALL_TARGETS, 'all']);
+  const supported = new Set<string>(SUPPORTED_TARGETS);
   const invalid = [...new Set(targets.filter((target) => !supported.has(target)))];
   if (invalid.length === 0) return undefined;
   return appError(
     'UNSUPPORTED_TARGET',
-    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${[...ALL_TARGETS, 'all'].join(', ')}`,
+    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${SUPPORTED_TARGETS.join(', ')}`,
     false,
-    { invalidTargets: invalid.join(', '), supportedTargets: [...ALL_TARGETS, 'all'].join(', ') },
+    { invalidTargets: invalid.join(', '), supportedTargets: SUPPORTED_TARGETS.join(', ') },
   );
 }
 
@@ -74,6 +76,7 @@ export class PrunerService {
   private readonly home: string;
   private readonly appData: string;
   private readonly workspace: string | undefined;
+  private readonly dataDir: string;
   private readonly workspaceId: string | undefined;
   private readonly sessionManager: McpSessionManager | undefined;
   private readonly recoveryTrashRoot: string;
@@ -82,6 +85,7 @@ export class PrunerService {
     this.home = options.homeDir ?? os.homedir();
     this.appData = options.appDataDir?.trim() ?? path.join(this.home, '.config');
     this.workspace = options.workspaceRoot?.trim();
+    this.dataDir = options.dataDir?.trim() ?? path.join(this.home, '.local', 'share', 'unified-mpc');
     this.workspaceId = options.workspaceId?.trim();
     this.sessionManager = options.sessionManager;
     this.recoveryTrashRoot = options.recoveryTrashRoot ?? path.join(this.home, '.unified-mpc', 'recovery-trash');
@@ -145,6 +149,9 @@ export class PrunerService {
     skillName: string,
     workspaceRoot?: string,
   ): string | undefined {
+    if (target === 'unified-mpc') {
+      return path.join(this.dataDir, 'extensions', 'skills', skillName);
+    }
     if (scope === 'workspace') {
       if (workspaceRoot === undefined) return undefined;
       switch (target) {
@@ -264,10 +271,22 @@ export class PrunerService {
           }
         }
 
-        // Terminate session only after filesystem mutations succeed; config rollback cannot restore a process.
+        // Terminate session before deleting parent-managed source. If termination fails,
+        // the config transaction can still roll back while the managed checkout remains intact.
         if (this.sessionManager !== undefined) {
           await this.sessionManager.dropServer(serverName);
           processTerminated = true;
+        }
+
+        if (targets.includes('unified-mpc')) {
+          const managedServerRoot = path.join(this.dataDir, 'extensions', 'mcp', serverName);
+          try {
+            await lstat(managedServerRoot);
+            await rm(managedServerRoot, { recursive: true, force: true });
+            removedPaths.push(managedServerRoot);
+          } catch (error: unknown) {
+            if (!isMissingPath(error)) throw error;
+          }
         }
       });
     } catch (error: unknown) {
@@ -344,6 +363,9 @@ export class PrunerService {
     scope: InstallScope,
     workspaceRoot?: string,
   ): string | undefined {
+    if (target === 'unified-mpc') {
+      return path.join(this.dataDir, 'extensions', 'mcp', 'registry.json');
+    }
     if (scope === 'workspace') {
       if (workspaceRoot === undefined) return undefined;
       switch (target) {

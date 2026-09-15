@@ -34,9 +34,12 @@ export function legacyCapabilityTaskOwner(): CapabilityTaskOwner {
 }
 
 export function capabilityTaskOwnerMatches(stored: CapabilityTaskOwner, requester: CapabilityTaskOwner): boolean {
-  if (stored.clientId !== requester.clientId || stored.sessionId !== requester.sessionId) return false;
-  if (requester.workspaceId !== undefined && stored.workspaceId !== requester.workspaceId) return false;
-  return true;
+  if (stored.workspaceId !== undefined || requester.workspaceId !== undefined) {
+    return stored.workspaceId !== undefined
+      && requester.workspaceId !== undefined
+      && stored.workspaceId === requester.workspaceId;
+  }
+  return stored.clientId === requester.clientId && stored.sessionId === requester.sessionId;
 }
 
 function boundedString(value: unknown): string | undefined {

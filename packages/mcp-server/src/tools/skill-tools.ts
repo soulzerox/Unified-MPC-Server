@@ -9,13 +9,9 @@ const ponytailSessionSchema = z.object({
   suppressed: z.boolean(),
 }).strict();
 
-const installTargetSchema = z.enum(['antigravity', 'cursor', 'claude', 'codex', 'cline', 'opencode', 'all']);
 const skillInstallSchema = z.object({
   name: z.string().min(1),
   source: z.string().min(1),
-  targets: z.array(installTargetSchema).min(1).default(['all']),
-  scope: z.enum(['global', 'workspace']).optional(),
-  workspaceRoot: z.string().min(1).optional(),
 }).strict();
 
 const readOnlyInspection = {
@@ -51,7 +47,7 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'skills_install',
-      description: 'Install a validated local or HTTPS Git SKILL.md source into supported IDE skill catalogs. Remote repositories are materialized without running install scripts and are rejected when unsafe symlinks are present.',
+      description: 'Install a validated local or HTTPS Git SKILL.md source into the canonical Unified MCP skill store. This does not write Cursor, Cline, Claude, Codex, Antigravity, or OpenCode skill catalogs. Remote repositories are materialized without running install scripts and are rejected when unsafe symlinks are present.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       inputSchema: skillInstallSchema,
@@ -60,9 +56,8 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
         : context.services.installer.installSkill({
           name: input.name,
           source: input.source,
-          targets: input.targets,
-          ...(input.scope === undefined ? {} : { scope: input.scope }),
-          ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+          targets: ['unified-mpc'],
+          scope: 'global',
         }),
     }),
     defineTool({

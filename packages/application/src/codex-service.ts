@@ -140,10 +140,11 @@ export class CodexService {
     workspaceId: string,
     codexTaskId: string,
   ): Promise<Result<GoalTaskCancellationObservation>> {
+    void ownerClientId;
     const owner = this.owners.get(codexTaskId);
     if (owner === undefined) return ok({ matched: false, state: 'not_found' });
-    if (owner.actorId !== ownerClientId || owner.workspaceId !== workspaceId) {
-      return err(appError('PERMISSION_DENIED', 'Codex task belongs to another client or workspace'));
+    if (owner.workspaceId !== workspaceId) {
+      return err(appError('PERMISSION_DENIED', 'Codex task belongs to another workspace'));
     }
 
     const before = this.adapter.statusProcess(owner.processId);
@@ -167,11 +168,12 @@ export class CodexService {
   }
 
   public async list(actor: FileActor, workspaceId: string): Promise<Result<readonly CodexTaskListItem[]>> {
+    actorSessionId(actor);
     const workspace = await this.getWorkspace(workspaceId);
     if (!workspace.ok) return workspace;
     const tasks: CodexTaskListItem[] = [];
     for (const [codexTaskId, owner] of this.owners) {
-      if (owner.actorId !== actor.clientId || owner.sessionId !== actorSessionId(actor) || owner.workspaceId !== workspaceId) continue;
+      if (owner.workspaceId !== workspaceId) continue;
       const process = this.adapter.statusProcess(owner.processId);
       if (process.ok) tasks.push({ codexTaskId, process: process.value });
     }
@@ -208,9 +210,10 @@ export class CodexService {
   }
 
   private authorize(actor: FileActor, workspaceId: string, codexTaskId: string): Result<CodexTaskOwner> {
+    actorSessionId(actor);
     const owner = this.owners.get(codexTaskId);
     if (owner === undefined) return err(appError('PROCESS_NOT_FOUND', 'Codex task was not found'));
-    if (owner.actorId !== actor.clientId || owner.sessionId !== actorSessionId(actor) || owner.workspaceId !== workspaceId) return err(appError('PERMISSION_DENIED', 'Codex task is not owned by this client session and workspace'));
+    if (owner.workspaceId !== workspaceId) return err(appError('PERMISSION_DENIED', 'Codex task belongs to another workspace'));
     return ok(owner);
   }
 

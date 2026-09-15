@@ -34,6 +34,7 @@ interface ManagedSession {
 interface PendingConnection {
   readonly launchFingerprint: string;
   readonly promise: Promise<ManagedSession>;
+  readonly abortController: AbortController;
 }
 
 const MAX_EXTERNAL_MCP_ARGUMENT_BYTES = 1 * 1024 * 1024;
@@ -186,10 +187,46 @@ export class McpSessionManager {
     await this.drop(server);
   }
 
+  public async reconcile(servers: readonly {
+    readonly name: string;
+    readonly enabled: boolean;
+    readonly excluded: boolean;
+    readonly config: McpServerLaunchConfig;
+  }[]): Promise<void> {
+    const expected = new Map<string, { readonly name: string; readonly launchFingerprint: string }>();
+    for (const server of servers) {
+      if (!server.enabled || server.excluded) continue;
+      expected.set(server.name.toLowerCase(), {
+        name: server.name,
+        launchFingerprint: fingerprintExternalMcpValue(server.config),
+      });
+    }
+
+    for (const [name, pending] of [...this.pendingConnections]) {
+      const current = expected.get(name.toLowerCase());
+      if (current !== undefined && current.name === name && current.launchFingerprint === pending.launchFingerprint) continue;
+      this.pinnedServers.delete(name);
+      pending.abortController.abort();
+      await pending.promise.catch(() => undefined);
+    }
+    for (const [name, managed] of [...this.sessions]) {
+      const current = expected.get(name.toLowerCase());
+      if (current !== undefined && current.name === name && current.launchFingerprint === managed.launchFingerprint) continue;
+      this.pinnedServers.delete(name);
+      await this.drop(name, managed);
+    }
+    for (const name of [...this.pinnedServers]) {
+      if (!expected.has(name.toLowerCase())) this.pinnedServers.delete(name);
+    }
+  }
+
   public async close(): Promise<void> {
     this.closed = true;
     if (this.idleTimer !== undefined) clearInterval(this.idleTimer);
     this.idleTimer = undefined;
+    const pending = [...this.pendingConnections.values()];
+    for (const connection of pending) connection.abortController.abort();
+    await Promise.all(pending.map((connection) => connection.promise.catch(() => undefined)));
     this.pendingConnections.clear();
     const closers = [...this.sessions.entries()].map(async ([name, managed]) => {
       this.sessions.delete(name);
@@ -216,11 +253,16 @@ export class McpSessionManager {
       return this.ensure(server, config, signal);
     }
 
-    const promise = this.connectManaged(server, config, launchFingerprint, signal);
-    this.pendingConnections.set(server, { launchFingerprint, promise });
+    const abortController = new AbortController();
+    const abortPending = (): void => abortController.abort();
+    signal?.addEventListener('abort', abortPending, { once: true });
+    if (signal?.aborted === true) abortController.abort();
+    const promise = this.connectManaged(server, config, launchFingerprint, abortController.signal);
+    this.pendingConnections.set(server, { launchFingerprint, promise, abortController });
     try {
       return await promise;
     } finally {
+      signal?.removeEventListener('abort', abortPending);
       if (this.pendingConnections.get(server)?.promise === promise) this.pendingConnections.delete(server);
     }
   }
@@ -232,7 +274,14 @@ export class McpSessionManager {
     signal?: AbortSignal,
   ): Promise<ManagedSession> {
     const session = await withTimeout(
-      (connectSignal) => this.factory.connect(config, connectSignal),
+      async (connectSignal) => {
+        const connected = await this.factory.connect(config, connectSignal);
+        if (connectSignal.aborted) {
+          await connected.close().catch(() => undefined);
+          throw new Error('Child MCP connection was cancelled');
+        }
+        return connected;
+      },
       this.callTimeoutMs,
       `Timed out connecting to ${server}`,
       signal,

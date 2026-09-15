@@ -112,11 +112,24 @@ describe('mandatory independent host approval', () => {
       expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint, arguments: expect.objectContaining({ role: 'assistant', content: input.assistantContent, workspace: 'workspace-a' }) }),
     ]);
 
-    const recreated = new ToolRegistry(services, actor, options);
+    const recreated = new ToolRegistry(services, actor, { ...options, sessionId: 'session-b' });
     const duplicate = await recreated.invoke('record_turn', input);
     expect(duplicate.isError).not.toBe(true);
     expect(duplicate.structuredContent).toMatchObject({ turnId: 'turn-1', recorded: 0, skipped: 2, duplicate: true });
     expect(childCalls).toHaveLength(2);
+
+    const otherWorkspace = new ToolRegistry(services, actor, {
+      ...options,
+      sessionId: 'session-c',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => ({
+        workspaceId: 'workspace-b',
+        rootPath: path.resolve(tmpdir(), 'unified-mpc-approval-fixture-b'),
+      }),
+    });
+    const distinctWorkspace = await otherWorkspace.invoke('record_turn', input);
+    expect(distinctWorkspace.isError).not.toBe(true);
+    expect(distinctWorkspace.structuredContent).toMatchObject({ turnId: 'turn-1', recorded: 2, skipped: 0, duplicate: false });
+    expect(childCalls).toHaveLength(4);
 
     const invalid = await first.invoke('record_turn', { ...input, server: 'arbitrary-child' });
     expect(invalid).toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
@@ -244,6 +257,94 @@ describe('mandatory independent host approval', () => {
 
     expect(response).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('Host exact-action approval') } } });
     expect(calls).toEqual([]);
+  });
+
+  it('offers one trusted-session approval scope for Playwright instead of prompting every opaque action', async () => {
+    const requests: import('./tool-registry.js').HostMutationApprovalRequest[] = [];
+    const descriptorFingerprint = 'a'.repeat(64);
+    const catalogFingerprint = 'b'.repeat(64);
+    const registry = new ToolRegistry(servicesWithCalls([]), { ...actor, sessionId: 'session-a' }, {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: balancedProfile,
+      hostMutationApprovalProvider: async (request): Promise<boolean> => { requests.push(request); return false; },
+    });
+
+    await registry.invoke('mcp_call', {
+      server: 'playwright',
+      tool: 'browser_click',
+      arguments: { element: 'Save', ref: 'e17' },
+      descriptorFingerprint,
+      catalogFingerprint,
+      userConfirmed: true,
+      goalLease: { goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 7 },
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.approvalScope).toMatchObject({
+      kind: 'automation_session',
+      id: expect.any(String),
+      label: expect.stringContaining('Playwright'),
+    });
+    expect(requests[0]?.approvalScope).not.toHaveProperty('ttlMs');
+    expect(requests[0]?.approvalScope).not.toHaveProperty('maxUses');
+  });
+
+  it('keeps the same Playwright approval scope when only the durable lease generation changes inside one trusted session', async () => {
+    const requests: import('./tool-registry.js').HostMutationApprovalRequest[] = [];
+    const registry = new ToolRegistry(servicesWithCalls([]), { ...actor, sessionId: 'session-a' }, {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: balancedProfile,
+      hostMutationApprovalProvider: async (request): Promise<boolean> => { requests.push(request); return false; },
+    });
+    const base = {
+      server: 'playwright', tool: 'browser_type', arguments: { element: 'Name', text: 'Ada' },
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true,
+    };
+
+    await registry.invoke('mcp_call', { ...base, goalLease: { goalId: 'goal-1', leaseToken: 'token-a', leaseGeneration: 7 } });
+    await registry.invoke('mcp_call', { ...base, goalLease: { goalId: 'goal-1', leaseToken: 'token-b', leaseGeneration: 8 } });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.approvalScope?.id).toBe(requests[1]?.approvalScope?.id);
+  });
+
+  it('changes the Playwright approval scope when the trusted host session changes', async () => {
+    const requests: import('./tool-registry.js').HostMutationApprovalRequest[] = [];
+    const base = {
+      server: 'playwright', tool: 'browser_click', arguments: { element: 'Save', ref: 'e17' },
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true,
+    };
+    for (const sessionId of ['session-a', 'session-b']) {
+      const registry = new ToolRegistry(servicesWithCalls([]), { ...actor, sessionId }, {
+        sessionId,
+        activeWorkspaceScopeProvider: activeScope,
+        profileProvider: balancedProfile,
+        hostMutationApprovalProvider: async (request): Promise<boolean> => { requests.push(request); return false; },
+      });
+      await registry.invoke('mcp_call', base);
+    }
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.approvalScope?.id).not.toBe(requests[1]?.approvalScope?.id);
+  });
+
+  it('never grants automation-session scope to destructive child MCP actions or unrelated child servers', async () => {
+    const requests: import('./tool-registry.js').HostMutationApprovalRequest[] = [];
+    const registry = new ToolRegistry(servicesWithCalls([]), actor, {
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: balancedProfile,
+      hostMutationApprovalProvider: async (request): Promise<boolean> => { requests.push(request); return false; },
+    });
+    const contract = { descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true };
+
+    await registry.invoke('mcp_call', { server: 'playwright', tool: 'browser_delete', arguments: {}, ...contract });
+    await registry.invoke('mcp_call', { server: 'filesystem', tool: 'write_file', arguments: { path: 'a.txt' }, ...contract });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.approvalScope).toBeUndefined();
+    expect(requests[1]?.approvalScope).toBeUndefined();
   });
 
   it.each([

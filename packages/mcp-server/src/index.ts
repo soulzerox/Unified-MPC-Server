@@ -10,6 +10,7 @@ export * from './server.js';
 export * from './shared-activity-snapshot.js';
 export * from './stdio.js';
 export * from './trusted-host-approval.js';
+export * from './turn-persistence.js';
 export * from './tool-registry.js';
 export * from './tool-delivery-contract.js';
 export * from './mutation-policy.js';

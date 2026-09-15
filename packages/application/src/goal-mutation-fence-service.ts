@@ -56,9 +56,6 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     try {
       const fence = await this.repository.getWorkspaceMutationFence(workspaceId);
       if (fence === null) return ok(null);
-      if (fence.goal.ownerClientId !== actor.clientId) {
-        return err(appError('CONFLICT', 'Workspace is reserved by another rolling scheduled goal owner', true));
-      }
       return ok({ goalId: fence.goal.id, leaseGeneration: fence.goal.leaseGeneration });
     } catch (error: unknown) {
       return mapFenceError(error);
@@ -80,6 +77,7 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
         goalId: proof.goalId,
         workspaceId,
         ownerClientId: actor.clientId,
+        ownerSessionId: actor.sessionId ?? actor.clientId,
         leaseTokenHash: hashLeaseToken(proof.leaseToken),
         leaseGeneration: proof.leaseGeneration,
         startedAt,

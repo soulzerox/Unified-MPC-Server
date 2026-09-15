@@ -26,6 +26,14 @@ const defaultStarter: McpHttpServerStarter = {
   start: startMcpHttp,
 };
 
+export type WebMcpHttpServerOptions = Omit<McpHttpServerOptions, 'hostMutationApprovalProvider'>;
+
+export function createWebMcpHttpServerOptions(options: McpHttpServerOptions): WebMcpHttpServerOptions {
+  const { hostMutationApprovalProvider, ...webOptions } = options;
+  void hostMutationApprovalProvider;
+  return webOptions;
+}
+
 export async function runMcpHttpCommand(
   options: McpHttpCommandOptions,
 ): Promise<Result<McpHttpCommandResult>> {
@@ -36,7 +44,8 @@ export async function runMcpHttpCommand(
   const resolved = await options.resolver.resolve(options.workspaceReference);
   if (!resolved.ok) return resolved;
 
-  const handle = await (options.starter ?? defaultStarter).start(options.createServerOptions(resolved.value));
+  const serverOptions = createWebMcpHttpServerOptions(options.createServerOptions(resolved.value));
+  const handle = await (options.starter ?? defaultStarter).start(serverOptions);
   return {
     ok: true,
     value: { workspaceId: resolved.value.id, handle },

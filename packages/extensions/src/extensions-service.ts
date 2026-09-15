@@ -1,9 +1,11 @@
+import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory } from './mcp-session-manager.js';
 import { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 import { SkillCatalog } from './skill-catalog.js';
 import type {
+  DiscoveredMcpServer,
   ExtensionsService,
   ExtensionsSettings,
   McpServerListItem,
@@ -17,6 +19,7 @@ export interface LocalExtensionsServiceOptions {
   readonly settingsProvider?: () => ExtensionsSettings;
   readonly homeDir?: string;
   readonly appDataDir?: string;
+  readonly dataDir?: string;
   readonly workspaceRootProvider?: () => Promise<string | undefined>;
   readonly bundledSkillRoots?: readonly string[];
   readonly clientFactory?: McpClientFactory;
@@ -28,6 +31,7 @@ export class LocalExtensionsService implements ExtensionsService {
   private readonly settingsProvider: () => ExtensionsSettings;
   private readonly homeDir: string | undefined;
   private readonly appDataDir: string | undefined;
+  private readonly dataDir: string | undefined;
   private readonly workspaceRootProvider: () => Promise<string | undefined>;
   private readonly bundledSkillRoots: readonly string[];
   private readonly sessions: McpSessionManager;
@@ -36,6 +40,7 @@ export class LocalExtensionsService implements ExtensionsService {
     this.settingsProvider = options.settingsProvider ?? ((): ExtensionsSettings => options.settings);
     this.homeDir = options.homeDir;
     this.appDataDir = options.appDataDir;
+    this.dataDir = options.dataDir;
     this.workspaceRootProvider = options.workspaceRootProvider ?? (async (): Promise<undefined> => undefined);
     this.bundledSkillRoots = options.bundledSkillRoots ?? [];
     this.sessions = new McpSessionManager({
@@ -59,7 +64,7 @@ export class LocalExtensionsService implements ExtensionsService {
     try {
       const settings = this.settingsProvider();
       const [discovered, skills] = await Promise.all([
-        this.loader().then((loader) => loader.discover()),
+        this.discoverMcpServers(),
         this.skillCatalog().then((catalog) => catalog.list({})),
       ]);
       if (!skills.ok) return err(skills.error);
@@ -70,7 +75,7 @@ export class LocalExtensionsService implements ExtensionsService {
   }
 
   public async listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>> {
-    const discovered = await this.loader().then((loader) => loader.discover());
+    const discovered = await this.discoverMcpServers();
     const required = new Set(configuredPolicies(this.settingsProvider())
       .filter((policy) => policy.resourceType === 'server' && policy.mandatory)
       .map((policy) => policy.resourceId.trim().toLowerCase()));
@@ -104,7 +109,7 @@ export class LocalExtensionsService implements ExtensionsService {
       }
     }
     const requiredNames = new Set(requirements.keys());
-    const discovered = await this.loader().then((loader) => loader.discover());
+    const discovered = await this.discoverMcpServers();
     for (const server of discovered) {
       if (!requiredNames.has(server.name.toLowerCase())) this.sessions.unpin(server.name);
     }
@@ -257,6 +262,7 @@ export class LocalExtensionsService implements ExtensionsService {
       ...(this.homeDir === undefined ? {} : { homeDir: this.homeDir }),
       ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
       bundledRoots: this.bundledSkillRoots,
+      ...(this.dataDir === undefined ? {} : { managedRoot: path.join(this.dataDir, 'extensions', 'skills') }),
     });
   }
 
@@ -266,12 +272,19 @@ export class LocalExtensionsService implements ExtensionsService {
       settings: this.settingsProvider(),
       ...(this.homeDir === undefined ? {} : { homeDir: this.homeDir }),
       ...(this.appDataDir === undefined ? {} : { appDataDir: this.appDataDir }),
+      ...(this.dataDir === undefined ? {} : { dataDir: this.dataDir }),
       ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
     });
   }
 
-  private async findServer(name: string): Promise<Result<Awaited<ReturnType<McpConfigLoader['discover']>>[number]>> {
+  private async discoverMcpServers(): Promise<readonly DiscoveredMcpServer[]> {
     const discovered = await this.loader().then((loader) => loader.discover());
+    await this.sessions.reconcile(discovered);
+    return discovered;
+  }
+
+  private async findServer(name: string): Promise<Result<Awaited<ReturnType<McpConfigLoader['discover']>>[number]>> {
+    const discovered = await this.discoverMcpServers();
     const normalized = name.trim().toLowerCase();
     const server = discovered.find((entry) => entry.name.toLowerCase() === normalized);
     if (server === undefined) return err(appError('INVALID_INPUT', `Unknown MCP server: ${name}`));

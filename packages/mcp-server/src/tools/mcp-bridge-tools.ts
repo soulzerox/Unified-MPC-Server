@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema, recordTurnSchema, taskBootstrapSchema } from './schemas.js';
 
-const installTargetSchema = z.enum(['antigravity', 'cursor', 'claude', 'codex', 'cline', 'opencode', 'all']);
 const mcpInstallSchema = z.object({
   name: z.string().min(1),
   transport: z.enum(['stdio', 'sse', 'http']),
@@ -12,9 +11,6 @@ const mcpInstallSchema = z.object({
   url: z.string().min(1).optional(),
   source: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
-  targets: z.array(installTargetSchema).min(1).default(['all']),
-  scope: z.enum(['global', 'workspace']).optional(),
-  workspaceRoot: z.string().min(1).optional(),
 }).strict();
 
 const readOnlyInspection = {
@@ -84,7 +80,7 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'mcp_install',
-      description: 'Register an MCP server for supported IDE targets. stdio accepts either an explicit command or a validated HTTPS Git repository source; SSE/HTTP accept a remote endpoint URL. Repository installs never run package install scripts.',
+      description: 'Register a child MCP server in the canonical Unified MCP registry. This does not write Cursor, Cline, Claude, Codex, Antigravity, or OpenCode MCP configs. stdio accepts either an explicit command or a validated HTTPS Git repository source; SSE/HTTP accept a remote endpoint URL. Repository installs never run package install scripts.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       inputSchema: mcpInstallSchema,
@@ -93,15 +89,14 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
         : context.services.installer.installServer({
           name: input.name,
           transport: input.transport,
-          targets: input.targets,
+          targets: ['unified-mpc'],
+          scope: 'global',
           ...(input.command === undefined ? {} : { command: input.command }),
           ...(input.args === undefined ? {} : { args: input.args }),
           ...(input.env === undefined ? {} : { env: input.env }),
           ...(input.url === undefined ? {} : { url: input.url }),
           ...(input.source === undefined ? {} : { source: input.source }),
           ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-          ...(input.scope === undefined ? {} : { scope: input.scope }),
-          ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
         }),
     }),
     defineTool({

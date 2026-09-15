@@ -61,18 +61,22 @@ describe('skills and mcp bridge tools', () => {
     await expect(registry.invoke('skills_install', {
       name: 'remote-skill',
       source: 'https://github.com/example/remote-skill.git',
-      targets: ['cursor'],
     })).resolves.toMatchObject({ structuredContent: { name: 'remote-skill' } });
     await expect(registry.invoke('mcp_install', {
       name: 'remote-mcp',
       transport: 'stdio',
       source: 'https://github.com/example/remote-mcp.git',
-      targets: ['cursor'],
     })).resolves.toMatchObject({ structuredContent: { name: 'remote-mcp' } });
     expect(installed).toEqual([
-      expect.objectContaining({ name: 'remote-skill', source: 'https://github.com/example/remote-skill.git' }),
-      expect.objectContaining({ name: 'remote-mcp', source: 'https://github.com/example/remote-mcp.git', transport: 'stdio' }),
+      expect.objectContaining({ name: 'remote-skill', source: 'https://github.com/example/remote-skill.git', targets: ['unified-mpc'], scope: 'global' }),
+      expect.objectContaining({ name: 'remote-mcp', source: 'https://github.com/example/remote-mcp.git', transport: 'stdio', targets: ['unified-mpc'], scope: 'global' }),
     ]);
+    await expect(registry.invoke('skills_install', {
+      name: 'legacy-skill', source: '/tmp/legacy', targets: ['cursor'],
+    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
+    await expect(registry.invoke('mcp_install', {
+      name: 'legacy-mcp', transport: 'stdio', command: 'node', targets: ['cursor'],
+    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
     await expect(registry.invoke('task_bootstrap', {})).resolves.toMatchObject({
       structuredContent: {
         ready: true,

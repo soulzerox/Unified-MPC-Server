@@ -10,6 +10,8 @@ export interface SkillCatalogOptions {
   readonly workspaceRoot?: string;
   readonly settings: ExtensionsSettings;
   readonly bundledRoots?: readonly string[];
+  /** Parent-owned canonical skill root managed by unified-mpc itself. */
+  readonly managedRoot?: string;
   readonly extraRoots?: readonly string[];
 }
 
@@ -166,6 +168,10 @@ export class SkillCatalog {
     }
     for (const bundled of this.options.bundledRoots ?? []) {
       defaults.push({ source: 'bundled:agent-skills', path: path.resolve(bundled) });
+    }
+    const managedRoot = this.options.managedRoot?.trim();
+    if (managedRoot !== undefined && managedRoot.length > 0) {
+      defaults.push({ source: 'unified-mpc-skills', path: path.resolve(managedRoot) });
     }
     for (const extra of [...(this.options.settings?.extraSkillRoots ?? []), ...(this.options.extraRoots ?? [])]) {
       defaults.push({ source: `extra:${path.basename(extra)}`, path: path.resolve(extra) });

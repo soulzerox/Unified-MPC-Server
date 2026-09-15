@@ -192,23 +192,28 @@ describe('ProcessService', () => {
     expect(calls).toEqual([{ executable: 'powershell.exe', args: ['-Command', 'Remove-Item target'], cwd: outside }]);
   });
 
-  it('enforces process ownership for status, logs, and stop handles', async () => {
+  it('shares process handles across clients and sessions in the same workspace while isolating other workspaces', async () => {
     const workspace = await createWorkspace();
     const service = new ProcessService(repository(workspace), { processManager: fakeManager([]) });
-    const started = await service.start({ clientId: 'client-1', clientName: 'test' }, workspace.id, {
+    const started = await service.start({ clientId: 'client-1', clientName: 'test', sessionId: 'session-a' }, workspace.id, {
       executable: 'pnpm',
       args: ['test'],
       userConfirmed: true,
     });
     expect(started.ok).toBe(true);
     if (!started.ok) return;
+    const otherClient = { clientId: 'client-2', clientName: 'other', sessionId: 'session-b' };
 
-    await expect(service.status({ clientId: 'client-2', clientName: 'other' }, workspace.id, started.value.processId))
+    await expect(service.status(otherClient, workspace.id, started.value.processId))
+      .resolves.toMatchObject({ ok: true });
+    await expect(service.list(otherClient, workspace.id))
+      .resolves.toMatchObject({ ok: true, value: [expect.objectContaining({ processId: started.value.processId })] });
+    await expect(service.logs(otherClient, workspace.id, started.value.processId, {}))
+      .resolves.toMatchObject({ ok: true });
+    await expect(service.stop(otherClient, workspace.id, started.value.processId, true))
+      .resolves.toMatchObject({ ok: true });
+    await expect(service.status(otherClient, 'another-workspace', started.value.processId))
       .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.logs({ clientId: 'client-1', clientName: 'test' }, workspace.id, started.value.processId, {}))
-      .resolves.toMatchObject({ ok: true });
-    await expect(service.stop({ clientId: 'client-1', clientName: 'test' }, workspace.id, started.value.processId, true))
-      .resolves.toMatchObject({ ok: true });
   });
 
   it('does not dispatch a project process after cancellation wins during command discovery', async () => {
@@ -320,25 +325,25 @@ describe('ProcessService', () => {
     expect(stops).toBe(1);
   });
 
-  it('isolates process handles between sessions of the same client and workspace', async () => {
+  it('keeps normal stop authorization while allowing same-workspace access across sessions', async () => {
     const workspace = await createWorkspace();
-    const service = new ProcessService(repository(workspace), { processManager: fakeManager([]) });
+    const service = new ProcessService(repository(workspace), { processManager: fakeManager([]), profile: permissionProfiles.safe });
     const owner = { clientId: 'client-1', clientName: 'test', sessionId: 'session-a' };
     const otherSession = { clientId: 'client-1', clientName: 'test', sessionId: 'session-b' };
     const started = await service.start(owner, workspace.id, { executable: 'pnpm', args: ['test'], userConfirmed: true });
     expect(started.ok).toBe(true);
     if (!started.ok) return;
 
-    await expect(service.status(otherSession, workspace.id, started.value.processId)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.logs(otherSession, workspace.id, started.value.processId, {})).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.stop(otherSession, workspace.id, started.value.processId)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.list(otherSession, workspace.id)).resolves.toMatchObject({ ok: true, value: [] });
+    await expect(service.status(otherSession, workspace.id, started.value.processId)).resolves.toMatchObject({ ok: true });
+    await expect(service.logs(otherSession, workspace.id, started.value.processId, {})).resolves.toMatchObject({ ok: true });
+    await expect(service.stop(otherSession, workspace.id, started.value.processId)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
+    await expect(service.list(otherSession, workspace.id)).resolves.toMatchObject({ ok: true, value: [expect.objectContaining({ processId: started.value.processId })] });
     await expect(service.status(owner, workspace.id, started.value.processId)).resolves.toMatchObject({ ok: true });
     expect(service.statusForGoalLiveness(workspace.id, started.value.processId)).toMatchObject({ ok: true, value: { state: 'running' } });
     expect(service.statusForGoalLiveness('another-workspace', started.value.processId)).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
   });
 
-  it('cancels a tracked process across MCP sessions while enforcing stable client/workspace ownership', async () => {
+  it('cancels a tracked process from another client in the same workspace while isolating other workspaces', async () => {
     const workspace = await createWorkspace();
     let current = processHandle('process-goal-cancel');
     const stopCalls: Array<{ processId: string; autoRetry: boolean | undefined }> = [];
@@ -363,12 +368,12 @@ describe('ProcessService', () => {
     if (!started.ok) return;
 
     await expect(service.cancelForGoal('client-2', workspace.id, started.value.processId))
-      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.cancelForGoal('client-1', workspace.id, started.value.processId))
       .resolves.toMatchObject({ ok: true, value: { matched: true, state: 'cancelled' } });
     expect(stopCalls).toEqual([{ processId: 'process-goal-cancel', autoRetry: true }]);
     await expect(service.cancelForGoal('client-1', workspace.id, started.value.processId))
       .resolves.toMatchObject({ ok: true, value: { matched: true, state: 'already_terminal' } });
+    await expect(service.cancelForGoal('client-3', 'another-workspace', started.value.processId))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
   });
 });
 

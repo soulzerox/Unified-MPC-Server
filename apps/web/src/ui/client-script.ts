@@ -45,7 +45,7 @@ export function getClientScriptJs(): string {
       // Tab Routing
       function setTab(tabId) {
         activeTab = tabId;
-        const tabs = ['dashboard', 'projects', 'servers', 'skills', 'install', 'policies', 'chatgpt', 'logs'];
+        const tabs = ['dashboard', 'projects', 'servers', 'skills', 'policies', 'chatgpt', 'logs'];
         for (const t of tabs) {
           const navEl = document.getElementById('nav-' + t);
           const panelEl = document.getElementById('view-' + t);
@@ -63,7 +63,7 @@ export function getClientScriptJs(): string {
         }
       }
 
-      const tabs = ['dashboard', 'projects', 'servers', 'skills', 'install', 'policies', 'chatgpt', 'logs'];
+      const tabs = ['dashboard', 'projects', 'servers', 'skills', 'policies', 'chatgpt', 'logs'];
       for (const t of tabs) {
         const navEl = document.getElementById('nav-' + t);
         if (navEl) {
@@ -577,7 +577,7 @@ export function getClientScriptJs(): string {
           const res = await mutationJson('/api/servers/prune', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ serverId: server.serverId, targets: ['all'] }),
+            body: JSON.stringify({ serverId: server.serverId }),
           });
           const result = await res.json();
           if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Server prune failed'));
@@ -597,7 +597,7 @@ export function getClientScriptJs(): string {
           const res = await mutationJson('/api/skills/prune', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: skill.name, targets: ['all'] }),
+            body: JSON.stringify({ name: skill.name }),
           });
           const result = await res.json();
           if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Skill prune failed'));
@@ -843,73 +843,6 @@ export function getClientScriptJs(): string {
         }
       }
 
-      async function submitSkillInstall(name, source, scope, modalToClose) {
-        const payload = {
-          name: name.trim(),
-          source: source.trim(),
-          scope: scope || 'global',
-          targets: ['all'],
-        };
-        try {
-          showToast('Installing skill ' + payload.name + '...');
-          logEvent('INFO', 'Installing agent skill: ' + payload.name + ' from ' + payload.source);
-          const res = await mutationJson('/api/skills/install', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          const result = await res.json();
-          if (result.ok) {
-            showToast('Installed skill ' + payload.name + ' successfully!');
-            logEvent('SUCCESS', 'Installed skill ' + payload.name);
-            if (modalToClose) modalToClose.style.display = 'none';
-            loadInventory();
-          } else {
-            showToast('Install failed: ' + (result.error?.message || 'Error'), true);
-            logEvent('ERROR', 'Install skill failed: ' + (result.error?.message || 'Error'));
-          }
-        } catch (err) {
-          showToast('Error: ' + err.message, true);
-          logEvent('ERROR', 'Skill install error: ' + err.message);
-        }
-      }
-
-      async function submitServerInstall(name, transport, command, argsRaw, url, source, modalToClose) {
-        const payload = {
-          name: name.trim(),
-          transport,
-          command: command ? command.trim() : undefined,
-          args: argsRaw ? argsRaw.split(',').map(a => a.trim()).filter(Boolean) : undefined,
-          url: url ? url.trim() : undefined,
-          source: source ? source.trim() : undefined,
-          targets: ['all'],
-          scope: 'global',
-        };
-        try {
-          showToast('Installing server ' + payload.name + '...');
-          logEvent('INFO', 'Registering MCP server: ' + payload.name + ' (' + transport + ')');
-          const res = await mutationJson('/api/servers/install', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          const result = await res.json();
-          if (result.ok) {
-            showToast('Installed server ' + payload.name + ' successfully!');
-            logEvent('SUCCESS', 'Registered server ' + payload.name);
-            if (modalToClose) modalToClose.style.display = 'none';
-            loadStatus();
-            loadInventory();
-          } else {
-            showToast('Install failed: ' + (result.error?.message || 'Error'), true);
-            logEvent('ERROR', 'Install server failed: ' + (result.error?.message || 'Error'));
-          }
-        } catch (err) {
-          showToast('Error: ' + err.message, true);
-          logEvent('ERROR', 'Server install error: ' + err.message);
-        }
-      }
-
       // Log Terminal Rendering
       function renderLogs() {
         const body = document.getElementById('terminal-log-body');
@@ -992,78 +925,6 @@ export function getClientScriptJs(): string {
       });
       document.getElementById('skill-search-input')?.addEventListener('input', (e) => {
         renderSkillTables(e.target.value);
-      });
-
-      // Modals
-      const skillModal = document.getElementById('install-skill-modal');
-      const serverModal = document.getElementById('install-server-modal');
-
-      document.getElementById('open-skill-modal-btn')?.addEventListener('click', () => { if (skillModal) skillModal.style.display = 'flex'; });
-      document.getElementById('skills-view-install-btn')?.addEventListener('click', () => { if (skillModal) skillModal.style.display = 'flex'; });
-      document.getElementById('close-skill-modal-btn')?.addEventListener('click', () => { if (skillModal) skillModal.style.display = 'none'; });
-
-      document.getElementById('open-server-modal-btn')?.addEventListener('click', () => { if (serverModal) serverModal.style.display = 'flex'; });
-      document.getElementById('servers-view-install-btn')?.addEventListener('click', () => { if (serverModal) serverModal.style.display = 'flex'; });
-      document.getElementById('close-server-modal-btn')?.addEventListener('click', () => { if (serverModal) serverModal.style.display = 'none'; });
-
-      // Transport selector toggle
-      function wireTransportToggle(selectId, urlGroupId, cmdGroupId, argsGroupId, sourceGroupId) {
-        document.getElementById(selectId)?.addEventListener('change', (e) => {
-          const isUrl = e.target.value === 'sse' || e.target.value === 'http';
-          const urlGroup = document.getElementById(urlGroupId);
-          const cmdGroup = document.getElementById(cmdGroupId);
-          const argsGroup = document.getElementById(argsGroupId);
-          const sourceGroup = document.getElementById(sourceGroupId);
-          if (urlGroup) urlGroup.style.display = isUrl ? 'block' : 'none';
-          if (cmdGroup) cmdGroup.style.display = isUrl ? 'none' : 'block';
-          if (argsGroup) argsGroup.style.display = isUrl ? 'none' : 'block';
-          if (sourceGroup) sourceGroup.style.display = isUrl ? 'none' : 'block';
-        });
-      }
-      wireTransportToggle('server-transport', 'url-group', 'command-group', 'args-group', 'source-group');
-      wireTransportToggle('wb-server-transport', 'wb-url-group', 'wb-command-group', 'wb-args-group', 'wb-source-group');
-
-      // Forms
-      document.getElementById('skill-form')?.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const name = document.getElementById('skill-name')?.value || '';
-        const source = document.getElementById('skill-source')?.value || '';
-        const scope = document.getElementById('skill-scope')?.value || 'global';
-        await submitSkillInstall(name, source, scope, skillModal);
-        e.target.reset();
-      });
-
-      document.getElementById('workbench-skill-form')?.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const name = document.getElementById('wb-skill-name')?.value || '';
-        const source = document.getElementById('wb-skill-source')?.value || '';
-        const scope = document.getElementById('wb-skill-scope')?.value || 'global';
-        await submitSkillInstall(name, source, scope, null);
-        e.target.reset();
-      });
-
-      document.getElementById('server-form')?.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const name = document.getElementById('server-name')?.value || '';
-        const transport = document.getElementById('server-transport')?.value || 'stdio';
-        const command = document.getElementById('server-command')?.value || '';
-        const argsRaw = document.getElementById('server-args')?.value || '';
-        const url = document.getElementById('server-url')?.value || '';
-        const source = document.getElementById('server-source')?.value || '';
-        await submitServerInstall(name, transport, command, argsRaw, url, source, serverModal);
-        e.target.reset();
-      });
-
-      document.getElementById('workbench-server-form')?.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const name = document.getElementById('wb-server-name')?.value || '';
-        const transport = document.getElementById('wb-server-transport')?.value || 'stdio';
-        const command = document.getElementById('wb-server-command')?.value || '';
-        const argsRaw = document.getElementById('wb-server-args')?.value || '';
-        const url = document.getElementById('wb-server-url')?.value || '';
-        const source = document.getElementById('wb-server-source')?.value || '';
-        await submitServerInstall(name, transport, command, argsRaw, url, source, null);
-        e.target.reset();
       });
 
       // Log controls

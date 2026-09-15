@@ -1,4 +1,5 @@
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -8,7 +9,7 @@ import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
 import { writeAtomic } from './ide-sync.js';
 import { withConfigMutationTransaction } from './config-mutation-lock.js';
 
-export type InstallTarget = 'antigravity' | 'cursor' | 'claude' | 'codex' | 'cline' | 'opencode' | 'all';
+export type InstallTarget = 'unified-mpc' | 'antigravity' | 'cursor' | 'claude' | 'codex' | 'cline' | 'opencode' | 'all';
 export type InstallScope = 'global' | 'workspace';
 
 export interface InstallSkillInput {
@@ -44,6 +45,8 @@ export interface InstallServerResult {
   readonly targets: readonly InstallTarget[];
   readonly updatedConfigFiles: readonly string[];
   readonly managedSourcePath?: string;
+  readonly sourceRevision?: string;
+  readonly sourceContentSha256?: string;
 }
 
 export interface InstallerServiceOptions {
@@ -53,6 +56,8 @@ export interface InstallerServiceOptions {
   readonly dataDir?: string;
   readonly gitRunner?: GitRunner;
 }
+
+const MANAGED_MCP_VERSION_RETENTION = 3;
 
 const ALL_TARGETS: readonly InstallTarget[] = [
   'antigravity',
@@ -65,14 +70,15 @@ const ALL_TARGETS: readonly InstallTarget[] = [
 
 function validateTargets(targets: readonly InstallTarget[] | undefined): ReturnType<typeof appError> | undefined {
   if (!targets || targets.length === 0) return appError('INVALID_INPUT', 'At least one target must be specified');
-  const supported = new Set<string>([...ALL_TARGETS, 'all']);
+  const supportedTargets = ['unified-mpc', ...ALL_TARGETS, 'all'] as const;
+  const supported = new Set<string>(supportedTargets);
   const invalid = [...new Set(targets.filter((target) => !supported.has(target)))];
   if (invalid.length === 0) return undefined;
   return appError(
     'UNSUPPORTED_TARGET',
-    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${[...ALL_TARGETS, 'all'].join(', ')}`,
+    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${supportedTargets.join(', ')}`,
     false,
-    { invalidTargets: invalid.join(', '), supportedTargets: [...ALL_TARGETS, 'all'].join(', ') },
+    { invalidTargets: invalid.join(', '), supportedTargets: supportedTargets.join(', ') },
   );
 }
 
@@ -218,6 +224,9 @@ export class InstallerService {
     skillName: string,
     workspaceRoot?: string,
   ): string | undefined {
+    if (target === 'unified-mpc') {
+      return path.join(this.dataDir, 'extensions', 'skills', skillName);
+    }
     if (scope === 'workspace') {
       if (workspaceRoot === undefined) return undefined;
       switch (target) {
@@ -274,6 +283,9 @@ export class InstallerService {
 
     let managedSourcePath: string | undefined;
     let managedVersionRoot: string | undefined;
+    let managedProvenanceJson: string | undefined;
+    let sourceRevision: string | undefined;
+    let sourceContentSha256: string | undefined;
     let effectiveCommand = input.command?.trim();
     let effectiveArgs = input.args;
     let effectiveCwd = input.cwd;
@@ -287,6 +299,9 @@ export class InstallerService {
         if (!materialized.ok) return err(materialized.error);
         managedSourcePath = materialized.value.path;
         managedVersionRoot = materialized.value.versionRoot;
+        managedProvenanceJson = materialized.value.provenanceJson;
+        sourceRevision = materialized.value.revision;
+        sourceContentSha256 = materialized.value.contentSha256;
         const launch = await resolveNodePackageLaunch(managedSourcePath, serverName);
         if (!launch.ok) {
           await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -348,12 +363,26 @@ export class InstallerService {
     const configFiles = this.expandTargets(input.targets)
       .map((target) => this.serverTargetConfigFile(target, scope, workspaceRoot))
       .filter((configFile): configFile is string => configFile !== undefined);
+    const currentMarkerFile = managedVersionRoot === undefined
+      ? undefined
+      : path.join(this.dataDir, 'extensions', 'mcp', serverName, 'current.json');
+    if (managedVersionRoot !== undefined) {
+      const references = {
+        version: 1,
+        configFiles: [...configFiles],
+      } as const;
+      await writeAtomic(path.join(managedVersionRoot, 'references.json'), `${JSON.stringify(references, null, 2)}\n`);
+    }
+    const transactionFiles = currentMarkerFile === undefined ? configFiles : [...configFiles, currentMarkerFile];
     const updatedConfigFiles: string[] = [];
     try {
-      await withConfigMutationTransaction(configFiles, async () => {
+      await withConfigMutationTransaction(transactionFiles, async () => {
         for (const configFile of configFiles) {
           await injectServerIntoConfigFile(configFile, serverName, serverEntry);
           updatedConfigFiles.push(configFile);
+        }
+        if (currentMarkerFile !== undefined && managedProvenanceJson !== undefined) {
+          await writeAtomic(currentMarkerFile, managedProvenanceJson);
         }
       });
     } catch (error: unknown) {
@@ -361,18 +390,30 @@ export class InstallerService {
       return err(appError('INTERNAL_ERROR', `Failed to update server config: ${error instanceof Error ? error.message : String(error)}`));
     }
 
+    if (managedVersionRoot !== undefined) {
+      await this.pruneUnreferencedManagedVersions(serverName, managedVersionRoot).catch(() => undefined);
+    }
+
     return ok({
       name: serverName,
       targets: input.targets,
       updatedConfigFiles,
       ...(managedSourcePath === undefined ? {} : { managedSourcePath }),
+      ...(sourceRevision === undefined ? {} : { sourceRevision }),
+      ...(sourceContentSha256 === undefined ? {} : { sourceContentSha256 }),
     });
   }
 
   private async materializeServerSource(
     serverName: string,
     source: string,
-  ): Promise<Result<{ readonly path: string; readonly versionRoot: string }>> {
+  ): Promise<Result<{
+    readonly path: string;
+    readonly versionRoot: string;
+    readonly revision: string;
+    readonly contentSha256: string;
+    readonly provenanceJson: string;
+  }>> {
     const remote = parseHttpsGitSource(source);
     if (remote === undefined) return err(appError('INVALID_INPUT', 'MCP repository sources must use an HTTPS Git repository URL'));
 
@@ -385,7 +426,79 @@ export class InstallerService {
       await rm(versionRoot, { recursive: true, force: true }).catch(() => undefined);
       return err(appError('INVALID_INPUT', `Failed to clone MCP repository source: ${boundedGitError(cloned.stderr)}`));
     }
-    return ok({ path: repositoryPath, versionRoot });
+
+    const revisionResult = await this.gitRunner.run(['rev-parse', 'HEAD'], repositoryPath, { timeoutMs: 30_000 });
+    const revision = revisionResult.stdout.trim().toLowerCase();
+    if (revisionResult.exitCode !== 0 || !/^[a-f0-9]{7,64}$/.test(revision)) {
+      await rm(versionRoot, { recursive: true, force: true }).catch(() => undefined);
+      return err(appError('INVALID_INPUT', `Failed to resolve MCP repository revision: ${boundedGitError(revisionResult.stderr)}`));
+    }
+
+    try {
+      const contentSha256 = await hashManagedSourceContent(repositoryPath);
+      const provenance = {
+        version: 1,
+        source: remote.href,
+        revision,
+        contentSha256,
+        versionId: path.basename(versionRoot),
+      } as const;
+      const provenanceJson = `${JSON.stringify(provenance, null, 2)}\n`;
+      await writeAtomic(path.join(versionRoot, 'provenance.json'), provenanceJson);
+      return ok({ path: repositoryPath, versionRoot, revision, contentSha256, provenanceJson });
+    } catch (error: unknown) {
+      await rm(versionRoot, { recursive: true, force: true }).catch(() => undefined);
+      return err(appError('INTERNAL_ERROR', `Failed to record MCP source provenance: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  }
+
+  private async pruneUnreferencedManagedVersions(serverName: string, currentVersionRoot: string): Promise<void> {
+    const versionsDirectory = path.join(this.dataDir, 'extensions', 'mcp', serverName, 'versions');
+    let entries;
+    try {
+      entries = await readdir(versionsDirectory, { withFileTypes: true });
+    } catch (error: unknown) {
+      if (isMissingPath(error)) return;
+      throw error;
+    }
+
+    const versions = await Promise.all(entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('version-'))
+      .map(async (entry) => {
+        const versionRoot = path.join(versionsDirectory, entry.name);
+        return { versionRoot, mtimeMs: (await stat(versionRoot)).mtimeMs };
+      }));
+    const recentOthers = versions
+      .filter((entry) => entry.versionRoot !== currentVersionRoot)
+      .sort((left, right) => right.mtimeMs - left.mtimeMs)
+      .slice(0, Math.max(0, MANAGED_MCP_VERSION_RETENTION - 1));
+    const retained = new Set([currentVersionRoot, ...recentOthers.map((entry) => entry.versionRoot)]);
+
+    for (const version of versions) {
+      if (retained.has(version.versionRoot)) continue;
+      if (await this.managedVersionHasLiveReference(version.versionRoot)) continue;
+      await rm(version.versionRoot, { recursive: true, force: true });
+    }
+  }
+
+  private async managedVersionHasLiveReference(versionRoot: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(path.join(versionRoot, 'references.json'), 'utf8')) as unknown;
+    } catch {
+      return true;
+    }
+    if (!isRecord(parsed) || !Array.isArray(parsed.configFiles) || !parsed.configFiles.every((entry) => typeof entry === 'string')) {
+      return true;
+    }
+    for (const configFile of parsed.configFiles as string[]) {
+      try {
+        if ((await readFile(configFile, 'utf8')).includes(versionRoot)) return true;
+      } catch (error: unknown) {
+        if (!isMissingPath(error)) return true;
+      }
+    }
+    return false;
   }
 
   private serverTargetConfigFile(
@@ -393,6 +506,9 @@ export class InstallerService {
     scope: InstallScope,
     workspaceRoot?: string,
   ): string | undefined {
+    if (target === 'unified-mpc') {
+      return path.join(this.dataDir, 'extensions', 'mcp', 'registry.json');
+    }
     if (scope === 'workspace') {
       if (workspaceRoot === undefined) return undefined;
       switch (target) {
@@ -458,6 +574,37 @@ function looksLikeRemoteSource(source: string): boolean {
 function boundedGitError(stderr: string): string {
   const message = stderr.trim().replace(/\s+/g, ' ');
   return message.length === 0 ? 'git clone failed' : message.slice(0, 512);
+}
+
+async function hashManagedSourceContent(repositoryPath: string): Promise<string> {
+  const hash = createHash('sha256');
+  const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .filter((entry) => !(relativeDirectory.length === 0 && entry.name === '.git'))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+      if (entry.isDirectory()) {
+        hash.update(`dir\0${relativePath}\0`);
+        await visit(absolutePath, relativePath);
+        continue;
+      }
+      if (entry.isFile()) {
+        hash.update(`file\0${relativePath}\0`);
+        hash.update(await readFile(absolutePath));
+        hash.update('\0');
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        hash.update(`symlink\0${relativePath}\0${await readlink(absolutePath)}\0`);
+        continue;
+      }
+      throw new Error(`Unsupported repository entry type: ${relativePath}`);
+    }
+  };
+  await visit(repositoryPath, '');
+  return hash.digest('hex');
 }
 
 async function resolveNodePackageLaunch(

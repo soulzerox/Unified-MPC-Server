@@ -183,7 +183,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       }
 
       const existing = this.toGoalRecord(existingRow);
-      this.assertOwner(existing, request.ownerClientId);
       if (request.objective !== undefined && request.objective !== existing.objective) {
         throw new GoalStateError('conflict', 'Existing goal objective does not match the requested objective');
       }
@@ -251,8 +250,12 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   }
 
   public async list(request: ListGoalRecordsRequest): Promise<readonly GoalRecord[]> {
-    const conditions = ['owner_client_id = ?'];
-    const values: Array<string | number> = [request.ownerClientId];
+    const conditions: string[] = [];
+    const values: Array<string | number> = [];
+    if (request.ownerClientId !== undefined) {
+      conditions.push('owner_client_id = ?');
+      values.push(request.ownerClientId);
+    }
     if (request.workspaceId !== undefined) {
       conditions.push('workspace_id = ?');
       values.push(request.workspaceId);
@@ -261,6 +264,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       conditions.push('status = ?');
       values.push(request.status);
     }
+    if (conditions.length === 0) throw new Error('Goal list requires an owner or workspace scope');
     values.push(request.limit);
     const rows = this.database.connection.prepare(`
       SELECT * FROM goals WHERE ${conditions.join(' AND ')}
@@ -340,7 +344,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   public async checkpoint(request: CheckpointGoalRecordRequest): Promise<GoalRecord> {
     return this.transaction(() => {
       const current = this.requireById(request.goalId);
-      this.assertOwner(current, request.ownerClientId);
       this.assertMutableLease(current, request.ownerClientId, request.ownerSessionId, request.leaseTokenHash, request.expectedRevision, request.now);
       const leaseDurationSeconds = current.leaseDurationSeconds;
       if (leaseDurationSeconds === undefined) throw corrupt('Active goal lease duration is missing');
@@ -402,7 +405,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   public async finish(request: FinishGoalRecordRequest): Promise<GoalRecord> {
     return this.transaction(() => {
       const current = this.requireById(request.goalId);
-      this.assertOwner(current, request.ownerClientId);
       this.assertMutableLease(current, request.ownerClientId, request.ownerSessionId, request.leaseTokenHash, request.expectedRevision, request.now);
       assertCompletionReady(current, request.status);
       const revision = current.revision + 1;
@@ -447,7 +449,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   public async validateFinish(request: FinishGoalRecordRequest): Promise<void> {
     this.transaction(() => {
       const current = this.requireById(request.goalId);
-      this.assertOwner(current, request.ownerClientId);
       this.assertMutableLease(current, request.ownerClientId, request.ownerSessionId, request.leaseTokenHash, request.expectedRevision, request.now);
       assertCompletionReady(current, request.status);
     });
@@ -588,7 +589,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   ): Promise<PrepareScheduledContinuationRecordResult> {
     return this.transaction(() => {
       const current = this.requireById(request.goalId);
-      this.assertOwner(current, request.ownerClientId);
 
       const existingSame = this.selectScheduledContinuationByFingerprint(
         request.goalId,
@@ -812,7 +812,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       const currentRow = this.selectScheduledContinuationById(request.continuationId);
       if (currentRow === undefined) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       const goal = this.requireById(currentRow.goal_id);
-      this.assertOwner(goal, request.ownerClientId);
       if (currentRow.version !== request.expectedVersion) {
         throw new GoalStateError('conflict', 'Scheduled continuation version is stale');
       }
@@ -990,8 +989,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         : this.selectLatestScheduledContinuation(request.goalId);
       if (row === undefined) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       const continuation = this.toScheduledContinuationRecord(row);
-      const goal = this.requireById(row.goal_id);
-      this.assertOwner(goal, request.ownerClientId);
       if (continuation.version !== request.expectedVersion) throw new GoalStateError('conflict', 'Scheduled continuation version is stale');
 
       if (continuation.status === 'cancelled' || continuation.status === 'superseded') {
@@ -1058,7 +1055,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (row === undefined) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       const continuation = this.toScheduledContinuationRecord(row);
       const goal = this.requireById(row.goal_id);
-      this.assertOwner(goal, request.ownerClientId);
 
       if (continuation.occurrence === 'interval') {
         return this.claimRecurringScheduledContinuation(request, continuation, goal);
@@ -1803,7 +1799,6 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (row === undefined) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       if (row.goal_id !== request.goalId) throw new GoalStateError('conflict', 'Scheduled continuation belongs to another goal');
       const goal = this.requireById(request.goalId);
-      this.assertOwner(goal, request.ownerClientId);
       this.assertMutableLease(
         goal,
         request.ownerClientId,
@@ -1907,8 +1902,10 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     return this.transaction(() => {
       const goal = this.requireById(request.goalId);
       if (goal.workspaceId !== request.workspaceId) throw new GoalStateError('conflict', 'Goal fence workspace does not match the request');
-      this.assertOwner(goal, request.ownerClientId);
       if (goal.status !== 'active') throw new GoalStateError('terminal', 'Goal is already terminal');
+      if (goal.leaseOwnerClientId !== request.ownerClientId || goal.leaseOwnerSessionId !== request.ownerSessionId) {
+        throw new GoalStateError('lease_invalid', 'Goal lease belongs to another current worker');
+      }
       if (goal.leaseTokenHash !== request.leaseTokenHash || goal.leaseGeneration !== request.leaseGeneration) {
         throw new GoalStateError('lease_invalid', 'Goal lease token or generation is invalid');
       }

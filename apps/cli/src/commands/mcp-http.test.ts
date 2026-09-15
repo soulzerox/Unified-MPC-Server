@@ -1,7 +1,7 @@
 import { appError, ok } from '@unified-mpc/domain';
 import type { McpServerOptions } from '@unified-mpc/mcp-server';
 import { describe, expect, it } from 'vitest';
-import { runMcpHttpCommand, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
+import { createWebMcpHttpServerOptions, runMcpHttpCommand, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
 
 const workspace = {
   id: 'workspace-http-1',
@@ -12,7 +12,21 @@ const workspace = {
 };
 
 describe('mcp http command', () => {
-  it('resolves the configured workspace before starting the HTTP server', async () => {
+  it('keeps the ChatGPT Web HTTP composition fail-closed even when a trusted host provider is supplied upstream', () => {
+    const hostMutationApprovalProvider = async (): Promise<boolean> => true;
+    const webOptions = createWebMcpHttpServerOptions({
+      port: 0,
+      services: {},
+      actor: { clientId: 'web-http-security', clientName: 'web-http-security' },
+      allowedHostnames: ['mcp.example.com'],
+      hostMutationApprovalProvider,
+    });
+
+    expect(webOptions).not.toHaveProperty('hostMutationApprovalProvider');
+    expect(webOptions.allowedHostnames).toEqual(['mcp.example.com']);
+  });
+
+  it('resolves the configured workspace and strips trusted-host approval before starting HTTP', async () => {
     let startedWith: McpServerOptions | undefined;
     const starter: McpHttpServerStarter = {
       async start(options): Promise<McpHttpServerHandle> {
@@ -28,12 +42,14 @@ describe('mcp http command', () => {
         port: 0,
         services: {},
         actor: { clientId: selectedWorkspace.id, clientName: 'unified-mpc-cli' },
+        hostMutationApprovalProvider: async (): Promise<boolean> => true,
       }),
       starter,
     });
 
     expect(result.ok).toBe(true);
     expect(startedWith?.actor.clientId).toBe('workspace-http-1');
+    expect(startedWith).not.toHaveProperty('hostMutationApprovalProvider');
   });
 
   it('does not start when the workspace reference is invalid', async () => {

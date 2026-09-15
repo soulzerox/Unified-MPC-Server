@@ -18,6 +18,7 @@ import { RETIRE_AUTO_MACHINE_ROOTS_MIGRATION_SQL } from './migrations/retire-aut
 import { AGENT_SWARM_MIGRATION_SQL } from './migrations/agent-swarm-migration.js';
 import { RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/recurring-scheduled-continuation-migration.js';
 import { GOAL_PONYTAIL_MODE_MIGRATION_SQL } from './migrations/goal-ponytail-mode-migration.js';
+import { TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/turn-persistence-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -74,6 +75,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '015_agent_swarm', sql: AGENT_SWARM_MIGRATION_SQL });
     this.applyMigration({ id: '016_recurring_scheduled_continuation', sql: RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL });
     this.applyMigration({ id: '017_goal_ponytail_mode', sql: GOAL_PONYTAIL_MODE_MIGRATION_SQL });
+    this.applyMigration({ id: '018_turn_persistence', sql: TURN_PERSISTENCE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
-import { permissionProfiles } from '@unified-mpc/permissions';
-import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
+import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
+import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 
 const actor = { clientId: 'client-1', clientName: 'test', sessionId: 'session-a' };
 
@@ -140,6 +140,91 @@ describe('scheduled continuation mutation fence', () => {
     expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
     expect(inspectWorkspaceFence).toHaveBeenCalledWith(actor, 'workspace-1');
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('blocks opaque child MCP mutation without the current goalLease proof before host approval or child dispatch', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn();
+    const hostApproval = vi.fn().mockResolvedValue(true);
+    const callMcpTool = vi.fn().mockResolvedValue(ok({ ok: true }));
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat: vi.fn(), end: vi.fn() },
+      extensions: { callMcpTool },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      hostMutationApprovalProvider: hostApproval,
+    });
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'playwright', tool: 'browser_click', arguments: { element: 'Save', ref: 'e17' },
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true,
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
+    expect(inspectWorkspaceFence).toHaveBeenCalledWith(actor, 'workspace-1');
+    expect(hostApproval).not.toHaveBeenCalled();
+    expect(begin).not.toHaveBeenCalled();
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('admits opaque child MCP mutation only with the current goal lease and closes the fenced call', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    const hostApproval = vi.fn().mockResolvedValue(true);
+    const callMcpTool = vi.fn().mockResolvedValue(ok({ ok: true }));
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      extensions: { callMcpTool },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      hostMutationApprovalProvider: hostApproval,
+    });
+    const goalLease = { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 };
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'playwright', tool: 'browser_click', arguments: { element: 'Save', ref: 'e17' },
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true, goalLease,
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(begin).toHaveBeenCalledWith(actor, 'workspace-1', expect.any(String), goalLease);
+    expect(hostApproval).toHaveBeenCalledTimes(1);
+    expect(callMcpTool).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a stale opaque child MCP lease before child dispatch', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(err(appError('CONFLICT', 'stale goal lease', true)));
+    const hostApproval = vi.fn().mockResolvedValue(true);
+    const callMcpTool = vi.fn().mockResolvedValue(ok({ ok: true }));
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat: vi.fn(), end: vi.fn() },
+      extensions: { callMcpTool },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      hostMutationApprovalProvider: hostApproval,
+    });
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'playwright', tool: 'browser_type', arguments: { element: 'Name', text: 'Ada' },
+      descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), userConfirmed: true,
+      goalLease: { goalId: 'goal-1', leaseToken: 'stale-token', leaseGeneration: 1 },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT', recoverable: true } });
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(callMcpTool).not.toHaveBeenCalled();
   });
 
   it('does not fence read-only file access', async (): Promise<void> => {

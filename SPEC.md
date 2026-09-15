@@ -179,7 +179,7 @@ The Local Web Control Plane enforces an explicit state machine for ChatGPT Web c
   - Built with native `node:http` (zero-overhead lightweight runtime, default port `18765`).
   - Origin Policy Guard: Validates that `Origin` headers strictly match `http:` or `https:` protocols on `localhost` or `127.0.0.1`. Malformed origins, non-http protocols (e.g. `ftp://localhost`), and remote spoofed origins receive `403 Forbidden` immediately.
   - Request Body Size Guard: Enforces a strict 1MB maximum payload on all POST requests, returning `413 Payload Too Large` if exceeded.
-  - Serves the native Obsidian Telemetry dashboard on `GET /` and exposes REST APIs for status, bifurcated installation, and pruning.
+  - Serves the native Obsidian Telemetry dashboard on `GET /` and exposes REST APIs for status, inventory, policy/gateway management, and pruning. Extension installation is intentionally not exposed through WebUI.
 
 ### 6. Unified CLI Commands & Headless Integration (`apps/cli`)
 
@@ -294,7 +294,7 @@ Under user direction, the repository executed **Option A (Clean Sweep)** with ze
 |---|---|---|---|
 | **Milestone 1** | **Option A Clean Start & Linux-Only Foundation**: Complete monorepo rename from `@lnwjud/*` to `@unified-mpc/*` across 220+ files; deletion of all Windows code/scripts; POSIX XDG runtime; zero backward compatibility. | ✅ **Audited & Hardened** | Full test suite passed across all packages; hardened POSIX process probes; 100 concurrent WAL writes test (`packages/shared/src/linux-foundation.test.ts`); Commits `0c72016`, `9637708`. |
 | **Milestone 2** | **Universal Multi-Client Discovery & Dynamic Policy Sync**: Discovery across Antigravity, Cline, OpenCode, Freebuff, Cursor, Claude, OMP, Codex; `SkillCatalog` multi-root scanner; `McpConfigLoader` JSONC aggregator; semantic runtime policies with user-editable P1–Pn ordering; `IdeSyncService` atomic/idempotent block sync. | ✅ **Audited & Hardened** | Dynamic policy reconciliation, arbitrary semantic IDs, policy-driven child-MCP required tools, reorder-safe IDE sync, JSONC parsing, and multi-client sync are covered by extensions tests. |
-| **Milestone 3** | **Bifurcated Dynamic Ingestion Engine**: Strict interface split between `installSkill` (`InstallSkillInput`) and `installServer` (`InstallServerInput`); validation pipelines; multi-target file injection (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); atomic writes; self-aggregation prevention. | ✅ **Audited & Hardened** | 69/69 tests in `packages/extensions`; prototype pollution guards; URL protocol validation (HTTP/HTTPS); self-aggregation loop blocking; `withFileLock` mutex tested with 20 concurrent server installs; Commit `8582f23`. |
+| **Milestone 3** | **Parent-Owned Bifurcated Dynamic Ingestion Engine**: `installSkill` and `installServer` stay type-separated, while LLM-facing `skills_install`/`mcp_install` install into the canonical Unified MCP store and reject per-IDE target/scope overrides. Direct platform targets remain an explicit compatibility/export seam rather than the default install path. | ✅ **Audited & Hardened** | Canonical skill/MCP registry tests, runtime discovery tests, URL/symlink/prototype-pollution guards, self-aggregation blocking, and strict LLM schema tests cover the current behavior. |
 | **Milestone 4** | **Zero-Artifact Pruner**: Atomic uninstallation; graceful SIGTERM -> SIGKILL process termination; config purging across all IDEs (Antigravity, Cline, OpenCode, Cursor, Claude, Codex); data directory cleanup; broken symlink & orphaned artifact purging. | ✅ **Audited & Hardened** | 11/11 tests passing in `packages/extensions/src/pruner.test.ts`; strict identifier regex validation; `isSafePurgePath` path traversal guards (SPEC.md line 218); Commit `fe6e601`. |
 | **Milestone 5** | **Gated ChatGPT Web Gateway & Local Web Control Plane**: `apps/cf-gateway` owns real Cloudflare lifecycle and MCP identity health; `apps/web` binds loopback web control plane at `http://127.0.0.1:3000/` by default; MCP HTTP remains at `127.0.0.1:18765`; capability auth and 412 session gate protect connection flow. | ⚠️ **Implemented; live tunnel evidence pending** | Web/gateway/MCP security targeted tests pass; live Cloudflare requires installed `cloudflared`, configured MCP runtime, explicit public allowlist, and operator credentials. |
 | **Milestone 6** | **Unified CLI Commands & End-to-End Integration**: `unified-mpc install skill/server`, `prune skill/server`, `sync`, `web`, `tools list/call`; POSIX path cleanups; full CLI argument parsing and execution dispatching. | ✅ **Audited & Hardened** | 75/75 tests passing in `apps/cli`; shebang and standalone binary entry; child process e2e smoketests (`milestone-6-e2e.test.ts`); exit code validation; capabilities syntax hardening; Commit `b1cc510`. |
@@ -349,7 +349,7 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
    - Historical full-suite claims require current rerun; unavailable CI status is not asserted.
 9. **Interactive Reactive Web Control Plane SPA (Option 1 — TDD)**:
    - Kept zero-dependency vanilla HTML/TypeScript UI, with `apps/web/src/dashboard-html.ts` composing `ui/tokens.ts`, `ui/views.ts`, and `ui/client-script.ts`.
-    - Wired live telemetry and management routes: `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, `/api/chatgpt-gateway/status`, policy sync, bifurcated install/prune, and gated `POST /api/chatgpt-web/connect` / `POST /api/chatgpt-web/disconnect`.
+    - Wired live telemetry and management routes: `/api/status`, `/api/logs`, `/api/servers`, `/api/skills`, `/api/chatgpt-gateway/status`, policy sync, pruning, and gated `POST /api/chatgpt-web/connect` / `POST /api/chatgpt-web/disconnect`; WebUI install routes are intentionally absent.
    - Server pruning now accepts only server-issued opaque `serverId` ownership proof; raw PID input is rejected.
    - `ControlPlaneServer` uses native `node:http`, validates loopback `Host`/`Origin`, requires Origin on mutations, caps bodies at 1 MiB, and converts async route failures to `500` without killing the process.
    - Detailed file-level audit record: `docs/AUDIT_REMEDIATION.md`.
@@ -394,7 +394,7 @@ An exhaustive audit, stress test, and end-to-end verification loop was completed
 3. `apps/cf-gateway`:
    - `gateway-service.test.ts`: 4-state lifecycle machine and hard gating invariant verification.
 4. `apps/web`:
-   - `web-server.test.ts`: Route tests for status, bifurcated installation, pruning, and 412 status on `/api/chatgpt-web/connect`.
+   - `web-server.test.ts`: Route tests for status, inventory, pruning, the intentional 404 install boundary, and 412 status on `/api/chatgpt-web/connect`.
    - `milestone-5-stress.test.ts`: Origin policy tests (403), 1MB payload limit (413), and 50 concurrent requests stress test.
 5. `tests/integration`:
    - `mcp-development-flow.test.ts`: End-to-end fixture workflow verifying application services.

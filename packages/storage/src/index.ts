@@ -15,3 +15,5 @@ export * from './backup-service.js';
 export * from './agent-swarm-repository.js';
 export * from './migrations/agent-swarm-migration.js';
 export * from './secret-store.js';
+export * from './turn-persistence-repository.js';
+export * from './migrations/turn-persistence-migration.js';

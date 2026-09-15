@@ -225,7 +225,7 @@ export interface ReconcileGoalRecordRequest {
 }
 
 export interface ListGoalRecordsRequest {
-  readonly ownerClientId: string;
+  readonly ownerClientId?: string;
   readonly workspaceId?: string;
   readonly status?: GoalStatus;
   readonly limit: number;

@@ -644,26 +644,26 @@ describe('ShellCapabilityBackend unrestricted', () => {
     expect(result).toMatchObject({ ok: true, value: { dry_run: true } });
   });
 
-  it('persists durable task ownership and rejects another session in the same workspace', async () => {
+  it('persists durable task ownership across clients and sessions in the same workspace while isolating other workspaces', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-owner-'));
     temporaryRoots.push(root);
     const taskStateDirectory = path.join(root, '.tasks');
-    const owner = (sessionId: string): { metadata: Record<string, unknown> } => ({
-      metadata: { [CAPABILITY_TASK_OWNER_METADATA_KEY]: { clientId: 'client-1', sessionId, workspaceId: 'workspace-1' } },
+    const owner = (clientId: string, sessionId: string, workspaceId = 'workspace-1'): { metadata: Record<string, unknown> } => ({
+      metadata: { [CAPABILITY_TASK_OWNER_METADATA_KEY]: { clientId, sessionId, workspaceId } },
     });
     const backendA = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
     const started = await backendA.execute({
       operation: 'run', executable: process.execPath, arguments: ['-e', 'setTimeout(() => {}, 5000)'],
-      cwd: root, execution: 'background', timeout_seconds: 10, userConfirmed: true, ...owner('session-a'),
+      cwd: root, execution: 'background', timeout_seconds: 10, userConfirmed: true, ...owner('client-1', 'session-a'),
     });
     expect(started).toMatchObject({ ok: true, value: { task_id: expect.any(String) } });
     if (!started.ok) return;
     const taskId = String(started.value.task_id);
 
     const backendB = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
-    await expect(backendB.execute({ operation: 'status', task_id: taskId, ...owner('session-b') })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(backendB.execute({ operation: 'list', ...owner('session-b') })).resolves.toMatchObject({ ok: true, value: { tasks: [] } });
-    await expect(backendB.execute({ operation: 'status', task_id: taskId, ...owner('session-a') })).resolves.toMatchObject({ ok: true });
+    await expect(backendB.execute({ operation: 'status', task_id: taskId, ...owner('client-2', 'session-b') })).resolves.toMatchObject({ ok: true });
+    await expect(backendB.execute({ operation: 'list', ...owner('client-2', 'session-b') })).resolves.toMatchObject({ ok: true, value: { tasks: [expect.objectContaining({ task_id: taskId })] } });
+    await expect(backendB.execute({ operation: 'status', task_id: taskId, ...owner('client-2', 'session-b', 'workspace-2') })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
     await expect(backendB.cancelForGoal('client-1', 'workspace-1', taskId))
       .resolves.toMatchObject({ ok: true, value: { matched: true } });
   }, 15_000);

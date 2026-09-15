@@ -195,6 +195,51 @@ describe('ScheduledContinuationService', () => {
     }
   });
 
+  it('lets a different client that owns the current goal lease prepare and inspect the scheduled continuation', async () => {
+    const { database, goals, scheduled } = await fixture();
+    const takeoverActor: FileActor = { clientId: 'cli-client', clientName: 'CLI', sessionId: 'cli-session' };
+    try {
+      const started = await startGoal(goals);
+      const released = await goals.checkpointGoal(actor, {
+        goalId: started.goalId,
+        leaseToken: started.leaseToken!,
+        expectedRevision: started.revision,
+        currentPhase: 'handoff',
+        summary: 'Release the creator lease for takeover.',
+        stepUpdates: [],
+        nextAction: 'Continue from another client.',
+        blockers: [],
+        evidence: [],
+        activeTaskIds: [],
+        releaseLease: true,
+      });
+      expect(released.ok).toBe(true);
+      const resumed = await goals.runGoal(takeoverActor, {
+        workspaceId: 'workspace-1',
+        goalKey: 'scheduled-application-test',
+        leaseSeconds: 600,
+      });
+      expect(resumed).toMatchObject({ ok: true, value: { acquired: true } });
+      if (!resumed.ok || resumed.value.leaseToken === undefined) throw new Error('takeover failed');
+
+      await expect(scheduled.authorizeWorkspaceMutation(takeoverActor, 'workspace-1'))
+        .resolves.toMatchObject({ ok: true, value: { allowed: true } });
+
+      const prepared = await scheduled.prepareScheduledContinuation(takeoverActor, validPrepare(resumed.value));
+      if (!prepared.ok) throw new Error(`takeover prepare failed: ${prepared.error.code}: ${prepared.error.message}`);
+      expect(prepared).toMatchObject({ ok: true, value: { outcome: 'prepared' } });
+      await expect(scheduled.authorizeWorkspaceMutation(takeoverActor, 'workspace-1'))
+        .resolves.toMatchObject({ ok: true, value: { allowed: true, goalId: started.goalId } });
+      await expect(scheduled.authorizeWorkspaceMutation(actor, 'workspace-1'))
+        .resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      await expect(scheduled.getScheduledContinuation(takeoverActor, {
+        continuationId: prepared.value.continuation.continuationId,
+      })).resolves.toMatchObject({ ok: true, value: { goalId: started.goalId } });
+    } finally {
+      database.close();
+    }
+  });
+
   it('emits an explicit host-timezone VEVENT while keeping dueAt as the canonical absolute instant', async () => {
     const { database, goals, scheduled } = await fixture('2026-08-27T10:00:00.750Z');
     try {

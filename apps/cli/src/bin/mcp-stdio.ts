@@ -196,6 +196,7 @@ async function main(): Promise<void> {
     services: runtime.services,
     actor: runtime.actor,
     activityTracker: runtime.activityTracker,
+    turnPersistenceLedger: runtime.turnPersistenceLedger,
     codexToolsEnabled: runtime.codexToolsEnabled,
     ponytailModeProvider: () => runtime.ponytailMode,
     profileProvider: runtime.profileProvider,

@@ -156,7 +156,7 @@ describe('durable goal continuation persistence', () => {
     second.database.close();
   });
 
-  it('uses stable client ownership across session changes and rejects a different client or workspace for an existing goal', async () => {
+  it('allows a different client to resume the same workspace goal while isolating other workspaces', async () => {
     const { filename, workspace, root } = await fixture();
     let now = new Date('2026-08-26T00:00:00.000Z');
     const runtime = await open(filename, workspace, () => now);
@@ -168,18 +168,81 @@ describe('durable goal continuation persistence', () => {
     if (!created.ok) throw new Error('goal create failed');
 
     now = new Date('2026-08-26T00:01:01.000Z');
-    await expect(runtime.service.runGoal(actor('session-b'), { workspaceId: workspace.id, goalKey: createRequest.goalKey })).resolves.toMatchObject({
+    const resumed = await runtime.service.runGoal(actor('session-b'), { workspaceId: workspace.id, goalKey: createRequest.goalKey });
+    expect(resumed).toMatchObject({ ok: true, value: { goalId: created.value.goalId, acquired: true } });
+    if (!resumed.ok || resumed.value.leaseToken === undefined) throw new Error('goal resume failed');
+    const released = await runtime.service.checkpointGoal(actor('session-b'), {
+      goalId: created.value.goalId,
+      leaseToken: resumed.value.leaseToken,
+      expectedRevision: resumed.value.revision,
+      currentPhase: 'handoff',
+      summary: 'Release the workspace goal for another authorized client.',
+      stepUpdates: [],
+      nextAction: 'Resume from another client.',
+      blockers: [],
+      evidence: [],
+      activeTaskIds: [],
+      releaseLease: true,
+    });
+    expect(released).toMatchObject({ ok: true });
+
+    const crossClient = await runtime.service.runGoal(actor('other-session', 'other-client'), { workspaceId: workspace.id, goalKey: createRequest.goalKey });
+    expect(crossClient).toMatchObject({
       ok: true,
       value: { goalId: created.value.goalId, acquired: true },
     });
-    await expect(runtime.service.runGoal(actor('other-session', 'other-client'), { workspaceId: workspace.id, goalKey: createRequest.goalKey })).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'PERMISSION_DENIED' },
+    if (!crossClient.ok || crossClient.value.leaseToken === undefined) throw new Error('cross-client goal resume failed');
+    await expect(runtime.repository.getById(created.value.goalId)).resolves.toMatchObject({
+      ownerClientId: 'chatgpt-web-client',
+      leaseOwnerClientId: 'other-client',
+      leaseOwnerSessionId: 'other-session',
     });
+    await expect(runtime.service.checkpointGoal(actor('other-session', 'other-client'), {
+      goalId: created.value.goalId,
+      leaseToken: crossClient.value.leaseToken,
+      expectedRevision: crossClient.value.revision,
+      currentPhase: 'cross-client',
+      summary: 'Continue the workspace goal from a different client.',
+      stepUpdates: [],
+      nextAction: 'Keep working from the new client.',
+      blockers: [],
+      evidence: [],
+      activeTaskIds: [],
+      releaseLease: true,
+    })).resolves.toMatchObject({ ok: true });
     await expect(runtime.service.getGoal(actor('other-session', 'other-client'), { goalId: created.value.goalId })).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'PERMISSION_DENIED' },
+      ok: true,
+      value: { goalId: created.value.goalId, workspaceId: workspace.id },
     });
+    await expect(runtime.service.listGoals(actor('other-session', 'other-client'), { workspaceId: workspace.id })).resolves.toMatchObject({
+      ok: true,
+      value: { goals: [expect.objectContaining({ goalId: created.value.goalId, workspaceId: workspace.id })] },
+    });
+    await expect(runtime.service.listGoals(actor('other-session', 'other-client'), { workspaceId: otherWorkspace.id })).resolves.toMatchObject({
+      ok: true,
+      value: { goals: [] },
+    });
+    const finisher = await runtime.service.runGoal(actor('finish-session', 'third-client'), { workspaceId: workspace.id, goalKey: createRequest.goalKey });
+    expect(finisher).toMatchObject({ ok: true, value: { acquired: true } });
+    if (!finisher.ok || finisher.value.leaseToken === undefined) throw new Error('cross-client finish lease failed');
+    await expect(runtime.service.reconcileGoals(actor('reconcile-session', 'fourth-client'), {
+      workspaceId: workspace.id,
+      goalIds: [created.value.goalId],
+      reason: 'abandoned',
+      summary: 'Preview reconciliation from another authorized client.',
+      apply: false,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { results: [expect.objectContaining({ goalId: created.value.goalId, disposition: 'live_lease' })] },
+    });
+    await expect(runtime.service.finishGoal(actor('finish-session', 'third-client'), {
+      goalId: created.value.goalId,
+      leaseToken: finisher.value.leaseToken,
+      expectedRevision: finisher.value.revision,
+      status: 'failed',
+      summary: 'Finish from another client after a seamless workspace handoff.',
+      evidence: [],
+    })).resolves.toMatchObject({ ok: true, value: { status: 'failed', completionState: 'completed' } });
     await expect(runtime.service.getGoal(actor('session-b'), { workspaceId: otherWorkspace.id, goalKey: createRequest.goalKey })).resolves.toMatchObject({
       ok: false,
       error: { code: 'INVALID_INPUT' },
@@ -690,7 +753,7 @@ describe('durable goal continuation persistence', () => {
     }
   });
 
-  it('cancels an active goal after lease expiry and stops every legacy-tracked task across session boundaries', async () => {
+  it('cancels an active goal from another client after lease expiry and stops every legacy-tracked task', async () => {
     const { filename, workspace } = await fixture();
     let now = new Date('2026-08-26T00:00:00.000Z');
     const calls: Array<{ ownerClientId: string; workspaceId: string; taskId: string }> = [];
@@ -729,7 +792,7 @@ describe('durable goal continuation persistence', () => {
       expect(checkpointed).toMatchObject({ ok: true, value: { revision: 1 } });
 
       now = new Date('2026-08-26T00:00:31.000Z');
-      const cancelled = await runtime.service.cancelGoal(actor('session-b'), {
+      const cancelled = await runtime.service.cancelGoal(actor('session-b', 'other-client'), {
         goalId: created.value.goalId,
         expectedRevision: 1,
         summary: 'User cancelled the goal and all tracked background work.',
@@ -812,6 +875,7 @@ describe('durable goal continuation persistence', () => {
         goalId: created.value.goalId,
         workspaceId: workspace.id,
         ownerClientId: 'chatgpt-web-client',
+        ownerSessionId: 'session-a',
         leaseTokenHash: createHash('sha256').update(created.value.leaseToken).digest('hex'),
         leaseGeneration: prepared.value.goal.leaseGeneration,
         startedAt: '2026-08-26T00:00:05.000Z',

@@ -87,7 +87,7 @@ describe('CodexService', () => {
     await expect(service.taskLogs({ clientId: 'client-1', clientName: 'test' }, workspace.id, started.value.codexTaskId, { tailLines: 20 }))
       .resolves.toMatchObject({ ok: true, value: { entries: [] } });
     await expect(service.stop({ clientId: 'client-2', clientName: 'other' }, workspace.id, started.value.codexTaskId))
-      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
     await expect(service.stop({ clientId: 'client-1', clientName: 'test' }, workspace.id, started.value.codexTaskId, true))
       .resolves.toMatchObject({ ok: true });
   });
@@ -152,22 +152,24 @@ describe('CodexService', () => {
     await expect(starting).resolves.toMatchObject({ ok: true, value: { codexTaskId: 'codex-provisional' } });
   });
 
-  it('isolates Codex task handles between sessions of the same client and workspace', async () => {
+  it('shares Codex task handles across clients and sessions in the same workspace while isolating other workspaces', async () => {
     const workspace = await createWorkspace();
     const service = new CodexService(repository(workspace), { adapter: fakeAdapter(), taskIdFactory: (): string => 'codex-session-task' });
     const owner = { clientId: 'client-1', clientName: 'test', sessionId: 'session-a' };
-    const otherSession = { clientId: 'client-1', clientName: 'test', sessionId: 'session-b' };
+    const otherClient = { clientId: 'client-2', clientName: 'other', sessionId: 'session-b' };
     const started = await service.run(owner, workspace.id, 'review', undefined, true);
     if (!started.ok) throw new Error('Codex task did not start');
 
-    await expect(service.taskStatus(otherSession, workspace.id, started.value.codexTaskId)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.list(otherSession, workspace.id)).resolves.toMatchObject({ ok: true, value: [] });
-    await expect(service.taskStatus(owner, workspace.id, started.value.codexTaskId)).resolves.toMatchObject({ ok: true });
+    await expect(service.taskStatus(otherClient, workspace.id, started.value.codexTaskId)).resolves.toMatchObject({ ok: true });
+    await expect(service.list(otherClient, workspace.id)).resolves.toMatchObject({ ok: true, value: [expect.objectContaining({ codexTaskId: started.value.codexTaskId })] });
+    await expect(service.taskLogs(otherClient, workspace.id, started.value.codexTaskId, {})).resolves.toMatchObject({ ok: true });
+    await expect(service.stop(otherClient, workspace.id, started.value.codexTaskId, true)).resolves.toMatchObject({ ok: true });
+    await expect(service.taskStatus(otherClient, 'another-workspace', started.value.codexTaskId)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
     expect(service.statusForGoalLiveness(workspace.id, started.value.codexTaskId)).toMatchObject({ ok: true, value: { state: 'running' } });
     expect(service.statusForGoalLiveness('another-workspace', started.value.codexTaskId)).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
   });
 
-  it('cancels a tracked Codex task across MCP sessions while enforcing stable client/workspace ownership', async () => {
+  it('cancels a tracked Codex task from another client in the same workspace while isolating other workspaces', async () => {
     const workspace = await createWorkspace();
     let current: ManagedProcess = {
       processId: 'process-1', executable: 'codex', args: [], cwd: workspace.realRootPath,
@@ -193,12 +195,12 @@ describe('CodexService', () => {
     if (!started.ok) return;
 
     await expect(service.cancelForGoal('client-2', workspace.id, started.value.codexTaskId))
-      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(service.cancelForGoal('client-1', workspace.id, started.value.codexTaskId))
       .resolves.toMatchObject({ ok: true, value: { matched: true, state: 'cancelled' } });
     expect(stopCalls).toEqual([{ processId: 'process-1', autoRetry: true }]);
     await expect(service.cancelForGoal('client-1', workspace.id, started.value.codexTaskId))
       .resolves.toMatchObject({ ok: true, value: { matched: true, state: 'already_terminal' } });
+    await expect(service.cancelForGoal('client-3', 'another-workspace', started.value.codexTaskId))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
   });
 });
 

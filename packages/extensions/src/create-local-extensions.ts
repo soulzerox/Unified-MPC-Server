@@ -12,6 +12,7 @@ export interface CreateLocalExtensionsOptions {
   readonly settingsJsonProvider?: () => string | null | undefined;
   readonly homeDir?: string;
   readonly appDataDir?: string;
+  readonly dataDir?: string;
   readonly workspaceRootProvider?: () => Promise<string | undefined>;
   readonly bundledSkillRoots?: readonly string[];
   readonly clientFactory?: McpClientFactory;
@@ -27,6 +28,7 @@ export function createLocalExtensionsService(options: CreateLocalExtensionsOptio
     }),
     ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir }),
     ...(options.appDataDir === undefined ? {} : { appDataDir: options.appDataDir }),
+    ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
     ...(options.workspaceRootProvider === undefined ? {} : { workspaceRootProvider: options.workspaceRootProvider }),
     bundledSkillRoots: options.bundledSkillRoots ?? bundledSkillRootCandidates(),
     ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),

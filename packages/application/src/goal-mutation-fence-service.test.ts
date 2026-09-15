@@ -34,9 +34,24 @@ describe('GoalMutationFenceService', () => {
     expect(result).toMatchObject({ ok: true, value: { goalId: 'goal-1', leaseGeneration: 7 } });
     expect(beginGoalFencedMutation).toHaveBeenCalledWith(expect.objectContaining({
       goalId: 'goal-1', workspaceId: 'workspace-1', leaseGeneration: 7,
+      ownerClientId: 'client-a', ownerSessionId: 'shared-session',
       leaseTokenHash: createHash('sha256').update('private-token').digest('hex'),
     }));
     expect(JSON.stringify(beginGoalFencedMutation.mock.calls)).not.toContain('private-token');
+  });
+
+  it('exposes an active workspace fence to a different client so takeover is decided by the current lease proof, not creator identity', async (): Promise<void> => {
+    const service = new GoalMutationFenceService(repository({
+      getWorkspaceMutationFence: vi.fn(async () => ({
+        goal: { id: 'goal-1', ownerClientId: 'creator-client', leaseGeneration: 9 } as never,
+        continuation: {} as never,
+      })),
+    }));
+
+    await expect(service.inspectWorkspaceFence(
+      { clientId: 'takeover-client', clientName: 'Takeover', sessionId: 'session-b' },
+      'workspace-1',
+    )).resolves.toMatchObject({ ok: true, value: { goalId: 'goal-1', leaseGeneration: 9 } });
   });
 
   it('fails closed when a stale token/generation is rejected by the CAS repository', async (): Promise<void> => {

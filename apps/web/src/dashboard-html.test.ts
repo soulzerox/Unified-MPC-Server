@@ -35,22 +35,25 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("fetch('/api/policies'");
   });
 
-  it('contains interactive modal/form elements for bifurcated installation', () => {
+  it('keeps extension inventory and pruning in WebUI but removes all install surfaces', () => {
     const html = renderDashboardHtml();
-    // Skill installation modal & endpoints
-    expect(html).toContain('install-skill-modal');
-    expect(html).toContain('/api/skills/install');
-    // Server installation modal & endpoints
-    expect(html).toContain('install-server-modal');
-    expect(html).toContain('/api/servers/install');
-  });
-
-  it('accepts an HTTPS Git repository as the stdio MCP server source in both install surfaces', () => {
-    const html = renderDashboardHtml();
-    expect(html).toContain('server-source');
-    expect(html).toContain('wb-server-source');
-    expect(html).toContain('source: source ? source.trim() : undefined');
-    expect(html).toContain('https://github.com/example/mcp-server.git');
+    expect(html).toContain('/api/servers');
+    expect(html).toContain('/api/skills');
+    expect(html).toContain('/api/servers/prune');
+    expect(html).toContain('/api/skills/prune');
+    expect(html).toContain('LLM-managed');
+    for (const forbidden of [
+      '/api/skills/install',
+      '/api/servers/install',
+      'install-skill-modal',
+      'install-server-modal',
+      'workbench-skill-form',
+      'workbench-server-form',
+      'servers-view-install-btn',
+      'skills-view-install-btn',
+      'id="view-install"',
+      'id="nav-install"',
+    ]) expect(html).not.toContain(forbidden);
   });
 
   it('contains live inventory and opaque-ID prune workflows', () => {
@@ -76,7 +79,7 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('Capability expired; reloading dashboard');
   });
 
-  it('routes every dashboard mutation through shared capability-expiry recovery', () => {
+  it('routes every remaining dashboard mutation through shared capability-expiry recovery', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('async function mutationJson(');
     expect(html).toContain('Capability expired; reloading dashboard');
@@ -89,8 +92,6 @@ describe('Dashboard HTML Reactive SPA', () => {
       '/api/chatgpt-gateway/start',
       '/api/chatgpt-gateway/stop',
       '/api/chatgpt-web/disconnect',
-      '/api/skills/install',
-      '/api/servers/install',
       '/api/skills/prune',
       '/api/servers/prune',
     ]) {
@@ -98,15 +99,15 @@ describe('Dashboard HTML Reactive SPA', () => {
     }
   });
 
-  it('renders modular tab navigation views for all subsystems', () => {
+  it('renders modular tab navigation views for management subsystems', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('id="view-dashboard"');
     expect(html).toContain('id="view-servers"');
     expect(html).toContain('id="view-skills"');
-    expect(html).toContain('id="view-install"');
     expect(html).toContain('id="view-policies"');
     expect(html).toContain('id="view-chatgpt"');
     expect(html).toContain('id="view-logs"');
+    expect(html).not.toContain('id="view-install"');
   });
 
   it('embeds the museum-grade canvas topology visualizer', () => {

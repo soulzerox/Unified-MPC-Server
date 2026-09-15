@@ -48,8 +48,18 @@ export function formatHostMutationApprovalMessage(request: HostMutationApprovalR
       lines.push(`Child catalog fingerprint: ${request.externalMcpContract.catalogFingerprint}`);
     }
   }
+  if (request.approvalScope !== undefined) {
+    lines.push(
+      '',
+      `Automation session: ${request.approvalScope.label}`,
+      'One approval covers matching non-destructive automation actions for the remainder of this trusted host session, with no time or action-count limit.',
+      'A new approval is required if the session, workspace, automation resource, or child contract changes, or if an action is destructive.',
+    );
+  }
 
-  lines.push('', 'Approve only if this exact action is expected.');
+  lines.push('', request.approvalScope === undefined
+    ? 'Approve only if this exact action is expected.'
+    : 'Approve only if this automation session scope and its first exact action are expected.');
   return lines.join('\n');
 }
 
@@ -61,18 +71,23 @@ export function createTrustedHostMutationApprovalProvider(
   const runCommand = options.runCommand ?? defaultRunApprovalCommand;
   const ttyPrompt = options.ttyPrompt ?? defaultTtyPrompt;
   const timeoutMs = normalizeTimeout(options.timeoutMs);
+  const sessionGrants = new Set<string>();
   let queue: Promise<void> = Promise.resolve();
 
   return async (request): Promise<boolean> => {
     const execute = async (): Promise<boolean> => {
       try {
-        return await requestTrustedApproval(request, {
+        const scope = request.approvalScope;
+        if (scope !== undefined && sessionGrants.has(scope.id)) return true;
+        const approved = await requestTrustedApproval(request, {
           platform,
           environment,
           runCommand,
           ttyPrompt,
           timeoutMs,
         });
+        if (approved && scope !== undefined) sessionGrants.add(scope.id);
+        return approved;
       } catch {
         return false;
       }

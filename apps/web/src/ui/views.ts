@@ -138,14 +138,10 @@ export function renderDashboardViewsHtml(): string {
         </div>
 
         <div class="card">
-          <h2>Bifurcated Ingestion</h2>
-          <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 14px;">
-            Clean separation between instruction prompt skills and executable MCP servers.
+          <h2>LLM-managed Extensions</h2>
+          <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 0; line-height: 1.7;">
+            Skill and child MCP installation is LLM-managed through the canonical Unified MCP store. This dashboard is intentionally limited to inventory, policy management, health, and safe pruning.
           </p>
-          <div style="display: flex; flex-direction: column; gap: 8px;">
-            <button class="btn" id="open-skill-modal-btn">Install Skill (SKILL.md)</button>
-            <button class="btn btn-secondary" id="open-server-modal-btn">Install MCP Server</button>
-          </div>
         </div>
 
         <div class="card">
@@ -201,7 +197,6 @@ export function renderDashboardViewsHtml(): string {
         <div style="display: flex; gap: 10px;">
           <input type="text" class="form-control mono" id="server-search-input" placeholder="Search servers by name or command..." style="width: 280px;">
           <button class="btn btn-secondary btn-sm" id="servers-view-refresh-btn">Refresh</button>
-          <button class="btn btn-sm" id="servers-view-install-btn">+ Install Server</button>
         </div>
       </div>
       <div class="table-responsive">
@@ -234,7 +229,6 @@ export function renderDashboardViewsHtml(): string {
         <div style="display: flex; gap: 10px;">
           <input type="text" class="form-control mono" id="skill-search-input" placeholder="Search skills by name..." style="width: 280px;">
           <button class="btn btn-secondary btn-sm" id="skills-view-refresh-btn">Refresh</button>
-          <button class="btn btn-sm" id="skills-view-install-btn">+ Install Skill</button>
         </div>
       </div>
       <div class="table-responsive">
@@ -252,86 +246,6 @@ export function renderDashboardViewsHtml(): string {
             <tr><td colspan="5" style="color: var(--text-muted); text-align: center;">Loading skills catalog...</td></tr>
           </tbody>
         </table>
-      </div>
-    </div>
-  </div>
-
-  <!-- VIEW: INSTALL VIEW (BIFURCATED WORKBENCH) -->
-  <div class="view-panel" id="view-install">
-    <div style="margin-bottom: 20px;">
-      <h2 style="font-size: 18px; color: var(--text-primary); margin-bottom: 6px;">Bifurcated Extension Workbench</h2>
-      <p style="color: var(--text-secondary); font-size: 13px;">Deploy new capabilities into the Unified MCP Server environment. Prompt instruction skills and executable server bridges are strictly bifurcated.</p>
-    </div>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-      <!-- Skill Ingestion Box -->
-      <div class="card">
-        <div class="card-header">
-          <h2>Install Agent Skill (SKILL.md)</h2>
-          <span class="badge badge-mandatory">Instruction</span>
-        </div>
-        <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 16px;">
-          Installs a structured markdown instruction folder containing a SKILL.md specification for autonomous agents.
-        </p>
-        <form id="workbench-skill-form">
-          <div class="form-group">
-            <label>Skill Name (alphanumeric, -, _)</label>
-            <input type="text" class="form-control" id="wb-skill-name" required placeholder="e.g. database-debugger">
-          </div>
-          <div class="form-group">
-            <label>Source Path or Git Repository</label>
-            <input type="text" class="form-control" id="wb-skill-source" required placeholder="/path/to/skill or https://github.com/...">
-          </div>
-          <div class="form-group">
-            <label>Installation Scope</label>
-            <select class="form-control" id="wb-skill-scope">
-              <option value="global">Global (~/.gemini, ~/.cline, etc.)</option>
-              <option value="workspace">Workspace Local</option>
-            </select>
-          </div>
-          <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">Deploy Skill</button>
-        </form>
-      </div>
-
-      <!-- Server Ingestion Box -->
-      <div class="card">
-        <div class="card-header">
-          <h2>Install Executable MCP Server</h2>
-          <span class="badge badge-optional">Executable</span>
-        </div>
-        <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 16px;">
-          Registers a downstream stdio, SSE, or HTTP tool/resource server into the Unified MCP registry.
-        </p>
-        <form id="workbench-server-form">
-          <div class="form-group">
-            <label>Server Identifier</label>
-            <input type="text" class="form-control" id="wb-server-name" required placeholder="e.g. sqlite-db">
-          </div>
-          <div class="form-group">
-            <label>Transport Mechanism</label>
-            <select class="form-control" id="wb-server-transport">
-              <option value="stdio">stdio (Standard I/O)</option>
-              <option value="sse">SSE (Server-Sent Events)</option>
-              <option value="http">HTTP Stream</option>
-            </select>
-          </div>
-          <div class="form-group" id="wb-command-group">
-            <label>Executable Command</label>
-            <input type="text" class="form-control mono" id="wb-server-command" placeholder="e.g. npx or uvx">
-          </div>
-          <div class="form-group" id="wb-source-group">
-            <label>HTTPS Git Repository (alternative to command)</label>
-            <input type="url" class="form-control mono" id="wb-server-source" placeholder="https://github.com/example/mcp-server.git">
-          </div>
-          <div class="form-group" id="wb-args-group">
-            <label>Arguments (comma-separated)</label>
-            <input type="text" class="form-control mono" id="wb-server-args" placeholder="e.g. -y, @modelcontextprotocol/server-sqlite">
-          </div>
-          <div class="form-group" id="wb-url-group" style="display: none;">
-            <label>Remote Endpoint URL</label>
-            <input type="url" class="form-control mono" id="wb-server-url" placeholder="http://127.0.0.1:8080/sse">
-          </div>
-          <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">Register MCP Server</button>
-        </form>
       </div>
     </div>
   </div>
@@ -482,75 +396,6 @@ export function renderDashboardViewsHtml(): string {
           </div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- Skill Modal -->
-  <div class="modal-overlay" id="install-skill-modal">
-    <div class="modal-content">
-      <h3>Install Agent Skill</h3>
-      <form id="skill-form">
-        <div class="form-group">
-          <label>Skill Name (alphanumeric, -, _)</label>
-          <input type="text" class="form-control" id="skill-name" required placeholder="e.g. unit-testing">
-        </div>
-        <div class="form-group">
-          <label>Source Path or Directory</label>
-          <input type="text" class="form-control" id="skill-source" required placeholder="/path/to/skill or git repo">
-        </div>
-        <div class="form-group">
-          <label>Scope</label>
-          <select class="form-control" id="skill-scope">
-            <option value="global">Global (~/.gemini, ~/.cline, etc.)</option>
-            <option value="workspace">Workspace Local</option>
-          </select>
-        </div>
-        <div class="form-actions">
-          <button type="button" class="btn btn-secondary" id="close-skill-modal-btn">Cancel</button>
-          <button type="submit" class="btn">Install Skill</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <!-- Server Modal -->
-  <div class="modal-overlay" id="install-server-modal">
-    <div class="modal-content">
-      <h3>Install Executable MCP Server</h3>
-      <form id="server-form">
-        <div class="form-group">
-          <label>Server Name</label>
-          <input type="text" class="form-control" id="server-name" required placeholder="e.g. sqlite">
-        </div>
-        <div class="form-group">
-          <label>Transport</label>
-          <select class="form-control" id="server-transport">
-            <option value="stdio">stdio</option>
-            <option value="sse">SSE</option>
-            <option value="http">HTTP</option>
-          </select>
-        </div>
-        <div class="form-group" id="command-group">
-          <label>Command (Executable)</label>
-          <input type="text" class="form-control mono" id="server-command" placeholder="e.g. npx or uvx">
-        </div>
-        <div class="form-group" id="source-group">
-          <label>HTTPS Git Repository (alternative to command)</label>
-          <input type="url" class="form-control mono" id="server-source" placeholder="https://github.com/example/mcp-server.git">
-        </div>
-        <div class="form-group" id="args-group">
-          <label>Arguments (comma-separated)</label>
-          <input type="text" class="form-control mono" id="server-args" placeholder="e.g. -y, @modelcontextprotocol/server-sqlite">
-        </div>
-        <div class="form-group" id="url-group" style="display: none;">
-          <label>Endpoint URL</label>
-          <input type="url" class="form-control mono" id="server-url" placeholder="http://127.0.0.1:8080/sse">
-        </div>
-        <div class="form-actions">
-          <button type="button" class="btn btn-secondary" id="close-server-modal-btn">Cancel</button>
-          <button type="submit" class="btn">Install Server</button>
-        </div>
-      </form>
     </div>
   </div>
 

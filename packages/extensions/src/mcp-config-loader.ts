@@ -7,6 +7,7 @@ import type { DiscoveredMcpServer, ExtensionsSettings, McpServerLaunchConfig } f
 export interface McpConfigLoaderOptions {
   readonly homeDir?: string;
   readonly appDataDir?: string;
+  readonly dataDir?: string;
   readonly platform?: NodeJS.Platform;
   readonly workspaceRoot?: string;
   readonly settings: ExtensionsSettings;
@@ -91,6 +92,15 @@ export class McpConfigLoader {
 
     for (const [name, config] of Object.entries(this.options.settings.extraMcpServers)) {
       discovered.push(this.toServer(name, 'unified-mpc-settings', config));
+    }
+
+    const dataDir = this.options.dataDir?.trim();
+    if (dataDir !== undefined && dataDir.length > 0) {
+      await this.loadFile(
+        discovered,
+        path.join(dataDir, 'extensions', 'mcp', 'registry.json'),
+        'unified-mpc-registry',
+      );
     }
 
     return dedupeServers(discovered);

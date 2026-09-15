@@ -111,8 +111,9 @@ export function createStdioMcpRuntime(
   );
   const activeWorkspaces = async (): Promise<readonly Workspace[]> => {
     const selected = await workspaceSelection.activeWorkspaces();
-    if (!selected.ok) throw new Error(selected.error.message);
-    return selected.value;
+    if (selected.ok) return selected.value;
+    if (selected.error.code === 'WORKSPACE_NOT_FOUND') return [workspace];
+    throw new Error(selected.error.message);
   };
   const primaryWorkspaceRoot = async (): Promise<string> => (await activeWorkspaces())[0]?.realRootPath ?? workspace.realRootPath;
   const toolAvailabilityService = new ToolAvailabilityService(settingsRepository);

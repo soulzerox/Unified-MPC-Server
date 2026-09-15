@@ -107,6 +107,50 @@ def test_resave_same_turn_id_no_fts_duplicate(temp_env):
     assert len([r for r in rows if r["turn_id"] == turn_id]) == 1
 
 
+def test_remember_turn_accepts_stable_turn_id_and_retries_idempotently(temp_env, monkeypatch):
+    """A caller-supplied turn_id must survive ambiguous retries without duplicate rows."""
+    storage, *_ = temp_env
+    server = LocalContextServer(
+        sqlite_path=storage.sqlite_path,
+        chroma_path=storage.chroma_path,
+    )
+    monkeypatch.setattr(server.embedder, "is_alive", lambda: False)
+    turn_id = "turn_stable_retry_001"
+    kwargs = {
+        "role": "user",
+        "content": "persist this once even if the caller retries",
+        "workspace": "ws",
+        "summary": "stable retry",
+        "tags": ["audit"],
+        "turn_id": turn_id,
+    }
+
+    try:
+        first = server.remember_turn(**kwargs)
+        second = server.remember_turn(**kwargs)
+
+        assert f"[ID: {turn_id}]" in first
+        assert f"[ID: {turn_id}]" in second
+        assert server.storage.sqlite_conn.execute(
+            "SELECT COUNT(*) FROM conversation_turns WHERE turn_id = ?", (turn_id,)
+        ).fetchone()[0] == 1
+        assert server.storage.sqlite_conn.execute(
+            "SELECT COUNT(*) FROM fts_conversation WHERE turn_id = ?", (turn_id,)
+        ).fetchone()[0] == 1
+    finally:
+        server.close()
+
+
+def test_mcp_remember_turn_exposes_optional_turn_id():
+    """FastMCP derives its remember_turn input schema from the public wrapper signature."""
+    import inspect
+    from thai_rag import server as server_module
+
+    params = inspect.signature(server_module.remember_turn).parameters
+    assert "turn_id" in params
+    assert params["turn_id"].default == ""
+
+
 def test_recall_category_returns_turns(temp_env):
     """BUG-8 regression: recall(category=...) must return remember_turn turns, not drop them."""
     storage, retriever, embedder, chunker = temp_env

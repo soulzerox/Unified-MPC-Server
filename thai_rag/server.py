@@ -320,13 +320,19 @@ class LocalContextServer:
         content: str,
         workspace: str = "",
         summary: Optional[str] = None,
-        tags: Optional[list] = None
+        tags: Optional[list] = None,
+        turn_id: Optional[str] = None,
     ) -> str:
-        """Record an interaction turn or decision immediately during chat into persistent memory."""
+        """Record an interaction turn or decision immediately during chat into persistent memory.
+
+        A caller may provide a stable ``turn_id`` so an ambiguous retry upserts the
+        same turn instead of creating a duplicate. Missing/blank IDs preserve the
+        historical behavior and generate a fresh local ID.
+        """
         if not content.strip():
             return "Error: Content cannot be empty."
 
-        turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+        turn_id = (turn_id or "").strip() or f"turn_{uuid.uuid4().hex[:12]}"
         vector = None
         embed_failed = False
         if self.embedder.is_alive():
@@ -479,10 +485,28 @@ def recall(query: str, category: str = None, limit: int = 5) -> str:
     return get_server().recall(query, category=category, limit=limit)
 
 @mcp.tool()
-def remember_turn(role: str, content: str, workspace: str = "", summary: str = "", tags: str = "") -> str:
-    """Record an interaction turn or decision immediately during chat into persistent memory."""
+def remember_turn(
+    role: str,
+    content: str,
+    workspace: str = "",
+    summary: str = "",
+    tags: str = "",
+    turn_id: str = "",
+) -> str:
+    """Record an interaction turn or decision immediately during chat into persistent memory.
+
+    ``turn_id`` is optional and lets callers retry the same logical turn without
+    creating a duplicate record.
+    """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-    return get_server().remember_turn(role=role, content=content, workspace=workspace, summary=summary, tags=tag_list)
+    return get_server().remember_turn(
+        role=role,
+        content=content,
+        workspace=workspace,
+        summary=summary,
+        tags=tag_list,
+        turn_id=turn_id or None,
+    )
 
 @mcp.tool()
 def pre_edit_context(file_path: str, workspace: str = "", proposed_symbol: str = "") -> str:

@@ -43,7 +43,7 @@ def ingest_turns(server, turns):
     for t in turns:
         try:
             res = server.remember_turn(role=t["role"], content=t["content"], workspace=WORKSPACE, summary=t["summary"], tags=list(AUDIT_TAGS))
-            if "OK" in res or "recorded" in res.lower() or "success" in res.lower():
+            if res.startswith("✅") or "recorded" in res.lower():
                 ok += 1
             else:
                 failures.append("step %s: %s" % (t["step_index"], res[:120]))

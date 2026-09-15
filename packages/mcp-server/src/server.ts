@@ -61,7 +61,7 @@ export interface McpServerOptions {
   readonly harnessActivationLedger?: HarnessActivationLedger;
   /** Shared bounded turn-persistence idempotency/compliance state for transport factories that recreate MCP servers per request. */
   readonly turnPersistenceLedger?: TurnPersistenceLedger;
-  /** Override host compliance mode. Core defaults to required for stdio and best_effort for HTTP/unknown; legacy stdio composition may downgrade to best_effort for generic 2025-era clients. */
+  /** Override host compliance mode. Packaged transports default to required; best_effort remains an explicit compatibility/testing override only. */
   readonly turnPersistenceMode?: TurnPersistenceMode;
   /** Current persisted per-tool availability snapshot. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
@@ -103,7 +103,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.ponytailActivationLedger === undefined ? {} : { ponytailActivationLedger: options.ponytailActivationLedger }),
     ...(options.harnessActivationLedger === undefined ? {} : { harnessActivationLedger: options.harnessActivationLedger }),
     ...(options.turnPersistenceLedger === undefined ? {} : { turnPersistenceLedger: options.turnPersistenceLedger }),
-    turnPersistenceMode: options.turnPersistenceMode ?? (options.requestScope?.transport === 'stdio' ? 'required' : 'best_effort'),
+    turnPersistenceMode: options.turnPersistenceMode ?? 'required',
     ...(options.toolAvailabilitySnapshotProvider === undefined ? {} : { toolAvailabilitySnapshotProvider: options.toolAvailabilitySnapshotProvider }),
     ...(options.incrementalVerifier === undefined ? {} : { incrementalVerifier: options.incrementalVerifier }),
     ...(options.setOfMarksStore === undefined ? {} : { setOfMarksStore: options.setOfMarksStore }),

@@ -30,6 +30,14 @@ export function resolveStdioHostMutationApprovalProvider(
   return configured ?? factory();
 }
 
+export function resolveStdioTurnPersistenceMode(
+  configured: McpServerOptions['turnPersistenceMode'],
+  _era: 'legacy' | 'modern',
+): NonNullable<McpServerOptions['turnPersistenceMode']> {
+  void _era;
+  return configured ?? 'required';
+}
+
 export function bindStdioHostMutationApprovalLifecycle(
   handle: StdioServerHandle,
   ownedProvider: Pick<TrustedHostMutationApprovalProvider, 'close'> | undefined,
@@ -88,7 +96,7 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
       harnessActivationLedger,
       turnPersistenceLedger,
       legacyTasksProtocol: context.era === 'legacy',
-      turnPersistenceMode: options.turnPersistenceMode ?? (context.era === 'legacy' ? 'best_effort' : 'required'),
+      turnPersistenceMode: resolveStdioTurnPersistenceMode(options.turnPersistenceMode, context.era),
       requestScope,
     }),
     { legacy: 'serve', onerror: options.onError ?? writeStdioDiagnostic, transport },

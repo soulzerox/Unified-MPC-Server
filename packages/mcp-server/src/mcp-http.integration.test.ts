@@ -150,6 +150,47 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
+  it('defaults HTTP/Web turn persistence to required without requiring host-generated turn IDs', async () => {
+    const strictHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        extensions: {
+          async runtimePolicySnapshot() {
+            return ok({ ready: true, policies: [{
+              priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt', source: 'configured', available: true,
+            }] });
+          },
+          async readSkill(input) {
+            return ok({ id: input.skillId, name: 'ask-matt', description: 'router', source: 'agents-skills', path: '/ask-matt/SKILL.md', content: '# Ask Matt' });
+          },
+        } as unknown as McpApplicationServices['extensions'],
+      },
+      actor: { clientId: 'strict-http-test', clientName: 'strict-http-test' },
+    });
+    const client = new Client(
+      { name: 'strict-http-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(strictHandle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: 'task_bootstrap', arguments: {} });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        turnPersistence: {
+          state: 'awaiting_record',
+          turnId: expect.stringMatching(/^turn_umcp_/),
+          mode: 'required',
+          violations: 0,
+        },
+      });
+    } finally {
+      await client.close().catch(() => undefined);
+      await strictHandle.close();
+    }
+  });
+
   it('advertises outcome-driven continuation without an elapsed-time cutoff', async () => {
     const client = new Client({ name: 'continuity-policy-client', version: '0.1.0' });
     const transport = new StreamableHTTPClientTransport(handle.endpoint);

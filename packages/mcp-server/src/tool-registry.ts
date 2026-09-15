@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
   appError,
@@ -40,6 +40,7 @@ import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
 import { TurnPersistenceLedger, type RecordTurnInput, type TurnPersistenceMode, type TurnPersistenceRole } from './turn-persistence.js';
+import { TrustedMemoryRagAdapter } from './trusted-memory-rag-adapter.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -146,6 +147,13 @@ const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
 const MAX_APPROVAL_SUMMARY_LENGTH = 8_192;
 const MAX_REMEMBERED_SHELL_TASKS = 512;
 const MAX_REMEMBERED_ACTIVITY_HANDLES = 512;
+const TRUSTED_INTERNAL_MEMORY_RAG_TOOLS = new Set([
+  'working_memory_search',
+  'working_memory_record',
+  'rag_recall',
+  'rag_remember',
+  'record_turn',
+]);
 
 interface BudgetedToolExecution {
   readonly response: McpToolResponse;
@@ -227,6 +235,8 @@ export class ToolRegistry {
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
+      ragRecall: (query, category, limit, signal) => this.ragRecall(query, category, limit, signal),
+      ragRemember: (content, category, signal) => this.ragRemember(content, category, signal),
       recordTurn: (input, signal) => this.recordTurn(input, signal),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
@@ -404,9 +414,11 @@ export class ToolRegistry {
       }
       const policyAllowsScopedDestructive = !fullBypass && mutationWorkspaceId !== undefined
         && isScopedAutoApprovalAllowed(tool.name, activeRoutedInput, mutationDecision, policy, activeWorkspaceScope);
-      const hostApprovalRequired = !fullBypass && requiresProfileMutationConfirmation(tool.name, mutationDecision, profile);
+      const trustedInternalMemoryRag = TRUSTED_INTERNAL_MEMORY_RAG_TOOLS.has(tool.name);
+      const hostApprovalRequired = !fullBypass && !trustedInternalMemoryRag
+        && requiresProfileMutationConfirmation(tool.name, mutationDecision, profile);
       const effectivePermission = permissionLevelForMutationDecision(mutationDecision);
-      const permissionDecision = fullBypass ? 'ALLOW' : this.permissionEngine.decide(profile, {
+      const permissionDecision = fullBypass || trustedInternalMemoryRag ? 'ALLOW' : this.permissionEngine.decide(profile, {
         action: 'mcp:' + tool.name,
         level: policyAllowsScopedDestructive ? 'WRITE' : effectivePermission,
         workspaceId: readWorkspaceId(activeRoutedInput),
@@ -414,6 +426,7 @@ export class ToolRegistry {
         destructive: isDestructiveMutation(mutationDecision),
       });
       const chatConfirmationRequired = permissionDecision !== 'DENY'
+        && !trustedInternalMemoryRag
         && !policyAllowsScopedDestructive
         && (permissionDecision === 'ASK' || hostApprovalRequired);
       if (chatConfirmationRequired && !hasExplicitUserConfirmation(activeRoutedInput)) {
@@ -669,10 +682,8 @@ export class ToolRegistry {
 
   private async bootstrapTaskContext(input: { readonly turnId?: string }, signal: AbortSignal, trackTurn = true): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent; readonly turnPersistence: unknown }>> {
     const scope = this.turnComplianceScope();
+    let requestedTurnId = input.turnId;
     let turnPersistence: unknown = { state: 'untracked', mode: this.turnPersistenceMode, reason: 'host did not supply a stable turnId' };
-    if (trackTurn && input.turnId === undefined && this.turnPersistenceMode === 'required') {
-      return err(appError('INVALID_INPUT', 'This host requires a stable turnId on task_bootstrap so completed-turn persistence can be enforced', true));
-    }
     const extensions = this.services.extensions;
     if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime policy and skill services are unavailable', true));
     const policy = await extensions.runtimePolicySnapshot();
@@ -688,8 +699,15 @@ export class ToolRegistry {
     if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
     const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
     if (!sessionStartSkill.ok) return sessionStartSkill;
-    if (trackTurn && input.turnId !== undefined) {
-      const begun = this.turnPersistence.beginTurn(scope, input.turnId, this.turnPersistenceMode);
+    if (trackTurn && requestedTurnId === undefined && this.turnPersistenceMode === 'required') {
+      const active = this.turnPersistence.status(scope);
+      if (active.state === 'awaiting_record') {
+        return err(appError('CONFLICT', `Previous turn ${active.turnId} was not persisted before starting a new task`, true));
+      }
+      requestedTurnId = `turn_umcp_${randomUUID().replaceAll('-', '')}`;
+    }
+    if (trackTurn && requestedTurnId !== undefined) {
+      const begun = this.turnPersistence.beginTurn(scope, requestedTurnId, this.turnPersistenceMode);
       if (!begun.accepted) {
         return err(appError('CONFLICT', `Previous turn ${begun.turnId} was not persisted before starting ${begun.attemptedTurnId}`, true));
       }
@@ -871,11 +889,42 @@ export class ToolRegistry {
     return written.ok ? written : err(appError('CONFLICT', `Working-memory write failed: ${written.error.message}`, true));
   }
 
+  private async ragRecall(
+    query: string,
+    category: string | undefined,
+    limit: number | undefined,
+    signal: AbortSignal,
+  ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const extensions = this.services.extensions;
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
+    return new TrustedMemoryRagAdapter(extensions).recall(query, category, limit, signal);
+  }
+
+  private async ragRemember(
+    content: string,
+    category: string | undefined,
+    signal: AbortSignal,
+  ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const extensions = this.services.extensions;
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
+    return new TrustedMemoryRagAdapter(extensions).remember(content, category, signal);
+  }
+
   private async recordTurn(input: RecordTurnInput, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const extensions = this.services.extensions;
     if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
 
     const complianceScope = this.turnComplianceScope();
+    const complianceStatus = this.turnPersistence.status(complianceScope);
+    const activeTurnId = complianceStatus.state === 'awaiting_record' ? complianceStatus.turnId : undefined;
+    const turnId = input.turnId ?? activeTurnId;
+    if (turnId === undefined) {
+      return err(appError('INVALID_INPUT', 'record_turn requires turnId when no task_bootstrap turn is active', true));
+    }
+    if (this.turnPersistenceMode === 'required' && activeTurnId !== undefined && activeTurnId !== turnId) {
+      return err(appError('CONFLICT', `Active turn ${activeTurnId} must be persisted before recording ${turnId}`, true));
+    }
+
     const idempotencyScope = await this.turnIdempotencyScope();
     const entries: readonly { readonly role: TurnPersistenceRole; readonly content: string }[] = [
       { role: 'user', content: input.userContent },
@@ -886,7 +935,7 @@ export class ToolRegistry {
     let inFlight = 0;
 
     for (const entry of entries) {
-      const claim = this.turnPersistence.claim(idempotencyScope, input.turnId, entry.role);
+      const claim = this.turnPersistence.claim(idempotencyScope, turnId, entry.role);
       if (claim === 'claimed') {
         claimed.push(entry);
         continue;
@@ -896,15 +945,15 @@ export class ToolRegistry {
     }
 
     const releaseClaims = (): void => {
-      for (const entry of claimed) this.turnPersistence.release(idempotencyScope, input.turnId, entry.role);
+      for (const entry of claimed) this.turnPersistence.release(idempotencyScope, turnId, entry.role);
     };
     if (inFlight > 0) {
       releaseClaims();
       return err(appError('CONFLICT', 'Turn persistence is already in flight; retry this turn after the current write settles', true));
     }
     if (claimed.length === 0) {
-      this.turnPersistence.completeTurn(complianceScope, input.turnId);
-      return ok({ turnId: input.turnId, recorded: 0, skipped, duplicate: skipped === entries.length });
+      this.turnPersistence.completeTurn(complianceScope, turnId);
+      return ok({ turnId, recorded: 0, skipped, duplicate: skipped === entries.length });
     }
 
     try {
@@ -927,7 +976,7 @@ export class ToolRegistry {
         && isRecord(rememberTurnInputSchema.properties)
         && Object.prototype.hasOwnProperty.call(rememberTurnInputSchema.properties, 'turn_id');
       const childTurnId = (role: TurnPersistenceRole): string => `turn_umcp_${createHash('sha256')
-        .update(JSON.stringify(['thai-rag-turn-v1', idempotencyScope, input.turnId, role]))
+        .update(JSON.stringify(['thai-rag-turn-v1', idempotencyScope, turnId, role]))
         .digest('hex')}`;
       let recorded = 0;
       for (const entry of claimed) {
@@ -948,11 +997,11 @@ export class ToolRegistry {
           releaseClaims();
           return err(appError('CONFLICT', `Turn persistence failed for ${entry.role}: ${persisted.error.message}`, true));
         }
-        this.turnPersistence.complete(idempotencyScope, input.turnId, entry.role);
+        this.turnPersistence.complete(idempotencyScope, turnId, entry.role);
         recorded += 1;
       }
-      this.turnPersistence.completeTurn(complianceScope, input.turnId);
-      return ok({ turnId: input.turnId, recorded, skipped, duplicate: false });
+      this.turnPersistence.completeTurn(complianceScope, turnId);
+      return ok({ turnId, recorded, skipped, duplicate: false });
     } catch (error: unknown) {
       releaseClaims();
       throw error;

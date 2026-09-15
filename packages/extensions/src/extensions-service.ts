@@ -8,6 +8,7 @@ import type {
   DiscoveredMcpServer,
   ExtensionsService,
   ExtensionsSettings,
+  MandatoryMcpBootstrapResult,
   McpServerListItem,
   RuntimePolicySnapshot,
   SkillContent,
@@ -25,7 +26,11 @@ export interface LocalExtensionsServiceOptions {
   readonly clientFactory?: McpClientFactory;
   readonly callTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
+  /** Health-check/reconnect cadence for mandatory child MCP servers. */
+  readonly mandatoryMcpKeepaliveMs?: number;
 }
+
+const DEFAULT_MANDATORY_MCP_KEEPALIVE_MS = 15_000;
 
 export class LocalExtensionsService implements ExtensionsService {
   private readonly settingsProvider: () => ExtensionsSettings;
@@ -35,6 +40,14 @@ export class LocalExtensionsService implements ExtensionsService {
   private readonly workspaceRootProvider: () => Promise<string | undefined>;
   private readonly bundledSkillRoots: readonly string[];
   private readonly sessions: McpSessionManager;
+  private readonly mandatoryMcpKeepaliveMs: number;
+  private readonly mandatoryMcpAbortController = new AbortController();
+  private readonly mandatoryMcpStartup: Promise<Result<MandatoryMcpBootstrapResult>>;
+  private mandatoryMcpRefresh: Promise<Result<MandatoryMcpBootstrapResult>> | undefined;
+  private mandatoryMcpKeepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+  private mandatoryMcpLastResult: MandatoryMcpBootstrapResult | undefined;
+  private mandatoryMcpLastCheckedAt: string | undefined;
+  private closed = false;
 
   public constructor(options: LocalExtensionsServiceOptions) {
     this.settingsProvider = options.settingsProvider ?? ((): ExtensionsSettings => options.settings);
@@ -48,6 +61,8 @@ export class LocalExtensionsService implements ExtensionsService {
       ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
       ...(options.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: options.idleTimeoutMs }),
     });
+    this.mandatoryMcpKeepaliveMs = normalizeMandatoryMcpKeepaliveMs(options.mandatoryMcpKeepaliveMs);
+    this.mandatoryMcpStartup = this.refreshMandatoryMcpServers();
   }
 
   public async listSkills(input: { readonly query?: string; readonly source?: string }): Promise<Result<{ readonly skills: readonly SkillSummary[] }>> {
@@ -75,22 +90,38 @@ export class LocalExtensionsService implements ExtensionsService {
   }
 
   public async listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>> {
+    await this.mandatoryMcpStartup;
     const discovered = await this.discoverMcpServers();
     const required = new Set(configuredPolicies(this.settingsProvider())
       .filter((policy) => policy.resourceType === 'server' && policy.mandatory)
       .map((policy) => policy.resourceId.trim().toLowerCase()));
+    const lastStatus = new Map((this.mandatoryMcpLastResult?.servers ?? []).map((server) => [server.name.toLowerCase(), server] as const));
     return ok({
-      servers: discovered.map((server) => ({
-        name: server.name,
-        source: server.source,
-        enabled: server.enabled,
-        connected: this.sessions.isConnected(server.name),
-        pinned: this.sessions.isPinned(server.name),
-        required: required.has(server.name.toLowerCase()),
-        excluded: server.excluded,
-        ...(server.exclusionReason === undefined ? {} : { exclusionReason: server.exclusionReason }),
-        command: server.config.command,
-      })),
+      servers: discovered.map((server) => {
+        const requiredServer = required.has(server.name.toLowerCase());
+        const connected = this.sessions.isConnected(server.name);
+        const pinned = this.sessions.isPinned(server.name);
+        const mandatoryStatus = lastStatus.get(server.name.toLowerCase());
+        const state = connected && (!requiredServer || pinned)
+          ? 'connected' as const
+          : requiredServer && server.enabled && !server.excluded
+            ? 'degraded' as const
+            : 'offline' as const;
+        return {
+          name: server.name,
+          source: server.source,
+          enabled: server.enabled,
+          connected,
+          pinned,
+          required: requiredServer,
+          state,
+          ...(requiredServer && this.mandatoryMcpLastCheckedAt !== undefined ? { lastCheckedAt: this.mandatoryMcpLastCheckedAt } : {}),
+          ...(mandatoryStatus?.error === undefined ? {} : { lastError: mandatoryStatus.error }),
+          excluded: server.excluded,
+          ...(server.exclusionReason === undefined ? {} : { exclusionReason: server.exclusionReason }),
+          command: server.config.command,
+        };
+      }),
     });
   }
 
@@ -154,7 +185,10 @@ export class LocalExtensionsService implements ExtensionsService {
         requiredTools: requiredToolList,
       };
     }));
-    return ok({ ready: servers.every((server) => server.connected && server.pinned), servers });
+    const result = { ready: servers.every((server) => server.connected && server.pinned), servers };
+    this.mandatoryMcpLastResult = result;
+    this.mandatoryMcpLastCheckedAt = new Date().toISOString();
+    return ok(result);
   }
 
   public async describeMcpServer(input: { readonly server: string }, signal?: AbortSignal): Promise<Result<{
@@ -251,8 +285,37 @@ export class LocalExtensionsService implements ExtensionsService {
     );
   }
 
-  public close(): Promise<void> {
-    return this.sessions.close();
+  public async close(): Promise<void> {
+    this.closed = true;
+    this.mandatoryMcpAbortController.abort();
+    if (this.mandatoryMcpKeepaliveTimer !== undefined) clearTimeout(this.mandatoryMcpKeepaliveTimer);
+    this.mandatoryMcpKeepaliveTimer = undefined;
+    await this.mandatoryMcpRefresh?.catch(() => undefined);
+    await this.sessions.close();
+  }
+
+  private refreshMandatoryMcpServers(): Promise<Result<MandatoryMcpBootstrapResult>> {
+    const refresh = this.bootstrapMandatoryMcpServers(this.mandatoryMcpAbortController.signal)
+      .catch((error: unknown) => err(appError(
+        'INTERNAL_ERROR',
+        `Mandatory MCP supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      )));
+    this.mandatoryMcpRefresh = refresh;
+    void refresh.then(() => {
+      if (this.mandatoryMcpRefresh === refresh) this.mandatoryMcpRefresh = undefined;
+      this.scheduleMandatoryMcpRefresh();
+    });
+    return refresh;
+  }
+
+  private scheduleMandatoryMcpRefresh(): void {
+    if (this.closed || this.mandatoryMcpKeepaliveMs <= 0 || this.mandatoryMcpKeepaliveTimer !== undefined) return;
+    this.mandatoryMcpKeepaliveTimer = setTimeout(() => {
+      this.mandatoryMcpKeepaliveTimer = undefined;
+      if (!this.closed) void this.refreshMandatoryMcpServers();
+    }, this.mandatoryMcpKeepaliveMs);
+    this.mandatoryMcpKeepaliveTimer.unref?.();
   }
 
   private async skillCatalog(): Promise<SkillCatalog> {
@@ -290,6 +353,12 @@ export class LocalExtensionsService implements ExtensionsService {
     if (server === undefined) return err(appError('INVALID_INPUT', `Unknown MCP server: ${name}`));
     return ok(server);
   }
+}
+
+function normalizeMandatoryMcpKeepaliveMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MANDATORY_MCP_KEEPALIVE_MS;
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_MANDATORY_MCP_KEEPALIVE_MS;
+  return Math.floor(value);
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {

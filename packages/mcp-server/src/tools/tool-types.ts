@@ -28,6 +28,7 @@ import type {
 import { z } from 'zod';
 import type { ContextEconomyRuntime } from '../context-economy.js';
 import type { RecordTurnInput } from '../turn-persistence.js';
+import type { TurnTranscriptRuntimeStatus } from '../turn-transcript-spool.js';
 
 export interface WorkspaceInfoPort {
   info(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
@@ -76,6 +77,10 @@ export interface McpApplicationServices {
   readonly localProviders?: () => { readonly pdfProvider?: string; readonly lspCommands?: Readonly<Record<string, string>> };
   readonly capabilities?: CapabilityService;
   readonly extensions?: ExtensionsService;
+  readonly memoryRuntime?: {
+    readonly policyVersion: 1;
+    readonly status: () => TurnTranscriptRuntimeStatus;
+  };
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
   readonly workspaceSelection?: WorkspaceSelectionPort;
@@ -150,6 +155,10 @@ export interface McpToolContext {
   readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Create or append a work-log entity through the pinned native working-memory child. */
   readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Search the pinned Thai-RAG child through a curated read-only surface. */
+  readonly ragRecall?: (query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Persist one bounded long-term memory through the pinned Thai-RAG child. */
+  readonly ragRemember?: (content: string, category: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Persist one bounded interaction through the curated local RAG child. */
   readonly recordTurn?: (input: RecordTurnInput, signal: AbortSignal) => Promise<Result<unknown>>;
 }

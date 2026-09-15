@@ -137,7 +137,11 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
             drift: { detected: false, reasons: [] },
           },
           tools: server === 'thai-rag-mcp'
-            ? [{ name: 'remember_turn', qualifiedName: 'mcp:thai-rag-mcp/remember_turn', description: 'Remember turn' }]
+            ? [
+                { name: 'recall', qualifiedName: 'mcp:thai-rag-mcp/recall', description: 'Recall memory' },
+                { name: 'remember', qualifiedName: 'mcp:thai-rag-mcp/remember', description: 'Remember memory' },
+                { name: 'remember_turn', qualifiedName: 'mcp:thai-rag-mcp/remember_turn', description: 'Remember turn', inputSchema: { type: 'object', properties: { turn_id: { type: 'string' } } } },
+              ]
             : [],
         };
       }

@@ -844,6 +844,13 @@ describe('LocalExtensionsService MCP bridge', () => {
         ok: true,
         value: { ready: false, servers: [{ name: 'mock', connected: false, pinned: false, error: expect.stringContaining('workspace-scoped') }] },
       });
+      await expect(service.listMcpServers()).resolves.toMatchObject({
+        ok: true,
+        value: { servers: [expect.objectContaining({
+          name: 'mock', required: true, connected: false, state: 'degraded',
+          lastError: expect.stringContaining('workspace-scoped'), lastCheckedAt: expect.any(String),
+        })] },
+      });
       expect(connects).toBe(0);
       await service.close();
     } finally {
@@ -869,6 +876,36 @@ describe('LocalExtensionsService MCP bridge', () => {
       ok: true,
       value: { ready: true, servers: [{ name: 'mock', connected: true, pinned: true }] },
     });
+    await service.close();
+  });
+
+  it('warms and pins mandatory child MCP servers automatically before status is observed', async () => {
+    let connects = 0;
+    const service = new LocalExtensionsService({
+      settings: {
+        ...settingsWithMockServer(),
+        mandatoryMcpServers: ['mock'],
+      },
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: {
+        connect: async (): Promise<McpClientSession> => {
+          connects += 1;
+          return {
+            listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+            listResources: async () => [],
+            callTool: async () => ({ content: [] }),
+            close: async () => undefined,
+          };
+        },
+      },
+    });
+
+    await expect(service.listMcpServers()).resolves.toMatchObject({
+      ok: true,
+      value: { servers: [expect.objectContaining({ name: 'mock', connected: true, pinned: true, required: true })] },
+    });
+    expect(connects).toBe(1);
     await service.close();
   });
 

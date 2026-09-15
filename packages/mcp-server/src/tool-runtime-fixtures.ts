@@ -49,7 +49,7 @@ const unavailable = (
 ): ToolRuntimeFixture => ({ input, evidence: { kind: 'truthful_unavailable', unavailableStatus } });
 
 /**
- * Safe parse-valid inputs and expected delivery evidence for the 104 core tools.
+ * Safe parse-valid inputs and expected delivery evidence for the 110 core tools.
  * These are non-production fixtures: they use controlled workspace IDs, dry-run
  * inputs where available, and never point at a real user path.
  */
@@ -130,6 +130,8 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   policy_snapshot: service({}, 'extensions.runtimePolicySnapshot'),
   mcp_list: service({}, 'extensions.listMcpServers'),
   mcp_describe: service({ server: 'server-1' }, 'extensions.describeMcpServer'),
+  rag_recall: service({ query: 'smoke memory', limit: 3 }, 'extensions.callMcpTool'),
+  rag_remember: service({ content: 'smoke durable memory', category: 'smoke' }, 'extensions.callMcpTool'),
   record_turn: service({ turnId: 'turn-smoke', userContent: 'Smoke user turn.', assistantContent: 'Smoke assistant turn.', workspace: workspaceId }, 'extensions.callMcpTool'),
   mcp_install: service({ name: 'smoke-server', transport: 'stdio', command: 'node' }, 'installer.installServer'),
   mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, descriptorFingerprint: '0'.repeat(64), catalogFingerprint: '0'.repeat(64), userConfirmed: true }, 'extensions.callMcpTool'),

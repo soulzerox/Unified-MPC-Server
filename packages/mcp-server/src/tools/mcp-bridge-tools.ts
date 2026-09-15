@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema, recordTurnSchema, taskBootstrapSchema } from './schemas.js';
+import { mcpCallSchema, mcpDescribeSchema, mcpListSchema, policySnapshotSchema, ragRecallSchema, ragRememberSchema, recordTurnSchema, taskBootstrapSchema } from './schemas.js';
 
 const mcpInstallSchema = z.object({
   name: z.string().min(1),
@@ -62,15 +62,34 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
         : context.services.extensions.describeMcpServer({ server: input.server }, signal),
     }),
     defineTool({
+      name: 'rag_recall',
+      description: 'Read matching persistent context through the trusted Thai-RAG adapter. The child server and recall tool are fixed by unified-mpc, live contract fingerprints are resolved internally, and callers cannot redirect this read to another child tool.',
+      ...readOnlyInspection,
+      inputSchema: ragRecallSchema,
+      handler: async (input, signal) => context.ragRecall === undefined
+        ? missingService()
+        : context.ragRecall(input.query, input.category, input.limit, signal),
+    }),
+    defineTool({
+      name: 'rag_remember',
+      description: 'Commit one already-distilled long-term memory through the trusted Thai-RAG adapter. This is not raw per-turn transcript storage; record_turn owns transcript persistence. The child server and remember tool are fixed by unified-mpc and cannot be redirected by callers.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: ragRememberSchema,
+      handler: async (input, signal) => context.ragRemember === undefined
+        ? missingService()
+        : context.ragRemember(input.content, input.category, signal),
+    }),
+    defineTool({
       name: 'record_turn',
-      description: 'Persist one bounded user/assistant interaction through the curated local RAG child. The child server and tool are fixed by unified-mpc; callers cannot redirect this primitive to arbitrary MCP mutations. Hosts should call this at a completed turn boundary when transcript persistence is available.',
+      description: 'Persist one bounded user/assistant interaction through the curated local RAG child. The child server and tool are fixed by unified-mpc; callers cannot redirect this primitive to arbitrary MCP mutations. Runtime transcript adapters should invoke this at completed turn boundaries; direct tool invocation is retained as a compatibility fallback for hosts that expose transcripts only to the model.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: recordTurnSchema,
       handler: async (input, signal) => context.recordTurn === undefined
         ? missingService()
         : context.recordTurn({
-            turnId: input.turnId,
+            ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
             userContent: input.userContent,
             ...(input.assistantContent === undefined ? {} : { assistantContent: input.assistantContent }),
             ...(input.workspace === undefined ? {} : { workspace: input.workspace }),

@@ -1,7 +1,7 @@
 export type TurnPersistenceRole = 'user' | 'assistant';
 
 export interface RecordTurnInput {
-  readonly turnId: string;
+  readonly turnId?: string;
   readonly userContent: string;
   readonly assistantContent?: string;
   readonly workspace?: string;

@@ -96,15 +96,72 @@ describe('skills and mcp bridge tools', () => {
       sessionId: 'strict-session',
       turnPersistenceMode: 'required',
     });
-    await expect(strictRegistry.invoke('task_bootstrap', {})).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
-    await expect(strictRegistry.invoke('task_bootstrap', { turnId: 'turn-1' })).resolves.toMatchObject({ structuredContent: { turnPersistence: { state: 'awaiting_record', turnId: 'turn-1', mode: 'required' } } });
-    await expect(strictRegistry.invoke('task_bootstrap', { turnId: 'turn-2' })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('turn-1') } } });
+    await expect(strictRegistry.invoke('task_bootstrap', {})).resolves.toMatchObject({
+      structuredContent: {
+        turnPersistence: {
+          state: 'awaiting_record',
+          turnId: expect.stringMatching(/^turn_umcp_/),
+          mode: 'required',
+        },
+      },
+    });
+    await expect(strictRegistry.invoke('task_bootstrap', { turnId: 'turn-2' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('was not persisted') } },
+    });
     await expect(registry.invoke('policy_snapshot', {})).resolves.toMatchObject({
       structuredContent: { ready: true, policies: [expect.objectContaining({ id: 'session-start:ask-matt' }), expect.objectContaining({ id: 'auto:server:mock' })] },
     });
     await expect(registry.invoke('mcp_call', { server: 'mock', tool: 'ping', arguments: {}, userConfirmed: true })).resolves.toMatchObject({
       structuredContent: { content: [{ type: 'text', text: 'pong' }] },
     });
+  });
+
+  it('uses the active server-generated strict turn when record_turn omits turnId', async () => {
+    const descriptorFingerprint = 'a'.repeat(64);
+    const catalogFingerprint = 'b'.repeat(64);
+    const childCalls: Array<{ readonly arguments?: Readonly<Record<string, unknown>> }> = [];
+    const extensions: ExtensionsService = {
+      listSkills: async () => ok({ skills: [] }),
+      readSkill: async (input) => ok({ id: input.skillId, name: 'ask-matt', description: 'router', source: 'agents-skills', path: '/ask-matt/SKILL.md', content: '# Ask Matt' }),
+      listMcpServers: async () => ok({ servers: [] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [{
+        priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt', source: 'configured', available: true,
+      }] }),
+      describeMcpServer: async () => ok({
+        server: 'thai-rag-mcp',
+        enabled: true,
+        connected: true,
+        provenance: {
+          source: 'test-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint,
+          drift: { detected: false, reasons: [] },
+        },
+        tools: [{
+          name: 'remember_turn',
+          qualifiedName: 'mcp:thai-rag-mcp/remember_turn',
+          description: 'Remember turn',
+          inputSchema: { type: 'object', properties: { turn_id: { type: 'string' } } },
+        }],
+      }),
+      callMcpTool: async (input) => {
+        childCalls.push(input);
+        return ok({ result: 'stored' });
+      },
+      close: async () => undefined,
+    };
+    const registry = new ToolRegistry({ extensions }, { clientId: 'strict-auto-turn', clientName: 'strict-auto-turn' }, {
+      sessionId: 'strict-auto-turn-session',
+      turnPersistenceMode: 'required',
+    });
+
+    await expect(registry.invoke('task_bootstrap', {})).resolves.toMatchObject({
+      structuredContent: { turnPersistence: { state: 'awaiting_record', turnId: expect.stringMatching(/^turn_umcp_/) } },
+    });
+    await expect(registry.invoke('record_turn', { userContent: 'Persist without host-generated correlation.' })).resolves.toMatchObject({
+      structuredContent: { turnId: expect.stringMatching(/^turn_umcp_/), recorded: 1, skipped: 0, duplicate: false },
+    });
+    expect(childCalls).toHaveLength(1);
+    expect(childCalls[0]?.arguments?.turn_id).toEqual(expect.stringMatching(/^turn_umcp_/));
   });
 
   it('forwards the caller AbortSignal through mcp_describe and approved mcp_call', async () => {

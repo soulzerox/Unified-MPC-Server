@@ -37,9 +37,14 @@ async function main(): Promise<void> {
   const settings = new SqliteSettingsRepository(database);
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
 
-  const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), { persistWorkspaceSelection: true });
+  const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), {
+    persistWorkspaceSelection: true,
+    enableLocalTranscriptSources: true,
+    chatGptWebTranscriptFallback: true,
+  });
   await runtime.activityReady;
   await runtime.recoveryReady;
+  await runtime.turnTranscriptReady;
   const brokeredHostMutationApprovalProvider = createCrossClientHostMutationApprovalProvider({
     directory: hostApprovalBrokerDirectory(dataPath),
   });

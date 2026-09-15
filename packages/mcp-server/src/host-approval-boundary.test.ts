@@ -67,6 +67,47 @@ describe('mandatory independent host approval', () => {
     expect(calls).toEqual([tool]);
   });
 
+  it('uses curated Thai-RAG recall and remember without native host approval or caller-managed fingerprints', async () => {
+    const descriptorFingerprint = 'a'.repeat(64);
+    const catalogFingerprint = 'b'.repeat(64);
+    const childCalls: Array<{ tool: string; arguments?: Readonly<Record<string, unknown>>; descriptorFingerprint?: string; catalogFingerprint?: string }> = [];
+    const approvals: string[] = [];
+    const services = servicesWithCalls([]);
+    services.extensions = {
+      ...services.extensions,
+      async describeMcpServer() {
+        return ok({
+          server: 'thai-rag-mcp', enabled: true, connected: true,
+          provenance: { source: 'antigravity-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
+          tools: [
+            { name: 'recall', qualifiedName: 'mcp:thai-rag-mcp/recall', description: 'Recall' },
+            { name: 'remember', qualifiedName: 'mcp:thai-rag-mcp/remember', description: 'Remember' },
+          ],
+        });
+      },
+      async callMcpTool(input) {
+        childCalls.push(input);
+        return ok({ result: input.tool === 'recall' ? 'matched memory' : 'stored memory' });
+      },
+    } as McpApplicationServices['extensions'];
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: (): PermissionProfile => permissionProfiles.safe,
+      hostMutationApprovalProvider: async (request): Promise<boolean> => { approvals.push(request.toolName); return false; },
+    });
+
+    const recalled = await registry.invoke('rag_recall', { query: 'architecture decision', category: 'decision', limit: 5 });
+    const remembered = await registry.invoke('rag_remember', { content: 'Prefer native curated RAG operations.', category: 'decision' });
+
+    expect(recalled.isError).not.toBe(true);
+    expect(remembered.isError).not.toBe(true);
+    expect(approvals).toEqual([]);
+    expect(childCalls).toEqual([
+      expect.objectContaining({ tool: 'recall', descriptorFingerprint, catalogFingerprint, arguments: { query: 'architecture decision', category: 'decision', limit: 5 } }),
+      expect.objectContaining({ tool: 'remember', descriptorFingerprint, catalogFingerprint, arguments: { content: 'Prefer native curated RAG operations.', category: 'decision' } }),
+    ]);
+  });
+
   it('persists a completed interaction through bounded record_turn without native host approval and deduplicates across registry recreation', async () => {
     const descriptorFingerprint = 'a'.repeat(64);
     const catalogFingerprint = 'b'.repeat(64);
@@ -89,7 +130,7 @@ describe('mandatory independent host approval', () => {
     const turnPersistenceLedger = new TurnPersistenceLedger();
     const options = {
       activeWorkspaceScopeProvider: activeScope,
-      profileProvider: balancedProfile,
+      profileProvider: (): PermissionProfile => permissionProfiles.safe,
       sessionId: 'session-a',
       turnPersistenceLedger,
     } as const;

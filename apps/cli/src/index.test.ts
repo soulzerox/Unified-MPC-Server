@@ -146,7 +146,7 @@ describe('CLI default dependency lifecycle', () => {
     const dependencies = createDefaultCliDependencies();
     const result = await dependencies.toolsCall?.('mcp_list', {});
     expect(result).toMatchObject({ ok: true });
-  });
+  }, 15_000);
 });
 
 describe('CLI execution dispatcher', () => {

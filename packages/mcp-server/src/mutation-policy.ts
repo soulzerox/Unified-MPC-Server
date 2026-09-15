@@ -97,6 +97,7 @@ export function inspectMutationOperation(
     case 'task_bootstrap':
     case 'policy_snapshot':
     case 'mcp_describe':
+    case 'rag_recall':
       return read('structured read-only operation');
     case 'tool_batch':
       return read('batch dispatcher applies mutation policy independently to every child call');
@@ -111,6 +112,8 @@ export function inspectMutationOperation(
       return boundedWrite(`${toolName} installs validated extension state without executing repository install scripts`);
     case 'working_memory_record':
       return boundedWrite('working_memory_record appends bounded project work-log state through the pinned memory MCP');
+    case 'rag_remember':
+      return boundedWrite('rag_remember commits one bounded, already-distilled long-term memory through the trusted Thai-RAG adapter');
     case 'record_turn':
       return boundedWrite('record_turn persists bounded interaction text through the curated local RAG child');
     case 'write_file':

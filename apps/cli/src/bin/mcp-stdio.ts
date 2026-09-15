@@ -174,10 +174,12 @@ async function main(): Promise<void> {
     checkpointEncryptionKey,
     permissionProfile: profileName,
     fullBypassAll: stdioFullBypassAll,
+    enableLocalTranscriptSources: true,
     ...(strictAllowedRoots === undefined ? {} : { strictAllowedRoots }),
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
+  await runtime.turnTranscriptReady;
   process.stderr.write(
     `Unified-MPC MCP stdio ready primary=${workspace.id} root=${workspace.realRootPath} profile=${profileName}`
       + `${stdioFullBypassAll ? ' full_bypass=1' : ''}${unrestricted ? ' unrestricted=1' : ''}${strictAllowedRoots === undefined ? '' : ` strict_roots=${strictAllowedRoots.length}`}\n`,

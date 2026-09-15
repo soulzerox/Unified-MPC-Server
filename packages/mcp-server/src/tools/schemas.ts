@@ -596,8 +596,19 @@ export const mcpDescribeSchema = z.object({
   server: z.string().trim().min(1).max(256),
 }).strict();
 
+export const ragRecallSchema = z.object({
+  query: z.string().trim().min(1).max(65_536),
+  category: z.string().trim().min(1).max(256).optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+}).strict();
+
+export const ragRememberSchema = z.object({
+  content: z.string().min(1).max(65_536),
+  category: z.string().trim().min(1).max(256).optional(),
+}).strict();
+
 export const recordTurnSchema = z.object({
-  turnId: z.string().trim().min(1).max(256),
+  turnId: z.string().trim().min(1).max(256).optional(),
   userContent: z.string().min(1).max(65_536),
   assistantContent: z.string().min(1).max(65_536).optional(),
   workspace: z.string().trim().max(MAX_PATH_LENGTH).optional(),

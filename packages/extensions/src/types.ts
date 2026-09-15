@@ -163,6 +163,9 @@ export interface McpServerListItem {
   readonly connected: boolean;
   readonly pinned: boolean;
   readonly required: boolean;
+  readonly state: 'connected' | 'degraded' | 'offline';
+  readonly lastCheckedAt?: string;
+  readonly lastError?: string;
   readonly excluded: boolean;
   readonly exclusionReason?: string;
   readonly command: string;

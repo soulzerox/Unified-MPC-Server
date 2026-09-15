@@ -81,6 +81,53 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+  it('starts the durable turn transcript supervisor without claiming automatic capture when no host adapter is enabled', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-supervisor-'));
+    temporaryRoots.push(dataPath);
+    const runtime = createStdioMcpRuntime(dataPath, workspace);
+    try {
+      await runtime.turnTranscriptReady;
+      expect(runtime.turnTranscriptStatus()).toMatchObject({
+        state: 'connected',
+        autoRecordTurn: false,
+        approvalMode: 'trusted-memory-only',
+        sources: [],
+        pendingTurns: 0,
+        replayCount: 0,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('reports local adapters and ChatGPT Web policy-assisted persistence separately', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-sources-'));
+    temporaryRoots.push(dataPath);
+    const missingRoot = path.join(dataPath, 'missing-host-storage');
+    const runtime = createStdioMcpRuntime(dataPath, workspace, false, {
+      enableLocalTranscriptSources: true,
+      chatGptWebTranscriptFallback: true,
+      transcriptSourcePaths: {
+        clineStorageRoots: [path.join(missingRoot, 'cline')],
+        openCodeDatabasePaths: [path.join(missingRoot, 'opencode.db')],
+        antigravityStorageRoots: [path.join(missingRoot, 'antigravity')],
+      },
+    });
+    try {
+      await runtime.turnTranscriptReady;
+      const status = runtime.turnTranscriptStatus();
+      expect(status).toMatchObject({ state: 'connected', autoRecordTurn: false, approvalMode: 'trusted-memory-only' });
+      expect(status.sources).toEqual(expect.arrayContaining([
+        expect.objectContaining({ sourceClient: 'cline', captureMode: 'automatic', state: 'unavailable', autoRecordTurn: false }),
+        expect.objectContaining({ sourceClient: 'opencode', captureMode: 'automatic', state: 'unavailable', autoRecordTurn: false }),
+        expect.objectContaining({ sourceClient: 'antigravity', captureMode: 'automatic', state: 'unavailable', autoRecordTurn: false }),
+        expect.objectContaining({ sourceClient: 'chatgpt-web', captureMode: 'policy-assisted', state: 'standby', autoRecordTurn: false }),
+      ]));
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('uses the registered host-facing root for active execution scopes when it differs from the canonical root', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-active-root-alias-'));
     temporaryRoots.push(dataPath);

@@ -12,6 +12,8 @@ export * from './stdio.js';
 export * from './trusted-host-approval.js';
 export * from './cross-client-host-approval.js';
 export * from './turn-persistence.js';
+export * from './turn-transcript-spool.js';
+export * from './trusted-memory-rag-adapter.js';
 export * from './tool-registry.js';
 export * from './tool-delivery-contract.js';
 export * from './mutation-policy.js';

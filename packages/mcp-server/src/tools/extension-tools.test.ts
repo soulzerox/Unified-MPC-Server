@@ -117,6 +117,68 @@ describe('skills and mcp bridge tools', () => {
     });
   });
 
+  it('bounds oversized global and child-MCP results while leaving small responses unchanged', async () => {
+    const diagnostics: unknown[] = [];
+    const extensions: ExtensionsService = {
+      listSkills: async () => ok({ skills: [] }),
+      readSkill: async (input) => ok({ id: input.skillId, name: 'ask-matt', description: '', source: 'test', path: '/SKILL.md', content: '' }),
+      listMcpServers: async () => ok({ servers: [{ name: 'huge', source: 'test', enabled: true, connected: true, excluded: false, command: 'x'.repeat(8_000) }] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [] }),
+      describeMcpServer: async () => ok({ server: 'mock', enabled: true, connected: true, tools: [] }),
+      callMcpTool: async (input) => input.tool === 'small'
+        ? ok({ content: [{ type: 'text', text: 'pong' }] })
+        : ok({ content: [{ type: 'text', text: 'x'.repeat(8_000) }], structuredContent: { payload: 'x'.repeat(8_000) } }),
+      close: async () => undefined,
+    };
+    const registry = new ToolRegistry({ extensions }, { clientId: 'output-budget', clientName: 'output-budget' }, {
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+      diagnostic: (event): void => { diagnostics.push(event); },
+      maxToolResultBytes: 2_048,
+      maxMcpCallResultBytes: 1_024,
+    });
+
+    await expect(registry.invoke('mcp_call', { server: 'mock', tool: 'small', arguments: {}, userConfirmed: true }))
+      .resolves.toMatchObject({ structuredContent: { content: [{ type: 'text', text: 'pong' }] } });
+
+    const child = await registry.invoke('mcp_call', { server: 'mock', tool: 'huge', arguments: {}, userConfirmed: true });
+    expect(child.structuredContent).toBeUndefined();
+    const childEnvelope = JSON.parse(child.content[0]?.type === 'text' ? child.content[0].text : '{}') as Record<string, unknown>;
+    expect(childEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_call', maxBytes: 1_024 });
+
+    const global = await registry.invoke('mcp_list', {});
+    expect(global.structuredContent).toBeUndefined();
+    const globalEnvelope = JSON.parse(global.content[0]?.type === 'text' ? global.content[0].text : '{}') as Record<string, unknown>;
+    expect(globalEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_list', maxBytes: 2_048 });
+
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'ToolResultBudgetExceeded', message: expect.stringContaining('mcp_call') }),
+      expect.objectContaining({ name: 'ToolResultBudgetExceeded', message: expect.stringContaining('mcp_list') }),
+    ]));
+  });
+
+  it('uses conservative default output budgets', async () => {
+    const extensions: ExtensionsService = {
+      listSkills: async () => ok({ skills: [] }),
+      readSkill: async (input) => ok({ id: input.skillId, name: 'ask-matt', description: '', source: 'test', path: '/SKILL.md', content: '' }),
+      listMcpServers: async () => ok({ servers: [{ name: 'huge', source: 'test', enabled: true, connected: true, excluded: false, command: 'x'.repeat(600_000) }] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [] }),
+      describeMcpServer: async () => ok({ server: 'mock', enabled: true, connected: true, tools: [] }),
+      callMcpTool: async () => ok({ content: [{ type: 'text', text: 'x'.repeat(300_000) }] }),
+      close: async () => undefined,
+    };
+    const registry = new ToolRegistry({ extensions }, { clientId: 'default-output-budget', clientName: 'default-output-budget' }, {
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+    });
+
+    const child = await registry.invoke('mcp_call', { server: 'mock', tool: 'huge', arguments: {}, userConfirmed: true });
+    const childEnvelope = JSON.parse(child.content[0]?.type === 'text' ? child.content[0].text : '{}') as Record<string, unknown>;
+    expect(childEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_call', maxBytes: 256 * 1024 });
+
+    const global = await registry.invoke('mcp_list', {});
+    const globalEnvelope = JSON.parse(global.content[0]?.type === 'text' ? global.content[0].text : '{}') as Record<string, unknown>;
+    expect(globalEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_list', maxBytes: 512 * 1024 });
+  });
+
   it('uses the active server-generated strict turn when record_turn omits turnId', async () => {
     const descriptorFingerprint = 'a'.repeat(64);
     const catalogFingerprint = 'b'.repeat(64);

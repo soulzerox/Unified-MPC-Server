@@ -71,6 +71,10 @@ export interface McpServerOptions {
   readonly incrementalVerifier?: IncrementalVerifier;
   /** Shared by transport-scoped server factories so visual observations survive the next MCP request. */
   readonly setOfMarksStore?: SetOfMarksObservationStore;
+  /** Global UTF-8 text-result ceiling before data crosses the MCP client boundary. */
+  readonly maxToolResultBytes?: number;
+  /** Tighter UTF-8 result ceiling for proxied child MCP calls. */
+  readonly maxMcpCallResultBytes?: number;
   /** Compatibility result guard; it must not apply elapsed-time behavior. */
   readonly runBudgetGuard?: RunBudgetGuard;
   /**
@@ -107,6 +111,8 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.toolAvailabilitySnapshotProvider === undefined ? {} : { toolAvailabilitySnapshotProvider: options.toolAvailabilitySnapshotProvider }),
     ...(options.incrementalVerifier === undefined ? {} : { incrementalVerifier: options.incrementalVerifier }),
     ...(options.setOfMarksStore === undefined ? {} : { setOfMarksStore: options.setOfMarksStore }),
+    ...(options.maxToolResultBytes === undefined ? {} : { maxToolResultBytes: options.maxToolResultBytes }),
+    ...(options.maxMcpCallResultBytes === undefined ? {} : { maxMcpCallResultBytes: options.maxMcpCallResultBytes }),
   });
   const runBudgetGuard = options.runBudgetGuard ?? new RunBudgetGuard();
   let configuredPonytailMode = DEFAULT_PONYTAIL_MODE;

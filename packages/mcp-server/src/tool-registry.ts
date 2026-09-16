@@ -118,6 +118,10 @@ export interface ToolRegistryOptions {
   readonly incrementalVerifier?: IncrementalVerifier;
   readonly setOfMarksStore?: SetOfMarksObservationStore;
   readonly maxToolDurationMs?: number;
+  /** Global text-result ceiling before returning data to an MCP client. */
+  readonly maxToolResultBytes?: number;
+  /** Tighter ceiling for opaque child MCP results, which clients commonly retain in conversation history. */
+  readonly maxMcpCallResultBytes?: number;
 }
 
 export interface HostMutationApprovalScope {
@@ -144,6 +148,8 @@ export interface HostMutationApprovalRequest {
 }
 
 const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
+const DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024;
+const DEFAULT_MAX_MCP_CALL_RESULT_BYTES = 256 * 1024;
 const MAX_APPROVAL_SUMMARY_LENGTH = 8_192;
 const MAX_REMEMBERED_SHELL_TASKS = 512;
 const MAX_REMEMBERED_ACTIVITY_HANDLES = 512;
@@ -201,6 +207,8 @@ export class ToolRegistry {
   private readonly processTargets = new Map<string, string>();
   private readonly codexTaskTargets = new Map<string, string>();
   private readonly maxToolDurationMs: number | null;
+  private readonly maxToolResultBytes: number;
+  private readonly maxMcpCallResultBytes: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
     this.services = services;
@@ -222,6 +230,11 @@ export class ToolRegistry {
     this.hostMutationApprovalProvider = options.hostMutationApprovalProvider;
     this.activityWorkspaceResolver = normalizeActivityWorkspaceResolver(services, actor);
     this.maxToolDurationMs = normalizeToolResponseBudget(options.maxToolDurationMs);
+    this.maxToolResultBytes = normalizeToolResultBudget(options.maxToolResultBytes, DEFAULT_MAX_TOOL_RESULT_BYTES);
+    this.maxMcpCallResultBytes = Math.min(
+      normalizeToolResultBudget(options.maxMcpCallResultBytes, DEFAULT_MAX_MCP_CALL_RESULT_BYTES),
+      this.maxToolResultBytes,
+    );
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
       services,
@@ -1298,7 +1311,15 @@ export class ToolRegistry {
           }, responseBudgetMs);
         }
         try {
-          operation = tool.execute(input, controller.signal, authorization).then(mapResult);
+          const maxBytes = tool.name === 'mcp_call' ? this.maxMcpCallResultBytes : this.maxToolResultBytes;
+          operation = tool.execute(input, controller.signal, authorization).then((result) => mapResult(result, {
+            maxBytes,
+            toolName: tool.name,
+            onTruncated: ({ originalBytes }) => this.diagnostic?.({
+              name: 'ToolResultBudgetExceeded',
+              message: `MCP tool ${tool.name} produced ${originalBytes} bytes, exceeding the ${maxBytes}-byte output budget; the client received a bounded truncation envelope`,
+            }),
+          }));
         } catch (error: unknown) {
           releaseRegistration();
           reject(error);
@@ -1326,6 +1347,10 @@ function legacyDeletePolicy(enabled: boolean): DestructiveAutoApprovalPolicy {
 
 function normalizeToolResponseBudget(value: number | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS;
+}
+
+function normalizeToolResultBudget(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
 function normalizeActivityWorkspaceResolver(services: McpApplicationServices, actor: FileActor): (cwd: string) => Promise<string | undefined> {

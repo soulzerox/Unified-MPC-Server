@@ -32,6 +32,32 @@ describe('mapResult image payloads', () => {
     expect(annotated.content[0]).toEqual({ type: 'image', data: 'marked-png', mimeType: 'image/png' });
   });
 
+  it('replaces oversized successful results with a compact protocol-safe budget envelope', () => {
+    const truncations: unknown[] = [];
+    const response = mapResult({
+      ok: true as const,
+      value: { payload: 'x'.repeat(2_000_000) },
+    }, {
+      maxBytes: 1_024,
+      toolName: 'mcp_call',
+      onTruncated: (event) => truncations.push(event),
+    });
+
+    expect(response.structuredContent).toBeUndefined();
+    expect(response.content).toHaveLength(1);
+    const envelope = JSON.parse(response.content[0]?.type === 'text' ? response.content[0].text : '{}') as Record<string, unknown>;
+    expect(envelope).toMatchObject({
+      truncated: true,
+      toolName: 'mcp_call',
+      maxBytes: 1_024,
+      reason: 'tool_result_exceeds_output_budget',
+    });
+    expect(Number(envelope.originalBytes)).toBeGreaterThan(1_024);
+    expect(String(envelope.hint)).toContain('narrower');
+    expect(response.content[0]?.type === 'text' ? response.content[0].text.length : Number.POSITIVE_INFINITY).toBeLessThan(1_024);
+    expect(truncations).toEqual([expect.objectContaining({ toolName: 'mcp_call', maxBytes: 1_024 })]);
+  });
+
   it('keeps filesystem error messages instead of Operation failed', () => {
     const response = mapError({ code: 'FILE_NOT_FOUND', message: 'File or directory was not found', recoverable: false });
     expect(response.content[0]?.text).toBe('FILE_NOT_FOUND: File or directory was not found');

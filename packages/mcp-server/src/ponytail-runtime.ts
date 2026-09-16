@@ -90,6 +90,13 @@ export class PonytailActivationLedger {
     return this.replace(context, { ...current, sessionSuppressed: suppressed });
   }
 
+  public invalidateSession(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const stateKey of this.states.keys()) {
+      if (stateKey.startsWith(prefix)) this.states.delete(stateKey);
+    }
+  }
+
   private replace(context: PonytailActivationContext, state: PonytailActivationState): PonytailActivationState {
     this.states.set(activationKey(context), state);
     return state;

@@ -36,6 +36,21 @@ describe('Ponytail runtime policy state', () => {
     ledger.setSessionSuppressed(context, full, true);
     expect(ledger.state(context, lite).sessionSuppressed).toBe(true);
   });
+
+  it('invalidates every activation owned by one transport session without touching other sessions', () => {
+    const ledger = new PonytailActivationLedger();
+    const sameSessionOtherWorkspace = { sessionId: context.sessionId, workspaceId: 'workspace-2', goalId: 'goal-2' } as const;
+    const otherSession = { sessionId: 'session-2', workspaceId: context.workspaceId, goalId: context.goalId } as const;
+    ledger.markPrimaryLoaded(context, full, BUNDLED_PONYTAIL_SKILL_ID);
+    ledger.markPrimaryLoaded(sameSessionOtherWorkspace, full, BUNDLED_PONYTAIL_SKILL_ID);
+    ledger.markPrimaryLoaded(otherSession, full, BUNDLED_PONYTAIL_SKILL_ID);
+
+    ledger.invalidateSession(context.sessionId);
+
+    expect(ledger.state(context, full).primarySkillLoaded).toBe(false);
+    expect(ledger.state(sameSessionOtherWorkspace, full).primarySkillLoaded).toBe(false);
+    expect(ledger.state(otherSession, full).primarySkillLoaded).toBe(true);
+  });
 });
 
 describe('Ponytail coding mutation classification', () => {

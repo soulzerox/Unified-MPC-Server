@@ -25,10 +25,13 @@ import { PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
 import { TurnPersistenceLedger } from './turn-persistence.js';
 import { createOriginPolicy, type OriginPolicy } from './origin-policy.js';
+import { BoundedRetentionMap } from './bounded-retention-map.js';
 import { APP_NAME, APP_VERSION } from '@unified-mpc/shared';
 
 export const MAX_MCP_HTTP_BODY_BYTES = 1_048_576;
 export const UNIFIED_MPC_MCP_IDENTITY_PATH = '/_unified-mpc/identity';
+const DEFAULT_LEGACY_SESSION_TTL_MS = 30 * 60_000;
+const DEFAULT_MAX_LEGACY_SESSIONS = 64;
 
 export interface McpHttpServerOptions extends McpServerOptions {
   readonly port: number;
@@ -38,6 +41,9 @@ export interface McpHttpServerOptions extends McpServerOptions {
   readonly allowedOrigins?: readonly string[];
   readonly allowedHostnamesProvider?: () => readonly string[] | undefined;
   readonly allowedOriginsProvider?: () => readonly string[] | undefined;
+  readonly legacySessionTtlMs?: number;
+  readonly maxLegacySessions?: number;
+  readonly legacySessionNow?: () => number;
 }
 
 export interface McpHttpServerAddress {
@@ -59,6 +65,7 @@ interface BodyReadResult {
 interface LegacySession {
   readonly server: McpServer;
   readonly transport: WebStandardStreamableHTTPServerTransport;
+  readonly scopeSessionId: string;
 }
 
 function writeDiagnostic(error: Error): void {
@@ -222,18 +229,49 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     requestScope: createHttpRequestScope({ ...(request === undefined ? {} : { request }), fallbackSessionId: endpointFallbackSessionId }),
   });
   const modernHandler = createMcpHandler((context) => factory(context.requestInfo), { legacy: 'reject', onerror: writeDiagnostic });
-  const sessions = new Map<string, LegacySession>();
+  const sessionTtlMs = options.legacySessionTtlMs ?? DEFAULT_LEGACY_SESSION_TTL_MS;
+  const sessions = new BoundedRetentionMap<string, LegacySession>({
+    ttlMs: sessionTtlMs,
+    maxEntries: options.maxLegacySessions ?? DEFAULT_MAX_LEGACY_SESSIONS,
+    ...(options.legacySessionNow === undefined ? {} : { now: options.legacySessionNow }),
+  });
+  const closingSessions = new WeakSet<LegacySession>();
+  const pendingSessionCloses = new Set<Promise<void>>();
   let closed = false;
 
+  const disposeLegacySession = async (session: LegacySession): Promise<void> => {
+    if (closingSessions.has(session)) return;
+    closingSessions.add(session);
+    ponytailActivationLedger.invalidateSession(session.scopeSessionId);
+    harnessActivationLedger.invalidateSession(session.scopeSessionId);
+    await session.server.close().catch(() => undefined);
+  };
+
+  const trackSessionClose = (session: LegacySession): Promise<void> => {
+    const pending = disposeLegacySession(session);
+    pendingSessionCloses.add(pending);
+    void pending.finally(() => pendingSessionCloses.delete(pending));
+    return pending;
+  };
+
+  const pruneLegacySessions = async (): Promise<void> => {
+    const expired = sessions.pruneExpired();
+    await Promise.allSettled(expired.map(([, session]) => trackSessionClose(session)));
+  };
+
+  const sweepTimer = setInterval(() => { void pruneLegacySessions(); }, Math.min(sessionTtlMs, 60_000));
+  sweepTimer.unref();
+
   const closeLegacySession = async (sessionId: string, session: LegacySession): Promise<void> => {
-    if (sessions.get(sessionId) === session) sessions.delete(sessionId);
-    await session.server.close();
+    if (sessions.peek(sessionId) === session) sessions.delete(sessionId);
+    await trackSessionClose(session);
   };
 
   const createLegacySession = async (request: Request): Promise<Response> => {
     if (closed) return sessionNotFoundResponse();
 
     const protocolSessionId = randomUUID();
+    const requestScope = createProtocolHttpRequestScope(protocolSessionId);
     const server = createMcpServer({
       ...options,
       runBudgetGuard,
@@ -243,17 +281,23 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       harnessActivationLedger,
       turnPersistenceLedger,
       legacyTasksProtocol: true,
-      requestScope: createProtocolHttpRequestScope(protocolSessionId),
+      requestScope,
     });
     let registeredSessionId: string | undefined;
+    let registeredSession: LegacySession | undefined;
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: (): string => protocolSessionId,
       onsessioninitialized(sessionId): void {
         registeredSessionId = sessionId;
-        sessions.set(sessionId, { server, transport });
+        registeredSession = { server, transport, scopeSessionId: requestScope.sessionId };
+        const evicted = sessions.set(sessionId, registeredSession);
+        for (const [, session] of evicted) void trackSessionClose(session);
       },
       onsessionclosed(sessionId): void {
-        if (sessions.get(sessionId)?.transport === transport) sessions.delete(sessionId);
+        const session = sessions.peek(sessionId);
+        if (session?.transport !== transport) return;
+        sessions.delete(sessionId);
+        void trackSessionClose(session);
       },
     });
 
@@ -261,12 +305,14 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       await server.connect(transport);
       const result = await transport.handleRequest(request);
       if (registeredSessionId === undefined) await server.close();
+      else await Promise.allSettled([...pendingSessionCloses]);
       return result;
     } catch (error: unknown) {
-      if (registeredSessionId !== undefined && sessions.get(registeredSessionId)?.transport === transport) {
+      if (registeredSessionId !== undefined && registeredSession !== undefined && sessions.peek(registeredSessionId) === registeredSession) {
         sessions.delete(registeredSessionId);
       }
-      await server.close().catch(() => undefined);
+      if (registeredSession !== undefined) await trackSessionClose(registeredSession);
+      else await server.close().catch(() => undefined);
       throw error;
     }
   };
@@ -286,6 +332,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
         return transformModernJsonResponse(protocol, requestMessage, result);
       }
 
+      await pruneLegacySessions();
       const sessionId = request.headers.get('mcp-session-id')?.trim();
       if (sessionId === undefined || sessionId.length === 0) {
         return createLegacySession(request);
@@ -301,10 +348,11 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
+      clearInterval(sweepTimer);
       await modernHandler.close();
-      const activeSessions = [...sessions.entries()];
-      sessions.clear();
-      await Promise.allSettled(activeSessions.map(([, session]) => session.server.close()));
+      const activeSessions = sessions.drain();
+      await Promise.allSettled(activeSessions.map(([, session]) => trackSessionClose(session)));
+      await Promise.allSettled([...pendingSessionCloses]);
     },
   };
 }

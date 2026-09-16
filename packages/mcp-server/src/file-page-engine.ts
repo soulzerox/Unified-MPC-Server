@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { err, ok, type Result } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
 import type { McpApplicationServices } from './tools/tool-types.js';
+import { BoundedRetentionMap } from './bounded-retention-map.js';
 
 export interface FilePageRequest {
   readonly workspaceId?: string;
@@ -34,14 +35,29 @@ interface Continuation {
 const DEFAULT_PAGE_SIZE = 200;
 const MAX_PAGE_SIZE = 5_000;
 const MAX_RESPONSE_TARGET_BYTES = 8 * 1024 * 1024;
+const DEFAULT_CONTINUATION_TTL_MS = 10 * 60_000;
+const DEFAULT_MAX_CONTINUATIONS = 128;
+
+export interface FilePageRetentionOptions {
+  readonly continuationTtlMs?: number;
+  readonly maxContinuations?: number;
+  readonly now?: () => number;
+}
 
 export class FilePageEngine {
-  private readonly continuations = new Map<string, Continuation>();
+  private readonly continuations: BoundedRetentionMap<string, Continuation>;
 
   public constructor(
     private readonly services: McpApplicationServices,
     private readonly actor: FileActor,
-  ) {}
+    retention: FilePageRetentionOptions = {},
+  ) {
+    this.continuations = new BoundedRetentionMap({
+      ttlMs: retention.continuationTtlMs ?? DEFAULT_CONTINUATION_TTL_MS,
+      maxEntries: retention.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS,
+      ...(retention.now === undefined ? {} : { now: retention.now }),
+    });
+  }
 
   public async readPage(request: FilePageRequest): Promise<Result<FilePageResult>> {
     const validation = validateRequest(request);
@@ -56,9 +72,8 @@ export class FilePageEngine {
   }
 
   public async continue(token: string, pageSize?: number): Promise<Result<FilePageResult>> {
-    const continuation = this.continuations.get(token);
+    const continuation = this.continuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'File continuation token is invalid or expired', recoverable: false });
-    this.continuations.delete(token);
     const next = pageSize === undefined ? continuation.pageSize : pageSize;
     if (!Number.isInteger(next) || next < 1 || next > MAX_PAGE_SIZE) return err({ code: 'INVALID_INPUT', message: 'File pageSize is invalid', recoverable: false });
     return this.readAt({ ...continuation, pageSize: next });

@@ -341,6 +341,62 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
+  it('evicts oldest legacy sessions and expires idle sessions', async () => {
+    let now = 0;
+    const retentionHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+      },
+      actor: { clientId: 'retention-http-test', clientName: 'retention-http-test' },
+      maxLegacySessions: 1,
+      legacySessionTtlMs: 100,
+      legacySessionNow: () => now,
+    });
+    const firstClient = new Client({ name: 'retention-first-client', version: '0.1.0' });
+    const firstTransport = new StreamableHTTPClientTransport(retentionHandle.endpoint);
+    const secondClient = new Client({ name: 'retention-second-client', version: '0.1.0' });
+    const secondTransport = new StreamableHTTPClientTransport(retentionHandle.endpoint);
+
+    try {
+      await firstClient.connect(firstTransport);
+      const firstSessionId = firstTransport.sessionId;
+      expect(firstSessionId).toEqual(expect.any(String));
+
+      await secondClient.connect(secondTransport);
+      const secondSessionId = secondTransport.sessionId;
+      expect(secondSessionId).toEqual(expect.any(String));
+
+      const evicted = await fetch(retentionHandle.endpoint, {
+        method: 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          'mcp-session-id': firstSessionId!,
+          ...(firstTransport.protocolVersion === undefined ? {} : { 'mcp-protocol-version': firstTransport.protocolVersion }),
+        },
+      });
+      expect(evicted.status).toBe(404);
+
+      now = 101;
+      const expired = await fetch(retentionHandle.endpoint, {
+        method: 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          'mcp-session-id': secondSessionId!,
+          ...(secondTransport.protocolVersion === undefined ? {} : { 'mcp-protocol-version': secondTransport.protocolVersion }),
+        },
+      });
+      expect(expired.status).toBe(404);
+    } finally {
+      await firstClient.close().catch(() => undefined);
+      await secondClient.close().catch(() => undefined);
+      await retentionHandle.close();
+    }
+  });
+
   it('releases an aborted standalone SSE stream so the same session can reconnect', async () => {
     const client = new Client({ name: 'sse-disconnect-client', version: '0.1.0' });
     const transport = new StreamableHTTPClientTransport(handle.endpoint);

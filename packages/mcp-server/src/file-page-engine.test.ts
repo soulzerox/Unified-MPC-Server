@@ -54,6 +54,25 @@ describe('file page engine', () => {
     });
   });
 
+  it('expires and caps abandoned continuation tokens', async () => {
+    let now = 0;
+    const engine = new FilePageEngine(services(), actor, {
+      continuationTtlMs: 100,
+      maxContinuations: 1,
+      now: (): number => now,
+    });
+
+    const first = await engine.readPage({ workspaceId: 'workspace-1', path: 'src/one.ts', pageSize: 1 });
+    const second = await engine.readPage({ workspaceId: 'workspace-1', path: 'src/two.ts', pageSize: 1 });
+    expect(first.ok && first.value.continuationToken).toEqual(expect.any(String));
+    expect(second.ok && second.value.continuationToken).toEqual(expect.any(String));
+    if (!first.ok || !second.ok || first.value.continuationToken === undefined || second.value.continuationToken === undefined) return;
+
+    await expect(engine.continue(first.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    now = 101;
+    await expect(engine.continue(second.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
   it('rejects an unknown continuation token without changing the source read contract', async () => {
     const result = await new FilePageEngine(services(), actor).continue('missing-token');
 

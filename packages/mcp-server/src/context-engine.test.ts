@@ -137,6 +137,32 @@ describe('context engine', () => {
     expect(many.value.failedFiles).toBe(0);
   });
 
+  it('expires and caps abandoned context and full-scan continuation tokens', async () => {
+    let now = 0;
+    const engine = new ContextEngine(services(), actor, undefined, {
+      continuationTtlMs: 100,
+      maxContinuations: 1,
+      now: (): number => now,
+    });
+
+    const first = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
+    const second = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
+    expect(first.ok && first.value.continuationToken).toEqual(expect.any(String));
+    expect(second.ok && second.value.continuationToken).toEqual(expect.any(String));
+    if (!first.ok || !second.ok || first.value.continuationToken === undefined || second.value.continuationToken === undefined) return;
+
+    await expect(engine.continue(first.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    now = 101;
+    await expect(engine.continue(second.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+
+    now = 200;
+    const scan = await engine.fullScan({ workspaceId: 'workspace-1', pageSize: 1 });
+    expect(scan.ok && scan.value.continuationToken).toEqual(expect.any(String));
+    if (!scan.ok || scan.value.continuationToken === undefined) return;
+    now = 301;
+    await expect(engine.continueFullScan(scan.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
   it('uses the context ledger to avoid resending unchanged files', async () => {
     const engine = new ContextEngine(services(), actor);
     const first = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });

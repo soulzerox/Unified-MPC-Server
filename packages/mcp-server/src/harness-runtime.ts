@@ -60,6 +60,13 @@ export class HarnessActivationLedger {
   public invalidate(context: HarnessActivationContext): void {
     this.states.delete(key(context));
   }
+
+  public invalidateSession(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const stateKey of this.states.keys()) {
+      if (stateKey.startsWith(prefix)) this.states.delete(stateKey);
+    }
+  }
 }
 
 export function hashHarnessText(content: string): string {

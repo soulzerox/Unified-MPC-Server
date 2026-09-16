@@ -4,6 +4,7 @@ import type { FileActor, GitService, SearchService } from '@unified-mpc/applicat
 import { classifyContextPath } from '@unified-mpc/search';
 import type { McpApplicationServices } from './tools/tool-types.js';
 import { ContextEconomyRuntime, type ContextEconomyStats, type ContextDeliveryKind } from './context-economy.js';
+import { BoundedRetentionMap } from './bounded-retention-map.js';
 
 export type ContextIntent = 'auto' | 'debug' | 'implement' | 'review' | 'trace' | 'explore';
 export type ContextMode = 'optimized' | 'full' | 'exhaustive';
@@ -164,16 +165,33 @@ const DEFAULT_RESPONSE_TARGET_BYTES = 256 * 1024;
 const MAX_RESPONSE_TARGET_BYTES = 8 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE: Record<ContextMode, number> = { optimized: 12, full: 50, exhaustive: 200 };
 const SEARCH_LIMIT: Record<ContextMode, number> = { optimized: 100, full: 300, exhaustive: 500 };
+const DEFAULT_CONTINUATION_TTL_MS = 10 * 60_000;
+const DEFAULT_MAX_CONTINUATIONS = 64;
+
+export interface ContextEngineRetentionOptions {
+  readonly continuationTtlMs?: number;
+  readonly maxContinuations?: number;
+  readonly now?: () => number;
+}
 
 export class ContextEngine {
-  private readonly continuations = new Map<string, Continuation>();
-  private readonly scanContinuations = new Map<string, ScanContinuation>();
+  private readonly continuations: BoundedRetentionMap<string, Continuation>;
+  private readonly scanContinuations: BoundedRetentionMap<string, ScanContinuation>;
 
   public constructor(
     private readonly services: McpApplicationServices,
     private readonly actor: FileActor,
     private readonly economy: ContextEconomyRuntime = new ContextEconomyRuntime(),
-  ) {}
+    retention: ContextEngineRetentionOptions = {},
+  ) {
+    const options = {
+      ttlMs: retention.continuationTtlMs ?? DEFAULT_CONTINUATION_TTL_MS,
+      maxEntries: retention.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS,
+      ...(retention.now === undefined ? {} : { now: retention.now }),
+    };
+    this.continuations = new BoundedRetentionMap(options);
+    this.scanContinuations = new BoundedRetentionMap(options);
+  }
 
   public async collect(request: WorkspaceContextRequest): Promise<Result<WorkspaceContextResult>> {
     this.economy.beginRequest();
@@ -203,9 +221,8 @@ export class ContextEngine {
   }
 
   public async continue(token: string, pageSize?: number): Promise<Result<WorkspaceContextResult>> {
-    const continuation = this.continuations.get(token);
+    const continuation = this.continuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Continuation token is invalid or expired', recoverable: false });
-    this.continuations.delete(token);
     return this.materialize(continuation.candidates, {
       ...continuation.request,
       ...(pageSize === undefined ? {} : { pageSize }),
@@ -307,9 +324,8 @@ export class ContextEngine {
   }
 
   public async continueFullScan(token: string, pageSize?: number): Promise<Result<WorkspaceFullScanResult>> {
-    const continuation = this.scanContinuations.get(token);
+    const continuation = this.scanContinuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Scan continuation token is invalid or expired', recoverable: false });
-    this.scanContinuations.delete(token);
     const size = normalizePageSize(pageSize ?? 200);
     const files = continuation.files.slice(0, size);
     const remaining = continuation.files.slice(files.length);

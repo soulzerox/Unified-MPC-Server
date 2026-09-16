@@ -19,14 +19,46 @@ export interface McpToolResponse {
   readonly structuredContent?: Readonly<Record<string, unknown>>;
 }
 
-export function mapResult<T>(result: Result<T>): McpToolResponse {
+export interface ToolResultTruncationEvent {
+  readonly toolName?: string;
+  readonly originalBytes: number;
+  readonly maxBytes: number;
+}
+
+export interface MapResultOptions {
+  readonly maxBytes?: number;
+  readonly toolName?: string;
+  readonly onTruncated?: (event: ToolResultTruncationEvent) => void;
+}
+
+export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}): McpToolResponse {
   if (!result.ok) return mapError(result.error);
-  const structuredContent = toStructuredContent(result.value);
   const image = extractImageContent(result.value);
+  const text = toText(result.value);
+  const maxBytes = normalizeMaxBytes(options.maxBytes);
+  if (image === undefined && maxBytes !== undefined) {
+    const originalBytes = Buffer.byteLength(text, 'utf8');
+    if (originalBytes > maxBytes) {
+      const event = {
+        ...(options.toolName === undefined ? {} : { toolName: options.toolName }),
+        originalBytes,
+        maxBytes,
+      };
+      try { options.onTruncated?.(event); } catch { /* diagnostics must not affect the response */ }
+      const envelope = {
+        truncated: true,
+        reason: 'tool_result_exceeds_output_budget',
+        ...(options.toolName === undefined ? {} : { toolName: options.toolName }),
+        originalBytes,
+        maxBytes,
+        hint: 'Retry with a narrower query, pagination, or a smaller response target.',
+      };
+      return { content: [{ type: 'text', text: JSON.stringify(envelope) }] };
+    }
+  }
+  const structuredContent = toStructuredContent(result.value);
   return {
-    content: image === undefined
-      ? [{ type: 'text', text: toText(result.value) }]
-      : [image, { type: 'text', text: toText(result.value) }],
+    content: image === undefined ? [{ type: 'text', text }] : [image, { type: 'text', text }],
     ...(structuredContent === undefined ? {} : { structuredContent }),
   };
 }
@@ -45,6 +77,10 @@ export function mapError(error: AppError): McpToolResponse {
       },
     },
   };
+}
+
+function normalizeMaxBytes(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
 function toText(value: unknown): string {

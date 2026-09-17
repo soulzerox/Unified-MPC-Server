@@ -91,6 +91,7 @@ export function prohibitedAgentGitInvocationReason(args: readonly string[]): str
   if (first === 'gc') return 'git gc can permanently prune otherwise recoverable objects';
   if (first === 'mv' && hasGitOption(lower, ['--force', '-f'])) return 'git mv --force can replace an existing path';
   if (first === 'push' && isDestructivePush(lower)) return 'git push invocation deletes or force-rewrites remote refs';
+  if (first === 'push') return prohibitedDefaultBranchPushReason(rest);
   return undefined;
 }
 
@@ -101,6 +102,31 @@ function hasGitOption(args: readonly string[], options: readonly string[]): bool
 function isDestructivePush(args: readonly string[]): boolean {
   if (hasGitOption(args, ['--force', '-f', '--force-with-lease', '--force-if-includes', '--delete', '--mirror', '--prune'])) return true;
   return args.some((arg) => arg.startsWith(':') || arg.startsWith('+'));
+}
+
+function prohibitedDefaultBranchPushReason(args: readonly string[]): string | undefined {
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (hasGitOption(lower, ['--all'])) {
+    return 'AI-issued git push --all can update the default branch; push one explicit feature or issue branch and use a reviewed pull request instead';
+  }
+
+  const positional = args.filter((arg) => !arg.startsWith('-'));
+  if (positional.length < 2) {
+    return 'AI-issued git push must name an explicit remote and non-default destination branch; implicit push can bypass the pull-request review workflow';
+  }
+
+  for (const refspec of positional.slice(1)) {
+    const separator = refspec.lastIndexOf(':');
+    const destinationRaw = separator >= 0 ? refspec.slice(separator + 1) : refspec;
+    const destination = destinationRaw.replace(/^refs\/heads\//i, '').toLowerCase();
+    if (destination === '' || (separator < 0 && destination === 'head')) {
+      return 'AI-issued git push must use an explicit non-default destination branch so the pull-request review workflow cannot be bypassed';
+    }
+    if (destination === 'main' || destination === 'master') {
+      return `Direct AI push to ${destination} is blocked; push a feature or issue branch and merge it only after pull-request review`;
+    }
+  }
+  return undefined;
 }
 
 function containsBroadPathspecMagic(args: readonly string[]): boolean {

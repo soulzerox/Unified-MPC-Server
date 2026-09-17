@@ -37,6 +37,13 @@ describe('prohibitedAgentGitInvocationReason', () => {
     [['push', '--prune', 'origin'], 'prune push'],
     [['push', 'origin', ':old'], 'delete refspec'],
     [['push', 'origin', '+main:main'], 'force refspec'],
+    [['push'], 'implicit push'],
+    [['push', 'origin'], 'implicit remote destination'],
+    [['push', 'origin', 'main'], 'direct main push'],
+    [['push', 'origin', 'master'], 'direct master push'],
+    [['push', 'origin', 'HEAD:main'], 'explicit main destination'],
+    [['push', 'origin', 'HEAD:refs/heads/main'], 'fully-qualified main destination'],
+    [['push', '--all', 'origin'], 'all branches push'],
   ] as const)('blocks %s (%s)', (args) => {
     expect(prohibitedAgentGitInvocationReason(args)).toBeTypeOf('string');
   });
@@ -58,6 +65,9 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['restore', '--staged', 'src/file.ts'],
     ['remote', '-v'],
     ['stash', 'list'],
+    ['push', '-u', 'origin', 'feature/review-gate'],
+    ['push', 'origin', 'HEAD:feature/review-gate'],
+    ['push', 'origin', 'refs/heads/feature/review-gate:refs/heads/feature/review-gate'],
   ] as const)('keeps reviewed non-destructive form %s available', (...args) => {
     expect(prohibitedAgentGitInvocationReason(args)).toBeUndefined();
   });

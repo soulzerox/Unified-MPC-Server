@@ -24,6 +24,16 @@ describe('MCP Ponytail instructions', () => {
     expect(instructions).toContain('without waiting for the user to name');
   });
 
+  it('requires the branch, PR, review, CI, then merge workflow even without GitHub protection', () => {
+    const instructions = buildMcpInstructions('off');
+    expect(instructions).toContain('never push commits directly to the repository default branch');
+    expect(instructions).toContain('open or update a pull request');
+    expect(instructions).toContain('inspect the final PR diff and CI');
+    expect(instructions).toContain('perform a code review');
+    expect(instructions).toContain('only then merge');
+    expect(instructions).toContain('branch protection or rulesets are absent');
+  });
+
   it.each(['lite', 'full', 'ultra'] as const)('adds a bounded exact-load directive for %s', (mode) => {
     const instructions = buildMcpInstructions(mode);
     expect(instructions).toContain(MCP_OUTCOME_DRIVEN_INSTRUCTIONS);

@@ -167,12 +167,13 @@ class LocalContextServer:
         except Exception as e:
             return f"Error recalling memories: {str(e)}"
 
-    def forget(self, memory_id: str) -> str:
+    def forget(self, memory_id: str, category: Optional[str] = None) -> str:
         """Delete an obsolete memory entry by its ID."""
         if not memory_id.strip():
             return "Error: Memory ID cannot be empty."
 
-        deleted = self.storage.delete_memory(memory_id.strip())
+        scoped_category = category.strip() if category is not None and category.strip() else None
+        deleted = self.storage.delete_memory(memory_id.strip(), category=scoped_category)
         if deleted:
             return f"🗑️ Deleted memory ID: {memory_id}"
         return f"Warning: Memory ID {memory_id} not found."
@@ -553,9 +554,9 @@ def code_blast_radius(symbol_name: str, workspace: str = "", max_depth: int = 2)
     return get_server().code_blast_radius(symbol_name=symbol_name, workspace=workspace, max_depth=max_depth)
 
 @mcp.tool()
-def forget(memory_id: str) -> str:
-    """Delete an obsolete memory entry by its ID."""
-    return get_server().forget(memory_id)
+def forget(memory_id: str, category: str = None) -> str:
+    """Delete an obsolete memory entry by ID, optionally requiring its category."""
+    return get_server().forget(memory_id, category=category)
 
 @mcp.tool()
 def code_index(workspace_path: str = ".", force: bool = False, background: bool = False, workspace: str = "") -> str:

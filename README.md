@@ -99,7 +99,7 @@ flowchart TD
 | **`index_status`** | `job_id` (str) | Poll ผล background `code_index` (running/done/error) | 🔵 **เรียก poll หลังสั่ง `code_index(background=True)`** |
 | **`remember`** | `content` (str)<br>`category` (str, default="general") | บันทึกความจำถาวรหรือกฎระยะยาวของโปรเจกต์ | 🟢 **บันทึกกฎถาวร เช่น Architecture Decision Records (ADR)** |
 | **`recall`** | `query` (str)<br>`category` (str, opt)<br>`limit` (int, default=5) | ค้นหาความจำถาวรด้วย Semantic Vector Search (turn ที่ไม่มี tag หมวดหมู่จะถูกนับเป็น `general` และผ่านทุก category filter) | 🟡 **ค้นหาข้อตกลงในอดีตเกี่ยวกับ Preference หรือ Rules** |
-| **`forget`** | `memory_id` (str) | ลบความจำถาวรที่ไม่ต้องการ | ⚪ **ใช้เฉพาะเมื่อผู้ใช้สั่งให้ลบอย่างชัดเจนเท่านั้น** |
+| **`forget`** | `memory_id` (str), `category` (str, optional) | ลบความจำถาวรที่ไม่ต้องการ; เมื่อส่ง `category` จะลบได้เฉพาะ memory ในหมวดนั้น | ⚪ **ใช้เฉพาะเมื่อผู้ใช้สั่งให้ลบอย่างชัดเจนเท่านั้น** |
 
 ---
 

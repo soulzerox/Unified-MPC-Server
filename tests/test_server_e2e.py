@@ -50,6 +50,16 @@ def test_memory_tools_lifecycle(test_server):
     after_forget = server.recall("คีย์ลัด vim")
     assert mem_id not in after_forget
 
+
+def test_forget_does_not_cross_workspace_category(test_server):
+    server, _ = test_server
+    server.storage.save_memory("mem_scoped", "workspace memory", "workspace:one", [1.0] + [0.0] * 767)
+
+    wrong_scope = server.forget("mem_scoped", category="workspace:two")
+
+    assert "not found" in wrong_scope
+    assert server.storage.get_memory("mem_scoped") is not None
+
 def test_code_rag_tools_lifecycle(test_server):
     server, ws_dir = test_server
 

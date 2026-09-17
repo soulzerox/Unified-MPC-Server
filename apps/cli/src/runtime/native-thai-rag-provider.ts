@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import {
@@ -73,6 +73,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       this.workspaceRoots.set(workspace.id, realRootPath);
       this.workspaceRootIds.set(realRootPath, workspace.id);
       if (workspace.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(workspace.rootPath), workspace.id);
+      const sourceAlias = path.join(sourcesRoot, workspace.id);
+      await rm(sourceAlias, { force: true, recursive: true });
+      await symlink(realRootPath, sourceAlias, 'dir');
     }
 
     this.launchConfig = {

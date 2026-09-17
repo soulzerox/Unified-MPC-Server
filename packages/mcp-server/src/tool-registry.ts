@@ -885,6 +885,8 @@ export class ToolRegistry {
       providerArgs = { ...args, category: scopedCategory };
     } else if (tool === 'recall') {
       providerArgs = { ...args, category: scopedCategory };
+    } else if (tool === 'forget') {
+      providerArgs = { ...args, category: scopedCategory };
     } else if (tool === 'workspace_memory_record') {
       const name = typeof args.name === 'string' ? args.name : 'workspace-note';
       const observations = Array.isArray(args.observations)

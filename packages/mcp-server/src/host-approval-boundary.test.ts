@@ -95,6 +95,31 @@ describe('mandatory independent host approval', () => {
     ]);
   });
 
+  it('scopes native Thai-RAG forget to the active workspace category', async () => {
+    const nativeCalls: Array<{ tool: string; arguments: Readonly<Record<string, unknown>> }> = [];
+    const services = servicesWithCalls([]);
+    services.thaiRag = {
+      health: async (): Promise<ReturnType<typeof ok>> => ok({ providerId: 'thai-rag', state: 'ready', embeddingIndexGeneration: 1 }),
+      call: async (tool, args): Promise<ReturnType<typeof ok>> => {
+        nativeCalls.push({ tool, arguments: args });
+        return ok({ result: 'deleted' });
+      },
+    };
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: activeScope,
+      profileProvider: balancedProfile,
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+    });
+
+    const result = await registry.invoke('rag_forget', { workspaceId: 'workspace-a', memoryId: 'memory-1', userConfirmed: true });
+
+    expect(result.isError).not.toBe(true);
+    expect(nativeCalls).toEqual([{
+      tool: 'forget',
+      arguments: { memory_id: 'memory-1', category: 'workspace:workspace-a' },
+    }]);
+  });
+
   it('allows an exact parent-policy read-only child MCP call without native host approval', async () => {
     const calls: string[] = [];
     const descriptorFingerprint = 'a'.repeat(64);

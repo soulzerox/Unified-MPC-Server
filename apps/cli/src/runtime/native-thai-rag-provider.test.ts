@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -87,6 +87,39 @@ describe('NativeThaiRagProviderDriver', () => {
       workspace: workspaceId,
       background: false,
     });
+    await driver.stop();
+  });
+
+  it('resolves pre-edit context through the UUID source alias', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const sourceFile = path.join(workspaceRoot, 'src', 'example.py');
+    await mkdir(path.dirname(sourceFile), { recursive: true });
+    await writeFile(sourceFile, 'def example():\n    return 1\n', 'utf8');
+    const sourcesRoot = path.join(dataRoot, 'thai-rag', 'sources');
+    const realSourceFile = await realpath(sourceFile);
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'pre_edit_context') {
+            const requested = typeof args.file_path === 'string' ? args.file_path : '';
+            const resolved = await realpath(path.join(sourcesRoot, requested)).catch(() => null);
+            return success(resolved === realSourceFile ? 'context-found' : 'code_context: none');
+          }
+          return success(tool === 'code_index' ? 'indexed' : 'ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    expect((await driver.call('code_index', { workspace_path: workspaceRoot })).ok).toBe(true);
+    const preEdit = await driver.call('pre_edit_context', { workspace: workspaceId, file_path: 'src/example.py' });
+
+    expect(preEdit).toMatchObject({ ok: true, value: { structuredContent: { result: 'context-found' } } });
+    expect(await realpath(path.join(sourcesRoot, workspaceId))).toBe(await realpath(workspaceRoot));
     await driver.stop();
   });
 

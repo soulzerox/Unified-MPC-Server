@@ -258,3 +258,37 @@ def test_code_search_absolute_path_filter():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
+def test_index_workspace_uses_explicit_namespace_after_realpath_resolution(temp_env):
+    """Explicit namespaces survive symlink resolution and same-basename roots."""
+    retriever, storage = temp_env
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        first_root = temp_dir / "first" / "repo"
+        second_root = temp_dir / "second" / "repo"
+        first_root.mkdir(parents=True)
+        second_root.mkdir(parents=True)
+        (first_root / "module.py").write_text("def first_workspace_symbol():\n    return 1\n", encoding="utf-8")
+        (second_root / "module.py").write_text("def second_workspace_symbol():\n    return 2\n", encoding="utf-8")
+        first_alias = temp_dir / "first-source"
+        first_alias.symlink_to(first_root, target_is_directory=True)
+
+        first_namespace = "11111111-1111-4111-8111-111111111111"
+        second_namespace = "22222222-2222-4222-8222-222222222222"
+        retriever.index_workspace(str(first_alias), workspace=first_namespace)
+        retriever.index_workspace(str(second_root), workspace=second_namespace)
+
+        rows = storage.sqlite_conn.cursor().execute(
+            "SELECT file_path FROM parent_documents WHERE file_path LIKE '%/module.py'"
+        ).fetchall()
+        paths = {row[0] for row in rows}
+        assert f"{first_namespace}/module.py" in paths
+        assert f"{second_namespace}/module.py" in paths
+        assert not any(path.startswith("repo/") for path in paths)
+
+        first_results = retriever.search("workspace_symbol", path_filter=first_namespace)
+        second_results = retriever.search("workspace_symbol", path_filter=second_namespace)
+        assert all(result["file_path"].startswith(f"{first_namespace}/") for result in first_results)
+        assert all(result["file_path"].startswith(f"{second_namespace}/") for result in second_results)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

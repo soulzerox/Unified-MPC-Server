@@ -93,6 +93,19 @@ def test_code_index_force_reindex(test_server):
     assert "Skipped (unchanged): `0 files`" in res3
 
 
+def test_code_index_forwards_explicit_workspace_namespace(test_server):
+    server, ws_dir = test_server
+    namespace = "11111111-1111-4111-8111-111111111111"
+
+    result = server.code_index(str(ws_dir), workspace=namespace)
+
+    assert "Indexed: `1 files`" in result
+    rows = server.storage.sqlite_conn.cursor().execute(
+        "SELECT file_path FROM parent_documents"
+    ).fetchall()
+    assert f"{namespace}/auth.py" in {row[0] for row in rows}
+
+
 def test_remember_turn_and_pre_edit_context_e2e(test_server):
     server, ws_dir = test_server
 
@@ -153,4 +166,3 @@ def test_index_status_unknown_job(test_server):
     server, _ = test_server
     res = server.index_status("idx_doesnotexist")
     assert "unknown" in res.lower() or "Warning" in res
-

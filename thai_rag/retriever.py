@@ -165,11 +165,13 @@ class HybridRetriever:
         workspace_path: str = ".",
         force: bool = False,
         progress_reporter: Optional[BaseProgressReporter] = None,
+        workspace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Traverse directory, check SHA256 hashes, and incrementally index code files."""
         root = Path(workspace_path).resolve()
         if not root.is_dir():
             raise ValueError(f"Workspace path {workspace_path} is not a directory.")
+        workspace_name = (workspace or "").strip() or root.name
 
         start_time = time.time()
         indexed_count = 0
@@ -222,11 +224,10 @@ class HybridRetriever:
         if progress_reporter:
             progress_reporter.notify_start(total_files, str(root))
 
-        ws_name = root.name
         self.embedder._fallback_count = 0
         for idx, full_path in enumerate(target_files, 1):
             rel_path = str(full_path.relative_to(root))
-            indexed_path = f"{ws_name}/{rel_path}"
+            indexed_path = f"{workspace_name}/{rel_path}"
 
             try:
                 stat = full_path.stat()
@@ -257,7 +258,7 @@ class HybridRetriever:
                         progress_reporter.notify_step(indexed_path, idx, total_files, skipped=True, chunks=0)
                     continue
 
-                chunks = self.index_file(indexed_path, content, workspace=ws_name)
+                chunks = self.index_file(indexed_path, content, workspace=workspace_name)
                 self.storage.set_file_hash(indexed_path, mtime, sha256)
                 indexed_count += 1
                 if progress_reporter:

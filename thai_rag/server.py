@@ -179,7 +179,13 @@ class LocalContextServer:
 
     # --- Domain B: Code RAG ---
 
-    def code_index(self, workspace_path: str = ".", force: bool = False, background: bool = False) -> str:
+    def code_index(
+        self,
+        workspace_path: str = ".",
+        force: bool = False,
+        background: bool = False,
+        workspace: Optional[str] = None,
+    ) -> str:
         """Index all source code files in a workspace with SHA256 incremental caching.
 
         background=True returns a job_id immediately; poll with index_status().
@@ -197,7 +203,7 @@ class LocalContextServer:
                     hud = ProgressReporter()
                     bridge = JobProgressReporter(job, hud)
                     res = self.retriever.index_workspace(
-                        workspace_path, force=force, progress_reporter=bridge
+                        workspace_path, force=force, progress_reporter=bridge, workspace=workspace
                     )
                     with _INDEX_JOBS_LOCK:
                         job["indexed_files"] = res.get("indexed", 0)
@@ -227,7 +233,9 @@ class LocalContextServer:
 
         try:
             reporter = ProgressReporter()
-            res = self.retriever.index_workspace(workspace_path, force=force, progress_reporter=reporter)
+            res = self.retriever.index_workspace(
+                workspace_path, force=force, progress_reporter=reporter, workspace=workspace
+            )
             out = (
                 f"📁 **Code Indexing Completed:**\n"
                 f"- Indexed: `{res['indexed']} files`\n"
@@ -550,12 +558,12 @@ def forget(memory_id: str) -> str:
     return get_server().forget(memory_id)
 
 @mcp.tool()
-def code_index(workspace_path: str = ".", force: bool = False, background: bool = False) -> str:
+def code_index(workspace_path: str = ".", force: bool = False, background: bool = False, workspace: str = "") -> str:
     """Index all source code files in a workspace with SHA256 incremental caching.
 
     background=True returns a job_id immediately; poll with index_status().
     """
-    return get_server().code_index(workspace_path, force=force, background=background)
+    return get_server().code_index(workspace_path, force=force, background=background, workspace=workspace or None)
 
 
 @mcp.tool()

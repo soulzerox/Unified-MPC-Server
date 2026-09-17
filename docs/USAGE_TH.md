@@ -162,8 +162,8 @@ Unified-MPC-Server ใช้ Runtime Policy ที่ผู้ใช้แก้
 | ลำดับ | Policy ID | Resource ID | ประเภท | มาตรการบังคับ | บทบาทหน้าที่ |
 |---|---|---|---|---|---|
 | **P1** | `session-start:ask-matt` | **`ask-matt`** | Skill | บังคับทุก Session | โหลดคำแนะนำเริ่มงานก่อนวางแผนหรือลงมือทำ |
-| **P2** | `child:memory` | **`memory`** | MCP Server | บังคับ (Realtime) | Working Memory และตรวจ required tools ตาม policy |
-| **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | MCP Server | บังคับทุก Session | Local RAG และ `pre_edit_context` เมื่อเกี่ยวข้องกับ repository |
+| **P2** | `memory:workspace-selective` | **`native-memory`** | Capability | ตามความจำเป็น | ใช้ workspace-scoped memory เฉพาะสำหรับ decision, constraint, preference และ explicit recall โดยไม่บันทึกทุก turn |
+| **P3** | `code:pre-edit-context` | **`native-thai-rag`** | Capability | Safety Pre-Check | ใช้ native Thai-RAG สำหรับ retrieval และบังคับ `pre_edit_context` ก่อนแก้ development artifact |
 | **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | ตามความจำเป็น | Safety analyzer เสริมสำหรับ refactor ใหญ่, migration, งาน security-sensitive หรือกรณีที่ blast radius ยังไม่ชัดเจน |
 | **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | MCP Server | ตามความจำเป็น | การคิดวิเคราะห์หลายขั้นสำหรับงานซับซ้อน |
 | **P6** | `optional:context7` | **`context7`** | MCP Server | ตามความจำเป็น | เอกสารและตัวอย่าง API/SDK ที่ตรงเวอร์ชัน |
@@ -232,4 +232,3 @@ pnpm test
 ```
 
 ทุกคำสั่งจะต้องเสร็จสิ้นโดยมีผลลัพธ์ผ่าน 100% (Exit code 0, Zero errors, Zero warnings)
-

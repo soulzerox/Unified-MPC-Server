@@ -81,8 +81,8 @@ The default policy order is:
 | Position | Stable Policy ID | Resource / Server | Role & Execution Directive | Enforcement |
 |---|---|---|---|---|
 | **P1** | `session-start:ask-matt` | **`ask-matt`** | Load session-start engineering guidance before planning or acting on each user task. | **Mandatory (Every Session)** |
-| **P2** | `child:memory` | **`memory`** | **Realtime Working Memory** with policy-declared required child tools such as `search_nodes`, `create_entities`, and `add_observations`. | **Mandatory (Realtime)** |
-| **P3** | `pre-edit:thai-rag` | **native Thai-RAG capability** | Workspace-scoped local RAG, memory, and pre-edit context when repository context is relevant. | **Mandatory (Every Session)** |
+| **P2** | `memory:workspace-selective` | **`native-memory` capability** | Selective workspace-scoped memory for durable decisions, constraints, preferences, and explicit recall; it does not persist every turn. | **Optional (On-Demand)** |
+| **P3** | `code:pre-edit-context` | **`native-thai-rag` capability** | Parent-owned workspace-scoped Thai-RAG retrieval with mandatory pre-edit context before development-artifact mutation. | **Mandatory (Safety Pre-Check)** |
 | **P4** | `code-safety:godkiller` | **`godkiller`** | Optional blast-radius and code-safety analysis for high-risk refactors, migrations, security-sensitive work, or unclear impact. | On-Demand |
 | **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | Revisable step-by-step reasoning for complex tasks. | On-Demand |
 | **P6** | `optional:context7` | **`context7`** | Current version-specific library, framework, SDK, and API documentation. | On-Demand |

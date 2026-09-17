@@ -52,6 +52,7 @@ const commands = [
   ['corepack', ['pnpm', 'version:check']],
   ['corepack', ['pnpm', 'typecheck']],
   ['corepack', ['pnpm', 'lint']],
+  [process.execPath, ['scripts/verify-native-rag-migration.mjs']],
   ['corepack', ['pnpm', 'test']],
   ['corepack', ['pnpm', 'build']],
   [process.execPath, ['scripts/test-config-mutation-lock.mjs']],

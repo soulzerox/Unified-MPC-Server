@@ -26,8 +26,8 @@ jobs:
 
       - name: Prepare portable test fixtures and mock Ollama API
         run: |
-          mkdir -p /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs
-          cat > /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs/transcript.jsonl <<'JSONL'
+          sudo mkdir -p /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs
+          sudo tee /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs/transcript.jsonl >/dev/null <<'JSONL'
           {"type":"USER_INPUT","content":"Please validate the openviking replacement and preserve CPG Code Property Graph behavior for thai-rag-mcp."}
           {"type":"PLANNER_RESPONSE","content":"I will preserve the CPG Code Property Graph path and verify pre_edit_context before editing repository code."}
           {"type":"USER_INPUT","content":"ย้าย cache ไปที่ /mnt/562AEA8C2AEA6887 และห้ามทำให้ storage.py หรือ save_conversation_turn เสียพฤติกรรมเดิม"}
@@ -35,6 +35,7 @@ jobs:
           {"type":"USER_INPUT","content":"ก่อนแก้ไฟล์ให้เรียก pre_edit_context และตรวจ blast radius ของ save_conversation_turn ทุกครั้ง"}
           {"type":"PLANNER_RESPONSE","content":"Acknowledged: pre_edit_context, CPG, storage.py, and the 562AEA8C2AEA6887 migration constraints will be retained."}
           JSONL
+          sudo chmod 644 /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs/transcript.jsonl
 
           cat > /tmp/mock_ollama.py <<'PY'
           import hashlib

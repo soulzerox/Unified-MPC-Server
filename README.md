@@ -21,8 +21,7 @@
    - [OpenCode](#5-opencode)
    - [Claude Desktop](#6-claude-desktop)
 4. [กฎข้อบังคับสำหรับ AI Agent (Rules & AGENTS.md Directives)](#-กฎข้อบังคับสำหรับ-ai-agent-rules--agentsmd-directives)
-   - [กฎสำหรับ `.clinerules` / `.cursorrules` / `.windsurfrules`](#กฎสำหรับ-clinerules---cursorrules---windsurfrules)
-   - [JIT Pre-Edit Protocol (ขั้นตอนบังคับก่อนแก้โค้ด)](#jit-pre-edit-protocol-ขั้นตอนบังคับก่อนแก้โค้ด)
+   - [กฎเหล็กฉบับเต็ม (ไฟล์ `AGENTS.md`)](AGENTS.md)
 5. [การสั่งงานผ่าน CLI (CLI & Background Indexing)](#-การสั่งงานผ่าน-cli-cli--background-indexing)
 6. [การแก้ไขปัญหาและประสิทธิภาพ (Troubleshooting & Tips)](#-การแก้ไขปัญหาและประสิทธิภาพ-troubleshooting--tips)
 
@@ -253,37 +252,17 @@ flowchart TD
 
 ## 📜 กฎข้อบังคับสำหรับ AI Agent (Rules & AGENTS.md Directives)
 
-เพื่อให้ AI Model ใน IDE เรียกใช้เครื่องมือได้อย่างถูกต้อง ไม่ข้ามขั้นตอน และทำงานได้เต็มประสิทธิภาพ **ให้คัดลอกบล็อกข้อความด้านล่างนี้ไปใส่ในไฟล์ Rules ของโปรเจกต์** (เช่น `.clinerules`, `.cursorrules`, `.windsurfrules` หรือ `AGENTS.md`):
+เพื่อให้ AI Model ใน IDE เรียกใช้เครื่องมือได้อย่างถูกต้อง ไม่ข้ามขั้นตอน และทำงานได้เต็มประสิทธิภาพ **กฎเหล็กทั้งหมดถูกเก็บไว้ในไฟล์ [`AGENTS.md`](AGENTS.md) ที่ root ของโปรเจกต์** — โปรดอ่านและปฏิบัติตามไฟล์นี้เสมอ
 
-### กฎสำหรับ `.clinerules` / `.cursorrules` / `.windsurfrules`
+- IDE ที่รองรับ `AGENTS.md` (Cline, Cursor, Codex, Claude Code ฯลฯ) จะอ่านกฎจากไฟล์นี้โดยอัตโนมัติ
+- หาก IDE ของคุณใช้ไฟล์ Rules แยก (`.clinerules`, `.cursorrules`, `.windsurfrules`) ให้คัดลอกเนื้อหาจาก [`AGENTS.md`](AGENTS.md) ไปวางในไฟล์นั้นแทน
 
-```markdown
-# 🛡️ Mandatory Thai RAG Context & CPG Execution Protocol
+### กฎเหล็กสรุปสั้น ๆ (ฉบับเต็มอยู่ที่ [`AGENTS.md`](AGENTS.md))
 
-คุณเชื่อมต่อกับเซิร์ฟเวอร์ MCP ประจำเครื่องชื่อ `thai-rag-mcp` ซึ่งเป็นระบบความจำถาวรและ Code Property Graph (CPG) ประจำเครื่อง คุณต้องปฏิบัติตามกฎเหล็กดังต่อไปนี้อย่างเคร่งครัด:
-
-## 1. JIT Pre-Edit Verification (กฎเหล็กก่อนแก้ไขโค้ด)
-- **ก่อนเริ่มแก้ไขไฟล์ใดๆ ก็ตาม (ห้ามข้ามเด็ดขาด)**:
-  คุณ **ต้อง** เรียกใช้เครื่องมือ `mcp__thai_rag_mcp__pre_edit_context` หรือ `pre_edit_context` โดยระบุ `file_path` (และ `proposed_symbol` หากทราบ) ก่อนเสมอ!
-- เครื่องมือจะส่งคืน:
-  1. ข้อตกลงในอดีต (Past Constraints & Decisions) ที่เกี่ยวข้องกับไฟล์นั้น
-  2. โค้ดขอบเขตเดิม (Enclosing Scope)
-  3. CPG Blast Radius: ฟังก์ชันและไฟล์อื่นๆ ที่จะได้รับผลกระทบจากการแก้สัญลักษณ์นี้
-- หากพบข้อขัดแย้งกับคำสั่งเดิมในอดีต ให้แจ้งเตือนผู้ใช้ก่อนทำการแก้ไข
-
-## 2. Realtime Conversational Memory (การบันทึกความจำตามเวลาจริง)
-- เมื่อผู้ใช้ระบุ: ข้อกำหนดใหม่, การตัดสินใจออกแบบ (Design Decision), หรือคำสั่งห้ามแตะต้องบางส่วน
-  → คุณ **ต้อง** เรียกใช้เครื่องมือ `remember_turn(role='user', content=..., summary=..., tags=...)` ทันทีโดยไม่ต้องถาม
-- ห้ามรอจนจบเซสชัน เพราะข้อมูลจะสูญหายหากมีการรีสตาร์ท IDE
-
-## 3. Retrieval-First Coding (ค้นหาโค้ดอย่างเป็นลำดับขั้น)
-- ก่อนใช้ grep ท่องไฟล์ หรือเปิดอ่านโค้ดทั้งไฟล์ยาวๆ ให้เรียก `code_search` ด้วย Keyword (ภาษาไทยหรืออังกฤษ) เพื่อหาตำแหน่งและบรรทัดที่เกี่ยวข้องก่อน
-- จากนั้นใช้ `code_context` เพื่อดึงเฉพาะบล็อกฟังก์ชันหรือคลาสนั้นมาดู
-- เมื่อต้องการ Refactor หรือเปลี่ยน Signature ของฟังก์ชัน ให้เรียก `code_blast_radius` เพื่อดูผลกระทบ Multi-hop ไปยังฟังก์ชันอื่นๆ
-
-## 4. ห้ามบอกว่า "จำไม่ได้"
-- หากผู้ใช้ถามถึงงานเดิมที่เคยทำ, การตัดสินใจในอดีต, หรือโปรเจกต์เดิม → ต้องเรียก `recall` หรือค้นหาผ่าน `pre_edit_context` ก่อนเสมอ ห้ามเดาเอาเอง
-```
+1. **JIT Pre-Edit Verification** — เรียก `pre_edit_context(file_path, proposed_symbol?)` ก่อนแก้ไขไฟล์ใดๆ เสมอ เพื่อดูข้อตกลงเดิม โค้ดขอบเขต และ CPG Blast Radius
+2. **Realtime Conversational Memory** — เรียก `remember_turn(role, content, summary, tags)` ทันทีเมื่อผู้ใช้ระบุข้อกำหนดใหม่ การตัดสินใจออกแบบ หรือข้อห้าม ห้ามรอจนจบเซสชัน
+3. **Retrieval-First Coding** — ใช้ `code_search` → `code_context` ก่อน grep/อ่านไฟล์ทั้งไฟล์ และเรียก `code_blast_radius` เมื่อต้อง Refactor หรือเปลี่ยน Signature
+4. **ห้ามบอกว่า "จำไม่ได้"** — เมื่อผู้ใช้ถามถึงงานเดิมหรือการตัดสินใจในอดีต ต้องเรียก `recall` หรือ `pre_edit_context` ก่อนตอบ ห้ามเดาเอาเอง
 
 ---
 

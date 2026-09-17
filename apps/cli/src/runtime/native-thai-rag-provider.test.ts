@@ -89,18 +89,46 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     await driver.stop();
   });
+
+  it('fails startup when the worker lacks the explicit workspace namespace contract', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ codeIndexSupportsWorkspace: false }),
+    });
+
+    const started = await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    });
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.message).toContain('explicit workspace namespace contract');
+  });
 });
 
 function clientFactory(options: {
   readonly onConnect?: (config: McpServerLaunchConfig) => void;
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
+  readonly codeIndexSupportsWorkspace?: boolean;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
       options.onConnect?.(config);
       return {
-        async listTools(): Promise<Array<{ name: string; description: string; inputSchema: { type: string } }>> {
-          return tools.map((name) => ({ name, description: name, inputSchema: { type: 'object' } }));
+        async listTools(): Promise<Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>> {
+          return tools.map((name) => ({
+            name,
+            description: name,
+            inputSchema: name === 'code_index' && options.codeIndexSupportsWorkspace !== false
+              ? { type: 'object', properties: { workspace: { type: 'string' } } }
+              : { type: 'object' },
+          }));
         },
         async listResources(): Promise<[]> { return []; },
         async callTool(tool, args): Promise<unknown> {

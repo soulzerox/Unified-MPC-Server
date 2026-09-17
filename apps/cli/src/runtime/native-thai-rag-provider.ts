@@ -91,6 +91,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return err(appError('CONFLICT', `Native Thai-RAG worker is missing required tools: ${missing.join(', ')}`, true));
     }
+    const codeIndexTool = described.value.tools.find((tool) => tool.name === 'code_index');
+    if (codeIndexTool === undefined || !toolAcceptsWorkspaceNamespace(codeIndexTool.inputSchema)) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError('CONFLICT', 'Native Thai-RAG worker code_index does not support the explicit workspace namespace contract', true));
+    }
     this.sessions.pin(SERVER_NAME);
     this.started = true;
     return this.refreshHealth(signal);
@@ -281,4 +286,9 @@ function errorMessage(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toolAcceptsWorkspaceNamespace(inputSchema: unknown): boolean {
+  if (!isRecord(inputSchema) || !isRecord(inputSchema.properties)) return false;
+  return Object.prototype.hasOwnProperty.call(inputSchema.properties, 'workspace');
 }

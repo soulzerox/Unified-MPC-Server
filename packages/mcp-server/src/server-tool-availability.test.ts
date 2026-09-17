@@ -67,6 +67,21 @@ describe('MCP server live tool availability', () => {
       const updated = await client.listTools();
       expect(updated.tools.map((tool) => tool.name)).toContain('read_file');
       expect(updated.tools.map((tool) => tool.name)).not.toContain('codex_run');
+      const prepare = updated.tools.find((tool) => tool.name === 'prepare_code_change');
+      const bootstrap = updated.tools.find((tool) => tool.name === 'workspace_bootstrap');
+      expect(bootstrap).toBeDefined();
+      expect(prepare).toBeDefined();
+      expect(prepare?.inputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: ['workspaceId', 'filePath'],
+        properties: {
+          workspaceId: { type: 'string' },
+          filePath: { type: 'string' },
+          proposedSymbol: { type: 'string' },
+          runGodkillerSafetyCheck: { type: 'boolean' },
+        },
+      });
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);

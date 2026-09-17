@@ -330,10 +330,16 @@ export class ToolRegistry {
   }
 
   private isEffectivelyExposed(name: string): boolean {
+    const systemEligible = this.systemEligibleToolNames.has(name);
+    if (!systemEligible) return false;
+    // Harness preconditions are inseparable from a mutation-capable coding surface.
+    // User/tool projection overrides must never hide the gates while leaving code
+    // mutation tools callable, otherwise the host can deadlock before an edit.
+    if (name === 'workspace_bootstrap' || name === 'prepare_code_change') return true;
     return resolveEffectiveToolAvailability({
       name,
       snapshot: this.currentToolAvailabilitySnapshot(),
-      systemEligible: this.systemEligibleToolNames.has(name),
+      systemEligible,
       defaultEnabled: this.defaultExposedToolNames.has(name),
     }).effectiveExposed;
   }

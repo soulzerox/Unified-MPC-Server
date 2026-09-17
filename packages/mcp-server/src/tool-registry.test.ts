@@ -181,6 +181,20 @@ describe('MCP tool registry', () => {
     expect(registry.listAll().map((tool) => tool.name)).toContain('read_file');
   });
 
+  it('keeps mandatory harness preconditions exposed despite user availability overrides', () => {
+    const registry = new ToolRegistry({}, actor, {
+      toolAvailabilitySnapshotProvider: (): ReturnType<NonNullable<ToolRegistryOptions['toolAvailabilitySnapshotProvider']>> => ({
+        version: 1,
+        generation: 1,
+        overrides: { workspace_bootstrap: 'disabled', prepare_code_change: 'disabled' },
+      }),
+    });
+
+    const exposed = registry.list().map((tool) => tool.name);
+    expect(exposed).toContain('workspace_bootstrap');
+    expect(exposed).toContain('prepare_code_change');
+  });
+
   it('lets an already-started call settle after disable while blocking future calls', async () => {
     let snapshot = { version: 1 as const, generation: 0, overrides: {} as Record<string, 'enabled' | 'disabled'> };
     let releaseRead!: () => void;

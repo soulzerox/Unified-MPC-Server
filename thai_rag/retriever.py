@@ -171,7 +171,13 @@ class HybridRetriever:
         root = Path(workspace_path).resolve()
         if not root.is_dir():
             raise ValueError(f"Workspace path {workspace_path} is not a directory.")
-        workspace_name = (workspace or "").strip() or root.name
+        requested_workspace = (workspace or "").strip()
+        if requested_workspace and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", requested_workspace):
+            raise ValueError("Workspace namespace must be a single identifier without path separators")
+        workspace_name = requested_workspace or root.name
+        if requested_workspace and workspace_name != root.name:
+            # Legacy indexes used root.name, which cannot distinguish same-basename repositories.
+            self.storage.delete_workspace_namespace(root.name)
 
         start_time = time.time()
         indexed_count = 0

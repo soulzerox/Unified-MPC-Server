@@ -292,3 +292,44 @@ def test_index_workspace_uses_explicit_namespace_after_realpath_resolution(temp_
         assert all(result["file_path"].startswith(f"{second_namespace}/") for result in second_results)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_index_workspace_migrates_legacy_namespace(temp_env):
+    retriever, storage = temp_env
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        workspace_root = temp_dir / "legacy-repo"
+        workspace_root.mkdir()
+        source_file = workspace_root / "module.py"
+        source_file.write_text("def legacy_symbol():\n    return 1\n", encoding="utf-8")
+        retriever.index_workspace(str(workspace_root))
+
+        source_file.write_text("def migrated_symbol():\n    return 2\n", encoding="utf-8")
+        namespace = "33333333-3333-4333-8333-333333333333"
+        retriever.index_workspace(str(workspace_root), force=True, workspace=namespace)
+
+        rows = storage.sqlite_conn.cursor().execute(
+            "SELECT file_path FROM parent_documents"
+        ).fetchall()
+        paths = {row[0] for row in rows}
+        assert "legacy-repo/module.py" not in paths
+        assert f"{namespace}/module.py" in paths
+        assert retriever.search("migrated_symbol", path_filter="legacy-repo") == []
+        assert any(result["file_path"] == f"{namespace}/module.py" for result in retriever.search("migrated_symbol", path_filter=namespace))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_index_workspace_rejects_multi_segment_namespace(temp_env):
+    retriever, _ = temp_env
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        workspace_root = temp_dir / "repo"
+        workspace_root.mkdir()
+        (workspace_root / "module.py").write_text("def symbol():\n    return 1\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="single identifier"):
+            retriever.index_workspace(str(workspace_root), workspace="foo/bar")
+        with pytest.raises(ValueError, match="single identifier"):
+            retriever.index_workspace(str(workspace_root), workspace="foo\\bar")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

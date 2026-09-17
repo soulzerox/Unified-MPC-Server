@@ -560,6 +560,20 @@ class StorageManager:
         except Exception:
             pass
 
+    def delete_workspace_namespace(self, workspace: str):
+        """Remove all indexed code records under one logical workspace namespace."""
+        prefix = f"{workspace.rstrip('/')}/%"
+        with self._lock:
+            rows = self.sqlite_conn.execute("""
+                SELECT file_path FROM parent_documents WHERE file_path LIKE ?
+                UNION SELECT file_path FROM file_cache WHERE file_path LIKE ?
+                UNION SELECT file_path FROM code_symbols WHERE file_path LIKE ?
+                UNION SELECT source_file FROM code_edges WHERE source_file LIKE ?
+                UNION SELECT target_file FROM code_edges WHERE target_file LIKE ? AND target_file IS NOT NULL
+            """, (prefix, prefix, prefix, prefix, prefix)).fetchall()
+        for row in {row[0] for row in rows if row[0]}:
+            self.delete_file_data(row)
+
     # --- Code Property Graph (CPG-Lite) CRUD ---
 
     def save_code_graph(
@@ -768,4 +782,3 @@ class StorageManager:
                 self.sqlite_conn.close()
             except Exception:
                 pass
-

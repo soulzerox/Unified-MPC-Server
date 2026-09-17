@@ -17,7 +17,7 @@ import {
 
 const SERVER_NAME = 'thai-rag-native';
 const REQUIRED_TOOLS = new Set([
-  'remember', 'recall', 'remember_turn', 'pre_edit_context', 'code_blast_radius',
+  'remember', 'recall', 'pre_edit_context', 'code_blast_radius',
   'forget', 'code_index', 'index_status', 'code_search', 'code_context',
 ]);
 

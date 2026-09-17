@@ -7,7 +7,7 @@ import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 
 const roots: string[] = [];
 const workspaceId = '11111111-1111-4111-8111-111111111111';
-const tools = ['remember', 'recall', 'remember_turn', 'pre_edit_context', 'code_blast_radius', 'forget', 'code_index', 'index_status', 'code_search', 'code_context'];
+const tools = ['remember', 'recall', 'pre_edit_context', 'code_blast_radius', 'forget', 'code_index', 'index_status', 'code_search', 'code_context'];
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'native-thai-rag-driver-'));
@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 describe('NativeThaiRagProviderDriver', () => {
-  it('launches the worker under the Unified-owned cache and canonical source root', async () => {
+  it('launches without the obsolete remember_turn dependency', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     let connectedConfig: McpServerLaunchConfig | undefined;

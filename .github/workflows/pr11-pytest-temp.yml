@@ -24,42 +24,81 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest chromadb pythainlp requests mcp
 
-      - name: Start mock Ollama API
+      - name: Prepare portable test fixtures and mock Ollama API
         run: |
+          mkdir -p /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs
+          cat > /home/qwerty/.gemini/antigravity/brain/20499698-6d2f-4539-b942-92421d974b99/.system_generated/logs/transcript.jsonl <<'JSONL'
+          {"type":"USER_INPUT","content":"Please validate the openviking replacement and preserve CPG Code Property Graph behavior for thai-rag-mcp."}
+          {"type":"PLANNER_RESPONSE","content":"I will preserve the CPG Code Property Graph path and verify pre_edit_context before editing repository code."}
+          {"type":"USER_INPUT","content":"ย้าย cache ไปที่ /mnt/562AEA8C2AEA6887 และห้ามทำให้ storage.py หรือ save_conversation_turn เสียพฤติกรรมเดิม"}
+          {"type":"PLANNER_RESPONSE","content":"The World_Engine project reference remains important; storage.py and save_conversation_turn must keep working after the migration."}
+          {"type":"USER_INPUT","content":"ก่อนแก้ไฟล์ให้เรียก pre_edit_context และตรวจ blast radius ของ save_conversation_turn ทุกครั้ง"}
+          {"type":"PLANNER_RESPONSE","content":"Acknowledged: pre_edit_context, CPG, storage.py, and the 562AEA8C2AEA6887 migration constraints will be retained."}
+          JSONL
+
           cat > /tmp/mock_ollama.py <<'PY'
+          import hashlib
           import json
+          import math
+          import re
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          DIM = 768
+
+          def embedding(text):
+              text = str(text or '').strip().lower()
+              for prefix in ('search_query:', 'search_document:'):
+                  if text.startswith(prefix):
+                      text = text[len(prefix):].strip()
+              compact = re.sub(r'\s+', ' ', text)
+              terms = re.findall(r'[a-z0-9_./-]+|[\u0e00-\u0e7f]+', compact)
+              no_space = re.sub(r'\s+', '', compact)
+              terms += [no_space[i:i+2] for i in range(max(0, len(no_space) - 1))]
+              terms += [no_space[i:i+3] for i in range(max(0, len(no_space) - 2))]
+              vec = [0.0] * DIM
+              for term in terms:
+                  if not term:
+                      continue
+                  digest = hashlib.sha256(term.encode('utf-8')).digest()
+                  idx = int.from_bytes(digest[:4], 'big') % DIM
+                  vec[idx] += 1.0
+              norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+              return [v / norm for v in vec]
 
           class Handler(BaseHTTPRequestHandler):
               def log_message(self, *args):
                   pass
 
+              def reply(self, payload, status=200):
+                  body = json.dumps(payload).encode()
+                  self.send_response(status)
+                  self.send_header('Content-Type', 'application/json')
+                  self.send_header('Content-Length', str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
               def do_GET(self):
                   if self.path == '/api/tags':
-                      body = json.dumps({'models': []}).encode()
-                      self.send_response(200)
-                      self.send_header('Content-Type', 'application/json')
-                      self.send_header('Content-Length', str(len(body)))
-                      self.end_headers()
-                      self.wfile.write(body)
-                      return
-                  self.send_response(404)
-                  self.end_headers()
+                      self.reply({'models': [{'name': 'mock-embedding'}]})
+                  else:
+                      self.reply({'error': 'not found'}, 404)
 
               def do_POST(self):
+                  length = int(self.headers.get('Content-Length', '0'))
+                  raw = self.rfile.read(length) if length else b'{}'
+                  try:
+                      data = json.loads(raw)
+                  except Exception:
+                      data = {}
                   if self.path == '/api/embeddings':
-                      length = int(self.headers.get('Content-Length', '0'))
-                      if length:
-                          self.rfile.read(length)
-                      body = json.dumps({'embedding': [0.0] * 768}).encode()
-                      self.send_response(200)
-                      self.send_header('Content-Type', 'application/json')
-                      self.send_header('Content-Length', str(len(body)))
-                      self.end_headers()
-                      self.wfile.write(body)
+                      self.reply({'embedding': embedding(data.get('prompt', ''))})
                       return
-                  self.send_response(404)
-                  self.end_headers()
+                  if self.path == '/api/embed':
+                      value = data.get('input', [])
+                      values = value if isinstance(value, list) else [value]
+                      self.reply({'embeddings': [embedding(v) for v in values]})
+                      return
+                  self.reply({'error': 'not found'}, 404)
 
           ThreadingHTTPServer(('127.0.0.1', 11434), Handler).serve_forever()
           PY

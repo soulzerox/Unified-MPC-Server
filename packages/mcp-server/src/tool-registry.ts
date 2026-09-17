@@ -40,7 +40,6 @@ import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
 import { TurnPersistenceLedger, type RecordTurnInput, type TurnPersistenceMode, type TurnPersistenceRole } from './turn-persistence.js';
-import { TrustedMemoryRagAdapter } from './trusted-memory-rag-adapter.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -771,6 +770,13 @@ export class ToolRegistry {
         return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));
       }
     }
+    const thaiRag = this.services.thaiRag;
+    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+    const thaiRagHealth = await thaiRag.health(signal);
+    if (!thaiRagHealth.ok) return err(appError('CONFLICT', `Native Thai-RAG provider health check failed: ${thaiRagHealth.error.message}`, true));
+    if (!nativeThaiRagReadyForHarness(thaiRagHealth.value)) {
+      return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for repository diagnostics: ${thaiRagHealth.value.state}`, true));
+    }
     const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
     if (!agentsMdHash.ok) return agentsMdHash;
     const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp.value);
@@ -787,6 +793,7 @@ export class ToolRegistry {
       harnessFingerprint: state.harnessFingerprint,
       sessionStartSkill: taskContext.value.sessionStartSkill,
       mandatoryMcp: mandatoryMcp.value,
+      thaiRag: thaiRagHealth.value,
       preferredGoal,
     });
   }
@@ -804,23 +811,23 @@ export class ToolRegistry {
       this.harnessActivation.invalidate(context);
       return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again', true));
     }
-    const extensions = this.services.extensions;
-    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
-    const thai = state.mandatoryMcp.servers.find((server) => server.name === 'thai-rag-mcp');
-    if (thai === undefined || thai.descriptorFingerprint === undefined || thai.catalogFingerprint === undefined) {
-      return err(appError('CONFLICT', 'Mandatory pre-edit MCP contract is unavailable; run workspace_bootstrap again', true));
+    const thaiRag = this.services.thaiRag;
+    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+    const thaiHealth = await thaiRag.health(signal);
+    if (!thaiHealth.ok || !nativeThaiRagReadyForHarness(thaiHealth.ok ? thaiHealth.value : undefined)) {
+      return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for pre-edit diagnostics${thaiHealth.ok ? '' : `: ${thaiHealth.error.message}`}`, true));
     }
-    const thaiCheck = await extensions.callMcpTool({
-      server: thai.name,
-      tool: 'pre_edit_context',
-      arguments: { file_path: filePath, workspace: workspaceId, ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }) },
-      descriptorFingerprint: thai.descriptorFingerprint,
-      catalogFingerprint: thai.catalogFingerprint,
+    const thaiCheck = await thaiRag.call('pre_edit_context', {
+      file_path: filePath,
+      workspace: workspaceId,
+      ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
     }, signal);
     if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
 
-    const checks = ['thai-rag-mcp/pre_edit_context'];
+    const checks = ['thai-rag/pre_edit_context'];
     if (runGodkillerSafetyCheck) {
+      const extensions = this.services.extensions;
+      if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable for optional Godkiller analysis', true));
       const described = await extensions.describeMcpServer({ server: 'godkiller' }, signal);
       if (!described.ok) return err(appError('CONFLICT', `Godkiller safety inspection failed: ${described.error.message}`, true));
       if (described.value.provenance.source.startsWith('workspace-')) {
@@ -909,9 +916,13 @@ export class ToolRegistry {
     limit: number | undefined,
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const extensions = this.services.extensions;
-    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
-    return new TrustedMemoryRagAdapter(extensions).recall(query, category, limit, signal);
+    const thaiRag = this.services.thaiRag;
+    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+    return thaiRag.call('recall', {
+      query,
+      ...(category === undefined ? {} : { category }),
+      ...(limit === undefined ? {} : { limit }),
+    }, signal);
   }
 
   private async ragRemember(
@@ -919,14 +930,26 @@ export class ToolRegistry {
     category: string | undefined,
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const extensions = this.services.extensions;
-    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
-    return new TrustedMemoryRagAdapter(extensions).remember(content, category, signal);
+    const thaiRag = this.services.thaiRag;
+    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+    return thaiRag.call('remember', {
+      content,
+      ...(category === undefined ? {} : { category }),
+    }, signal);
   }
 
   private async recordTurn(input: RecordTurnInput, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const extensions = this.services.extensions;
-    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable', true));
+    const thaiRag = this.services.thaiRag;
+    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+    let canonicalWorkspaceId: string | undefined;
+    try {
+      canonicalWorkspaceId = (await this.activeWorkspaceScopeProvider())?.workspaceId;
+    } catch {
+      canonicalWorkspaceId = undefined;
+    }
+    if (canonicalWorkspaceId === undefined) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'record_turn requires an active canonical workspace', true));
+    }
 
     const complianceScope = this.turnComplianceScope();
     const complianceStatus = this.turnPersistence.status(complianceScope);
@@ -971,41 +994,18 @@ export class ToolRegistry {
     }
 
     try {
-      const described = await extensions.describeMcpServer({ server: 'thai-rag-mcp' }, signal);
-      if (!described.ok) {
-        releaseClaims();
-        return err(appError('CONFLICT', `Turn persistence child inspection failed: ${described.error.message}`, true));
-      }
-      if (described.value.provenance.source.startsWith('workspace-')) {
-        releaseClaims();
-        return err(appError('PERMISSION_DENIED', 'Refusing to use a workspace-scoped MCP server for curated turn persistence'));
-      }
-      const contract = {
-        descriptorFingerprint: described.value.provenance.descriptorFingerprint,
-        catalogFingerprint: described.value.provenance.catalogFingerprint,
-      };
-      const rememberTurnTool = described.value.tools.find((tool) => tool.name === 'remember_turn');
-      const rememberTurnInputSchema = rememberTurnTool?.inputSchema;
-      const supportsStableChildTurnId = isRecord(rememberTurnInputSchema)
-        && isRecord(rememberTurnInputSchema.properties)
-        && Object.prototype.hasOwnProperty.call(rememberTurnInputSchema.properties, 'turn_id');
       const childTurnId = (role: TurnPersistenceRole): string => `turn_umcp_${createHash('sha256')
-        .update(JSON.stringify(['thai-rag-turn-v1', idempotencyScope, turnId, role]))
+        .update(JSON.stringify(['thai-rag-turn-v2', canonicalWorkspaceId, idempotencyScope, turnId, role]))
         .digest('hex')}`;
       let recorded = 0;
       for (const entry of claimed) {
-        const persisted = await extensions.callMcpTool({
-          server: 'thai-rag-mcp',
-          tool: 'remember_turn',
-          arguments: {
-            role: entry.role,
-            content: entry.content,
-            ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
-            ...(input.summary === undefined ? {} : { summary: input.summary }),
-            ...(input.tags === undefined ? {} : { tags: input.tags }),
-            ...(supportsStableChildTurnId ? { turn_id: childTurnId(entry.role) } : {}),
-          },
-          ...contract,
+        const persisted = await thaiRag.call('remember_turn', {
+          role: entry.role,
+          content: entry.content,
+          workspace: canonicalWorkspaceId,
+          ...(input.summary === undefined ? {} : { summary: input.summary }),
+          ...(input.tags === undefined ? {} : { tags: input.tags }),
+          turn_id: childTurnId(entry.role),
         }, signal);
         if (!persisted.ok) {
           releaseClaims();
@@ -1487,6 +1487,24 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
     .filter((scope) => isAbsoluteActivityPath(scope.rootPath) && activityPathContains(scope.rootPath, candidate))
     .sort((left, right) => normalizedActivityPath(right.rootPath).length - normalizedActivityPath(left.rootPath).length);
   return matches[0] ?? null;
+}
+
+function nativeThaiRagReadyForHarness(health: {
+  readonly state: string;
+  readonly components?: {
+    readonly workerReachable: boolean;
+    readonly sqliteAvailable: boolean;
+    readonly ftsAvailable: boolean;
+    readonly lexicalRetrievalAvailable: boolean;
+  };
+} | undefined): boolean {
+  if (health === undefined || (health.state !== 'ready' && health.state !== 'degraded')) return false;
+  const components = health.components;
+  return components !== undefined
+    && components.workerReachable
+    && components.sqliteAvailable
+    && components.ftsAvailable
+    && components.lexicalRetrievalAvailable;
 }
 
 type ActiveWorkspaceScopeOptions = Pick<ToolRegistryOptions, 'activeWorkspaceScopeProvider' | 'activeWorkspaceScopesProvider' | 'activeProjectProvider'>;

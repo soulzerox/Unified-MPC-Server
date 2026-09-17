@@ -1,0 +1,254 @@
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import {
+  McpSessionManager,
+  type McpClientFactory,
+  type McpServerLaunchConfig,
+} from '@unified-mpc/extensions';
+import {
+  ThaiRagIndexJobStore,
+  ensureThaiRagWorkspaceSourceAlias,
+  parseCanonicalWorkspaceId,
+  thaiRagSourcesRoot,
+  type ThaiRagProviderDriver,
+  type ThaiRagProviderDriverHealth,
+  type ThaiRagProviderDriverStartOptions,
+} from '@unified-mpc/thai-rag';
+
+const SERVER_NAME = 'thai-rag-native';
+const REQUIRED_TOOLS = new Set([
+  'remember', 'recall', 'remember_turn', 'pre_edit_context', 'code_blast_radius',
+  'forget', 'code_index', 'index_status', 'code_search', 'code_context',
+]);
+
+export interface NativeThaiRagWorkspace {
+  readonly id: string;
+  readonly realRootPath: string;
+}
+
+export interface NativeThaiRagProviderDriverOptions {
+  readonly dataRoot: string;
+  readonly launchConfig: McpServerLaunchConfig;
+  readonly workspacesProvider: () => Promise<readonly NativeThaiRagWorkspace[]>;
+  readonly clientFactory?: McpClientFactory;
+  readonly callTimeoutMs?: number;
+  readonly healthRefreshMs?: number;
+}
+
+export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
+  private readonly sessions: McpSessionManager;
+  private readonly jobs: ThaiRagIndexJobStore;
+  private readonly healthRefreshMs: number;
+  private launchConfig: McpServerLaunchConfig | undefined;
+  private lastHealth: ThaiRagProviderDriverHealth | undefined;
+  private lastHealthAt = 0;
+  private workerQueue: Promise<unknown> = Promise.resolve();
+  private readonly workspaceRoots = new Map<string, string>();
+  private started = false;
+
+  public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
+    this.sessions = new McpSessionManager({
+      ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
+      ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
+      idleTimeoutMs: 24 * 60 * 60_000,
+    });
+    this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
+    this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
+  }
+
+  public async start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
+    await this.jobs.initialize();
+    const sources = thaiRagSourcesRoot(this.options.dataRoot);
+    if (!sources.ok) return sources;
+    await mkdir(sources.value, { recursive: true });
+
+    const workspaces = await this.options.workspacesProvider();
+    this.workspaceRoots.clear();
+    for (const workspace of workspaces) {
+      const alias = await ensureThaiRagWorkspaceSourceAlias(this.options.dataRoot, workspace.id, workspace.realRootPath);
+      if (!alias.ok) return alias;
+      this.workspaceRoots.set(workspace.id, path.resolve(workspace.realRootPath));
+    }
+
+    this.launchConfig = {
+      ...this.options.launchConfig,
+      cwd: sources.value,
+      env: {
+        ...(this.options.launchConfig.env ?? {}),
+        THAI_RAG_CACHE_DIR: path.join(options.providerRoot, 'runtime'),
+      },
+    };
+    const described = await this.sessions.describe(SERVER_NAME, this.launchConfig, signal);
+    if (!described.ok) return described;
+    const toolNames = new Set(described.value.tools.map((tool) => tool.name));
+    const missing = [...REQUIRED_TOOLS].filter((tool) => !toolNames.has(tool));
+    if (missing.length > 0) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError('CONFLICT', `Native Thai-RAG worker is missing required tools: ${missing.join(', ')}`, true));
+    }
+    this.sessions.pin(SERVER_NAME);
+    this.started = true;
+    return this.refreshHealth(signal);
+  }
+
+  public async health(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
+    if (!this.started || this.launchConfig === undefined) {
+      return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
+    }
+    const activeJobs = await this.jobs.active();
+    if (activeJobs.length > 0 && this.lastHealth !== undefined) {
+      return ok({ ...this.lastHealth, activeJobs: activeJobs.map((job) => job.jobId) });
+    }
+    if (this.lastHealth !== undefined && Date.now() - this.lastHealthAt < this.healthRefreshMs) {
+      return ok(this.lastHealth);
+    }
+    return this.refreshHealth(signal);
+  }
+
+  public async call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
+    if (!this.started || this.launchConfig === undefined) {
+      return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
+    }
+    if (tool === 'index_status' && typeof args.job_id === 'string' && args.job_id.startsWith('idx_umcp_')) {
+      const job = await this.jobs.get(args.job_id);
+      return job === null
+        ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${args.job_id}`))
+        : ok(job);
+    }
+    if (tool === 'code_index') return this.codeIndex(args, signal);
+    const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
+    if (!normalizedArgs.ok) return normalizedArgs;
+    return this.callWorker(tool, normalizedArgs.value, signal);
+  }
+
+  public async stop(): Promise<Result<void>> {
+    this.started = false;
+    await this.jobs.interruptRunning();
+    this.sessions.unpin(SERVER_NAME);
+    await this.sessions.close().catch(() => undefined);
+    return ok(undefined);
+  }
+
+  private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
+    const workspaceValue = typeof args.workspace_path === 'string' ? args.workspace_path : '';
+    const workspace = parseCanonicalWorkspaceId(workspaceValue);
+    if (!workspace.ok) return workspace;
+    const force = args.force === true;
+    const background = args.background === true;
+    const childArgs = { workspace_path: workspace.value, force, background: false };
+    if (!background) return this.callWorker('code_index', childArgs, signal);
+
+    const job = await this.jobs.create(workspace.value, force);
+    const operation = this.enqueueWorker(async () => {
+      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs);
+      const result = normalizeWorkerCallResult('code_index', raw);
+      if (result.ok) await this.jobs.complete(job.jobId, result.value);
+      else await this.jobs.fail(job.jobId, result.error.message);
+      return result;
+    });
+    void operation.catch(async (error: unknown) => {
+      await this.jobs.fail(job.jobId, errorMessage(error)).catch(() => undefined);
+    });
+    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value });
+  }
+
+  private async callWorker(
+    tool: string,
+    args: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+  ): Promise<Result<unknown>> {
+    const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal));
+    return normalizeWorkerCallResult(tool, raw);
+  }
+
+  private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {
+    const workspaceValue = typeof args.workspace === 'string' ? args.workspace : '';
+    const workspace = parseCanonicalWorkspaceId(workspaceValue);
+    if (!workspace.ok) return workspace;
+    const root = this.workspaceRoots.get(workspace.value);
+    if (root === undefined) return err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${workspace.value}`));
+    if (typeof args.file_path !== 'string' || args.file_path.trim().length === 0) {
+      return err(appError('INVALID_INPUT', 'Thai-RAG pre-edit file_path is required'));
+    }
+    const original = args.file_path.trim();
+    const prefixed = `${workspace.value}/`;
+    let relative = original.replaceAll('\\', '/');
+    if (relative.startsWith(prefixed)) relative = relative.slice(prefixed.length);
+    else if (path.isAbsolute(original)) relative = path.relative(root, path.resolve(original)).replaceAll('\\', '/');
+    relative = relative.replace(/^\.\//, '');
+    if (relative.length === 0 || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) {
+      return err(appError('PERMISSION_DENIED', `Thai-RAG pre-edit path escapes canonical workspace ${workspace.value}`));
+    }
+    return ok({ ...args, workspace: workspace.value, file_path: `${workspace.value}/${relative}` });
+  }
+
+  private async refreshHealth(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
+    const config = this.launchConfig;
+    if (!this.started || config === undefined) return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
+    const storageProbe = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, config, 'code_blast_radius', {
+      symbol_name: '__unified_mpc_health_probe__',
+      workspace: '',
+      max_depth: 1,
+    }, signal));
+    const storageAvailable = storageProbe.ok && !toolResultIsError(storageProbe.value);
+
+    let semanticAvailable = false;
+    if (storageAvailable) {
+      const semanticProbe = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, config, 'code_search', {
+        query: '__unified_mpc_health_probe__',
+        top_k: 1,
+      }, signal));
+      semanticAvailable = semanticProbe.ok && !toolResultIsError(semanticProbe.value);
+    }
+    const activeJobs = await this.jobs.active();
+    const health: ThaiRagProviderDriverHealth = {
+      workerReachable: true,
+      sqliteAvailable: storageAvailable,
+      ftsAvailable: storageAvailable,
+      vectorStoreAvailable: storageAvailable,
+      embedderAvailable: semanticAvailable,
+      lexicalRetrievalAvailable: storageAvailable,
+      semanticRetrievalAvailable: semanticAvailable,
+      activeJobs: activeJobs.map((job) => job.jobId),
+    };
+    this.lastHealth = health;
+    this.lastHealthAt = Date.now();
+    return ok(health);
+  }
+
+  private enqueueWorker<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.workerQueue.then(operation, operation);
+    this.workerQueue = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+}
+
+function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {
+  if (!result.ok) return result;
+  const text = toolResultText(result.value)?.trim();
+  return text !== undefined && /^(?:❌\s*)?Error\b/i.test(text)
+    ? err(appError('CONFLICT', `Native Thai-RAG ${tool} failed: ${text}`, true))
+    : result;
+}
+
+function toolResultIsError(value: unknown): boolean {
+  const text = toolResultText(value)?.trim();
+  return text !== undefined && /^(?:❌\s*)?Error\b/i.test(text);
+}
+
+function toolResultText(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  if (isRecord(value.structuredContent) && typeof value.structuredContent.result === 'string') return value.structuredContent.result;
+  if (!Array.isArray(value.content) || value.content.length === 0) return undefined;
+  const first = value.content[0];
+  return isRecord(first) && typeof first.text === 'string' ? first.text : undefined;
+}
+
+function errorMessage(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

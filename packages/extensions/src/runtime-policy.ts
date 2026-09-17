@@ -1,9 +1,10 @@
 import type { DiscoveredMcpServer, ExtensionsSettings, PolicyEntry, ResolvedPolicyEntry, RuntimePolicySnapshot, SkillSummary } from './types.js';
 
+const NATIVE_PROVIDER_SERVER_IDS = new Set(['thai-rag-mcp']);
+
 export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
   { id: 'session-start:ask-matt', resourceId: 'ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'At the start of every user task, load and follow ask-matt before planning or acting.' },
   { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively for current-task recall and durable progress notes.', requiredTools: ['search_nodes', 'create_entities', 'add_observations'], readOnlyTools: ['search_nodes', 'read_graph', 'open_nodes'] },
-  { id: 'pre-edit:thai-rag', resourceId: 'thai-rag-mcp', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Use local RAG and pre-edit context automatically when repository context is relevant.', requiredTools: ['pre_edit_context'], readOnlyTools: ['pre_edit_context', 'recall', 'code_search', 'code_context', 'index_status'] },
   { id: 'code-safety:godkiller', resourceId: 'godkiller', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'For high-risk changes such as broad refactors, migrations, security-sensitive work, or unclear blast radius, request the curated Godkiller safety path by setting runGodkillerSafetyCheck=true on prepare_code_change.', requiredTools: ['gk_task'] },
   { id: 'optional:sequentialthinking', resourceId: 'sequentialthinking', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use revisable step-by-step reasoning when a complex task benefits from explicit decomposition.', readOnlyTools: ['sequentialthinking'] },
   { id: 'optional:context7', resourceId: 'context7', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use current version-specific library, framework, SDK, or API documentation before relying on external interfaces.', readOnlyTools: ['resolve-library-id', 'query-docs'] },
@@ -13,9 +14,10 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
 
 export function configuredPolicies(settings: ExtensionsSettings): readonly PolicyEntry[] {
   const legacyMandatoryNames = new Set(settings.mandatoryMcpServers.map((name) => name.trim().toLowerCase()).filter(Boolean));
-  const configured = settings.policies === undefined
+  const configured = (settings.policies === undefined
     ? DEFAULT_POLICIES.filter((policy) => policy.resourceType !== 'server' || !policy.mandatory || legacyMandatoryNames.has(policy.resourceId.trim().toLowerCase()))
-    : [...settings.policies];
+    : [...settings.policies])
+    .filter((policy) => policy.resourceType !== 'server' || !NATIVE_PROVIDER_SERVER_IDS.has(policy.resourceId.trim().toLowerCase()));
   const configuredServers = new Set(configured
     .filter((policy) => policy.resourceType === 'server')
     .map((policy) => policy.resourceId.trim().toLowerCase()));
@@ -25,7 +27,7 @@ export function configuredPolicies(settings: ExtensionsSettings): readonly Polic
   for (const rawName of settings.mandatoryMcpServers) {
     const name = rawName.trim();
     const key = name.toLowerCase();
-    if (name.length === 0 || configuredServers.has(key)) continue;
+    if (name.length === 0 || configuredServers.has(key) || NATIVE_PROVIDER_SERVER_IDS.has(key)) continue;
     configured.push(defaultMandatoryServers.get(key) ?? {
       id: `legacy:mandatory:${key}`,
       resourceId: name,
@@ -45,7 +47,7 @@ export function reconcileRuntimePolicies(settings: ExtensionsSettings, servers: 
   const coveredServers = new Set(configured.filter((policy) => policy.resourceType === 'server').map((policy) => policy.resourceId.trim().toLowerCase()));
   for (const server of servers) {
     const key = server.name.trim().toLowerCase();
-    if (!server.enabled || server.excluded || coveredServers.has(key)) continue;
+    if (!server.enabled || server.excluded || coveredServers.has(key) || NATIVE_PROVIDER_SERVER_IDS.has(key)) continue;
     resolved.push({ id: `auto:server:${key}`, resourceId: server.name, resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: `Inspect and use child MCP server ${server.name} automatically when its live tool catalog is relevant; do not wait for the user to name it.`, source: 'discovered', available: true, resolvedResourceId: server.name });
   }
   const policies: ResolvedPolicyEntry[] = resolved.map((policy, index) => ({ ...policy, priority: `P${index + 1}` }));

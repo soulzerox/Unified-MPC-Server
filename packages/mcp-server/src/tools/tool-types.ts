@@ -65,6 +65,26 @@ export interface McpRuntimeTiming {
   readonly mcpPollWaitSeconds: number;
 }
 
+export interface ThaiRagProviderPort {
+  health(signal?: AbortSignal): Promise<Result<{
+    readonly providerId: 'thai-rag';
+    readonly state: string;
+    readonly embeddingIndexGeneration: number;
+    readonly degradation?: readonly string[];
+    readonly components?: {
+      readonly workerReachable: boolean;
+      readonly sqliteAvailable: boolean;
+      readonly ftsAvailable: boolean;
+      readonly vectorStoreAvailable: boolean;
+      readonly embedderAvailable: boolean;
+      readonly lexicalRetrievalAvailable: boolean;
+      readonly semanticRetrievalAvailable: boolean;
+      readonly activeJobs: readonly unknown[];
+    };
+  }>>;
+  call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>>;
+}
+
 export interface McpApplicationServices {
   /** Host platform selected by the composition root; tests may inject a deterministic profile. */
   readonly platform?: NodeJS.Platform;
@@ -77,6 +97,8 @@ export interface McpApplicationServices {
   readonly localProviders?: () => { readonly pdfProvider?: string; readonly lspCommands?: Readonly<Record<string, string>> };
   readonly capabilities?: CapabilityService;
   readonly extensions?: ExtensionsService;
+  /** Parent-owned native Thai-RAG provider. Repository-local child MCP configuration cannot replace this port. */
+  readonly thaiRag?: ThaiRagProviderPort;
   readonly memoryRuntime?: {
     readonly policyVersion: 1;
     readonly status: () => TurnTranscriptRuntimeStatus;

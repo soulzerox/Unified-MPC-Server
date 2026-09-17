@@ -98,6 +98,9 @@ importers:
       '@unified-mpc/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@unified-mpc/thai-rag':
+        specifier: workspace:*
+        version: link:../../packages/thai-rag
       '@unified-mpc/web':
         specifier: workspace:*
         version: link:../web
@@ -305,6 +308,12 @@ importers:
       '@unified-mpc/workspace':
         specifier: workspace:*
         version: link:../workspace
+
+  packages/thai-rag:
+    dependencies:
+      '@unified-mpc/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/workspace:
     dependencies:

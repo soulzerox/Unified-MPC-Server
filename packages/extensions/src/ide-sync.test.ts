@@ -42,8 +42,8 @@ describe('IdeSyncService', () => {
     expect(compiled).toContain('<!-- MCP-POLICY-END -->');
     expect(compiled).toContain('| P1 | session-start:ask-matt | ask-matt |');
     expect(compiled).toContain('| P2 | child:memory | memory |');
-    expect(compiled).toContain('| P3 | pre-edit:thai-rag | thai-rag-mcp |');
-    expect(compiled).toContain('| P4 | code-safety:godkiller | godkiller | server | ON_DEMAND | Optional |');
+    expect(compiled).toContain('| P3 | code-safety:godkiller | godkiller | server | ON_DEMAND | Optional |');
+    expect(compiled).not.toContain('pre-edit:thai-rag');
     expect(DEFAULT_POLICIES.find((policy) => policy.id === 'code-safety:godkiller')).toMatchObject({
       mandatory: false,
       enforcement: 'ON_DEMAND',
@@ -61,6 +61,7 @@ describe('IdeSyncService', () => {
     expect(godkillerPolicies).toEqual([
       expect.objectContaining({ id: 'code-safety:godkiller', mandatory: false, enforcement: 'ON_DEMAND' }),
     ]);
+    expect(policies.some((policy) => policy.resourceId === 'thai-rag-mcp')).toBe(false);
   });
 
   it('derives P1-Pn from the user-selected array order instead of renaming policy ids', () => {

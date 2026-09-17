@@ -5,9 +5,10 @@ import { HarnessActivationLedger } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 
-function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; bootstrapEvents: string[]; setAgentsMd(content: string): void } {
+function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; nativeRagCalls: string[]; bootstrapEvents: string[]; setAgentsMd(content: string): void } {
   const writes: string[] = [];
   const childCalls: string[] = [];
+  const nativeRagCalls: string[] = [];
   const bootstrapEvents: string[] = [];
   let agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
   const services = {
@@ -19,6 +20,29 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       async writeFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
         writes.push(request.path);
         return ok({ path: request.path, replacedExisting: false });
+      },
+    },
+    thaiRag: {
+      async health() {
+        return ok({
+          providerId: 'thai-rag' as const,
+          state: 'ready',
+          embeddingIndexGeneration: 1,
+          components: {
+            workerReachable: true,
+            sqliteAvailable: true,
+            ftsAvailable: true,
+            vectorStoreAvailable: true,
+            embedderAvailable: true,
+            lexicalRetrievalAvailable: true,
+            semanticRetrievalAvailable: true,
+            activeJobs: [],
+          },
+        });
+      },
+      async call(tool: string) {
+        nativeRagCalls.push(tool);
+        return ok({ content: [{ type: 'text', text: 'ok' }] });
       },
     },
     extensions: {
@@ -39,7 +63,6 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
           ready: true,
           servers: [
             { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'], requiredTools: ['search_nodes', 'create_entities', 'add_observations'] },
-            { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'], requiredTools: ['pre_edit_context'] },
           ],
         });
       },
@@ -67,12 +90,12 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
     },
   } as unknown as McpApplicationServices;
-  return { services, writes, childCalls, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; } };
+  return { services, writes, childCalls, nativeRagCalls, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; } };
 }
 
 describe('workspace engineering harness enforcement', () => {
   it('self-bootstraps and runs mandatory pre-edit checks when the host cannot call lifecycle tools explicitly', async () => {
-    const { services, writes, childCalls, bootstrapEvents } = createHarnessServices();
+    const { services, writes, childCalls, nativeRagCalls, bootstrapEvents } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
 
     const first = await registry.invoke('write_file', {
@@ -80,14 +103,16 @@ describe('workspace engineering harness enforcement', () => {
     });
     expect(first.isError).not.toBe(true);
     expect(bootstrapEvents).toEqual(['policy_snapshot', 'skill_load:agents-skills/ask-matt', 'mandatory_mcp']);
-    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context']);
+    expect(childCalls).toEqual([]);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
     expect(writes).toEqual(['src/app.ts']);
 
     const second = await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 2;\n',
     });
     expect(second.isError).not.toBe(true);
-    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'thai-rag-mcp/pre_edit_context']);
+    expect(childCalls).toEqual([]);
+    expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
     expect(writes).toEqual(['src/app.ts', 'src/app.ts']);
   });
 
@@ -129,14 +154,14 @@ describe('workspace engineering harness enforcement', () => {
       structuredContent: {
         ready: true,
         filePath: 'src/risky.ts',
-        checks: ['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task'],
+        checks: ['thai-rag/pre_edit_context', 'godkiller/gk_task'],
       },
     });
-    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'godkiller/gk_task']);
+    expect(childCalls).toEqual(['godkiller/gk_task']);
   });
 
   it('refuses a workspace-scoped Godkiller shadow when optional safety analysis is requested', async () => {
-    const { services, childCalls } = createHarnessServices();
+    const { services, childCalls, nativeRagCalls } = createHarnessServices();
     const originalDescribe = services.extensions!.describeMcpServer.bind(services.extensions);
     services.extensions = {
       ...services.extensions,
@@ -155,7 +180,8 @@ describe('workspace engineering harness enforcement', () => {
       isError: true,
       structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspace-scoped Godkiller') } },
     });
-    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context']);
+    expect(childCalls).toEqual([]);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
   });
 
   it('fails closed when the workspace AGENTS.md harness cannot be loaded', async () => {
@@ -184,7 +210,7 @@ describe('workspace engineering harness enforcement', () => {
         if (!result.ok) return result;
         return ok({
           ...result.value,
-          servers: result.value.servers.map((server) => server.name === 'thai-rag-mcp' ? { ...server, tools: [] } : server),
+          servers: result.value.servers.map((server) => server.name === 'memory' ? { ...server, tools: [] } : server),
         });
       },
     } as typeof services.extensions;
@@ -192,7 +218,7 @@ describe('workspace engineering harness enforcement', () => {
 
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('pre_edit_context') } },
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('search_nodes') } },
     });
   });
 
@@ -244,7 +270,7 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('re-bootstraps and re-runs pre-edit checks when AGENTS.md changes', async () => {
-    const { services, setAgentsMd, writes, childCalls, bootstrapEvents } = createHarnessServices();
+    const { services, setAgentsMd, writes, childCalls, nativeRagCalls, bootstrapEvents } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
 
     expect((await registry.invoke('write_file', {
@@ -257,7 +283,8 @@ describe('workspace engineering harness enforcement', () => {
     });
     expect(changed.isError).not.toBe(true);
     expect(writes).toEqual(['src/app.ts', 'src/app.ts']);
-    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'thai-rag-mcp/pre_edit_context']);
+    expect(childCalls).toEqual([]);
+    expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
     expect(bootstrapEvents.filter((entry) => entry === 'mandatory_mcp')).toHaveLength(2);
   });
 });

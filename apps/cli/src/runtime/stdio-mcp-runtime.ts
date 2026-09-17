@@ -1,5 +1,6 @@
 import fs from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import {
   AgentSwarmService,
@@ -37,8 +38,9 @@ import {
   createLocalExtensionsService,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, TrustedMemoryRagAdapter, TurnPersistenceLedger, TurnTranscriptSupervisor, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, loadOrCreateTurnIngressKey, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type TurnTranscriptRuntimeStatus, type TurnTranscriptSourceRuntimeStatus, type WorkspaceScope } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, TurnPersistenceLedger, TurnTranscriptSupervisor, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, loadOrCreateTurnIngressKey, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type TurnTranscriptRuntimeStatus, type TurnTranscriptSourceRuntimeStatus, type WorkspaceScope } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
+import { ThaiRagProviderCoordinator, type ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
 import {
   AesGcmCheckpointCipher,
   SqliteAgentSwarmRepository,
@@ -54,6 +56,7 @@ import { SecretPolicy, WorkspacePathGuard, WorkspaceService, type Workspace } fr
 import { AntigravityTurnTranscriptSource } from './antigravity-turn-transcript-source.js';
 import { ClineTurnTranscriptSource } from './cline-turn-transcript-source.js';
 import { OpenCodeTurnTranscriptSource } from './opencode-turn-transcript-source.js';
+import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 
 export interface StdioMcpRuntime {
@@ -74,6 +77,7 @@ export interface StdioMcpRuntime {
   readonly codexToolsEnabled: boolean;
   readonly ponytailMode: PonytailMode;
   readonly toolAvailabilityService: ToolAvailabilityService;
+  initializeThaiRag(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -94,6 +98,10 @@ export interface StdioMcpRuntimeOptions {
   };
   /** Expose ChatGPT Web's record_turn compatibility path truthfully as policy-assisted. */
   readonly chatGptWebTranscriptFallback?: boolean;
+  /** Unified-owned Thai-RAG install root; repository MCP configs never supply this path. */
+  readonly thaiRagProviderPath?: string;
+  /** Test seam for the parent-owned provider worker. */
+  readonly thaiRagDriver?: ThaiRagProviderDriver;
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
 }
@@ -138,6 +146,52 @@ export function createStdioMcpRuntime(
     throw new Error(selected.error.message);
   };
   const primaryWorkspaceRoot = async (): Promise<string> => (await activeWorkspaces())[0]?.realRootPath ?? workspace.realRootPath;
+  const thaiRagInstallRoot = path.resolve(
+    options.thaiRagProviderPath?.trim()
+      || settingsRepository.get(USER_SETTING_KEYS.thaiRagProviderPath)?.trim()
+      || process.env.UNIFIED_MPC_THAI_RAG_PROVIDER_PATH?.trim()
+      || path.join(os.homedir(), 'thai-rag-mcp'),
+  );
+  const thaiRagDriver = options.thaiRagDriver ?? new NativeThaiRagProviderDriver({
+    dataRoot: dataPath,
+    launchConfig: {
+      command: process.platform === 'win32'
+        ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')
+        : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
+      args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
+    },
+    workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
+      .map((entry) => ({ id: entry.id, realRootPath: entry.realRootPath })),
+    callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
+  });
+  const thaiRagCoordinator = new ThaiRagProviderCoordinator({
+    dataRoot: dataPath,
+    ownerId: `unified-mpc:${process.pid}`,
+    providerVersion: '4.61.0',
+    embeddingIndexGeneration: 1,
+    driver: thaiRagDriver,
+  });
+  let thaiRagStart: ReturnType<ThaiRagProviderCoordinator['start']> | undefined;
+  const ensureThaiRagStarted = (): ReturnType<ThaiRagProviderCoordinator['start']> => {
+    thaiRagStart ??= thaiRagCoordinator.start();
+    return thaiRagStart;
+  };
+  const thaiRagPort: NonNullable<McpApplicationServices['thaiRag']> = {
+    async health(signal) {
+      const started = await ensureThaiRagStarted();
+      if (!started.ok) return { ok: false, error: started.error };
+      return thaiRagCoordinator.health(signal);
+    },
+    async call(tool, args, signal) {
+      const started = await ensureThaiRagStarted();
+      if (!started.ok) return { ok: false, error: started.error };
+      return thaiRagCoordinator.call(tool, args, signal);
+    },
+  };
+  const initializeThaiRag = async (): Promise<void> => {
+    const started = await ensureThaiRagStarted();
+    if (!started.ok) throw new Error(started.error.message);
+  };
   const toolAvailabilityService = new ToolAvailabilityService(settingsRepository);
   const stopToolAvailabilityWatch = toolAvailabilityService.watch(250);
   const auditRepository = new SqliteAuditRepository(database);
@@ -198,7 +252,6 @@ export function createStdioMcpRuntime(
   const turnTranscriptSources: RuntimeTurnTranscriptSource[] = [];
   const transcriptSourceInitializationErrors = new Map<string, string>();
   const turnTranscriptReady = loadOrCreateTurnIngressKey(dataPath).then(async (key) => {
-    const adapter = new TrustedMemoryRagAdapter(extensions);
     turnTranscriptSupervisor = new TurnTranscriptSupervisor({
       dataPath,
       key,
@@ -213,11 +266,10 @@ export function createStdioMcpRuntime(
       persist: async (turn, signal): Promise<{ ok: boolean; recorded?: number; skipped?: number; error?: string }> => {
         const summary = turn.metadata === undefined ? undefined : readTurnMetadataString(turn.metadata, 'summary');
         const tags = turn.metadata === undefined ? undefined : readTurnMetadataString(turn.metadata, 'tags');
-        const persisted = await adapter.recordCompletedTurn({
+        const persisted = await persistCompletedTurnToNativeThaiRag(thaiRagPort, {
           sessionId: turn.sessionId,
           turnId: turn.turnId,
           projectId: turn.projectId,
-          projectRoot: turn.projectRoot,
           userMessage: turn.userMessage,
           assistantMessage: turn.assistantMessage,
           sourceClient: turn.sourceClient,
@@ -225,8 +277,8 @@ export function createStdioMcpRuntime(
           ...(tags === undefined ? {} : { tags }),
         }, signal);
         return persisted.ok
-          ? { ok: true, recorded: persisted.value.recorded, skipped: 0 }
-          : { ok: false, error: persisted.error.message };
+          ? { ok: true, recorded: persisted.recorded, skipped: 0 }
+          : { ok: false, error: persisted.error };
       },
     });
     turnTranscriptSupervisor.start();
@@ -387,6 +439,7 @@ export function createStdioMcpRuntime(
     }),
     capabilities: capabilityRuntime.service,
     extensions,
+    thaiRag: thaiRagPort,
     memoryRuntime: { policyVersion: 1, status: turnTranscriptStatus },
     installer: {
       installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installSkill(input),
@@ -453,12 +506,14 @@ export function createStdioMcpRuntime(
     codexToolsEnabled: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.codexToolsEnabled), DEFAULT_CODEX_TOOLS_ENABLED),
     ponytailMode: parsePonytailMode(settingsRepository.get(USER_SETTING_KEYS.ponytailMode), DEFAULT_PONYTAIL_MODE),
     toolAvailabilityService,
+    initializeThaiRag,
     close: async (): Promise<void> => {
       stopToolAvailabilityWatch();
       await recoveryReady.catch(() => undefined);
       await turnTranscriptReady.catch(() => undefined);
       for (const source of turnTranscriptSources) await source.close().catch(() => undefined);
       await turnTranscriptSupervisor?.close().catch(() => undefined);
+      await thaiRagCoordinator.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);
       await workspaceIndex.close().catch(() => undefined);
@@ -496,6 +551,45 @@ export function resolveStdioCheckpointKey(configured: Uint8Array | undefined = u
     }
   }
   return randomBytes(32);
+}
+
+interface NativeCompletedTurnInput {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly projectId: string;
+  readonly userMessage: string;
+  readonly assistantMessage: string;
+  readonly sourceClient: string;
+  readonly summary?: string;
+  readonly tags?: string;
+}
+
+async function persistCompletedTurnToNativeThaiRag(
+  provider: NonNullable<McpApplicationServices['thaiRag']>,
+  input: NativeCompletedTurnInput,
+  signal?: AbortSignal,
+): Promise<{ readonly ok: true; readonly recorded: number } | { readonly ok: false; readonly error: string }> {
+  const entries = [
+    { role: 'user' as const, content: input.userMessage },
+    { role: 'assistant' as const, content: input.assistantMessage },
+  ];
+  let recorded = 0;
+  for (const entry of entries) {
+    const childTurnId = `turn_umcp_${createHash('sha256')
+      .update(JSON.stringify(['native-thai-rag-turn-v1', input.sessionId, input.projectId, input.turnId, entry.role]))
+      .digest('hex')}`;
+    const persisted = await provider.call('remember_turn', {
+      role: entry.role,
+      content: entry.content,
+      workspace: input.projectId,
+      ...(input.summary === undefined ? {} : { summary: input.summary }),
+      tags: input.tags ?? `runtime-turn,${input.sourceClient}`,
+      turn_id: childTurnId,
+    }, signal);
+    if (!persisted.ok) return { ok: false, error: persisted.error.message };
+    recorded += 1;
+  }
+  return { ok: true, recorded };
 }
 
 function normalizeTurnProjectRef(value: string): string {

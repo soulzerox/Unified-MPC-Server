@@ -9,6 +9,7 @@ export const USER_SETTING_KEYS = Object.freeze({
   shellSynchronousWaitSeconds: 'shell_synchronous_wait_seconds',
   capabilityRoots: 'capability_roots',
   pdfProviderPath: 'pdf_provider_path',
+  thaiRagProviderPath: 'thai_rag_provider_path',
   lspCommands: 'lsp_commands',
   mcpHttpPort: 'mcp_http_port',
   httpWorkspaceSelection: 'http_workspace_selection_v1',

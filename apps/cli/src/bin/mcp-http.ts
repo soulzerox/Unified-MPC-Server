@@ -44,6 +44,7 @@ async function main(): Promise<void> {
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
+  await runtime.initializeThaiRag();
   await runtime.turnTranscriptReady;
   const brokeredHostMutationApprovalProvider = createCrossClientHostMutationApprovalProvider({
     directory: hostApprovalBrokerDirectory(dataPath),

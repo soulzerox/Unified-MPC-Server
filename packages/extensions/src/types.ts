@@ -171,7 +171,7 @@ export interface McpServerListItem {
   readonly command: string;
 }
 
-export const DEFAULT_MANDATORY_MCP_SERVERS = Object.freeze(['memory', 'thai-rag-mcp'] as const);
+export const DEFAULT_MANDATORY_MCP_SERVERS = Object.freeze(['memory'] as const);
 
 export const DEFAULT_EXTENSIONS_SETTINGS: ExtensionsSettings = Object.freeze({
   mode: 'enable_all',

@@ -19,13 +19,14 @@
     "@unified-mpc/permissions": "workspace:*",
     "@unified-mpc/shared": "workspace:*",
     "@unified-mpc/storage": "workspace:*",
+    "@unified-mpc/thai-rag": "workspace:*",
     "@unified-mpc/workspace": "workspace:*",
     "@unified-mpc/web": "workspace:*"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "corepack pnpm --filter @unified-mpc/shared build && corepack pnpm --filter @unified-mpc/domain build && corepack pnpm --filter @unified-mpc/filesystem build && corepack pnpm --filter @unified-mpc/permissions build && corepack pnpm --filter @unified-mpc/workspace build && corepack pnpm --filter @unified-mpc/storage build && corepack pnpm --filter @unified-mpc/audit build && corepack pnpm --filter @unified-mpc/capabilities build && corepack pnpm --filter @unified-mpc/process build && corepack pnpm --filter @unified-mpc/extensions build && corepack pnpm --filter @unified-mpc/codex build && corepack pnpm --filter @unified-mpc/application build && corepack pnpm --filter @unified-mpc/mcp-server build && corepack pnpm --filter @unified-mpc/web build && tsc --outDir dist"
+    "build": "corepack pnpm --filter @unified-mpc/shared build && corepack pnpm --filter @unified-mpc/domain build && corepack pnpm --filter @unified-mpc/filesystem build && corepack pnpm --filter @unified-mpc/permissions build && corepack pnpm --filter @unified-mpc/workspace build && corepack pnpm --filter @unified-mpc/storage build && corepack pnpm --filter @unified-mpc/audit build && corepack pnpm --filter @unified-mpc/capabilities build && corepack pnpm --filter @unified-mpc/process build && corepack pnpm --filter @unified-mpc/extensions build && corepack pnpm --filter @unified-mpc/codex build && corepack pnpm --filter @unified-mpc/application build && corepack pnpm --filter @unified-mpc/thai-rag build && corepack pnpm --filter @unified-mpc/mcp-server build && corepack pnpm --filter @unified-mpc/web build && tsc --outDir dist"
   },
   "license": "MIT"
 }

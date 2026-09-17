@@ -17,6 +17,7 @@ import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescri
 import { createProcessTreeTerminator } from '@unified-mpc/process';
 import { normalizeProjectProfile } from '@unified-mpc/shared';
 import { hostPathApi, isAbsoluteHostPath, normalizeHostPath } from '@unified-mpc/workspace';
+import { z } from 'zod';
 import type { McpApplicationServices, McpToolDefinition } from './tools/tool-types.js';
 import { ContextEngine } from './context-engine.js';
 import type { ActivityTelemetrySnapshot, ActivityTracker, ToolTelemetrySnapshot } from './activity-tracker.js';
@@ -588,11 +589,17 @@ export class UpgradeRuntimeService {
     if (entry === undefined) return { found: false, name: name ?? null };
     const upgradeEntry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === entry.name);
     if (upgradeEntry === undefined) {
+      const primitive = this.discoveryTools?.().find((tool) => tool.name === entry.name);
+      const inputSchema = primitive === undefined ? undefined : zodToolInputJsonSchema(primitive);
       return {
         found: true,
         ...entry,
-        schema: { type: 'object', additionalProperties: true },
-        contractSource: 'primitive-registry',
+        schema: inputSchema ?? { type: 'object', additionalProperties: true },
+        ...(inputSchema === undefined ? {} : { inputSchema }),
+        ...(primitive?.outputSchema === undefined ? {} : { outputSchema: zodSchemaToJsonSchema(primitive.outputSchema) }),
+        ...(primitive?.annotations === undefined ? {} : { annotations: primitive.annotations }),
+        ...(primitive?.execution === undefined ? {} : { execution: primitive.execution }),
+        contractSource: primitive === undefined ? 'primitive-registry' : 'primitive-registry-canonical',
         authorizationUnchanged: true,
       };
     }
@@ -2599,6 +2606,22 @@ function permissionDecision(action: string): { readonly action: string; readonly
 
 function actorSessionId(actor: FileActor): string {
   return actor.sessionId?.trim() || actor.clientId;
+}
+
+function zodToolInputJsonSchema(tool: McpToolDefinition): Record<string, unknown> | undefined {
+  return zodSchemaToJsonSchema(tool.inputSchema);
+}
+
+function zodSchemaToJsonSchema(schema: unknown): Record<string, unknown> | undefined {
+  if (!(schema instanceof z.ZodType)) return undefined;
+  try {
+    const converted = z.toJSONSchema(schema);
+    return typeof converted === 'object' && converted !== null && !Array.isArray(converted)
+      ? converted as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function runtimeOwnerKey(actor: FileActor): string {

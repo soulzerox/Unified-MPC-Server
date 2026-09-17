@@ -165,6 +165,22 @@ describe('upgrade runtime', () => {
       const matches = (search.structuredContent as { matches: Array<{ name: string }> }).matches;
       expect(matches.map((entry) => entry.name)).toContain(name);
       expect(described.structuredContent).toMatchObject({ found: true, name });
+      if (name === 'prepare_code_change') {
+        expect(described.structuredContent).toMatchObject({
+          contractSource: 'primitive-registry-canonical',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              workspaceId: { type: 'string' },
+              filePath: { type: 'string' },
+              proposedSymbol: { type: 'string' },
+              runGodkillerSafetyCheck: { type: 'boolean' },
+            },
+            required: ['workspaceId', 'filePath'],
+            additionalProperties: false,
+          },
+        });
+      }
     }
   });
 

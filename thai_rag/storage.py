@@ -365,9 +365,15 @@ class StorageManager:
                 return None
             return dict(row)
 
-    def delete_memory(self, memory_id: str) -> bool:
+    def delete_memory(self, memory_id: str, category: Optional[str] = None) -> bool:
         with self._lock:
             with self.sqlite_conn:
+                row = self.sqlite_conn.execute(
+                    "SELECT category FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                if row is None or (category is not None and row[0] != category):
+                    return False
                 cur = self.sqlite_conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
                 deleted = cur.rowcount > 0
         try:

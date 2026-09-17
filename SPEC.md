@@ -44,7 +44,7 @@
 #### โดเมน A: ระบบจัดการความจำ (Memory Subsystem - แทน OpenViking)
 - `remember(content: str, category: str = "general") -> str`: บันทึกข้อมูลบริบท/ข้อตกลง
 - `recall(query: str, category: str = None, limit: int = 5) -> str`: ค้นหาความจำและความรู้เดิม
-- `forget(memory_id: str) -> str`: ลบความจำที่ไม่ต้องการ
+- `forget(memory_id: str, category: str = None) -> str`: ลบความจำที่ไม่ต้องการ โดยตรวจ `category` เมื่อ caller ต้องการบังคับขอบเขต workspace
 
 #### โดเมน B: ระบบสืบค้นโค้ด (Code RAG Subsystem)
 - `code_index(workspace_path: str = ".", force: bool = False, background: bool = False, workspace: str = "") -> str`: ทราเวิร์สและทำดัชนีโค้ด โดย `workspace_path` เป็น filesystem root และ `workspace` เป็น logical namespace ที่ stable; ถ้าไม่ส่ง `workspace` จะ fallback เป็น basename ของ root

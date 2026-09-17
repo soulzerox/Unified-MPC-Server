@@ -62,6 +62,15 @@ def test_memory_crud_and_vector_search(temp_storage):
     assert deleted is True
     assert temp_storage.get_memory("mem_1") is None
 
+
+def test_memory_delete_respects_category_scope(temp_storage):
+    temp_storage.save_memory("mem_scoped", "workspace memory", "workspace:one", [1.0] + [0.0] * 767)
+
+    assert temp_storage.delete_memory("mem_scoped", category="workspace:two") is False
+    assert temp_storage.get_memory("mem_scoped") is not None
+    assert temp_storage.delete_memory("mem_scoped", category="workspace:one") is True
+    assert temp_storage.get_memory("mem_scoped") is None
+
 def test_file_cache_and_cleanup(temp_storage):
     temp_storage.set_file_hash("src/app.py", 1700000000.0, "abcdef123456")
     cached = temp_storage.get_file_hash("src/app.py")

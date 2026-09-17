@@ -562,14 +562,19 @@ class StorageManager:
 
     def delete_workspace_namespace(self, workspace: str):
         """Remove all indexed code records under one logical workspace namespace."""
-        prefix = f"{workspace.rstrip('/')}/%"
+        # Escape LIKE metacharacters so cleanup cannot cross namespace boundaries.
+        escaped_workspace = (workspace.rstrip('/')
+                             .replace('\\', '\\\\')
+                             .replace('%', '\\%')
+                             .replace('_', '\\_'))
+        prefix = f"{escaped_workspace}/%"
         with self._lock:
             rows = self.sqlite_conn.execute("""
-                SELECT file_path FROM parent_documents WHERE file_path LIKE ?
-                UNION SELECT file_path FROM file_cache WHERE file_path LIKE ?
-                UNION SELECT file_path FROM code_symbols WHERE file_path LIKE ?
-                UNION SELECT source_file FROM code_edges WHERE source_file LIKE ?
-                UNION SELECT target_file FROM code_edges WHERE target_file LIKE ? AND target_file IS NOT NULL
+                SELECT file_path FROM parent_documents WHERE file_path LIKE ? ESCAPE '\\'
+                UNION SELECT file_path FROM file_cache WHERE file_path LIKE ? ESCAPE '\\'
+                UNION SELECT file_path FROM code_symbols WHERE file_path LIKE ? ESCAPE '\\'
+                UNION SELECT source_file FROM code_edges WHERE source_file LIKE ? ESCAPE '\\'
+                UNION SELECT target_file FROM code_edges WHERE target_file LIKE ? ESCAPE '\\' AND target_file IS NOT NULL
             """, (prefix, prefix, prefix, prefix, prefix)).fetchall()
         for row in {row[0] for row in rows if row[0]}:
             self.delete_file_data(row)

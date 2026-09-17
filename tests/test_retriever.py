@@ -333,3 +333,18 @@ def test_index_workspace_rejects_multi_segment_namespace(temp_env):
             retriever.index_workspace(str(workspace_root), workspace="foo\\bar")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_delete_workspace_namespace_escapes_like_wildcards(temp_env):
+    _, storage = temp_env
+    storage.save_parent_doc("legacy-doc", "legacy_repo/module.py", 1, 1, "legacy", "legacy")
+    storage.save_parent_doc("sibling-doc", "legacyXrepo/module.py", 1, 1, "sibling", "sibling")
+
+    storage.delete_workspace_namespace("legacy_repo")
+
+    rows = storage.sqlite_conn.cursor().execute(
+        "SELECT file_path FROM parent_documents"
+    ).fetchall()
+    paths = {row[0] for row in rows}
+    assert "legacy_repo/module.py" not in paths
+    assert "legacyXrepo/module.py" in paths

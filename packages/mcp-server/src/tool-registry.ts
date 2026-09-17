@@ -480,6 +480,7 @@ export class ToolRegistry {
           mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId,
           tool.name,
           activeRoutedInput,
+          parentSignal,
         );
         if (harnessError !== undefined && !harnessError.ok) {
           const response = mapError(harnessError.error);
@@ -1021,13 +1022,28 @@ export class ToolRegistry {
     }
   }
 
-  private async validateHarnessMutation(workspaceId: string | undefined, toolName: string, input: unknown): Promise<ReturnType<typeof err> | undefined> {
+  private async validateHarnessMutation(
+    workspaceId: string | undefined,
+    toolName: string,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<ReturnType<typeof err> | undefined> {
     if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return undefined;
     const paths = codeMutationPaths(toolName, input);
     if (paths.length === 0) return undefined;
     const context = this.harnessContext(workspaceId);
-    const state = this.harnessActivation.state(context);
-    if (state === undefined) return err(appError('CONFLICT', 'Workspace engineering harness is not loaded; run workspace_bootstrap before code mutation', true));
+    const operationSignal = signal ?? new AbortController().signal;
+
+    let state = this.harnessActivation.state(context);
+    if (state === undefined) {
+      const bootstrapped = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
+      if (!bootstrapped.ok) return bootstrapped;
+      state = this.harnessActivation.state(context);
+      if (state === undefined) {
+        return err(appError('CONFLICT', 'Workspace engineering harness could not be activated for code mutation', true));
+      }
+    }
+
     const currentHash = await this.currentAgentsMdHash(workspaceId);
     if (!currentHash.ok) {
       this.harnessActivation.invalidate(context);
@@ -1035,10 +1051,19 @@ export class ToolRegistry {
     }
     if (currentHash.value !== state.agentsMdHash) {
       this.harnessActivation.invalidate(context);
-      return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again before code mutation', true));
+      const reloaded = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
+      if (!reloaded.ok) return reloaded;
+      state = this.harnessActivation.state(context);
+      if (state === undefined) {
+        return err(appError('CONFLICT', 'Workspace engineering harness could not be reactivated after harness change', true));
+      }
     }
-    const unprepared = paths.find((path) => !this.harnessActivation.isPathPrepared(context, path));
-    if (unprepared !== undefined) return err(appError('CONFLICT', `Run prepare_code_change for ${unprepared} before code mutation`, true));
+
+    for (const path of paths) {
+      if (this.harnessActivation.isPathPrepared(context, path)) continue;
+      const prepared = await this.prepareCodeChange(workspaceId, path, undefined, false, operationSignal);
+      if (!prepared.ok) return prepared;
+    }
     return undefined;
   }
 

@@ -71,46 +71,24 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
 }
 
 describe('workspace engineering harness enforcement', () => {
-  it('blocks code mutation until workspace bootstrap and pre-edit checks succeed', async () => {
+  it('self-bootstraps and runs mandatory pre-edit checks when the host cannot call lifecycle tools explicitly', async () => {
     const { services, writes, childCalls, bootstrapEvents } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
 
-    await expect(registry.invoke('write_file', {
+    const first = await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
-    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('workspace_bootstrap') } } });
-    expect(writes).toEqual([]);
-
-    const bootstrap = await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
-    expect(bootstrap).toMatchObject({
-      structuredContent: {
-        ready: true,
-        agentsMdLoaded: true,
-        harnessFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
-        sessionStartSkill: { id: 'agents-skills/ask-matt', name: 'ask-matt', content: expect.stringContaining('# Ask Matt') },
-        mandatoryMcp: { ready: true },
-      },
     });
+    expect(first.isError).not.toBe(true);
     expect(bootstrapEvents).toEqual(['policy_snapshot', 'skill_load:agents-skills/ask-matt', 'mandatory_mcp']);
-
-    await expect(registry.invoke('write_file', {
-      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 2;\n',
-    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } } });
-
-    const prepared = await registry.invoke('prepare_code_change', {
-      workspaceId: 'workspace-1', filePath: 'src/app.ts', proposedSymbol: 'x',
-    });
-    expect(prepared).toMatchObject({ structuredContent: { ready: true, filePath: 'src/app.ts' } });
     expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context']);
-
-    const allowed = await registry.invoke('write_file', {
-      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 3;\n',
-    });
-    expect(allowed.isError).not.toBe(true);
     expect(writes).toEqual(['src/app.ts']);
 
-    await expect(registry.invoke('write_file', {
-      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 4;\n',
-    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } } });
+    const second = await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 2;\n',
+    });
+    expect(second.isError).not.toBe(true);
+    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'thai-rag-mcp/pre_edit_context']);
+    expect(writes).toEqual(['src/app.ts', 'src/app.ts']);
   });
 
   it('returns the preferred workspace goal as a non-leasing continuation hint during bootstrap', async () => {
@@ -265,16 +243,21 @@ describe('workspace engineering harness enforcement', () => {
     ]);
   });
 
-  it('invalidates the bootstrap when AGENTS.md changes and requires a fresh bootstrap', async () => {
-    const { services, setAgentsMd } = createHarnessServices();
+  it('re-bootstraps and re-runs pre-edit checks when AGENTS.md changes', async () => {
+    const { services, setAgentsMd, writes, childCalls, bootstrapEvents } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
 
-    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
-    expect((await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/app.ts' })).isError).not.toBe(true);
+    expect((await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const before = true;\n',
+    })).isError).not.toBe(true);
     setAgentsMd('# Rules\nChanged policy.\n');
 
-    await expect(registry.invoke('write_file', {
+    const changed = await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const changed = true;\n',
-    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('changed') } } });
+    });
+    expect(changed.isError).not.toBe(true);
+    expect(writes).toEqual(['src/app.ts', 'src/app.ts']);
+    expect(childCalls).toEqual(['thai-rag-mcp/pre_edit_context', 'thai-rag-mcp/pre_edit_context']);
+    expect(bootstrapEvents.filter((entry) => entry === 'mandatory_mcp')).toHaveLength(2);
   });
 });

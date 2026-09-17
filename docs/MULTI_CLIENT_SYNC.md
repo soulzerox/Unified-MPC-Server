@@ -29,8 +29,8 @@ The default order is:
 | Position | Stable Policy ID | Resource ID | Type | Enforcement Tier | Mandatory | Role / Directive |
 |---|---|---|---|---|---|---|
 | **P1** | `session-start:ask-matt` | **`ask-matt`** | Skill | `EVERY_SESSION` | ✅ YES | Load session-start engineering guidance before planning or acting. |
-| **P2** | `child:memory` | **`memory`** | MCP Server | `REALTIME` | ✅ YES | Realtime working memory; required child tools are policy-declared and validated at bootstrap. |
-| **P3** | `pre-edit:thai-rag` | **`thai-rag-mcp`** | MCP Server | `EVERY_SESSION` | ✅ YES | Local RAG and `pre_edit_context` when repository context is relevant. |
+| **P2** | `memory:workspace-selective` | **`native-memory`** | capability | `ON_DEMAND` | Optional | Selective workspace-scoped memory for durable decisions, constraints, preferences, and explicit recall; do not persist every turn. |
+| **P3** | `code:pre-edit-context` | **`native-thai-rag`** | capability | `SAFETY_PRE_CHECK` | ✅ YES | Parent-owned Thai-RAG retrieval and mandatory `pre_edit_context` before development-artifact mutation. |
 | **P4** | `code-safety:godkiller` | **`godkiller`** | MCP Server | `ON_DEMAND` | Optional | For high-risk changes, set `runGodkillerSafetyCheck=true` on `prepare_code_change`; the parent then invokes only curated `gk_task(action=edit_safe)` after live source/drift/fingerprint validation. |
 | **P5** | `optional:sequentialthinking` | **`sequentialthinking`** | MCP Server | `ON_DEMAND` | Optional | Structured reasoning for complex tasks. |
 | **P6** | `optional:context7` | **`context7`** | MCP Server | `ON_DEMAND` | Optional | Current library/SDK documentation and examples. |
@@ -93,4 +93,3 @@ pnpm cli doctor
 ```
 
 The doctor command checks target paths, validates JSON schemas, verifies write permissions across Linux XDG directories, and confirms policy block integrity.
-

@@ -97,7 +97,13 @@ export function inspectMutationOperation(
     case 'task_bootstrap':
     case 'policy_snapshot':
     case 'mcp_describe':
+    case 'working_memory_search':
     case 'rag_recall':
+    case 'rag_pre_edit_context':
+    case 'rag_code_search':
+    case 'rag_code_context':
+    case 'rag_code_blast_radius':
+    case 'rag_index_status':
       return read('structured read-only operation');
     case 'tool_batch':
       return read('batch dispatcher applies mutation policy independently to every child call');
@@ -111,11 +117,14 @@ export function inspectMutationOperation(
     case 'mcp_install':
       return boundedWrite(`${toolName} installs validated extension state without executing repository install scripts`);
     case 'working_memory_record':
-      return boundedWrite('working_memory_record appends bounded project work-log state through the pinned memory MCP');
+    case 'workspace_memory_record':
+      return boundedWrite(`${toolName} records bounded selective workspace memory through the parent-owned native Thai-RAG provider`);
     case 'rag_remember':
-      return boundedWrite('rag_remember commits one bounded, already-distilled long-term memory through the trusted Thai-RAG adapter');
-    case 'record_turn':
-      return boundedWrite('record_turn persists bounded interaction text through the curated local RAG child');
+      return boundedWrite('rag_remember commits one bounded selective long-term memory through the parent-owned native Thai-RAG provider');
+    case 'rag_code_index':
+      return boundedWrite('rag_code_index refreshes only the parent-owned native code index for one registered workspace');
+    case 'rag_forget':
+      return opaque('rag_forget deletes a persistent native Thai-RAG memory and remains explicitly approval-guarded');
     case 'write_file':
       return value.overwriteExisting === true
         ? replace('write_file explicitly replaces existing file content')

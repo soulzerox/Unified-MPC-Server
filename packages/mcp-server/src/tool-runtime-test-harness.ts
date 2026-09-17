@@ -49,6 +49,30 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       primaryWorkspaceId: 'workspace-1',
       activeWorkspaceIds: ['workspace-1'],
     })),
+    thaiRag: {
+      async health() {
+        calls.push('thaiRag.health');
+        return ok({
+          providerId: 'thai-rag' as const,
+          state: 'ready',
+          embeddingIndexGeneration: 1,
+          components: {
+            workerReachable: true,
+            sqliteAvailable: true,
+            ftsAvailable: true,
+            vectorStoreAvailable: true,
+            embedderAvailable: true,
+            lexicalRetrievalAvailable: true,
+            semanticRetrievalAvailable: true,
+            activeJobs: [],
+          },
+        });
+      },
+      async call(tool: string) {
+        calls.push(`thaiRag.call:${tool}`);
+        return ok({ called: true, tool });
+      },
+    },
     workspaceQuery: serviceProxy('workspaceQuery', calls, () => ({ entries: [] })),
     projectSnapshot: serviceProxy('projectSnapshot', calls, () => ({ workspaceId: 'workspace-1', files: 1 })),
     project: serviceProxy('project', calls, () => ({ kind: 'node', packageManager: 'pnpm' })),
@@ -146,13 +170,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         };
       }
       if (method === 'listMcpResources') return { server: 'server-1', enabled: true, connected: true, resources: [{ uri: 'file:///resource.txt', name: 'resource' }] };
-      if (method === 'bootstrapMandatoryMcpServers') return {
-        ready: true,
-        servers: [
-          { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'] },
-          { name: 'thai-rag-mcp', required: true, connected: true, pinned: true, descriptorFingerprint: 'b'.repeat(64), catalogFingerprint: '2'.repeat(64), tools: ['pre_edit_context'] },
-        ],
-      };
+      if (method === 'bootstrapMandatoryMcpServers') return { ready: true, servers: [] };
       if (method === 'callMcpTool') {
         const request = runtimeRecord(args[0]);
         if (request.server === 'memory' && request.tool === 'search_nodes') return { structuredContent: { entities: [], relations: [] } };

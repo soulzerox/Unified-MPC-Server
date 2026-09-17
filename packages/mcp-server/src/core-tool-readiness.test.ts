@@ -23,7 +23,10 @@ function coreRegistry(): ToolRegistry {
 }
 
 function successRegistry(calls: string[]): ToolRegistry {
-  return new ToolRegistry(successServices(calls), actor, { codexToolsEnabled: true });
+  return new ToolRegistry(successServices(calls), actor, {
+    codexToolsEnabled: true,
+    activeWorkspaceScopeProvider: async () => ({ workspaceId, rootPath: process.cwd() }),
+  });
 }
 
 async function executeParsed(registry: ToolRegistry, name: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
@@ -45,13 +48,13 @@ function coreToolNames(registry: ToolRegistry): string[] {
 }
 
 describe('core tool readiness', () => {
-  it('tracks one representative contract for every core tool in the complete 248-tool inventory', () => {
+  it('tracks one representative contract for every core tool in the complete 255-tool inventory', () => {
     const registry = coreRegistry();
-    expect(registry.listAll()).toHaveLength(248);
+    expect(registry.listAll()).toHaveLength(255);
     const advertisedUpgradeCount = UPGRADE_TOOL_CATALOG.filter((entry) => entry.deliveryState !== 'feature_disabled' && entry.deliveryState !== 'planned').length;
     expect(registry.list()).toHaveLength(coreToolNames(registry).length + advertisedUpgradeCount);
     expect(UPGRADE_TOOL_CATALOG).toHaveLength(138);
-    expect(coreToolNames(registry)).toHaveLength(110);
+    expect(coreToolNames(registry)).toHaveLength(117);
     expect(Object.keys(CORE_TOOL_SMOKE_INPUTS).sort()).toEqual(coreToolNames(registry));
   });
 
@@ -90,7 +93,7 @@ describe('core tool readiness', () => {
     await executeParsed(registry, 'working_memory_search', { workspaceId, query: 'current smoke task' });
     await executeParsed(registry, 'working_memory_record', { workspaceId, name: 'goal:smoke', observations: ['smoke progress'] });
     expect(calls).toContain('extensions.bootstrapMandatoryMcpServers');
-    expect(calls.filter((entry) => entry === 'extensions.callMcpTool').length).toBeGreaterThanOrEqual(4);
+    expect(calls.filter((entry) => entry.startsWith('thaiRag.call:')).length).toBeGreaterThanOrEqual(3);
 
     const context = record(await executeParsed(registry, 'workspace_context', { workspaceId, query: 'smoke', pageSize: 1 }));
     expect(context.continuationToken).toEqual(expect.any(String));

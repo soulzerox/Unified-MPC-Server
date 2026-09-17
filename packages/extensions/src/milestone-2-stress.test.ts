@@ -182,7 +182,7 @@ describe('Milestone 2 - Stress Test & Edge Case Audit', () => {
       expect(updated).toContain('# Custom User Footer');
       expect(updated).not.toContain('Old obsolete policy table');
       expect(updated).toContain('| P1 | session-start:ask-matt | ask-matt | skill |');
-      expect(updated).toContain('| P2 | child:memory | memory | server |');
+      expect(updated).toContain('| P2 | memory:workspace-selective | native-memory | capability |');
     });
   });
 });

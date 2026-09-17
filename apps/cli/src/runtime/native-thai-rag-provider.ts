@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import {
@@ -8,9 +8,8 @@ import {
 } from '@unified-mpc/extensions';
 import {
   ThaiRagIndexJobStore,
-  ensureThaiRagWorkspaceSourceAlias,
   parseCanonicalWorkspaceId,
-  thaiRagSourcesRoot,
+  resolveThaiRagProviderRoot,
   type ThaiRagProviderDriver,
   type ThaiRagProviderDriverHealth,
   type ThaiRagProviderDriverStartOptions,
@@ -18,12 +17,13 @@ import {
 
 const SERVER_NAME = 'thai-rag-native';
 const REQUIRED_TOOLS = new Set([
-  'remember', 'recall', 'remember_turn', 'pre_edit_context', 'code_blast_radius',
+  'remember', 'recall', 'pre_edit_context', 'code_blast_radius',
   'forget', 'code_index', 'index_status', 'code_search', 'code_context',
 ]);
 
 export interface NativeThaiRagWorkspace {
   readonly id: string;
+  readonly rootPath?: string;
   readonly realRootPath: string;
 }
 
@@ -45,6 +45,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private lastHealthAt = 0;
   private workerQueue: Promise<unknown> = Promise.resolve();
   private readonly workspaceRoots = new Map<string, string>();
+  private readonly workspaceRootIds = new Map<string, string>();
   private started = false;
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
@@ -59,21 +60,35 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   public async start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
     await this.jobs.initialize();
-    const sources = thaiRagSourcesRoot(this.options.dataRoot);
-    if (!sources.ok) return sources;
-    await mkdir(sources.value, { recursive: true });
+    const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
+    if (!providerRoot.ok) return providerRoot;
+    const rawWorkspaces = await this.options.workspacesProvider();
+    const workspaces: NativeThaiRagWorkspace[] = [];
+    for (const workspace of rawWorkspaces) {
+      const parsedId = parseCanonicalWorkspaceId(workspace.id);
+      if (!parsedId.ok) {
+        return err(appError('CONFLICT', `Native Thai-RAG workspace ID is not canonical: ${workspace.id}`, true));
+      }
+      workspaces.push({ ...workspace, id: parsedId.value });
+    }
+    const sourcesRoot = path.join(providerRoot.value, 'sources');
+    await mkdir(sourcesRoot, { recursive: true });
 
-    const workspaces = await this.options.workspacesProvider();
     this.workspaceRoots.clear();
+    this.workspaceRootIds.clear();
     for (const workspace of workspaces) {
-      const alias = await ensureThaiRagWorkspaceSourceAlias(this.options.dataRoot, workspace.id, workspace.realRootPath);
-      if (!alias.ok) return alias;
-      this.workspaceRoots.set(workspace.id, path.resolve(workspace.realRootPath));
+      const realRootPath = path.resolve(workspace.realRootPath);
+      this.workspaceRoots.set(workspace.id, realRootPath);
+      this.workspaceRootIds.set(realRootPath, workspace.id);
+      if (workspace.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(workspace.rootPath), workspace.id);
+      const sourceAlias = path.join(sourcesRoot, workspace.id);
+      await rm(sourceAlias, { force: true, recursive: true });
+      await symlink(realRootPath, sourceAlias, 'dir');
     }
 
     this.launchConfig = {
       ...this.options.launchConfig,
-      cwd: sources.value,
+      cwd: sourcesRoot,
       env: {
         ...(this.options.launchConfig.env ?? {}),
         THAI_RAG_CACHE_DIR: path.join(options.providerRoot, 'runtime'),
@@ -86,6 +101,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (missing.length > 0) {
       await this.sessions.close().catch(() => undefined);
       return err(appError('CONFLICT', `Native Thai-RAG worker is missing required tools: ${missing.join(', ')}`, true));
+    }
+    const codeIndexTool = described.value.tools.find((tool) => tool.name === 'code_index');
+    if (codeIndexTool === undefined || !toolAcceptsWorkspaceNamespace(codeIndexTool.inputSchema)) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError('CONFLICT', 'Native Thai-RAG worker code_index does not support the explicit workspace namespace contract', true));
+    }
+    const forgetTool = described.value.tools.find((tool) => tool.name === 'forget');
+    if (forgetTool === undefined || !toolAcceptsProperty(forgetTool.inputSchema, 'category')) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError('CONFLICT', 'Native Thai-RAG worker forget does not support the workspace category contract', true));
     }
     this.sessions.pin(SERVER_NAME);
     this.started = true;
@@ -132,14 +157,19 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
     const workspaceValue = typeof args.workspace_path === 'string' ? args.workspace_path : '';
-    const workspace = parseCanonicalWorkspaceId(workspaceValue);
+    const workspace = this.resolveIndexWorkspace(workspaceValue);
     if (!workspace.ok) return workspace;
     const force = args.force === true;
     const background = args.background === true;
-    const childArgs = { workspace_path: workspace.value, force, background: false };
+    const childArgs = {
+      workspace_path: workspace.value.rootPath,
+      workspace: workspace.value.workspaceId,
+      force,
+      background: false,
+    };
     if (!background) return this.callWorker('code_index', childArgs, signal);
 
-    const job = await this.jobs.create(workspace.value, force);
+    const job = await this.jobs.create(workspace.value.workspaceId, force);
     const operation = this.enqueueWorker(async () => {
       const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs);
       const result = normalizeWorkerCallResult('code_index', raw);
@@ -150,7 +180,28 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     void operation.catch(async (error: unknown) => {
       await this.jobs.fail(job.jobId, errorMessage(error)).catch(() => undefined);
     });
-    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value });
+    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value.workspaceId });
+  }
+
+  private resolveIndexWorkspace(workspaceValue: string): Result<{ readonly workspaceId: string; readonly rootPath: string }> {
+    const parsed = parseCanonicalWorkspaceId(workspaceValue);
+    if (parsed.ok) {
+      const rootPath = this.workspaceRoots.get(parsed.value);
+      return rootPath === undefined
+        ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${parsed.value}`))
+        : ok({ workspaceId: parsed.value, rootPath });
+    }
+
+    if (!path.isAbsolute(workspaceValue)) return parsed;
+    const requestedRoot = path.resolve(workspaceValue);
+    const workspaceId = this.workspaceRootIds.get(requestedRoot);
+    if (workspaceId === undefined) {
+      return err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace root is not registered: ${requestedRoot}`));
+    }
+    const rootPath = this.workspaceRoots.get(workspaceId);
+    return rootPath === undefined
+      ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${workspaceId}`))
+      : ok({ workspaceId, rootPath });
   }
 
   private async callWorker(
@@ -251,4 +302,13 @@ function errorMessage(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toolAcceptsWorkspaceNamespace(inputSchema: unknown): boolean {
+  return toolAcceptsProperty(inputSchema, 'workspace');
+}
+
+function toolAcceptsProperty(inputSchema: unknown, property: string): boolean {
+  if (!isRecord(inputSchema) || !isRecord(inputSchema.properties)) return false;
+  return Object.prototype.hasOwnProperty.call(inputSchema.properties, property);
 }

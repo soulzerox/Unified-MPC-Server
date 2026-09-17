@@ -59,7 +59,7 @@ function policyArray(value: unknown): readonly PolicyEntry[] {
     if (
       id.length === 0 || id.length > 128 ||
       resourceId.length === 0 || resourceId.length > 512 ||
-      (record.resourceType !== 'server' && record.resourceType !== 'skill') ||
+      (record.resourceType !== 'server' && record.resourceType !== 'skill' && record.resourceType !== 'capability') ||
       typeof record.mandatory !== 'boolean' ||
       enforcement.length === 0 || enforcement.length > 128 ||
       directive.length === 0 || directive.length > 4096
@@ -72,6 +72,7 @@ function policyArray(value: unknown): readonly PolicyEntry[] {
       enforcement,
       directive,
       ...(record.requiredTools === undefined ? {} : { requiredTools: stringArray(record.requiredTools).map((tool) => tool.trim()) }),
+      ...(record.requiredCapabilities === undefined ? {} : { requiredCapabilities: stringArray(record.requiredCapabilities).map((capability) => capability.trim()) }),
       ...(record.readOnlyTools === undefined ? {} : { readOnlyTools: stringArray(record.readOnlyTools).map((tool) => tool.trim()) }),
     });
   }

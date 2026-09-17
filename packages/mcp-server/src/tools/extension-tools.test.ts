@@ -5,7 +5,7 @@ import type { ExtensionsService } from '@unified-mpc/extensions';
 
 describe('skills and mcp bridge tools', () => {
   it('registers skill and MCP inspection as read-only while mcp_call remains opaque mutation', async () => {
-    let runtimePolicyFails = false;
+    const runtimePolicyFails = false;
     const extensions: ExtensionsService = {
       listSkills: async () => ok({ skills: [{ id: 'a/b', name: 'b', description: 'd', source: 'a', rootPath: '/', skillPath: '/SKILL.md' }] }),
       readSkill: async (input) => input.skillId === 'agents-skills/ask-matt'
@@ -82,32 +82,12 @@ describe('skills and mcp bridge tools', () => {
         ready: true,
         policy: { ready: true, policies: [expect.objectContaining({ id: 'session-start:ask-matt' }), expect.objectContaining({ id: 'auto:server:mock' })] },
         sessionStartSkill: { id: 'agents-skills/ask-matt', name: 'ask-matt', content: '# Ask Matt' },
-        turnPersistence: { state: 'untracked', mode: 'best_effort' },
       },
     });
-    await expect(registry.invoke('task_bootstrap', { turnId: 'web-turn-1' })).resolves.toMatchObject({ structuredContent: { turnPersistence: { state: 'awaiting_record', turnId: 'web-turn-1', mode: 'best_effort', violations: 0 } } });
-    await expect(registry.invoke('task_bootstrap', { turnId: 'web-turn-2' })).resolves.toMatchObject({ structuredContent: { turnPersistence: { state: 'awaiting_record', turnId: 'web-turn-2', mode: 'best_effort', violations: 1, replacedUnpersistedTurnId: 'web-turn-1' } } });
-    const bootstrapFailureRegistry = new ToolRegistry({ extensions }, { clientId: 'bootstrap-failure', clientName: 'bootstrap-failure' }, { sessionId: 'bootstrap-failure', turnPersistenceMode: 'required' });
-    runtimePolicyFails = true;
-    await expect(bootstrapFailureRegistry.invoke('task_bootstrap', { turnId: 'failed-turn' })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
-    runtimePolicyFails = false;
-    await expect(bootstrapFailureRegistry.invoke('task_bootstrap', { turnId: 'next-turn' })).resolves.toMatchObject({ structuredContent: { turnPersistence: { state: 'awaiting_record', turnId: 'next-turn', mode: 'required' } } });
-    const strictRegistry = new ToolRegistry({ extensions }, { clientId: 'strict-test', clientName: 'strict-test' }, {
-      sessionId: 'strict-session',
-      turnPersistenceMode: 'required',
-    });
-    await expect(strictRegistry.invoke('task_bootstrap', {})).resolves.toMatchObject({
-      structuredContent: {
-        turnPersistence: {
-          state: 'awaiting_record',
-          turnId: expect.stringMatching(/^turn_umcp_/),
-          mode: 'required',
-        },
-      },
-    });
-    await expect(strictRegistry.invoke('task_bootstrap', { turnId: 'turn-2' })).resolves.toMatchObject({
+    await expect(registry.invoke('task_bootstrap', {})).resolves.toMatchObject({ structuredContent: { ready: true } });
+    await expect(registry.invoke('task_bootstrap', { unexpected: true })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('was not persisted') } },
+      structuredContent: { error: { code: 'INVALID_INPUT' } },
     });
     await expect(registry.invoke('policy_snapshot', {})).resolves.toMatchObject({
       structuredContent: { ready: true, policies: [expect.objectContaining({ id: 'session-start:ask-matt' }), expect.objectContaining({ id: 'auto:server:mock' })] },
@@ -177,53 +157,6 @@ describe('skills and mcp bridge tools', () => {
     const global = await registry.invoke('mcp_list', {});
     const globalEnvelope = JSON.parse(global.content[0]?.type === 'text' ? global.content[0].text : '{}') as Record<string, unknown>;
     expect(globalEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_list', maxBytes: 512 * 1024 });
-  });
-
-  it('uses the active server-generated strict turn when record_turn omits turnId', async () => {
-    const descriptorFingerprint = 'a'.repeat(64);
-    const catalogFingerprint = 'b'.repeat(64);
-    const childCalls: Array<{ readonly arguments?: Readonly<Record<string, unknown>> }> = [];
-    const extensions: ExtensionsService = {
-      listSkills: async () => ok({ skills: [] }),
-      readSkill: async (input) => ok({ id: input.skillId, name: 'ask-matt', description: 'router', source: 'agents-skills', path: '/ask-matt/SKILL.md', content: '# Ask Matt' }),
-      listMcpServers: async () => ok({ servers: [] }),
-      runtimePolicySnapshot: async () => ok({ ready: true, policies: [{
-        priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt', source: 'configured', available: true,
-      }] }),
-      describeMcpServer: async () => ok({
-        server: 'thai-rag-mcp',
-        enabled: true,
-        connected: true,
-        provenance: {
-          source: 'test-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint,
-          drift: { detected: false, reasons: [] },
-        },
-        tools: [{
-          name: 'remember_turn',
-          qualifiedName: 'mcp:thai-rag-mcp/remember_turn',
-          description: 'Remember turn',
-          inputSchema: { type: 'object', properties: { turn_id: { type: 'string' } } },
-        }],
-      }),
-      callMcpTool: async (input) => {
-        childCalls.push(input);
-        return ok({ result: 'stored' });
-      },
-      close: async () => undefined,
-    };
-    const registry = new ToolRegistry({ extensions }, { clientId: 'strict-auto-turn', clientName: 'strict-auto-turn' }, {
-      sessionId: 'strict-auto-turn-session',
-      turnPersistenceMode: 'required',
-    });
-
-    await expect(registry.invoke('task_bootstrap', {})).resolves.toMatchObject({
-      structuredContent: { turnPersistence: { state: 'awaiting_record', turnId: expect.stringMatching(/^turn_umcp_/) } },
-    });
-    await expect(registry.invoke('record_turn', { userContent: 'Persist without host-generated correlation.' })).resolves.toMatchObject({
-      structuredContent: { turnId: expect.stringMatching(/^turn_umcp_/), recorded: 1, skipped: 0, duplicate: false },
-    });
-    expect(childCalls).toHaveLength(1);
-    expect(childCalls[0]?.arguments?.turn_id).toEqual(expect.stringMatching(/^turn_umcp_/));
   });
 
   it('forwards the caller AbortSignal through mcp_describe and approved mcp_call', async () => {

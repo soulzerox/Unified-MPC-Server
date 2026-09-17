@@ -1,10 +1,23 @@
 import type { DiscoveredMcpServer, ExtensionsSettings, PolicyEntry, ResolvedPolicyEntry, RuntimePolicySnapshot, SkillSummary } from './types.js';
 
-const NATIVE_PROVIDER_SERVER_IDS = new Set(['thai-rag-mcp']);
+const NATIVE_PROVIDER_SERVER_IDS = new Set(['memory', 'thai-rag-mcp']);
+const NATIVE_CAPABILITIES = new Set([
+  'rag_recall',
+  'rag_remember',
+  'workspace_memory_record',
+  'rag_forget',
+  'rag_pre_edit_context',
+  'rag_code_search',
+  'rag_code_context',
+  'rag_code_blast_radius',
+  'rag_code_index',
+  'rag_index_status',
+]);
 
 export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
   { id: 'session-start:ask-matt', resourceId: 'ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'At the start of every user task, load and follow ask-matt before planning or acting.' },
-  { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively for current-task recall and durable progress notes.', requiredTools: ['search_nodes', 'create_entities', 'add_observations'], readOnlyTools: ['search_nodes', 'read_graph', 'open_nodes'] },
+  { id: 'memory:workspace-selective', resourceId: 'native-memory', resourceType: 'capability', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use native workspace-scoped memory selectively for durable decisions, constraints, preferences, and explicit recall; do not persist every turn.', requiredCapabilities: ['rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_forget'] },
+  { id: 'code:pre-edit-context', resourceId: 'native-thai-rag', resourceType: 'capability', mandatory: true, enforcement: 'SAFETY_PRE_CHECK', directive: 'Use the parent-owned native Thai-RAG capability for repository retrieval and mandatory pre-edit context before development-artifact mutation.', requiredCapabilities: ['rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status'] },
   { id: 'code-safety:godkiller', resourceId: 'godkiller', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'For high-risk changes such as broad refactors, migrations, security-sensitive work, or unclear blast radius, request the curated Godkiller safety path by setting runGodkillerSafetyCheck=true on prepare_code_change.', requiredTools: ['gk_task'] },
   { id: 'optional:sequentialthinking', resourceId: 'sequentialthinking', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use revisable step-by-step reasoning when a complex task benefits from explicit decomposition.', readOnlyTools: ['sequentialthinking'] },
   { id: 'optional:context7', resourceId: 'context7', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use current version-specific library, framework, SDK, or API documentation before relying on external interfaces.', readOnlyTools: ['resolve-library-id', 'query-docs'] },
@@ -61,6 +74,11 @@ function resolveConfiguredPolicy(policy: PolicyEntry, servers: readonly Discover
     const key = policy.resourceId.trim().toLowerCase();
     const server = servers.find((entry) => entry.name.trim().toLowerCase() === key);
     return { ...policy, source: 'configured', available: server !== undefined && server.enabled && !server.excluded, ...(server === undefined ? {} : { resolvedResourceId: server.name }) };
+  }
+  if (policy.resourceType === 'capability') {
+    const required = policy.requiredCapabilities ?? [];
+    const available = required.every((capability) => NATIVE_CAPABILITIES.has(capability));
+    return { ...policy, source: 'configured', available, ...(available ? { resolvedResourceId: `native:${policy.resourceId}` } : {}) };
   }
   const key = policy.resourceId.trim().toLowerCase();
   const skill = skills.find((entry) => entry.id === policy.resourceId || entry.name.trim().toLowerCase() === key);

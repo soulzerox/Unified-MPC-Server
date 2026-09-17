@@ -39,13 +39,10 @@ async function main(): Promise<void> {
 
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), {
     persistWorkspaceSelection: true,
-    enableLocalTranscriptSources: true,
-    chatGptWebTranscriptFallback: true,
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
   await runtime.initializeThaiRag();
-  await runtime.turnTranscriptReady;
   const brokeredHostMutationApprovalProvider = createCrossClientHostMutationApprovalProvider({
     directory: hostApprovalBrokerDirectory(dataPath),
   });
@@ -54,7 +51,6 @@ async function main(): Promise<void> {
     services: runtime.services,
     actor: runtime.actor,
     activityTracker: runtime.activityTracker,
-    turnPersistenceLedger: runtime.turnPersistenceLedger,
     codexToolsEnabled: runtime.codexToolsEnabled,
     ponytailModeProvider: () => runtime.ponytailMode,
     profileProvider: runtime.profileProvider,

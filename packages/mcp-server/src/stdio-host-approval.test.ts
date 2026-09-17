@@ -1,17 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { McpServerOptions } from './server.js';
-import { bindStdioHostMutationApprovalLifecycle, resolveStdioHostMutationApprovalProvider, resolveStdioTurnPersistenceMode } from './stdio.js';
+import { bindStdioHostMutationApprovalLifecycle, resolveStdioHostMutationApprovalProvider } from './stdio.js';
 
 const approved: NonNullable<McpServerOptions['hostMutationApprovalProvider']> = async () => true;
 const denied: NonNullable<McpServerOptions['hostMutationApprovalProvider']> = async () => false;
 
 describe('stdio host approval wiring', () => {
-  it('keeps turn persistence required for both legacy and modern stdio unless explicitly overridden', () => {
-    expect(resolveStdioTurnPersistenceMode(undefined, 'legacy')).toBe('required');
-    expect(resolveStdioTurnPersistenceMode(undefined, 'modern')).toBe('required');
-    expect(resolveStdioTurnPersistenceMode('best_effort', 'legacy')).toBe('best_effort');
-  });
-
   it('installs the trusted human approval provider by default for stdio hosts', () => {
     const factory = vi.fn(() => approved);
 

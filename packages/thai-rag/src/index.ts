@@ -5,5 +5,4 @@ export * from './workspace-manifest.js';
 export * from './legacy-migration.js';
 export * from './migration-journal.js';
 export * from './provider-coordinator.js';
-export * from './workspace-source.js';
 export * from './index-job-store.js';

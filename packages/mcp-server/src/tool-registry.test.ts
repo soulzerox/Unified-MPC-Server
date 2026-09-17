@@ -99,7 +99,7 @@ describe('MCP tool registry', () => {
       'system_info', 'notification', 'file_dialog', 'clipboard', 'web_fetch',
       'audio', 'screen_record', 'office', 'scheduler',
       'wsl_exec', 'wsl_fs',
-      'skills_list', 'skills_read', 'skills_install', 'ponytail_session', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'rag_recall', 'rag_remember', 'record_turn', 'mcp_install', 'mcp_call',
+      'skills_list', 'skills_read', 'skills_install', 'ponytail_session', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call', 'rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status',
       'workspace_context', 'workspace_context_continue', 'workspace_full_scan', 'workspace_full_scan_continue',
       'workspace_snapshot', 'search_all', 'read_many_files',
       'read_file_page', 'read_file_page_continue',
@@ -213,6 +213,28 @@ describe('MCP tool registry', () => {
         prepareCodeChange: true,
       },
     });
+  });
+
+  it('passes the active workspace root to native code indexing', async () => {
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const rootPath = '/tmp/project-directory';
+    const registry = new ToolRegistry({
+      thaiRag: {
+        async call(tool: string, args: Readonly<Record<string, unknown>>): Promise<ReturnType<typeof ok>> {
+          calls.push({ tool, args });
+          return ok({ indexed: true });
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath }),
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    const result = await registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
+
+    expect(result.isError).not.toBe(true);
+    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath, workspace: workspaceId } }]);
   });
 
   it('lets an already-started call settle after disable while blocking future calls', async () => {

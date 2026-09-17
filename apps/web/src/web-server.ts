@@ -1015,8 +1015,8 @@ function parsePolicyEntries(body: unknown):
     if (resourceId.length > 512) return { ok: false, error: `policies[${index}].resourceId is too long` };
     if (enforcement.length > 128) return { ok: false, error: `policies[${index}].enforcement is too long` };
     if (directive.length > 4096) return { ok: false, error: `policies[${index}].directive is too long` };
-    if (raw.resourceType !== 'server' && raw.resourceType !== 'skill') {
-      return { ok: false, error: `policies[${index}].resourceType must be server or skill` };
+    if (raw.resourceType !== 'server' && raw.resourceType !== 'skill' && raw.resourceType !== 'capability') {
+      return { ok: false, error: `policies[${index}].resourceType must be server, skill, or capability` };
     }
     if (typeof raw.mandatory !== 'boolean') return { ok: false, error: `policies[${index}].mandatory must be boolean` };
     const idKey = id.toLowerCase();
@@ -1029,6 +1029,13 @@ function parsePolicyEntries(body: unknown):
         return { ok: false, error: `policies[${index}].requiredTools must be a string array` };
       }
       requiredTools = [...new Set(raw.requiredTools.map((tool) => (tool as string).trim()))];
+    }
+    let requiredCapabilities: readonly string[] | undefined;
+    if (raw.requiredCapabilities !== undefined) {
+      if (!Array.isArray(raw.requiredCapabilities) || raw.requiredCapabilities.some((capability) => typeof capability !== 'string' || capability.trim().length === 0)) {
+        return { ok: false, error: `policies[${index}].requiredCapabilities must be a string array` };
+      }
+      requiredCapabilities = [...new Set(raw.requiredCapabilities.map((capability) => (capability as string).trim()))];
     }
     let readOnlyTools: readonly string[] | undefined;
     if (raw.readOnlyTools !== undefined) {
@@ -1045,6 +1052,7 @@ function parsePolicyEntries(body: unknown):
       enforcement,
       directive,
       ...(requiredTools === undefined ? {} : { requiredTools }),
+      ...(requiredCapabilities === undefined ? {} : { requiredCapabilities }),
       ...(readOnlyTools === undefined ? {} : { readOnlyTools }),
     });
   }

@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
-import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
+import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
+const activeWorkspaceScopeProvider = async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' });
 
-function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; nativeRagCalls: string[]; bootstrapEvents: string[]; setAgentsMd(content: string): void } {
+function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; nativeRagCalls: string[]; nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>; bootstrapEvents: string[]; setAgentsMd(content: string): void } {
   const writes: string[] = [];
   const childCalls: string[] = [];
   const nativeRagCalls: string[] = [];
+  const nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
   const bootstrapEvents: string[] = [];
   let agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
   const services = {
@@ -40,8 +42,9 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
           },
         });
       },
-      async call(tool: string) {
+      async call(tool: string, args: Readonly<Record<string, unknown>>) {
         nativeRagCalls.push(tool);
+        nativeRagArguments.push({ tool, args });
         return ok({ content: [{ type: 'text', text: 'ok' }] });
       },
     },
@@ -90,13 +93,13 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
     },
   } as unknown as McpApplicationServices;
-  return { services, writes, childCalls, nativeRagCalls, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; } };
+  return { services, writes, childCalls, nativeRagCalls, nativeRagArguments, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; } };
 }
 
 describe('workspace engineering harness enforcement', () => {
   it('self-bootstraps and runs mandatory pre-edit checks when the host cannot call lifecycle tools explicitly', async () => {
-    const { services, writes, childCalls, nativeRagCalls, bootstrapEvents } = createHarnessServices();
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const { services, writes, childCalls, nativeRagCalls, nativeRagArguments, bootstrapEvents } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     const first = await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
@@ -105,6 +108,10 @@ describe('workspace engineering harness enforcement', () => {
     expect(bootstrapEvents).toEqual(['policy_snapshot', 'skill_load:agents-skills/ask-matt', 'mandatory_mcp']);
     expect(childCalls).toEqual([]);
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
+    expect(nativeRagArguments[0]).toEqual({
+      tool: 'pre_edit_context',
+      args: { file_path: 'src/app.ts', workspace: 'workspace-1' },
+    });
     expect(writes).toEqual(['src/app.ts']);
 
     const second = await registry.invoke('write_file', {
@@ -117,9 +124,9 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('preserves bootstrap and single-use prepared-path state across request-scoped registry recreation', async () => {
-    const { services, writes, nativeRagCalls } = createHarnessServices();
+    const { services, writes, nativeRagCalls, nativeRagArguments } = createHarnessServices();
     const ledger = new HarnessActivationLedger();
-    const options = { harnessActivationLedger: ledger, sessionId: 'shared-transport-session' };
+    const options = { harnessActivationLedger: ledger, sessionId: 'shared-transport-session', activeWorkspaceScopeProvider };
 
     const bootstrapRegistry = new ToolRegistry(services, actor, options);
     expect((await bootstrapRegistry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
@@ -129,6 +136,10 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', filePath: 'src/shared.ts', proposedSymbol: 'shared',
     })).isError).not.toBe(true);
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
+    expect(nativeRagArguments).toEqual([{
+      tool: 'pre_edit_context',
+      args: { file_path: 'src/shared.ts', proposed_symbol: 'shared', workspace: 'workspace-1' },
+    }]);
 
     const mutationRegistry = new ToolRegistry(services, actor, options);
     expect((await mutationRegistry.invoke('write_file', {
@@ -156,7 +167,7 @@ describe('workspace engineering harness enforcement', () => {
         updatedAt: '2026-09-16T01:00:00.000Z',
       } : null,
     };
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       structuredContent: {
@@ -172,7 +183,7 @@ describe('workspace engineering harness enforcement', () => {
 
   it('runs the optional Godkiller safety check only when explicitly requested', async () => {
     const { services, childCalls } = createHarnessServices();
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
     const prepared = await registry.invoke('prepare_code_change', {
@@ -200,7 +211,7 @@ describe('workspace engineering harness enforcement', () => {
         return ok({ ...result.value, provenance: { ...result.value.provenance, source: 'workspace-cursor' } });
       },
     } as typeof services.extensions;
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
     await expect(registry.invoke('prepare_code_change', {
@@ -221,7 +232,7 @@ describe('workspace engineering harness enforcement', () => {
         return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
       },
     } as typeof services.file;
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       isError: true,
@@ -243,7 +254,7 @@ describe('workspace engineering harness enforcement', () => {
         });
       },
     } as typeof services.extensions;
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       isError: true,
@@ -271,7 +282,7 @@ describe('workspace engineering harness enforcement', () => {
         });
       },
     } as typeof services.extensions;
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       isError: true,
       structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('custom-capability') } },
@@ -279,8 +290,11 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('exposes curated native working-memory tools after bootstrap', async () => {
-    const { services, childCalls } = createHarnessServices();
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const { services, nativeRagCalls } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider: async (): Promise<{ readonly workspaceId: string; readonly rootPath: string }> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' }),
+    });
 
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
     const searched = await registry.invoke('working_memory_search', { workspaceId: 'workspace-1', query: 'current task' });
@@ -291,16 +305,12 @@ describe('workspace engineering harness enforcement', () => {
       observations: ['Implemented harness bootstrap'],
     });
     expect(recorded.isError).not.toBe(true);
-    expect(childCalls).toEqual([
-      'memory/search_nodes',
-      'memory/search_nodes',
-      'memory/create_entities',
-    ]);
+    expect(nativeRagCalls).toEqual(['recall', 'remember']);
   });
 
   it('re-bootstraps and re-runs pre-edit checks when AGENTS.md changes', async () => {
     const { services, setAgentsMd, writes, childCalls, nativeRagCalls, bootstrapEvents } = createHarnessServices();
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     expect((await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const before = true;\n',

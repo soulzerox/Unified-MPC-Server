@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { appError, err, ok } from '@unified-mpc/domain';
+import { ok } from '@unified-mpc/domain';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalPolicy } from '@unified-mpc/shared';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
-import { TurnPersistenceLedger } from './turn-persistence.js';
 
 const actor = { clientId: 'host-approval', clientName: 'host-approval-test' };
 const activeScope = async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: path.resolve(tmpdir(), 'unified-mpc-approval-fixture') });
@@ -68,212 +67,57 @@ describe('mandatory independent host approval', () => {
   });
 
   it('uses curated Thai-RAG recall and remember without native host approval or caller-managed fingerprints', async () => {
-    const descriptorFingerprint = 'a'.repeat(64);
-    const catalogFingerprint = 'b'.repeat(64);
-    const childCalls: Array<{ tool: string; arguments?: Readonly<Record<string, unknown>>; descriptorFingerprint?: string; catalogFingerprint?: string }> = [];
+    const nativeCalls: Array<{ tool: string; arguments: Readonly<Record<string, unknown>> }> = [];
     const approvals: string[] = [];
     const services = servicesWithCalls([]);
-    services.extensions = {
-      ...services.extensions,
-      async describeMcpServer() {
-        return ok({
-          server: 'thai-rag-mcp', enabled: true, connected: true,
-          provenance: { source: 'antigravity-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
-          tools: [
-            { name: 'recall', qualifiedName: 'mcp:thai-rag-mcp/recall', description: 'Recall' },
-            { name: 'remember', qualifiedName: 'mcp:thai-rag-mcp/remember', description: 'Remember' },
-          ],
-        });
+    services.thaiRag = {
+      health: async (): Promise<ReturnType<typeof ok>> => ok({ providerId: 'thai-rag', state: 'ready', embeddingIndexGeneration: 1 }),
+      call: async (tool, args): Promise<ReturnType<typeof ok>> => {
+        nativeCalls.push({ tool, arguments: args });
+        return ok({ result: tool === 'recall' ? 'matched memory' : 'stored memory' });
       },
-      async callMcpTool(input) {
-        childCalls.push(input);
-        return ok({ result: input.tool === 'recall' ? 'matched memory' : 'stored memory' });
-      },
-    } as McpApplicationServices['extensions'];
+    };
     const registry = new ToolRegistry(services, actor, {
       activeWorkspaceScopeProvider: activeScope,
       profileProvider: (): PermissionProfile => permissionProfiles.safe,
       hostMutationApprovalProvider: async (request): Promise<boolean> => { approvals.push(request.toolName); return false; },
     });
 
-    const recalled = await registry.invoke('rag_recall', { query: 'architecture decision', category: 'decision', limit: 5 });
-    const remembered = await registry.invoke('rag_remember', { content: 'Prefer native curated RAG operations.', category: 'decision' });
+    const recalled = await registry.invoke('rag_recall', { workspaceId: 'workspace-a', query: 'architecture decision', category: 'decision', limit: 5 });
+    const remembered = await registry.invoke('rag_remember', { workspaceId: 'workspace-a', content: 'Prefer native curated RAG operations.', category: 'decision' });
 
     expect(recalled.isError).not.toBe(true);
     expect(remembered.isError).not.toBe(true);
     expect(approvals).toEqual([]);
-    expect(childCalls).toEqual([
-      expect.objectContaining({ tool: 'recall', descriptorFingerprint, catalogFingerprint, arguments: { query: 'architecture decision', category: 'decision', limit: 5 } }),
-      expect.objectContaining({ tool: 'remember', descriptorFingerprint, catalogFingerprint, arguments: { content: 'Prefer native curated RAG operations.', category: 'decision' } }),
+    expect(nativeCalls).toEqual([
+      { tool: 'recall', arguments: { query: '[decision] architecture decision', category: 'workspace:workspace-a', limit: 5 } },
+      { tool: 'remember', arguments: { content: '[decision] Prefer native curated RAG operations.', category: 'workspace:workspace-a' } },
     ]);
   });
 
-  it('persists a completed interaction through bounded record_turn without native host approval and deduplicates across registry recreation', async () => {
-    const descriptorFingerprint = 'a'.repeat(64);
-    const catalogFingerprint = 'b'.repeat(64);
-    const childCalls: Array<{ server: string; tool: string; arguments?: Readonly<Record<string, unknown>>; descriptorFingerprint?: string; catalogFingerprint?: string }> = [];
+  it('scopes native Thai-RAG forget to the active workspace category', async () => {
+    const nativeCalls: Array<{ tool: string; arguments: Readonly<Record<string, unknown>> }> = [];
     const services = servicesWithCalls([]);
-    services.extensions = {
-      ...services.extensions,
-      async describeMcpServer() {
-        return ok({
-          server: 'thai-rag-mcp', enabled: true, connected: true,
-          provenance: { source: 'antigravity-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
-          tools: [{ name: 'remember_turn', qualifiedName: 'mcp:thai-rag-mcp/remember_turn', description: 'Remember turn' }],
-        });
+    services.thaiRag = {
+      health: async (): Promise<ReturnType<typeof ok>> => ok({ providerId: 'thai-rag', state: 'ready', embeddingIndexGeneration: 1 }),
+      call: async (tool, args): Promise<ReturnType<typeof ok>> => {
+        nativeCalls.push({ tool, arguments: args });
+        return ok({ result: 'deleted' });
       },
-      async callMcpTool(input) {
-        childCalls.push(input);
-        return ok({ result: 'stored' });
-      },
-    } as McpApplicationServices['extensions'];
-    const turnPersistenceLedger = new TurnPersistenceLedger();
-    const options = {
-      activeWorkspaceScopeProvider: activeScope,
-      profileProvider: (): PermissionProfile => permissionProfiles.safe,
-      sessionId: 'session-a',
-      turnPersistenceLedger,
-    } as const;
-    const input = {
-      turnId: 'turn-1',
-      userContent: 'Please inspect the runtime.',
-      assistantContent: 'Inspection completed.',
-      workspace: 'workspace-a',
-      summary: 'Cross-host runtime audit',
-      tags: 'audit',
     };
-
-    const first = new ToolRegistry(services, actor, options);
-    const firstResponse = await first.invoke('record_turn', input);
-    expect(firstResponse.isError).not.toBe(true);
-    expect(firstResponse.structuredContent).toMatchObject({ turnId: 'turn-1', recorded: 2, skipped: 0, duplicate: false });
-    expect(childCalls).toHaveLength(2);
-    expect(childCalls).toEqual([
-      expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint, arguments: expect.objectContaining({ role: 'user', content: input.userContent, workspace: 'workspace-a' }) }),
-      expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint, arguments: expect.objectContaining({ role: 'assistant', content: input.assistantContent, workspace: 'workspace-a' }) }),
-    ]);
-    expect(childCalls[0]?.arguments).not.toHaveProperty('turn_id');
-    expect(childCalls[1]?.arguments).not.toHaveProperty('turn_id');
-
-    const recreated = new ToolRegistry(services, actor, { ...options, sessionId: 'session-b' });
-    const duplicate = await recreated.invoke('record_turn', input);
-    expect(duplicate.isError).not.toBe(true);
-    expect(duplicate.structuredContent).toMatchObject({ turnId: 'turn-1', recorded: 0, skipped: 2, duplicate: true });
-    expect(childCalls).toHaveLength(2);
-
-    const otherWorkspace = new ToolRegistry(services, actor, {
-      ...options,
-      sessionId: 'session-c',
-      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => ({
-        workspaceId: 'workspace-b',
-        rootPath: path.resolve(tmpdir(), 'unified-mpc-approval-fixture-b'),
-      }),
-    });
-    const distinctWorkspace = await otherWorkspace.invoke('record_turn', input);
-    expect(distinctWorkspace.isError).not.toBe(true);
-    expect(distinctWorkspace.structuredContent).toMatchObject({ turnId: 'turn-1', recorded: 2, skipped: 0, duplicate: false });
-    expect(childCalls).toHaveLength(4);
-
-    const invalid = await first.invoke('record_turn', { ...input, server: 'arbitrary-child' });
-    expect(invalid).toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
-  });
-
-  it('reuses the same child turn_id after an ambiguous write response and session recreation when the live child schema supports it', async () => {
-    const descriptorFingerprint = 'a'.repeat(64);
-    const catalogFingerprint = 'b'.repeat(64);
-    const childCalls: Array<{ arguments?: Readonly<Record<string, unknown>> }> = [];
-    let attempts = 0;
-    const services = servicesWithCalls([]);
-    services.extensions = {
-      ...services.extensions,
-      async describeMcpServer() {
-        return ok({
-          server: 'thai-rag-mcp', enabled: true, connected: true,
-          provenance: { source: 'antigravity-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
-          tools: [{
-            name: 'remember_turn',
-            qualifiedName: 'mcp:thai-rag-mcp/remember_turn',
-            description: 'Remember turn',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                role: { type: 'string' },
-                content: { type: 'string' },
-                turn_id: { type: 'string' },
-              },
-              required: ['role', 'content'],
-            },
-          }],
-        });
-      },
-      async callMcpTool(input) {
-        childCalls.push(input);
-        attempts += 1;
-        return attempts === 1
-          ? err(appError('PROCESS_TIMEOUT', 'connection lost after child dispatch', true))
-          : ok({ result: 'stored' });
-      },
-    } as McpApplicationServices['extensions'];
-    const input = {
-      turnId: 'turn-ambiguous-retry',
-      userContent: 'Persist this logical turn exactly once at the child boundary.',
-      workspace: 'caller-label-is-not-the-authorization-scope',
-    };
-
-    const first = new ToolRegistry(services, actor, {
-      activeWorkspaceScopeProvider: activeScope,
-      profileProvider: balancedProfile,
-      sessionId: 'session-a',
-      turnPersistenceLedger: new TurnPersistenceLedger(),
-    });
-    const firstResponse = await first.invoke('record_turn', input);
-    expect(firstResponse).toMatchObject({ isError: true });
-
-    const recreated = new ToolRegistry(services, actor, {
-      activeWorkspaceScopeProvider: activeScope,
-      profileProvider: balancedProfile,
-      sessionId: 'session-b',
-      turnPersistenceLedger: new TurnPersistenceLedger(),
-    });
-    const retryResponse = await recreated.invoke('record_turn', input);
-    expect(retryResponse.isError).not.toBe(true);
-
-    expect(childCalls).toHaveLength(2);
-    const firstChildTurnId = childCalls[0]?.arguments?.turn_id;
-    const retryChildTurnId = childCalls[1]?.arguments?.turn_id;
-    expect(firstChildTurnId).toEqual(expect.any(String));
-    expect(firstChildTurnId).not.toBe('');
-    expect(retryChildTurnId).toBe(firstChildTurnId);
-  });
-
-  it('refuses a workspace-scoped thai-rag child for record_turn before persistence dispatch', async () => {
-    let childCalls = 0;
-    const services = servicesWithCalls([]);
-    services.extensions = {
-      ...services.extensions,
-      async describeMcpServer() {
-        return ok({
-          server: 'thai-rag-mcp', enabled: true, connected: true,
-          provenance: { source: 'workspace-cursor', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: 'b'.repeat(64), drift: { detected: false, reasons: [] } },
-          tools: [{ name: 'remember_turn', qualifiedName: 'mcp:thai-rag-mcp/remember_turn', description: 'Remember turn' }],
-        });
-      },
-      async callMcpTool() {
-        childCalls += 1;
-        return ok({ result: 'unexpected' });
-      },
-    } as McpApplicationServices['extensions'];
     const registry = new ToolRegistry(services, actor, {
       activeWorkspaceScopeProvider: activeScope,
       profileProvider: balancedProfile,
-      sessionId: 'session-a',
-      turnPersistenceLedger: new TurnPersistenceLedger(),
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
     });
 
-    const response = await registry.invoke('record_turn', { turnId: 'workspace-shadow', userContent: 'Do not trust workspace MCP shadowing.' });
+    const result = await registry.invoke('rag_forget', { workspaceId: 'workspace-a', memoryId: 'memory-1', userConfirmed: true });
 
-    expect(response).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspace-scoped') } } });
-    expect(childCalls).toBe(0);
+    expect(result.isError).not.toBe(true);
+    expect(nativeCalls).toEqual([{
+      tool: 'forget',
+      arguments: { memory_id: 'memory-1', category: 'workspace:workspace-a' },
+    }]);
   });
 
   it('allows an exact parent-policy read-only child MCP call without native host approval', async () => {

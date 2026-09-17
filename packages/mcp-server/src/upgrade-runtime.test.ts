@@ -157,7 +157,7 @@ describe('upgrade runtime', () => {
   it('keeps shared-core lifecycle and workspace harness tools discoverable through the public registry boundary', async () => {
     const registry = new ToolRegistry({}, actor);
 
-    for (const name of ['task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'record_turn', 'skills_list', 'skills_read', 'workspace_bootstrap', 'prepare_code_change'] as const) {
+    for (const name of ['task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'skills_list', 'skills_read', 'workspace_bootstrap', 'prepare_code_change'] as const) {
       const search = await registry.invoke('tool_search', { query: name, limit: 20 });
       const described = await registry.invoke('tool_describe', { name });
 

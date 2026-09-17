@@ -1071,9 +1071,7 @@ export class UpgradeRuntimeService {
       excluded: server.excluded,
       ...(server.exclusionReason === undefined ? {} : { exclusionReason: server.exclusionReason }),
     }));
-    const turnRuntime = this.services.memoryRuntime?.status();
-    const memoryServer = servers.find((server) => server.name.toLowerCase() === 'memory');
-    const thaiRagServer = servers.find((server) => server.name.toLowerCase() === 'thai-rag-mcp');
+    const nativeCapabilities = ['rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status'];
     return ok({
       tool: name,
       status: 'ready',
@@ -1084,36 +1082,10 @@ export class UpgradeRuntimeService {
       connected: servers.filter((server) => server.connected).length,
       enabled: servers.filter((server) => server.enabled).length,
       runtimePolicy: {
-        version: this.services.memoryRuntime?.policyVersion ?? 1,
-        approval: { mode: turnRuntime?.approvalMode ?? 'trusted-memory-only', safeInternalMemoryOps: 'auto', arbitraryChildTools: 'normal-policy' },
-        memory: {
-          mandatory: memoryServer?.required === true,
-          connected: memoryServer?.connected === true,
-          state: memoryServer?.state ?? 'offline',
-          ...(memoryServer?.lastError === undefined ? {} : { lastError: memoryServer.lastError }),
-        },
-        thaiRag: {
-          mandatory: thaiRagServer?.required === true,
-          connected: thaiRagServer?.connected === true,
-          state: thaiRagServer?.state ?? 'offline',
-          autoRecordTurn: turnRuntime?.autoRecordTurn === true,
-          automaticSources: turnRuntime?.sources
-            ?.filter((source) => source.captureMode === 'automatic' && source.state === 'active' && source.autoRecordTurn)
-            .map((source) => source.sourceClient) ?? [],
-          policyAssistedSources: turnRuntime?.sources
-            ?.filter((source) => source.captureMode === 'policy-assisted')
-            .map((source) => source.sourceClient) ?? [],
-          ...(thaiRagServer?.lastError === undefined ? {} : { lastError: thaiRagServer.lastError }),
-        },
-        transcript: turnRuntime ?? {
-          state: 'offline',
-          autoRecordTurn: false,
-          approvalMode: 'trusted-memory-only',
-          pendingTurns: 0,
-          replayCount: 0,
-          rejectedTurns: 0,
-          missingSequences: [],
-        },
+        version: 2,
+        approval: { mode: 'trusted-memory-only', safeInternalMemoryOps: 'auto', arbitraryChildTools: 'normal-policy' },
+        nativeCapabilities: { available: nativeCapabilities, workspaceScoped: true, selectiveMemory: true, automaticTurnCapture: false },
+        externalMcp: { connected: servers.filter((server) => server.connected).length, enabled: servers.filter((server) => server.enabled).length },
       },
     });
   }

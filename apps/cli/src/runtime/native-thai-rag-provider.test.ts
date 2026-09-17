@@ -46,7 +46,7 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
-  it('indexes through the canonical UUID source alias when the directory basename differs', async () => {
+  it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     let inFlight = 0;
@@ -83,7 +83,8 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(maxInFlight).toBe(1);
     const indexCall = calls.find((call) => call.tool === 'code_index');
     expect(indexCall?.args).toMatchObject({
-      workspace_path: path.join(dataRoot, 'thai-rag', 'sources', workspaceId),
+      workspace_path: workspaceRoot,
+      workspace: workspaceId,
       background: false,
     });
     await driver.stop();

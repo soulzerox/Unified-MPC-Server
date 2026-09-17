@@ -790,9 +790,8 @@ export class ToolRegistry {
     if (!thaiHealth.ok || !nativeThaiRagReadyForHarness(thaiHealth.ok ? thaiHealth.value : undefined)) {
       return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for pre-edit diagnostics${thaiHealth.ok ? '' : `: ${thaiHealth.error.message}`}`, true));
     }
-    const thaiCheck = await thaiRag.call('pre_edit_context', {
+    const thaiCheck = await this.nativeRagCall(workspaceId, 'pre_edit_context', {
       file_path: filePath,
-      workspace: workspaceId,
       ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
     }, signal);
     if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
@@ -902,7 +901,7 @@ export class ToolRegistry {
     } else if (tool === 'code_blast_radius') {
       providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_index') {
-      providerArgs = { ...args, workspace_path: scope.rootPath };
+      providerArgs = { ...args, workspace_path: scope.rootPath, workspace: workspaceId };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
       const pathFilter = requestedFilter.length === 0

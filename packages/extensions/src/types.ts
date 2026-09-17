@@ -1,7 +1,7 @@
 import type { Result } from '@unified-mpc/domain';
 
 export type ExtensionsMode = 'enable_all' | 'allowlist';
-export type PolicyResourceType = 'server' | 'skill';
+export type PolicyResourceType = 'server' | 'skill' | 'capability';
 export type PolicySource = 'configured' | 'discovered';
 
 export interface PolicyEntry {
@@ -12,6 +12,8 @@ export interface PolicyEntry {
   readonly enforcement: 'REALTIME' | 'EVERY_SESSION' | 'SAFETY_PRE_CHECK' | 'ON_DEMAND' | 'AUTO_ROUTE' | string;
   readonly directive: string;
   readonly requiredTools?: readonly string[];
+  /** Parent-owned native capabilities that must exist for a capability policy to be available. */
+  readonly requiredCapabilities?: readonly string[];
   /** Parent-owned allowlist of exact child tools proven safe to invoke as reads when the live MCP contract fingerprints match. */
   readonly readOnlyTools?: readonly string[];
 }
@@ -171,7 +173,7 @@ export interface McpServerListItem {
   readonly command: string;
 }
 
-export const DEFAULT_MANDATORY_MCP_SERVERS = Object.freeze(['memory'] as const);
+export const DEFAULT_MANDATORY_MCP_SERVERS = Object.freeze([] as const);
 
 export const DEFAULT_EXTENSIONS_SETTINGS: ExtensionsSettings = Object.freeze({
   mode: 'enable_all',

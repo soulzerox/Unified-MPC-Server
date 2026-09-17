@@ -41,8 +41,9 @@ describe('IdeSyncService', () => {
     expect(compiled).toContain('<!-- MCP-POLICY-START -->');
     expect(compiled).toContain('<!-- MCP-POLICY-END -->');
     expect(compiled).toContain('| P1 | session-start:ask-matt | ask-matt |');
-    expect(compiled).toContain('| P2 | child:memory | memory |');
-    expect(compiled).toContain('| P3 | code-safety:godkiller | godkiller | server | ON_DEMAND | Optional |');
+    expect(compiled).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
+    expect(compiled).toContain('| P3 | code:pre-edit-context | native-thai-rag | capability | SAFETY_PRE_CHECK | ✅ YES |');
+    expect(compiled).toContain('| P4 | code-safety:godkiller | godkiller | server | ON_DEMAND | Optional |');
     expect(compiled).not.toContain('pre-edit:thai-rag');
     expect(DEFAULT_POLICIES.find((policy) => policy.id === 'code-safety:godkiller')).toMatchObject({
       mandatory: false,
@@ -68,7 +69,7 @@ describe('IdeSyncService', () => {
     const service = new IdeSyncService({ policies: [DEFAULT_POLICIES[1]!, DEFAULT_POLICIES[0]!] });
     const compiled = service.compile();
 
-    expect(compiled).toContain('| P1 | child:memory | memory |');
+    expect(compiled).toContain('| P1 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
     expect(compiled).toContain('| P2 | session-start:ask-matt | ask-matt |');
   });
 
@@ -96,7 +97,7 @@ describe('IdeSyncService', () => {
     const cursorFile = path.join(workspace, '.cursor', 'rules', '00-mandatory-policy.mdc');
     const cursorContent = await readFile(cursorFile, 'utf8');
     expect(cursorContent).toContain('alwaysApply: true');
-    expect(cursorContent).toContain('| P2 | child:memory | memory |');
+    expect(cursorContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
 
     // 2. Cline: .clinerules
     const clineFile = path.join(workspace, '.clinerules');
@@ -104,17 +105,17 @@ describe('IdeSyncService', () => {
     expect(clineContent).toContain('# Existing Cline Rules');
     expect(clineContent).toContain('Do not delete this.');
     expect(clineContent).toContain('<!-- MCP-POLICY-START -->');
-    expect(clineContent).toContain('| P2 | child:memory | memory |');
+    expect(clineContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
     expect(clineContent).toContain('<!-- MCP-POLICY-END -->');
 
     // 3. Antigravity: ~/.gemini/antigravity/rules/mcp-policy.md & workspace GEMINI.md
     const agGlobalFile = path.join(home, '.gemini', 'antigravity', 'rules', 'mcp-policy.md');
     const agGlobalContent = await readFile(agGlobalFile, 'utf8');
-    expect(agGlobalContent).toContain('| P2 | child:memory | memory |');
+    expect(agGlobalContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
 
     const agWsFile = path.join(workspace, 'GEMINI.md');
     const agWsContent = await readFile(agWsFile, 'utf8');
-    expect(agWsContent).toContain('| P2 | child:memory | memory |');
+    expect(agWsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
 
     // 4. OpenCode & Freebuff: AGENTS.md
     const agentsFile = path.join(workspace, 'AGENTS.md');
@@ -122,22 +123,22 @@ describe('IdeSyncService', () => {
     expect(agentsContent).toContain('# Existing Agent Instructions');
     expect(agentsContent).toContain('Preserve this note.');
     expect(agentsContent).toContain('<!-- MCP-POLICY-START -->');
-    expect(agentsContent).toContain('| P2 | child:memory | memory |');
+    expect(agentsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
     expect(agentsContent).toContain('<!-- MCP-POLICY-END -->');
 
     // 5. Claude: ~/.claude/CLAUDE.md & workspace CLAUDE.md
     const claudeGlobalFile = path.join(home, '.claude', 'CLAUDE.md');
     const claudeGlobalContent = await readFile(claudeGlobalFile, 'utf8');
-    expect(claudeGlobalContent).toContain('| P2 | child:memory | memory |');
+    expect(claudeGlobalContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
 
     const claudeWsFile = path.join(workspace, 'CLAUDE.md');
     const claudeWsContent = await readFile(claudeWsFile, 'utf8');
-    expect(claudeWsContent).toContain('| P2 | child:memory | memory |');
+    expect(claudeWsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
 
     // 6. Oh My Pi: workspace .omp/system.md
     const ompWsFile = path.join(workspace, '.omp', 'system.md');
     const ompWsContent = await readFile(ompWsFile, 'utf8');
-    expect(ompWsContent).toContain('| P2 | child:memory | memory |');
+    expect(ompWsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
   });
 
   it('updates policy block idempotently without duplicating content', async () => {
@@ -179,4 +180,3 @@ describe('IdeSyncService', () => {
     expect(secondContent).toContain('custom-tool');
   });
 });
-

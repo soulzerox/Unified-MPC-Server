@@ -7,7 +7,6 @@ import { IncrementalVerifier } from './incremental-verifier.js';
 import { RunBudgetGuard } from './run-budget.js';
 import { PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
-import { TurnPersistenceLedger } from './turn-persistence.js';
 import { createStdioRequestScope } from './request-scope.js';
 import { resolveDataPath } from '@unified-mpc/shared';
 import { createTrustedHostMutationApprovalProvider, type TrustedHostMutationApprovalProvider } from './trusted-host-approval.js';
@@ -28,14 +27,6 @@ export function resolveStdioHostMutationApprovalProvider(
   factory: () => HostMutationApprovalProvider = createTrustedHostMutationApprovalProvider,
 ): HostMutationApprovalProvider {
   return configured ?? factory();
-}
-
-export function resolveStdioTurnPersistenceMode(
-  configured: McpServerOptions['turnPersistenceMode'],
-  _era: 'legacy' | 'modern',
-): NonNullable<McpServerOptions['turnPersistenceMode']> {
-  void _era;
-  return configured ?? 'required';
 }
 
 export function bindStdioHostMutationApprovalLifecycle(
@@ -71,7 +62,6 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
   const setOfMarksStore = options.setOfMarksStore ?? new SetOfMarksObservationStore();
   const ponytailActivationLedger = options.ponytailActivationLedger ?? new PonytailActivationLedger();
   const harnessActivationLedger = options.harnessActivationLedger ?? new HarnessActivationLedger();
-  const turnPersistenceLedger = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
   const requestScope = options.requestScope ?? createStdioRequestScope();
   let ownedHostMutationApprovalProvider: TrustedHostMutationApprovalProvider | undefined;
   const hostMutationApprovalProvider = resolveStdioHostMutationApprovalProvider(
@@ -94,9 +84,7 @@ export function startMcpStdio(options: McpStdioOptions): StdioServerHandle {
       setOfMarksStore,
       ponytailActivationLedger,
       harnessActivationLedger,
-      turnPersistenceLedger,
       legacyTasksProtocol: context.era === 'legacy',
-      turnPersistenceMode: resolveStdioTurnPersistenceMode(options.turnPersistenceMode, context.era),
       requestScope,
     }),
     { legacy: 'serve', onerror: options.onError ?? writeStdioDiagnostic, transport },

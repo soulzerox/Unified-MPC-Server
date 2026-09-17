@@ -107,104 +107,6 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
-  it('shares record_turn idempotency across modern HTTP server recreation', async () => {
-    const descriptorFingerprint = 'a'.repeat(64);
-    const catalogFingerprint = 'b'.repeat(64);
-    const childCalls: Array<{ server: string; tool: string; arguments?: Readonly<Record<string, unknown>>; descriptorFingerprint?: string; catalogFingerprint?: string }> = [];
-    const turnHandle = await startMcpHttp({
-      port: 0,
-      services: {
-        extensions: {
-          async describeMcpServer() {
-            return ok({
-              server: 'thai-rag-mcp', enabled: true, connected: true,
-              provenance: { source: 'test-config', trustTier: 'external', namespace: 'mcp:thai-rag-mcp', descriptorFingerprint, catalogFingerprint, drift: { detected: false, reasons: [] } },
-              tools: [{ name: 'remember_turn', qualifiedName: 'mcp:thai-rag-mcp/remember_turn', description: 'Remember turn' }],
-            });
-          },
-          async callMcpTool(input) {
-            childCalls.push(input);
-            return ok({ result: 'stored' });
-          },
-        } as unknown as McpApplicationServices['extensions'],
-      },
-      actor: { clientId: 'turn-http-test', clientName: 'turn-http-test' },
-    });
-    const client = new Client(
-      { name: 'turn-http-client', version: '0.1.0' },
-      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
-    );
-    const transport = new StreamableHTTPClientTransport(turnHandle.endpoint);
-    const input = {
-      turnId: 'http-turn-1',
-      userContent: 'Audit shared HTTP persistence.',
-      assistantContent: 'Audit complete.',
-      workspace: 'workspace-1',
-      summary: 'HTTP persistence test',
-      tags: 'test',
-    };
-
-    try {
-      await client.connect(transport);
-      const first = await client.callTool({ name: 'record_turn', arguments: input });
-      const duplicate = await client.callTool({ name: 'record_turn', arguments: input });
-
-      expect(first.isError).not.toBe(true);
-      expect(first.structuredContent).toMatchObject({ turnId: input.turnId, recorded: 2, skipped: 0, duplicate: false });
-      expect(duplicate.isError).not.toBe(true);
-      expect(duplicate.structuredContent).toMatchObject({ turnId: input.turnId, recorded: 0, skipped: 2, duplicate: true });
-      expect(childCalls).toHaveLength(2);
-      expect(childCalls).toEqual([
-        expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint }),
-        expect.objectContaining({ server: 'thai-rag-mcp', tool: 'remember_turn', descriptorFingerprint, catalogFingerprint }),
-      ]);
-    } finally {
-      await client.close().catch(() => undefined);
-      await turnHandle.close();
-    }
-  });
-
-  it('defaults HTTP/Web turn persistence to required without requiring host-generated turn IDs', async () => {
-    const strictHandle = await startMcpHttp({
-      port: 0,
-      services: {
-        extensions: {
-          async runtimePolicySnapshot() {
-            return ok({ ready: true, policies: [{
-              priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt', source: 'configured', available: true,
-            }] });
-          },
-          async readSkill(input) {
-            return ok({ id: input.skillId, name: 'ask-matt', description: 'router', source: 'agents-skills', path: '/ask-matt/SKILL.md', content: '# Ask Matt' });
-          },
-        } as unknown as McpApplicationServices['extensions'],
-      },
-      actor: { clientId: 'strict-http-test', clientName: 'strict-http-test' },
-    });
-    const client = new Client(
-      { name: 'strict-http-client', version: '0.1.0' },
-      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
-    );
-    const transport = new StreamableHTTPClientTransport(strictHandle.endpoint);
-
-    try {
-      await client.connect(transport);
-      const result = await client.callTool({ name: 'task_bootstrap', arguments: {} });
-      expect(result.isError).not.toBe(true);
-      expect(result.structuredContent).toMatchObject({
-        turnPersistence: {
-          state: 'awaiting_record',
-          turnId: expect.stringMatching(/^turn_umcp_/),
-          mode: 'required',
-          violations: 0,
-        },
-      });
-    } finally {
-      await client.close().catch(() => undefined);
-      await strictHandle.close();
-    }
-  });
-
   it('advertises outcome-driven continuation without an elapsed-time cutoff', async () => {
     const client = new Client({ name: 'continuity-policy-client', version: '0.1.0' });
     const transport = new StreamableHTTPClientTransport(handle.endpoint);
@@ -218,8 +120,6 @@ describe('MCP localhost HTTP transport', () => {
       expect(instructions).toContain('Before the first mutation of any multi-step change');
       expect(instructions).toContain('call run_goal with scheduledContinuation=auto');
       expect(instructions).toContain('enroll it before the next mutation');
-      expect(instructions).toContain('call record_turn');
-      expect(instructions).toContain('completed user task turn');
       expect(instructions).not.toMatch(/\b(?:22|25|60)\s*minutes?\b/i);
     } finally {
       await client.close();

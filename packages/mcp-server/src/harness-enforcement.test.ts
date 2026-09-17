@@ -279,8 +279,11 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('exposes curated native working-memory tools after bootstrap', async () => {
-    const { services, childCalls } = createHarnessServices();
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger() });
+    const { services, nativeRagCalls } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider: async (): Promise<{ readonly workspaceId: string; readonly rootPath: string }> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' }),
+    });
 
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
     const searched = await registry.invoke('working_memory_search', { workspaceId: 'workspace-1', query: 'current task' });
@@ -291,11 +294,7 @@ describe('workspace engineering harness enforcement', () => {
       observations: ['Implemented harness bootstrap'],
     });
     expect(recorded.isError).not.toBe(true);
-    expect(childCalls).toEqual([
-      'memory/search_nodes',
-      'memory/search_nodes',
-      'memory/create_entities',
-    ]);
+    expect(nativeRagCalls).toEqual(['recall', 'remember']);
   });
 
   it('re-bootstraps and re-runs pre-edit checks when AGENTS.md changes', async () => {

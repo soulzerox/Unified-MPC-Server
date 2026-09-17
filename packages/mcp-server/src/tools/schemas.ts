@@ -584,9 +584,7 @@ export const skillsReadSchema = z.object({
   relativePath: z.string().min(1).max(MAX_PATH_LENGTH).optional(),
 }).strict();
 
-export const taskBootstrapSchema = z.object({
-  turnId: z.string().trim().min(1).max(256).optional(),
-}).strict();
+export const taskBootstrapSchema = z.object({}).strict();
 
 export const policySnapshotSchema = z.object({}).strict();
 
@@ -597,23 +595,66 @@ export const mcpDescribeSchema = z.object({
 }).strict();
 
 export const ragRecallSchema = z.object({
+  workspaceId: workspaceIdSchema,
   query: z.string().trim().min(1).max(65_536),
   category: z.string().trim().min(1).max(256).optional(),
   limit: z.number().int().min(1).max(50).optional(),
 }).strict();
 
 export const ragRememberSchema = z.object({
+  workspaceId: workspaceIdSchema,
   content: z.string().min(1).max(65_536),
   category: z.string().trim().min(1).max(256).optional(),
 }).strict();
 
-export const recordTurnSchema = z.object({
-  turnId: z.string().trim().min(1).max(256).optional(),
-  userContent: z.string().min(1).max(65_536),
-  assistantContent: z.string().min(1).max(65_536).optional(),
-  workspace: z.string().trim().max(MAX_PATH_LENGTH).optional(),
-  summary: z.string().max(8192).optional(),
-  tags: z.string().max(2048).optional(),
+export const workspaceMemoryRecordSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  name: z.string().trim().min(1).max(512),
+  observations: z.array(z.string().trim().min(1).max(8192)).min(1).max(50),
+  category: z.string().trim().min(1).max(128).optional(),
+}).strict();
+
+export const ragForgetSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  memoryId: z.string().trim().min(1).max(256),
+  userConfirmed: z.boolean().optional(),
+}).strict();
+
+export const ragPreEditContextSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  filePath: pathSchema,
+  proposedSymbol: z.string().trim().max(512).optional(),
+}).strict();
+
+export const ragCodeSearchSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  query: z.string().trim().min(1).max(65_536),
+  topK: z.number().int().min(1).max(50).optional(),
+  pathFilter: z.string().trim().min(1).max(MAX_PATH_LENGTH).optional(),
+}).strict();
+
+export const ragCodeContextSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  filePath: pathSchema,
+  lineNumber: z.number().int().min(1).max(1_000_000),
+  window: z.number().int().min(1).max(500).optional(),
+}).strict();
+
+export const ragCodeBlastRadiusSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  symbolName: z.string().trim().min(1).max(512),
+  maxDepth: z.number().int().min(1).max(10).optional(),
+}).strict();
+
+export const ragCodeIndexSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  force: z.boolean().optional(),
+  background: z.boolean().optional(),
+}).strict();
+
+export const ragIndexStatusSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  jobId: z.string().trim().min(1).max(256),
 }).strict();
 
 export const mcpCallSchema = z.object({

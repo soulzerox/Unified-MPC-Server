@@ -216,7 +216,7 @@ export function getClientScriptJs(): string {
           const typeCell = document.createElement('td');
           const typeSelect = document.createElement('select');
           typeSelect.className = 'form-control';
-          for (const value of ['server', 'skill']) {
+          for (const value of ['server', 'skill', 'capability']) {
             const option = document.createElement('option');
             option.value = value;
             option.textContent = value;
@@ -252,6 +252,20 @@ export function getClientScriptJs(): string {
             };
           });
           toolsCell.appendChild(tools);
+          const capabilities = document.createElement('input');
+          capabilities.type = 'text';
+          capabilities.className = 'form-control mono';
+          capabilities.style.minWidth = '180px';
+          capabilities.style.marginTop = '6px';
+          capabilities.value = (policy.requiredCapabilities || []).join(', ');
+          capabilities.placeholder = 'capability_a, capability_b';
+          capabilities.addEventListener('input', () => {
+            cachedPolicies[index] = {
+              ...cachedPolicies[index],
+              requiredCapabilities: capabilities.value.split(',').map((value) => value.trim()).filter(Boolean),
+            };
+          });
+          toolsCell.appendChild(capabilities);
           row.appendChild(toolsCell);
 
           addTextEditor(policy.directive, 'directive', '280px');
@@ -298,11 +312,12 @@ export function getClientScriptJs(): string {
         return cachedPolicies.map((policy) => ({
           id: String(policy.id || '').trim(),
           resourceId: String(policy.resourceId || '').trim(),
-          resourceType: policy.resourceType === 'skill' ? 'skill' : 'server',
+          resourceType: policy.resourceType === 'skill' ? 'skill' : policy.resourceType === 'capability' ? 'capability' : 'server',
           mandatory: policy.mandatory === true,
           enforcement: String(policy.enforcement || '').trim(),
           directive: String(policy.directive || '').trim(),
           requiredTools: [...new Set((policy.requiredTools || []).map((tool) => String(tool).trim()).filter(Boolean))],
+          requiredCapabilities: [...new Set((policy.requiredCapabilities || []).map((capability) => String(capability).trim()).filter(Boolean))],
           readOnlyTools: [...new Set((policy.readOnlyTools || []).map((tool) => String(tool).trim()).filter(Boolean))],
         }));
       }

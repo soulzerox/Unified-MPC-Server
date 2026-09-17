@@ -27,8 +27,6 @@ import type {
 } from '@unified-mpc/application';
 import { z } from 'zod';
 import type { ContextEconomyRuntime } from '../context-economy.js';
-import type { RecordTurnInput } from '../turn-persistence.js';
-import type { TurnTranscriptRuntimeStatus } from '../turn-transcript-spool.js';
 
 export interface WorkspaceInfoPort {
   info(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
@@ -99,10 +97,6 @@ export interface McpApplicationServices {
   readonly extensions?: ExtensionsService;
   /** Parent-owned native Thai-RAG provider. Repository-local child MCP configuration cannot replace this port. */
   readonly thaiRag?: ThaiRagProviderPort;
-  readonly memoryRuntime?: {
-    readonly policyVersion: 1;
-    readonly status: () => TurnTranscriptRuntimeStatus;
-  };
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
   readonly workspaceSelection?: WorkspaceSelectionPort;
@@ -168,7 +162,7 @@ export interface McpToolContext {
   /** Session-scoped Ponytail suppression owned by the current ToolRegistry/transport ledger. */
   readonly setPonytailSessionSuppressed?: (workspaceId: string, goalId: string | undefined, suppressed: boolean) => Promise<boolean>;
   /** Resolve live policy, load the mandatory session-start routing skill, and register the correlated turn when supplied. */
-  readonly bootstrapTaskContext?: (input: { readonly turnId?: string }, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly bootstrapTaskContext?: (signal: AbortSignal) => Promise<Result<unknown>>;
   /** Bootstrap the effective workspace engineering harness and mandatory child MCP connections. */
   readonly bootstrapWorkspaceHarness?: (workspaceId: string, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Run mandatory pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path. */
@@ -177,12 +171,12 @@ export interface McpToolContext {
   readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Create or append a work-log entity through the pinned native working-memory child. */
   readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Search the pinned Thai-RAG child through a curated read-only surface. */
-  readonly ragRecall?: (query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Persist one bounded long-term memory through the pinned Thai-RAG child. */
-  readonly ragRemember?: (content: string, category: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Persist one bounded interaction through the curated local RAG child. */
-  readonly recordTurn?: (input: RecordTurnInput, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Search parent-owned native Thai-RAG within one canonical workspace. */
+  readonly ragRecall?: (workspaceId: string, query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Persist one bounded long-term memory through the parent-owned native Thai-RAG capability. */
+  readonly ragRemember?: (workspaceId: string, content: string, category: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  /** Invoke one parent-owned native Thai-RAG operation after canonical workspace validation. */
+  readonly nativeRagCall?: (workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>, signal: AbortSignal) => Promise<Result<unknown>>;
 }
 
 export interface ToolConfig<T extends z.ZodType> {

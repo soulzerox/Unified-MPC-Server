@@ -210,7 +210,10 @@ describe('tool runtime delivery contract', () => {
 
   it.each(Object.entries(TOOL_RUNTIME_FIXTURES))('%s produces its declared runtime evidence', async (name, fixture) => {
     const calls: string[] = [];
-    const registry = new ToolRegistry(successServices(calls), actor, { codexToolsEnabled: true });
+    const registry = new ToolRegistry(successServices(calls), actor, {
+      codexToolsEnabled: true,
+      activeWorkspaceScopeProvider: async (): Promise<{ readonly workspaceId: string; readonly rootPath: string }> => ({ workspaceId: 'workspace-1', rootPath: process.cwd() }),
+    });
     const input = await preparedInput(registry, name, fixture);
     const generationBefore = fixture.prepare === 'cache_seed' ? await cacheGeneration(registry) : undefined;
     const callsBefore = calls.length;

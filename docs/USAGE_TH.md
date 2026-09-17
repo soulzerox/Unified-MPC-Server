@@ -132,7 +132,7 @@ pnpm cli tools call working_memory_search '{"workspaceId":"<workspace-id>","quer
 
 Client แบบ non-Web ที่เข้า Unified-MPC ผ่าน `startMcpStdio` ใช้ trusted human approval adapter ชุดเดียวกันโดยอัตโนมัติ จึงครอบคลุม CLI, standalone local STDIO และ IDE ที่ launch Unified-MPC stdio entrypoint โดยไม่ต้องทำ adapter แยกราย IDE หาก host ฝัง provider ของตัวเองมา ระบบจะใช้ provider นั้นแทนค่าเริ่มต้น
 
-STDIO entrypoint รองรับทั้ง MCP ยุค `2025-11-25` (เช่น Cline 4.1.17) และ modern `2026-07-28+` บน factory เดียวกัน โดยแยกความสามารถด้าน Tasks ตาม protocol era แต่ **turn-persistence เป็น `required` ตามค่าเริ่มต้นทั้ง legacy และ modern**; หาก host ไม่ส่ง stable `turnId` มา parent จะสร้าง bounded turn ID ให้เอง และจะไม่เปิด correlated turn ใหม่จน turn ก่อนหน้าถูก persist สำเร็จ ทั้งสองเส้นทางยังผ่าน trusted host approval boundary เดิม ไม่มีการลดระดับ mutation safety เพื่อรองรับ client รุ่นเก่า
+STDIO entrypoint รองรับทั้ง MCP ยุค `2025-11-25` (เช่น Cline 4.1.17) และ modern `2026-07-28+` บน factory เดียวกัน โดยแยกความสามารถด้าน Tasks ตาม protocol era. Native Thai-RAG memory เป็น workspace-scoped และ selective; ไม่มีการบันทึก transcript ทุก turn และการเริ่ม task ใหม่ไม่ขึ้นกับ persistence ของ turn ก่อนหน้า ทั้งสองเส้นทางยังผ่าน trusted host approval boundary เดิม
 
 ช่องทางยืนยันถูกแยกออกจาก MCP protocol โดยเด็ดขาดและ **ไม่อ่าน MCP stdin**: Linux ใช้ `zenity`/`kdialog` เมื่อมี GUI และ fallback ไป controlling TTY, macOS ใช้ `osascript`, Windows ใช้ PowerShell/WinForms dialog หากผู้ใช้กดปฏิเสธจริงจะจบที่ Deny ทันทีและไม่วนไปถามช่องทางอื่น แต่ถ้า helper ใช้งานไม่ได้ ระบบจึงค่อย fallback ไปช่องทาง trusted ถัดไป; หากไม่มีช่องทางที่ถามมนุษย์ได้จริง mutation จะ fail closed ไม่มี environment variable สำหรับ auto-approve
 

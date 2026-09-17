@@ -99,7 +99,7 @@ describe('MCP tool registry', () => {
       'system_info', 'notification', 'file_dialog', 'clipboard', 'web_fetch',
       'audio', 'screen_record', 'office', 'scheduler',
       'wsl_exec', 'wsl_fs',
-      'skills_list', 'skills_read', 'skills_install', 'ponytail_session', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'rag_recall', 'rag_remember', 'record_turn', 'mcp_install', 'mcp_call',
+      'skills_list', 'skills_read', 'skills_install', 'ponytail_session', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call', 'rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status',
       'workspace_context', 'workspace_context_continue', 'workspace_full_scan', 'workspace_full_scan_continue',
       'workspace_snapshot', 'search_all', 'read_many_files',
       'read_file_page', 'read_file_page_continue',

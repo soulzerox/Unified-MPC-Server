@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -38,7 +38,7 @@ import {
   createLocalExtensionsService,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, TurnPersistenceLedger, TurnTranscriptSupervisor, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, loadOrCreateTurnIngressKey, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type TurnTranscriptRuntimeStatus, type TurnTranscriptSourceRuntimeStatus, type WorkspaceScope } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import { ThaiRagProviderCoordinator, type ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
 import {
@@ -49,13 +49,9 @@ import {
   SqliteDatabase,
   SqliteGoalRepository,
   SqliteSettingsRepository,
-  SqliteTurnPersistenceRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
-import { AntigravityTurnTranscriptSource } from './antigravity-turn-transcript-source.js';
-import { ClineTurnTranscriptSource } from './cline-turn-transcript-source.js';
-import { OpenCodeTurnTranscriptSource } from './opencode-turn-transcript-source.js';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 
@@ -63,9 +59,6 @@ export interface StdioMcpRuntime {
   readonly services: McpApplicationServices;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
-  readonly turnPersistenceLedger: TurnPersistenceLedger;
-  readonly turnTranscriptReady: Promise<void>;
-  readonly turnTranscriptStatus: () => TurnTranscriptRuntimeStatus;
   readonly activityTracker: ActivityTracker;
   readonly activityReady: Promise<void>;
   readonly recoveryReady: Promise<void>;
@@ -88,29 +81,12 @@ export interface StdioMcpRuntimeOptions {
   readonly fullBypassAll?: boolean;
   /** Persist the HTTP active-project profile so WebUI/CLI changes are visible without restart. */
   readonly persistWorkspaceSelection?: boolean;
-  /** Enable read-only automatic transcript adapters for supported local AI hosts. */
-  readonly enableLocalTranscriptSources?: boolean;
-  /** Test/operator overrides for local host persistence locations. */
-  readonly transcriptSourcePaths?: {
-    readonly clineStorageRoots?: readonly string[];
-    readonly openCodeDatabasePaths?: readonly string[];
-    readonly antigravityStorageRoots?: readonly string[];
-  };
-  /** Expose ChatGPT Web's record_turn compatibility path truthfully as policy-assisted. */
-  readonly chatGptWebTranscriptFallback?: boolean;
   /** Unified-owned Thai-RAG install root; repository MCP configs never supply this path. */
   readonly thaiRagProviderPath?: string;
   /** Test seam for the parent-owned provider worker. */
   readonly thaiRagDriver?: ThaiRagProviderDriver;
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
-}
-
-interface RuntimeTurnTranscriptSource {
-  initialize(): Promise<void>;
-  start(): void;
-  close(): Promise<void>;
-  status(): TurnTranscriptSourceRuntimeStatus;
 }
 
 export function createStdioMcpRuntime(
@@ -121,7 +97,6 @@ export function createStdioMcpRuntime(
 ): StdioMcpRuntime {
   const databaseFilename = path.join(dataPath, 'unified-mpc.sqlite');
   const database = new SqliteDatabase(databaseFilename, { backupDirectory: path.join(dataPath, 'backups') });
-  const turnPersistenceLedger = new TurnPersistenceLedger({ store: new SqliteTurnPersistenceRepository(database) });
   const rawWorkspaceRepository = new SqliteWorkspaceRepository(database);
   const workspaceRepository = options.strictAllowedRoots === undefined
     ? rawWorkspaceRepository
@@ -248,115 +223,6 @@ export function createStdioMcpRuntime(
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
     idleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
   });
-  let turnTranscriptSupervisor: TurnTranscriptSupervisor | undefined;
-  const turnTranscriptSources: RuntimeTurnTranscriptSource[] = [];
-  const transcriptSourceInitializationErrors = new Map<string, string>();
-  const turnTranscriptReady = loadOrCreateTurnIngressKey(dataPath).then(async (key) => {
-    turnTranscriptSupervisor = new TurnTranscriptSupervisor({
-      dataPath,
-      key,
-      resolveProject: async (projectRef): Promise<{ projectId: string; rootPath: string } | null> => {
-        const normalizedRef = normalizeTurnProjectRef(projectRef);
-        const registered = await workspaceRepository.list();
-        const matched = registered.find((entry) => normalizedRef === normalizeTurnProjectRef(entry.id)
-          || normalizedRef === normalizeTurnProjectRef(entry.rootPath)
-          || normalizedRef === normalizeTurnProjectRef(entry.realRootPath));
-        return matched === undefined ? null : { projectId: matched.id, rootPath: matched.rootPath };
-      },
-      persist: async (turn, signal): Promise<{ ok: boolean; recorded?: number; skipped?: number; error?: string }> => {
-        const summary = turn.metadata === undefined ? undefined : readTurnMetadataString(turn.metadata, 'summary');
-        const tags = turn.metadata === undefined ? undefined : readTurnMetadataString(turn.metadata, 'tags');
-        const persisted = await persistCompletedTurnToNativeThaiRag(thaiRagPort, {
-          sessionId: turn.sessionId,
-          turnId: turn.turnId,
-          projectId: turn.projectId,
-          userMessage: turn.userMessage,
-          assistantMessage: turn.assistantMessage,
-          sourceClient: turn.sourceClient,
-          ...(summary === undefined ? {} : { summary }),
-          ...(tags === undefined ? {} : { tags }),
-        }, signal);
-        return persisted.ok
-          ? { ok: true, recorded: persisted.recorded, skipped: 0 }
-          : { ok: false, error: persisted.error };
-      },
-    });
-    turnTranscriptSupervisor.start();
-    await turnTranscriptSupervisor.reconcile();
-
-    if (options.enableLocalTranscriptSources === true) {
-      turnTranscriptSources.push(
-        new ClineTurnTranscriptSource({
-          dataPath,
-          key,
-          ...(options.transcriptSourcePaths?.clineStorageRoots === undefined ? {} : { storageRoots: options.transcriptSourcePaths.clineStorageRoots }),
-        }),
-        new OpenCodeTurnTranscriptSource({
-          dataPath,
-          key,
-          ...(options.transcriptSourcePaths?.openCodeDatabasePaths === undefined ? {} : { databasePaths: options.transcriptSourcePaths.openCodeDatabasePaths }),
-        }),
-        new AntigravityTurnTranscriptSource({
-          dataPath,
-          key,
-          ...(options.transcriptSourcePaths?.antigravityStorageRoots === undefined ? {} : { storageRoots: options.transcriptSourcePaths.antigravityStorageRoots }),
-        }),
-      );
-      for (const source of turnTranscriptSources) {
-        try {
-          await source.initialize();
-          source.start();
-        } catch (error: unknown) {
-          transcriptSourceInitializationErrors.set(source.status().sourceClient, error instanceof Error ? error.message : String(error));
-        }
-      }
-      // Local sources may have staged turns that completed while Unified MCP
-      // was offline. Reconcile once immediately rather than waiting for the timer.
-      await turnTranscriptSupervisor.reconcile();
-    }
-  });
-  const turnTranscriptStatus = (): TurnTranscriptRuntimeStatus => {
-    const journal = turnTranscriptSupervisor?.status() ?? {
-      state: 'offline' as const,
-      autoRecordTurn: false,
-      approvalMode: 'trusted-memory-only' as const,
-      pendingTurns: 0,
-      replayCount: 0,
-      rejectedTurns: 0,
-      missingSequences: [],
-    };
-    const sources: TurnTranscriptSourceRuntimeStatus[] = turnTranscriptSources.map((source) => {
-      const status = source.status();
-      const initializationError = transcriptSourceInitializationErrors.get(status.sourceClient);
-      return initializationError === undefined
-        ? status
-        : { ...status, state: 'degraded', autoRecordTurn: false, lastError: initializationError };
-    });
-    if (options.chatGptWebTranscriptFallback === true) {
-      sources.push({
-        sourceClient: 'chatgpt-web',
-        state: 'standby',
-        captureMode: 'policy-assisted',
-        autoRecordTurn: false,
-        roots: 0,
-        stagedTurns: 0,
-        lastError: 'Standard MCP HTTP does not expose hidden ChatGPT conversation transcripts; record_turn remains the policy-assisted persistence fallback.',
-      });
-    }
-    const automatic = sources.find((source) => source.captureMode === 'automatic' && source.state === 'active' && source.autoRecordTurn);
-    return {
-      ...journal,
-      autoRecordTurn: automatic !== undefined,
-      sources,
-      ...(automatic === undefined ? {} : {
-        sourceClient: automatic.sourceClient,
-        sourceState: automatic.state,
-        sourceRoots: automatic.roots,
-        ...(automatic.lastScanAt === undefined ? {} : { sourceLastScanAt: automatic.lastScanAt }),
-        ...(automatic.lastError === undefined ? {} : { sourceLastError: automatic.lastError }),
-      }),
-    };
-  };
   const codexService = new CodexService(workspaceRepository, {
     auditService,
     profileProvider,
@@ -440,7 +306,6 @@ export function createStdioMcpRuntime(
     capabilities: capabilityRuntime.service,
     extensions,
     thaiRag: thaiRagPort,
-    memoryRuntime: { policyVersion: 1, status: turnTranscriptStatus },
     installer: {
       installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installSkill(input),
       installServer: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installServer(input),
@@ -488,9 +353,6 @@ export function createStdioMcpRuntime(
     services,
     actor,
     extensions,
-    turnPersistenceLedger,
-    turnTranscriptReady,
-    turnTranscriptStatus,
     activityTracker,
     activityReady,
     recoveryReady,
@@ -510,9 +372,6 @@ export function createStdioMcpRuntime(
     close: async (): Promise<void> => {
       stopToolAvailabilityWatch();
       await recoveryReady.catch(() => undefined);
-      await turnTranscriptReady.catch(() => undefined);
-      for (const source of turnTranscriptSources) await source.close().catch(() => undefined);
-      await turnTranscriptSupervisor?.close().catch(() => undefined);
       await thaiRagCoordinator.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);
@@ -551,54 +410,6 @@ export function resolveStdioCheckpointKey(configured: Uint8Array | undefined = u
     }
   }
   return randomBytes(32);
-}
-
-interface NativeCompletedTurnInput {
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly projectId: string;
-  readonly userMessage: string;
-  readonly assistantMessage: string;
-  readonly sourceClient: string;
-  readonly summary?: string;
-  readonly tags?: string;
-}
-
-async function persistCompletedTurnToNativeThaiRag(
-  provider: NonNullable<McpApplicationServices['thaiRag']>,
-  input: NativeCompletedTurnInput,
-  signal?: AbortSignal,
-): Promise<{ readonly ok: true; readonly recorded: number } | { readonly ok: false; readonly error: string }> {
-  const entries = [
-    { role: 'user' as const, content: input.userMessage },
-    { role: 'assistant' as const, content: input.assistantMessage },
-  ];
-  let recorded = 0;
-  for (const entry of entries) {
-    const childTurnId = `turn_umcp_${createHash('sha256')
-      .update(JSON.stringify(['native-thai-rag-turn-v1', input.sessionId, input.projectId, input.turnId, entry.role]))
-      .digest('hex')}`;
-    const persisted = await provider.call('remember_turn', {
-      role: entry.role,
-      content: entry.content,
-      workspace: input.projectId,
-      ...(input.summary === undefined ? {} : { summary: input.summary }),
-      tags: input.tags ?? `runtime-turn,${input.sourceClient}`,
-      turn_id: childTurnId,
-    }, signal);
-    if (!persisted.ok) return { ok: false, error: persisted.error.message };
-    recorded += 1;
-  }
-  return { ok: true, recorded };
-}
-
-function normalizeTurnProjectRef(value: string): string {
-  return value.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-}
-
-function readTurnMetadataString(metadata: Readonly<Record<string, unknown>>, key: string): string | undefined {
-  const value = metadata[key];
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function customPermissionProfile(settingsRepository: SqliteSettingsRepository): PermissionProfile {

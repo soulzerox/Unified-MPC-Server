@@ -81,53 +81,6 @@ describe('stdio MCP runtime', () => {
     }
   });
 
-  it('starts the durable turn transcript supervisor without claiming automatic capture when no host adapter is enabled', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-supervisor-'));
-    temporaryRoots.push(dataPath);
-    const runtime = createStdioMcpRuntime(dataPath, workspace);
-    try {
-      await runtime.turnTranscriptReady;
-      expect(runtime.turnTranscriptStatus()).toMatchObject({
-        state: 'connected',
-        autoRecordTurn: false,
-        approvalMode: 'trusted-memory-only',
-        sources: [],
-        pendingTurns: 0,
-        replayCount: 0,
-      });
-    } finally {
-      await runtime.close();
-    }
-  });
-
-  it('reports local adapters and ChatGPT Web policy-assisted persistence separately', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-sources-'));
-    temporaryRoots.push(dataPath);
-    const missingRoot = path.join(dataPath, 'missing-host-storage');
-    const runtime = createStdioMcpRuntime(dataPath, workspace, false, {
-      enableLocalTranscriptSources: true,
-      chatGptWebTranscriptFallback: true,
-      transcriptSourcePaths: {
-        clineStorageRoots: [path.join(missingRoot, 'cline')],
-        openCodeDatabasePaths: [path.join(missingRoot, 'opencode.db')],
-        antigravityStorageRoots: [path.join(missingRoot, 'antigravity')],
-      },
-    });
-    try {
-      await runtime.turnTranscriptReady;
-      const status = runtime.turnTranscriptStatus();
-      expect(status).toMatchObject({ state: 'connected', autoRecordTurn: false, approvalMode: 'trusted-memory-only' });
-      expect(status.sources).toEqual(expect.arrayContaining([
-        expect.objectContaining({ sourceClient: 'cline', captureMode: 'automatic', state: 'unavailable', autoRecordTurn: false }),
-        expect.objectContaining({ sourceClient: 'opencode', captureMode: 'automatic', state: 'unavailable', autoRecordTurn: false }),
-        expect.objectContaining({ sourceClient: 'antigravity', captureMode: 'automatic', state: 'unavailable', autoRecordTurn: false }),
-        expect.objectContaining({ sourceClient: 'chatgpt-web', captureMode: 'policy-assisted', state: 'standby', autoRecordTurn: false }),
-      ]));
-    } finally {
-      await runtime.close();
-    }
-  });
-
   it('uses the registered host-facing root for active execution scopes when it differs from the canonical root', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-active-root-alias-'));
     temporaryRoots.push(dataPath);
@@ -147,32 +100,6 @@ describe('stdio MCP runtime', () => {
       ]);
     } finally {
       await runtime.close();
-    }
-  });
-
-  it('keeps completed turn idempotency and active compliance across runtime recreation without persisting in-flight claims', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-turn-persistence-'));
-    temporaryRoots.push(dataPath);
-
-    const firstRuntime = createStdioMcpRuntime(dataPath, workspace);
-    expect(firstRuntime.turnPersistenceLedger.beginTurn('session-a', 'turn-active', 'required')).toMatchObject({ accepted: true });
-    expect(firstRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-complete', 'user')).toBe('claimed');
-    firstRuntime.turnPersistenceLedger.complete('client-a/workspace-1', 'turn-complete', 'user');
-    expect(firstRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-in-flight', 'assistant')).toBe('claimed');
-    await firstRuntime.close();
-
-    const replacementRuntime = createStdioMcpRuntime(dataPath, workspace);
-    try {
-      expect(replacementRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-complete', 'user')).toBe('completed');
-      expect(replacementRuntime.turnPersistenceLedger.beginTurn('session-a', 'turn-next', 'required')).toMatchObject({
-        accepted: false,
-        state: 'violation',
-        turnId: 'turn-active',
-        attemptedTurnId: 'turn-next',
-      });
-      expect(replacementRuntime.turnPersistenceLedger.claim('client-a/workspace-1', 'turn-in-flight', 'assistant')).toBe('claimed');
-    } finally {
-      await replacementRuntime.close();
     }
   });
 

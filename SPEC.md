@@ -209,29 +209,26 @@ Embedded in `packages/mcp-server` and backed by `packages/extensions`:
   - `ULTRA`: Applies the strictest bundled Ponytail policy while preserving the same authorization/security boundaries.
 - **Fail-Closed Workspace Bootstrap**:
   - `workspace_bootstrap(workspaceId)` must successfully read and SHA-256 fingerprint the workspace `AGENTS.md`; unavailable or unreadable harness content blocks readiness.
-  - The default mandatory native child MCP set is `memory` and `thai-rag-mcp`. `godkiller` is an optional on-demand safety analyzer and does not participate in workspace readiness by default.
-  - Mandatory children are eagerly connected and pinned, launch/catalog contracts are fingerprinted, and exact required tool names are checked before readiness is recorded.
-  - Workspace-scoped MCP definitions are rejected for trusted mandatory-native promotion, preventing repository-controlled config from impersonating the mandatory child set.
+  - Native Thai-RAG is a parent-owned workspace capability; `memory` and `thai-rag-mcp` are not mandatory child MCP dependencies. `godkiller` is optional and does not participate in workspace readiness by default.
+  - Workspace bootstrap verifies native Thai-RAG health and configured optional-child readiness without promoting repository-controlled child definitions into trusted native capabilities.
 - **Single-Use Code Mutation Preflight**:
-  - `prepare_code_change(workspaceId, filePath, proposedSymbol?, runGodkillerSafetyCheck?)` revalidates `AGENTS.md` and calls mandatory `thai-rag-mcp/pre_edit_context`. When `runGodkillerSafetyCheck=true`, the parent additionally describes the live non-workspace-scoped `godkiller` child, rejects contract drift, and invokes only `gk_task(action=edit_safe)` with the live descriptor/catalog fingerprints.
+  - `prepare_code_change(workspaceId, filePath, proposedSymbol?, runGodkillerSafetyCheck?)` revalidates `AGENTS.md` and calls the parent-owned native Thai-RAG pre-edit provider. When `runGodkillerSafetyCheck=true`, the parent invokes only the curated optional `gk_task(action=edit_safe)` route.
   - A successful development-artifact mutation consumes that path's prepared authorization. Repeated edits require a new preflight.
   - Any `AGENTS.md` change invalidates the bootstrap before subsequent code mutation.
-- **Curated Working Memory Surface**:
-  - `working_memory_search` and `working_memory_record` expose the bounded operations needed from the pinned `memory` child without flattening the entire child tool catalog into the client context.
+- **Curated Native Memory Surface**:
+  - `rag_recall`, `rag_remember`, and `workspace_memory_record` provide selective workspace-scoped memory; they never capture ordinary turns automatically.
 - **Per-Task Bootstrap and Lazy Child Routing**:
   - `task_bootstrap` is a public registry primitive and must resolve the live runtime-policy snapshot plus the configured session-start engineering skill before planning or acting on each user task.
   - Optional child MCP servers remain lazy. A policy-declared `readOnlyTools` allowlist may bypass the host mutation prompt only after `mcp_describe` establishes matching live descriptor/catalog fingerprints. Context7 uses `resolve-library-id` and `query-docs`; Filesystem uses the explicitly reviewed read/list/search metadata surface. Unknown or mutating child calls remain opaque and retain the normal approval boundary.
-- **Completed-Turn Local RAG Persistence**:
-  - `record_turn` is a bounded parent-owned `WRITE` primitive whose destination is fixed to `thai-rag-mcp/remember_turn`; callers cannot redirect it to another child server or child tool. `rag_recall` and `rag_remember` are the corresponding trusted curated memory primitives and do not weaken the approval boundary for generic `mcp_call`.
-  - CLI HTTP/stdio runtimes enable local transcript sources for Cline, OpenCode, and Antigravity. Each source discovers only its supported host storage, baselines existing completed turns, then stages newly completed visible user/assistant turns into a signed journal. The supervisor validates signatures and bounds, resolves the source project against the registered workspace set, persists at least once through the trusted Thai-RAG adapter, ACKs success, and replays pending entries after transient failures without duplicating stable turn IDs.
-  - `task_bootstrap` registers a transport-scoped compliance state and all packaged transports default to `required`. A caller-supplied stable `turnId` is accepted; when a host does not supply one, the parent generates a stable bounded ID for that task. A new correlated task is blocked until the prior turn is persisted, so HTTP/Web no longer weakens the persistence contract merely because transcript capture is policy-assisted.
-  - The parent describes the live Thai-RAG child before trusted recall/persistence, supplies the current descriptor/catalog fingerprints on every call, requires the expected `recall`, `remember`, and idempotent `remember_turn(turn_id)` contract, and rejects workspace-scoped child definitions from impersonating the trusted target.
-  - A transport-scoped bounded idempotency/compliance ledger deduplicates one stable `turnId` per user/assistant role across request-scoped MCP server recreation. Failed or cancelled persistence releases the write claim so the host can retry safely; successful `record_turn` or journal ingestion closes the correlated turn state.
-  - Host transcript availability remains explicit: local adapters may read supported local host stores, but the MCP server does not infer invisible ChatGPT Web conversation content. ChatGPT Web therefore remains policy-assisted through `record_turn` when the host supplies transcript text.
+- **Native Workspace-Scoped Memory and Code Context**:
+  - `rag_recall`, `rag_remember`, `workspace_memory_record`, `rag_pre_edit_context`, `rag_code_search`, `rag_code_context`, `rag_code_blast_radius`, `rag_code_index`, and `rag_index_status` are first-party Unified tools backed by the parent-owned Thai-RAG provider.
+  - Every native memory and code operation carries canonical workspace scope. Cross-workspace recall requires an explicit workspace ID; default recall never silently crosses projects.
+  - Memory is selective: durable decisions, constraints, preferences, milestones, handoffs, and explicit remember requests are valid; ordinary greetings, acknowledgements, tool output, and automatic conversation capture are not persisted.
+  - Generic `mcp_call` remains opaque and independently approval-guarded; native RAG tools do not route through child MCP topology.
 - **Stable Bundled Skill Discovery**:
   - Bundled Ponytail skills use `bundled:agent-skills/*` identifiers and resolve from packaged resources or the source-tree `.agents/skills` fallback during development.
 - **Client Guidance + Runtime Enforcement**:
-  - MCP server `instructions` direct clients through `task_bootstrap` at task start, `workspace_bootstrap`/`prepare_code_change` for guarded coding work, and `record_turn` at completed turn boundaries when transcript text is available; `ToolRegistry` independently enforces the mutation and child-MCP trust boundaries.
+  - MCP server `instructions` direct clients through `task_bootstrap` at task start, native `rag_*`/`workspace_memory_record` tools for selective memory, and `workspace_bootstrap`/`prepare_code_change` for guarded coding work; `ToolRegistry` independently enforces mutation and child-MCP trust boundaries.
 
 ---
 

@@ -1,4 +1,3 @@
-import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
   appError,
@@ -39,7 +38,6 @@ import { isScopedAutoApprovalAllowed, type WorkspaceScope } from './destructive-
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
-import { TurnPersistenceLedger, type RecordTurnInput, type TurnPersistenceMode, type TurnPersistenceRole } from './turn-persistence.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -67,6 +65,7 @@ import { goalTools } from './tools/goal-tools.js';
 import { harnessTools } from './tools/harness-tools.js';
 import { mcpBridgeTools } from './tools/mcp-bridge-tools.js';
 import { processTools } from './tools/process-tools.js';
+import { ragTools } from './tools/rag-tools.js';
 import { sessionTools } from './tools/session-tools.js';
 import { searchTools } from './tools/search-tools.js';
 import { scheduledContinuationTools } from './tools/scheduled-continuation-tools.js';
@@ -108,10 +107,6 @@ export interface ToolRegistryOptions {
   readonly ponytailActivationLedger?: PonytailActivationLedger;
   /** Shared workspace harness/bootstrap and pre-edit authorization state for one MCP transport session. */
   readonly harnessActivationLedger?: HarnessActivationLedger;
-  /** Shared bounded turn-persistence idempotency/compliance state for transports that recreate registries per request. */
-  readonly turnPersistenceLedger?: TurnPersistenceLedger;
-  /** Required blocks a new correlated task until record_turn closes the prior turn; best_effort only reports violations. */
-  readonly turnPersistenceMode?: TurnPersistenceMode;
   /** Current persisted per-tool user availability snapshot. Read dynamically so one registry instance observes live changes. */
   readonly toolAvailabilitySnapshotProvider?: () => ToolAvailabilitySnapshot;
   readonly incrementalVerifier?: IncrementalVerifier;
@@ -155,9 +150,15 @@ const MAX_REMEMBERED_ACTIVITY_HANDLES = 512;
 const TRUSTED_INTERNAL_MEMORY_RAG_TOOLS = new Set([
   'working_memory_search',
   'working_memory_record',
+  'workspace_memory_record',
   'rag_recall',
   'rag_remember',
-  'record_turn',
+  'rag_pre_edit_context',
+  'rag_code_search',
+  'rag_code_context',
+  'rag_code_blast_radius',
+  'rag_code_index',
+  'rag_index_status',
 ]);
 
 interface BudgetedToolExecution {
@@ -194,8 +195,6 @@ export class ToolRegistry {
   private readonly ponytailModeProvider: () => PonytailMode;
   private readonly ponytailActivation: PonytailActivationLedger;
   private readonly harnessActivation: HarnessActivationLedger;
-  private readonly turnPersistence: TurnPersistenceLedger;
-  private readonly turnPersistenceMode: TurnPersistenceMode;
   private readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
   private readonly activeWorkspaceScopesProvider: (() => Promise<readonly WorkspaceScope[]>) | undefined;
   private readonly enforceActiveWorkspaceScope: boolean;
@@ -221,8 +220,6 @@ export class ToolRegistry {
     this.ponytailModeProvider = options.ponytailModeProvider ?? ((): PonytailMode => DEFAULT_PONYTAIL_MODE);
     this.ponytailActivation = options.ponytailActivationLedger ?? new PonytailActivationLedger();
     this.harnessActivation = options.harnessActivationLedger ?? new HarnessActivationLedger();
-    this.turnPersistence = options.turnPersistenceLedger ?? new TurnPersistenceLedger();
-    this.turnPersistenceMode = options.turnPersistenceMode ?? 'best_effort';
     this.activeWorkspaceScopeProvider = normalizeActiveWorkspaceScopeProvider(options);
     this.activeWorkspaceScopesProvider = normalizeActiveWorkspaceScopesProvider(options);
     this.enforceActiveWorkspaceScope = options.activeWorkspaceScopesProvider !== undefined || options.activeWorkspaceScopeProvider !== undefined || options.activeProjectProvider !== undefined;
@@ -242,14 +239,14 @@ export class ToolRegistry {
       isToolExposed: (name) => this.isEffectivelyExposed(name),
       discoveryTools: () => this.allTools,
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
-      bootstrapTaskContext: (input, signal) => this.bootstrapTaskContext(input, signal),
+      bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
-      ragRecall: (query, category, limit, signal) => this.ragRecall(query, category, limit, signal),
-      ragRemember: (content, category, signal) => this.ragRemember(content, category, signal),
-      recordTurn: (input, signal) => this.recordTurn(input, signal),
+      ragRecall: (workspaceId, query, category, limit, signal) => this.ragRecall(workspaceId, query, category, limit, signal),
+      ragRemember: (workspaceId, content, category, signal) => this.ragRemember(workspaceId, content, category, signal),
+      nativeRagCall: (workspaceId, tool, args, signal) => this.nativeRagCall(workspaceId, tool, args, signal),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
     const filePageEngine = new FilePageEngine(services, actor);
@@ -269,6 +266,7 @@ export class ToolRegistry {
       ...capabilityTools(context, options.setOfMarksStore),
       ...skillTools(context),
       ...mcpBridgeTools(context),
+      ...ragTools(context),
       ...contextTools(context, contextEngine),
       ...filePageTools(filePageEngine),
       ...workspaceIndexTools(context),
@@ -685,24 +683,7 @@ export class ToolRegistry {
     return { kind: 'read', reason: `Parent runtime policy marks exact child MCP tool ${server}/${childTool} read-only and the live contract fingerprints match` };
   }
 
-  private turnComplianceScope(): string {
-    return this.sessionId ?? this.actor.sessionId ?? this.actor.clientId;
-  }
-
-  private async turnIdempotencyScope(): Promise<string> {
-    let workspaceId: string | undefined;
-    try {
-      workspaceId = (await this.activeWorkspaceScopeProvider())?.workspaceId;
-    } catch {
-      workspaceId = undefined;
-    }
-    return JSON.stringify(['client-workspace-v1', this.actor.clientId, workspaceId ?? '-']);
-  }
-
-  private async bootstrapTaskContext(input: { readonly turnId?: string }, signal: AbortSignal, trackTurn = true): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent; readonly turnPersistence: unknown }>> {
-    const scope = this.turnComplianceScope();
-    let requestedTurnId = input.turnId;
-    let turnPersistence: unknown = { state: 'untracked', mode: this.turnPersistenceMode, reason: 'host did not supply a stable turnId' };
+  private async bootstrapTaskContext(signal: AbortSignal): Promise<Result<{ readonly ready: boolean; readonly policy: import('@unified-mpc/extensions').RuntimePolicySnapshot; readonly sessionStartSkill: import('@unified-mpc/extensions').SkillContent }>> {
     const extensions = this.services.extensions;
     if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime policy and skill services are unavailable', true));
     const policy = await extensions.runtimePolicySnapshot();
@@ -718,21 +699,7 @@ export class ToolRegistry {
     if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
     const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
     if (!sessionStartSkill.ok) return sessionStartSkill;
-    if (trackTurn && requestedTurnId === undefined && this.turnPersistenceMode === 'required') {
-      const active = this.turnPersistence.status(scope);
-      if (active.state === 'awaiting_record') {
-        return err(appError('CONFLICT', `Previous turn ${active.turnId} was not persisted before starting a new task`, true));
-      }
-      requestedTurnId = `turn_umcp_${randomUUID().replaceAll('-', '')}`;
-    }
-    if (trackTurn && requestedTurnId !== undefined) {
-      const begun = this.turnPersistence.beginTurn(scope, requestedTurnId, this.turnPersistenceMode);
-      if (!begun.accepted) {
-        return err(appError('CONFLICT', `Previous turn ${begun.turnId} was not persisted before starting ${begun.attemptedTurnId}`, true));
-      }
-      turnPersistence = begun;
-    }
-    return ok({ ready: policy.value.ready, policy: policy.value, sessionStartSkill: sessionStartSkill.value, turnPersistence });
+    return ok({ ready: policy.value.ready, policy: policy.value, sessionStartSkill: sessionStartSkill.value });
   }
 
   private harnessContext(workspaceId: string): HarnessActivationContext {
@@ -759,7 +726,7 @@ export class ToolRegistry {
   }
 
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const taskContext = await this.bootstrapTaskContext({}, signal, false);
+    const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
     const extensions = this.services.extensions;
     if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
@@ -858,19 +825,7 @@ export class ToolRegistry {
   }
 
   private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const state = this.harnessActivation.state(this.harnessContext(workspaceId));
-    if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before using working memory', true));
-    const memory = state.mandatoryMcp.servers.find((server) => server.name === 'memory');
-    if (memory?.descriptorFingerprint === undefined || memory.catalogFingerprint === undefined || this.services.extensions === undefined) {
-      return err(appError('CONFLICT', 'Pinned working-memory contract is unavailable; run workspace_bootstrap again', true));
-    }
-    return this.services.extensions.callMcpTool({
-      server: memory.name,
-      tool: 'search_nodes',
-      arguments: { query },
-      descriptorFingerprint: memory.descriptorFingerprint,
-      catalogFingerprint: memory.catalogFingerprint,
-    }, signal);
+    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal);
   }
 
   private async workingMemoryRecord(
@@ -880,152 +835,97 @@ export class ToolRegistry {
     observations: readonly string[],
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const state = this.harnessActivation.state(this.harnessContext(workspaceId));
-    if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before using working memory', true));
-    const memory = state.mandatoryMcp.servers.find((server) => server.name === 'memory');
-    if (memory?.descriptorFingerprint === undefined || memory.catalogFingerprint === undefined || this.services.extensions === undefined) {
-      return err(appError('CONFLICT', 'Pinned working-memory contract is unavailable; run workspace_bootstrap again', true));
-    }
-    const contract = {
-      descriptorFingerprint: memory.descriptorFingerprint,
-      catalogFingerprint: memory.catalogFingerprint,
-    };
-    const searched = await this.services.extensions.callMcpTool({
-      server: memory.name,
-      tool: 'search_nodes',
-      arguments: { query: name },
-      ...contract,
+    return this.nativeRagCall(workspaceId, 'workspace_memory_record', {
+      name,
+      category: entityType,
+      observations,
     }, signal);
-    if (!searched.ok) return err(appError('CONFLICT', `Working-memory lookup failed: ${searched.error.message}`, true));
-    const structured = isRecord(searched.value) && isRecord(searched.value.structuredContent) ? searched.value.structuredContent : undefined;
-    const entities = Array.isArray(structured?.entities) ? structured.entities : [];
-    const exists = entities.some((entity) => isRecord(entity) && readTrimmedString(entity.name) === name);
-    const written = exists
-      ? await this.services.extensions.callMcpTool({
-          server: memory.name,
-          tool: 'add_observations',
-          arguments: { observations: [{ entityName: name, contents: [...observations] }] },
-          ...contract,
-        }, signal)
-      : await this.services.extensions.callMcpTool({
-          server: memory.name,
-          tool: 'create_entities',
-          arguments: { entities: [{ name, entityType, observations: [...observations] }] },
-          ...contract,
-        }, signal);
-    return written.ok ? written : err(appError('CONFLICT', `Working-memory write failed: ${written.error.message}`, true));
   }
 
   private async ragRecall(
+    workspaceId: string,
     query: string,
     category: string | undefined,
     limit: number | undefined,
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const thaiRag = this.services.thaiRag;
-    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    return thaiRag.call('recall', {
-      query,
-      ...(category === undefined ? {} : { category }),
+    return this.nativeRagCall(workspaceId, 'recall', {
+      query: category === undefined ? query : `[${category}] ${query}`,
       ...(limit === undefined ? {} : { limit }),
     }, signal);
   }
 
   private async ragRemember(
+    workspaceId: string,
     content: string,
     category: string | undefined,
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    const thaiRag = this.services.thaiRag;
-    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    return thaiRag.call('remember', {
-      content,
-      ...(category === undefined ? {} : { category }),
+    return this.nativeRagCall(workspaceId, 'remember', {
+      content: category === undefined ? content : `[${category}] ${content}`,
     }, signal);
   }
 
-  private async recordTurn(input: RecordTurnInput, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+  private async nativeRagCall(
+    workspaceId: string,
+    tool: string,
+    args: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    const scope = await this.resolveActiveWorkspaceScope(workspaceId);
+    if (scope === null || scope.workspaceId !== workspaceId) {
+      return err(appError('WORKSPACE_NOT_FOUND', `Native Thai-RAG workspace is not active: ${workspaceId}`, true));
+    }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    let canonicalWorkspaceId: string | undefined;
-    try {
-      canonicalWorkspaceId = (await this.activeWorkspaceScopeProvider())?.workspaceId;
-    } catch {
-      canonicalWorkspaceId = undefined;
-    }
-    if (canonicalWorkspaceId === undefined) {
-      return err(appError('WORKSPACE_NOT_FOUND', 'record_turn requires an active canonical workspace', true));
-    }
+    const scopedCategory = `workspace:${workspaceId}`;
+    let providerTool = tool;
+    let providerArgs: Readonly<Record<string, unknown>> = args;
 
-    const complianceScope = this.turnComplianceScope();
-    const complianceStatus = this.turnPersistence.status(complianceScope);
-    const activeTurnId = complianceStatus.state === 'awaiting_record' ? complianceStatus.turnId : undefined;
-    const turnId = input.turnId ?? activeTurnId;
-    if (turnId === undefined) {
-      return err(appError('INVALID_INPUT', 'record_turn requires turnId when no task_bootstrap turn is active', true));
-    }
-    if (this.turnPersistenceMode === 'required' && activeTurnId !== undefined && activeTurnId !== turnId) {
-      return err(appError('CONFLICT', `Active turn ${activeTurnId} must be persisted before recording ${turnId}`, true));
-    }
-
-    const idempotencyScope = await this.turnIdempotencyScope();
-    const entries: readonly { readonly role: TurnPersistenceRole; readonly content: string }[] = [
-      { role: 'user', content: input.userContent },
-      ...(input.assistantContent === undefined ? [] : [{ role: 'assistant' as const, content: input.assistantContent }]),
-    ];
-    const claimed: Array<{ readonly role: TurnPersistenceRole; readonly content: string }> = [];
-    let skipped = 0;
-    let inFlight = 0;
-
-    for (const entry of entries) {
-      const claim = this.turnPersistence.claim(idempotencyScope, turnId, entry.role);
-      if (claim === 'claimed') {
-        claimed.push(entry);
-        continue;
+    if (tool === 'remember') {
+      providerArgs = { ...args, category: scopedCategory };
+    } else if (tool === 'recall') {
+      providerArgs = { ...args, category: scopedCategory };
+    } else if (tool === 'workspace_memory_record') {
+      const name = typeof args.name === 'string' ? args.name : 'workspace-note';
+      const observations = Array.isArray(args.observations)
+        ? args.observations.filter((value): value is string => typeof value === 'string')
+        : [];
+      const category = typeof args.category === 'string' && args.category.trim().length > 0 ? args.category.trim() : 'working-memory';
+      providerTool = 'remember';
+      providerArgs = {
+        category: scopedCategory,
+        content: `[${category}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
+      };
+    } else if (tool === 'pre_edit_context') {
+      providerArgs = { ...args, workspace: workspaceId };
+    } else if (tool === 'code_blast_radius') {
+      providerArgs = { ...args, workspace: workspaceId };
+    } else if (tool === 'code_index') {
+      providerArgs = { ...args, workspace_path: workspaceId };
+    } else if (tool === 'code_search') {
+      const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
+      const pathFilter = requestedFilter.length === 0
+        ? workspaceId
+        : requestedFilter.startsWith(`${workspaceId}/`) ? requestedFilter : `${workspaceId}/${requestedFilter}`;
+      providerArgs = { ...args, path_filter: pathFilter };
+    } else if (tool === 'code_context') {
+      const requestedPath = typeof args.file_path === 'string' ? args.file_path.trim().replaceAll('\\', '/').replace(/^\.\//, '') : '';
+      if (requestedPath.length === 0 || requestedPath === '..' || requestedPath.startsWith('../')) {
+        return err(appError('INVALID_INPUT', 'Native Thai-RAG code_context requires a workspace-relative file path'));
       }
-      skipped += 1;
-      if (claim === 'in_flight') inFlight += 1;
+      providerArgs = {
+        ...args,
+        file_path: requestedPath.startsWith(`${workspaceId}/`) ? requestedPath : `${workspaceId}/${requestedPath}`,
+      };
     }
 
-    const releaseClaims = (): void => {
-      for (const entry of claimed) this.turnPersistence.release(idempotencyScope, turnId, entry.role);
-    };
-    if (inFlight > 0) {
-      releaseClaims();
-      return err(appError('CONFLICT', 'Turn persistence is already in flight; retry this turn after the current write settles', true));
+    const result = await thaiRag.call(providerTool, providerArgs, signal);
+    if (!result.ok) return result;
+    if (tool === 'index_status' && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {
+      return err(appError('PERMISSION_DENIED', `Native Thai-RAG index job belongs to another workspace: ${result.value.workspaceId}`));
     }
-    if (claimed.length === 0) {
-      this.turnPersistence.completeTurn(complianceScope, turnId);
-      return ok({ turnId, recorded: 0, skipped, duplicate: skipped === entries.length });
-    }
-
-    try {
-      const childTurnId = (role: TurnPersistenceRole): string => `turn_umcp_${createHash('sha256')
-        .update(JSON.stringify(['thai-rag-turn-v2', canonicalWorkspaceId, idempotencyScope, turnId, role]))
-        .digest('hex')}`;
-      let recorded = 0;
-      for (const entry of claimed) {
-        const persisted = await thaiRag.call('remember_turn', {
-          role: entry.role,
-          content: entry.content,
-          workspace: canonicalWorkspaceId,
-          ...(input.summary === undefined ? {} : { summary: input.summary }),
-          ...(input.tags === undefined ? {} : { tags: input.tags }),
-          turn_id: childTurnId(entry.role),
-        }, signal);
-        if (!persisted.ok) {
-          releaseClaims();
-          return err(appError('CONFLICT', `Turn persistence failed for ${entry.role}: ${persisted.error.message}`, true));
-        }
-        this.turnPersistence.complete(idempotencyScope, turnId, entry.role);
-        recorded += 1;
-      }
-      this.turnPersistence.completeTurn(complianceScope, turnId);
-      return ok({ turnId, recorded, skipped, duplicate: false });
-    } catch (error: unknown) {
-      releaseClaims();
-      throw error;
-    }
+    return result;
   }
 
   private async validateHarnessMutation(

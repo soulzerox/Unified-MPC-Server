@@ -47,7 +47,7 @@
 - `forget(memory_id: str) -> str`: ลบความจำที่ไม่ต้องการ
 
 #### โดเมน B: ระบบสืบค้นโค้ด (Code RAG Subsystem)
-- `code_index(workspace_path: str = ".", force: bool = False) -> str`: ทราเวิร์สและทำดัชนีโค้ด
+- `code_index(workspace_path: str = ".", force: bool = False, background: bool = False, workspace: str = "") -> str`: ทราเวิร์สและทำดัชนีโค้ด โดย `workspace_path` เป็น filesystem root และ `workspace` เป็น logical namespace ที่ stable; ถ้าไม่ส่ง `workspace` จะ fallback เป็น basename ของ root
 - `code_search(query: str, top_k: int = 5) -> str`: ค้นหาโค้ดแบบไฮบริด (FTS5 + Vector RRF)
 - `code_context(file_path: str, line_number: int, window: int = 25) -> str`: ดึงเนื้อหาแวดล้อมเฉพาะจุด
 

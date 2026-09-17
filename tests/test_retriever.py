@@ -258,3 +258,93 @@ def test_code_search_absolute_path_filter():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
+def test_index_workspace_uses_explicit_namespace_after_realpath_resolution(temp_env):
+    """Explicit namespaces survive symlink resolution and same-basename roots."""
+    retriever, storage = temp_env
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        first_root = temp_dir / "first" / "repo"
+        second_root = temp_dir / "second" / "repo"
+        first_root.mkdir(parents=True)
+        second_root.mkdir(parents=True)
+        (first_root / "module.py").write_text("def first_workspace_symbol():\n    return 1\n", encoding="utf-8")
+        (second_root / "module.py").write_text("def second_workspace_symbol():\n    return 2\n", encoding="utf-8")
+        first_alias = temp_dir / "first-source"
+        first_alias.symlink_to(first_root, target_is_directory=True)
+
+        first_namespace = "11111111-1111-4111-8111-111111111111"
+        second_namespace = "22222222-2222-4222-8222-222222222222"
+        retriever.index_workspace(str(first_alias), workspace=first_namespace)
+        retriever.index_workspace(str(second_root), workspace=second_namespace)
+
+        rows = storage.sqlite_conn.cursor().execute(
+            "SELECT file_path FROM parent_documents WHERE file_path LIKE '%/module.py'"
+        ).fetchall()
+        paths = {row[0] for row in rows}
+        assert f"{first_namespace}/module.py" in paths
+        assert f"{second_namespace}/module.py" in paths
+        assert not any(path.startswith("repo/") for path in paths)
+
+        first_results = retriever.search("workspace_symbol", path_filter=first_namespace)
+        second_results = retriever.search("workspace_symbol", path_filter=second_namespace)
+        assert all(result["file_path"].startswith(f"{first_namespace}/") for result in first_results)
+        assert all(result["file_path"].startswith(f"{second_namespace}/") for result in second_results)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_index_workspace_migrates_legacy_namespace(temp_env):
+    retriever, storage = temp_env
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        workspace_root = temp_dir / "legacy-repo"
+        workspace_root.mkdir()
+        source_file = workspace_root / "module.py"
+        source_file.write_text("def legacy_symbol():\n    return 1\n", encoding="utf-8")
+        retriever.index_workspace(str(workspace_root))
+
+        source_file.write_text("def migrated_symbol():\n    return 2\n", encoding="utf-8")
+        namespace = "33333333-3333-4333-8333-333333333333"
+        retriever.index_workspace(str(workspace_root), force=True, workspace=namespace)
+
+        rows = storage.sqlite_conn.cursor().execute(
+            "SELECT file_path FROM parent_documents"
+        ).fetchall()
+        paths = {row[0] for row in rows}
+        assert "legacy-repo/module.py" not in paths
+        assert f"{namespace}/module.py" in paths
+        assert retriever.search("migrated_symbol", path_filter="legacy-repo") == []
+        assert any(result["file_path"] == f"{namespace}/module.py" for result in retriever.search("migrated_symbol", path_filter=namespace))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_index_workspace_rejects_multi_segment_namespace(temp_env):
+    retriever, _ = temp_env
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        workspace_root = temp_dir / "repo"
+        workspace_root.mkdir()
+        (workspace_root / "module.py").write_text("def symbol():\n    return 1\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="single identifier"):
+            retriever.index_workspace(str(workspace_root), workspace="foo/bar")
+        with pytest.raises(ValueError, match="single identifier"):
+            retriever.index_workspace(str(workspace_root), workspace="foo\\bar")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_delete_workspace_namespace_escapes_like_wildcards(temp_env):
+    _, storage = temp_env
+    storage.save_parent_doc("legacy-doc", "legacy_repo/module.py", 1, 1, "legacy", "legacy")
+    storage.save_parent_doc("sibling-doc", "legacyXrepo/module.py", 1, 1, "sibling", "sibling")
+
+    storage.delete_workspace_namespace("legacy_repo")
+
+    rows = storage.sqlite_conn.cursor().execute(
+        "SELECT file_path FROM parent_documents"
+    ).fetchall()
+    paths = {row[0] for row in rows}
+    assert "legacy_repo/module.py" not in paths
+    assert "legacyXrepo/module.py" in paths

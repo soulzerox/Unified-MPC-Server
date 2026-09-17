@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -143,12 +143,46 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(started.ok).toBe(false);
     if (!started.ok) expect(started.error.message).toContain('explicit workspace namespace contract');
   });
+
+  it('fails startup when the worker lacks the scoped forget category contract', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ forgetSupportsCategory: false }),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.message).toContain('forget does not support the workspace category contract');
+  });
+
+  it('rejects malformed workspace IDs before creating source aliases', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: '../outside', realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.message).toContain('workspace ID is not canonical');
+    await expect(access(path.join(dataRoot, 'thai-rag', 'sources'))).rejects.toThrow();
+  });
 });
 
 function clientFactory(options: {
   readonly onConnect?: (config: McpServerLaunchConfig) => void;
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
   readonly codeIndexSupportsWorkspace?: boolean;
+  readonly forgetSupportsCategory?: boolean;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
@@ -160,7 +194,9 @@ function clientFactory(options: {
             description: name,
             inputSchema: name === 'code_index' && options.codeIndexSupportsWorkspace !== false
               ? { type: 'object', properties: { workspace: { type: 'string' } } }
-              : { type: 'object' },
+              : name === 'forget' && options.forgetSupportsCategory !== false
+                ? { type: 'object', properties: { category: { type: 'string' } } }
+                : { type: 'object' },
           }));
         },
         async listResources(): Promise<[]> { return []; },

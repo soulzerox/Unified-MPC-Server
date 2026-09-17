@@ -62,10 +62,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     await this.jobs.initialize();
     const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
     if (!providerRoot.ok) return providerRoot;
+    const rawWorkspaces = await this.options.workspacesProvider();
+    const workspaces: NativeThaiRagWorkspace[] = [];
+    for (const workspace of rawWorkspaces) {
+      const parsedId = parseCanonicalWorkspaceId(workspace.id);
+      if (!parsedId.ok) {
+        return err(appError('CONFLICT', `Native Thai-RAG workspace ID is not canonical: ${workspace.id}`, true));
+      }
+      workspaces.push({ ...workspace, id: parsedId.value });
+    }
     const sourcesRoot = path.join(providerRoot.value, 'sources');
     await mkdir(sourcesRoot, { recursive: true });
 
-    const workspaces = await this.options.workspacesProvider();
     this.workspaceRoots.clear();
     this.workspaceRootIds.clear();
     for (const workspace of workspaces) {
@@ -98,6 +106,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (codeIndexTool === undefined || !toolAcceptsWorkspaceNamespace(codeIndexTool.inputSchema)) {
       await this.sessions.close().catch(() => undefined);
       return err(appError('CONFLICT', 'Native Thai-RAG worker code_index does not support the explicit workspace namespace contract', true));
+    }
+    const forgetTool = described.value.tools.find((tool) => tool.name === 'forget');
+    if (forgetTool === undefined || !toolAcceptsProperty(forgetTool.inputSchema, 'category')) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError('CONFLICT', 'Native Thai-RAG worker forget does not support the workspace category contract', true));
     }
     this.sessions.pin(SERVER_NAME);
     this.started = true;
@@ -292,6 +305,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toolAcceptsWorkspaceNamespace(inputSchema: unknown): boolean {
+  return toolAcceptsProperty(inputSchema, 'workspace');
+}
+
+function toolAcceptsProperty(inputSchema: unknown, property: string): boolean {
   if (!isRecord(inputSchema) || !isRecord(inputSchema.properties)) return false;
-  return Object.prototype.hasOwnProperty.call(inputSchema.properties, 'workspace');
+  return Object.prototype.hasOwnProperty.call(inputSchema.properties, property);
 }

@@ -195,6 +195,26 @@ describe('MCP tool registry', () => {
     expect(exposed).toContain('prepare_code_change');
   });
 
+  it('reports actual primitive surface availability without hiding harness-gate reachability', async () => {
+    const registry = new ToolRegistry({}, actor, {
+      toolAvailabilitySnapshotProvider: (): ReturnType<NonNullable<ToolRegistryOptions['toolAvailabilitySnapshotProvider']>> => ({
+        version: 1,
+        generation: 1,
+        overrides: { read_file: 'disabled' },
+      }),
+    });
+
+    const result = await registry.invoke('tool_search', { query: 'read file', limit: 20 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      primitiveToolsRemainAvailable: false,
+      harnessSurface: {
+        workspaceBootstrap: true,
+        prepareCodeChange: true,
+      },
+    });
+  });
+
   it('lets an already-started call settle after disable while blocking future calls', async () => {
     let snapshot = { version: 1 as const, generation: 0, overrides: {} as Record<string, 'enabled' | 'disabled'> };
     let releaseRead!: () => void;

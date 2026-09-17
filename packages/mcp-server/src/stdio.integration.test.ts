@@ -109,6 +109,20 @@ describe('MCP stdio transport', () => {
       const listed = await client.listTools();
       expect(listed.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
       expect(listed.tools.some((tool) => tool.name === 'task_bootstrap')).toBe(true);
+      expect(listed.tools.some((tool) => tool.name === 'workspace_bootstrap')).toBe(true);
+      const prepare = listed.tools.find((tool) => tool.name === 'prepare_code_change');
+      expect(prepare).toBeDefined();
+      expect(prepare?.inputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: ['workspaceId', 'filePath'],
+        properties: {
+          workspaceId: { type: 'string' },
+          filePath: { type: 'string' },
+          proposedSymbol: { type: 'string' },
+          runGodkillerSafetyCheck: { type: 'boolean' },
+        },
+      });
       expect(client.getServerCapabilities()?.tasks).toEqual({ list: {}, cancel: {} });
     } finally {
       await client.close();
@@ -130,6 +144,20 @@ describe('MCP stdio transport', () => {
 
       expect(first.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
       expect(first.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(first.tools.some((tool) => tool.name === 'workspace_bootstrap')).toBe(true);
+      const prepare = first.tools.find((tool) => tool.name === 'prepare_code_change');
+      expect(prepare).toBeDefined();
+      expect(prepare?.inputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: ['workspaceId', 'filePath'],
+        properties: {
+          workspaceId: { type: 'string' },
+          filePath: { type: 'string' },
+          proposedSymbol: { type: 'string' },
+          runGodkillerSafetyCheck: { type: 'boolean' },
+        },
+      });
       expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
       expect(client.getServerCapabilities()?.tasks).toBeUndefined();
       expect(client.getServerCapabilities()?.extensions?.[MODERN_TASKS_EXTENSION_ID]).toEqual({});

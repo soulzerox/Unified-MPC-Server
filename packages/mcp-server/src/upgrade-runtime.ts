@@ -216,9 +216,9 @@ export class UpgradeRuntimeService {
       case 'tool_categories':
         return ok(this.categories());
       case 'tool_aliases':
-        return ok({ aliases: { read: 'read_file', edit: 'edit_file', search: 'search_text', tree: 'workspace_tree', logs: 'live_logs_query', tests: 'test_context', context: 'workspace_context', map: 'repo_map' }, primitiveToolsRemainAvailable: true });
+        return ok({ aliases: { read: 'read_file', edit: 'edit_file', search: 'search_text', tree: 'workspace_tree', logs: 'live_logs_query', tests: 'test_context', context: 'workspace_context', map: 'repo_map' }, ...this.primitiveSurfaceStatus() });
       case 'capabilities':
-        return ok({ categories: this.categories().categories, totalUpgradeTools: UPGRADE_TOOL_CATALOG.length, primitiveToolsRemainAvailable: true });
+        return ok({ categories: this.categories().categories, totalUpgradeTools: UPGRADE_TOOL_CATALOG.length, ...this.primitiveSurfaceStatus() });
       case 'route_intent':
         return ok(routeIntent(readString(input, 'prompt') ?? readString(input, 'query') ?? ''));
       case 'recipe_list':
@@ -578,9 +578,37 @@ export class UpgradeRuntimeService {
       },
       ...(rerankerDisposition === 'unavailable' ? { fallbackReason: 'local_model_not_configured' } : {}),
       ...(rerankerDisposition === 'unsupported' ? { fallbackReason: 'unsupported_reranker' } : {}),
-      primitiveToolsRemainAvailable: true,
+      ...this.primitiveSurfaceStatus(),
       authorizationUnchanged: true,
       route: route.route,
+    };
+  }
+
+  private primitiveSurfaceStatus(): {
+    readonly primitiveToolsRemainAvailable: boolean;
+    readonly harnessSurface: {
+      readonly workspaceBootstrap: boolean;
+      readonly prepareCodeChange: boolean;
+    };
+  } {
+    const registered = this.discoveryTools?.();
+    if (registered === undefined || registered.length === 0) {
+      return {
+        primitiveToolsRemainAvailable: true,
+        harnessSurface: {
+          workspaceBootstrap: this.isToolExposed('workspace_bootstrap'),
+          prepareCodeChange: this.isToolExposed('prepare_code_change'),
+        },
+      };
+    }
+    const upgradeNames = new Set(UPGRADE_TOOL_CATALOG.map((entry) => entry.name));
+    const primitiveNames = registered.filter((tool) => !upgradeNames.has(tool.name)).map((tool) => tool.name);
+    return {
+      primitiveToolsRemainAvailable: primitiveNames.every((name) => this.isToolExposed(name)),
+      harnessSurface: {
+        workspaceBootstrap: this.isToolExposed('workspace_bootstrap'),
+        prepareCodeChange: this.isToolExposed('prepare_code_change'),
+      },
     };
   }
 

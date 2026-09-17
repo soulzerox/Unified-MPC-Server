@@ -116,6 +116,35 @@ describe('workspace engineering harness enforcement', () => {
     expect(writes).toEqual(['src/app.ts', 'src/app.ts']);
   });
 
+  it('preserves bootstrap and single-use prepared-path state across request-scoped registry recreation', async () => {
+    const { services, writes, nativeRagCalls } = createHarnessServices();
+    const ledger = new HarnessActivationLedger();
+    const options = { harnessActivationLedger: ledger, sessionId: 'shared-transport-session' };
+
+    const bootstrapRegistry = new ToolRegistry(services, actor, options);
+    expect((await bootstrapRegistry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    const prepareRegistry = new ToolRegistry(services, actor, options);
+    expect((await prepareRegistry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/shared.ts', proposedSymbol: 'shared',
+    })).isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+
+    const mutationRegistry = new ToolRegistry(services, actor, options);
+    expect((await mutationRegistry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/shared.ts', content: 'export const shared = 1;\n',
+    })).isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+    expect(writes).toEqual(['src/shared.ts']);
+
+    const secondMutationRegistry = new ToolRegistry(services, actor, options);
+    expect((await secondMutationRegistry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/shared.ts', content: 'export const shared = 2;\n',
+    })).isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
+    expect(writes).toEqual(['src/shared.ts', 'src/shared.ts']);
+  });
+
   it('returns the preferred workspace goal as a non-leasing continuation hint during bootstrap', async () => {
     const { services } = createHarnessServices();
     (services as { preferredGoal?: McpApplicationServices['preferredGoal'] }).preferredGoal = {

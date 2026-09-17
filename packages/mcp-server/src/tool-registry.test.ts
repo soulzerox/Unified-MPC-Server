@@ -215,6 +215,28 @@ describe('MCP tool registry', () => {
     });
   });
 
+  it('passes the active workspace root to native code indexing', async () => {
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const rootPath = '/tmp/project-directory';
+    const registry = new ToolRegistry({
+      thaiRag: {
+        async call(tool: string, args: Readonly<Record<string, unknown>>): Promise<ReturnType<typeof ok>> {
+          calls.push({ tool, args });
+          return ok({ indexed: true });
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath }),
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    const result = await registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
+
+    expect(result.isError).not.toBe(true);
+    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath } }]);
+  });
+
   it('lets an already-started call settle after disable while blocking future calls', async () => {
     let snapshot = { version: 1 as const, generation: 0, overrides: {} as Record<string, 'enabled' | 'disabled'> };
     let releaseRead!: () => void;

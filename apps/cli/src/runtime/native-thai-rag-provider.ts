@@ -24,6 +24,7 @@ const REQUIRED_TOOLS = new Set([
 
 export interface NativeThaiRagWorkspace {
   readonly id: string;
+  readonly rootPath?: string;
   readonly realRootPath: string;
 }
 
@@ -45,6 +46,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private lastHealthAt = 0;
   private workerQueue: Promise<unknown> = Promise.resolve();
   private readonly workspaceRoots = new Map<string, string>();
+  private readonly workspaceRootIds = new Map<string, string>();
+  private readonly workspaceSourceAliases = new Map<string, string>();
   private started = false;
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
@@ -65,10 +68,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
     const workspaces = await this.options.workspacesProvider();
     this.workspaceRoots.clear();
+    this.workspaceRootIds.clear();
+    this.workspaceSourceAliases.clear();
     for (const workspace of workspaces) {
       const alias = await ensureThaiRagWorkspaceSourceAlias(this.options.dataRoot, workspace.id, workspace.realRootPath);
       if (!alias.ok) return alias;
-      this.workspaceRoots.set(workspace.id, path.resolve(workspace.realRootPath));
+      const realRootPath = path.resolve(workspace.realRootPath);
+      this.workspaceRoots.set(workspace.id, realRootPath);
+      this.workspaceRootIds.set(realRootPath, workspace.id);
+      if (workspace.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(workspace.rootPath), workspace.id);
+      this.workspaceSourceAliases.set(workspace.id, alias.value);
     }
 
     this.launchConfig = {
@@ -132,14 +141,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
     const workspaceValue = typeof args.workspace_path === 'string' ? args.workspace_path : '';
-    const workspace = parseCanonicalWorkspaceId(workspaceValue);
+    const workspace = this.resolveIndexWorkspace(workspaceValue);
     if (!workspace.ok) return workspace;
     const force = args.force === true;
     const background = args.background === true;
-    const childArgs = { workspace_path: workspace.value, force, background: false };
+    const childArgs = { workspace_path: workspace.value.sourceAlias, force, background: false };
     if (!background) return this.callWorker('code_index', childArgs, signal);
 
-    const job = await this.jobs.create(workspace.value, force);
+    const job = await this.jobs.create(workspace.value.workspaceId, force);
     const operation = this.enqueueWorker(async () => {
       const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs);
       const result = normalizeWorkerCallResult('code_index', raw);
@@ -150,7 +159,28 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     void operation.catch(async (error: unknown) => {
       await this.jobs.fail(job.jobId, errorMessage(error)).catch(() => undefined);
     });
-    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value });
+    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value.workspaceId });
+  }
+
+  private resolveIndexWorkspace(workspaceValue: string): Result<{ readonly workspaceId: string; readonly sourceAlias: string }> {
+    const parsed = parseCanonicalWorkspaceId(workspaceValue);
+    if (parsed.ok) {
+      const sourceAlias = this.workspaceSourceAliases.get(parsed.value);
+      return sourceAlias === undefined
+        ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${parsed.value}`))
+        : ok({ workspaceId: parsed.value, sourceAlias });
+    }
+
+    if (!path.isAbsolute(workspaceValue)) return parsed;
+    const requestedRoot = path.resolve(workspaceValue);
+    const workspaceId = this.workspaceRootIds.get(requestedRoot);
+    if (workspaceId === undefined) {
+      return err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace root is not registered: ${requestedRoot}`));
+    }
+    const sourceAlias = this.workspaceSourceAliases.get(workspaceId);
+    return sourceAlias === undefined
+      ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${workspaceId}`))
+      : ok({ workspaceId, sourceAlias });
   }
 
   private async callWorker(

@@ -46,7 +46,7 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
-  it('owns background index lifecycle and serializes it with foreground calls', async () => {
+  it('indexes through the canonical UUID source alias when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     let inFlight = 0;
@@ -71,7 +71,7 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
 
-    const scheduled = await driver.call('code_index', { workspace_path: workspaceId, force: false, background: true });
+    const scheduled = await driver.call('code_index', { workspace_path: workspaceRoot, force: false, background: true });
     expect(scheduled.ok).toBe(true);
     if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
     const foreground = driver.call('recall', { query: 'after index' });
@@ -82,7 +82,10 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(status.ok && isRecord(status.value) && status.value.status).toBe('completed');
     expect(maxInFlight).toBe(1);
     const indexCall = calls.find((call) => call.tool === 'code_index');
-    expect(indexCall?.args).toMatchObject({ workspace_path: workspaceId, background: false });
+    expect(indexCall?.args).toMatchObject({
+      workspace_path: path.join(dataRoot, 'thai-rag', 'sources', workspaceId),
+      background: false,
+    });
     await driver.stop();
   });
 });

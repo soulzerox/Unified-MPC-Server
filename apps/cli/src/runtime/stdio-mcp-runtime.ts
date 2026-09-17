@@ -135,8 +135,8 @@ export function createStdioMcpRuntime(
         : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
       args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
     },
-    workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
-      .map((entry) => ({ id: entry.id, realRootPath: entry.realRootPath })),
+    workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
+      .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
   });
   const thaiRagCoordinator = new ThaiRagProviderCoordinator({
@@ -455,4 +455,3 @@ function readCapabilityRoots(value: string | undefined): readonly string[] {
   if (value === undefined || value.trim().length === 0) return [];
   return value.split(path.delimiter).map((root) => root.trim()).filter((root) => root.length > 0).map((root) => path.resolve(root));
 }
-

@@ -17,6 +17,7 @@
     "start": "corepack pnpm --filter @unified-mpc/cli build && node apps/cli/dist/index.js",
     "cli": "node apps/cli/dist/index.js",
     "docs:tools": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs",
+    "docs:tools:check": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs --check",
     "prepare": "husky"
   },
   "devDependencies": {

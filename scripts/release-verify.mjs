@@ -54,6 +54,7 @@ const commands = [
   ['corepack', ['pnpm', 'lint']],
   // Run the destructive clean-build guard before recursive workspace tests.
   [process.execPath, ['scripts/verify-native-rag-migration.mjs']],
+  [process.execPath, ['scripts/generate-tool-catalog.mjs', '--check']],
   ['corepack', ['pnpm', 'test']],
   ['corepack', ['pnpm', 'build']],
   [process.execPath, ['scripts/test-config-mutation-lock.mjs']],

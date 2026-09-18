@@ -171,7 +171,13 @@ describe('durable goal continuation persistence', () => {
       goalKey: createRequest.goalKey,
       ponytailMode: 'ultra',
     });
-    expect(unleasedChange).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(unleasedChange).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: expect.stringContaining('Omit ponytailMode when resuming an existing goal'),
+      },
+    });
 
     now = new Date('2026-08-26T00:01:01.000Z');
     const resumed = await second.service.runGoal(actor('session-b'), {

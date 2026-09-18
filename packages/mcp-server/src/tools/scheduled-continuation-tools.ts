@@ -142,7 +142,7 @@ export const SCHEDULED_CONTINUATION_TOOL_NAMES = [
 ] as const;
 
 export function scheduledContinuationTools(context: McpToolContext): McpToolDefinition[] {
-  return [
+  const tools = [
     defineTool({
       name: 'prepare_scheduled_continuation',
       description: 'Checkpoint durable progress and ensure exactly one live current-chat Native ChatGPT hourly recurring watchdog with cloud execution requested. New v4.53 watchdogs use occurrence=interval and intervalMinutes=60; when successorDelayMinutes is omitted the first firing is one hour from prepare, while a legacy explicit 2–25 minute value changes only the first firing and never the hourly recurrence cadence. Reuse the same confirmed native task ID across checkpoints and ordinary wakes; never create a per-wake successor or retime the recurring cadence. If an active v4.52 one-time watchdog already exists, reuse that legacy task until it becomes historical before creating the recurring watchdog, so one-time and recurring native tasks never overlap for one goal. prepared means reservation only and is not confirmed host coverage. Record native create failure or uncertainty truthfully and reconcile uncertain host state before any blind create. On an explicit host-surface lookup/dispatch failure such as Resource not found that proves the operation was not dispatched, re-resolve the current Native Scheduled Task host operation once and retry that exact native operation once; never retry ambiguous possible-success and never switch scheduler providers. Host create and cleanup remain Native ChatGPT Scheduled Task operations exposed by the current chat; never use browser/DOM automation, Windows Task Scheduler, cron, shell timers, or an unified-mpc-local scheduler as a substitute.',
@@ -222,4 +222,10 @@ export function scheduledContinuationTools(context: McpToolContext): McpToolDefi
       handler: async (input) => context.services.scheduledContinuations?.cancelScheduledContinuation(context.actor, input) ?? missingService(),
     }),
   ];
+  return tools.map((tool) => tool.name === 'claim_scheduled_continuation'
+    ? {
+      ...tool,
+      description: `${tool.description} When worker_busy_noop returns retryAfterSeconds <= 60, retry the same recurring runKey after the brief stale-heartbeat grace; do not let a prior retryable noop become a permanent already_claimed result.`,
+    }
+    : tool);
 }

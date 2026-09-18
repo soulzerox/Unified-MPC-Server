@@ -263,7 +263,7 @@ export class GoalContinuationService {
         : normalizePlan(request.plan);
       const ponytailMode = request.ponytailMode === undefined ? undefined : normalizeGoalPonytailModeOverride(request.ponytailMode);
       if (existing !== null && ponytailMode !== undefined && ponytailMode !== (existing.ponytailMode ?? 'inherit')) {
-        return err(appError('INVALID_INPUT', 'ponytailMode can only change through a leased goal checkpoint'));
+        return err(appError('INVALID_INPUT', 'Omit ponytailMode when resuming an existing goal; policy changes require a leased goal checkpoint'));
       }
       const leaseSeconds = normalizeLeaseSeconds(request.leaseSeconds);
       let recoveryEvidence: GoalLeaseRecoveryEvidence | undefined;

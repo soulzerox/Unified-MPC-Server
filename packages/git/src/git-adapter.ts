@@ -75,21 +75,10 @@ export class GitAdapter {
   }
 
   public async defaultBranch(cwd: string, remote = 'origin'): Promise<Result<string | null>> {
-    const symbolicRef = await this.runner.run(
-      ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`],
-      cwd,
-    );
-    if (symbolicRef.exitCode === 0) {
-      const prefix = `${remote}/`;
-      const value = symbolicRef.stdout.trim();
-      return ok(value.startsWith(prefix) ? value.slice(prefix.length) : value || null);
-    }
-
-    const remoteShow = await this.runner.run(['remote', 'show', remote], cwd);
-    if (remoteShow.exitCode === 0) {
-      const match = /^\s*HEAD branch:\s*(\S+)\s*$/im.exec(remoteShow.stdout);
-      const branch = match?.[1];
-      return ok(branch === undefined || branch === '(unknown)' ? null : branch);
+    const remoteHead = await this.runner.run(['ls-remote', '--symref', remote, 'HEAD'], cwd);
+    if (remoteHead.exitCode === 0) {
+      const match = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD\s*$/im.exec(remoteHead.stdout);
+      return ok(match?.[1] ?? null);
     }
     return ok(null);
   }

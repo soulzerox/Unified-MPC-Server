@@ -77,6 +77,32 @@ describe('GitService', () => {
     expect(calls).toBe(0);
   });
 
+  it('parses push option values before resolving the push remote', async () => {
+    const workspace = await createWorkspace();
+    const remotes: string[] = [];
+    let calls = 0;
+    const adapter = {
+      async defaultBranch(_cwd: string, remote: string): Promise<{ ok: true; value: string }> {
+        remotes.push(remote);
+        return { ok: true, value: 'trunk' };
+      },
+      async run(): Promise<{ ok: true; value: { exitCode: number; stdout: string; stderr: string } }> {
+        calls += 1;
+        return { ok: true, value: { exitCode: 0, stdout: '', stderr: '' } };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['push', '-o', 'ci.skip', 'origin', 'feature/review-gate'],
+      workspaceId: workspace.id,
+      userConfirmed: true,
+    }, undefined, authorization)).resolves.toMatchObject({ ok: true });
+    expect(remotes).toEqual(['origin']);
+    expect(calls).toBe(1);
+  });
+
   it('forwards cancellation to every MCP-exposed Git adapter operation', async () => {
     const workspace = await createWorkspace();
     const observedSignals: Array<AbortSignal | undefined> = [];

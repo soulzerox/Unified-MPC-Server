@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isProvablyReadOnlyGitInvocation, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from './git-mutation-policy.js';
+import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from './git-mutation-policy.js';
 
 describe('prohibitedAgentGitInvocationReason', () => {
   it.each([
@@ -42,6 +42,7 @@ describe('prohibitedAgentGitInvocationReason', () => {
     [['push', 'origin', 'main'], 'direct default branch push'],
     [['push', 'origin', 'HEAD:main'], 'explicit default branch destination'],
     [['push', 'origin', 'HEAD:refs/heads/main'], 'fully-qualified default branch destination'],
+    [['push', 'origin', '@'], 'implicit current-branch destination'],
     [['push', '--all', 'origin'], 'all branches push'],
     [['push', 'origin', 'refs/heads/*:refs/heads/*'], 'wildcard refspec'],
   ] as const)('blocks %s (%s)', (args, _label) => {
@@ -69,6 +70,7 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['push', '-u', 'origin', 'feature/review-gate'],
     ['push', 'origin', 'HEAD:feature/review-gate'],
     ['push', 'origin', 'refs/heads/feature/review-gate:refs/heads/feature/review-gate'],
+    ['push', '-o', 'ci.skip', 'origin', 'feature/review-gate'],
   ] as const)('keeps reviewed non-destructive form %s available', (...args) => {
     expect(prohibitedAgentGitInvocationReason(args)).toBeUndefined();
   });
@@ -94,5 +96,12 @@ describe('prohibitedAgentGitInvocationReason', () => {
 
   it('rejects wildcard push refspecs independently of default-branch resolution', () => {
     expect(prohibitedDefaultBranchPushReason(['origin', 'refs/heads/*:refs/heads/*'])).toBeTypeOf('string');
+  });
+
+  it('parses push options with values before locating the remote', () => {
+    expect(parseGitPushArguments(['-o', 'ci.skip', '-u', 'origin', 'feature/review-gate'])).toEqual({
+      remote: 'origin',
+      refspecs: ['feature/review-gate'],
+    });
   });
 });

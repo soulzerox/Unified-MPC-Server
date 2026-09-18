@@ -19,7 +19,7 @@ import {
   type GitStatusResult,
 } from '@unified-mpc/git';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
-import { isProvablyReadOnlyGitInvocation, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from '@unified-mpc/shared';
+import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
 import { isAbsoluteFsPath, resolveWorkspaceForPath } from './workspace-locator.js';
 
@@ -114,9 +114,9 @@ export class GitService {
   private async resolveDefaultBranch(cwd: string, args: readonly string[]): Promise<Result<string>> {
     const resolver = this.adapter.defaultBranch;
     if (typeof resolver !== 'function') return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
-    const remote = args.slice(1).find((arg) => !arg.startsWith('-'));
-    if (remote === undefined) return err(appError('PERMISSION_DENIED', 'Git push remote must be explicit so the repository default branch can be checked'));
-    const result = await resolver.call(this.adapter, cwd, remote);
+    const parsed = parseGitPushArguments(args.slice(1));
+    if (parsed.invalidOption !== undefined || parsed.remote === undefined) return err(appError('PERMISSION_DENIED', 'Git push remote must be explicit so the repository default branch can be checked'));
+    const result = await resolver.call(this.adapter, cwd, parsed.remote);
     if (!result.ok || result.value === null || result.value.trim().length === 0) {
       return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
     }

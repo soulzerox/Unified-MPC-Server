@@ -29,12 +29,12 @@ describe('GitAdapter', () => {
     expect(runner.calls).toEqual([{ args: ['branch', '--show-current'], cwd: 'C:\\workspace' }]);
   });
 
-  it('resolves the configured remote default branch', async () => {
-    const runner = new FakeGitRunner({ exitCode: 0, stdout: 'origin/trunk\n', stderr: '' });
+  it('resolves the authoritative remote default branch instead of the cached symbolic ref', async () => {
+    const runner = new FakeGitRunner({ exitCode: 0, stdout: 'ref: refs/heads/production\tHEAD\n012345\tHEAD\n', stderr: '' });
 
-    await expect(new GitAdapter(runner).defaultBranch('C:\\workspace')).resolves.toEqual({ ok: true, value: 'trunk' });
+    await expect(new GitAdapter(runner).defaultBranch('C:\\workspace')).resolves.toEqual({ ok: true, value: 'production' });
     expect(runner.calls).toEqual([{
-      args: ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
+      args: ['ls-remote', '--symref', 'origin', 'HEAD'],
       cwd: 'C:\\workspace',
     }]);
   });

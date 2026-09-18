@@ -113,6 +113,32 @@ describe('ShellCapabilityBackend', () => {
   });
 
   it.each([
+    ['direct git', 'git', ['push', 'origin', 'trunk']],
+    ['shell git', 'bash', ['-lc', 'git push origin trunk']],
+  ] as const)('blocks %s outside the guarded Git service under Full Bypass', async (_label, executable, args) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-git-'));
+    temporaryRoots.push(root);
+    const backend = new ShellCapabilityBackend({
+      allowedRoots: [root],
+      executableResolver: { async resolve(): Promise<Result<string>> { return ok(process.execPath); } },
+    });
+    const executeWithAuthorization = backend.execute.bind(backend) as unknown as (
+      input: unknown,
+      signal: AbortSignal | undefined,
+      authorization: unknown,
+    ) => Promise<Result<unknown>>;
+
+    await expect(executeWithAuthorization({
+      operation: 'run', executable, arguments: args, cwd: root, execution: 'foreground',
+    }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+  });
+
+  it.each([
     ['direct delete utility', 'rm', ['victim.txt']],
     ['inline PowerShell command', 'powershell.exe', ['-NoProfile', '-Command', 'Remove-Item victim.txt']],
     ['inline Node program', 'node.exe', ['-e', "process.stdout.write('inline')"]],

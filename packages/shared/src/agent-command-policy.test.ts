@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { prohibitedAgentCommandReason, riskyAgentCommandReason } from './agent-command-policy.js';
+import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from './agent-command-policy.js';
 
 describe('agent command policy', () => {
   it.each([
@@ -54,5 +54,14 @@ describe('agent command policy', () => {
   ] as const)('allows normal command without confirmation: %s', (executable, args) => {
     expect(prohibitedAgentCommandReason(executable, args)).toBeUndefined();
     expect(riskyAgentCommandReason(executable, args)).toBeUndefined();
+  });
+
+  it.each([
+    ['git', ['push', 'origin', 'feature/review-gate']],
+    ['bash', ['-lc', 'git push origin feature/review-gate']],
+    ['powershell.exe', ['-Command', 'git push origin feature/review-gate']],
+  ] as const)('hard-blocks unscoped Git push execution: %s', (executable, args) => {
+    expect(prohibitedUnscopedGitPushReason(executable, args)).toBeDefined();
+    expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
   });
 });

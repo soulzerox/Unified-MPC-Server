@@ -19,12 +19,29 @@ const INLINE_SCRIPT_EXECUTABLES = new Set(['perl', 'ruby']);
  */
 export function prohibitedAgentCommandReason(executable: string, args: readonly string[]): string | undefined {
   const basename = executableBasename(executable);
+  const unscopedGitPush = prohibitedUnscopedGitPushReason(executable, args);
+  if (unscopedGitPush !== undefined) return unscopedGitPush;
   const fileEditReason = terminalTextEditRoutingReason(basename, args);
   if (fileEditReason !== undefined) return fileEditReason;
   if (HARD_BLOCK_EXECUTABLES.has(basename)) return `${basename} is blocked for AI-issued execution`;
   const commandText = interpreterCommandText(basename, args);
   if (commandText !== undefined && /\b(?:shutdown\s+-[rRhH]|poweroff|reboot|halt)\b/i.test(commandText)) {
     return 'Machine-level destructive command is blocked for AI-issued execution';
+  }
+  return undefined;
+}
+
+export function prohibitedUnscopedGitPushReason(executable: string, args: readonly string[]): string | undefined {
+  const basename = executableBasename(executable);
+  if (basename === 'git' && args[0]?.toLowerCase() === 'push') return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
+  if (POSIX_SHELL_EXECUTABLES.has(basename)) {
+    const commandText = interpreterCommandText(basename, args);
+    if (commandText !== undefined && /\bgit[\t ]+push\b/i.test(commandText)) return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
+  }
+  if (POWERSHELL_EXECUTABLES.has(basename)) {
+    const commandIndex = args.findIndex((arg) => ['-command', '-c'].includes(arg.toLowerCase()));
+    const commandText = commandIndex >= 0 ? args.slice(commandIndex + 1).join(' ') : undefined;
+    if (commandText !== undefined && /\bgit[\t ]+push\b/i.test(commandText)) return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
   }
   return undefined;
 }

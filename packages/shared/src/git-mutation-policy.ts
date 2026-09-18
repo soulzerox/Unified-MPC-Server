@@ -44,6 +44,14 @@ export interface GitMutationPolicyOptions {
   readonly defaultBranch?: string;
 }
 
+export interface GitPushArguments {
+  readonly remote?: string;
+  readonly refspecs: readonly string[];
+  readonly invalidOption?: string;
+}
+
+const GIT_PUSH_OPTIONS_WITH_VALUES = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo']);
+
 export function prohibitedAgentGitInvocationReason(args: readonly string[], options: GitMutationPolicyOptions = {}): string | undefined {
   if (args.length === 0) return 'Git invocation has no explicit subcommand';
   const first = args[0]!.toLowerCase();
@@ -109,24 +117,25 @@ function isDestructivePush(args: readonly string[]): boolean {
 }
 
 export function prohibitedDefaultBranchPushReason(args: readonly string[], defaultBranch?: string): string | undefined {
+  const parsed = parseGitPushArguments(args);
+  if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is missing its value`;
   const lower = args.map((arg) => arg.toLowerCase());
   if (hasGitOption(lower, ['--all'])) {
     return 'AI-issued git push --all can update the default branch; push one explicit feature or issue branch and use a reviewed pull request instead';
   }
 
-  const positional = args.filter((arg) => !arg.startsWith('-'));
-  if (positional.length < 2) {
+  if (parsed.remote === undefined || parsed.refspecs.length === 0) {
     return 'AI-issued git push must name an explicit remote and non-default destination branch; implicit push can bypass the pull-request review workflow';
   }
 
-  for (const refspec of positional.slice(1)) {
+  for (const refspec of parsed.refspecs) {
     if (refspec.includes('*') || refspec.includes('?') || refspec.includes('[') || refspec.includes(']')) {
       return 'AI-issued git push wildcard refspecs are blocked because they can update the default branch; push one explicit feature or issue branch instead';
     }
     const separator = refspec.lastIndexOf(':');
     const destinationRaw = separator >= 0 ? refspec.slice(separator + 1) : refspec;
     const destination = destinationRaw.replace(/^refs\/heads\//i, '').toLowerCase();
-    if (destination === '' || (separator < 0 && destination === 'head')) {
+    if (destination === '' || (separator < 0 && (destination === 'head' || destination === '@'))) {
       return 'AI-issued git push must use an explicit non-default destination branch so the pull-request review workflow cannot be bypassed';
     }
     if (defaultBranch !== undefined && destination === normalizeBranch(defaultBranch)) {
@@ -134,6 +143,29 @@ export function prohibitedDefaultBranchPushReason(args: readonly string[], defau
     }
   }
   return undefined;
+}
+
+export function parseGitPushArguments(args: readonly string[]): GitPushArguments {
+  const positional: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    const lower = argument.toLowerCase();
+    if (argument === '--') {
+      positional.push(...args.slice(index + 1));
+      break;
+    }
+    if (GIT_PUSH_OPTIONS_WITH_VALUES.has(lower)) {
+      const value = args[index + 1];
+      if (value === undefined) return { refspecs: [], invalidOption: argument };
+      index += 1;
+      continue;
+    }
+    if (GIT_PUSH_OPTIONS_WITH_VALUES.has(lower.split('=', 1)[0]!)) continue;
+    if (!argument.startsWith('-')) positional.push(argument);
+  }
+  return positional[0] === undefined
+    ? { refspecs: positional.slice(1) }
+    : { remote: positional[0], refspecs: positional.slice(1) };
 }
 
 function normalizeBranch(value: string): string {

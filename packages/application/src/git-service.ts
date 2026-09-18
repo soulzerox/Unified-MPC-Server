@@ -107,6 +107,12 @@ export class GitService {
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd, authorization);
     if (!cwd.ok) return cwd;
     if (isPush) {
+      const parsedPush = parseGitPushArguments(invocation.subcommandArgs);
+      if (parsedPush.remote === undefined) return err(appError('PERMISSION_DENIED', 'Git push remote must be explicit so push side effects can be checked'));
+      const pushSafetyResolver = this.adapter.validatePushSafety;
+      if (typeof pushSafetyResolver !== 'function') return err(appError('PERMISSION_DENIED', 'Git push side effects could not be verified safely'));
+      const pushSafety = await pushSafetyResolver.call(this.adapter, cwd.value, parsedPush.remote, signal);
+      if (!pushSafety.ok) return pushSafety;
       const defaultBranches = await this.resolveDefaultBranches(cwd.value, invocation.subcommandArgs);
       if (!defaultBranches.ok) return defaultBranches;
       for (const defaultBranch of defaultBranches.value) {

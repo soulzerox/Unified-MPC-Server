@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { DirectGitRunner, type GitRunOptions, type GitRunResult, type GitRunner } from './git-runner.js';
 import { parsePorcelainStatus, type GitStatusEntry } from './parsers/status-parser.js';
@@ -95,6 +97,30 @@ export class GitAdapter {
     return ok(branches);
   }
 
+  public async validatePushSafety(cwd: string, remote: string, signal?: AbortSignal): Promise<Result<void>> {
+    const receivePack = await this.runner.run(['config', '--get', `remote.${remote}.receivepack`], cwd, this.signalOptions(signal));
+    if (receivePack.exitCode === 0) {
+      return err(appError('PERMISSION_DENIED', 'Git push cannot use a configured custom receive-pack program'));
+    }
+    if (receivePack.exitCode !== 1) {
+      const error = this.mapError(receivePack);
+      if (error !== null) return error;
+    }
+
+    const hooks = await this.runner.run(['rev-parse', '--git-path', 'hooks'], cwd, this.signalOptions(signal));
+    const hooksError = this.mapError(hooks);
+    if (hooksError !== null) return hooksError;
+    const hooksPath = hooks.stdout.trim();
+    if (hooksPath.length === 0) return err(appError('PERMISSION_DENIED', 'Git push hook location could not be resolved safely'));
+    try {
+      const hook = await stat(path.join(path.resolve(cwd, hooksPath), 'pre-push'));
+      if (hook.isFile()) return err(appError('PERMISSION_DENIED', 'Git push cannot run a configured pre-push hook'));
+    } catch (error: unknown) {
+      if (!isMissingFile(error)) return err(appError('INTERNAL_ERROR', 'Git push hook safety could not be verified', true));
+    }
+    return ok(undefined);
+  }
+
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {
     const maxBytes = request.maxBytes ?? 1024 * 1024;
     if (!this.isLimit(maxBytes, 4 * 1024 * 1024)) return err(appError('INVALID_INPUT', 'Git diff byte limit is invalid'));
@@ -184,4 +210,8 @@ export class GitAdapter {
     if (bytes.byteLength <= maxBytes) return { text: value, truncated: false };
     return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true };
   }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }

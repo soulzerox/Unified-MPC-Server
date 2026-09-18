@@ -61,6 +61,7 @@ describe('GitService', () => {
     const workspace = await createWorkspace();
     let calls = 0;
     const adapter = {
+      async validatePushSafety(): Promise<{ ok: true; value: undefined }> { return { ok: true, value: undefined }; },
       async defaultBranch(): Promise<{ ok: true; value: string }> { return { ok: true, value: 'trunk' }; },
       async run(): Promise<{ ok: true; value: { exitCode: number; stdout: string; stderr: string } }> {
         calls += 1;
@@ -84,6 +85,7 @@ describe('GitService', () => {
     const workspace = await createWorkspace();
     let defaultBranchCalls = 0;
     const adapter = {
+      async validatePushSafety(): Promise<{ ok: true; value: undefined }> { return { ok: true, value: undefined }; },
       async defaultBranch(): Promise<{ ok: true; value: string }> {
         defaultBranchCalls += 1;
         return { ok: true, value: 'trunk' };
@@ -152,6 +154,7 @@ describe('GitService', () => {
     const workspace = await createWorkspace();
     let calls = 0;
     const adapter = {
+      async validatePushSafety(): Promise<{ ok: true; value: undefined }> { return { ok: true, value: undefined }; },
       async defaultBranches(): Promise<{ ok: true; value: readonly string[] }> {
         return { ok: true, value: ['trunk', 'main'] };
       },
@@ -202,11 +205,44 @@ describe('GitService', () => {
     expect(defaultBranchCalls).toBe(0);
   });
 
+  it('denies a push when native push side effects cannot be verified under Full Bypass', async () => {
+    const workspace = await createWorkspace();
+    let defaultBranchCalls = 0;
+    let runCalls = 0;
+    const adapter = {
+      async validatePushSafety(): Promise<{ ok: false; error: { code: 'PERMISSION_DENIED' } }> {
+        return { ok: false, error: { code: 'PERMISSION_DENIED' } };
+      },
+      async defaultBranches(): Promise<{ ok: true; value: readonly string[] }> {
+        defaultBranchCalls += 1;
+        return { ok: true, value: ['trunk'] };
+      },
+      async run(): Promise<never> {
+        runCalls += 1;
+        throw new Error('push must be denied before execution');
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['push', 'origin', 'feature/review-gate'],
+      workspaceId: workspace.id,
+    }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(defaultBranchCalls).toBe(0);
+    expect(runCalls).toBe(0);
+  });
+
   it('parses push option values before resolving the push remote', async () => {
     const workspace = await createWorkspace();
     const remotes: string[] = [];
     let calls = 0;
     const adapter = {
+      async validatePushSafety(): Promise<{ ok: true; value: undefined }> { return { ok: true, value: undefined }; },
       async defaultBranch(_cwd: string, remote: string): Promise<{ ok: true; value: string }> {
         remotes.push(remote);
         return { ok: true, value: 'trunk' };

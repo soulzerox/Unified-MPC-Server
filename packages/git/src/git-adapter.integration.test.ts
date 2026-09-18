@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -47,6 +47,7 @@ describe('GitAdapter integration', () => {
     const status = await adapter.status(root);
     const diff = await adapter.diff(root, { path: filename });
     const log = await adapter.log(root, { maxCommits: 20 });
+    const pushSafety = await adapter.validatePushSafety(root, 'origin');
 
     expect(status).toMatchObject({ ok: true, value: { entries: [
       { path: filename, kind: 'modified' },
@@ -54,5 +55,37 @@ describe('GitAdapter integration', () => {
     ] } });
     expect(diff).toMatchObject({ ok: true, value: { patch: expect.stringContaining('changed'), truncated: false } });
     expect(log).toMatchObject({ ok: true, value: { entries: [{ subject: 'initial' }], truncated: false } });
+    expect(pushSafety).toEqual({ ok: true, value: undefined });
+  }, 15_000);
+
+  it('rejects a configured custom receive-pack program', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'remote.origin.receivepack', '/tmp/custom-receive-pack'], { cwd: root, windowsHide: true });
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_DENIED' },
+    });
+  }, 15_000);
+
+  it('rejects an active pre-push hook, including a configured hooks path', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    const hooksPath = path.join(root, '.githooks');
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await mkdir(hooksPath);
+    await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root, windowsHide: true });
+    const hookPath = path.join(hooksPath, 'pre-push');
+    await writeFile(hookPath, '#!/bin/sh\nexit 0\n', 'utf8');
+    await chmod(hookPath, 0o755);
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_DENIED' },
+    });
   }, 15_000);
 });

@@ -200,6 +200,13 @@ function isDestructivePush(args: readonly string[]): boolean {
 }
 
 export function prohibitedDefaultBranchPushReason(args: readonly string[], defaultBranch?: string): string | undefined {
+  const sideEffectOption = args.find((arg) => {
+    const lower = arg.toLowerCase();
+    return lower === '--receive-pack' || lower.startsWith('--receive-pack=') || lower === '--exec' || lower.startsWith('--exec=');
+  });
+  if (sideEffectOption !== undefined) {
+    return `AI-issued git push cannot use ${sideEffectOption}; guarded pushes must use Git's normal transport`;
+  }
   const parsed = parseGitPushArguments(args);
   if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is missing its value`;
   const lower = args.map((arg) => arg.toLowerCase());

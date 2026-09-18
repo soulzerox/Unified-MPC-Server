@@ -119,6 +119,20 @@ export function prohibitedGitPushConfigOverrideReason(args: readonly string[]): 
   return undefined;
 }
 
+/** Rejects global executable-path overrides before a guarded push reaches Git. */
+export function prohibitedGitPushGlobalOptionReason(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (!argument.startsWith('-')) return undefined;
+    const lower = argument.toLowerCase();
+    if (lower === '--exec-path' || lower.startsWith('--exec-path=')) {
+      return 'Git push cannot override the Git executable path; guarded pushes must use Git\'s normal helper programs';
+    }
+    if (lower === '--') return undefined;
+  }
+  return undefined;
+}
+
 function skipGitGlobalOption(args: readonly string[], index: number, option: string): GitInvocation {
   const argument = args[index]!;
   const hasAttachedValue = argument.includes('=') || (option === '-C' && argument.length > 2);

@@ -19,7 +19,7 @@ import {
   type GitStatusResult,
 } from '@unified-mpc/git';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
-import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
+import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
 import { isAbsoluteFsPath, resolveWorkspaceForPath } from './workspace-locator.js';
 
@@ -96,6 +96,8 @@ export class GitService {
     const prohibitedSubcommand = prohibitedGitSubcommandReason(request.args);
     if (prohibitedSubcommand !== undefined) return err(appError('PERMISSION_DENIED', prohibitedSubcommand));
     if (isPush) {
+      const prohibitedGlobalOption = prohibitedGitPushGlobalOptionReason(request.args);
+      if (prohibitedGlobalOption !== undefined) return err(appError('PERMISSION_DENIED', prohibitedGlobalOption));
       const prohibitedConfigOverride = prohibitedGitPushConfigOverrideReason(request.args);
       if (prohibitedConfigOverride !== undefined) return err(appError('PERMISSION_DENIED', prohibitedConfigOverride));
       const staticReason = prohibitedDefaultBranchPushReason(invocation.subcommandArgs);

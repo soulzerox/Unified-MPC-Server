@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason } from './git-mutation-policy.js';
+import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason } from './git-mutation-policy.js';
 
 describe('prohibitedAgentGitInvocationReason', () => {
   it.each([
@@ -124,5 +124,12 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['--config-env', 'include.path=GIT_INCLUDE', 'push', 'origin', 'feature/review-gate'],
   ] as const)('rejects push-time config overrides %s', (...args) => {
     expect(prohibitedGitPushConfigOverrideReason(args)).toBeTypeOf('string');
+  });
+
+  it.each([
+    ['--exec-path=/tmp/custom-bin', 'push', 'origin', 'feature/review-gate'],
+    ['--exec-path', '/tmp/custom-bin', 'push', 'origin', 'feature/review-gate'],
+  ] as const)('rejects push-time Git executable path overrides %s', (...args) => {
+    expect(prohibitedGitPushGlobalOptionReason(args)).toBeTypeOf('string');
   });
 });

@@ -81,6 +81,8 @@ describe('GitService', () => {
   it.each([
     ['-c', ['-c', 'color.ui=false', 'push', 'origin', 'trunk']],
     ['--no-pager', ['--no-pager', 'push', 'origin', 'trunk']],
+    ['--exec-path=', ['--exec-path=/tmp/custom-bin', 'push', 'origin', 'feature/review-gate']],
+    ['--exec-path value', ['--exec-path', '/tmp/custom-bin', 'push', 'origin', 'feature/review-gate']],
   ] as const)('keeps the default-branch invariant after Git global option %s under Full Bypass', async (_label, args) => {
     const workspace = await createWorkspace();
     let defaultBranchCalls = 0;
@@ -99,7 +101,7 @@ describe('GitService', () => {
 
     await expect(service.run({ clientId: 'test', clientName: 'test' }, { args, workspaceId: workspace.id }, undefined, authorization))
       .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    expect(defaultBranchCalls).toBe(_label === '-c' ? 0 : 1);
+    expect(defaultBranchCalls).toBe(_label === '--no-pager' ? 1 : 0);
   });
 
   it.each([

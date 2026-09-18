@@ -192,6 +192,26 @@ describe('ProcessService', () => {
     expect(calls).toEqual([{ executable: 'powershell.exe', args: ['-Command', 'Remove-Item target'], cwd: outside }]);
   });
 
+  it.each([
+    ['direct git', 'git', ['push', 'origin', 'trunk']],
+    ['direct git with repository override', 'git', ['-C', '/outside', 'push', 'origin', 'trunk']],
+    ['shell git', 'bash', ['-lc', 'git push origin trunk']],
+    ['shell git with repository override', 'bash', ['-lc', 'git -C /outside push origin trunk']],
+  ] as const)('blocks %s outside the guarded Git service even under Full Bypass', async (_label, executable, args) => {
+    const workspace = await createWorkspace();
+    const calls: ManagedProcessStart[] = [];
+    const service = new ProcessService(repository(workspace), { processManager: fakeManager(calls) });
+
+    await expect(service.start(
+      { clientId: 'client-1', clientName: 'test' },
+      workspace.id,
+      { executable, args },
+      undefined,
+      fullBypassAuthorization,
+    )).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toHaveLength(0);
+  });
+
   it('shares process handles across clients and sessions in the same workspace while isolating other workspaces', async () => {
     const workspace = await createWorkspace();
     const service = new ProcessService(repository(workspace), { processManager: fakeManager([]) });

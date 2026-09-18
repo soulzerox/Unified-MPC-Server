@@ -137,6 +137,7 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['config', 'core.sshCommand', '/tmp/ssh-wrapper'],
     ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack'],
     ['config', '--unset', 'credential.helper'],
+    ['config', 'protocol.ext.allow', 'always'],
   ] as const)('rejects executable Git config mutation %s', (...args) => {
     expect(prohibitedGitConfigMutationReason(args)).toBeTypeOf('string');
   });

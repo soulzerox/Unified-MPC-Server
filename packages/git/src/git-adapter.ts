@@ -88,6 +88,7 @@ export class GitAdapter {
     if (targets.length === 0) return ok([]);
     const branches: string[] = [];
     for (const target of targets) {
+      if (!isSupportedRemoteTarget(target)) return ok([]);
       const remoteHead = await this.runner.run(['ls-remote', '--symref', target, 'HEAD'], cwd);
       if (remoteHead.exitCode !== 0) return ok([]);
       const match = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD\s*$/im.exec(remoteHead.stdout);
@@ -106,6 +107,7 @@ export class GitAdapter {
       'core.sshCommand',
       'core.gitProxy',
       'credential.helper',
+      'protocol.allow',
     ];
     for (const key of executableConfigKeys) {
       const configured = await this.runner.run(['config', '--get-all', key], cwd, this.signalOptions(signal));
@@ -114,6 +116,12 @@ export class GitAdapter {
         const error = this.mapError(configured);
         if (error !== null) return error;
       }
+    }
+    const protocolAllow = await this.runner.run(['config', '--get-regexp', '^protocol\\..*\\.allow$'], cwd, this.signalOptions(signal));
+    if (protocolAllow.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot enable external transport protocols'));
+    if (protocolAllow.exitCode !== 1) {
+      const error = this.mapError(protocolAllow);
+      if (error !== null) return error;
     }
 
     const hooks = await this.runner.run(['rev-parse', '--git-path', 'hooks'], cwd, this.signalOptions(signal));
@@ -223,4 +231,10 @@ export class GitAdapter {
 
 function isMissingFile(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function isSupportedRemoteTarget(target: string): boolean {
+  if (/^[a-z][a-z0-9+.-]*::/i.test(target)) return false;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(target)?.[1]?.toLowerCase();
+  return scheme === undefined || ['file', 'git', 'git+ssh', 'http', 'https', 'ssh'].includes(scheme);
 }

@@ -89,6 +89,26 @@ describe('GitAdapter integration', () => {
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
+  it('rejects external remote-helper targets before ls-remote can execute them', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    const marker = path.join(root, 'ext-wrapper-ran');
+    const wrapper = path.join(root, 'ext-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'protocol.ext.allow', 'always'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', `ext::${wrapper}`], { cwd: root, windowsHide: true });
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_DENIED' },
+    });
+    await expect(new GitAdapter(new DirectGitRunner()).defaultBranches(root, 'origin')).resolves.toEqual({ ok: true, value: [] });
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
   it('rejects an active pre-push hook, including a configured hooks path', async () => {
     if (!gitAvailable) return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

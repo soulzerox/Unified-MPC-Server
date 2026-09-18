@@ -152,6 +152,8 @@ function isExecutableGitConfigKey(argument: string): boolean {
   return key === 'core.sshcommand'
     || key === 'core.gitproxy'
     || key === 'credential.helper'
+    || key === 'protocol.allow'
+    || /^protocol\..+\.allow$/.test(key)
     || /^remote\..+\.(?:receivepack|uploadpack|proxy|vcs)$/.test(key);
 }
 

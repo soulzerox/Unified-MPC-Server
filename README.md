@@ -300,6 +300,17 @@ python -m pytest -m benchmark     # quality/performance/migration benchmark
 
 Test doubles สำหรับ embeddings เป็น deterministic, non-zero และกำหนด dimension ได้ เพื่อไม่ผูก unit tests เข้ากับ model/vector dimension เดียว
 
+### Permanent CI quality gate
+
+ทุก Pull Request เข้า `main` และทุก push เข้า `main` จะรัน GitHub Actions workflow `.github/workflows/ci.yml` โดยมี check names ที่ตั้งใจให้ใช้กับ branch protection ได้ภายหลัง:
+
+- `unit-py3.10` ถึง `unit-py3.14`: clean install + compile smoke + hermetic unit suite
+- `package-smoke`: build wheel, fresh-venv install, CLI/import และ standalone stdio startup
+- `schema-regression`: storage/workspace migration regression suite
+- `repository-hygiene`: ป้องกัน DB/cache/socket/build artifacts ถูก commit
+
+Live Ollama, stress และ benchmark profiles ยังคงเป็น opt-in และไม่ block normal CI
+
 ### Dependency update policy
 
 Runtime dependencies ถูกประกาศใน `pyproject.toml` ด้วยช่วงเวอร์ชันที่จำกัด major version เพื่อหลีกเลี่ยงการ float ข้าม storage/protocol incompatibility โดยไม่ตั้งใจ การขยับ major version ให้ทำผ่าน PR แยก พร้อมรัน hermetic suite และ integration ที่เกี่ยวข้องก่อน merge

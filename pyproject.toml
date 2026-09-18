@@ -7,9 +7,16 @@ name = "thai-rag-mcp"
 version = "0.1.0"
 description = "Local Thai-aware memory, code retrieval, and CPG MCP provider"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 license = "MIT"
 authors = [{ name = "soulzerox" }]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
   "chromadb>=1.5,<2",
   "mcp>=1.26,<3",

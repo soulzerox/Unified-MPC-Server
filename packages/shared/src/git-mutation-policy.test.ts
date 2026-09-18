@@ -47,6 +47,9 @@ describe('prohibitedAgentGitInvocationReason', () => {
     [['push', '--exec', '/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'custom exec transport'],
     [['push', '--receive=/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'abbreviated receive-pack'],
     [['push', '--exe=/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'abbreviated exec transport'],
+    [['push', '--signed', 'origin', 'feature/review-gate'], 'signed push'],
+    [['push', '--signed=if-asked', 'origin', 'feature/review-gate'], 'conditional signed push'],
+    [['push', '--recurse-submodules=on-demand', 'origin', 'feature/review-gate'], 'recursive submodule push'],
     [['push', '--all', 'origin'], 'all branches push'],
     [['push', 'origin', 'refs/heads/*:refs/heads/*'], 'wildcard refspec'],
   ] as const)('blocks %s (%s)', (args, _label) => {
@@ -139,6 +142,11 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack'],
     ['config', '--unset', 'credential.helper'],
     ['config', 'credential.https://example.invalid.helper', '!/tmp/credential-wrapper'],
+    ['config', 'push.gpgSign', 'true'],
+    ['config', 'push.recurseSubmodules', 'on-demand'],
+    ['config', 'submodule.recurse', 'true'],
+    ['config', 'gpg.program', '/tmp/sign-wrapper'],
+    ['config', 'gpg.ssh.program', '/tmp/sign-wrapper'],
     ['config', 'protocol.ext.allow', 'always'],
   ] as const)('rejects executable Git config mutation %s', (...args) => {
     expect(prohibitedGitConfigMutationReason(args)).toBeTypeOf('string');

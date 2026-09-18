@@ -154,6 +154,10 @@ function isExecutableGitConfigKey(argument: string): boolean {
     || key === 'core.gitproxy'
     || key === 'credential.helper'
     || /^credential\..+\.helper$/.test(key)
+    || key === 'push.gpgsign'
+    || key === 'push.recursesubmodules'
+    || key === 'submodule.recurse'
+    || /^gpg(?:\..+)?\.program$/.test(key)
     || key === 'protocol.allow'
     || /^protocol\..+\.allow$/.test(key)
     || /^remote\..+\.(?:receivepack|uploadpack|proxy|vcs)$/.test(key);
@@ -248,10 +252,22 @@ function isDestructivePush(args: readonly string[]): boolean {
 export function prohibitedDefaultBranchPushReason(args: readonly string[], defaultBranch?: string): string | undefined {
   const sideEffectOption = args.find((arg) => {
     const lower = arg.toLowerCase();
-    return lower === '--receive-pack' || lower.startsWith('--receive-pack=') || lower === '--exec' || lower.startsWith('--exec=');
+    return lower === '--receive-pack'
+      || lower.startsWith('--receive-pack=')
+      || lower === '--exec'
+      || lower.startsWith('--exec=')
+      || lower === '--signed'
+      || lower.startsWith('--signed=');
   });
   if (sideEffectOption !== undefined) {
     return `AI-issued git push cannot use ${sideEffectOption}; guarded pushes must use Git's normal transport`;
+  }
+  const recursiveOption = args.find((arg) => {
+    const lower = arg.toLowerCase();
+    return lower === '--recurse-submodules' || lower.startsWith('--recurse-submodules=');
+  });
+  if (recursiveOption !== undefined) {
+    return `AI-issued git push cannot use ${recursiveOption}; guarded pushes cannot launch nested submodule pushes`;
   }
   const parsed = parseGitPushArguments(args);
   if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is not on the explicit allowlist or is missing its value`;

@@ -213,6 +213,10 @@ describe('GitService', () => {
     ['remote upload-pack', ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack']],
     ['credential helper', ['config', '--unset', 'credential.helper']],
     ['URL-scoped credential helper', ['config', 'credential.https://example.invalid.helper', '!/tmp/credential-wrapper']],
+    ['push signing', ['config', 'push.gpgSign', 'true']],
+    ['recursive submodule push', ['config', 'push.recurseSubmodules', 'on-demand']],
+    ['recursive submodule config', ['config', 'submodule.recurse', 'true']],
+    ['GPG signing program', ['config', 'gpg.program', '/tmp/sign-wrapper']],
     ['external protocol allowlist', ['config', 'protocol.ext.allow', 'always']],
   ] as const)('rejects executable %s config mutations under Full Bypass', async (_label, args) => {
     const workspace = await createWorkspace();

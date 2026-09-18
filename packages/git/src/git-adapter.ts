@@ -108,6 +108,9 @@ export class GitAdapter {
       'core.askPass',
       'core.gitProxy',
       'credential.helper',
+      'push.gpgSign',
+      'push.recurseSubmodules',
+      'submodule.recurse',
       'protocol.allow',
     ];
     for (const key of executableConfigKeys) {
@@ -128,6 +131,12 @@ export class GitAdapter {
     if (credentialHelpers.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured credential helpers'));
     if (credentialHelpers.exitCode !== 1) {
       const error = this.mapError(credentialHelpers);
+      if (error !== null) return error;
+    }
+    const signingPrograms = await this.runner.run(['config', '--get-regexp', '^gpg(\\..+)?\\.program$'], cwd, this.signalOptions(signal));
+    if (signingPrograms.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured signing programs'));
+    if (signingPrograms.exitCode !== 1) {
+      const error = this.mapError(signingPrograms);
       if (error !== null) return error;
     }
 

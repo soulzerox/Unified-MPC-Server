@@ -1318,7 +1318,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
 
     const runKey = recurringRunKey(continuation, request.now);
     const previousRunOutcome = this.recurringRunOutcome(continuation.continuationId, runKey);
-    const retryablePreviousRun = previousRunOutcome === 'worker_busy_noop' || previousRunOutcome === 'orphan_probe_noop';
+    const retryablePreviousRun = previousRunOutcome === 'worker_busy_noop';
     if (previousRunOutcome !== undefined && !retryablePreviousRun) {
       return { outcome: 'already_claimed', continuation, goal };
     }

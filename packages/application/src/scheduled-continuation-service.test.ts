@@ -1022,6 +1022,55 @@ describe('ScheduledContinuationService', () => {
     }
   });
 
+  it('returns an explicit same-tick retry action during recurring stale-heartbeat grace', async () => {
+    let leaseGeneration = 0;
+    let leaseActivitySeq = 0;
+    const workerLiveness: ScheduledContinuationWorkerLivenessPort = {
+      observe: async () => ({
+        trustworthy: true,
+        observedAt: '2026-08-27T10:25:00.000Z',
+        leaseGeneration,
+        leaseActivitySeq,
+        liveFencedCallCount: 0,
+        blockingTaskStates: [],
+      }),
+    };
+    const { database, goals, scheduled, clock } = await fixture('2026-08-27T10:00:00.000Z', workerLiveness);
+    try {
+      const started = await startGoal(goals);
+      leaseGeneration = started.leaseGeneration;
+      leaseActivitySeq = started.leaseActivitySeq;
+      const prepared = await scheduled.prepareScheduledContinuation(actor, validPrepare(started));
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) throw new Error('prepare failed');
+      const created = await scheduled.recordScheduledContinuationReceipt(actor, {
+        continuationId: prepared.value.continuation.continuationId,
+        expectedVersion: prepared.value.continuation.version,
+        outcome: 'created',
+        nativeTaskId: 'native-stale-retry-guidance',
+        dueAt: prepared.value.continuation.dueAt,
+        runsOn: 'cloud',
+      });
+      expect(created.ok).toBe(true);
+      database.connection.prepare('UPDATE goals SET lease_heartbeat_at = ?, lease_expires_at = ? WHERE id = ?')
+        .run('2026-08-27T10:24:30.000Z', '2026-08-27T10:30:00.000Z', started.goalId);
+
+      clock.set('2026-08-27T10:25:00.000Z');
+      await expect(scheduled.claimScheduledContinuation({ ...actor, sessionId: 'stale-retry-client' }, {
+        continuationId: prepared.value.continuation.continuationId,
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          outcome: 'worker_busy_noop',
+          retryAfterSeconds: 30,
+          nextRequiredAction: 'retry_claim_after_stale_grace_window',
+        },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('deduplicates concurrent recurring claims so exactly one tick acquires and no successor is created', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

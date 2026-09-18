@@ -175,7 +175,7 @@ export type ClaimScheduledContinuationResult =
       readonly runKey: string;
       readonly retryAfterSeconds: number;
       readonly currentWakeMayReturn: true;
-      readonly nextRequiredAction: 'return_without_mutation_and_wait_for_next_interval';
+      readonly nextRequiredAction: 'retry_claim_after_stale_grace_window' | 'return_without_mutation_and_wait_for_next_interval';
     }
   | {
       readonly outcome: 'terminal_cleanup_required';
@@ -646,7 +646,9 @@ export class ScheduledContinuationService {
           runKey: claimed.runKey,
           retryAfterSeconds: claimed.retryAfterSeconds,
           currentWakeMayReturn: true,
-          nextRequiredAction: 'return_without_mutation_and_wait_for_next_interval',
+          nextRequiredAction: claimed.outcome === 'worker_busy_noop' && claimed.retryAfterSeconds <= 60
+            ? 'retry_claim_after_stale_grace_window'
+            : 'return_without_mutation_and_wait_for_next_interval',
         });
       }
       if (claimed.outcome === 'terminal_cleanup_required') {
@@ -858,7 +860,7 @@ function buildScheduleRequest(
   if (continuation.occurrence === 'interval') {
     if (continuation.intervalMinutes !== 60) throw new GoalStateError('corrupt', 'Recurring watchdog must use the 60-minute interval');
     const recurringPrompt = `Call claim_scheduled_continuation first for recurring continuation ${continuation.continuationId}, goal ${continuation.goalId}, workspace ${workspaceId}. This is one hourly Native ChatGPT recurring watchdog for the durable goal; the same native task remains runnable across normal firings and ordinary wakes must never create, retime, replace, or consume a successor task. If claim returns recurring_acquired, continue the real durable goal using the returned goal lease and the existing recurring watchdog. If claim returns worker_busy_noop or already_claimed, perform no workspace mutation and let this scheduled run return naturally; the same recurring task will wake again on its next hourly interval. If trustworthy liveness proves no real worker or blocking job and the still-valid lease heartbeat is past the bounded 60-second stale-recovery grace, claim must recover that lease in this same hourly tick as recurring_acquired rather than waiting for lease expiry or a later hourly firing. orphan_probe_noop is legacy pre-hardening compatibility only and is not a current recurring recovery step. If claim returns receipt_required, reconcile exact host metadata before mutation. If claim returns terminal_noop or terminal cleanup is requested, do not resume goal work; make this exact recurring native task non-runnable using the strongest Scheduled Task operation actually exposed by the host and record truthful cleanup evidence. Scheduler transport failure alone never completes, fails, or blocks the durable goal. Resolve Native Scheduled Task operations from the current ChatGPT host surface; never hard-code an internal operation name and never use Windows Task Scheduler, unified-mpc scheduler, cron, shell timers, DOM automation, or another scheduler provider. Never report completion until finish_goal completes and get_goal is terminal.`;
-    const recurringRecoveryGuidance = 'If worker_busy_noop has retryAfterSeconds <= 60, retry the same recurring runKey after the brief stale-recovery window; a prior retryable noop must not strand safe takeover behind already_claimed. For CLI, IDE, or Web manual takeover, use the same workspaceId and goalKey, omit ponytailMode to inherit the stored policy, and read get_goal before mutation.';
+    const recurringRecoveryGuidance = 'For worker_busy_noop, the return-naturally path applies only when retryAfterSeconds > 60; when retryAfterSeconds <= 60, retry the same recurring runKey after the brief stale-recovery window. A prior retryable noop must not strand safe takeover behind already_claimed. For CLI, IDE, or Web manual takeover, use the same workspaceId and goalKey, omit ponytailMode to inherit the stored policy, and read get_goal before mutation.';
     return {
       provider: 'chatgpt_scheduled_task',
       occurrence: 'interval',

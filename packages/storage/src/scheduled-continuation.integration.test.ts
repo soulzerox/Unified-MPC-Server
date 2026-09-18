@@ -1287,25 +1287,47 @@ describe('scheduled continuation repository state machine', () => {
       });
       expect(firstTick).toMatchObject({ outcome: 'worker_busy_noop', runKey: 'interval-0' });
 
-      const retry = await repository.claimScheduledContinuation({
-        continuationId: prepared.continuation.continuationId,
-        ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
-        ownerClientId: 'other-client',
-        ownerSessionId: 'session-c',
-        leaseTokenHash: 'lease-hash-c',
-        leaseSeconds: 600,
-        earlyToleranceSeconds: 120,
-        liveness: {
-          trustworthy: true,
-          observedAt: '2026-08-27T00:32:00.000Z',
-          leaseGeneration: beforeTick.leaseGeneration,
-          leaseActivitySeq: beforeTick.leaseActivitySeq,
-          liveFencedCallCount: 0,
-          blockingTaskStates: [],
-        },
-        now: '2026-08-27T00:32:00.000Z',
-      });
-
+      const retries = await Promise.all([
+        repository.claimScheduledContinuation({
+          continuationId: prepared.continuation.continuationId,
+          ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
+          ownerClientId: 'other-client',
+          ownerSessionId: 'session-c',
+          leaseTokenHash: 'lease-hash-c',
+          leaseSeconds: 600,
+          earlyToleranceSeconds: 120,
+          liveness: {
+            trustworthy: true,
+            observedAt: '2026-08-27T00:32:00.000Z',
+            leaseGeneration: beforeTick.leaseGeneration,
+            leaseActivitySeq: beforeTick.leaseActivitySeq,
+            liveFencedCallCount: 0,
+            blockingTaskStates: [],
+          },
+          now: '2026-08-27T00:32:00.000Z',
+        }),
+        repository.claimScheduledContinuation({
+          continuationId: prepared.continuation.continuationId,
+          ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
+          ownerClientId: 'third-client',
+          ownerSessionId: 'session-d',
+          leaseTokenHash: 'lease-hash-d',
+          leaseSeconds: 600,
+          earlyToleranceSeconds: 120,
+          liveness: {
+            trustworthy: true,
+            observedAt: '2026-08-27T00:32:00.000Z',
+            leaseGeneration: beforeTick.leaseGeneration,
+            leaseActivitySeq: beforeTick.leaseActivitySeq,
+            liveFencedCallCount: 0,
+            blockingTaskStates: [],
+          },
+          now: '2026-08-27T00:32:00.000Z',
+        }),
+      ]);
+      expect(retries.map((result) => result.outcome).sort()).toEqual(['already_claimed', 'recurring_acquired']);
+      const retry = retries.find((result) => result.outcome === 'recurring_acquired');
+      if (retry === undefined || retry.outcome !== 'recurring_acquired') throw new Error('concurrent takeover did not acquire');
       expect(retry).toMatchObject({
         outcome: 'recurring_acquired',
         acquisition: 'expired_lease',

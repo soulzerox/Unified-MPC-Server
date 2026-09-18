@@ -92,4 +92,34 @@ describe('WorkspaceInfoService.register', () => {
     const listed = await new WorkspaceInfoService(repository, undefined, false, 'win32').list({ clientId: 't', clientName: 't' });
     expect(listed).toMatchObject({ ok: true, value: [{ kind: 'machine_root' }] });
   });
+
+  it('relinks an archived canonical path without creating a second workspace identity', async () => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-register-relink-'));
+    temporaryRoots.push(projectRoot);
+    const archived: Workspace = {
+      id: 'workspace-relink',
+      displayName: 'Old name',
+      rootPath: projectRoot,
+      realRootPath: await realpath(projectRoot),
+      createdAt: new Date(0).toISOString(),
+      archivedAt: '2026-08-24T00:00:00.000Z',
+    };
+    const store = new Map<string, Workspace>([[archived.id, archived]]);
+    const repository: WorkspaceRepository = {
+      async list(): Promise<Workspace[]> { return [...store.values()].filter((entry) => entry.archivedAt === undefined); },
+      async listAll(): Promise<Workspace[]> { return [...store.values()]; },
+      async get(): Promise<Workspace | null> { return null; },
+      async insert(workspace: Workspace): Promise<void> { store.set(workspace.id, workspace); },
+      async delete(id: string): Promise<void> { store.delete(id); },
+      async restore(id: string, workspace?: Workspace): Promise<void> { if (workspace !== undefined) store.set(id, workspace); },
+    };
+
+    const result = await new WorkspaceInfoService(repository, new WorkspaceService(repository)).register(
+      { clientId: 't', clientName: 't' },
+      { path: projectRoot, displayName: 'Reconnected' },
+    );
+
+    expect(result).toMatchObject({ ok: true, value: { id: archived.id, displayName: 'Reconnected' } });
+    expect((await repository.list()).map((entry) => entry.id)).toEqual([archived.id]);
+  });
 });

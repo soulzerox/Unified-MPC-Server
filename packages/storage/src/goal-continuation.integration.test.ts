@@ -7,7 +7,7 @@ import { GoalContinuationService } from '@unified-mpc/application';
 import { ScheduledContinuationService } from '@unified-mpc/application';
 import type { FileActor, GoalRequestCancellationPort, GoalTaskCancellationPort } from '@unified-mpc/application';
 import type { ScheduledContinuationWorkerLiveness } from '@unified-mpc/domain';
-import type { Workspace } from '@unified-mpc/workspace';
+import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { SqliteDatabase } from './database.js';
 import { SqliteGoalRepository } from './goal-repository.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
@@ -81,6 +81,27 @@ const createRequest = {
 } as const;
 
 describe('durable goal continuation persistence', () => {
+  it('keeps an existing goal discoverable after workspace archive and path relink', async () => {
+    const { filename, root, workspace } = await fixture();
+    const now = new Date('2026-08-26T00:00:00.000Z');
+    const runtime = await open(filename, workspace, () => now);
+    try {
+      const created = await runtime.service.runGoal(actor('session-a'), createRequest);
+      if (!created.ok) throw new Error('goal create failed');
+
+      await runtime.workspaces.archive(workspace.id, '2026-08-26T00:01:00.000Z');
+      const relinked = await new WorkspaceService(runtime.workspaces).add('Relinked', root);
+
+      expect(relinked).toMatchObject({ ok: true, value: { id: workspace.id } });
+      await expect(runtime.service.getGoal(actor('session-b'), { goalId: created.value.goalId })).resolves.toMatchObject({
+        ok: true,
+        value: { goalId: created.value.goalId, workspaceId: workspace.id },
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('creates once, is idempotent by workspace + goalKey, and resumes after a runtime/database restart', async () => {
     const { filename, workspace } = await fixture();
     let now = new Date('2026-08-26T00:00:00.000Z');

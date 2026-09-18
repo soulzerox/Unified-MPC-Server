@@ -6,7 +6,8 @@ interface WorkspaceRegistration {
 
 interface WorkspaceRegistrationService {
   list(): Promise<readonly WorkspaceRegistration[]>;
-  delete(id: string): Promise<void>;
+  unregister(id: string): Promise<unknown>;
+  unregisterMany?(ids: readonly string[]): Promise<unknown>;
 }
 
 interface WorkspaceResetBackupService {
@@ -14,12 +15,12 @@ interface WorkspaceResetBackupService {
 }
 
 export interface WorkspaceResetResult {
-  readonly deleted: number;
+  readonly archived: number;
   readonly backupId: string | null;
 }
 
 /**
- * A workspace reset deletes only unified-mpc registration rows, never project files.
+ * A workspace reset archives only unified-mpc registration rows, never project files.
  * It is still a broad persistent mutation, so it requires an exact phrase and a
  * restorable SQLite snapshot before the first row is removed.
  */
@@ -35,9 +36,23 @@ export async function resetWorkspaceRegistrations(
   }
 
   const existing = await workspaces.list();
-  if (existing.length === 0) return { deleted: 0, backupId: null };
+  if (existing.length === 0) return { archived: 0, backupId: null };
 
   const backup = await backups.create('manual');
-  for (const workspace of existing) await workspaces.delete(workspace.id);
-  return { deleted: existing.length, backupId: backup.id };
+  if (workspaces.unregisterMany !== undefined) {
+    assertSuccessful(await workspaces.unregisterMany(existing.map((workspace) => workspace.id)));
+  } else {
+    for (const workspace of existing) assertSuccessful(await workspaces.unregister(workspace.id));
+  }
+  return { archived: existing.length, backupId: backup.id };
+}
+
+function assertSuccessful(result: unknown): void {
+  if (typeof result !== 'object' || result === null || !('ok' in result)) return;
+  if (result.ok === false) {
+    const error = 'error' in result && typeof result.error === 'object' && result.error !== null && 'message' in result.error
+      ? String(result.error.message)
+      : 'Workspace registration reset failed';
+    throw new Error(error);
+  }
 }

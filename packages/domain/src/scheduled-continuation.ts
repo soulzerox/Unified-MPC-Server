@@ -236,6 +236,8 @@ export interface ClaimScheduledContinuationRecordRequest {
   readonly claimSuccessorDueAt: string;
   readonly claimSuccessorRequestFingerprint: string;
   readonly now: string;
+  /** False when the goal workspace is archived; claims must become cleanup-only. */
+  readonly workspaceActive?: boolean;
 }
 
 export type ScheduledContinuationAcquisition = 'normal' | 'expired_lease' | 'orphan_recovered';

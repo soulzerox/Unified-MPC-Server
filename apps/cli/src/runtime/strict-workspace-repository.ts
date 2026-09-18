@@ -29,10 +29,57 @@ export class StrictWorkspaceRepository implements WorkspaceRepository {
     await this.inner.insert(workspace);
   }
 
+  public async insertIfAvailable(workspace: Workspace): Promise<boolean> {
+    if (!this.isAllowed(workspace)) throw new Error('Strict workspace repository rejected a root outside the explicit allowlist');
+    return this.inner.insertIfAvailable === undefined
+      ? (await this.inner.insert(workspace), true)
+      : this.inner.insertIfAvailable(workspace);
+  }
+
   public async delete(id: string): Promise<void> {
     const workspace = await this.get(id);
     if (workspace === null) return;
     await this.inner.delete(id);
+  }
+
+  public async listAll(): Promise<Workspace[]> {
+    const workspaces = this.inner.listAll === undefined ? await this.inner.list() : await this.inner.listAll();
+    return workspaces.filter((workspace) => this.isAllowed(workspace));
+  }
+
+  public async archive(id: string, archivedAt?: string): Promise<void> {
+    const workspace = await this.getAny(id);
+    if (workspace === null) throw new Error('Strict workspace repository could not find the workspace to archive');
+    if (this.inner.archive === undefined) throw new Error('Strict workspace repository cannot archive registrations');
+    if (!this.isAllowed(workspace)) throw new Error('Strict workspace repository rejected an archive outside the explicit allowlist');
+    await this.inner.archive(id, archivedAt);
+  }
+
+  public async archiveMany(ids: readonly string[], archivedAt?: string): Promise<void> {
+    const workspaces = await Promise.all(ids.map((id) => this.getAny(id)));
+    if (workspaces.some((workspace) => workspace === null)) throw new Error('Strict workspace repository could not find a workspace to archive');
+    if (this.inner.archiveMany === undefined) {
+      for (const id of ids) await this.archive(id, archivedAt);
+      return;
+    }
+    for (const workspace of workspaces) {
+      if (workspace === null || !this.isAllowed(workspace)) throw new Error('Strict workspace repository rejected an archive outside the explicit allowlist');
+    }
+    await this.inner.archiveMany(ids, archivedAt);
+  }
+
+  public async restore(id: string, workspace?: Workspace): Promise<void> {
+    const existing = await this.getAny(id);
+    const candidate = workspace ?? existing;
+    if (candidate === null || candidate === undefined) throw new Error('Strict workspace repository could not find the workspace to restore');
+    if (!this.isAllowed(candidate)) throw new Error('Strict workspace repository rejected a restore outside the explicit allowlist');
+    if (this.inner.restore === undefined) throw new Error('Strict workspace repository cannot restore registrations');
+    await this.inner.restore(id, workspace);
+  }
+
+  public async getAny(id: string): Promise<Workspace | null> {
+    const workspace = this.inner.getAny === undefined ? await this.inner.get(id) : await this.inner.getAny(id);
+    return workspace !== null && this.isAllowed(workspace) ? workspace : null;
   }
 
   private isAllowed(workspace: Workspace): boolean {

@@ -1,4 +1,5 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { realpath } from 'node:fs/promises';
 import {
   hostPathApi,
   isAbsoluteHostPath,
@@ -99,7 +100,13 @@ export class WorkspaceInfoService {
     }
 
     const existing = await this.workspaces.list();
-    const normalizedTarget = normalizeCompare(absolutePath, this.platform);
+    let canonicalTarget: string;
+    try {
+      canonicalTarget = await realpath(absolutePath);
+    } catch {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root could not be canonicalized'));
+    }
+    const normalizedTarget = normalizeCompare(canonicalTarget, this.platform);
     const duplicate = existing.find((entry) => normalizeCompare(entry.realRootPath, this.platform) === normalizedTarget
       || normalizeCompare(entry.rootPath, this.platform) === normalizedTarget);
     if (duplicate !== undefined) return ok(this.toWorkspaceInfo(duplicate));

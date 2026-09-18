@@ -1,5 +1,5 @@
 import { ok, err, appError, type GoalRecord, type Result } from '@unified-mpc/domain';
-import { WorkspaceSelectionService } from '@unified-mpc/application';
+import { JsonWorkspaceIndexStore, WorkspaceIndexService, WorkspaceSelectionService } from '@unified-mpc/application';
 import {
   ControlPlaneServer,
   type ControlPlaneServerOptions,
@@ -69,10 +69,11 @@ export async function runWeb(
     const settings = new SqliteSettingsRepository(database);
     const workspaceRepository = new SqliteWorkspaceRepository(database);
     const workspaceService = new WorkspaceService(workspaceRepository);
+    const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
     const goalRepository = new SqliteGoalRepository(database);
     bootstrapNonSecretSettings(settings);
-    const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings);
-    const goalControl = createGoalControl(goalRepository, settings);
+    const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings, workspaceIndex);
+    const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
@@ -82,6 +83,7 @@ export async function runWeb(
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       goalControl: serverOptions?.goalControl ?? goalControl,
       closeSettings: (): void => {
+        void workspaceIndex.close();
         if (serverOptions?.closeSettings === undefined) database.close();
         serverOptions?.closeSettings?.();
       },
@@ -107,6 +109,7 @@ function createWorkspaceControl(
   workspaceRepository: SqliteWorkspaceRepository,
   workspaceService: WorkspaceService,
   settings: SqliteSettingsRepository,
+  workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
 ): WorkspaceControlPort {
   const projectList = async (): Promise<readonly WebWorkspaceSummary[]> => (await workspaceService.list())
     .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath));
@@ -142,7 +145,16 @@ function createWorkspaceControl(
     remove: async (workspaceId): Promise<WebWorkspaceSelectionSnapshot | null> => {
       const projects = await projectList();
       if (!projects.some((project) => project.id === workspaceId)) throw new Error('Workspace is not a registered project');
-      await workspaceService.delete(workspaceId);
+      const existing = await workspaceRepository.get(workspaceId);
+      if (existing === null) throw new Error('Workspace is not a registered project');
+      const removed = await workspaceService.unregister(workspaceId);
+      if (!removed.ok) throw new Error(removed.error.message);
+      try {
+        await workspaceIndex.forgetWorkspace(workspaceId);
+      } catch (error: unknown) {
+        await workspaceRepository.restore(existing.id, existing).catch(() => undefined);
+        throw error;
+      }
       const service = await selection();
       return service === null ? null : unwrap(service.list());
     },
@@ -152,6 +164,7 @@ function createWorkspaceControl(
 export function createGoalControl(
   goals: Pick<SqliteGoalRepository, 'countWorkspaceGoalsForHost' | 'listWorkspaceGoalsForHost' | 'getById'>,
   settings: Pick<SqliteSettingsRepository, 'get' | 'set'>,
+  activateWorkspace?: (workspaceId: string) => Promise<WebWorkspaceSelectionSnapshot>,
 ): GoalControlPort {
   const preferredMap = (): Readonly<Record<string, string>> => parseStringRecordSetting(
     settings.get(USER_SETTING_KEYS.preferredWorkspaceGoals),
@@ -172,6 +185,7 @@ export function createGoalControl(
       if (goal === null || goal.workspaceId !== workspaceId || goal.status !== 'active') {
         throw new Error('Open goal was not found in this workspace');
       }
+      await activateWorkspace?.(workspaceId);
       settings.set(USER_SETTING_KEYS.preferredWorkspaceGoals, serializeStringRecordSetting({
         ...preferredMap(),
         [workspaceId]: goal.id,

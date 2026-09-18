@@ -316,7 +316,7 @@ export class ControlPlaneServer {
         const registered = await this.workspaceControl.list();
         if (!registered.some((workspace) => workspace.id === workspaceId)) throw new Error('Workspace is not a registered project');
         const goal = await this.goalControl.continue(workspaceId, goalId);
-        const selection = await this.workspaceControl.activate(workspaceId);
+        const selection = await this.workspaceControl.selection();
         this.recordLog('SUCCESS', `Preferred workspace goal selected: ${workspaceId} ${goal.goalKey}`);
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ goal, preferredGoalId: goal.goalId, selection }));
@@ -1164,4 +1164,3 @@ async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Pr
     });
   });
 }
-

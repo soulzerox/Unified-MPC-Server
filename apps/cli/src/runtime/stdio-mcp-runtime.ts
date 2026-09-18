@@ -65,7 +65,7 @@ export interface StdioMcpRuntime {
   readonly profileProvider: () => PermissionProfile;
   readonly allowAiDeleteProvider: () => boolean;
   readonly destructivePolicyProvider: () => DestructiveAutoApprovalPolicy;
-  readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope>;
+  readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
   readonly activeWorkspaceScopesProvider: () => Promise<readonly WorkspaceScope[]>;
   readonly codexToolsEnabled: boolean;
   readonly ponytailMode: PonytailMode;
@@ -117,10 +117,14 @@ export function createStdioMcpRuntime(
   const activeWorkspaces = async (): Promise<readonly Workspace[]> => {
     const selected = await workspaceSelection.activeWorkspaces();
     if (selected.ok) return selected.value;
-    if (selected.error.code === 'WORKSPACE_NOT_FOUND') return [workspace];
+    if (selected.error.code === 'WORKSPACE_NOT_FOUND') return [];
     throw new Error(selected.error.message);
   };
-  const primaryWorkspaceRoot = async (): Promise<string> => (await activeWorkspaces())[0]?.realRootPath ?? workspace.realRootPath;
+  const primaryWorkspaceRoot = async (): Promise<string> => {
+    const primary = (await activeWorkspaces())[0];
+    if (primary === undefined) throw new Error('No active project workspace is available');
+    return primary.realRootPath;
+  };
   const thaiRagInstallRoot = path.resolve(
     options.thaiRagProviderPath?.trim()
       || settingsRepository.get(USER_SETTING_KEYS.thaiRagProviderPath)?.trim()
@@ -228,10 +232,7 @@ export function createStdioMcpRuntime(
     profileProvider,
   });
   const agentSwarmService = new AgentSwarmService(new SqliteAgentSwarmRepository(database), codexService);
-  const capabilityRuntime = createStdioCapabilityService(dataPath, workspace.realRootPath, async () => {
-    const roots = (await activeWorkspaces()).map((entry) => entry.realRootPath);
-    return roots.length === 0 ? [workspace.realRootPath] : roots;
-  }, effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
+  const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
   const taskCancellation = new GoalTaskCancellationService([
     { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
@@ -252,7 +253,10 @@ export function createStdioMcpRuntime(
     taskCancellation,
     requestCancellation,
   });
-  const scheduledContinuationService = new ScheduledContinuationService(goalRepository, { workerLiveness: goalMutationFence });
+  const scheduledContinuationService = new ScheduledContinuationService(goalRepository, {
+    workerLiveness: goalMutationFence,
+    workspaceIsActive: async (workspaceId: string): Promise<boolean> => (await workspaceRepository.get(workspaceId)) !== null,
+  });
   const actor: FileActor = { clientId: 'cli-mcp-stdio', clientName: 'Unified-MPC-Server CLI' };
   const sharedActivityLease = createSharedActivityLease(process.env.TUNNEL_CLIENT_PROFILE_DIR);
   const activityReady = sharedActivityLease.then(async (lease) => lease?.initialize());
@@ -359,9 +363,15 @@ export function createStdioMcpRuntime(
     profileProvider,
     allowAiDeleteProvider,
     destructivePolicyProvider,
-    activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => {
-      const selected = (await activeWorkspaces())[0] ?? workspace;
-      return { workspaceId: selected.id, rootPath: selected.rootPath };
+    activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => {
+      const selected = (await activeWorkspaces())[0];
+      if (selected === undefined) return null;
+      const current = rawWorkspaceRepository.getAny === undefined
+        ? await rawWorkspaceRepository.get(selected.id)
+        : await rawWorkspaceRepository.getAny(selected.id);
+      if (current === null) return null;
+      if (current.archivedAt !== undefined && current.archivedAt !== null) return null;
+      return { workspaceId: current.id, rootPath: current.rootPath };
     },
     activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => (await activeWorkspaces())
       .map((selected) => ({ workspaceId: selected.id, rootPath: selected.rootPath })),
@@ -433,7 +443,6 @@ interface StdioCapabilityRuntime {
 
 function createStdioCapabilityService(
   dataPath: string,
-  restrictedRoot: string,
   workspaceRootsProvider: () => Promise<readonly string[]>,
   unrestricted: boolean,
   strictAllowedRoots?: readonly string[],
@@ -445,7 +454,7 @@ function createStdioCapabilityService(
     dataPath,
     workspaceRootsProvider,
     unrestricted,
-    configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.UNIFIED_MPC_CAPABILITY_ROOTS ?? process.env.UNIFIED_MPC_CAPABILITY_ROOTS), ...configuredRootsProvider(), restrictedRoot],
+    configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.UNIFIED_MPC_CAPABILITY_ROOTS), ...configuredRootsProvider()],
     synchronousWaitSecondsProvider,
   });
   return { service: runtime.service, shell: runtime.shell };

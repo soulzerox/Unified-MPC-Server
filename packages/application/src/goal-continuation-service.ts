@@ -401,6 +401,7 @@ export class GoalContinuationService {
       const goalId = requiredBounded(request.goalId, 'goalId', 128);
       const current = await this.goals.getById(goalId);
       if (current === null) return err(appError('INVALID_INPUT', 'Goal was not found'));
+      if (await this.workspaces.get(current.workspaceId) === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) return err(appError('INVALID_INPUT', 'expectedRevision is invalid'));
       const now = this.now().toISOString();
       const finishRequest = {

@@ -7,25 +7,25 @@ import {
 describe('resetWorkspaceRegistrations', () => {
   it('refuses a broad registration reset without the exact confirmation phrase', async () => {
     const list = vi.fn(async () => [{ id: 'workspace-1' }]);
-    const remove = vi.fn(async () => undefined);
+    const unregister = vi.fn(async () => undefined);
     const createBackup = vi.fn(async () => ({ id: 'backup-1' }));
 
     await expect(resetWorkspaceRegistrations(
-      { list, delete: remove },
+      { list, unregister },
       { create: createBackup },
       'yes',
     )).rejects.toThrow(WORKSPACE_RESET_CONFIRMATION);
 
     expect(createBackup).not.toHaveBeenCalled();
-    expect(remove).not.toHaveBeenCalled();
+    expect(unregister).not.toHaveBeenCalled();
   });
 
-  it('creates a recoverable database backup before deleting any registration', async () => {
+  it('creates a recoverable database backup before archiving any registration', async () => {
     const events: string[] = [];
     const result = await resetWorkspaceRegistrations(
       {
         list: async () => [{ id: 'workspace-1' }, { id: 'workspace-2' }],
-        delete: async (id) => { events.push(`delete:${id}`); },
+        unregister: async (id) => { events.push(`archive:${id}`); },
       },
       {
         create: async (reason) => {
@@ -38,20 +38,20 @@ describe('resetWorkspaceRegistrations', () => {
 
     expect(events).toEqual([
       'backup:manual',
-      'delete:workspace-1',
-      'delete:workspace-2',
+      'archive:workspace-1',
+      'archive:workspace-2',
     ]);
-    expect(result).toEqual({ deleted: 2, backupId: 'backup-before-reset' });
+    expect(result).toEqual({ archived: 2, backupId: 'backup-before-reset' });
   });
 
   it('does not create a needless backup when there are no registrations', async () => {
     const createBackup = vi.fn(async () => ({ id: 'backup-1' }));
 
     await expect(resetWorkspaceRegistrations(
-      { list: async () => [], delete: async () => undefined },
+      { list: async () => [], unregister: async () => undefined },
       { create: createBackup },
       WORKSPACE_RESET_CONFIRMATION,
-    )).resolves.toEqual({ deleted: 0, backupId: null });
+    )).resolves.toEqual({ archived: 0, backupId: null });
 
     expect(createBackup).not.toHaveBeenCalled();
   });

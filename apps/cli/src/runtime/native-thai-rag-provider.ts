@@ -1,4 +1,4 @@
-import { mkdir, rm, symlink } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readlink, rm, symlink, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import {
@@ -46,6 +46,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private workerQueue: Promise<unknown> = Promise.resolve();
   private readonly workspaceRoots = new Map<string, string>();
   private readonly workspaceRootIds = new Map<string, string>();
+  private readonly pendingReindexIds = new Set<string>();
   private started = false;
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
@@ -62,29 +63,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     await this.jobs.initialize();
     const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
     if (!providerRoot.ok) return providerRoot;
-    const rawWorkspaces = await this.options.workspacesProvider();
-    const workspaces: NativeThaiRagWorkspace[] = [];
-    for (const workspace of rawWorkspaces) {
-      const parsedId = parseCanonicalWorkspaceId(workspace.id);
-      if (!parsedId.ok) {
-        return err(appError('CONFLICT', `Native Thai-RAG workspace ID is not canonical: ${workspace.id}`, true));
-      }
-      workspaces.push({ ...workspace, id: parsedId.value });
-    }
+    const refreshed = await this.refreshWorkspaceRoots();
+    if (!refreshed.ok) return refreshed;
     const sourcesRoot = path.join(providerRoot.value, 'sources');
-    await mkdir(sourcesRoot, { recursive: true });
-
-    this.workspaceRoots.clear();
-    this.workspaceRootIds.clear();
-    for (const workspace of workspaces) {
-      const realRootPath = path.resolve(workspace.realRootPath);
-      this.workspaceRoots.set(workspace.id, realRootPath);
-      this.workspaceRootIds.set(realRootPath, workspace.id);
-      if (workspace.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(workspace.rootPath), workspace.id);
-      const sourceAlias = path.join(sourcesRoot, workspace.id);
-      await rm(sourceAlias, { force: true, recursive: true });
-      await symlink(realRootPath, sourceAlias, 'dir');
-    }
 
     this.launchConfig = {
       ...this.options.launchConfig,
@@ -114,6 +95,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     this.sessions.pin(SERVER_NAME);
     this.started = true;
+    for (const workspaceId of this.workspaceRoots.keys()) this.pendingReindexIds.add(workspaceId);
+    const postStartRefresh = await this.refreshWorkspaceRoots();
+    if (!postStartRefresh.ok) {
+      this.started = false;
+      this.sessions.unpin(SERVER_NAME);
+      await this.sessions.close().catch(() => undefined);
+      return postStartRefresh;
+    }
     return this.refreshHealth(signal);
   }
 
@@ -121,6 +110,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
+    const refreshed = await this.refreshWorkspaceRoots();
+    if (!refreshed.ok) return refreshed;
     const activeJobs = await this.jobs.active();
     if (activeJobs.length > 0 && this.lastHealth !== undefined) {
       return ok({ ...this.lastHealth, activeJobs: activeJobs.map((job) => job.jobId) });
@@ -135,6 +126,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
+    const refreshed = await this.refreshWorkspaceRoots();
+    if (!refreshed.ok) return refreshed;
     if (tool === 'index_status' && typeof args.job_id === 'string' && args.job_id.startsWith('idx_umcp_')) {
       const job = await this.jobs.get(args.job_id);
       return job === null
@@ -202,6 +195,84 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return rootPath === undefined
       ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${workspaceId}`))
       : ok({ workspaceId, rootPath });
+  }
+
+  private refreshWorkspaceRoots(): Promise<Result<void>> {
+    return this.enqueueWorker(() => this.refreshWorkspaceRootsNow());
+  }
+
+  private async refreshWorkspaceRootsNow(): Promise<Result<void>> {
+    const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
+    if (!providerRoot.ok) return providerRoot;
+    let rawWorkspaces: readonly NativeThaiRagWorkspace[];
+    try {
+      rawWorkspaces = await this.options.workspacesProvider();
+    } catch (error: unknown) {
+      return err(appError('INTERNAL_ERROR', `Unable to refresh Native Thai-RAG workspaces: ${errorMessage(error)}`, true));
+    }
+    const workspaces: NativeThaiRagWorkspace[] = [];
+    for (const workspace of rawWorkspaces) {
+      const parsedId = parseCanonicalWorkspaceId(workspace.id);
+      if (!parsedId.ok) {
+        return err(appError('CONFLICT', `Native Thai-RAG workspace ID is not canonical: ${workspace.id}`, true));
+      }
+      workspaces.push({ ...workspace, id: parsedId.value });
+    }
+
+    const sourcesRoot = path.join(providerRoot.value, 'sources');
+    const previousWorkspaces: readonly NativeThaiRagWorkspace[] = [...this.workspaceRoots].map(([id, realRootPath]) => ({ id, realRootPath }));
+    try {
+      await mkdir(sourcesRoot, { recursive: true });
+    } catch (error: unknown) {
+      return err(appError('INTERNAL_ERROR', `Unable to prepare Native Thai-RAG sources: ${errorMessage(error)}`, true));
+    }
+    const aliases = await syncWorkspaceSourceAliases(sourcesRoot, workspaces);
+    if (!aliases.ok) return aliases;
+    for (const workspaceId of aliases.value) this.pendingReindexIds.add(workspaceId);
+    const relinked = workspaces.filter((workspace) => {
+      const previousRoot = this.workspaceRoots.get(workspace.id);
+      return previousRoot !== undefined && previousRoot !== path.resolve(workspace.realRootPath);
+    });
+    for (const workspace of relinked) this.pendingReindexIds.add(workspace.id);
+    if (this.started && this.launchConfig !== undefined) {
+      const pending = new Set(this.pendingReindexIds);
+      for (const workspace of workspaces.filter((entry) => pending.has(entry.id))) {
+        const indexed = normalizeWorkerCallResult(
+          'code_index',
+          await this.sessions.call(SERVER_NAME, this.launchConfig, 'code_index', {
+            workspace_path: path.resolve(workspace.realRootPath),
+            workspace: workspace.id,
+            force: true,
+            background: false,
+          }),
+        );
+        if (!indexed.ok) {
+          for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
+          const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
+          if (!rolledBack.ok) {
+            this.workspaceRoots.clear();
+            this.workspaceRootIds.clear();
+            return err(appError('CONFLICT', `Native Thai-RAG refresh failed and could not restore its previous state: ${rolledBack.error.message}`, true));
+          }
+          return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
+        }
+        this.pendingReindexIds.delete(workspace.id);
+      }
+    }
+    const nextRoots = new Map<string, string>();
+    const nextRootIds = new Map<string, string>();
+    for (const workspace of workspaces) {
+      const realRootPath = path.resolve(workspace.realRootPath);
+      nextRoots.set(workspace.id, realRootPath);
+      nextRootIds.set(realRootPath, workspace.id);
+      if (workspace.rootPath !== undefined) nextRootIds.set(path.resolve(workspace.rootPath), workspace.id);
+    }
+
+    this.workspaceRoots.clear();
+    this.workspaceRootIds.clear();
+    for (const [id, root] of nextRoots) this.workspaceRoots.set(id, root);
+    for (const [root, id] of nextRootIds) this.workspaceRootIds.set(root, id);
+    return ok(undefined);
   }
 
   private async callWorker(
@@ -275,6 +346,67 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 }
 
+async function syncWorkspaceSourceAliases(
+  sourcesRoot: string,
+  workspaces: readonly NativeThaiRagWorkspace[],
+): Promise<Result<readonly string[]>> {
+  const expected = new Map(workspaces.map((workspace) => [workspace.id, path.resolve(workspace.realRootPath)]));
+  const changed: Array<{ readonly alias: string; readonly previousTarget: string | null }> = [];
+  const changedWorkspaceIds = new Set<string>();
+
+  try {
+    const entries = await readdir(sourcesRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!parseCanonicalWorkspaceId(entry.name).ok || expected.has(entry.name)) continue;
+      const alias = path.join(sourcesRoot, entry.name);
+      const metadata = await lstat(alias);
+      if (!metadata.isSymbolicLink()) {
+        await rollbackWorkspaceAliases(changed);
+        return err(appError('CONFLICT', `Thai-RAG source alias path is occupied by a non-symlink: ${alias}`, true));
+      }
+      changed.push({ alias, previousTarget: await readlink(alias) });
+      await unlink(alias);
+    }
+
+    for (const [workspaceId, target] of expected) {
+      const alias = path.join(sourcesRoot, workspaceId);
+      let existingTarget: string | null = null;
+      try {
+        const metadata = await lstat(alias);
+        if (!metadata.isSymbolicLink()) {
+          await rollbackWorkspaceAliases(changed);
+          return err(appError('CONFLICT', `Thai-RAG source alias path is occupied by a non-symlink: ${alias}`, true));
+        }
+        existingTarget = await readlink(alias);
+      } catch (error: unknown) {
+        if (!isNodeError(error, 'ENOENT')) throw error;
+      }
+
+      if (existingTarget !== null && path.resolve(path.dirname(alias), existingTarget) === target) continue;
+      if (existingTarget !== null) {
+        changed.push({ alias, previousTarget: existingTarget });
+        await unlink(alias);
+        changedWorkspaceIds.add(workspaceId);
+      } else {
+        changed.push({ alias, previousTarget: null });
+        changedWorkspaceIds.add(workspaceId);
+      }
+      await symlink(target, alias, 'dir');
+    }
+    return ok([...changedWorkspaceIds]);
+  } catch (error: unknown) {
+    await rollbackWorkspaceAliases(changed);
+    return err(appError('INTERNAL_ERROR', `Unable to refresh Thai-RAG workspace aliases: ${errorMessage(error)}`, true));
+  }
+}
+
+async function rollbackWorkspaceAliases(changed: readonly { readonly alias: string; readonly previousTarget: string | null }[]): Promise<void> {
+  await Promise.all([...changed].reverse().map(async ({ alias, previousTarget }) => {
+    await rm(alias, { force: true, recursive: true }).catch(() => undefined);
+    if (previousTarget !== null) await symlink(previousTarget, alias, 'dir').catch(() => undefined);
+  }));
+}
+
 function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {
   if (!result.ok) return result;
   const text = toolResultText(result.value)?.trim();
@@ -302,6 +434,10 @@ function errorMessage(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNodeError(value: unknown, code: string): value is NodeJS.ErrnoException {
+  return value instanceof Error && 'code' in value && value.code === code;
 }
 
 function toolAcceptsWorkspaceNamespace(inputSchema: unknown): boolean {

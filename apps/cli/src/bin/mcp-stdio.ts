@@ -103,7 +103,7 @@ async function main(): Promise<void> {
       readArg('--confirm-reset-workspaces') ?? process.env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES,
     );
     process.stderr.write(
-      `Unified-MPC stdio: cleared ${result.deleted} previous workspace registration(s)`
+      `Unified-MPC stdio: archived ${result.archived} previous workspace registration(s)`
       + `${result.backupId === null ? '' : ` after backup ${result.backupId}`}\n`,
     );
   }
@@ -151,9 +151,6 @@ async function main(): Promise<void> {
     if (selected === undefined) throw new Error(`Strict allowed root was not registered: ${selectedAllowedRoot}`);
     workspace = selected;
   } else {
-    process.env.UNIFIED_MPC_CAPABILITY_ROOTS = process.env.UNIFIED_MPC_CAPABILITY_ROOTS?.trim()
-      || requestedPath.replace(/\\/g, '/');
-
     const requestedNorm = comparableWorkspaceRoot(requestedPath);
     const workspaces = await workspaceService.list();
     let selected = requestedNorm === null ? undefined : workspaces.find((entry) => comparableWorkspaceRoot(entry.realRootPath) === requestedNorm);
@@ -174,6 +171,7 @@ async function main(): Promise<void> {
     checkpointEncryptionKey,
     permissionProfile: profileName,
     fullBypassAll: stdioFullBypassAll,
+    persistWorkspaceSelection: true,
     ...(strictAllowedRoots === undefined ? {} : { strictAllowedRoots }),
   });
   await runtime.activityReady;

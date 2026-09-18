@@ -1063,9 +1063,26 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (row === undefined) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       const continuation = this.toScheduledContinuationRecord(row);
       const goal = this.requireById(row.goal_id);
+      const workspaceActive = this.isWorkspaceActive(goal.workspaceId);
+      const effectiveRequest = { ...request, workspaceActive };
+
+      if (continuation.occurrence !== 'interval' && !workspaceActive) {
+        if (continuation.status === 'terminal_noop') return { outcome: 'terminal_noop', continuation, goal };
+        const changed = this.database.connection.prepare(`
+          UPDATE goal_scheduled_continuations
+          SET status = 'terminal_noop', version = version + 1, updated_at = ?, terminal_at = ?
+          WHERE id = ? AND version = ? AND status <> 'terminal_noop'
+        `).run(request.now, request.now, request.continuationId, continuation.version);
+        if (Number(changed.changes) !== 1) throw new GoalStateError('conflict', 'Archived workspace terminal no-op lost the compare-and-swap race');
+        return {
+          outcome: 'terminal_noop',
+          continuation: this.requireScheduledContinuationById(request.continuationId),
+          goal: this.requireById(goal.id),
+        };
+      }
 
       if (continuation.occurrence === 'interval') {
-        return this.claimRecurringScheduledContinuation(request, continuation, goal);
+        return this.claimRecurringScheduledContinuation(effectiveRequest, continuation, goal);
       }
 
       if (continuation.status === 'claimed') {
@@ -1242,6 +1259,24 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   ): ClaimScheduledContinuationRecordResult {
     if (continuation.intervalMinutes !== 60) throw corrupt('Recurring continuation is missing its hourly interval');
     if (continuation.status === 'terminal_noop') return { outcome: 'terminal_noop', continuation, goal };
+    if (request.workspaceActive === false) {
+      if (continuation.nativeTaskId === undefined || !isConfirmedNativeHostRunMode(continuation.confirmedRunsOn)) {
+        return { outcome: 'receipt_required', reason: 'native_task_unconfirmed', continuation, goal };
+      }
+      const runKey = recurringRunKey(continuation, request.now);
+      if (this.recurringRunExists(continuation.continuationId, runKey)) {
+        return { outcome: 'already_claimed', continuation, goal };
+      }
+      this.recordRecurringRun(
+        continuation,
+        runKey,
+        'terminal_cleanup_required',
+        request.now,
+        null,
+        'Workspace is archived; recurring wake is cleanup-only and must not resume workspace work',
+      );
+      return { outcome: 'terminal_cleanup_required', continuation, goal, runKey };
+    }
     if (['cancel_required', 'cancel_failed', 'cancel_uncertain'].includes(continuation.status)) {
       if (continuation.nativeTaskId === undefined || !isConfirmedNativeHostRunMode(continuation.confirmedRunsOn)) {
         return { outcome: 'receipt_required', reason: 'native_task_unconfirmed', continuation, goal };
@@ -2417,6 +2452,11 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       connection.exec('ROLLBACK;');
       throw error;
     }
+  }
+
+  private isWorkspaceActive(workspaceId: string): boolean {
+    const row = this.database.connection.prepare('SELECT archived_at FROM workspaces WHERE id = ?').get(workspaceId) as { archived_at?: string | null } | undefined;
+    return row !== undefined && (row.archived_at === null || row.archived_at === undefined);
   }
 }
 

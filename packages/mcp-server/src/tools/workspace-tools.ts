@@ -1,4 +1,5 @@
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
+import { ok, type Result } from '@unified-mpc/domain';
 import {
   prepareCodeChangeSchema,
   projectSnapshotSchema,
@@ -80,7 +81,10 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
         });
         if (registered.ok && context.services.workspaceIndex !== undefined) {
           const workspaceId = readWorkspaceId(registered.value);
-          if (workspaceId !== undefined) await context.services.workspaceIndex.indexWorkspace(workspaceId);
+          if (workspaceId !== undefined) {
+            const refreshed = await refreshWorkspaceIndex(context, workspaceId);
+            if (!refreshed.ok) return refreshed;
+          }
         }
         return registered;
       },
@@ -140,6 +144,29 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
         : context.services.projectSnapshot.snapshot(context.actor, input.workspaceId),
     }),
   ];
+}
+
+async function refreshWorkspaceIndex(context: McpToolContext, workspaceId: string): Promise<Result<void>> {
+  const index = context.services.workspaceIndex;
+  if (index === undefined) return ok(undefined);
+  const before = await index.status(workspaceId);
+  if (!before.ok) return before;
+  const wasWatching = before.value.watcher !== null;
+  const stopped = await index.stopWatch(workspaceId);
+  if (!stopped.ok) return stopped;
+  const rebuilt = await index.indexWorkspace(workspaceId, { rebuild: true });
+  if (!rebuilt.ok) {
+    await index.forgetWorkspace(workspaceId).catch(() => undefined);
+    return rebuilt;
+  }
+  if (wasWatching) {
+    const restarted = await index.startWatch(workspaceId);
+    if (!restarted.ok) {
+      await index.forgetWorkspace(workspaceId).catch(() => undefined);
+      return restarted;
+    }
+  }
+  return ok(undefined);
 }
 
 function readWorkspaceId(value: unknown): string | undefined {

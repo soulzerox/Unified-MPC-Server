@@ -58,6 +58,26 @@ describe('mapResult image payloads', () => {
     expect(truncations).toEqual([expect.objectContaining({ toolName: 'mcp_call', maxBytes: 1_024 })]);
   });
 
+  it('enforces explicit text, structured, and image budgets without returning oversized content', () => {
+    const text = mapResult({ ok: true as const, value: 'x'.repeat(2_000) }, {
+      budget: { maxTextBytes: 128 },
+    });
+    const structured = mapResult({ ok: true as const, value: { payload: 'x'.repeat(2_000) } }, {
+      budget: { maxTextBytes: 4_096, maxStructuredBytes: 128 },
+    });
+    const image = mapResult({ ok: true as const, value: {
+      content: 'x'.repeat(2_000), encoding: 'base64', mimeType: 'image/png',
+    } }, {
+      budget: { maxTextBytes: 4_096, maxBinaryBytes: 128, maxBase64Bytes: 128 },
+    });
+
+    expect(JSON.parse(text.content[0]?.type === 'text' ? text.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'text' });
+    expect(structured.structuredContent).toBeUndefined();
+    expect(JSON.parse(structured.content[0]?.type === 'text' ? structured.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'structured' });
+    expect(image.content).toHaveLength(1);
+    expect(JSON.parse(image.content[0]?.type === 'text' ? image.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'binary' });
+  });
+
   it('keeps filesystem error messages instead of Operation failed', () => {
     const response = mapError({ code: 'FILE_NOT_FOUND', message: 'File or directory was not found', recoverable: false });
     expect(response.content[0]?.text).toBe('FILE_NOT_FOUND: File or directory was not found');

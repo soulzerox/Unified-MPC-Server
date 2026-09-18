@@ -1,4 +1,4 @@
-import { err, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
+import { err, ok, type InvocationAuthorization, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
@@ -148,7 +148,7 @@ export interface McpToolDefinition {
   readonly outputSchema: z.ZodType;
   readonly execution: McpToolExecution;
   parse(input: unknown): Result<unknown>;
-  execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>>;
+  execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization, budget?: ResultBudget): Promise<Result<unknown>>;
 }
 
 export interface McpToolContext {
@@ -187,7 +187,7 @@ export interface ToolConfig<T extends z.ZodType> {
   readonly inputSchema: T;
   readonly outputSchema?: z.ZodType;
   readonly execution?: Partial<McpToolExecution>;
-  handler(input: z.infer<T>, signal: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>>;
+  handler(input: z.infer<T>, signal: AbortSignal, authorization?: InvocationAuthorization, budget?: ResultBudget): Promise<Result<unknown>>;
 }
 
 const defaultStructuredOutputSchema = z.object({}).catchall(z.unknown());
@@ -210,8 +210,8 @@ export function defineTool<T extends z.ZodType>(config: ToolConfig<T>): McpToolD
       const parsed = config.inputSchema.safeParse(input);
       return parsed.success ? ok(parsed.data) : err({ code: 'INVALID_INPUT', message: 'Tool input is invalid', recoverable: false });
     },
-    execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
-      return config.handler(input as z.infer<T>, signal, authorization);
+    execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization, budget?: ResultBudget): Promise<Result<unknown>> {
+      return config.handler(input as z.infer<T>, signal, authorization, budget);
     },
   };
 }

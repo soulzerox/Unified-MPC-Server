@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { err, ok, type AppError, type Result } from '@unified-mpc/domain';
+import { err, ok, type AppError, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { FileActor, GitService, SearchService } from '@unified-mpc/application';
 import { classifyContextPath } from '@unified-mpc/search';
 import type { McpApplicationServices } from './tools/tool-types.js';
@@ -18,6 +18,7 @@ export interface WorkspaceContextRequest {
   readonly includeIgnored?: boolean;
   readonly responseTargetBytes?: number;
   readonly pageSize?: number;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface ContextSnippet {
@@ -81,6 +82,7 @@ export interface SearchAllRequest {
   readonly glob?: string;
   readonly maxResults?: number;
   readonly includeIgnored?: boolean;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchAllResult {
@@ -97,6 +99,7 @@ export interface WorkspaceFullScanRequest {
   readonly glob?: string;
   readonly pageSize?: number;
   readonly includeIgnored?: boolean;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface WorkspaceFullScanResult {
@@ -193,15 +196,16 @@ export class ContextEngine {
     this.scanContinuations = new BoundedRetentionMap(options);
   }
 
-  public async collect(request: WorkspaceContextRequest): Promise<Result<WorkspaceContextResult>> {
+  public async collect(request: WorkspaceContextRequest, budget?: ResultBudget): Promise<Result<WorkspaceContextResult>> {
     this.economy.beginRequest();
-    const validation = validateRequest(request);
+    const boundedRequest = boundContextRequest(request, budget);
+    const validation = validateRequest(boundedRequest);
     if (!validation.ok) return validation;
-    const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
+    const workspaceIds = await this.resolveWorkspaceIds(boundedRequest.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
     if (workspaceIds.value.length === 0) return err({ code: 'WORKSPACE_NOT_FOUND', message: 'No registered workspace is available', recoverable: false });
 
-    const settled = await Promise.allSettled(workspaceIds.value.map((workspaceId) => this.collectWorkspace(workspaceId, request)));
+    const settled = await Promise.allSettled(workspaceIds.value.map((workspaceId) => this.collectWorkspace(workspaceId, boundedRequest)));
     const successful: WorkspaceCollection[] = [];
     let firstError: AppError | undefined;
     for (const entry of settled) {
@@ -213,33 +217,34 @@ export class ContextEngine {
     }
 
     const merged = mergeCollections(successful);
-    return this.materialize(merged.candidates, request, {
+    return this.materialize(merged.candidates, boundedRequest, {
       scannedFiles: merged.scannedFiles,
       totalMatches: merged.totalMatches,
       searchTruncated: merged.searchTruncated,
     });
   }
 
-  public async continue(token: string, pageSize?: number): Promise<Result<WorkspaceContextResult>> {
+  public async continue(token: string, pageSize?: number, budget?: ResultBudget): Promise<Result<WorkspaceContextResult>> {
     const continuation = this.continuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Continuation token is invalid or expired', recoverable: false });
-    return this.materialize(continuation.candidates, {
+    return this.materialize(continuation.candidates, boundContextRequest({
       ...continuation.request,
       ...(pageSize === undefined ? {} : { pageSize }),
-    }, continuation);
+    }, budget), continuation);
   }
 
-  public async searchAll(request: SearchAllRequest): Promise<Result<SearchAllResult>> {
+  public async searchAll(request: SearchAllRequest, budget?: ResultBudget): Promise<Result<SearchAllResult>> {
     this.economy.beginRequest();
     if (request.query.trim().length === 0) return err({ code: 'INVALID_INPUT', message: 'Search query is required', recoverable: false });
     const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
     if (this.services.search === undefined) return err({ code: 'INTERNAL_ERROR', message: 'Search service is unavailable', recoverable: true });
-    const maxResults = Math.max(1, Math.min(500, Math.floor(request.maxResults ?? 500)));
+    const effectiveBudget = budget ?? request.resultBudget;
+    const maxResults = Math.max(1, Math.min(500, Math.floor(Math.min(request.maxResults ?? 500, effectiveBudget?.maxItems ?? Number.MAX_SAFE_INTEGER))));
     const settled = await Promise.allSettled(workspaceIds.value.map(async (workspaceId) => {
       const [text, files] = await Promise.all([
-        this.safeSearchText(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }) }, maxResults),
-        this.safeSearchFiles(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }) }, maxResults, request.glob),
+      this.safeSearchText(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, maxResults),
+      this.safeSearchFiles(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, maxResults, request.glob),
       ]);
       return { workspaceId, text, files };
     }));
@@ -280,19 +285,20 @@ export class ContextEngine {
     });
   }
 
-  public async fullScan(request: WorkspaceFullScanRequest): Promise<Result<WorkspaceFullScanResult>> {
+  public async fullScan(request: WorkspaceFullScanRequest, budget?: ResultBudget): Promise<Result<WorkspaceFullScanResult>> {
     this.economy.beginRequest();
     const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
     if (request.includeIgnored === false && request.workspaceId !== undefined && this.services.workspaceIndex !== undefined) {
-      const indexed = await this.fullScanFromIndex(request.workspaceId, request.path, request.pageSize);
+      const indexed = await this.fullScanFromIndex(request.workspaceId, request.path, Math.min(request.pageSize ?? 200, budget?.maxItems ?? Number.MAX_SAFE_INTEGER));
       if (indexed !== null) return indexed;
     }
     if (this.services.search === undefined) return err({ code: 'INTERNAL_ERROR', message: 'Search service is unavailable', recoverable: true });
-    const maxResults = 500;
+    const effectiveBudget = budget ?? request.resultBudget;
+    const maxResults = Math.max(1, Math.min(500, effectiveBudget?.maxItems ?? 500));
     const settled = await Promise.allSettled(workspaceIds.value.map(async (workspaceId) => ({
       workspaceId,
-      result: await this.safeSearchFiles(workspaceId, { query: '*', includeIgnored: request.includeIgnored !== false, ...(request.path === undefined ? {} : { path: request.path }) }, maxResults, request.glob),
+      result: await this.safeSearchFiles(workspaceId, { query: '*', includeIgnored: request.includeIgnored !== false, ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, maxResults, request.glob),
     })));
     const files: Array<{ readonly workspaceId: string; readonly path: string }> = [];
     let hasMore = false;
@@ -323,10 +329,10 @@ export class ContextEngine {
     });
   }
 
-  public async continueFullScan(token: string, pageSize?: number): Promise<Result<WorkspaceFullScanResult>> {
+  public async continueFullScan(token: string, pageSize?: number, budget?: ResultBudget): Promise<Result<WorkspaceFullScanResult>> {
     const continuation = this.scanContinuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Scan continuation token is invalid or expired', recoverable: false });
-    const size = normalizePageSize(pageSize ?? 200);
+    const size = normalizePageSize(Math.min(pageSize ?? 200, budget?.maxItems ?? Number.MAX_SAFE_INTEGER));
     const files = continuation.files.slice(0, size);
     const remaining = continuation.files.slice(files.length);
     let nextToken: string | undefined;
@@ -343,13 +349,14 @@ export class ContextEngine {
     });
   }
 
-  public async readMany(request: ReadManyFilesRequest): Promise<Result<ReadManyFilesResult>> {
+  public async readMany(request: ReadManyFilesRequest, budget?: ResultBudget): Promise<Result<ReadManyFilesResult>> {
     if (this.services.file === undefined) return err({ code: 'INTERNAL_ERROR', message: 'File service is unavailable', recoverable: true });
     const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
     const workspaceId = request.workspaceId ?? workspaceIds.value[0];
     if (workspaceId === undefined) return err({ code: 'WORKSPACE_NOT_FOUND', message: 'No workspace is available', recoverable: false });
-    const settled = await Promise.allSettled(request.files.map(async (file) => {
+    const filesToRead = request.files.slice(0, budget?.maxItems ?? Number.MAX_SAFE_INTEGER);
+    const settled = await Promise.allSettled(filesToRead.map(async (file) => {
       try {
         const result = await this.services.file!.readFile(this.actor, workspaceId, file);
         return result.ok
@@ -361,7 +368,7 @@ export class ContextEngine {
     }));
     const files = settled.map((entry, index) => entry.status === 'fulfilled'
       ? entry.value
-      : { workspaceId, path: request.files[index]?.path ?? '', error: { code: 'INTERNAL_ERROR', message: 'File read failed' } });
+      : { workspaceId, path: filesToRead[index]?.path ?? '', error: { code: 'INTERNAL_ERROR', message: 'File read failed' } });
     return ok({ files, totalFiles: files.length, failedFiles: files.filter((file) => file.error !== undefined).length });
   }
 
@@ -512,6 +519,7 @@ export class ContextEngine {
         maxResults,
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(request.path === undefined ? {} : { path: request.path }),
+        ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       });
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context text search failed', recoverable: true });
@@ -525,6 +533,7 @@ export class ContextEngine {
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(glob === undefined ? {} : { glob }),
         ...(request.path === undefined ? {} : { path: request.path }),
+        ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       });
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context filename search failed', recoverable: true });
@@ -645,6 +654,16 @@ export class ContextEngine {
       };
     }
   }
+}
+
+function boundContextRequest(request: WorkspaceContextRequest, budget: ResultBudget | undefined): WorkspaceContextRequest {
+  if (budget === undefined) return request;
+  return {
+    ...request,
+    pageSize: Math.max(1, Math.min(request.pageSize ?? DEFAULT_PAGE_SIZE[request.mode ?? 'optimized'], budget.maxItems)),
+    responseTargetBytes: Math.max(1, Math.min(request.responseTargetBytes ?? DEFAULT_RESPONSE_TARGET_BYTES, budget.maxTextBytes)),
+    resultBudget: budget,
+  };
 }
 
 function mergeCollections(collections: readonly WorkspaceCollection[]): WorkspaceCollection {

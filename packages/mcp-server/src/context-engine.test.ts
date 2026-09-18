@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type ResultBudget } from '@unified-mpc/domain';
 import type { McpApplicationServices } from './tools/tool-types.js';
 import { ContextEngine, type WorkspaceContextRequest } from './context-engine.js';
 
@@ -83,6 +83,19 @@ describe('context engine', () => {
     expect(explicitPaths).toContain('.git/config');
     expect(explicitPaths).toContain('node_modules/pkg/index.js');
     expect(explicitPaths).toContain('dist/login.js');
+  });
+
+  it('bounds context search and materialization before reading candidates', async () => {
+    const result = await new ContextEngine(services(), actor).collect({ query: 'login', workspaceId: 'workspace-1', mode: 'exhaustive', pageSize: 20 }, {
+      maxItems: 1,
+      maxTextBytes: 1024,
+      maxStructuredBytes: 1024,
+      maxBinaryBytes: 1024,
+      maxBase64Bytes: 1024,
+    } satisfies ResultBudget);
+
+    expect(result).toMatchObject({ ok: true, value: { files: expect.any(Array) } });
+    if (result.ok) expect(result.value.files).toHaveLength(1);
   });
 
   it('returns a continuation token without discarding candidates outside the response page', async () => {

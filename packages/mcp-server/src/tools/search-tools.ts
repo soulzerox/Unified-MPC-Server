@@ -9,13 +9,14 @@ export function searchTools(context: McpToolContext): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: searchFilesSchema,
-      handler: async (input, signal) => context.services.search === undefined
+      handler: async (input, signal, _authorization, budget) => context.services.search === undefined
         ? missingService()
         : context.services.search.searchFiles(context.actor, input.workspaceId, {
           ...(input.path === undefined ? {} : { path: input.path }),
           ...(input.glob === undefined ? {} : { glob: input.glob }),
           ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
           discovery: input.includeIgnored ? 'explicit' : 'automatic',
+          ...(budget === undefined ? {} : { resultBudget: budget }),
         }, signal),
     }),
     defineTool({
@@ -24,7 +25,7 @@ export function searchTools(context: McpToolContext): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: searchTextSchema,
-      handler: async (input, signal) => context.services.search === undefined
+      handler: async (input, signal, _authorization, budget) => context.services.search === undefined
         ? missingService()
         : context.services.search.searchText(context.actor, input.workspaceId, {
           query: input.query,
@@ -32,6 +33,7 @@ export function searchTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.glob === undefined ? {} : { glob: input.glob }),
           ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
           discovery: input.includeIgnored ? 'explicit' : 'automatic',
+          ...(budget === undefined ? {} : { resultBudget: budget }),
         }, signal),
     }),
   ];

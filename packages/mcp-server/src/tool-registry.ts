@@ -9,6 +9,7 @@ import {
   type InvocationAuthorizationMode,
   type InvocationAuthorizationSource,
   type Result,
+  type ResultBudget,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
 import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
@@ -1244,8 +1245,16 @@ export class ToolRegistry {
         }
         try {
           const maxBytes = tool.name === 'mcp_call' ? this.maxMcpCallResultBytes : this.maxToolResultBytes;
-          operation = tool.execute(input, controller.signal, authorization).then((result) => mapResult(result, {
+          const budget: ResultBudget = {
+            maxItems: 100,
+            maxTextBytes: maxBytes,
+            maxStructuredBytes: maxBytes,
+            maxBinaryBytes: maxBytes,
+            maxBase64Bytes: maxBytes,
+          };
+          operation = tool.execute(input, controller.signal, authorization, budget).then((result) => mapResult(result, {
             maxBytes,
+            budget,
             toolName: tool.name,
             onTruncated: ({ originalBytes }) => this.diagnostic?.({
               name: 'ToolResultBudgetExceeded',

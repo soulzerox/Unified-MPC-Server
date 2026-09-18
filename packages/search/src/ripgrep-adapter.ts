@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result } from '@unified-mpc/domain';
+import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { createProcessTreeTerminator, createSpawnInvocationFactory, PathExecutableResolver, type ExecutableResolver, type ProcessTreeTerminator, type SpawnInvocationFactory } from '@unified-mpc/process';
 import {
   classifyContextPath,
@@ -166,6 +166,7 @@ export interface SearchTextRequest {
   readonly maxResults?: number;
   readonly discovery?: ContextDiscoveryMode;
   readonly signal?: AbortSignal;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchMatch {
@@ -185,6 +186,7 @@ export interface SearchFilesRequest {
   readonly maxResults?: number;
   readonly discovery?: ContextDiscoveryMode;
   readonly signal?: AbortSignal;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchFilesResult {
@@ -201,7 +203,7 @@ export class RipgrepAdapter {
   ) {}
 
   public async searchText(request: SearchTextRequest): Promise<Result<SearchTextResult>> {
-    const maxResults = request.maxResults ?? DEFAULT_SEARCH_RESULTS;
+    const maxResults = Math.min(request.maxResults ?? DEFAULT_SEARCH_RESULTS, request.resultBudget?.maxItems ?? Number.MAX_SAFE_INTEGER);
     if (request.query.length === 0 || !Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_SEARCH_RESULTS) {
       return err({ code: 'INVALID_INPUT', message: 'Search query or result limit is invalid', recoverable: false });
     }
@@ -232,22 +234,25 @@ export class RipgrepAdapter {
       return err({ code: 'INTERNAL_ERROR', message: searchProcessError(processResult.stderr), recoverable: true });
     }
     const matches: SearchMatch[] = [];
+    let resultBytes = 0;
     let hasAdditionalMatch = false;
     for (const line of processResult.stdout.split(/\r?\n/)) {
       const match = this.parseMatch(line);
       if (match === null) continue;
       if (discovery === 'automatic' && !classifyContextPath(match.path, discovery).discoverable) continue;
-      if (matches.length >= maxResults) {
+      const matchBytes = Buffer.byteLength(JSON.stringify(match), 'utf8');
+      if (matches.length >= maxResults || resultBytes + matchBytes > (request.resultBudget?.maxStructuredBytes ?? Number.MAX_SAFE_INTEGER)) {
         hasAdditionalMatch = true;
         break;
       }
       matches.push(match);
+      resultBytes += matchBytes;
     }
     return ok({ matches, truncated: processResult.timedOut === true || processResult.stoppedEarly === true || hasAdditionalMatch });
   }
 
   public async searchFiles(request: SearchFilesRequest): Promise<Result<SearchFilesResult>> {
-    const maxResults = request.maxResults ?? DEFAULT_SEARCH_RESULTS;
+    const maxResults = Math.min(request.maxResults ?? DEFAULT_SEARCH_RESULTS, request.resultBudget?.maxItems ?? Number.MAX_SAFE_INTEGER);
     if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_SEARCH_RESULTS) {
       return err({ code: 'INVALID_INPUT', message: 'Search result limit is invalid', recoverable: false });
     }

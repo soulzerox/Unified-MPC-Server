@@ -1,4 +1,5 @@
 import { defineTool, type McpToolContext, type McpToolDefinition } from './tool-types.js';
+import type { ResultBudget } from '@unified-mpc/domain';
 import { ContextEngine } from '../context-engine.js';
 import {
   readManyFilesSchema,
@@ -19,7 +20,7 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceContextSchema,
-      handler: async (input) => engine.collect({
+      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.collect({
         query: input.query,
         ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
         ...(input.path === undefined ? {} : { path: input.path }),
@@ -28,7 +29,7 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
         includeIgnored: input.includeIgnored,
         ...(input.responseTargetBytes === undefined ? {} : { responseTargetBytes: input.responseTargetBytes }),
         ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize }),
-      }),
+      }, budget),
     }),
     defineTool({
       name: 'workspace_context_continue',
@@ -36,7 +37,7 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceContextContinueSchema,
-      handler: async (input) => engine.continue(input.continuationToken, input.pageSize),
+      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.continue(input.continuationToken, input.pageSize, budget),
     }),
     defineTool({
       name: 'workspace_full_scan',
@@ -44,13 +45,13 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceFullScanSchema,
-      handler: async (input) => engine.fullScan({
+      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.fullScan({
         ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
         ...(input.path === undefined ? {} : { path: input.path }),
         ...(input.glob === undefined ? {} : { glob: input.glob }),
         includeIgnored: input.includeIgnored,
         ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize }),
-      }),
+      }, budget),
     }),
     defineTool({
       name: 'workspace_full_scan_continue',
@@ -58,7 +59,7 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceFullScanContinueSchema,
-      handler: async (input) => engine.continueFullScan(input.continuationToken, input.pageSize),
+      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.continueFullScan(input.continuationToken, input.pageSize, budget),
     }),
     defineTool({
       name: 'workspace_snapshot',
@@ -74,14 +75,14 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: searchAllSchema,
-      handler: async (input) => engine.searchAll({
+      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.searchAll({
         query: input.query,
         ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
         ...(input.path === undefined ? {} : { path: input.path }),
         ...(input.glob === undefined ? {} : { glob: input.glob }),
         ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
         includeIgnored: input.includeIgnored,
-      }),
+      }, budget),
     }),
     defineTool({
       name: 'read_many_files',
@@ -89,14 +90,14 @@ export function contextTools(context: McpToolContext, engine: ContextEngine): Mc
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: readManyFilesSchema,
-      handler: async (input) => engine.readMany({
+      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.readMany({
         ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
         files: input.files.map((file) => ({
           path: file.path,
           ...(file.startLine === undefined ? {} : { startLine: file.startLine }),
           ...(file.endLine === undefined ? {} : { endLine: file.endLine }),
         })),
-      }),
+      }, budget),
     }),
   ];
 }

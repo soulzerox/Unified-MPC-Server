@@ -23,6 +23,28 @@ afterEach(() => {
 });
 
 describe('MCP tool registry', () => {
+  it('passes effective result budget to controlled search producers before materialization', async () => {
+    let request: unknown;
+    const registry = new ToolRegistry({
+      search: {
+        async searchText(_actor, _workspaceId, options): Promise<ReturnType<typeof ok>> {
+          request = options;
+          return ok({ matches: [] });
+        },
+      },
+    }, actor, { maxToolResultBytes: 1_024 });
+
+    await registry.invoke('search_text', { workspaceId: 'workspace-1', query: 'needle' });
+
+    expect(request).toMatchObject({ resultBudget: {
+      maxItems: 100,
+      maxTextBytes: 1_024,
+      maxStructuredBytes: 1_024,
+      maxBinaryBytes: 1_024,
+      maxBase64Bytes: 1_024,
+    } });
+  });
+
   it.each([
     ['/tmp/Project', '/tmp/Project/src'],
     ['E:\\Project', 'E:\\Project\\src'],

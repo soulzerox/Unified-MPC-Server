@@ -95,36 +95,22 @@ export function prohibitedGitSubcommandReason(args: readonly string[]): string |
   return undefined;
 }
 
-/** Rejects push-time config overrides that can redirect the actual push target. */
+/** Rejects every push-time config override so included config cannot redirect the actual push target. */
 export function prohibitedGitPushConfigOverrideReason(args: readonly string[]): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     if (!argument.startsWith('-')) return undefined;
     const lower = argument.toLowerCase();
-    let configKey: string | undefined;
     if (argument === '-c' || lower === '--config-env') {
       const value = args[index + 1];
       if (value === undefined) return 'Git push config override is missing its value';
-      configKey = value;
-      index += 1;
-    } else if (argument.startsWith('-c') && !argument.startsWith('--')) {
-      configKey = argument.slice(2);
-    } else if (lower.startsWith('--config-env=')) {
-      configKey = argument.slice(argument.indexOf('=') + 1);
+      return 'Git push cannot use invocation-local config overrides; use the guarded repository configuration instead';
     }
-    if (configKey !== undefined && changesGitPushTarget(configKey)) {
-      return 'Git push cannot override remote or push URL configuration; use the guarded repository configuration instead';
+    if ((argument.startsWith('-c') && !argument.startsWith('--')) || lower.startsWith('--config-env=')) {
+      return 'Git push cannot use invocation-local config overrides; use the guarded repository configuration instead';
     }
   }
   return undefined;
-}
-
-function changesGitPushTarget(configValue: string): boolean {
-  const key = configValue.split('=', 1)[0]!.toLowerCase();
-  return key === 'remote.pushdefault'
-    || /^remote\..+\.(?:url|pushurl)$/.test(key)
-    || /^branch\..+\.(?:remote|pushremote)$/.test(key)
-    || /^url\..+\.(?:insteadof|pushinsteadof)$/.test(key);
 }
 
 function skipGitGlobalOption(args: readonly string[], index: number, option: string): GitInvocation {

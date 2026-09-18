@@ -80,7 +80,7 @@ describe('GitService', () => {
   it.each([
     ['-c', ['-c', 'color.ui=false', 'push', 'origin', 'trunk']],
     ['--no-pager', ['--no-pager', 'push', 'origin', 'trunk']],
-  ] as const)('keeps the default-branch invariant after harmless Git global option %s under Full Bypass', async (_label, args) => {
+  ] as const)('keeps the default-branch invariant after Git global option %s under Full Bypass', async (_label, args) => {
     const workspace = await createWorkspace();
     let defaultBranchCalls = 0;
     const adapter = {
@@ -97,7 +97,7 @@ describe('GitService', () => {
 
     await expect(service.run({ clientId: 'test', clientName: 'test' }, { args, workspaceId: workspace.id }, undefined, authorization))
       .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    expect(defaultBranchCalls).toBe(1);
+    expect(defaultBranchCalls).toBe(_label === '-c' ? 0 : 1);
   });
 
   it.each([
@@ -174,7 +174,11 @@ describe('GitService', () => {
     expect(calls).toBe(0);
   });
 
-  it('rejects push URL config overrides under Full Bypass before resolution', async () => {
+  it.each([
+    ['push URL override', ['-c', 'remote.origin.pushurl=/tmp/other.git', 'push', 'origin', 'main']],
+    ['included push URL override', ['-c', 'include.path=/tmp/override.cfg', 'push', 'origin', 'main']],
+    ['config-env include override', ['--config-env=include.path=GIT_INCLUDE', 'push', 'origin', 'main']],
+  ] as const)('rejects %s under Full Bypass before resolution', async (_label, args) => {
     const workspace = await createWorkspace();
     let defaultBranchCalls = 0;
     const adapter = {
@@ -187,7 +191,7 @@ describe('GitService', () => {
     const service = new GitService(repository(workspace), undefined, adapter);
 
     await expect(service.run({ clientId: 'test', clientName: 'test' }, {
-      args: ['-c', 'remote.origin.pushurl=/tmp/other.git', 'push', 'origin', 'main'],
+      args,
       workspaceId: workspace.id,
     }, undefined, {
       mode: 'full_bypass',

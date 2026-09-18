@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from './git-mutation-policy.js';
+import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason } from './git-mutation-policy.js';
 
 describe('prohibitedAgentGitInvocationReason', () => {
   it.each([
@@ -111,5 +111,14 @@ describe('prohibitedAgentGitInvocationReason', () => {
       refspecs: ['feature/review-gate'],
     });
     expect(prohibitedAgentGitInvocationReason(['push', '--repo', 'origin', 'feature/review-gate'])).toBeUndefined();
+  });
+
+  it.each([
+    ['-c', 'color.ui=false', 'push', 'origin', 'feature/review-gate'],
+    ['-c', 'include.path=/tmp/override.cfg', 'push', 'origin', 'feature/review-gate'],
+    ['--config-env=include.path=GIT_INCLUDE', 'push', 'origin', 'feature/review-gate'],
+    ['--config-env', 'include.path=GIT_INCLUDE', 'push', 'origin', 'feature/review-gate'],
+  ] as const)('rejects push-time config overrides %s', (...args) => {
+    expect(prohibitedGitPushConfigOverrideReason(args)).toBeTypeOf('string');
   });
 });

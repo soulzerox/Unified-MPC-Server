@@ -45,6 +45,8 @@ describe('prohibitedAgentGitInvocationReason', () => {
     [['push', 'origin', '@'], 'implicit current-branch destination'],
     [['push', '--receive-pack=/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'custom receive-pack'],
     [['push', '--exec', '/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'custom exec transport'],
+    [['push', '--receive=/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'abbreviated receive-pack'],
+    [['push', '--exe=/tmp/custom-receive-pack', 'origin', 'feature/review-gate'], 'abbreviated exec transport'],
     [['push', '--all', 'origin'], 'all branches push'],
     [['push', 'origin', 'refs/heads/*:refs/heads/*'], 'wildcard refspec'],
   ] as const)('blocks %s (%s)', (args, _label) => {

@@ -50,7 +50,13 @@ export interface GitPushArguments {
   readonly invalidOption?: string;
 }
 
-const GIT_PUSH_OPTIONS_WITH_VALUES = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo']);
+const GIT_PUSH_OPTIONS_WITH_VALUES = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo', '--recurse-submodules']);
+const GIT_PUSH_OPTIONS = new Set([
+  '--all', '--atomic', '--delete', '--dry-run', '--exec', '--follow-tags', '--force', '--force-if-includes', '--force-with-lease',
+  '--ipv4', '--ipv6', '--mirror', '--no-follow-tags', '--no-force-if-includes', '--no-progress', '--no-signed', '--no-thin',
+  '--no-verify', '--porcelain', '--prune', '--progress', '--push-option', '--receive-pack', '--recurse-submodules', '--repo',
+  '--set-upstream', '--signed', '--tags', '--thin', '--verbose', '--quiet',
+]);
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-c', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
 
 export interface GitInvocation {
@@ -208,7 +214,7 @@ export function prohibitedDefaultBranchPushReason(args: readonly string[], defau
     return `AI-issued git push cannot use ${sideEffectOption}; guarded pushes must use Git's normal transport`;
   }
   const parsed = parseGitPushArguments(args);
-  if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is missing its value`;
+  if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is not on the explicit allowlist or is missing its value`;
   const lower = args.map((arg) => arg.toLowerCase());
   if (hasGitOption(lower, ['--all'])) {
     return 'AI-issued git push --all can update the default branch; push one explicit feature or issue branch and use a reviewed pull request instead';
@@ -257,6 +263,7 @@ export function parseGitPushArguments(args: readonly string[]): GitPushArguments
       if (optionName === '--repo') optionRemote = argument.slice(argument.indexOf('=') + 1);
       continue;
     }
+    if (argument.startsWith('--') && !GIT_PUSH_OPTIONS.has(optionName)) return { refspecs: [], invalidOption: argument };
     if (!argument.startsWith('-')) positional.push(argument);
   }
   if (optionRemote !== undefined) return { remote: optionRemote, refspecs: positional };

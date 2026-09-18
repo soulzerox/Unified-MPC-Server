@@ -89,6 +89,24 @@ describe('GitAdapter integration', () => {
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
+  it('rejects executable askpass configuration before remote inspection can run it', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    const marker = path.join(root, 'askpass-wrapper-ran');
+    const wrapper = path.join(root, 'askpass-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'core.askPass', wrapper], { cwd: root, windowsHide: true });
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_DENIED' },
+    });
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
   it('rejects external remote-helper targets before ls-remote can execute them', async () => {
     if (!gitAvailable) return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

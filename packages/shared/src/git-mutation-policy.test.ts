@@ -135,6 +135,7 @@ describe('prohibitedAgentGitInvocationReason', () => {
 
   it.each([
     ['config', 'core.sshCommand', '/tmp/ssh-wrapper'],
+    ['config', 'core.askPass', '/tmp/askpass-wrapper'],
     ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack'],
     ['config', '--unset', 'credential.helper'],
     ['config', 'protocol.ext.allow', 'always'],

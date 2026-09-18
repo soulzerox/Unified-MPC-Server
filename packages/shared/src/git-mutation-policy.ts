@@ -150,6 +150,7 @@ export function prohibitedGitConfigMutationReason(args: readonly string[]): stri
 function isExecutableGitConfigKey(argument: string): boolean {
   const key = argument.split('=', 1)[0]!;
   return key === 'core.sshcommand'
+    || key === 'core.askpass'
     || key === 'core.gitproxy'
     || key === 'credential.helper'
     || key === 'protocol.allow'

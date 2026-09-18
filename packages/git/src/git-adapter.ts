@@ -105,6 +105,7 @@ export class GitAdapter {
       `remote.${remote}.proxy`,
       `remote.${remote}.vcs`,
       'core.sshCommand',
+      'core.askPass',
       'core.gitProxy',
       'credential.helper',
       'protocol.allow',

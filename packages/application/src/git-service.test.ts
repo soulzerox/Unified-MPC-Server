@@ -209,6 +209,7 @@ describe('GitService', () => {
 
   it.each([
     ['ssh command', ['config', 'core.sshCommand', '/tmp/ssh-wrapper']],
+    ['askpass helper', ['config', 'core.askPass', '/tmp/askpass-wrapper']],
     ['remote upload-pack', ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack']],
     ['credential helper', ['config', '--unset', 'credential.helper']],
     ['external protocol allowlist', ['config', 'protocol.ext.allow', 'always']],

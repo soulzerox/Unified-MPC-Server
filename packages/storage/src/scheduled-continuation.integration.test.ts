@@ -1235,6 +1235,178 @@ describe('scheduled continuation repository state machine', () => {
     }
   });
 
+  it('allows a different client to retry the same recurring tick after a busy noop lease expires', async () => {
+    const database = await openDatabase();
+    const repository = new SqliteGoalRepository(database);
+    try {
+      await acquireGoalLease(repository, '2026-08-27T00:20:00.000Z');
+      const prepared = await repository.prepareScheduledContinuation(prepareRequest(
+        '2026-08-27T00:20:00.000Z',
+        '2026-08-27T00:22:00.000Z',
+        0,
+        'recurring-retryable-busy-fp',
+        'continuation-recurring-retryable-busy',
+      ));
+      await repository.recordScheduledContinuationReceipt({
+        continuationId: prepared.continuation.continuationId,
+        ownerClientId: 'chatgpt-web-client',
+        expectedVersion: prepared.continuation.version,
+        outcome: 'created',
+        nativeTaskId: 'native-recurring-retryable-busy',
+        dueAt: prepared.continuation.dueAt,
+        runsOn: 'cloud',
+        now: '2026-08-27T00:20:05.000Z',
+      });
+      database.connection.prepare(`
+        UPDATE goal_scheduled_continuations
+        SET occurrence = 'interval', interval_minutes = 60
+        WHERE id = ?
+      `).run(prepared.continuation.continuationId);
+      database.connection.prepare('UPDATE goals SET lease_heartbeat_at = ?, lease_expires_at = ? WHERE id = ?')
+        .run('2026-08-27T00:21:30.000Z', '2026-08-27T00:31:30.000Z', 'goal-1');
+
+      const beforeTick = await repository.getById('goal-1');
+      if (beforeTick === null) throw new Error('goal missing');
+      const firstTick = await repository.claimScheduledContinuation({
+        continuationId: prepared.continuation.continuationId,
+        ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
+        ownerClientId: 'chatgpt-web-client',
+        ownerSessionId: 'session-b',
+        leaseTokenHash: 'lease-hash-b',
+        leaseSeconds: 600,
+        earlyToleranceSeconds: 120,
+        liveness: {
+          trustworthy: true,
+          observedAt: '2026-08-27T00:22:00.000Z',
+          leaseGeneration: beforeTick.leaseGeneration,
+          leaseActivitySeq: beforeTick.leaseActivitySeq,
+          liveFencedCallCount: 0,
+          blockingTaskStates: [],
+        },
+        now: '2026-08-27T00:22:00.000Z',
+      });
+      expect(firstTick).toMatchObject({ outcome: 'worker_busy_noop', runKey: 'interval-0' });
+
+      const retry = await repository.claimScheduledContinuation({
+        continuationId: prepared.continuation.continuationId,
+        ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
+        ownerClientId: 'other-client',
+        ownerSessionId: 'session-c',
+        leaseTokenHash: 'lease-hash-c',
+        leaseSeconds: 600,
+        earlyToleranceSeconds: 120,
+        liveness: {
+          trustworthy: true,
+          observedAt: '2026-08-27T00:32:00.000Z',
+          leaseGeneration: beforeTick.leaseGeneration,
+          leaseActivitySeq: beforeTick.leaseActivitySeq,
+          liveFencedCallCount: 0,
+          blockingTaskStates: [],
+        },
+        now: '2026-08-27T00:32:00.000Z',
+      });
+
+      expect(retry).toMatchObject({
+        outcome: 'recurring_acquired',
+        acquisition: 'expired_lease',
+        runKey: 'interval-0',
+        goal: {
+          leaseOwnerClientId: 'other-client',
+          leaseOwnerSessionId: 'session-c',
+          leaseGeneration: beforeTick.leaseGeneration + 1,
+        },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('allows the same recurring tick to recover after the stale-heartbeat grace', async () => {
+    const database = await openDatabase();
+    const repository = new SqliteGoalRepository(database);
+    try {
+      await acquireGoalLease(repository, '2026-08-27T00:20:00.000Z');
+      const prepared = await repository.prepareScheduledContinuation(prepareRequest(
+        '2026-08-27T00:20:00.000Z',
+        '2026-08-27T00:22:00.000Z',
+        0,
+        'recurring-retryable-stale-fp',
+        'continuation-recurring-retryable-stale',
+      ));
+      await repository.recordScheduledContinuationReceipt({
+        continuationId: prepared.continuation.continuationId,
+        ownerClientId: 'chatgpt-web-client',
+        expectedVersion: prepared.continuation.version,
+        outcome: 'created',
+        nativeTaskId: 'native-recurring-retryable-stale',
+        dueAt: prepared.continuation.dueAt,
+        runsOn: 'cloud',
+        now: '2026-08-27T00:20:05.000Z',
+      });
+      database.connection.prepare(`
+        UPDATE goal_scheduled_continuations
+        SET occurrence = 'interval', interval_minutes = 60
+        WHERE id = ?
+      `).run(prepared.continuation.continuationId);
+      database.connection.prepare('UPDATE goals SET lease_heartbeat_at = ?, lease_expires_at = ? WHERE id = ?')
+        .run('2026-08-27T00:21:30.000Z', '2026-08-27T00:31:30.000Z', 'goal-1');
+
+      const beforeTick = await repository.getById('goal-1');
+      if (beforeTick === null) throw new Error('goal missing');
+      const firstTick = await repository.claimScheduledContinuation({
+        continuationId: prepared.continuation.continuationId,
+        ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
+        ownerClientId: 'chatgpt-web-client',
+        ownerSessionId: 'session-b',
+        leaseTokenHash: 'lease-hash-b',
+        leaseSeconds: 600,
+        earlyToleranceSeconds: 120,
+        liveness: {
+          trustworthy: true,
+          observedAt: '2026-08-27T00:22:00.000Z',
+          leaseGeneration: beforeTick.leaseGeneration,
+          leaseActivitySeq: beforeTick.leaseActivitySeq,
+          liveFencedCallCount: 0,
+          blockingTaskStates: [],
+        },
+        now: '2026-08-27T00:22:00.000Z',
+      });
+      expect(firstTick).toMatchObject({ outcome: 'worker_busy_noop', runKey: 'interval-0', retryAfterSeconds: 30 });
+
+      const retry = await repository.claimScheduledContinuation({
+        continuationId: prepared.continuation.continuationId,
+        ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
+        ownerClientId: 'other-client',
+        ownerSessionId: 'session-c',
+        leaseTokenHash: 'lease-hash-c',
+        leaseSeconds: 600,
+        earlyToleranceSeconds: 120,
+        liveness: {
+          trustworthy: true,
+          observedAt: '2026-08-27T00:22:31.000Z',
+          leaseGeneration: beforeTick.leaseGeneration,
+          leaseActivitySeq: beforeTick.leaseActivitySeq,
+          liveFencedCallCount: 0,
+          blockingTaskStates: [],
+        },
+        now: '2026-08-27T00:22:31.000Z',
+      });
+
+      expect(retry).toMatchObject({
+        outcome: 'recurring_acquired',
+        acquisition: 'orphan_recovered',
+        runKey: 'interval-0',
+        goal: {
+          leaseOwnerClientId: 'other-client',
+          leaseOwnerSessionId: 'session-c',
+          leaseGeneration: beforeTick.leaseGeneration + 1,
+        },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('recovers the exact ghost-worker case in the current hourly tick when process/task evidence is empty and no fenced call is live', async () => {
     const database = await openDatabase();
     const repository = new SqliteGoalRepository(database);

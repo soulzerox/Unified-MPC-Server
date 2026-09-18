@@ -31,7 +31,7 @@ One user request owns one durable goal and at most one live Native ChatGPT watch
 
 ## Start or resume
 
-1. Call `run_goal` before the first mutation of non-trivial multi-step work. Reuse the stable workspace and `goalKey`; do not create a second active goal for the same objective.
+1. Call `run_goal` before the first mutation of non-trivial multi-step work. Reuse the stable workspace and `goalKey`; do not create a second active goal for the same objective. CLI, IDE, and Web clients must resume the same `workspaceId + goalKey`, omit `ponytailMode` to inherit the durable policy, and read `get_goal` before mutating.
 2. Use the normal 600-second lease and keep the lease token private.
 3. Read the durable checkpoint and continue useful fenced work.
 4. At a real milestone call `checkpoint_goal`.
@@ -92,9 +92,9 @@ gh run watch 123456 -i 20 --exit-status
 Handle the result exactly:
 
 - `recurring_acquired`: continue work with the returned `leaseToken`/`leaseGeneration`. Keep the same recurring native task. Do **not** create, update, consume, or replace it.
-- `worker_busy_noop`: another worker is live or blocking work is still running. If `retryAfterSeconds <= 60` is returned, no live worker was observed and the lease is simply within the bounded stale-heartbeat grace window: wait that brief duration and retry `claim_scheduled_continuation` or `run_goal` in the same turn to complete takeover. If `retryAfterSeconds` is large, do not mutate the workspace, do not steal the lease, do not touch the native task, and return naturally. A later hourly firing will try again.
+- `worker_busy_noop`: another worker is live or blocking work is still running. If `retryAfterSeconds <= 60` is returned, no live worker was observed and the lease is simply within the bounded stale-heartbeat grace window: wait that brief duration and retry `claim_scheduled_continuation` or `run_goal` in the same turn to complete takeover. The retry remains eligible within the same recurring `runKey`; an earlier `worker_busy_noop` must not strand the goal behind `already_claimed` after liveness becomes safely recoverable. If `retryAfterSeconds` is large, do not mutate the workspace, do not steal the lease, do not touch the native task, and return naturally. A later hourly firing will try again.
 - `orphan_probe_noop`: legacy pre-hardening compatibility only. Current v4.53 recurring mainline must not enter a two-probe wait; if this historical outcome is encountered, do not mutate or touch the native task.
-- `already_claimed`: this run/tick was already handled. Do nothing.
+- `already_claimed`: this run/tick was already handled, or the same retryable tick still has live/uncertain worker evidence. Do nothing and never create a second goal. A cross-client manual resume uses `run_goal` with the same `workspaceId + goalKey` and no Ponytail override.
 - `receipt_required`: reconcile exact native host metadata before any mutation or blind create.
 - `not_due`: do not mutate; let the recurring task remain unchanged.
 - `terminal_cleanup_required`: **cleanup only**. Do not resume goal work and do not claim a worker lease before host cleanup. Make the exact recurring native task non-runnable with the strongest host operation exposed (prefer delete; otherwise confirmed disable) and record the exact cancellation receipt. If the prior completion worker lease has expired, call `run_goal` with the same workspace/goalKey **after cleanup only** to obtain an administrative finalization lease; do not resume workspace work. Then call `finish_goal` again immediately.

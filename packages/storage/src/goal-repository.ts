@@ -1317,7 +1317,9 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     }
 
     const runKey = recurringRunKey(continuation, request.now);
-    if (this.recurringRunExists(continuation.continuationId, runKey)) {
+    const previousRunOutcome = this.recurringRunOutcome(continuation.continuationId, runKey);
+    const retryablePreviousRun = previousRunOutcome === 'worker_busy_noop' || previousRunOutcome === 'orphan_probe_noop';
+    if (previousRunOutcome !== undefined && !retryablePreviousRun) {
       return { outcome: 'already_claimed', continuation, goal };
     }
 
@@ -1339,6 +1341,9 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     const hasUnknown = !liveness.trustworthy || expectedTaskStates.some((state) => state === 'unknown');
     const hasLiveWorker = liveness.liveFencedCallCount > 0 || expectedTaskStates.some((state) => state === 'running');
     const confirmedInactive = !hasUnknown && !hasLiveWorker && liveness.liveFencedCallCount === 0 && allExpectedInactive;
+    if (previousRunOutcome !== undefined && (!retryablePreviousRun || !confirmedInactive)) {
+      return { outcome: 'already_claimed', continuation, goal };
+    }
 
     const leaseExpiresMs = goal.leaseExpiresAt === undefined ? undefined : parseIso(goal.leaseExpiresAt, 'lease expiry');
     if (leaseExpiresMs === undefined || leaseExpiresMs <= nowMs) {
@@ -1475,11 +1480,15 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   }
 
   private recurringRunExists(continuationId: string, runKey: string): boolean {
+    return this.recurringRunOutcome(continuationId, runKey) !== undefined;
+  }
+
+  private recurringRunOutcome(continuationId: string, runKey: string): string | undefined {
     const row = this.database.connection.prepare(`
-      SELECT 1 AS present FROM goal_scheduled_continuation_runs
+      SELECT outcome FROM goal_scheduled_continuation_runs
       WHERE continuation_id = ? AND run_key = ?
-    `).get(continuationId, runKey);
-    return row !== undefined;
+    `).get(continuationId, runKey) as { outcome?: string } | undefined;
+    return row?.outcome;
   }
 
   private recordRecurringRun(

@@ -22,6 +22,26 @@ function repositorySpy(): WorkspaceRepository & { inserted: Workspace[] } {
   };
 }
 
+function archivalRepository(): WorkspaceRepository & { archived: Workspace[] } {
+  const archived: Workspace[] = [];
+  return {
+    archived,
+    async list(): Promise<Workspace[]> { return []; },
+    async listAll(): Promise<Workspace[]> { return [...archived]; },
+    async get(): Promise<Workspace | null> { return null; },
+    async insert(workspace: Workspace): Promise<void> { archived.push(workspace); },
+    async delete(): Promise<void> {},
+    async archive(id: string): Promise<void> {
+      const workspace = archived.find((entry) => entry.id === id);
+      if (workspace !== undefined) archived[archived.indexOf(workspace)] = { ...workspace, archivedAt: '2026-08-24T00:00:00.000Z' };
+    },
+    async restore(id: string, workspace?: Workspace): Promise<void> {
+      const index = archived.findIndex((entry) => entry.id === id);
+      if (index >= 0 && workspace !== undefined) archived[index] = workspace;
+    },
+  };
+}
+
 describe('WorkspaceService', () => {
   it('stores the canonical realRootPath when adding a directory', async () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-service-'));
@@ -81,5 +101,27 @@ describe('WorkspaceService', () => {
     expect(repository.inserted).toEqual([]);
     await expect(import('node:fs/promises').then(({ stat }) => stat(rootPath))).resolves.toMatchObject({});
     await expect(import('node:fs/promises').then(({ readFile }) => readFile(path.join(rootPath, 'keep.txt'), 'utf8'))).resolves.toBe('keep source files');
+  });
+
+  it('restores the archived identity when the canonical source path is registered again', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-service-relink-'));
+    temporaryRoots.push(parent);
+    const rootPath = path.join(parent, 'project');
+    await mkdir(rootPath);
+    const repository = archivalRepository();
+    const initial: Workspace = {
+      id: 'workspace-relinked',
+      displayName: 'Original',
+      rootPath,
+      realRootPath: rootPath,
+      createdAt: new Date(0).toISOString(),
+      archivedAt: '2026-08-24T00:00:00.000Z',
+    };
+    repository.archived.push(initial);
+
+    const result = await new WorkspaceService(repository).add('Reconnected', rootPath);
+
+    expect(result).toMatchObject({ ok: true, value: { id: initial.id, displayName: 'Reconnected' } });
+    expect(repository.archived).toEqual([expect.objectContaining({ id: initial.id, displayName: 'Reconnected' })]);
   });
 });

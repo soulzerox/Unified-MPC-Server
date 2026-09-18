@@ -59,22 +59,31 @@ export class WorkspaceSelectionService {
 
   private async state(): Promise<Result<ResolvedSelection>> {
     const projects = (await this.repository.list()).filter((project) => !isMachineRootPath(project.realRootPath) && !isMachineRootPath(project.rootPath));
-    if (projects.length === 0) return err(appError('WORKSPACE_NOT_FOUND', 'No registered project workspace is available', true));
+    if (projects.length === 0) {
+      this.persist({ primaryWorkspaceId: '', activeWorkspaceIds: [] });
+      return err(appError('WORKSPACE_NOT_FOUND', 'No registered project workspace is available', true));
+    }
     const ids = new Set(projects.map((project) => project.id));
     const fallback = ids.has(this.initialWorkspaceId) ? this.initialWorkspaceId : projects[0]!.id;
     const parsed = parseSelection(this.store?.get() ?? this.memory);
     const active = [...new Set(parsed?.activeWorkspaceIds ?? [])].filter((id) => ids.has(id));
     if (active.length === 0) active.push(fallback);
     const primary = parsed !== null && ids.has(parsed.primaryWorkspaceId) && active.includes(parsed.primaryWorkspaceId) ? parsed.primaryWorkspaceId : active[0]!;
-    return ok({ projects, primaryWorkspaceId: primary, activeWorkspaceIds: [primary, ...active.filter((id) => id !== primary)] });
+    const snapshot = { primaryWorkspaceId: primary, activeWorkspaceIds: [primary, ...active.filter((id) => id !== primary)] };
+    this.persist(snapshot);
+    return ok({ projects, ...snapshot });
   }
 
   private save(primaryWorkspaceId: string, activeWorkspaceIds: readonly string[]): Result<WorkspaceSelectionSnapshot> {
     const snapshot = { primaryWorkspaceId, activeWorkspaceIds: [primaryWorkspaceId, ...activeWorkspaceIds.filter((id) => id !== primaryWorkspaceId)] };
+    this.persist(snapshot);
+    return ok(snapshot);
+  }
+
+  private persist(snapshot: WorkspaceSelectionSnapshot): void {
     const encoded = JSON.stringify(snapshot);
     if (this.store === undefined) this.memory = encoded;
     else this.store.set(encoded);
-    return ok(snapshot);
   }
 
   private snapshot(value: WorkspaceSelectionSnapshot): WorkspaceSelectionSnapshot {

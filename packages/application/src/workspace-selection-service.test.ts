@@ -7,10 +7,10 @@ const projects: Workspace[] = [
   { id: 'b', displayName: 'B', rootPath: '/projects/b', realRootPath: '/projects/b', createdAt: '2026-01-02T00:00:00.000Z' },
 ];
 
-function repository(): WorkspaceRepository {
+function repository(entries: readonly Workspace[] = projects): WorkspaceRepository {
   return {
-    list: async () => projects,
-    get: async (id) => projects.find((project) => project.id === id) ?? null,
+    list: async () => [...entries],
+    get: async (id) => entries.find((project) => project.id === id) ?? null,
     insert: async () => undefined,
     delete: async () => undefined,
   };
@@ -48,5 +48,17 @@ describe('WorkspaceSelectionService', () => {
     expect((await first.activate('b')).ok).toBe(true);
     expect((await second.setPrimary('b')).ok).toBe(true);
     expect((await first.list()).value).toEqual({ primaryWorkspaceId: 'b', activeWorkspaceIds: ['b', 'a'] });
+  });
+
+  it('persists normalized selection after an archived project disappears', async () => {
+    const shared = store();
+    shared.set(JSON.stringify({ primaryWorkspaceId: 'b', activeWorkspaceIds: ['b', 'a'] }));
+    const selection = new WorkspaceSelectionService(repository([projects[0]!]), 'a', shared);
+
+    await expect(selection.list()).resolves.toMatchObject({
+      ok: true,
+      value: { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] },
+    });
+    expect(shared.get()).toBe(JSON.stringify({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }));
   });
 });

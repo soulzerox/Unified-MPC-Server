@@ -89,6 +89,9 @@ describe('stdio MCP runtime', () => {
       rootPath: '/home/qwerty/thai-rag-mcp',
       realRootPath: '/mnt/workspace_data/thai-rag-mcp',
     };
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    await new SqliteWorkspaceRepository(database).insert(aliasedWorkspace);
+    database.close();
     const runtime = createStdioMcpRuntime(dataPath, aliasedWorkspace);
     try {
       await expect(runtime.activeWorkspaceScopeProvider()).resolves.toEqual({
@@ -99,6 +102,50 @@ describe('stdio MCP runtime', () => {
         expect.objectContaining({ workspaceId: aliasedWorkspace.id, rootPath: aliasedWorkspace.rootPath }),
       ]);
     } finally {
+      await runtime.close();
+    }
+  });
+
+  it('fails closed when another client archives the runtime primary workspace', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-archive-scope-'));
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-archive-project-'));
+    temporaryRoots.push(dataPath, projectRoot);
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    const repository = new SqliteWorkspaceRepository(database);
+    const registered = { ...workspace, rootPath: projectRoot, realRootPath: await realpath(projectRoot) };
+    await repository.insert(registered);
+    database.close();
+
+    const runtime = createStdioMcpRuntime(dataPath, registered);
+    const externalDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    try {
+      await new SqliteWorkspaceRepository(externalDatabase).archive(registered.id, '2026-08-24T00:00:00.000Z');
+      await expect(runtime.activeWorkspaceScopeProvider()).resolves.toBeNull();
+      await expect(runtime.activeWorkspaceScopesProvider()).resolves.toEqual([]);
+    } finally {
+      externalDatabase.close();
+      await runtime.close();
+    }
+  });
+
+  it('fails closed when another client deletes the runtime primary workspace', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-delete-scope-'));
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-delete-project-'));
+    temporaryRoots.push(dataPath, projectRoot);
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    const repository = new SqliteWorkspaceRepository(database);
+    const registered = { ...workspace, rootPath: projectRoot, realRootPath: await realpath(projectRoot) };
+    await repository.insert(registered);
+    database.close();
+
+    const runtime = createStdioMcpRuntime(dataPath, registered);
+    const externalDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    try {
+      await new SqliteWorkspaceRepository(externalDatabase).delete(registered.id);
+      await expect(runtime.activeWorkspaceScopeProvider()).resolves.toBeNull();
+      await expect(runtime.activeWorkspaceScopesProvider()).resolves.toEqual([]);
+    } finally {
+      externalDatabase.close();
       await runtime.close();
     }
   });
@@ -148,6 +195,9 @@ describe('stdio MCP runtime', () => {
   it('observes persisted extension settings writes from another SQLite connection without restart', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-extension-settings-'));
     temporaryRoots.push(dataPath);
+    const workspaceDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    await new SqliteWorkspaceRepository(workspaceDatabase).insert(workspace);
+    workspaceDatabase.close();
     const runtime = createStdioMcpRuntime(dataPath, workspace);
     const externalDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const externalSettings = new SqliteSettingsRepository(externalDatabase);

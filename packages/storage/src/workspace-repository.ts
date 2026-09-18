@@ -51,12 +51,62 @@ export class SqliteWorkspaceRepository {
     ).run(workspace.id, workspace.displayName, workspace.rootPath, workspace.realRootPath, workspace.createdAt, workspace.archivedAt ?? null);
   }
 
+  public async insertIfAvailable(workspace: Workspace): Promise<boolean> {
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const existing = this.database.connection.prepare(
+        'SELECT 1 FROM workspaces WHERE archived_at IS NULL AND real_root_path = ? LIMIT 1',
+      ).get(workspace.realRootPath);
+      if (existing !== undefined) {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+      this.database.connection.prepare(
+        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ).run(workspace.id, workspace.displayName, workspace.rootPath, workspace.realRootPath, workspace.createdAt, workspace.archivedAt ?? null);
+      this.database.connection.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
   public async archive(id: string, archivedAt: string = new Date().toISOString()): Promise<void> {
     this.database.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?').run(archivedAt, id);
   }
 
-  public async restore(id: string): Promise<void> {
-    this.database.connection.prepare('UPDATE workspaces SET archived_at = NULL WHERE id = ?').run(id);
+  public async archiveMany(ids: readonly string[], archivedAt: string = new Date().toISOString()): Promise<void> {
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const statement = this.database.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?');
+      for (const id of ids) statement.run(archivedAt, id);
+      this.database.connection.exec('COMMIT;');
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  public async restore(id: string, workspace?: Workspace): Promise<void> {
+    if (workspace === undefined) {
+      this.database.connection.prepare('UPDATE workspaces SET archived_at = NULL WHERE id = ?').run(id);
+      return;
+    }
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const existing = this.database.connection.prepare(
+        'SELECT 1 FROM workspaces WHERE archived_at IS NULL AND real_root_path = ? AND id <> ? LIMIT 1',
+      ).get(workspace.realRootPath, id);
+      if (existing !== undefined) throw new Error('Workspace root is already registered');
+      this.database.connection.prepare(
+        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, archived_at = NULL WHERE id = ?',
+      ).run(workspace.displayName, workspace.rootPath, workspace.realRootPath, id);
+      this.database.connection.exec('COMMIT;');
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
   }
 
   public async delete(id: string): Promise<void> {

@@ -63,4 +63,16 @@ describe('WorkspaceIndexService', () => {
     if (!explicit.ok) return;
     expect(explicit.value.entries.map((entry) => entry.relativePath)).toEqual(expect.arrayContaining(['node_modules', 'node_modules/fixture/index.js']));
   });
+
+  it('forgets a workspace snapshot when its registration is relinked or archived', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-index-forget-'));
+    const workspace: Workspace = {
+      id: 'workspace-forget', displayName: 'fixture', rootPath: root, realRootPath: root, createdAt: new Date().toISOString(),
+    };
+    const service = new WorkspaceIndexService(fixtureRepository(workspace), new JsonWorkspaceIndexStore(path.join(root, 'index-store')));
+
+    await expect(service.indexWorkspace(workspace.id)).resolves.toMatchObject({ ok: true });
+    await service.forgetWorkspace(workspace.id);
+    await expect(service.snapshot(workspace.id)).resolves.toMatchObject({ ok: true, value: null });
+  });
 });

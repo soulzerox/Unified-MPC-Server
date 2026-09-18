@@ -53,6 +53,19 @@ describe('SqliteWorkspaceRepository', () => {
       await repository.restore(workspace.id);
       await expect(repository.get(workspace.id)).resolves.toMatchObject({ id: workspace.id });
       expect((await repository.getAny(workspace.id))?.archivedAt).toBeUndefined();
+
+      await repository.archive(workspace.id, '2026-08-25T00:00:00.000Z');
+      await repository.restore(workspace.id, {
+        ...workspace,
+        displayName: 'Relinked',
+        rootPath: `${root}/alias`,
+        realRootPath: root,
+      });
+      await expect(repository.get(workspace.id)).resolves.toMatchObject({
+        id: workspace.id,
+        displayName: 'Relinked',
+        realRootPath: root,
+      });
     } finally {
       database.close();
     }

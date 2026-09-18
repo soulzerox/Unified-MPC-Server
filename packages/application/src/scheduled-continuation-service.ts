@@ -272,6 +272,7 @@ export type ExpediteScheduledContinuationResult =
 export interface ScheduledContinuationServiceOptions {
   readonly now?: () => Date;
   readonly workerLiveness?: ScheduledContinuationWorkerLivenessPort;
+  readonly workspaceIsActive?: (workspaceId: string) => Promise<boolean>;
   /** IANA zone used in native ChatGPT VEVENT schedules. Defaults to the machine's resolved zone. */
   readonly hostTimeZone?: string;
 }
@@ -280,6 +281,7 @@ export class ScheduledContinuationService {
   private readonly now: () => Date;
   private readonly workerLiveness: ScheduledContinuationWorkerLivenessPort;
   private readonly hostTimeZone: string;
+  private readonly workspaceIsActive?: (workspaceId: string) => Promise<boolean>;
 
   public constructor(
     private readonly goals: ScheduledContinuationRepository & {
@@ -289,6 +291,7 @@ export class ScheduledContinuationService {
   ) {
     this.now = options.now ?? ((): Date => new Date());
     this.hostTimeZone = normalizeHostTimeZone(options.hostTimeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+    if (options.workspaceIsActive !== undefined) this.workspaceIsActive = options.workspaceIsActive;
     this.workerLiveness = options.workerLiveness ?? {
       observe: async (goalId, trackedTasks): ReturnType<ScheduledContinuationWorkerLivenessPort['observe']> => {
         const goal = await this.goals.getById(goalId);
@@ -447,6 +450,9 @@ export class ScheduledContinuationService {
   ): Promise<Result<ScheduledContinuationSnapshot>> {
     try {
       const continuationId = required(request.continuationId, 'continuationId', MAX_ID);
+      const continuation = await this.goals.getScheduledContinuation({ continuationId });
+      if (continuation === null) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
+      await this.requireGoal(continuation.goalId, false);
       if (!Number.isInteger(request.expectedVersion) || request.expectedVersion < 0) throw new Error('expectedVersion is invalid');
       const suppliedNativeTaskId = request.nativeTaskId === undefined ? undefined : required(request.nativeTaskId, 'nativeTaskId', MAX_NATIVE_TASK_ID);
       const suppliedDueAt = request.dueAt === undefined ? undefined : requiredIso(request.dueAt, 'dueAt');
@@ -537,6 +543,9 @@ export class ScheduledContinuationService {
       const target = 'continuationId' in request
         ? { continuationId: required(request.continuationId, 'continuationId', MAX_ID) }
         : { goalId: required(request.goalId, 'goalId', MAX_ID), latest: true as const };
+      const targetContinuation = await this.goals.getScheduledContinuation(target);
+      if (targetContinuation === null) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
+      await this.requireGoal(targetContinuation.goalId, false);
       const cancelled = await this.goals.cancelScheduledContinuation({
         ...target,
         ownerClientId: owner(actor),
@@ -564,7 +573,10 @@ export class ScheduledContinuationService {
       if (!Number.isInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) throw new Error('leaseSeconds is out of range');
       const currentContinuation = await this.goals.getScheduledContinuation({ continuationId });
       if (currentContinuation === null) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
-      const currentGoal = await this.requireGoal(currentContinuation.goalId);
+      const currentGoal = await this.requireGoal(currentContinuation.goalId, false);
+      const workspaceActive = this.workspaceIsActive === undefined
+        ? true
+        : await this.workspaceIsActive(currentGoal.workspaceId);
       const claimSuccessorRequestFingerprint = createHash('sha256')
         .update(`claimed-successor-v1\0${continuationId}`)
         .digest('hex');
@@ -593,6 +605,7 @@ export class ScheduledContinuationService {
         claimSuccessorId,
         claimSuccessorDueAt,
         claimSuccessorRequestFingerprint,
+        workspaceActive,
       });
       const continuation = toPublicContinuation(claimed.continuation);
       const goal = toGoalSnapshot(claimed.goal);
@@ -785,7 +798,7 @@ export class ScheduledContinuationService {
           : { goalId: required(request.goalId, 'goalId', MAX_ID), latest: true },
       );
       if (record === null) return err(appError('INVALID_INPUT', 'Scheduled continuation was not found'));
-      const goal = await this.requireGoal(record.goalId);
+      const goal = await this.requireGoal(record.goalId, false);
       if (goal.id !== record.goalId) return err(appError('PERMISSION_DENIED', 'Goal belongs to another client'));
       return ok(toPublicContinuation(record));
     } catch (error: unknown) {
@@ -827,9 +840,12 @@ export class ScheduledContinuationService {
     }
   }
 
-  private async requireGoal(goalId: string): Promise<GoalRecord> {
+  private async requireGoal(goalId: string, requireActiveWorkspace = true): Promise<GoalRecord> {
     const goal = await this.goals.getById(goalId);
     if (goal === null) throw new GoalStateError('not_found', 'Goal was not found');
+    if (requireActiveWorkspace && this.workspaceIsActive !== undefined && !(await this.workspaceIsActive(goal.workspaceId))) {
+      throw new GoalStateError('conflict', 'Goal workspace is not active');
+    }
     return goal;
   }
 }

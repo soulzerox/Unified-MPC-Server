@@ -1242,6 +1242,24 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   ): ClaimScheduledContinuationRecordResult {
     if (continuation.intervalMinutes !== 60) throw corrupt('Recurring continuation is missing its hourly interval');
     if (continuation.status === 'terminal_noop') return { outcome: 'terminal_noop', continuation, goal };
+    if (request.workspaceActive === false) {
+      if (continuation.nativeTaskId === undefined || !isConfirmedNativeHostRunMode(continuation.confirmedRunsOn)) {
+        return { outcome: 'receipt_required', reason: 'native_task_unconfirmed', continuation, goal };
+      }
+      const runKey = recurringRunKey(continuation, request.now);
+      if (this.recurringRunExists(continuation.continuationId, runKey)) {
+        return { outcome: 'already_claimed', continuation, goal };
+      }
+      this.recordRecurringRun(
+        continuation,
+        runKey,
+        'terminal_cleanup_required',
+        request.now,
+        null,
+        'Workspace is archived; recurring wake is cleanup-only and must not resume workspace work',
+      );
+      return { outcome: 'terminal_cleanup_required', continuation, goal, runKey };
+    }
     if (['cancel_required', 'cancel_failed', 'cancel_uncertain'].includes(continuation.status)) {
       if (continuation.nativeTaskId === undefined || !isConfirmedNativeHostRunMode(continuation.confirmedRunsOn)) {
         return { outcome: 'receipt_required', reason: 'native_task_unconfirmed', continuation, goal };

@@ -29,6 +29,45 @@ describe('GitAdapter', () => {
     expect(runner.calls).toEqual([{ args: ['branch', '--show-current'], cwd: 'C:\\workspace' }]);
   });
 
+  it('resolves the authoritative remote default branch instead of the cached symbolic ref', async () => {
+    const calls: { args: readonly string[]; cwd: string }[] = [];
+    const runner: GitRunner = {
+      async run(args: readonly string[], cwd: string): Promise<GitRunResult> {
+        calls.push({ args, cwd });
+        return args[0] === 'remote'
+          ? { exitCode: 0, stdout: 'https://example.test/repository.git\n', stderr: '' }
+          : { exitCode: 0, stdout: 'ref: refs/heads/production\tHEAD\n012345\tHEAD\n', stderr: '' };
+      },
+    };
+
+    await expect(new GitAdapter(runner).defaultBranch('C:\\workspace')).resolves.toEqual({ ok: true, value: 'production' });
+    expect(calls).toEqual([{
+      args: ['remote', 'get-url', '--push', '--all', 'origin'],
+      cwd: 'C:\\workspace',
+    }, {
+      args: ['ls-remote', '--symref', 'https://example.test/repository.git', 'HEAD'],
+      cwd: 'C:\\workspace',
+    }]);
+  });
+
+  it('resolves every configured push URL before checking default branches', async () => {
+    const calls: { args: readonly string[]; cwd: string }[] = [];
+    const runner: GitRunner = {
+      async run(args: readonly string[], cwd: string): Promise<GitRunResult> {
+        calls.push({ args, cwd });
+        if (args[0] === 'remote') return { exitCode: 0, stdout: 'repo-a\nrepo-b\n', stderr: '' };
+        const branch = args[2] === 'repo-a' ? 'trunk' : 'main';
+        return { exitCode: 0, stdout: `ref: refs/heads/${branch}\tHEAD\n012345\tHEAD\n`, stderr: '' };
+      },
+    };
+
+    await expect(new GitAdapter(runner).defaultBranches('C:\\workspace', 'origin')).resolves.toEqual({
+      ok: true,
+      value: ['trunk', 'main'],
+    });
+    expect(calls).toHaveLength(3);
+  });
+
   it('bounds diff output and keeps the path as a separate argument', async () => {
     const runner = new FakeGitRunner({ exitCode: 0, stdout: '0123456789', stderr: '' });
     const result = await new GitAdapter(runner).diff('C:\\workspace', { path: 'src\\space file.txt', maxBytes: 5 });

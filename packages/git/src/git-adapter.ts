@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { DirectGitRunner, type GitRunOptions, type GitRunResult, type GitRunner } from './git-runner.js';
 import { parsePorcelainStatus, type GitStatusEntry } from './parsers/status-parser.js';
@@ -72,6 +74,84 @@ export class GitAdapter {
     const error = this.mapError(result);
     if (error !== null) return error;
     return ok(null);
+  }
+
+  public async defaultBranch(cwd: string, remote = 'origin'): Promise<Result<string | null>> {
+    const branches = await this.defaultBranches(cwd, remote);
+    return branches.ok ? ok(branches.value[0] ?? null) : branches;
+  }
+
+  public async defaultBranches(cwd: string, remote = 'origin'): Promise<Result<readonly string[]>> {
+    const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd);
+    if (pushUrls.exitCode !== 0) return ok([]);
+    const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (targets.length === 0) return ok([]);
+    const branches: string[] = [];
+    for (const target of targets) {
+      if (!isSupportedRemoteTarget(target)) return ok([]);
+      const remoteHead = await this.runner.run(['ls-remote', '--symref', target, 'HEAD'], cwd);
+      if (remoteHead.exitCode !== 0) return ok([]);
+      const match = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD\s*$/im.exec(remoteHead.stdout);
+      if (match?.[1] === undefined) return ok([]);
+      branches.push(match[1]);
+    }
+    return ok(branches);
+  }
+
+  public async validatePushSafety(cwd: string, remote: string, signal?: AbortSignal): Promise<Result<void>> {
+    const executableConfigKeys = [
+      `remote.${remote}.receivepack`,
+      `remote.${remote}.uploadpack`,
+      `remote.${remote}.proxy`,
+      `remote.${remote}.vcs`,
+      'core.sshCommand',
+      'core.askPass',
+      'core.gitProxy',
+      'credential.helper',
+      'push.gpgSign',
+      'push.recurseSubmodules',
+      'submodule.recurse',
+      'protocol.allow',
+    ];
+    for (const key of executableConfigKeys) {
+      const configured = await this.runner.run(['config', '--get-all', key], cwd, this.signalOptions(signal));
+      if (configured.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured executable transport or credential helpers'));
+      if (configured.exitCode !== 1) {
+        const error = this.mapError(configured);
+        if (error !== null) return error;
+      }
+    }
+    const protocolAllow = await this.runner.run(['config', '--get-regexp', '^protocol\\..*\\.allow$'], cwd, this.signalOptions(signal));
+    if (protocolAllow.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot enable external transport protocols'));
+    if (protocolAllow.exitCode !== 1) {
+      const error = this.mapError(protocolAllow);
+      if (error !== null) return error;
+    }
+    const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
+    if (credentialHelpers.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured credential helpers'));
+    if (credentialHelpers.exitCode !== 1) {
+      const error = this.mapError(credentialHelpers);
+      if (error !== null) return error;
+    }
+    const signingPrograms = await this.runner.run(['config', '--get-regexp', '^gpg(\\..+)?\\.program$'], cwd, this.signalOptions(signal));
+    if (signingPrograms.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured signing programs'));
+    if (signingPrograms.exitCode !== 1) {
+      const error = this.mapError(signingPrograms);
+      if (error !== null) return error;
+    }
+
+    const hooks = await this.runner.run(['rev-parse', '--git-path', 'hooks'], cwd, this.signalOptions(signal));
+    const hooksError = this.mapError(hooks);
+    if (hooksError !== null) return hooksError;
+    const hooksPath = hooks.stdout.trim();
+    if (hooksPath.length === 0) return err(appError('PERMISSION_DENIED', 'Git push hook location could not be resolved safely'));
+    try {
+      const hook = await stat(path.join(path.resolve(cwd, hooksPath), 'pre-push'));
+      if (hook.isFile()) return err(appError('PERMISSION_DENIED', 'Git push cannot run a configured pre-push hook'));
+    } catch (error: unknown) {
+      if (!isMissingFile(error)) return err(appError('INTERNAL_ERROR', 'Git push hook safety could not be verified', true));
+    }
+    return ok(undefined);
   }
 
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {
@@ -163,4 +243,14 @@ export class GitAdapter {
     if (bytes.byteLength <= maxBytes) return { text: value, truncated: false };
     return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true };
   }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function isSupportedRemoteTarget(target: string): boolean {
+  if (/^[a-z][a-z0-9+.-]*::/i.test(target)) return false;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(target)?.[1]?.toLowerCase();
+  return scheme === undefined || ['file', 'git', 'git+ssh', 'http', 'https', 'ssh'].includes(scheme);
 }

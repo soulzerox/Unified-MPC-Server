@@ -13,7 +13,7 @@ import {
 import { CommandPolicy, DefaultPermissionEngine, permissionProfiles, type PermissionEngine, type PermissionProfile } from '@unified-mpc/permissions';
 import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult } from '@unified-mpc/process';
 import { JsCommandDetector, ProjectDetector, type ProjectCommandKind } from '@unified-mpc/project';
-import { prohibitedAgentCommandReason, riskyAgentCommandReason } from '@unified-mpc/shared';
+import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from '@unified-mpc/shared';
 import { isAbsoluteHostPath, isHostPathWithin, resolveHostPath, WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 import type { FileActor } from './file-service.js';
 import { ProjectService } from './project-service.js';
@@ -207,6 +207,9 @@ export class ProcessService {
     const cwd = await this.resolveCwd(workspace.value, request.cwd, bypassAuthorization);
     if (isAborted(signal)) return cancelledStart();
     if (!cwd.ok) return cwd;
+
+    const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.args);
+    if (unscopedGitPush !== undefined) return err(appError('PERMISSION_DENIED', unscopedGitPush));
 
     const applicationApproved = isApplicationAuthorized(authorization, request.userConfirmed === true);
     if (!bypassAuthorization) {

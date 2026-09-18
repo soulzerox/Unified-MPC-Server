@@ -40,7 +40,152 @@ export function isProvablyReadOnlyGitInvocation(args: readonly string[]): boolea
  * workspace delete/reset/restore families are handled by the destructive policy
  * so Full Access can ask or auto-approve them according to user settings.
  */
-export function prohibitedAgentGitInvocationReason(args: readonly string[]): string | undefined {
+export interface GitMutationPolicyOptions {
+  readonly defaultBranch?: string;
+}
+
+export interface GitPushArguments {
+  readonly remote?: string;
+  readonly refspecs: readonly string[];
+  readonly invalidOption?: string;
+}
+
+const GIT_PUSH_OPTIONS_WITH_VALUES = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo', '--recurse-submodules']);
+const GIT_PUSH_OPTIONS = new Set([
+  '--all', '--atomic', '--delete', '--dry-run', '--exec', '--follow-tags', '--force', '--force-if-includes', '--force-with-lease',
+  '--ipv4', '--ipv6', '--mirror', '--no-follow-tags', '--no-force-if-includes', '--no-progress', '--no-signed', '--no-thin',
+  '--no-verify', '--porcelain', '--prune', '--progress', '--push-option', '--receive-pack', '--recurse-submodules', '--repo',
+  '--set-upstream', '--signed', '--tags', '--thin', '--verbose', '--quiet',
+]);
+const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-c', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
+
+export interface GitInvocation {
+  readonly subcommand?: string;
+  readonly subcommandArgs: readonly string[];
+  readonly scopeChangingOption?: string;
+}
+
+/** Finds the actual Git subcommand while preserving the arguments after it. */
+export function parseGitInvocation(args: readonly string[]): GitInvocation {
+  for (let index = 0; index < args.length;) {
+    const argument = args[index]!;
+    const lower = argument.toLowerCase();
+    if (!argument.startsWith('-')) return { subcommand: lower, subcommandArgs: args.slice(index + 1) };
+    if (lower === '--') {
+      const subcommand = args[index + 1];
+      return subcommand === undefined
+        ? { subcommandArgs: [] }
+        : { subcommand: subcommand.toLowerCase(), subcommandArgs: args.slice(index + 2) };
+    }
+
+    const scopeChangingOption = scopeChangingGitOption(argument);
+    if (scopeChangingOption !== undefined) {
+      return skipGitGlobalOption(args, index, scopeChangingOption);
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUES.has(lower) && !lower.startsWith('--exec-path')) {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return { subcommandArgs: [] };
+}
+
+/** Keeps repository aliases and unknown Git subcommands out of the native Git path. */
+export function prohibitedGitSubcommandReason(args: readonly string[]): string | undefined {
+  const invocation = parseGitInvocation(args);
+  if (invocation.subcommand === undefined) return 'Git invocation has no explicit subcommand';
+  if (!AGENT_ALLOWED_GIT_SUBCOMMANDS.has(invocation.subcommand)) {
+    return `Git subcommand ${invocation.subcommand} is not on the explicit agent allowlist; repository aliases are never executed`;
+  }
+  return undefined;
+}
+
+/** Rejects every push-time config override so included config cannot redirect the actual push target. */
+export function prohibitedGitPushConfigOverrideReason(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (!argument.startsWith('-')) return undefined;
+    const lower = argument.toLowerCase();
+    if (argument === '-c' || lower === '--config-env') {
+      const value = args[index + 1];
+      if (value === undefined) return 'Git push config override is missing its value';
+      return 'Git push cannot use invocation-local config overrides; use the guarded repository configuration instead';
+    }
+    if ((argument.startsWith('-c') && !argument.startsWith('--')) || lower.startsWith('--config-env=')) {
+      return 'Git push cannot use invocation-local config overrides; use the guarded repository configuration instead';
+    }
+  }
+  return undefined;
+}
+
+/** Rejects global executable-path overrides before a guarded push reaches Git. */
+export function prohibitedGitPushGlobalOptionReason(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (!argument.startsWith('-')) return undefined;
+    const lower = argument.toLowerCase();
+    if (lower === '--exec-path' || lower.startsWith('--exec-path=')) {
+      return 'Git push cannot override the Git executable path; guarded pushes must use Git\'s normal helper programs';
+    }
+    if (lower === '--') return undefined;
+  }
+  return undefined;
+}
+
+/** Keeps native Git config mutations from installing executable transport helpers. */
+export function prohibitedGitConfigMutationReason(args: readonly string[]): string | undefined {
+  const invocation = parseGitInvocation(args);
+  if (invocation.subcommand !== 'config') return undefined;
+  const configArgs = invocation.subcommandArgs.map((argument) => argument.toLowerCase());
+  if (configArgs.some((argument) => ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', '--name-only', '--show-origin', '--show-scope'].includes(argument))) {
+    return undefined;
+  }
+  if (configArgs.some(isExecutableGitConfigKey)) {
+    return 'Git config cannot install executable transport or credential helpers';
+  }
+  return undefined;
+}
+
+function isExecutableGitConfigKey(argument: string): boolean {
+  const key = argument.split('=', 1)[0]!;
+  return key === 'core.sshcommand'
+    || key === 'core.askpass'
+    || key === 'core.gitproxy'
+    || key === 'credential.helper'
+    || /^credential\..+\.helper$/.test(key)
+    || key === 'push.gpgsign'
+    || key === 'push.recursesubmodules'
+    || key === 'submodule.recurse'
+    || /^gpg(?:\..+)?\.program$/.test(key)
+    || key === 'protocol.allow'
+    || /^protocol\..+\.allow$/.test(key)
+    || /^remote\..+\.(?:receivepack|uploadpack|proxy|vcs)$/.test(key);
+}
+
+function skipGitGlobalOption(args: readonly string[], index: number, option: string): GitInvocation {
+  const argument = args[index]!;
+  const hasAttachedValue = argument.includes('=') || (option === '-C' && argument.length > 2);
+  if (hasAttachedValue) {
+    return findGitSubcommand(args, index + 1, option);
+  }
+  return findGitSubcommand(args, index + 2, option);
+}
+
+function findGitSubcommand(args: readonly string[], start: number, scopeChangingOption: string): GitInvocation {
+  const parsed = parseGitInvocation(args.slice(start));
+  return { ...parsed, scopeChangingOption };
+}
+
+function scopeChangingGitOption(argument: string): string | undefined {
+  const lower = argument.toLowerCase();
+  if (argument === '-C' || (argument.startsWith('-C') && !argument.startsWith('--'))) return '-C';
+  if (lower === '--git-dir' || lower.startsWith('--git-dir=')) return '--git-dir';
+  if (lower === '--work-tree' || lower.startsWith('--work-tree=')) return '--work-tree';
+  return undefined;
+}
+
+export function prohibitedAgentGitInvocationReason(args: readonly string[], options: GitMutationPolicyOptions = {}): string | undefined {
   if (args.length === 0) return 'Git invocation has no explicit subcommand';
   const first = args[0]!.toLowerCase();
   if (first.startsWith('-')) {
@@ -91,6 +236,7 @@ export function prohibitedAgentGitInvocationReason(args: readonly string[]): str
   if (first === 'gc') return 'git gc can permanently prune otherwise recoverable objects';
   if (first === 'mv' && hasGitOption(lower, ['--force', '-f'])) return 'git mv --force can replace an existing path';
   if (first === 'push' && isDestructivePush(lower)) return 'git push invocation deletes or force-rewrites remote refs';
+  if (first === 'push') return prohibitedDefaultBranchPushReason(rest, options.defaultBranch);
   return undefined;
 }
 
@@ -101,6 +247,89 @@ function hasGitOption(args: readonly string[], options: readonly string[]): bool
 function isDestructivePush(args: readonly string[]): boolean {
   if (hasGitOption(args, ['--force', '-f', '--force-with-lease', '--force-if-includes', '--delete', '--mirror', '--prune'])) return true;
   return args.some((arg) => arg.startsWith(':') || arg.startsWith('+'));
+}
+
+export function prohibitedDefaultBranchPushReason(args: readonly string[], defaultBranch?: string): string | undefined {
+  const sideEffectOption = args.find((arg) => {
+    const lower = arg.toLowerCase();
+    return lower === '--receive-pack'
+      || lower.startsWith('--receive-pack=')
+      || lower === '--exec'
+      || lower.startsWith('--exec=')
+      || lower === '--signed'
+      || lower.startsWith('--signed=');
+  });
+  if (sideEffectOption !== undefined) {
+    return `AI-issued git push cannot use ${sideEffectOption}; guarded pushes must use Git's normal transport`;
+  }
+  const recursiveOption = args.find((arg) => {
+    const lower = arg.toLowerCase();
+    return lower === '--recurse-submodules' || lower.startsWith('--recurse-submodules=');
+  });
+  if (recursiveOption !== undefined) {
+    return `AI-issued git push cannot use ${recursiveOption}; guarded pushes cannot launch nested submodule pushes`;
+  }
+  const parsed = parseGitPushArguments(args);
+  if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is not on the explicit allowlist or is missing its value`;
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (hasGitOption(lower, ['--all'])) {
+    return 'AI-issued git push --all can update the default branch; push one explicit feature or issue branch and use a reviewed pull request instead';
+  }
+
+  if (parsed.remote === undefined || parsed.refspecs.length === 0) {
+    return 'AI-issued git push must name an explicit remote and non-default destination branch; implicit push can bypass the pull-request review workflow';
+  }
+
+  for (const refspec of parsed.refspecs) {
+    if (refspec.includes('*') || refspec.includes('?') || refspec.includes('[') || refspec.includes(']')) {
+      return 'AI-issued git push wildcard refspecs are blocked because they can update the default branch; push one explicit feature or issue branch instead';
+    }
+    const separator = refspec.lastIndexOf(':');
+    const destinationRaw = separator >= 0 ? refspec.slice(separator + 1) : refspec;
+    const destination = destinationRaw.replace(/^refs\/heads\//i, '').toLowerCase();
+    if (destination === '' || (separator < 0 && (destination === 'head' || destination === '@'))) {
+      return 'AI-issued git push must use an explicit non-default destination branch so the pull-request review workflow cannot be bypassed';
+    }
+    if (defaultBranch !== undefined && destination === normalizeBranch(defaultBranch)) {
+      return `Direct AI push to ${destination} is blocked; push a feature or issue branch and merge it only after pull-request review`;
+    }
+  }
+  return undefined;
+}
+
+export function parseGitPushArguments(args: readonly string[]): GitPushArguments {
+  const positional: string[] = [];
+  let optionRemote: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    const lower = argument.toLowerCase();
+    if (argument === '--') {
+      positional.push(...args.slice(index + 1));
+      break;
+    }
+    if (GIT_PUSH_OPTIONS_WITH_VALUES.has(lower)) {
+      const value = args[index + 1];
+      if (value === undefined) return { refspecs: [], invalidOption: argument };
+      if (lower === '--repo') optionRemote = value;
+      index += 1;
+      continue;
+    }
+    const optionName = lower.split('=', 1)[0]!;
+    if (GIT_PUSH_OPTIONS_WITH_VALUES.has(optionName)) {
+      if (optionName === '--repo') optionRemote = argument.slice(argument.indexOf('=') + 1);
+      continue;
+    }
+    if (argument.startsWith('--') && !GIT_PUSH_OPTIONS.has(optionName)) return { refspecs: [], invalidOption: argument };
+    if (!argument.startsWith('-')) positional.push(argument);
+  }
+  if (optionRemote !== undefined) return { remote: optionRemote, refspecs: positional };
+  return positional[0] === undefined
+    ? { refspecs: [] }
+    : { remote: positional[0], refspecs: positional.slice(1) };
+}
+
+function normalizeBranch(value: string): string {
+  return value.trim().replace(/^refs\/heads\//i, '').toLowerCase();
 }
 
 function containsBroadPathspecMagic(args: readonly string[]): boolean {

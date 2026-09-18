@@ -4,9 +4,17 @@ import time
 from pathlib import Path
 from thai_rag.storage import StorageManager
 from thai_rag.retriever import HybridRetriever
-from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
 from thai_rag.code_chunker import CodeChunker
 from thai_rag.server import LocalContextServer
+from tests.fakes import DeterministicEmbeddingAdapter
+
+
+def _hermetic_server(*args, **kwargs):
+    server = LocalContextServer(*args, **kwargs)
+    fake_embedder = DeterministicEmbeddingAdapter()
+    server.embedder = fake_embedder
+    server.retriever.embedder = fake_embedder
+    return server
 
 @pytest.fixture
 def temp_env():
@@ -14,7 +22,7 @@ def temp_env():
     sqlite_p = Path(td) / "test_context.db"
     chroma_p = Path(td) / "chroma"
     storage = StorageManager(sqlite_path=sqlite_p, chroma_path=str(chroma_p))
-    embedder = OllamaEmbeddingAdapter()
+    embedder = DeterministicEmbeddingAdapter()
     chunker = CodeChunker()
     retriever = HybridRetriever(storage=storage, embedder=embedder, chunker=chunker)
     yield storage, retriever, embedder, chunker
@@ -59,7 +67,7 @@ def test_pre_edit_context_integration(temp_env):
     storage, retriever, embedder, chunker = temp_env
 
     # Setup a dummy server
-    server = LocalContextServer(
+    server = _hermetic_server(
         sqlite_path=storage.sqlite_path,
         chroma_path=storage.chroma_path
     )
@@ -110,7 +118,7 @@ def test_resave_same_turn_id_no_fts_duplicate(temp_env):
 def test_remember_turn_accepts_stable_turn_id_and_retries_idempotently(temp_env, monkeypatch):
     """A caller-supplied turn_id must survive ambiguous retries without duplicate rows."""
     storage, *_ = temp_env
-    server = LocalContextServer(
+    server = _hermetic_server(
         sqlite_path=storage.sqlite_path,
         chroma_path=storage.chroma_path,
     )
@@ -154,11 +162,7 @@ def test_mcp_remember_turn_exposes_optional_turn_id():
 def test_recall_category_returns_turns(temp_env):
     """BUG-8 regression: recall(category=...) must return remember_turn turns, not drop them."""
     storage, retriever, embedder, chunker = temp_env
-    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
-    if not embedder.is_alive():
-        # Skip when Ollama is unavailable (only embeddings need it)
-        server.close()
-        pytest.skip("Ollama not available")
+    server = _hermetic_server(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
     server.remember_turn(role="user", content="ตัดสินใจ: ใช้ JWT ไม่ใช่ session", workspace="ws", tags=["decision"])
     server.remember("ผู้ใช้ชอบธีมสีมืด", category="preference")
     res = server.recall("ตัดสินใจ JWT", category="decision", limit=5)
@@ -179,10 +183,7 @@ def test_turn_tags_stored_as_list_not_perchar(temp_env):
 def test_recall_turn_shows_date_and_category(temp_env):
     """BUG-8b regression: turn results carry created_at + category in metadata."""
     storage, retriever, embedder, chunker = temp_env
-    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
-    if not embedder.is_alive():
-        server.close()
-        pytest.skip("Ollama not available")
+    server = _hermetic_server(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
     server.remember_turn(role="assistant", content="สรุป bug fix", workspace="ws", tags=["constraint"], summary="bug")
     res = server.recall("bug fix", limit=5)
     assert "Date:" in res
@@ -195,10 +196,7 @@ def test_recall_turn_shows_date_and_category(temp_env):
 def test_untagged_turn_passes_category_filter(temp_env):
     """(A) Untagged/general turns must pass any category query (wildcard)."""
     storage, retriever, embedder, chunker = temp_env
-    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
-    if not embedder.is_alive():
-        server.close()
-        pytest.skip("Ollama not available")
+    server = _hermetic_server(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
     server.remember_turn(
         role="user",
         content="ตัดสินใจใช้ JWT สำหรับ auth flow ใหม่ทั้งหมด",
@@ -214,10 +212,7 @@ def test_untagged_turn_passes_category_filter(temp_env):
 def test_explicit_mismatch_still_excluded(temp_env):
     """(A) A concrete non-matching category must still be filtered out."""
     storage, retriever, embedder, chunker = temp_env
-    server = LocalContextServer(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
-    if not embedder.is_alive():
-        server.close()
-        pytest.skip("Ollama not available")
+    server = _hermetic_server(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
     server.remember_turn(
         role="user",
         content="ผู้ใช้ชอบธีมสีมืดสำหรับการ coding ตอนกลางคืนมาก",

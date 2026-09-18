@@ -5,6 +5,15 @@ from pathlib import Path
 from thai_rag.cpg_extractor import extract_cpg
 from thai_rag.storage import StorageManager
 from thai_rag.server import LocalContextServer
+from tests.fakes import DeterministicEmbeddingAdapter
+
+def _hermetic_server(*args, **kwargs):
+    server = LocalContextServer(*args, **kwargs)
+    fake_embedder = DeterministicEmbeddingAdapter()
+    server.embedder = fake_embedder
+    server.retriever.embedder = fake_embedder
+    return server
+
 
 PYTHON_SAMPLE = """
 import os
@@ -133,7 +142,7 @@ def test_pre_edit_context_with_cpg_blast_radius():
         symbols, edges = extract_cpg(file_path, PYTHON_SAMPLE, workspace="test_ws")
         storage.save_code_graph(file_path, symbols, edges, workspace="test_ws")
 
-        server = LocalContextServer(storage=storage)
+        server = _hermetic_server(storage=storage)
         res = server.pre_edit_context(file_path=file_path, proposed_symbol="validate", workspace="test_ws")
         
         assert res["can_proceed"] is True

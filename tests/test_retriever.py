@@ -3,7 +3,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from thai_rag.storage import StorageManager
-from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
+from tests.fakes import DeterministicEmbeddingAdapter
 from thai_rag.code_chunker import CodeChunker
 from thai_rag.retriever import HybridRetriever
 
@@ -13,7 +13,7 @@ def temp_env():
     db_path = Path(temp_dir) / "test.db"
     chroma_path = str(Path(temp_dir) / "chroma")
     storage = StorageManager(sqlite_path=db_path, chroma_path=chroma_path)
-    adapter = OllamaEmbeddingAdapter()
+    adapter = DeterministicEmbeddingAdapter()
     chunker = CodeChunker()
     retriever = HybridRetriever(storage=storage, embedder=adapter, chunker=chunker)
 
@@ -200,7 +200,7 @@ def test_incremental_skip_by_mtime():
         storage = StorageManager(sqlite_path=db_path, chroma_path=chroma_path)
         retriever = HybridRetriever(
             storage=storage,
-            embedder=OllamaEmbeddingAdapter(),
+            embedder=DeterministicEmbeddingAdapter(),
             chunker=CodeChunker(),
         )
         ws_dir = Path(temp_dir) / "ws"
@@ -239,7 +239,7 @@ def test_code_search_absolute_path_filter():
     temp_dir = tempfile.mkdtemp()
     try:
         storage = StorageManager(sqlite_path=str(Path(temp_dir) / "t.db"), chroma_path=str(Path(temp_dir) / "ch"))
-        retriever = HybridRetriever(storage=storage, embedder=OllamaEmbeddingAdapter(), chunker=CodeChunker())
+        retriever = HybridRetriever(storage=storage, embedder=DeterministicEmbeddingAdapter(), chunker=CodeChunker())
         ws_dir = Path(temp_dir) / "finance"
         ws_dir.mkdir()
         f = ws_dir / "calc.py"

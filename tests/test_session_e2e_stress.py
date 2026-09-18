@@ -1,4 +1,6 @@
 import pytest
+
+pytestmark = pytest.mark.stress
 import tempfile
 from pathlib import Path
 from scripts.e2e_stress_session_test import (

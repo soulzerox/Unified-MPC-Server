@@ -3,6 +3,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from thai_rag.server import LocalContextServer
+from tests.fakes import DeterministicEmbeddingAdapter
 
 @pytest.fixture
 def diag_server():
@@ -10,6 +11,9 @@ def diag_server():
     db_path = Path(temp_dir) / "diag.db"
     chroma_path = str(Path(temp_dir) / "diag_chroma")
     server = LocalContextServer(sqlite_path=db_path, chroma_path=chroma_path)
+    fake_embedder = DeterministicEmbeddingAdapter()
+    server.embedder = fake_embedder
+    server.retriever.embedder = fake_embedder
     yield server
     server.close()
     shutil.rmtree(temp_dir, ignore_errors=True)
@@ -59,9 +63,11 @@ def test_code_context_nonexistent_file(diag_server):
     res = diag_server.code_context("non_existent_file.py", line_number=100)
     assert "No context found" in res
 
-def test_ollama_health_check(diag_server):
-    # Valid embedder should report alive
-    assert diag_server.embedder.is_alive() is True
+@pytest.mark.integration
+def test_ollama_health_check():
+    from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
+
+    assert OllamaEmbeddingAdapter().is_alive() is True
 
 def test_ollama_unreachable_handling():
     from thai_rag.ollama_adapter import OllamaEmbeddingAdapter

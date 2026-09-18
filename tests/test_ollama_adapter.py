@@ -6,6 +6,7 @@ def test_ollama_adapter_init():
     assert adapter.base_url == "http://127.0.0.1:11434"
     assert adapter.model == "nomic-embed-text-v2-moe:latest"
 
+@pytest.mark.integration
 def test_ollama_embed_query():
     adapter = OllamaEmbeddingAdapter()
     vec = adapter.embed_query("ทดสอบค้นหาฟังก์ชัน")
@@ -13,12 +14,14 @@ def test_ollama_embed_query():
     assert len(vec) == 768
     assert all(isinstance(x, float) for x in vec)
 
+@pytest.mark.integration
 def test_ollama_embed_document():
     adapter = OllamaEmbeddingAdapter()
     vec = adapter.embed_document("def hello(): return 'world'")
     assert isinstance(vec, list)
     assert len(vec) == 768
 
+@pytest.mark.integration
 def test_ollama_embed_documents_batch():
     adapter = OllamaEmbeddingAdapter()
     docs = ["เอกสารที่หนึ่ง", "def second(): pass"]

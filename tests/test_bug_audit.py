@@ -15,7 +15,16 @@ from unittest import mock
 import pytest
 
 from thai_rag.server import LocalContextServer, _INDEX_JOBS, _INDEX_JOBS_LOCK, _new_index_job
+from tests.fakes import DeterministicEmbeddingAdapter
 from thai_rag.retriever import HybridRetriever
+
+def _hermetic_server(*args, **kwargs):
+    server = LocalContextServer(*args, **kwargs)
+    fake_embedder = DeterministicEmbeddingAdapter()
+    server.embedder = fake_embedder
+    server.retriever.embedder = fake_embedder
+    return server
+
 
 # --- BUG-1: CPG failure must be logged, not silently swallowed ---
 
@@ -23,7 +32,7 @@ from thai_rag.retriever import HybridRetriever
 def test_cpg_extraction_error_is_logged(monkeypatch, caplog):
     """index_file logs a warning but still stores parent docs when CPG raises."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -53,7 +62,7 @@ def test_index_jobs_thread_safety():
     """Daemon-style concurrent writes + reads on _INDEX_JOBS do not lose updates."""
     import threading
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -102,7 +111,7 @@ def test_fts_special_keywords_no_error():
 
 def test_remember_turn_warns_on_embed_failure(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -131,7 +140,7 @@ def test_remember_turn_warns_on_embed_failure(monkeypatch):
 def test_ingest_turns_counts_correctly(monkeypatch):
     from scripts.embed_session_audit import ingest_turns
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -168,7 +177,7 @@ def _no_embed(monkeypatch, embedder):
 def test_code_search_fts_only_when_ollama_down(monkeypatch):
     """BUG-R1: code_search returns FTS results (not an Ollama error) when embedder is down."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -199,7 +208,7 @@ def test_code_search_fts_only_when_ollama_down(monkeypatch):
 def test_index_file_canonicalizes_bare_path(monkeypatch):
     """BUG-R2: parents/chunks/cpg all store the workspace-prefixed canonical path."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -223,7 +232,7 @@ def test_index_file_canonicalizes_bare_path(monkeypatch):
 def test_get_file_symbols_matches_bare_and_canonical():
     """BUG-R3: lookup must resolve legacy bare rows and canonical rows for the same file."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -257,7 +266,7 @@ def test_get_file_symbols_matches_bare_and_canonical():
 def test_blast_radius_workspace_scoping():
     """BUG-R3: symbol identical in two workspaces must not leak callers across workspaces."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -300,7 +309,7 @@ def test_normalize_bare_paths_idempotent():
     from scripts.normalize_bare_paths import normalize_bare_paths
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -336,7 +345,7 @@ def test_path_filter_vector_search_does_not_deplete_fetch_pool():
     among Chroma's nearest top_k — the python-side path filter needs a larger
     candidate pool than top_k."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -390,7 +399,7 @@ def test_index_workspace_logs_errors_instead_of_silent_skip(tmp_path, caplog):
     (work / "bad.py").write_text("def boom():\n    return 1\n")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -426,7 +435,7 @@ def test_get_context_normalizes_absolute_path(tmp_path):
     """code_context-style lookup with an absolute file path must resolve to the
     <ws>/<rel> parent doc that index_file stored (BUG-10 class)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -492,7 +501,7 @@ def test_ts_arrow_regex_rejects_assignment_with_call_rhs():
 def test_recall_clamps_invalid_limit(monkeypatch):
     """recall with limit=0 or a negative int must not leak a raw Chroma error."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        server = LocalContextServer(
+        server = _hermetic_server(
             sqlite_path=Path(tmpdir) / "t.db",
             chroma_path=str(Path(tmpdir) / "chroma"),
         )
@@ -525,13 +534,12 @@ def test_recall_clamps_invalid_limit(monkeypatch):
 
 def _make_storage_retriever(tmpdir):
     from thai_rag.storage import StorageManager
-    from thai_rag.ollama_adapter import OllamaEmbeddingAdapter
     from thai_rag.code_chunker import CodeChunker
 
     storage = StorageManager(sqlite_path=Path(tmpdir) / "t.db", chroma_path=str(Path(tmpdir) / "chroma"))
     retriever = HybridRetriever(
         storage=storage,
-        embedder=OllamaEmbeddingAdapter(),
+        embedder=DeterministicEmbeddingAdapter(),
         chunker=CodeChunker(),
     )
     return storage, retriever

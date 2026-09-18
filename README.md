@@ -56,7 +56,7 @@ flowchart TD
         end
     end
 
-    subgraph Storage_Layer [100% Local Storage /mnt/562AEA8C2AEA6887]
+    subgraph Storage_Layer [100% Local Storage / configurable THAI_RAG_CACHE_DIR]
         SQLite[(SQLite local_context.db\nFTS5 unicode61 + PyThaiNLP\ncode_symbols & code_edges\nconversation_turns)]
         Chroma[(ChromaDB Vector Store\nmemory_vectors & code_vectors)]
         Ollama[Local Ollama Server\nnomic-embed-text-v2-moe]
@@ -109,10 +109,24 @@ flowchart TD
    ```bash
    ollama pull nomic-embed-text-v2-moe
    ```
-2. **ที่ตั้งของโปรเจกต์**:
-   - Repository Path: `/home/qwerty/thai-rag-mcp` (หรือ symlink ไปยัง `/mnt/562AEA8C2AEA6887/thai-rag-mcp`)
-   - Python Virtual Environment: `/home/qwerty/thai-rag-mcp/venv/bin/python3`
-   - Entrypoint Script: `/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py`
+2. **Python 3.10+ และติดตั้งแพ็กเกจจาก repository**:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   python -m pip install -e .
+   ```
+   หลังติดตั้งจะมีคำสั่ง `thai-rag-mcp` ใน environment โดยไม่ต้องอ้าง path ของ repository หรือไฟล์ entrypoint โดยตรง
+
+   ถ้าต้องการ Floating HUD ให้ติดตั้ง extra:
+   ```bash
+   python -m pip install -e ".[hud]"
+   ```
+
+3. **ที่เก็บข้อมูล** (ไม่บังคับ): ค่าเริ่มต้นคือ `~/.cache/thai-rag-mcp` และเปลี่ยนได้ด้วย `THAI_RAG_CACHE_DIR`
+   ```bash
+   export THAI_RAG_CACHE_DIR="/path/to/thai-rag-cache"
+   ```
 
 ---
 
@@ -125,8 +139,8 @@ flowchart TD
 {
   "mcpServers": {
     "thai-rag-mcp": {
-      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-      "args": ["/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"],
+      "command": "thai-rag-mcp",
+      "args": [],
       "disabled": false,
       "autoApprove": [
         "remember",
@@ -155,8 +169,8 @@ flowchart TD
 {
   "mcpServers": {
     "thai-rag-mcp": {
-      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-      "args": ["/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"]
+      "command": "thai-rag-mcp",
+      "args": []
     }
   }
 }
@@ -173,8 +187,8 @@ flowchart TD
 {
   "mcpServers": {
     "thai-rag-mcp": {
-      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-      "args": ["/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"]
+      "command": "thai-rag-mcp",
+      "args": []
     }
   }
 }
@@ -190,8 +204,8 @@ flowchart TD
 {
   "mcpServers": {
     "thai-rag-mcp": {
-      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-      "args": ["/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"]
+      "command": "thai-rag-mcp",
+      "args": []
     }
   }
 }
@@ -222,8 +236,8 @@ flowchart TD
   "mcp": {
     "thai-rag-mcp": {
       "type": "stdio",
-      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-      "args": ["/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"]
+      "command": "thai-rag-mcp",
+      "args": []
     }
   }
 }
@@ -241,12 +255,56 @@ flowchart TD
 {
   "mcpServers": {
     "thai-rag-mcp": {
-      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-      "args": ["/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"]
+      "command": "thai-rag-mcp",
+      "args": []
     }
   }
 }
 ```
+
+---
+
+## 📦 การติดตั้ง การทดสอบ และ Dependency Policy
+
+### Standalone MCP
+
+หลัง `pip install -e .` หรือการติดตั้งแพ็กเกจแบบปกติ สามารถเริ่ม stdio MCP ได้โดยตรง:
+
+```bash
+thai-rag-mcp --stdio
+```
+
+การรัน `thai-rag-mcp` โดยไม่มี argument ใช้ stdio เช่นเดียวกัน ส่วนไฟล์ `thai_rag_context_mcp.py` ยังคงเป็น compatibility wrapper สำหรับผู้ใช้เดิม
+
+### Test profiles
+
+ติดตั้ง dependency สำหรับทดสอบก่อน:
+
+```bash
+python -m pip install -e ".[test]"
+```
+
+Default suite เป็น **hermetic/unit profile**: ไม่เรียก network, ไม่ต้องมี Ollama และใช้ temporary SQLite/Chroma เท่านั้น
+
+```bash
+python -m pytest
+```
+
+งานที่ต้องพึ่ง environment ภายนอกแยกเป็น opt-in markers:
+
+```bash
+python -m pytest -m integration   # ต้อง provision Ollama/local integration service เอง
+python -m pytest -m stress        # stress/session harness
+python -m pytest -m benchmark     # quality/performance/migration benchmark
+```
+
+Test doubles สำหรับ embeddings เป็น deterministic, non-zero และกำหนด dimension ได้ เพื่อไม่ผูก unit tests เข้ากับ model/vector dimension เดียว
+
+### Dependency update policy
+
+Runtime dependencies ถูกประกาศใน `pyproject.toml` ด้วยช่วงเวอร์ชันที่จำกัด major version เพื่อหลีกเลี่ยงการ float ข้าม storage/protocol incompatibility โดยไม่ตั้งใจ การขยับ major version ให้ทำผ่าน PR แยก พร้อมรัน hermetic suite และ integration ที่เกี่ยวข้องก่อน merge
+
+`hud` เป็น optional extra เพื่อให้ provider/standalone core ไม่บังคับติดตั้ง Pillow/pystray หากไม่ได้ใช้ UI
 
 ---
 
@@ -291,7 +349,7 @@ flowchart TD
 
 ### 1. ดัชนีโปรเจกต์ใหม่ (Incremental Indexing with SHA256 Cache)
 ```bash
-/home/qwerty/thai-rag-mcp/venv/bin/python3 /home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py --index "/path/to/project"
+thai-rag-mcp --index "/path/to/project"
 ```
 - ระบบจะเปิดหน้าต่าง **Floating HUD** ลอยขึ้นมามุมจออัตโนมัติ แสดง Progress Bar, จำนวนคิว และ EWMA ETA
 - ไฟล์ที่ไม่มีการเปลี่ยนแปลงจะถูกข้ามผ่าน SHA256 cache ในเวลาไม่กี่มิลลิวินาที
@@ -299,7 +357,7 @@ flowchart TD
 
 ### 2. บังคับดัชนีใหม่ทั้งหมด (Force Re-index)
 ```bash
-/home/qwerty/thai-rag-mcp/venv/bin/python3 /home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py --index "/path/to/project" --force
+thai-rag-mcp --index "/path/to/project" --force
 ```
 
 ### 2b. ดัชนี workspace ใหญ่แบบ Background (ไม่บล็อก Agent)
@@ -318,13 +376,13 @@ index_status(job_id="idx_xxxxxxxx")
 
 ### 3. ดูดประวัติแชตย้อนหลังเข้าสู่ Memory (Historical Chat Ingestion)
 ```bash
-/home/qwerty/thai-rag-mcp/venv/bin/python3 /home/qwerty/thai-rag-mcp/scripts/ingest_history.py
+python scripts/ingest_history.py
 ```
 - ดูด Log ทั้งหมดจาก `~/.cline/data/memory/knowledge-graph.jsonl` และ Antigravity Transcripts เข้าสู่ฐานข้อมูล SQLite FTS5 และ ChromaDB อัตโนมัติ
 
 ### 4. รัน Real-Session E2E Stress & Smoke Benchmark
 ```bash
-/home/qwerty/thai-rag-mcp/venv/bin/python3 /home/qwerty/thai-rag-mcp/scripts/e2e_stress_session_test.py
+python scripts/e2e_stress_session_test.py
 ```
 
 ---
@@ -336,7 +394,7 @@ index_status(job_id="idx_xxxxxxxx")
 | **Ollama Unreachable Error** | Service Ollama ยังไม่ได้ถูกรัน | เปิด Terminal แล้วพิมพ์ `ollama serve` หรือตรวจสอบว่ารันพอร์ต `11434` อยู่หรือไม่ |
 | **Model Not Found Error** | ยังไม่ได้ดาวน์โหลดโมเดล Embedding | พิมพ์คำสั่ง `ollama pull nomic-embed-text-v2-moe` |
 | **ค้นหาภาษาไทยไม่เจอ** | ลืมตัดคำภาษาไทย | ระบบเวอร์ชันล่าสุดมี `pythainlp.tokenize.word_tokenize(..., engine="newmm")` ตัดคำลง FTS5 อัตโนมัติ |
-| **เนื้อที่ดิสก์ Root `/` เต็ม** | แคชขนาดใหญ่กินเนื้อที่ระบบ | เซิร์ฟเวอร์นี้ย้ายฐานข้อมูลและเวกเตอร์ทั้งหมดไปจัดเก็บไว้ที่ `/mnt/562AEA8C2AEA6887/.cache/thai-rag-mcp` ผ่าน Symlink ปลอดภัย 100% |
+| **เนื้อที่ดิสก์ Root `/` เต็ม** | แคชขนาดใหญ่กินเนื้อที่ระบบ | ตั้ง `THAI_RAG_CACHE_DIR` ไปยัง volume ที่มีพื้นที่เพียงพอ แล้ว restart server; ไม่ต้องใช้ symlink หรือ path เฉพาะเครื่อง |
 | **Git Permission บน NTFS mount** | ไฟล์บน NTFS mount ถูกเซ็ตโหมด 755 อัตโนมัติ | รันคำสั่ง `git config core.fileMode false` ภายในโฟลเดอร์โปรเจกต์ |
 
 ---

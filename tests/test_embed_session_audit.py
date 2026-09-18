@@ -1,6 +1,8 @@
 """Pytest wrapper for the embed-session audit harness (temp isolated storage only)."""
 import sys
 import pytest
+
+pytestmark = pytest.mark.stress
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

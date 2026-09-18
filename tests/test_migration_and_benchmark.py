@@ -3,6 +3,9 @@ import tempfile
 import shutil
 from pathlib import Path
 from thai_rag.server import LocalContextServer
+from tests.fakes import DeterministicEmbeddingAdapter
+
+pytestmark = pytest.mark.benchmark
 
 @pytest.fixture
 def bench_server():
@@ -10,6 +13,9 @@ def bench_server():
     db_path = Path(temp_dir) / "bench.db"
     chroma_path = str(Path(temp_dir) / "bench_chroma")
     server = LocalContextServer(sqlite_path=db_path, chroma_path=chroma_path)
+    fake_embedder = DeterministicEmbeddingAdapter()
+    server.embedder = fake_embedder
+    server.retriever.embedder = fake_embedder
     yield server
     server.close()
     shutil.rmtree(temp_dir, ignore_errors=True)

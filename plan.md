@@ -88,10 +88,8 @@
 ```json
 "mcpServers": {
   "thai-context-aware-rag": {
-    "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
-    "args": [
-      "/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"
-    ]
+    "command": "thai-rag-mcp",
+    "args": []
   }
 }
 ```

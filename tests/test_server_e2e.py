@@ -3,6 +3,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from thai_rag.server import LocalContextServer
+from tests.fakes import DeterministicEmbeddingAdapter
 
 @pytest.fixture
 def test_server():
@@ -10,6 +11,9 @@ def test_server():
     db_path = Path(temp_dir) / "test_mcp.db"
     chroma_path = str(Path(temp_dir) / "test_chroma")
     server = LocalContextServer(sqlite_path=db_path, chroma_path=chroma_path)
+    fake_embedder = DeterministicEmbeddingAdapter()
+    server.embedder = fake_embedder
+    server.retriever.embedder = fake_embedder
     
     # Create a small dummy workspace
     ws_dir = Path(temp_dir) / "workspace"

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=80,<82", "wheel>=0.45,<1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thai-rag-mcp"
+version = "0.1.0"
+description = "Local Thai-aware memory, code retrieval, and CPG MCP provider"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "soulzerox" }]
+dependencies = [
+  "chromadb>=1.5,<2",
+  "mcp>=1.26,<3",
+  "pythainlp>=5.3,<6",
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+hud = [
+  "Pillow>=11,<13",
+  "pystray>=0.19,<1",
+]
+test = [
+  "pytest>=8,<9",
+]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+thai-rag-mcp = "thai_rag.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["thai_rag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not integration and not stress and not benchmark'"
+markers = [
+  "integration: requires an explicitly provisioned local integration service such as Ollama",
+  "stress: opt-in stress/session tests that may require local fixtures",
+  "benchmark: opt-in quality/performance or migration benchmark tests",
+]

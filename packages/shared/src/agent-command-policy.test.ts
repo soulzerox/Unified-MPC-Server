@@ -58,10 +58,20 @@ describe('agent command policy', () => {
 
   it.each([
     ['git', ['push', 'origin', 'feature/review-gate']],
-    ['bash', ['-lc', 'git push origin feature/review-gate']],
-    ['powershell.exe', ['-Command', 'git push origin feature/review-gate']],
+    ['bash', ['-lc', 'git -c color.ui=false push origin feature/review-gate']],
+    ['powershell.exe', ['-Command', 'git.exe push origin feature/review-gate']],
+    ['cmd.exe', ['/c', '"git push origin feature/review-gate"']],
   ] as const)('hard-blocks unscoped Git push execution: %s', (executable, args) => {
     expect(prohibitedUnscopedGitPushReason(executable, args)).toBeDefined();
     expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['bash', ['-lc', 'echo ok']],
+    ['node', ['script.js']],
+    ['python3', ['script.py']],
+  ] as const)('rejects opaque Git-capable runners in strict mode: %s', (executable, args) => {
+    expect(prohibitedUnscopedGitPushReason(executable, args, { rejectOpaqueGitRunners: true })).toContain('Git integration');
+    expect(prohibitedUnscopedGitPushReason(executable, args)).toBeUndefined();
   });
 });

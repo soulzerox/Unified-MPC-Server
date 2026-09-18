@@ -208,7 +208,7 @@ export class ProcessService {
     if (isAborted(signal)) return cancelledStart();
     if (!cwd.ok) return cwd;
 
-    const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.args);
+    const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.args, { rejectOpaqueGitRunners: bypassAuthorization });
     if (unscopedGitPush !== undefined) return err(appError('PERMISSION_DENIED', unscopedGitPush));
 
     const applicationApproved = isApplicationAuthorized(authorization, request.userConfirmed === true);

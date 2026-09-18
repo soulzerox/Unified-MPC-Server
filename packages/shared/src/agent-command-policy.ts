@@ -7,9 +7,16 @@ const DIRECT_RISKY_EXECUTABLES = new Set([
 const HARD_BLOCK_EXECUTABLES = new Set(['shutdown', 'reboot', 'poweroff', 'halt']);
 const POSIX_SHELL_EXECUTABLES = new Set(['sh', 'dash', 'bash', 'zsh', 'fish']);
 const POWERSHELL_EXECUTABLES = new Set(['pwsh', 'powershell']);
+const WINDOWS_SHELL_EXECUTABLES = new Set(['cmd']);
 const JAVASCRIPT_EXECUTABLES = new Set(['node', 'nodejs', 'bun', 'deno']);
 const PYTHON_EXECUTABLES = new Set(['python', 'python3']);
 const INLINE_SCRIPT_EXECUTABLES = new Set(['perl', 'ruby']);
+const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-c', '-cde', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
+
+export interface UnscopedGitPushPolicyOptions {
+  /** Reject opaque runners whose child processes cannot be inspected under Full Bypass. */
+  readonly rejectOpaqueGitRunners?: boolean;
+}
 
 /**
  * Hard blocks machine-level commands plus terminal-style inline text editing that
@@ -31,19 +38,63 @@ export function prohibitedAgentCommandReason(executable: string, args: readonly 
   return undefined;
 }
 
-export function prohibitedUnscopedGitPushReason(executable: string, args: readonly string[]): string | undefined {
+export function prohibitedUnscopedGitPushReason(
+  executable: string,
+  args: readonly string[],
+  options: UnscopedGitPushPolicyOptions = {},
+): string | undefined {
   const basename = executableBasename(executable);
-  if (basename === 'git' && args[0]?.toLowerCase() === 'push') return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
-  if (POSIX_SHELL_EXECUTABLES.has(basename)) {
+  if (basename === 'git' && hasGitPushArguments(args)) return guardedGitPushReason();
+  if (isOpaqueGitRunner(basename)) {
+    if (options.rejectOpaqueGitRunners) return 'Generic shell/interpreter execution cannot perform Git integration under Full Bypass; use the guarded git tool';
     const commandText = interpreterCommandText(basename, args);
-    if (commandText !== undefined && /\bgit[\t ]+push\b/i.test(commandText)) return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
-  }
-  if (POWERSHELL_EXECUTABLES.has(basename)) {
-    const commandIndex = args.findIndex((arg) => ['-command', '-c'].includes(arg.toLowerCase()));
-    const commandText = commandIndex >= 0 ? args.slice(commandIndex + 1).join(' ') : undefined;
-    if (commandText !== undefined && /\bgit[\t ]+push\b/i.test(commandText)) return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
+    if (commandText !== undefined && hasGitPushCommand(commandText)) return guardedGitPushReason();
   }
   return undefined;
+}
+
+function guardedGitPushReason(): string {
+  return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
+}
+
+function isOpaqueGitRunner(basename: string): boolean {
+  return POSIX_SHELL_EXECUTABLES.has(basename)
+    || POWERSHELL_EXECUTABLES.has(basename)
+    || WINDOWS_SHELL_EXECUTABLES.has(basename)
+    || JAVASCRIPT_EXECUTABLES.has(basename)
+    || PYTHON_EXECUTABLES.has(basename)
+    || INLINE_SCRIPT_EXECUTABLES.has(basename);
+}
+
+function hasGitPushArguments(args: readonly string[]): boolean {
+  let index = 0;
+  while (index < args.length) {
+    const argument = args[index]!.toLowerCase();
+    if (argument === 'push') return true;
+    if (!argument.startsWith('-')) return false;
+    index += optionTakesValue(argument) && !argument.includes('=') ? 2 : 1;
+  }
+  return false;
+}
+
+function hasGitPushCommand(commandText: string): boolean {
+  const tokens = commandText.split(/\s+/).filter(Boolean).map((token) => token.replace(/^[('"`]+|[)"'`;|&]+$/g, ''));
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = unquote(tokens[index]!).toLowerCase();
+    if (token !== 'git' && token !== 'git.exe') continue;
+    if (hasGitPushArguments(tokens.slice(index + 1).map(unquote))) return true;
+  }
+  return false;
+}
+
+function unquote(value: string): string {
+  return value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+    ? value.slice(1, -1)
+    : value;
+}
+
+function optionTakesValue(argument: string): boolean {
+  return GIT_GLOBAL_OPTIONS_WITH_VALUES.has(argument);
 }
 
 function terminalTextEditRoutingReason(basename: string, args: readonly string[]): string | undefined {
@@ -134,7 +185,13 @@ function riskyCommandText(value: string): boolean {
 
 function interpreterCommandText(basename: string, args: readonly string[]): string | undefined {
   const lower = args.map((arg) => arg.toLowerCase());
-  const flags = POSIX_SHELL_EXECUTABLES.has(basename) ? ['-c', '-lc', '-cl', '--command'] : [];
+  const flags = POSIX_SHELL_EXECUTABLES.has(basename)
+    ? ['-c', '-lc', '-cl', '--command']
+    : POWERSHELL_EXECUTABLES.has(basename)
+      ? ['-command', '-c']
+      : WINDOWS_SHELL_EXECUTABLES.has(basename)
+        ? ['/c', '/k', '/r']
+        : [];
   for (const flag of flags) {
     const index = lower.indexOf(flag);
     if (index >= 0) return args.slice(index + 1).join(' ');

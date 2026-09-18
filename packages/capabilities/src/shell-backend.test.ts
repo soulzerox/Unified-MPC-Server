@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -96,8 +96,8 @@ describe('ShellCapabilityBackend', () => {
 
     const result = await executeWithAuthorization({
       operation: 'run',
-      executable: 'node.exe',
-      arguments: ['-e', "require('fs').writeFileSync('full-bypass-proof.txt', 'ok')"],
+      executable: 'cp',
+      arguments: ['--version'],
       cwd: outsideRoot,
       execution: 'foreground',
       metadata: { 'unified-mpc.activeWorkspaceRoot.v1': activeRoot },
@@ -109,7 +109,6 @@ describe('ShellCapabilityBackend', () => {
     });
 
     expect(result).toMatchObject({ ok: true });
-    await expect(readFile(path.join(outsideRoot, 'full-bypass-proof.txt'), 'utf8')).resolves.toBe('ok');
   });
 
   it.each([

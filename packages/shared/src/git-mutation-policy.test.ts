@@ -104,4 +104,12 @@ describe('prohibitedAgentGitInvocationReason', () => {
       refspecs: ['feature/review-gate'],
     });
   });
+
+  it('keeps --repo push syntax available for an explicit feature ref', () => {
+    expect(parseGitPushArguments(['--repo=origin', 'feature/review-gate'])).toEqual({
+      remote: 'origin',
+      refspecs: ['feature/review-gate'],
+    });
+    expect(prohibitedAgentGitInvocationReason(['push', '--repo', 'origin', 'feature/review-gate'])).toBeUndefined();
+  });
 });

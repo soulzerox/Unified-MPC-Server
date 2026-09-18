@@ -147,6 +147,7 @@ export function prohibitedDefaultBranchPushReason(args: readonly string[], defau
 
 export function parseGitPushArguments(args: readonly string[]): GitPushArguments {
   const positional: string[] = [];
+  let optionRemote: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     const lower = argument.toLowerCase();
@@ -157,14 +158,20 @@ export function parseGitPushArguments(args: readonly string[]): GitPushArguments
     if (GIT_PUSH_OPTIONS_WITH_VALUES.has(lower)) {
       const value = args[index + 1];
       if (value === undefined) return { refspecs: [], invalidOption: argument };
+      if (lower === '--repo') optionRemote = value;
       index += 1;
       continue;
     }
-    if (GIT_PUSH_OPTIONS_WITH_VALUES.has(lower.split('=', 1)[0]!)) continue;
+    const optionName = lower.split('=', 1)[0]!;
+    if (GIT_PUSH_OPTIONS_WITH_VALUES.has(optionName)) {
+      if (optionName === '--repo') optionRemote = argument.slice(argument.indexOf('=') + 1);
+      continue;
+    }
     if (!argument.startsWith('-')) positional.push(argument);
   }
+  if (optionRemote !== undefined) return { remote: optionRemote, refspecs: positional };
   return positional[0] === undefined
-    ? { refspecs: positional.slice(1) }
+    ? { refspecs: [] }
     : { remote: positional[0], refspecs: positional.slice(1) };
 }
 

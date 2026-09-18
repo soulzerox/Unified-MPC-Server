@@ -77,6 +77,54 @@ describe('GitService', () => {
     expect(calls).toBe(0);
   });
 
+  it.each([
+    ['-c', ['-c', 'color.ui=false', 'push', 'origin', 'trunk']],
+    ['--no-pager', ['--no-pager', 'push', 'origin', 'trunk']],
+  ] as const)('keeps the default-branch invariant after harmless Git global option %s under Full Bypass', async (_label, args) => {
+    const workspace = await createWorkspace();
+    let defaultBranchCalls = 0;
+    const adapter = {
+      async defaultBranch(): Promise<{ ok: true; value: string }> {
+        defaultBranchCalls += 1;
+        return { ok: true, value: 'trunk' };
+      },
+      async run(): Promise<{ ok: true; value: { exitCode: number; stdout: string; stderr: string } }> {
+        throw new Error('default branch push must be denied before adapter execution');
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, { args, workspaceId: workspace.id }, undefined, authorization))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(defaultBranchCalls).toBe(1);
+  });
+
+  it.each([
+    ['-C', ['-C', '/outside', 'push', 'origin', 'trunk']],
+    ['--git-dir', ['--git-dir', '/outside/.git', 'push', 'origin', 'trunk']],
+    ['--work-tree', ['--work-tree', '/outside', 'push', 'origin', 'trunk']],
+  ] as const)('rejects scope-changing Git global option %s before a push', async (_label, args) => {
+    const workspace = await createWorkspace();
+    let defaultBranchCalls = 0;
+    const adapter = {
+      async defaultBranch(): Promise<{ ok: true; value: string }> {
+        defaultBranchCalls += 1;
+        return { ok: true, value: 'trunk' };
+      },
+      async run(): Promise<never> { throw new Error('scope-changing push must be denied before adapter execution'); },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, { args, workspaceId: workspace.id }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(defaultBranchCalls).toBe(0);
+  });
+
   it('parses push option values before resolving the push remote', async () => {
     const workspace = await createWorkspace();
     const remotes: string[] = [];

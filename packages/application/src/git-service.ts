@@ -19,7 +19,7 @@ import {
   type GitStatusResult,
 } from '@unified-mpc/git';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
-import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from '@unified-mpc/shared';
+import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
 import { isAbsoluteFsPath, resolveWorkspaceForPath } from './workspace-locator.js';
 
@@ -88,9 +88,13 @@ export class GitService {
 
   public async run(actor: FileActor, request: GitRunRequest, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<GitCommandResult>> {
     void actor;
-    const isPush = request.args[0]?.toLowerCase() === 'push';
+    const invocation = parseGitInvocation(request.args);
+    const isPush = invocation.subcommand === 'push';
+    if (isPush && invocation.scopeChangingOption !== undefined) {
+      return err(appError('PERMISSION_DENIED', `Git push cannot use scope-changing global option ${invocation.scopeChangingOption}`));
+    }
     if (isPush) {
-      const staticReason = prohibitedDefaultBranchPushReason(request.args.slice(1));
+      const staticReason = prohibitedDefaultBranchPushReason(invocation.subcommandArgs);
       if (staticReason !== undefined) return err(appError('PERMISSION_DENIED', staticReason));
     }
     if (!isProvablyReadOnlyGitInvocation(request.args) && !isApplicationAuthorized(authorization, request.userConfirmed === true)) {
@@ -99,9 +103,9 @@ export class GitService {
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd, authorization);
     if (!cwd.ok) return cwd;
     if (isPush) {
-      const defaultBranch = await this.resolveDefaultBranch(cwd.value, request.args);
+      const defaultBranch = await this.resolveDefaultBranch(cwd.value, invocation.subcommandArgs);
       if (!defaultBranch.ok) return defaultBranch;
-      const prohibitedDefaultBranchPush = prohibitedDefaultBranchPushReason(request.args.slice(1), defaultBranch.value);
+      const prohibitedDefaultBranchPush = prohibitedDefaultBranchPushReason(invocation.subcommandArgs, defaultBranch.value);
       if (prohibitedDefaultBranchPush !== undefined) return err(appError('PERMISSION_DENIED', prohibitedDefaultBranchPush));
     }
     if (!isFullBypassAuthorization(authorization)) {
@@ -111,10 +115,10 @@ export class GitService {
     return this.adapter.run(cwd.value, request.args, request.timeoutMs, signal);
   }
 
-  private async resolveDefaultBranch(cwd: string, args: readonly string[]): Promise<Result<string>> {
+  private async resolveDefaultBranch(cwd: string, pushArgs: readonly string[]): Promise<Result<string>> {
     const resolver = this.adapter.defaultBranch;
     if (typeof resolver !== 'function') return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
-    const parsed = parseGitPushArguments(args.slice(1));
+    const parsed = parseGitPushArguments(pushArgs);
     if (parsed.invalidOption !== undefined || parsed.remote === undefined) return err(appError('PERMISSION_DENIED', 'Git push remote must be explicit so the repository default branch can be checked'));
     const result = await resolver.call(this.adapter, cwd, parsed.remote);
     if (!result.ok || result.value === null || result.value.trim().length === 0) {

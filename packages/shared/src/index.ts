@@ -35,7 +35,7 @@ export {
 } from './agent-policy.js';
 
 export { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from './agent-command-policy.js';
-export { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from './git-mutation-policy.js';
+export { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from './git-mutation-policy.js';
 export type { GitMutationPolicyOptions, GitPushArguments } from './git-mutation-policy.js';
 
 export {

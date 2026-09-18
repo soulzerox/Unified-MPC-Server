@@ -51,6 +51,61 @@ export interface GitPushArguments {
 }
 
 const GIT_PUSH_OPTIONS_WITH_VALUES = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo']);
+const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-c', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
+
+export interface GitInvocation {
+  readonly subcommand?: string;
+  readonly subcommandArgs: readonly string[];
+  readonly scopeChangingOption?: string;
+}
+
+/** Finds the actual Git subcommand while preserving the arguments after it. */
+export function parseGitInvocation(args: readonly string[]): GitInvocation {
+  for (let index = 0; index < args.length;) {
+    const argument = args[index]!;
+    const lower = argument.toLowerCase();
+    if (!argument.startsWith('-')) return { subcommand: lower, subcommandArgs: args.slice(index + 1) };
+    if (lower === '--') {
+      const subcommand = args[index + 1];
+      return subcommand === undefined
+        ? { subcommandArgs: [] }
+        : { subcommand: subcommand.toLowerCase(), subcommandArgs: args.slice(index + 2) };
+    }
+
+    const scopeChangingOption = scopeChangingGitOption(argument);
+    if (scopeChangingOption !== undefined) {
+      return skipGitGlobalOption(args, index, scopeChangingOption);
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUES.has(lower) && !lower.startsWith('--exec-path')) {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return { subcommandArgs: [] };
+}
+
+function skipGitGlobalOption(args: readonly string[], index: number, option: string): GitInvocation {
+  const argument = args[index]!;
+  const hasAttachedValue = argument.includes('=') || (option === '-C' && argument.length > 2);
+  if (hasAttachedValue) {
+    return findGitSubcommand(args, index + 1, option);
+  }
+  return findGitSubcommand(args, index + 2, option);
+}
+
+function findGitSubcommand(args: readonly string[], start: number, scopeChangingOption: string): GitInvocation {
+  const parsed = parseGitInvocation(args.slice(start));
+  return { ...parsed, scopeChangingOption };
+}
+
+function scopeChangingGitOption(argument: string): string | undefined {
+  const lower = argument.toLowerCase();
+  if (argument === '-C' || (argument.startsWith('-C') && !argument.startsWith('--'))) return '-C';
+  if (lower === '--git-dir' || lower.startsWith('--git-dir=')) return '--git-dir';
+  if (lower === '--work-tree' || lower.startsWith('--work-tree=')) return '--work-tree';
+  return undefined;
+}
 
 export function prohibitedAgentGitInvocationReason(args: readonly string[], options: GitMutationPolicyOptions = {}): string | undefined {
   if (args.length === 0) return 'Git invocation has no explicit subcommand';

@@ -57,6 +57,26 @@ describe('GitService', () => {
     expect(calls).toEqual([{ cwd: await realpath(outsideRoot), args: ['-C', outsideRoot, 'status'] }]);
   });
 
+  it('keeps the default-branch invariant under trusted Full Bypass', async () => {
+    const workspace = await createWorkspace();
+    let calls = 0;
+    const adapter = {
+      async defaultBranch(): Promise<{ ok: true; value: string }> { return { ok: true, value: 'trunk' }; },
+      async run(): Promise<{ ok: true; value: { exitCode: number; stdout: string; stderr: string } }> {
+        calls += 1;
+        return { ok: true, value: { exitCode: 0, stdout: '', stderr: '' } };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['push', 'origin', 'trunk'],
+      workspaceId: workspace.id,
+    }, undefined, authorization)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toBe(0);
+  });
+
   it('forwards cancellation to every MCP-exposed Git adapter operation', async () => {
     const workspace = await createWorkspace();
     const observedSignals: Array<AbortSignal | undefined> = [];

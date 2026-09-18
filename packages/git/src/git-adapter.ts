@@ -74,6 +74,26 @@ export class GitAdapter {
     return ok(null);
   }
 
+  public async defaultBranch(cwd: string, remote = 'origin'): Promise<Result<string | null>> {
+    const symbolicRef = await this.runner.run(
+      ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`],
+      cwd,
+    );
+    if (symbolicRef.exitCode === 0) {
+      const prefix = `${remote}/`;
+      const value = symbolicRef.stdout.trim();
+      return ok(value.startsWith(prefix) ? value.slice(prefix.length) : value || null);
+    }
+
+    const remoteShow = await this.runner.run(['remote', 'show', remote], cwd);
+    if (remoteShow.exitCode === 0) {
+      const match = /^\s*HEAD branch:\s*(\S+)\s*$/im.exec(remoteShow.stdout);
+      const branch = match?.[1];
+      return ok(branch === undefined || branch === '(unknown)' ? null : branch);
+    }
+    return ok(null);
+  }
+
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {
     const maxBytes = request.maxBytes ?? 1024 * 1024;
     if (!this.isLimit(maxBytes, 4 * 1024 * 1024)) return err(appError('INVALID_INPUT', 'Git diff byte limit is invalid'));

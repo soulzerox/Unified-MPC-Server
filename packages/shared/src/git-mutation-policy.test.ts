@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isProvablyReadOnlyGitInvocation, prohibitedAgentGitInvocationReason } from './git-mutation-policy.js';
+import { isProvablyReadOnlyGitInvocation, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from './git-mutation-policy.js';
 
 describe('prohibitedAgentGitInvocationReason', () => {
   it.each([
@@ -39,13 +39,14 @@ describe('prohibitedAgentGitInvocationReason', () => {
     [['push', 'origin', '+main:main'], 'force refspec'],
     [['push'], 'implicit push'],
     [['push', 'origin'], 'implicit remote destination'],
-    [['push', 'origin', 'main'], 'direct main push'],
-    [['push', 'origin', 'master'], 'direct master push'],
-    [['push', 'origin', 'HEAD:main'], 'explicit main destination'],
-    [['push', 'origin', 'HEAD:refs/heads/main'], 'fully-qualified main destination'],
+    [['push', 'origin', 'main'], 'direct default branch push'],
+    [['push', 'origin', 'HEAD:main'], 'explicit default branch destination'],
+    [['push', 'origin', 'HEAD:refs/heads/main'], 'fully-qualified default branch destination'],
     [['push', '--all', 'origin'], 'all branches push'],
-  ] as const)('blocks %s (%s)', (args) => {
-    expect(prohibitedAgentGitInvocationReason(args)).toBeTypeOf('string');
+    [['push', 'origin', 'refs/heads/*:refs/heads/*'], 'wildcard refspec'],
+  ] as const)('blocks %s (%s)', (args, _label) => {
+    void _label;
+    expect(prohibitedAgentGitInvocationReason(args, { defaultBranch: 'main' })).toBeTypeOf('string');
   });
 
   it.each([
@@ -83,5 +84,15 @@ describe('prohibitedAgentGitInvocationReason', () => {
     expect(isProvablyReadOnlyGitInvocation(['branch', '-D', 'old'])).toBe(false);
     expect(isProvablyReadOnlyGitInvocation(['add', '--', 'src/file.ts'])).toBe(false);
     expect(isProvablyReadOnlyGitInvocation(['commit', '-m', 'message'])).toBe(false);
+  });
+
+  it('protects a repository default branch without assuming main or master', () => {
+    expect(prohibitedAgentGitInvocationReason(['push', 'origin', 'trunk'], { defaultBranch: 'trunk' })).toBeTypeOf('string');
+    expect(prohibitedAgentGitInvocationReason(['push', 'origin', 'HEAD:refs/heads/production'], { defaultBranch: 'production' })).toBeTypeOf('string');
+    expect(prohibitedAgentGitInvocationReason(['push', 'origin', 'main'], { defaultBranch: 'trunk' })).toBeUndefined();
+  });
+
+  it('rejects wildcard push refspecs independently of default-branch resolution', () => {
+    expect(prohibitedDefaultBranchPushReason(['origin', 'refs/heads/*:refs/heads/*'])).toBeTypeOf('string');
   });
 });

@@ -29,6 +29,16 @@ describe('GitAdapter', () => {
     expect(runner.calls).toEqual([{ args: ['branch', '--show-current'], cwd: 'C:\\workspace' }]);
   });
 
+  it('resolves the configured remote default branch', async () => {
+    const runner = new FakeGitRunner({ exitCode: 0, stdout: 'origin/trunk\n', stderr: '' });
+
+    await expect(new GitAdapter(runner).defaultBranch('C:\\workspace')).resolves.toEqual({ ok: true, value: 'trunk' });
+    expect(runner.calls).toEqual([{
+      args: ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
+      cwd: 'C:\\workspace',
+    }]);
+  });
+
   it('bounds diff output and keeps the path as a separate argument', async () => {
     const runner = new FakeGitRunner({ exitCode: 0, stdout: '0123456789', stderr: '' });
     const result = await new GitAdapter(runner).diff('C:\\workspace', { path: 'src\\space file.txt', maxBytes: 5 });

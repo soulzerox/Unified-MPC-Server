@@ -40,7 +40,11 @@ export function isProvablyReadOnlyGitInvocation(args: readonly string[]): boolea
  * workspace delete/reset/restore families are handled by the destructive policy
  * so Full Access can ask or auto-approve them according to user settings.
  */
-export function prohibitedAgentGitInvocationReason(args: readonly string[]): string | undefined {
+export interface GitMutationPolicyOptions {
+  readonly defaultBranch?: string;
+}
+
+export function prohibitedAgentGitInvocationReason(args: readonly string[], options: GitMutationPolicyOptions = {}): string | undefined {
   if (args.length === 0) return 'Git invocation has no explicit subcommand';
   const first = args[0]!.toLowerCase();
   if (first.startsWith('-')) {
@@ -91,7 +95,7 @@ export function prohibitedAgentGitInvocationReason(args: readonly string[]): str
   if (first === 'gc') return 'git gc can permanently prune otherwise recoverable objects';
   if (first === 'mv' && hasGitOption(lower, ['--force', '-f'])) return 'git mv --force can replace an existing path';
   if (first === 'push' && isDestructivePush(lower)) return 'git push invocation deletes or force-rewrites remote refs';
-  if (first === 'push') return prohibitedDefaultBranchPushReason(rest);
+  if (first === 'push') return prohibitedDefaultBranchPushReason(rest, options.defaultBranch);
   return undefined;
 }
 
@@ -104,7 +108,7 @@ function isDestructivePush(args: readonly string[]): boolean {
   return args.some((arg) => arg.startsWith(':') || arg.startsWith('+'));
 }
 
-function prohibitedDefaultBranchPushReason(args: readonly string[]): string | undefined {
+export function prohibitedDefaultBranchPushReason(args: readonly string[], defaultBranch?: string): string | undefined {
   const lower = args.map((arg) => arg.toLowerCase());
   if (hasGitOption(lower, ['--all'])) {
     return 'AI-issued git push --all can update the default branch; push one explicit feature or issue branch and use a reviewed pull request instead';
@@ -116,17 +120,24 @@ function prohibitedDefaultBranchPushReason(args: readonly string[]): string | un
   }
 
   for (const refspec of positional.slice(1)) {
+    if (refspec.includes('*') || refspec.includes('?') || refspec.includes('[') || refspec.includes(']')) {
+      return 'AI-issued git push wildcard refspecs are blocked because they can update the default branch; push one explicit feature or issue branch instead';
+    }
     const separator = refspec.lastIndexOf(':');
     const destinationRaw = separator >= 0 ? refspec.slice(separator + 1) : refspec;
     const destination = destinationRaw.replace(/^refs\/heads\//i, '').toLowerCase();
     if (destination === '' || (separator < 0 && destination === 'head')) {
       return 'AI-issued git push must use an explicit non-default destination branch so the pull-request review workflow cannot be bypassed';
     }
-    if (destination === 'main' || destination === 'master') {
+    if (defaultBranch !== undefined && destination === normalizeBranch(defaultBranch)) {
       return `Direct AI push to ${destination} is blocked; push a feature or issue branch and merge it only after pull-request review`;
     }
   }
   return undefined;
+}
+
+function normalizeBranch(value: string): string {
+  return value.trim().replace(/^refs\/heads\//i, '').toLowerCase();
 }
 
 function containsBroadPathspecMagic(args: readonly string[]): boolean {

@@ -11,7 +11,7 @@ const WINDOWS_SHELL_EXECUTABLES = new Set(['cmd']);
 const JAVASCRIPT_EXECUTABLES = new Set(['node', 'nodejs', 'bun', 'deno']);
 const PYTHON_EXECUTABLES = new Set(['python', 'python3']);
 const INLINE_SCRIPT_EXECUTABLES = new Set(['perl', 'ruby']);
-const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-c', '-cde', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
+const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-C', '-c', '-cde', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
 
 /**
  * Hard blocks machine-level commands plus terminal-style inline text editing that

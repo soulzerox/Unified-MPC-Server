@@ -58,7 +58,9 @@ describe('agent command policy', () => {
 
   it.each([
     ['git', ['push', 'origin', 'feature/review-gate']],
+    ['git', ['-C', '/outside', 'push', 'origin', 'feature/review-gate']],
     ['bash', ['-lc', 'git -c color.ui=false push origin feature/review-gate']],
+    ['bash', ['-lc', 'git -C /outside push origin feature/review-gate']],
     ['powershell.exe', ['-Command', 'git.exe push origin feature/review-gate']],
     ['cmd.exe', ['/c', '"git push origin feature/review-gate"']],
   ] as const)('hard-blocks unscoped Git push execution: %s', (executable, args) => {

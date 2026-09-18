@@ -114,7 +114,9 @@ describe('ShellCapabilityBackend', () => {
 
   it.each([
     ['direct git', 'git', ['push', 'origin', 'trunk']],
+    ['direct git with repository override', 'git', ['-C', '/outside', 'push', 'origin', 'trunk']],
     ['shell git', 'bash', ['-lc', 'git push origin trunk']],
+    ['shell git with repository override', 'bash', ['-lc', 'git -C /outside push origin trunk']],
   ] as const)('blocks %s outside the guarded Git service under Full Bypass', async (_label, executable, args) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-git-'));
     temporaryRoots.push(root);

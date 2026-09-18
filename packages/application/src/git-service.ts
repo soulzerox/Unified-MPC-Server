@@ -19,7 +19,7 @@ import {
   type GitStatusResult,
 } from '@unified-mpc/git';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
-import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
+import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
 import { isAbsoluteFsPath, resolveWorkspaceForPath } from './workspace-locator.js';
 
@@ -96,6 +96,8 @@ export class GitService {
     const prohibitedSubcommand = prohibitedGitSubcommandReason(request.args);
     if (prohibitedSubcommand !== undefined) return err(appError('PERMISSION_DENIED', prohibitedSubcommand));
     if (isPush) {
+      const prohibitedConfigOverride = prohibitedGitPushConfigOverrideReason(request.args);
+      if (prohibitedConfigOverride !== undefined) return err(appError('PERMISSION_DENIED', prohibitedConfigOverride));
       const staticReason = prohibitedDefaultBranchPushReason(invocation.subcommandArgs);
       if (staticReason !== undefined) return err(appError('PERMISSION_DENIED', staticReason));
     }
@@ -105,10 +107,12 @@ export class GitService {
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd, authorization);
     if (!cwd.ok) return cwd;
     if (isPush) {
-      const defaultBranch = await this.resolveDefaultBranch(cwd.value, invocation.subcommandArgs);
-      if (!defaultBranch.ok) return defaultBranch;
-      const prohibitedDefaultBranchPush = prohibitedDefaultBranchPushReason(invocation.subcommandArgs, defaultBranch.value);
-      if (prohibitedDefaultBranchPush !== undefined) return err(appError('PERMISSION_DENIED', prohibitedDefaultBranchPush));
+      const defaultBranches = await this.resolveDefaultBranches(cwd.value, invocation.subcommandArgs);
+      if (!defaultBranches.ok) return defaultBranches;
+      for (const defaultBranch of defaultBranches.value) {
+        const prohibitedDefaultBranchPush = prohibitedDefaultBranchPushReason(invocation.subcommandArgs, defaultBranch);
+        if (prohibitedDefaultBranchPush !== undefined) return err(appError('PERMISSION_DENIED', prohibitedDefaultBranchPush));
+      }
     }
     if (!isFullBypassAuthorization(authorization)) {
       const prohibitedReason = prohibitedAgentGitInvocationReason(request.args);
@@ -117,16 +121,22 @@ export class GitService {
     return this.adapter.run(cwd.value, request.args, request.timeoutMs, signal);
   }
 
-  private async resolveDefaultBranch(cwd: string, pushArgs: readonly string[]): Promise<Result<string>> {
-    const resolver = this.adapter.defaultBranch;
-    if (typeof resolver !== 'function') return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
+  private async resolveDefaultBranches(cwd: string, pushArgs: readonly string[]): Promise<Result<readonly string[]>> {
     const parsed = parseGitPushArguments(pushArgs);
     if (parsed.invalidOption !== undefined || parsed.remote === undefined) return err(appError('PERMISSION_DENIED', 'Git push remote must be explicit so the repository default branch can be checked'));
+    const branchesResolver = this.adapter.defaultBranches;
+    if (typeof branchesResolver === 'function') {
+      const result = await branchesResolver.call(this.adapter, cwd, parsed.remote);
+      if (!result.ok || result.value.length === 0) return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
+      return result;
+    }
+    const resolver = this.adapter.defaultBranch;
+    if (typeof resolver !== 'function') return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
     const result = await resolver.call(this.adapter, cwd, parsed.remote);
     if (!result.ok || result.value === null || result.value.trim().length === 0) {
       return err(appError('PERMISSION_DENIED', 'Repository default branch could not be resolved safely'));
     }
-    return ok(result.value);
+    return ok([result.value]);
   }
 
   private async resolveCwd(workspaceId: string | undefined, requestedCwd: string | undefined, authorization?: InvocationAuthorization): Promise<Result<string>> {

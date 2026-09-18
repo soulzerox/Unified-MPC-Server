@@ -75,12 +75,24 @@ export class GitAdapter {
   }
 
   public async defaultBranch(cwd: string, remote = 'origin'): Promise<Result<string | null>> {
-    const remoteHead = await this.runner.run(['ls-remote', '--symref', remote, 'HEAD'], cwd);
-    if (remoteHead.exitCode === 0) {
+    const branches = await this.defaultBranches(cwd, remote);
+    return branches.ok ? ok(branches.value[0] ?? null) : branches;
+  }
+
+  public async defaultBranches(cwd: string, remote = 'origin'): Promise<Result<readonly string[]>> {
+    const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd);
+    if (pushUrls.exitCode !== 0) return ok([]);
+    const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (targets.length === 0) return ok([]);
+    const branches: string[] = [];
+    for (const target of targets) {
+      const remoteHead = await this.runner.run(['ls-remote', '--symref', target, 'HEAD'], cwd);
+      if (remoteHead.exitCode !== 0) return ok([]);
       const match = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD\s*$/im.exec(remoteHead.stdout);
-      return ok(match?.[1] ?? null);
+      if (match?.[1] === undefined) return ok([]);
+      branches.push(match[1]);
     }
-    return ok(null);
+    return ok(branches);
   }
 
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {

@@ -148,6 +148,56 @@ describe('GitService', () => {
     expect(calls).toBe(0);
   });
 
+  it('checks every actual push target default branch under Full Bypass', async () => {
+    const workspace = await createWorkspace();
+    let calls = 0;
+    const adapter = {
+      async defaultBranches(): Promise<{ ok: true; value: readonly string[] }> {
+        return { ok: true, value: ['trunk', 'main'] };
+      },
+      async run(): Promise<never> {
+        calls += 1;
+        throw new Error('push to any target default branch must be denied');
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['push', 'origin', 'main'],
+      workspaceId: workspace.id,
+    }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toBe(0);
+  });
+
+  it('rejects push URL config overrides under Full Bypass before resolution', async () => {
+    const workspace = await createWorkspace();
+    let defaultBranchCalls = 0;
+    const adapter = {
+      async defaultBranches(): Promise<{ ok: true; value: readonly string[] }> {
+        defaultBranchCalls += 1;
+        return { ok: true, value: ['trunk'] };
+      },
+      async run(): Promise<never> { throw new Error('push URL override must be denied before adapter execution'); },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['-c', 'remote.origin.pushurl=/tmp/other.git', 'push', 'origin', 'main'],
+      workspaceId: workspace.id,
+    }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(defaultBranchCalls).toBe(0);
+  });
+
   it('parses push option values before resolving the push remote', async () => {
     const workspace = await createWorkspace();
     const remotes: string[] = [];

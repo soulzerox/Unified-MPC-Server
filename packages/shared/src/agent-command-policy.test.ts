@@ -66,12 +66,4 @@ describe('agent command policy', () => {
     expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
   });
 
-  it.each([
-    ['bash', ['-lc', 'echo ok']],
-    ['node', ['script.js']],
-    ['python3', ['script.py']],
-  ] as const)('rejects opaque Git-capable runners in strict mode: %s', (executable, args) => {
-    expect(prohibitedUnscopedGitPushReason(executable, args, { rejectOpaqueGitRunners: true })).toContain('Git integration');
-    expect(prohibitedUnscopedGitPushReason(executable, args)).toBeUndefined();
-  });
 });

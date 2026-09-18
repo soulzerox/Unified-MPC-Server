@@ -196,7 +196,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     if (request.dryRun) {
       return ok({ dry_run: true, executable: request.executable, arguments: [...request.arguments], cwd: cwd.value });
     }
-    const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.arguments, { rejectOpaqueGitRunners: fullBypass });
+    const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.arguments);
     if (unscopedGitPush !== undefined) return err(appError('PERMISSION_DENIED', unscopedGitPush));
     if (!fullBypass) {
       const prohibitedReason = prohibitedAgentCommandReason(request.executable, request.arguments);

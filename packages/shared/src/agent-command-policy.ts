@@ -13,11 +13,6 @@ const PYTHON_EXECUTABLES = new Set(['python', 'python3']);
 const INLINE_SCRIPT_EXECUTABLES = new Set(['perl', 'ruby']);
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-c', '-cde', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
 
-export interface UnscopedGitPushPolicyOptions {
-  /** Reject opaque runners whose child processes cannot be inspected under Full Bypass. */
-  readonly rejectOpaqueGitRunners?: boolean;
-}
-
 /**
  * Hard blocks machine-level commands plus terminal-style inline text editing that
  * must go through the guarded file tools. The latter is a routing safeguard: it
@@ -41,12 +36,10 @@ export function prohibitedAgentCommandReason(executable: string, args: readonly 
 export function prohibitedUnscopedGitPushReason(
   executable: string,
   args: readonly string[],
-  options: UnscopedGitPushPolicyOptions = {},
 ): string | undefined {
   const basename = executableBasename(executable);
   if (basename === 'git' && hasGitPushArguments(args)) return guardedGitPushReason();
   if (isOpaqueGitRunner(basename)) {
-    if (options.rejectOpaqueGitRunners) return 'Generic shell/interpreter execution cannot perform Git integration under Full Bypass; use the guarded git tool';
     const commandText = interpreterCommandText(basename, args);
     if (commandText !== undefined && hasGitPushCommand(commandText)) return guardedGitPushReason();
   }

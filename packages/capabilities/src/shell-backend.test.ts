@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -96,8 +96,8 @@ describe('ShellCapabilityBackend', () => {
 
     const result = await executeWithAuthorization({
       operation: 'run',
-      executable: 'cp',
-      arguments: ['--version'],
+      executable: 'node.exe',
+      arguments: ['-e', "require('fs').writeFileSync('full-bypass-proof.txt', 'ok')"],
       cwd: outsideRoot,
       execution: 'foreground',
       metadata: { 'unified-mpc.activeWorkspaceRoot.v1': activeRoot },
@@ -109,13 +109,12 @@ describe('ShellCapabilityBackend', () => {
     });
 
     expect(result).toMatchObject({ ok: true });
+    await expect(readFile(path.join(outsideRoot, 'full-bypass-proof.txt'), 'utf8')).resolves.toBe('ok');
   });
 
   it.each([
     ['direct git', 'git', ['push', 'origin', 'trunk']],
     ['shell git', 'bash', ['-lc', 'git push origin trunk']],
-    ['opaque Node runner', 'node.exe', ['script.js']],
-    ['opaque Windows shell', 'cmd.exe', ['/c', 'git push origin trunk']],
   ] as const)('blocks %s outside the guarded Git service under Full Bypass', async (_label, executable, args) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-git-'));
     temporaryRoots.push(root);

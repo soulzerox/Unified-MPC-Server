@@ -183,20 +183,18 @@ describe('ProcessService', () => {
     const result = await service.start(
       { clientId: 'client-1', clientName: 'test' },
       workspace.id,
-      { executable: 'rm', args: ['-f', 'target'], cwd: outside },
+      { executable: 'powershell.exe', args: ['-Command', 'Remove-Item target'], cwd: outside },
       undefined,
       fullBypassAuthorization,
     );
 
     expect(result).toMatchObject({ ok: true, value: { processId: 'process-1' } });
-    expect(calls).toEqual([{ executable: 'rm', args: ['-f', 'target'], cwd: outside }]);
+    expect(calls).toEqual([{ executable: 'powershell.exe', args: ['-Command', 'Remove-Item target'], cwd: outside }]);
   });
 
   it.each([
     ['direct git', 'git', ['push', 'origin', 'trunk']],
     ['shell git', 'bash', ['-lc', 'git push origin trunk']],
-    ['opaque node runner', 'node', ['script.js']],
-    ['opaque Windows shell', 'cmd.exe', ['/c', 'git push origin trunk']],
   ] as const)('blocks %s outside the guarded Git service even under Full Bypass', async (_label, executable, args) => {
     const workspace = await createWorkspace();
     const calls: ManagedProcessStart[] = [];

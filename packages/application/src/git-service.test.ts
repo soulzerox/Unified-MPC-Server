@@ -125,6 +125,29 @@ describe('GitService', () => {
     expect(defaultBranchCalls).toBe(0);
   });
 
+  it.each([
+    ['stored alias', ['ship']],
+    ['inline alias', ['-c', 'alias.ship=push origin HEAD:main', 'ship']],
+  ] as const)('blocks %s under Full Bypass before Git alias expansion', async (_label, args) => {
+    const workspace = await createWorkspace();
+    let calls = 0;
+    const adapter = {
+      async run(): Promise<never> {
+        calls += 1;
+        throw new Error('Git aliases must be blocked before adapter execution');
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, { args, workspaceId: workspace.id }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toBe(0);
+  });
+
   it('parses push option values before resolving the push remote', async () => {
     const workspace = await createWorkspace();
     const remotes: string[] = [];

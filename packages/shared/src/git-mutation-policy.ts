@@ -85,6 +85,16 @@ export function parseGitInvocation(args: readonly string[]): GitInvocation {
   return { subcommandArgs: [] };
 }
 
+/** Keeps repository aliases and unknown Git subcommands out of the native Git path. */
+export function prohibitedGitSubcommandReason(args: readonly string[]): string | undefined {
+  const invocation = parseGitInvocation(args);
+  if (invocation.subcommand === undefined) return 'Git invocation has no explicit subcommand';
+  if (!AGENT_ALLOWED_GIT_SUBCOMMANDS.has(invocation.subcommand)) {
+    return `Git subcommand ${invocation.subcommand} is not on the explicit agent allowlist; repository aliases are never executed`;
+  }
+  return undefined;
+}
+
 function skipGitGlobalOption(args: readonly string[], index: number, option: string): GitInvocation {
   const argument = args[index]!;
   const hasAttachedValue = argument.includes('=') || (option === '-C' && argument.length > 2);

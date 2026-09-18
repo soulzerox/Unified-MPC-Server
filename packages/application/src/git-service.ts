@@ -19,7 +19,7 @@ import {
   type GitStatusResult,
 } from '@unified-mpc/git';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
-import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason } from '@unified-mpc/shared';
+import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
 import { isAbsoluteFsPath, resolveWorkspaceForPath } from './workspace-locator.js';
 
@@ -93,6 +93,8 @@ export class GitService {
     if (isPush && invocation.scopeChangingOption !== undefined) {
       return err(appError('PERMISSION_DENIED', `Git push cannot use scope-changing global option ${invocation.scopeChangingOption}`));
     }
+    const prohibitedSubcommand = prohibitedGitSubcommandReason(request.args);
+    if (prohibitedSubcommand !== undefined) return err(appError('PERMISSION_DENIED', prohibitedSubcommand));
     if (isPush) {
       const staticReason = prohibitedDefaultBranchPushReason(invocation.subcommandArgs);
       if (staticReason !== undefined) return err(appError('PERMISSION_DENIED', staticReason));

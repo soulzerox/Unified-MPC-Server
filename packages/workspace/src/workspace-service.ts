@@ -64,22 +64,25 @@ export class WorkspaceService {
       return err(appError('CONFLICT', 'Workspace root is already registered', true));
     }
 
-    const archived = registrations.find((workspace) => workspace.archivedAt !== undefined
+    const archived = registrations.filter((workspace) => workspace.archivedAt !== undefined
       && workspace.archivedAt !== null
       && samePath(workspace.realRootPath, canonicalRootPath, platform));
-    if (archived !== undefined) {
+    if (archived.length > 1) {
+      return err(appError('CONFLICT', 'Multiple archived workspace identities match this canonical path; relink requires explicit recovery', true));
+    }
+    if (archived.length === 1) {
       if (this.repository.restore === undefined) {
         return err(appError('CONFLICT', 'Workspace identity is archived and cannot be relinked by this repository', true));
       }
       const restored: Workspace = {
-        id: archived.id,
+        id: archived[0]!.id,
         displayName: displayName.trim(),
         rootPath: absoluteRootPath,
         realRootPath: canonicalRootPath,
-        createdAt: archived.createdAt,
+        createdAt: archived[0]!.createdAt,
       };
       try {
-        await this.repository.restore(archived.id, restored);
+        await this.repository.restore(archived[0]!.id, restored);
       } catch (error: unknown) {
         return err(appError('CONFLICT', `Workspace identity could not be restored: ${errorMessage(error)}`, true));
       }

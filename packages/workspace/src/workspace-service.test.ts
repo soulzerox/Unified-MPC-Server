@@ -124,4 +124,20 @@ describe('WorkspaceService', () => {
     expect(result).toMatchObject({ ok: true, value: { id: initial.id, displayName: 'Reconnected' } });
     expect(repository.archived).toEqual([expect.objectContaining({ id: initial.id, displayName: 'Reconnected' })]);
   });
+
+  it('fails closed when multiple archived identities match the canonical source path', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-service-ambiguous-relink-'));
+    temporaryRoots.push(parent);
+    const rootPath = path.join(parent, 'project');
+    await mkdir(rootPath);
+    const repository = archivalRepository();
+    repository.archived.push(
+      { id: 'workspace-old-a', displayName: 'Old A', rootPath, realRootPath: rootPath, createdAt: new Date(0).toISOString(), archivedAt: '2026-08-24T00:00:00.000Z' },
+      { id: 'workspace-old-b', displayName: 'Old B', rootPath, realRootPath: rootPath, createdAt: new Date(1).toISOString(), archivedAt: '2026-08-25T00:00:00.000Z' },
+    );
+
+    await expect(new WorkspaceService(repository).add('Reconnected', rootPath))
+      .resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(repository.archived).toHaveLength(2);
+  });
 });

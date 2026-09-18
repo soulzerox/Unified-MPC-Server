@@ -145,9 +145,16 @@ function createWorkspaceControl(
     remove: async (workspaceId): Promise<WebWorkspaceSelectionSnapshot | null> => {
       const projects = await projectList();
       if (!projects.some((project) => project.id === workspaceId)) throw new Error('Workspace is not a registered project');
+      const existing = await workspaceRepository.get(workspaceId);
+      if (existing === null) throw new Error('Workspace is not a registered project');
       const removed = await workspaceService.unregister(workspaceId);
       if (!removed.ok) throw new Error(removed.error.message);
-      await workspaceIndex.forgetWorkspace(workspaceId);
+      try {
+        await workspaceIndex.forgetWorkspace(workspaceId);
+      } catch (error: unknown) {
+        await workspaceRepository.restore(existing.id, existing).catch(() => undefined);
+        throw error;
+      }
       const service = await selection();
       return service === null ? null : unwrap(service.list());
     },

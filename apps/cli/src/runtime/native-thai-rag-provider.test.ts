@@ -201,6 +201,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const result = await driver.call('pre_edit_context', { workspace: recoveredWorkspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(true);
+    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace === recoveredWorkspaceId && call.args.force === true)).toBe(true);
     expect(calls.at(-1)?.args).toMatchObject({ workspace: recoveredWorkspaceId, file_path: `${recoveredWorkspaceId}/src/index.ts` });
     await expect(access(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).rejects.toThrow();
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', recoveredWorkspaceId))).resolves.toBe(await realpath(recoveredRoot));
@@ -232,6 +233,35 @@ describe('NativeThaiRagProviderDriver', () => {
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
     expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace === workspaceId && call.args.force === true)).toBe(true);
     await second.stop();
+  });
+
+  it('restores the previous source alias when a relink reindex fails', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const relinkedRoot = await tempRoot();
+    let current = [{ id: workspaceId, realRootPath: firstRoot }];
+    let failIndex = false;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => current,
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index' && failIndex) return { content: [{ type: 'text', text: 'Error: index failed' }] };
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    current = [{ id: workspaceId, realRootPath: relinkedRoot }];
+    failIndex = true;
+
+    const result = await driver.call('pre_edit_context', { workspace: workspaceId, file_path: 'src/index.ts' });
+
+    expect(result.ok).toBe(false);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
+    await driver.stop();
   });
 });
 

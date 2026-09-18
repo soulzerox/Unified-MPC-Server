@@ -2090,4 +2090,35 @@ describe('scheduled continuation repository state machine', () => {
       database.close();
     }
   });
+
+  it('turns a scheduled wake into terminal_noop when its workspace is archived', async () => {
+    const database = await openDatabase();
+    const repository = new SqliteGoalRepository(database);
+    try {
+      await acquireGoalLease(repository, '2026-08-27T00:00:00.000Z');
+      await repository.prepareScheduledContinuation(prepareRequest(
+        '2026-08-27T00:20:00.000Z',
+        '2026-08-27T00:22:00.000Z',
+        0,
+        'archived-workspace-fp',
+        'continuation-archived-workspace',
+      ));
+      database.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?').run('2026-08-27T00:21:00.000Z', 'workspace-1');
+
+      const claim = await repository.claimScheduledContinuation({
+        continuationId: 'continuation-archived-workspace',
+        ...claimSuccessorFields('continuation-archived-workspace', '2026-08-27T00:24:00.000Z'),
+        ownerClientId: 'chatgpt-web-client',
+        ownerSessionId: 'session-b',
+        leaseTokenHash: 'lease-hash-b',
+        leaseSeconds: 600,
+        now: '2026-08-27T00:22:00.000Z',
+      });
+
+      expect(claim.outcome).toBe('terminal_noop');
+      expect(claim.continuation.status).toBe('terminal_noop');
+    } finally {
+      database.close();
+    }
+  });
 });

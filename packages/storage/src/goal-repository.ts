@@ -1063,9 +1063,26 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (row === undefined) throw new GoalStateError('not_found', 'Scheduled continuation was not found');
       const continuation = this.toScheduledContinuationRecord(row);
       const goal = this.requireById(row.goal_id);
+      const workspaceActive = this.isWorkspaceActive(goal.workspaceId);
+      const effectiveRequest = { ...request, workspaceActive };
+
+      if (continuation.occurrence !== 'interval' && !workspaceActive) {
+        if (continuation.status === 'terminal_noop') return { outcome: 'terminal_noop', continuation, goal };
+        const changed = this.database.connection.prepare(`
+          UPDATE goal_scheduled_continuations
+          SET status = 'terminal_noop', version = version + 1, updated_at = ?, terminal_at = ?
+          WHERE id = ? AND version = ? AND status <> 'terminal_noop'
+        `).run(request.now, request.now, request.continuationId, continuation.version);
+        if (Number(changed.changes) !== 1) throw new GoalStateError('conflict', 'Archived workspace terminal no-op lost the compare-and-swap race');
+        return {
+          outcome: 'terminal_noop',
+          continuation: this.requireScheduledContinuationById(request.continuationId),
+          goal: this.requireById(goal.id),
+        };
+      }
 
       if (continuation.occurrence === 'interval') {
-        return this.claimRecurringScheduledContinuation(request, continuation, goal);
+        return this.claimRecurringScheduledContinuation(effectiveRequest, continuation, goal);
       }
 
       if (continuation.status === 'claimed') {
@@ -2435,6 +2452,11 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       connection.exec('ROLLBACK;');
       throw error;
     }
+  }
+
+  private isWorkspaceActive(workspaceId: string): boolean {
+    const row = this.database.connection.prepare('SELECT archived_at FROM workspaces WHERE id = ?').get(workspaceId) as { archived_at?: string | null } | undefined;
+    return row !== undefined && (row.archived_at === null || row.archived_at === undefined);
   }
 }
 

@@ -156,12 +156,15 @@ async function refreshWorkspaceIndex(context: McpToolContext, workspaceId: strin
   if (!stopped.ok) return stopped;
   const rebuilt = await index.indexWorkspace(workspaceId, { rebuild: true });
   if (!rebuilt.ok) {
-    if (wasWatching) await index.startWatch(workspaceId);
+    await index.forgetWorkspace(workspaceId).catch(() => undefined);
     return rebuilt;
   }
   if (wasWatching) {
     const restarted = await index.startWatch(workspaceId);
-    if (!restarted.ok) return restarted;
+    if (!restarted.ok) {
+      await index.forgetWorkspace(workspaceId).catch(() => undefined);
+      return restarted;
+    }
   }
   return ok(undefined);
 }

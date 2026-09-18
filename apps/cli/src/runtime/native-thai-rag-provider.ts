@@ -220,6 +220,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
 
     const sourcesRoot = path.join(providerRoot.value, 'sources');
+    const previousWorkspaces: readonly NativeThaiRagWorkspace[] = [...this.workspaceRoots].map(([id, realRootPath]) => ({ id, realRootPath }));
     try {
       await mkdir(sourcesRoot, { recursive: true });
     } catch (error: unknown) {
@@ -245,7 +246,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             background: false,
           }),
         );
-        if (!indexed.ok) return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
+        if (!indexed.ok) {
+          for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
+          const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
+          if (!rolledBack.ok) {
+            this.workspaceRoots.clear();
+            this.workspaceRootIds.clear();
+            return err(appError('CONFLICT', `Native Thai-RAG refresh failed and could not restore its previous state: ${rolledBack.error.message}`, true));
+          }
+          return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
+        }
         this.pendingReindexIds.delete(workspace.id);
       }
     }
@@ -379,6 +389,7 @@ async function syncWorkspaceSourceAliases(
         changedWorkspaceIds.add(workspaceId);
       } else {
         changed.push({ alias, previousTarget: null });
+        changedWorkspaceIds.add(workspaceId);
       }
       await symlink(target, alias, 'dir');
     }

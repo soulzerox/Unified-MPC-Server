@@ -138,6 +138,7 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['config', 'core.askPass', '/tmp/askpass-wrapper'],
     ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack'],
     ['config', '--unset', 'credential.helper'],
+    ['config', 'credential.https://example.invalid.helper', '!/tmp/credential-wrapper'],
     ['config', 'protocol.ext.allow', 'always'],
   ] as const)('rejects executable Git config mutation %s', (...args) => {
     expect(prohibitedGitConfigMutationReason(args)).toBeTypeOf('string');

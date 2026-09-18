@@ -153,6 +153,7 @@ function isExecutableGitConfigKey(argument: string): boolean {
     || key === 'core.askpass'
     || key === 'core.gitproxy'
     || key === 'credential.helper'
+    || /^credential\..+\.helper$/.test(key)
     || key === 'protocol.allow'
     || /^protocol\..+\.allow$/.test(key)
     || /^remote\..+\.(?:receivepack|uploadpack|proxy|vcs)$/.test(key);

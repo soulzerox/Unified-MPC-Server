@@ -124,6 +124,12 @@ export class GitAdapter {
       const error = this.mapError(protocolAllow);
       if (error !== null) return error;
     }
+    const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
+    if (credentialHelpers.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured credential helpers'));
+    if (credentialHelpers.exitCode !== 1) {
+      const error = this.mapError(credentialHelpers);
+      if (error !== null) return error;
+    }
 
     const hooks = await this.runner.run(['rev-parse', '--git-path', 'hooks'], cwd, this.signalOptions(signal));
     const hooksError = this.mapError(hooks);

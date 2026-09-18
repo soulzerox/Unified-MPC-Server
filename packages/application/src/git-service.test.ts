@@ -212,6 +212,7 @@ describe('GitService', () => {
     ['askpass helper', ['config', 'core.askPass', '/tmp/askpass-wrapper']],
     ['remote upload-pack', ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack']],
     ['credential helper', ['config', '--unset', 'credential.helper']],
+    ['URL-scoped credential helper', ['config', 'credential.https://example.invalid.helper', '!/tmp/credential-wrapper']],
     ['external protocol allowlist', ['config', 'protocol.ext.allow', 'always']],
   ] as const)('rejects executable %s config mutations under Full Bypass', async (_label, args) => {
     const workspace = await createWorkspace();

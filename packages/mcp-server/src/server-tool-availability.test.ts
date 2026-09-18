@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
 import type { ToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { createMcpServer } from './server.js';
+import { ToolRegistry } from './tool-registry.js';
 import type { McpApplicationServices } from './tool-registry.js';
 
 const actor: FileActor = {
@@ -12,6 +13,42 @@ const actor: FileActor = {
 };
 
 describe('MCP server live tool availability', () => {
+  it('keeps connector discovery contract identical to canonical registered harness definitions', async () => {
+    const registry = new ToolRegistry({}, actor);
+    const canonical = registry.describeSchema('prepare_code_change');
+    expect(canonical).toBeDefined();
+
+    const server = createMcpServer({ services: {} as McpApplicationServices, actor });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'connector-contract-test-client', version: '1.0.0' });
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const listed = await client.listTools();
+      const tool = listed.tools.find((candidate) => candidate.name === 'prepare_code_change');
+      expect(tool).toBeDefined();
+      const described = await client.callTool({ name: 'tool_describe', arguments: { name: 'prepare_code_change' } });
+      expect(described.isError).not.toBe(true);
+      const describedValue = described.structuredContent as {
+        inputSchema: unknown;
+        outputSchema: unknown;
+        annotations: unknown;
+        execution: unknown;
+      };
+
+      expect(tool?.inputSchema).toEqual(describedValue.inputSchema);
+      expect(tool?.outputSchema).toEqual(describedValue.outputSchema);
+      expect(tool?.annotations).toEqual(describedValue.annotations);
+      expect(canonical?.inputSchema).toBeInstanceOf(Object);
+      expect(canonical?.annotations).toEqual(describedValue.annotations);
+      expect(canonical?.execution).toEqual(describedValue.execution);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+    }
+  });
+
   it('updates one connected client live and debounces tools/list_changed notifications', async () => {
     let snapshot: ToolAvailabilitySnapshot = { version: 1, generation: 0, overrides: {} };
     const listeners = new Set<(next: ToolAvailabilitySnapshot) => void>();

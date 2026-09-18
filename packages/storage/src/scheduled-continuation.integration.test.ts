@@ -10,6 +10,7 @@ import { GOAL_CONTINUATION_MIGRATION_SQL } from './migrations/goal-continuation-
 import { SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/scheduled-continuation-migration.js';
 
 const temporaryRoots: string[] = [];
+const databaseFilenames = new WeakMap<SqliteDatabase, string>();
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -18,7 +19,9 @@ afterEach(async () => {
 async function openDatabase(): Promise<SqliteDatabase> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-scheduled-continuation-'));
   temporaryRoots.push(root);
-  const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+  const filename = path.join(root, 'state.sqlite');
+  const database = new SqliteDatabase(filename);
+  databaseFilenames.set(database, filename);
   database.connection.prepare(`
     INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at)
     VALUES (?, ?, ?, ?, ?)
@@ -1238,6 +1241,7 @@ describe('scheduled continuation repository state machine', () => {
   it('allows a different client to retry the same recurring tick after a busy noop lease expires', async () => {
     const database = await openDatabase();
     const repository = new SqliteGoalRepository(database);
+    let competingDatabase: SqliteDatabase | undefined;
     try {
       await acquireGoalLease(repository, '2026-08-27T00:20:00.000Z');
       const prepared = await repository.prepareScheduledContinuation(prepareRequest(
@@ -1287,8 +1291,12 @@ describe('scheduled continuation repository state machine', () => {
       });
       expect(firstTick).toMatchObject({ outcome: 'worker_busy_noop', runKey: 'interval-0' });
 
+      const filename = databaseFilenames.get(database);
+      if (filename === undefined) throw new Error('database filename missing');
+      competingDatabase = new SqliteDatabase(filename);
+      const competingRepository = new SqliteGoalRepository(competingDatabase);
       const retries = await Promise.all([
-        repository.claimScheduledContinuation({
+        competingRepository.claimScheduledContinuation({
           continuationId: prepared.continuation.continuationId,
           ...claimSuccessorFields(prepared.continuation.continuationId, '2026-08-27T00:32:00.000Z'),
           ownerClientId: 'other-client',
@@ -1339,6 +1347,7 @@ describe('scheduled continuation repository state machine', () => {
         },
       });
     } finally {
+      competingDatabase?.close();
       database.close();
     }
   });

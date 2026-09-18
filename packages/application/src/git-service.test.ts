@@ -207,6 +207,33 @@ describe('GitService', () => {
     expect(defaultBranchCalls).toBe(0);
   });
 
+  it.each([
+    ['ssh command', ['config', 'core.sshCommand', '/tmp/ssh-wrapper']],
+    ['remote upload-pack', ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack']],
+    ['credential helper', ['config', '--unset', 'credential.helper']],
+  ] as const)('rejects executable %s config mutations under Full Bypass', async (_label, args) => {
+    const workspace = await createWorkspace();
+    let calls = 0;
+    const adapter = {
+      async run(): Promise<never> {
+        calls += 1;
+        throw new Error('executable Git config mutation must be denied');
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args,
+      workspaceId: workspace.id,
+    }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toBe(0);
+  });
+
   it('denies a push when native push side effects cannot be verified under Full Bypass', async () => {
     const workspace = await createWorkspace();
     let defaultBranchCalls = 0;

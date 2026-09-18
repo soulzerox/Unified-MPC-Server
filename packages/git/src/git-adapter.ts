@@ -98,13 +98,22 @@ export class GitAdapter {
   }
 
   public async validatePushSafety(cwd: string, remote: string, signal?: AbortSignal): Promise<Result<void>> {
-    const receivePack = await this.runner.run(['config', '--get', `remote.${remote}.receivepack`], cwd, this.signalOptions(signal));
-    if (receivePack.exitCode === 0) {
-      return err(appError('PERMISSION_DENIED', 'Git push cannot use a configured custom receive-pack program'));
-    }
-    if (receivePack.exitCode !== 1) {
-      const error = this.mapError(receivePack);
-      if (error !== null) return error;
+    const executableConfigKeys = [
+      `remote.${remote}.receivepack`,
+      `remote.${remote}.uploadpack`,
+      `remote.${remote}.proxy`,
+      `remote.${remote}.vcs`,
+      'core.sshCommand',
+      'core.gitProxy',
+      'credential.helper',
+    ];
+    for (const key of executableConfigKeys) {
+      const configured = await this.runner.run(['config', '--get-all', key], cwd, this.signalOptions(signal));
+      if (configured.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured executable transport or credential helpers'));
+      if (configured.exitCode !== 1) {
+        const error = this.mapError(configured);
+        if (error !== null) return error;
+      }
     }
 
     const hooks = await this.runner.run(['rev-parse', '--git-path', 'hooks'], cwd, this.signalOptions(signal));

@@ -133,6 +133,28 @@ export function prohibitedGitPushGlobalOptionReason(args: readonly string[]): st
   return undefined;
 }
 
+/** Keeps native Git config mutations from installing executable transport helpers. */
+export function prohibitedGitConfigMutationReason(args: readonly string[]): string | undefined {
+  const invocation = parseGitInvocation(args);
+  if (invocation.subcommand !== 'config') return undefined;
+  const configArgs = invocation.subcommandArgs.map((argument) => argument.toLowerCase());
+  if (configArgs.some((argument) => ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', '--name-only', '--show-origin', '--show-scope'].includes(argument))) {
+    return undefined;
+  }
+  if (configArgs.some(isExecutableGitConfigKey)) {
+    return 'Git config cannot install executable transport or credential helpers';
+  }
+  return undefined;
+}
+
+function isExecutableGitConfigKey(argument: string): boolean {
+  const key = argument.split('=', 1)[0]!;
+  return key === 'core.sshcommand'
+    || key === 'core.gitproxy'
+    || key === 'credential.helper'
+    || /^remote\..+\.(?:receivepack|uploadpack|proxy|vcs)$/.test(key);
+}
+
 function skipGitGlobalOption(args: readonly string[], index: number, option: string): GitInvocation {
   const argument = args[index]!;
   const hasAttachedValue = argument.includes('=') || (option === '-C' && argument.length > 2);

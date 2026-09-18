@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason } from './git-mutation-policy.js';
+import { isProvablyReadOnlyGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitConfigMutationReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason } from './git-mutation-policy.js';
 
 describe('prohibitedAgentGitInvocationReason', () => {
   it.each([
@@ -131,5 +131,13 @@ describe('prohibitedAgentGitInvocationReason', () => {
     ['--exec-path', '/tmp/custom-bin', 'push', 'origin', 'feature/review-gate'],
   ] as const)('rejects push-time Git executable path overrides %s', (...args) => {
     expect(prohibitedGitPushGlobalOptionReason(args)).toBeTypeOf('string');
+  });
+
+  it.each([
+    ['config', 'core.sshCommand', '/tmp/ssh-wrapper'],
+    ['config', '--add', 'remote.origin.uploadpack', '/tmp/upload-pack'],
+    ['config', '--unset', 'credential.helper'],
+  ] as const)('rejects executable Git config mutation %s', (...args) => {
+    expect(prohibitedGitConfigMutationReason(args)).toBeTypeOf('string');
   });
 });

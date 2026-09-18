@@ -1,6 +1,6 @@
-# 🇹🇭 Thai RAG Context & Personal Second Brain MCP Server (`thai-rag-mcp`)
+# Thai-RAG Provider and Optional Standalone MCP Adapter (`thai-rag-mcp`)
 
-> **100% Local, Offline-First, Zero-Cost AI Memory & Code Property Graph (CPG) Server**  
+> **100% Local, Offline-First, Zero-Cost Thai-aware memory, code retrieval, and CPG provider**
 > รองรับทั้ง **Personal Second Brain** (ความจำการสนทนาข้ามเซสชัน) และ **Code Property Graph** (วิเคราะห์ความสัมพันธ์ของโค้ดแบบ Multi-Hop AST) สำหรับ IDE และ AI Coding Agents ทุกค่าย
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -27,7 +27,18 @@
 
 ---
 
-## 🏛️ สถาปัตยกรรมและหลักการทำงาน (Architecture & Core Principles)
+## Architecture and Core Principles
+
+Production topology:
+
+```text
+Client -> Unified MCP -> Native Thai-RAG Provider
+                         └-> optional standalone MCP adapter
+```
+
+`thai_rag.provider.ThaiRagProvider` is transport-independent. It exposes versioned capability metadata, explicit `workspace_id` scope, structured status/result/error fields, selective event memory, retrieval/index operations, and health/version metadata. Unified owns public tool names and final presentation. Standalone stdio remains supported for local development and compatibility, but is not authoritative and does not require Unified.
+
+Provider contract returns structured `scope_denied` when canonical workspace ownership/query support is unavailable; storage migration belongs to #2/#13. It never treats category as workspace authorization and never requires raw `remember_turn` for normal operation.
 
 `thai-rag-mcp` ถูกออกแบบมาเพื่อแก้ปัญหาคลาสสิก 3 ประการของ AI Coding Assistants:
 1. **AI ลืมบริบทเมื่อขึ้นเซสชันใหม่**: ลืมข้อตกลง สถาปัตยกรรมเดิม หรือคำสั่งห้ามที่เคยคุยไว้
@@ -41,10 +52,11 @@ flowchart TD
     end
 
     subgraph MCP_Server [thai-rag-mcp Server]
-        Router[FastMCP Router]
+        Provider[ThaiRagProvider\nTransport-independent contract]
+        Router[Optional FastMCP Adapter]
         
         subgraph Domain_A [Domain A: Personal Second Brain]
-            TurnMem[remember_turn\nLive Turn Ingestion]
+            EventMem[record_event\nSelective Workspace Event]
             PreEdit[pre_edit_context\nJIT Constraint Check]
             RecallMem[recall / remember\nLong-term Decision Memory]
         end
@@ -62,9 +74,11 @@ flowchart TD
         Ollama[Local Ollama Server\nnomic-embed-text-v2-moe]
     end
 
-    Agent <-->|Stdio JSON-RPC| Router
-    Router --> Domain_A
-    Router --> Domain_B
+    Unified[Unified MCP] --> Provider
+    Agent -. optional stdio .-> Router
+    Router --> Provider
+    Provider --> Domain_A
+    Provider --> Domain_B
 
     Domain_A --> SQLite
     Domain_A --> Chroma
@@ -83,9 +97,13 @@ flowchart TD
 
 ---
 
+## MCP Adapter Compatibility Surface
+
+The stdio adapter exposes legacy-compatible tools for standalone development only. Unified integrations should call `ThaiRagProvider` directly and map `ProviderResult` to public `rag_*` capabilities. `remember_turn` remains legacy compatibility; selective provider memory uses `record_event` with meaningful event types and no mandatory turn ID.
+
 ## 🛠️ สารบบเครื่องมือ MCP (Available MCP Tools)
 
-เซิร์ฟเวอร์นี้ให้บริการเครื่องมือทั้งหมด 9 รายการผ่านโปรโตคอลมาตรฐาน MCP (Model Context Protocol):
+Optional standalone adapter exposes legacy-compatible tools through Model Context Protocol:
 
 | ชื่อเครื่องมือ | พารามิเตอร์ | การทำงานหลัก | จังหวะที่ Agent ต้องเรียก |
 |---|---|---|---|
@@ -102,7 +120,9 @@ flowchart TD
 
 ---
 
-## 💻 คู่มือติดตั้งใน IDE ต่างๆ (IDE Setup Guide)
+## Optional Standalone IDE Setup
+
+Use direct IDE registration only for standalone development/compatibility. Production clients should register Unified MCP; Unified owns workspace policy and calls native Thai-RAG provider directly.
 
 ### สิ่งที่ต้องเตรียมก่อนติดตั้ง (Prerequisites)
 1. **Ollama**: รันโมเดล Embedding บนเครื่อง (ทำงาน Offline 100%):

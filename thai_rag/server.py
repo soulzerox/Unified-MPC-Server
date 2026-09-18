@@ -323,6 +323,42 @@ class LocalContextServer:
         except Exception as e:
             return f"Error retrieving context: {str(e)}"
 
+    def record_event(
+        self,
+        event_type: str,
+        content: str,
+        workspace_id: str,
+        summary: Optional[str] = None,
+        tags: Optional[list] = None,
+    ) -> dict:
+        if not event_type.strip() or not content.strip():
+            raise ValueError("event_type and content cannot be empty")
+        event_tags = list(tags or [])
+        event_tags.append(event_type)
+        turn_id = f"event_{uuid.uuid4().hex[:12]}"
+        vector = None
+        if self.embedder.is_alive():
+            try:
+                vector = self.embedder.embed_document(f"[{workspace_id}] event: {summary or content}")
+            except Exception:
+                pass
+        self.storage.save_conversation_turn(
+            turn_id=turn_id,
+            workspace=workspace_id,
+            role="event",
+            content=content,
+            summary=summary,
+            tags=event_tags,
+            embedding=vector,
+        )
+        return {
+            "event_type": event_type,
+            "workspace_id": workspace_id,
+            "content": content,
+            "summary": summary,
+            "tags": event_tags,
+        }
+
     def remember_turn(
         self,
         role: str,
@@ -467,6 +503,12 @@ class LocalContextServer:
                 out.append(f"- `{f}`")
 
         return "\n".join(out)
+
+    def provider(self):
+        """Return transport-independent provider contract for this core."""
+        from thai_rag.provider import ThaiRagProvider
+
+        return ThaiRagProvider(core=self)
 
     def close(self):
         self.storage.close()

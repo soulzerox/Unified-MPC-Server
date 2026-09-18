@@ -1,6 +1,10 @@
-# 📐 ข้อกำหนดระบบ: Local Context & Code RAG MCP Server (Unified Deep Module)
+# Technical Specification: Native Thai-RAG Provider and Optional MCP Adapter
 
-เอกสารฉบับนี้เป็นข้อกำหนดทางเทคนิค (Technical Specification) สำหรับการพัฒนา **MCP Server** ท้องถิ่น (Local 100%) เพื่อทำหน้าที่ 2 ประการร่วมกัน:
+Production architecture is `Client -> Unified MCP -> Native Thai-RAG Provider`. `thai_rag.provider.ThaiRagProvider` is the transport-independent contract for memory, retrieval, indexing, CPG, health, version, capabilities, structured status/results/errors, and explicit `workspace_id` scope. The stdio FastMCP layer is an optional thin compatibility adapter; standalone mode remains usable without Unified.
+
+The current contract does not claim canonical workspace ownership/query support before #2/#13 storage migration. Missing or unsupported canonical scope returns structured unavailable/scope errors. Selective `record_event` replaces raw automatic turn recording as provider primitive; legacy `remember_turn` is compatibility-only.
+
+เอกสารฉบับนี้เป็นข้อกำหนดทางเทคนิค (Technical Specification) สำหรับการพัฒนา **Native Thai-RAG Provider** และ optional local MCP adapter เพื่อทำหน้าที่ 2 ประการร่วมกัน:
 1. **Agent Long-Term Memory:** ระบบความจำระยะยาว (บันทึกข้อตกลง, กฎ, บริบทโปรเจกต์) เพื่อทดแทน OpenViking จากเครื่องรีโมต
 2. **AST-Aware Code RAG:** ระบบสืบค้นและทำความเข้าใจซอร์สโค้ดที่เข้าใจไวยากรณ์และภาษาไทย โดยไม่ทำให้ Context Window ของ Agent บวม
 
@@ -38,18 +42,18 @@
 
 ## ⚙️ 4. การตัดสินใจเชิงสถาปัตยกรรม (Implementation Decisions)
 
-### 4.1 ขอบเขตคำสั่งภายนอก (Exposed MCP Interface)
-ออกแบบเป็น Small Surface, High Leverage Interface แยก 2 โดเมนชัดเจน:
+### 4.1 Provider contract and adapter surface
+`ThaiRagProvider` exposes typed `ProviderResult` values independent of MCP transport. Every workspace-bound operation accepts explicit canonical `workspace_id`; result metadata includes provider/contract version and capabilities. Results carry `status` (`ok`, `review_required`, `degraded`, `unavailable`), warnings, generation/operation fields, evidence/data, and machine-readable error codes.
 
-#### โดเมน A: ระบบจัดการความจำ (Memory Subsystem - แทน OpenViking)
-- `remember(content: str, category: str = "general") -> str`: บันทึกข้อมูลบริบท/ข้อตกลง
-- `recall(query: str, category: str = None, limit: int = 5) -> str`: ค้นหาความจำและความรู้เดิม
-- `forget(memory_id: str, category: str = None) -> str`: ลบความจำที่ไม่ต้องการ โดยตรวจ `category` เมื่อ caller ต้องการบังคับขอบเขต workspace
+Provider operations:
+- `version()` / `health()` — contract version, provider version, capabilities, readiness and scope model.
+- `remember(content, workspace_id, category)` / `recall(query, workspace_id, category, limit)` / `forget(memory_id, workspace_id)` — workspace-scoped durable memory; unavailable until canonical ownership is provided by storage.
+- `record_event(event_type, content, workspace_id, summary, tags)` — selective meaningful workspace event without mandatory turn ID.
+- `pre_edit_context(file_path, workspace_id, proposed_symbol)` — structured evidence with truthful `review_required`/`degraded` status.
+- `code_index(workspace_path, workspace_id, force, background)` / `index_status(job_id, workspace_id)` — explicit workspace namespace and job status.
+- `code_search(query, workspace_id, top_k, path_filter)`, `code_context(file_path, line_number, workspace_id, window)`, and `code_blast_radius(symbol_name, workspace_id, max_depth)`.
 
-#### โดเมน B: ระบบสืบค้นโค้ด (Code RAG Subsystem)
-- `code_index(workspace_path: str = ".", force: bool = False, background: bool = False, workspace: str = "") -> str`: ทราเวิร์สและทำดัชนีโค้ด โดย `workspace_path` เป็น filesystem root และ `workspace` เป็น logical namespace ที่ stable; ถ้าไม่ส่ง `workspace` จะ fallback เป็น basename ของ root
-- `code_search(query: str, top_k: int = 5) -> str`: ค้นหาโค้ดแบบไฮบริด (FTS5 + Vector RRF)
-- `code_context(file_path: str, line_number: int, window: int = 25) -> str`: ดึงเนื้อหาแวดล้อมเฉพาะจุด
+The optional FastMCP adapter may retain legacy string tools for standalone compatibility. Unified owns public formatting and policy.
 
 ---
 

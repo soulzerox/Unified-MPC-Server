@@ -640,15 +640,22 @@ function buildStrategy(input: {
     for (const suffix of ['node_modules', 'dist', 'build', '.next', 'coverage']) {
       local('worktree runtime/output', suffix);
     }
+    const manager = detected.packageManagerVersion === undefined ? undefined : `npm@${detected.packageManagerVersion}`;
     commands.push({
-      executable: 'npm',
-      args: [installMode === 'frozen' ? 'ci' : 'install', '--prefer-offline', '--cache', cache],
+      executable: manager === undefined ? 'npm' : 'corepack',
+      args: [
+        ...(manager === undefined ? [] : [manager]),
+        installMode === 'frozen' ? 'ci' : 'install',
+        '--prefer-offline',
+        '--cache',
+        cache,
+      ],
       cwd: rootPath,
       environment,
       phase: 'install',
     });
-    if (detected.packageManagerVersion !== undefined) {
-      versionCheck = { executable: 'npm', args: ['--version'], expectedVersion: detected.packageManagerVersion };
+    if (manager !== undefined) {
+      versionCheck = { executable: 'corepack', args: [manager, '--version'], expectedVersion: detected.packageManagerVersion! };
     }
   } else if (detected.ecosystem === 'python-uv') {
     const cache = shared('uv package/download cache', 'python', 'uv');

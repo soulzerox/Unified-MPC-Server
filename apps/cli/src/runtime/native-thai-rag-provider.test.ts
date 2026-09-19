@@ -157,6 +157,47 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(closed).toBe(true);
   });
 
+  it('fails closed when restarting same driver after stop', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    expect((await driver.stop()).ok).toBe(true);
+    const restarted = await driver.start(options);
+
+    expect(restarted.ok).toBe(false);
+    if (!restarted.ok) expect(restarted.error.message).toContain('cannot restart after stop');
+  });
+
+  it('serializes concurrent start and stop without opening work after shutdown', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let releaseWorkspaces: (() => void) | undefined;
+    const workspacesBlocked = new Promise<void>((resolve) => { releaseWorkspaces = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => {
+        await workspacesBlocked;
+        return [{ id: workspaceId, realRootPath: workspaceRoot }];
+      },
+      clientFactory: clientFactory(),
+    });
+    const starting = driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+    const stopping = driver.stop();
+
+    releaseWorkspaces?.();
+    expect((await starting).ok).toBe(false);
+    expect((await stopping).ok).toBe(true);
+  });
+
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

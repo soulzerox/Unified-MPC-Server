@@ -25,6 +25,10 @@ afterEach(async () => {
 });
 
 describe('NativeThaiRagProviderDriver', () => {
+  it('keeps native tool fixture aligned with provider conformance capabilities', () => {
+    expect(new Set(tools)).toEqual(new Set(THAI_RAG_REQUIRED_CAPABILITIES));
+  });
+
   it('launches without the obsolete remember_turn dependency', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -579,6 +583,38 @@ describe('NativeThaiRagProviderDriver', () => {
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
 
     expect(started.ok).toBe(false);
+    await driver.stop();
+  });
+
+  it('accepts production-shaped Thai-RAG provider handshake bridge', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const production = {
+      ...defaultHandshake(),
+      state: 'degraded',
+      embedding: { profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', dimension: 768 },
+      generation: { contract: THAI_RAG_CONTRACT_FINGERPRINT, embedding: 'nomic-embed-text-v2-moe:latest', index: 'unknown', storage: 'sqlite' },
+      components: {
+        worker_reachable: true,
+        sqlite_available: true,
+        fts_available: true,
+        vector_store_available: false,
+        embedder_available: false,
+        lexical_retrieval_available: true,
+        semantic_retrieval_available: false,
+        active_jobs: [],
+      },
+    };
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: production }),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(true);
     await driver.stop();
   });
 

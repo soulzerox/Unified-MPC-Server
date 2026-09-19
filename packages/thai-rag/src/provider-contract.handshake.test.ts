@@ -51,6 +51,50 @@ describe('Thai-RAG provider handshake', () => {
     if (!result.ok) expect(result.error.code).toBe('CONFLICT');
   });
 
+  it('accepts production bridge metadata with unknown index and omitted preprocessing', () => {
+    const production = {
+      ...baseHandshake,
+      health: 'degraded',
+      embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, index: 'unknown' },
+      components: {
+        workerReachable: true,
+        sqliteAvailable: true,
+        ftsAvailable: true,
+        vectorStoreAvailable: false,
+        embedderAvailable: false,
+        lexicalRetrievalAvailable: true,
+        semanticRetrievalAvailable: false,
+        activeJobs: [],
+      },
+      legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
+    };
+    expect(validateThaiRagHandshake(production, { embeddingIndexGeneration: 1, allowLegacyAdapter: true })).toEqual({ ok: true, value: production });
+  });
+
+  it('rejects production bridge when native capabilities are unavailable', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      health: 'degraded',
+      components: { ...baseHandshake.components, lexicalRetrievalAvailable: false },
+      legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
+    }, { allowLegacyAdapter: true });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('health-degraded');
+  });
+
+  it('validates compatibility range and supplied embedding metadata', () => {
+    for (const change of [
+      { compatibilityRange: { min: '2.0', max: '2.x' } },
+      { embedding: { ...baseHandshake.embedding, model: 'other@sha256:abc' } },
+      { embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' } },
+      { generation: { ...baseHandshake.generation, embedding: 'other-profile' } },
+    ]) {
+      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedPreprocessingVersion: '1' });
+      expect(result.ok).toBe(false);
+    }
+  });
+
   it('rejects unavailable health and workspace scope mismatch', () => {
     const unavailable = validateThaiRagHandshake({ ...baseHandshake, health: 'unavailable' });
     const degraded = validateThaiRagHandshake({ ...baseHandshake, health: 'degraded' });
@@ -86,8 +130,8 @@ describe('Thai-RAG provider handshake', () => {
       ...baseHandshake,
       contractVersion: '0.9',
       compatibilityRange: { min: '0.9', max: '1.x' },
-      capabilities: baseHandshake.capabilities.filter((capability) => capability !== 'record_event'),
-      legacyAdapter: 'category-memory-scope',
+      capabilities: [...baseHandshake.capabilities],
+      legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
     }, { allowLegacyAdapter: true });
     expect(legacy.ok).toBe(true);
   });

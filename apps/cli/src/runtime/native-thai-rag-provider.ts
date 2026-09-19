@@ -10,6 +10,9 @@ import {
   ThaiRagIndexJobStore,
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
+  THAI_RAG_CONTRACT_FINGERPRINT,
+  THAI_RAG_EMBEDDING_PROFILE,
+  THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
   type ThaiRagProviderDriver,
   type ThaiRagProviderDriverHealth,
@@ -19,7 +22,7 @@ import {
 
 const SERVER_NAME = 'thai-rag-native';
 const REQUIRED_TOOLS = new Set([
-  'remember', 'recall', 'pre_edit_context', 'code_blast_radius',
+  'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',
   'forget', 'code_index', 'index_status', 'code_search', 'code_context',
   'health', 'version',
 ]);
@@ -118,12 +121,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return version;
     }
-    const handshake = parseProviderHandshake(version.value);
+    const handshake = parseProviderHandshake(version.value, true);
     if (!handshake.ok) {
       await this.sessions.close().catch(() => undefined);
       return handshake;
     }
-    const compatible = validateThaiRagHandshake(handshake.value, { embeddingIndexGeneration: options.embeddingIndexGeneration });
+    const compatible = validateThaiRagHandshake(handshake.value, {
+      embeddingIndexGeneration: options.embeddingIndexGeneration,
+      allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
+      expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+    });
     if (!compatible.ok) {
       await this.sessions.close().catch(() => undefined);
       return compatible;
@@ -133,12 +140,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return healthProbe;
     }
-    const healthHandshake = parseProviderHandshake(healthProbe.value);
+    const healthHandshake = parseProviderHandshake(healthProbe.value, true);
     if (!healthHandshake.ok) {
       await this.sessions.close().catch(() => undefined);
       return healthHandshake;
     }
-    const healthy = validateThaiRagHandshake(healthHandshake.value, { embeddingIndexGeneration: options.embeddingIndexGeneration });
+    const healthy = validateThaiRagHandshake(healthHandshake.value, {
+      embeddingIndexGeneration: options.embeddingIndexGeneration,
+      allowLegacyAdapter: healthHandshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
+      expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+    });
     if (!healthy.ok) {
       await this.sessions.close().catch(() => undefined);
       return healthy;
@@ -425,9 +436,13 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || config === undefined) return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     const raw = normalizeWorkerCallResult('health', await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, config, 'health', {}, signal)));
     if (!raw.ok) return raw;
-    const handshake = parseProviderHandshake(raw.value);
+    const handshake = parseProviderHandshake(raw.value, true);
     if (!handshake.ok) return handshake;
-    const compatible = validateThaiRagHandshake(handshake.value, { embeddingIndexGeneration: this.expectedEmbeddingIndexGeneration });
+    const compatible = validateThaiRagHandshake(handshake.value, {
+      embeddingIndexGeneration: this.expectedEmbeddingIndexGeneration,
+      allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
+      expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+    });
     if (!compatible.ok) return compatible;
     if (handshake.value.components === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG health response omitted structured component diagnostics', true, { reason: 'missing-health-components' }));
@@ -557,10 +572,11 @@ async function rollbackWorkspaceAliases(changed: readonly { readonly alias: stri
   return restored;
 }
 
-function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake> {
-  const data = isRecord(value) && isRecord(value.structuredContent) && isRecord(value.structuredContent.data)
+function parseProviderHandshake(value: unknown, allowProductionBridge = false): Result<ThaiRagProviderHandshake> {
+  const outer = isRecord(value) && isRecord(value.structuredContent) && isRecord(value.structuredContent.data)
     ? value.structuredContent.data
     : isRecord(value) && isRecord(value.data) ? value.data : value;
+  const data = isRecord(outer) && isRecord(outer.data) && typeof outer.data.provider_id === 'string' ? outer.data : outer;
   if (!isRecord(data)
     || typeof data.provider_id !== 'string'
     || typeof data.provider_version !== 'string'
@@ -578,7 +594,7 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
     || typeof data.embedding.profile !== 'string'
     || typeof data.embedding.model !== 'string'
     || typeof data.embedding.dimension !== 'number'
-    || typeof data.embedding.preprocessing_version !== 'string'
+    || (data.embedding.preprocessing_version !== undefined && typeof data.embedding.preprocessing_version !== 'string')
     || !isRecord(data.generation)
     || typeof data.generation.contract !== 'string'
     || typeof data.generation.embedding !== 'string'
@@ -602,7 +618,7 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
       profile: data.embedding.profile,
       model: data.embedding.model,
       dimension: data.embedding.dimension,
-      preprocessingVersion: data.embedding.preprocessing_version,
+      ...(data.embedding.preprocessing_version === undefined ? {} : { preprocessingVersion: data.embedding.preprocessing_version }),
     },
     generation: {
       contract: data.generation.contract,
@@ -614,7 +630,11 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
     ...(typeof data.workspace_ready === 'boolean' ? { workspaceReady: data.workspace_ready } : {}),
     ...(components === undefined ? {} : { components }),
     embeddingIndexGeneration: data.embedding_index_generation,
-    ...(typeof data.legacy_adapter === 'string' ? { legacyAdapter: data.legacy_adapter } : {}),
+    ...(typeof data.legacy_adapter === 'string'
+      ? { legacyAdapter: data.legacy_adapter }
+      : allowProductionBridge && data.contract_version === '1.0' && data.contract_fingerprint === THAI_RAG_CONTRACT_FINGERPRINT
+        ? { legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE }
+        : {}),
   });
 }
 

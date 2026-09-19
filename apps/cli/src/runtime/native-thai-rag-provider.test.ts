@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -75,6 +75,266 @@ describe('NativeThaiRagProviderDriver', () => {
       status: 'running',
     })]);
     await driver.stop();
+  });
+
+  it('does not block startup on workspace reindexing', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            markIndexStarted?.();
+            await indexBlocked;
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(true);
+    await indexStarted;
+    releaseIndex?.();
+    await driver.stop();
+  });
+
+  it('waits for background reindex before completing stop', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    let indexActive = false;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            indexActive = true;
+            markIndexStarted?.();
+            await indexBlocked;
+            indexActive = false;
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await indexStarted;
+    let stopCompleted = false;
+    const stopping = driver.stop().then((result) => {
+      stopCompleted = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(stopCompleted).toBe(false);
+    expect(indexActive).toBe(true);
+    releaseIndex?.();
+    expect((await stopping).ok).toBe(true);
+    expect(indexActive).toBe(false);
+  });
+
+  it('drains queued calls before closing the worker on stop', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    let closed = false;
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        onClose(): void { closed = true; },
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            markIndexStarted?.();
+            await indexBlocked;
+          }
+          if (closed) throw new Error('worker called after close');
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await indexStarted;
+    const call = driver.call('recall', { query: 'queued during stop' });
+    const stopping = driver.stop();
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    releaseIndex?.();
+    expect((await call).ok).toBe(true);
+    expect((await stopping).ok).toBe(true);
+    expect(calls).toContain('recall');
+    expect(closed).toBe(true);
+  });
+
+  it('fails closed when restarting same driver after stop', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    expect((await driver.stop()).ok).toBe(true);
+    const restarted = await driver.start(options);
+
+    expect(restarted.ok).toBe(false);
+    if (!restarted.ok) expect(restarted.error.message).toContain('cannot restart after stop');
+  });
+
+  it('serializes concurrent start and stop without opening work after shutdown', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let releaseWorkspaces: (() => void) | undefined;
+    const workspacesBlocked = new Promise<void>((resolve) => { releaseWorkspaces = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => {
+        await workspacesBlocked;
+        return [{ id: workspaceId, realRootPath: workspaceRoot }];
+      },
+      clientFactory: clientFactory(),
+    });
+    const starting = driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+    const stopping = driver.stop();
+
+    releaseWorkspaces?.();
+    expect((await starting).ok).toBe(false);
+    expect((await stopping).ok).toBe(true);
+  });
+
+  it('skips stale alias sync when stop claims shutdown during refresh', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let workspaceReads = 0;
+    let releaseRefresh: (() => void) | undefined;
+    const refreshBlocked = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => {
+        workspaceReads += 1;
+        if (workspaceReads > 1) await refreshBlocked;
+        return [{ id: workspaceId, realRootPath: workspaceRoot }];
+      },
+      clientFactory: clientFactory(),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    const refreshing = driver.call('recall', { query: 'refresh before stop' });
+    await expect.poll(() => workspaceReads).toBe(2);
+    const stopping = driver.stop();
+    releaseRefresh?.();
+
+    await refreshing;
+    expect((await stopping).ok).toBe(true);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(workspaceRoot));
+  });
+
+  it('restores previous alias when stop invalidates an in-flight reindex', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const relinkedRoot = await tempRoot();
+    let current = [{ id: workspaceId, realRootPath: firstRoot }];
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let markRelinkIndexStarted: (() => void) | undefined;
+    const relinkIndexStarted = new Promise<void>((resolve) => { markRelinkIndexStarted = resolve; });
+    let indexCalls = 0;
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => current,
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            indexCalls += 1;
+            if (indexCalls === 1) markIndexStarted?.();
+            else markRelinkIndexStarted?.();
+            await indexBlocked;
+          }
+          return success('indexed');
+        },
+      }),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    await indexStarted;
+    releaseIndex?.();
+    current = [{ id: workspaceId, realRootPath: relinkedRoot }];
+    const refreshing = driver.call('recall', { query: 'relink before stop' });
+    await relinkIndexStarted;
+    const stopping = driver.stop();
+    releaseIndex?.();
+
+    await refreshing;
+    expect((await stopping).ok).toBe(true);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
+  });
+
+  it('reports stop failure when stale alias restoration is unsafe', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            markIndexStarted?.();
+            await indexBlocked;
+          }
+          return success('indexed');
+        },
+      }),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    await indexStarted;
+    const alias = path.join(dataRoot, 'thai-rag', 'sources', workspaceId);
+    await rm(alias, { recursive: true, force: true });
+    await mkdir(alias);
+    const stopping = driver.stop();
+    releaseIndex?.();
+
+    const stopped = await stopping;
+    expect(stopped.ok).toBe(false);
+    expect((await lstat(alias)).isSymbolicLink()).toBe(false);
   });
 
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
@@ -396,7 +656,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
     const second = createDriver(relinkedRoot);
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace === workspaceId && call.args.force === true)).toBe(true);
+    await expect.poll(() => calls.some((call) => call.tool === 'code_index' && call.args.workspace === workspaceId && call.args.force === true)).toBe(true);
     await second.stop();
   });
 
@@ -432,6 +692,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
 function clientFactory(options: {
   readonly onConnect?: (config: McpServerLaunchConfig) => void;
+  readonly onClose?: () => void;
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
   readonly codeIndexSupportsWorkspace?: boolean;
   readonly forgetSupportsCategory?: boolean;
@@ -455,7 +716,7 @@ function clientFactory(options: {
         async callTool(tool, args): Promise<unknown> {
           return options.onCall === undefined ? success('ok') : options.onCall(tool, args);
         },
-        async close(): Promise<void> {},
+        async close(): Promise<void> { options.onClose?.(); },
       };
     },
   };

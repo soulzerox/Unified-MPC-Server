@@ -95,7 +95,7 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 
 ### 3. Two-Tier Context Preservation Catalog
 - **LLM Context Optimization**: Traditional MCP gateways flood the AI model's context window with dozens of massive tool schemas, inflating token costs and causing instruction distraction.
-- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets and optional child MCP servers on demand. Mandatory workspace-harness children are pinned only after `workspace_bootstrap`; optional children connect for discovery/calls and may be released again when idle.
+- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets and optional child MCP servers on demand. Workspace bootstrap verifies native capabilities; optional children connect only for explicit discovery/calls and may be released again when idle.
 - **Native Workspace-Scoped Thai-RAG**: Unified MCP owns `rag_recall`, `rag_remember`, `workspace_memory_record`, pre-edit context, code search/context, blast-radius, and indexing tools. Memory is selective, carries canonical workspace scope, and never captures every conversation turn automatically. Native RAG calls do not route through generic `mcp_call`; arbitrary child MCP mutations remain separately guarded.
 
 ### 4. Bifurcated Dynamic Ingestion Engine

@@ -989,7 +989,7 @@ describe('LocalExtensionsService MCP bridge', () => {
     await service.close();
   });
 
-  it('warms and pins mandatory child MCP servers automatically before status is observed', async () => {
+  it('does not launch legacy mandatory child MCP servers during discovery', async () => {
     let connects = 0;
     const service = new LocalExtensionsService({
       settings: {
@@ -1013,9 +1013,9 @@ describe('LocalExtensionsService MCP bridge', () => {
 
     await expect(service.listMcpServers()).resolves.toMatchObject({
       ok: true,
-      value: { servers: [expect.objectContaining({ name: 'mock', connected: true, pinned: true, required: true })] },
+      value: { servers: [expect.objectContaining({ name: 'mock', connected: false, pinned: false, required: true })] },
     });
-    expect(connects).toBe(1);
+    expect(connects).toBe(0);
     await service.close();
   });
 
@@ -1085,7 +1085,7 @@ describe('LocalExtensionsService MCP bridge', () => {
       },
     });
 
-    liveSettings = { ...liveSettings, extraMcpServers: {} };
+    liveSettings = { ...liveSettings, extraMcpServers: {} as typeof liveSettings.extraMcpServers };
     const afterRemoval = await service.runtimePolicySnapshot();
     expect(afterRemoval.ok).toBe(true);
     if (afterRemoval.ok) expect(afterRemoval.value.policies.some((policy) => policy.id === 'auto:server:mock')).toBe(false);

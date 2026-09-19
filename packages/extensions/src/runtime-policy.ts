@@ -64,7 +64,12 @@ export function reconcileRuntimePolicies(settings: ExtensionsSettings, servers: 
     resolved.push({ id: `auto:server:${key}`, resourceId: server.name, resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: `Inspect and use child MCP server ${server.name} automatically when its live tool catalog is relevant; do not wait for the user to name it.`, source: 'discovered', available: true, resolvedResourceId: server.name });
   }
   const policies: ResolvedPolicyEntry[] = resolved.map((policy, index) => ({ ...policy, priority: `P${index + 1}` }));
-  return { ready: policies.filter((policy) => policy.mandatory).every((policy) => policy.available), policies };
+  return {
+    ready: policies
+      .filter((policy) => policy.mandatory && policy.resourceType !== 'server')
+      .every((policy) => policy.available),
+    policies,
+  };
 }
 
 type UnprioritizedResolvedPolicyEntry = Omit<ResolvedPolicyEntry, 'priority'>;

@@ -154,18 +154,36 @@ class LocalContextServer:
             limit = 5
         limit = min(limit, 50)
 
-        err = self._check_ollama()
-        if err:
-            return err
-
+        warnings = []
         try:
-            q_vec = self.embedder.embed_query(query)
-            search_kwargs = {"limit": limit, "category": category}
-            if workspace_id:
-                search_kwargs["workspace_id"] = workspace_id
-            matches = self.storage.search_memories_vector(q_vec, **search_kwargs)
+            matches = []
+            if self.embedder.is_alive():
+                try:
+                    q_vec = self.embedder.embed_query(query)
+                    search_kwargs = {"limit": limit, "category": category, "workspace_id": workspace_id}
+                    matches = self.storage.search_memories_vector(q_vec, **search_kwargs)
+                except Exception as exc:
+                    warnings.append(f"semantic retrieval failed: {exc}; FTS fallback used")
+            else:
+                warnings.append("embedding backend unavailable; FTS fallback used")
+
             if not matches:
-                return f"No memories found matching '{query}'."
+                turns = self.storage.search_conversation_turns(query, workspace=workspace_id, limit=limit)
+                matches = [
+                    {
+                        "id": turn["turn_id"],
+                        "content": turn["content"],
+                        "metadata": {
+                            "category": "general",
+                            "created_at": turn.get("created_at", ""),
+                        },
+                        "distance": 0.0,
+                    }
+                    for turn in turns
+                ]
+            if not matches:
+                result = f"No memories found matching '{query}'."
+                return f"{result}  ⚠️ {'; '.join(warnings)}" if warnings else result
 
             out = [f"### 🧠 Retrieved Memories for '{query}':"]
             for m in matches:
@@ -176,6 +194,8 @@ class LocalContextServer:
                 dist = round(m.get("distance", 0.0), 3)
                 out.append(f"- **[ID: {m['id']}]** (Category: `{cat}`, Date: `{date}`, Dist: `{dist}`):\n  {m['content']}")
 
+            if warnings:
+                out.append(f"⚠️ {'; '.join(warnings)}")
             return "\n\n".join(out)
         except Exception as e:
             return f"Error recalling memories: {str(e)}"
@@ -426,8 +446,11 @@ class LocalContextServer:
         summary: Optional[str] = None,
         tags: Optional[list] = None,
     ) -> dict:
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            raise ValueError("canonical workspace_id is required")
         if not event_type.strip() or not content.strip():
             raise ValueError("event_type and content cannot be empty")
+        workspace_id = workspace_id.strip()
         event_tags = list(tags or [])
         event_tags.append(event_type)
         turn_id = f"event_{uuid.uuid4().hex[:12]}"
@@ -438,6 +461,8 @@ class LocalContextServer:
                 vector = self.embedder.embed_document(f"[{workspace_id}] event: {summary or content}")
             except Exception as exc:
                 embedding_error = str(exc)
+        else:
+            embedding_error = "embedding backend unavailable"
         self.storage.save_conversation_turn(
             turn_id=turn_id,
             workspace=workspace_id,
@@ -478,7 +503,9 @@ class LocalContextServer:
         if not content.strip():
             return "Error: Content cannot be empty."
 
-        workspace_id = workspace_id or workspace or "general"
+        workspace_id = workspace_id or workspace
+        if not workspace_id or not workspace_id.strip():
+            return "Error: canonical workspace_id is required."
         turn_id = (turn_id or "").strip() or f"turn_{uuid.uuid4().hex[:12]}"
         vector = None
         embed_failed = False
@@ -486,9 +513,9 @@ class LocalContextServer:
             try:
                 vector = self.embedder.embed_document(f"[{workspace_id}] {role}: {summary or content}")
             except Exception:
-                # BUG-4: turn still saved to SQLite (FTS search works), but Chroma
-                # vector is skipped — surface a warning so silent data loss is visible.
                 embed_failed = True
+        else:
+            embed_failed = True
 
         self.storage.save_conversation_turn(
             turn_id=turn_id,

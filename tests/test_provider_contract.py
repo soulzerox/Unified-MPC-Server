@@ -84,6 +84,88 @@ def test_health_reports_degraded_embedding_state():
     assert result.warnings
 
 
+def test_health_probes_code_fts_instead_of_conversation_fts():
+    import sqlite3
+
+    class Collection:
+        @staticmethod
+        def count():
+            return 0
+
+    class Storage:
+        sqlite_conn = sqlite3.connect(":memory:")
+        code_collection = Collection()
+
+    Storage.sqlite_conn.execute("CREATE TABLE fts_conversation (content TEXT)")
+
+    class Embedder:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class Core:
+        storage = Storage()
+        embedder = Embedder()
+
+    result = ThaiRagProvider(core=Core()).health()
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert result.data["readiness"]["fts_ready"] is False
+    assert ErrorCode.LEXICAL_RETRIEVAL_UNAVAILABLE in {error.code for error in result.errors}
+
+
+def test_health_verifies_workspace_has_owned_index_rows():
+    import sqlite3
+
+    class Collection:
+        @staticmethod
+        def count():
+            return 0
+
+    class Storage:
+        sqlite_conn = sqlite3.connect(":memory:")
+        code_collection = Collection()
+
+    Storage.sqlite_conn.execute(
+        "CREATE VIRTUAL TABLE fts_code_symbols USING fts5(doc_id UNINDEXED, symbol_name, file_path, content)"
+    )
+    Storage.sqlite_conn.execute(
+        "CREATE TABLE code_symbols (file_path TEXT, symbol_name TEXT, workspace TEXT)"
+    )
+    Storage.sqlite_conn.execute(
+        "INSERT INTO code_symbols VALUES ('ws-a/auth.py', 'auth', 'ws-a')"
+    )
+    Storage.sqlite_conn.execute(
+        "INSERT INTO fts_code_symbols (doc_id, symbol_name, file_path, content) VALUES ('doc-1', 'auth', 'ws-a/auth.py', 'def auth(): pass')"
+    )
+
+    class Embedder:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class Core:
+        storage = Storage()
+        embedder = Embedder()
+        supports_canonical_code_scope = True
+
+        def pre_edit_context(self, file_path, workspace_id=None, proposed_symbol=None): return {}
+        def code_index(self, workspace_path, workspace_id, force=False, background=False): return {}
+        def index_status(self, job_id, workspace_id): return {}
+        def code_search(self, query, workspace_id, top_k=5, path_filter=None): return {}
+        def code_context(self, file_path, workspace_id, line_number, window=25): return {}
+        def code_blast_radius(self, symbol_name, workspace_id, max_depth=2): return {}
+
+    provider = ThaiRagProvider(core=Core())
+    owned = provider.health(workspace_id="ws-a")
+    foreign = provider.health(workspace_id="ws-b")
+
+    assert owned.status is ProviderStatus.OK
+    assert owned.data["readiness"]["workspace_ready"] is True
+    assert foreign.status is ProviderStatus.UNAVAILABLE
+    assert foreign.data["readiness"]["workspace_ready"] is False
+
+
 def test_health_fails_closed_when_vector_or_workspace_readiness_is_missing():
     import sqlite3
 
@@ -170,6 +252,56 @@ def test_provider_records_selective_event_without_turn_id():
     assert result.data["event_type"] == "decision"
     assert result.data["workspace_id"] == "ws-123"
     assert "turn_id" not in result.data
+
+
+def test_provider_propagates_core_degraded_status_and_warnings_for_events():
+    class Core(RecordingCore):
+        def record_event(self, event_type, content, workspace_id, summary=None, tags=None):
+            return {
+                "status": "degraded",
+                "event_type": event_type,
+                "workspace_id": workspace_id,
+                "warnings": ["embedding failed; FTS storage succeeded"],
+            }
+
+    result = ThaiRagProvider(core=Core({"constraints": [], "code_context": None})).record_event(
+        "decision", "Use SQLite", workspace_id="ws-123"
+    )
+
+    assert result.status is ProviderStatus.DEGRADED
+    assert result.warnings == ["embedding failed; FTS storage succeeded"]
+    assert result.data["event_type"] == "decision"
+
+
+def test_provider_rejects_unscoped_remember_turn():
+    provider = ThaiRagProvider(core=RecordingCore({"constraints": [], "code_context": None}))
+
+    result = provider.remember_turn(role="user", content="decision")
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert result.errors[0].code is ErrorCode.WORKSPACE_SCOPE_REQUIRED
+
+
+def test_core_rejects_unscoped_event_write(tmp_path):
+    from thai_rag.server import LocalContextServer
+
+    server = LocalContextServer(
+        sqlite_path=tmp_path / "context.db",
+        chroma_path=str(tmp_path / "chroma"),
+    )
+    try:
+        try:
+            server.record_event("decision", "must be scoped", workspace_id=None)
+        except ValueError as exc:
+            assert str(exc) == "canonical workspace_id is required"
+        else:
+            raise AssertionError("unscoped event write was accepted")
+        assert server.storage.sqlite_conn.execute(
+            "SELECT COUNT(*) FROM conversation_turns WHERE content = ?",
+            ("must be scoped",),
+        ).fetchone()[0] == 0
+    finally:
+        server.close()
 
 
 def test_pre_edit_reports_review_required_when_constraints_exist():
@@ -394,7 +526,8 @@ def test_record_event_preserves_embedding_failure_truthfully(tmp_path, monkeypat
     try:
         result = server.provider().record_event("decision", "event content", workspace_id="ws-a")
 
-        assert result.status is ProviderStatus.OK
+        assert result.status is ProviderStatus.DEGRADED
+        assert result.warnings == ["embedding failed: embed down; FTS storage succeeded"]
         assert result.data["warnings"] == ["embedding failed: embed down; FTS storage succeeded"]
         row = server.storage.sqlite_conn.execute(
             "SELECT event_type FROM conversation_turns WHERE workspace = ? AND content = ?",
@@ -909,7 +1042,12 @@ def test_global_health_reports_ready_without_workspace_scope():
         sqlite_conn = sqlite3.connect(":memory:")
         code_collection = Collection()
 
-    Storage.sqlite_conn.execute("CREATE TABLE fts_conversation (content TEXT)")
+    Storage.sqlite_conn.execute(
+        "CREATE VIRTUAL TABLE fts_code_symbols USING fts5(doc_id UNINDEXED, symbol_name, file_path, content)"
+    )
+    Storage.sqlite_conn.execute(
+        "INSERT INTO fts_code_symbols (doc_id, symbol_name, file_path, content) VALUES ('doc-1', 'health', 'ws-other/health.py', 'def health(): pass')"
+    )
 
     class Embedder:
         model = "test"
@@ -938,8 +1076,8 @@ def test_global_health_reports_ready_without_workspace_scope():
     assert global_health.data["ready"] is True
     assert global_health.data["readiness"]["workspace_ready"] is False
     assert global_health.errors == []
-    assert scoped_health.status is ProviderStatus.OK
-    assert scoped_health.data["readiness"]["workspace_ready"] is True
+    assert scoped_health.status is ProviderStatus.UNAVAILABLE
+    assert scoped_health.data["readiness"]["workspace_ready"] is False
 
 
 def test_standalone_index_adapters_return_structured_errors(monkeypatch):

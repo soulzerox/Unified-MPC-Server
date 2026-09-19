@@ -482,16 +482,41 @@ class ThaiRagProvider:
                     workspace_id=workspace_id,
                     job_id=data.get("job_id"),
                 )
-            if operation in self._CANONICAL_CODE_OPERATIONS and isinstance(data, dict) and data.get("status") not in {None, "ok", "running", "done"}:
+            warnings = self._result_warnings(data)
+            status = self._result_status(data, warnings)
+            if operation in self._CANONICAL_CODE_OPERATIONS and isinstance(data, dict) and (
+                status not in {ProviderStatus.OK, ProviderStatus.DEGRADED}
+                or data.get("code") is not None
+                or data.get("error") is not None
+            ):
                 return self._structured_error(operation, workspace_id, data)
             return ProviderResult(
-                status=ProviderStatus.OK,
+                status=status,
                 data=data,
                 workspace_id=workspace_id,
+                warnings=warnings,
                 metadata=self._metadata(workspace_id),
             )
         except Exception as exc:
             return self._failure(operation, workspace_id, exc)
+
+    @staticmethod
+    def _result_warnings(data: Any) -> list[str]:
+        if isinstance(data, dict):
+            raw = data.get("warnings", [])
+            return [str(warning) for warning in raw] if isinstance(raw, list) else [str(raw)]
+        if isinstance(data, str) and any(term in data.lower() for term in ("warning", "degraded", "embedding failed", "without vector")):
+            return [data]
+        return []
+
+    def _result_status(self, data: Any, warnings: list[str]) -> ProviderStatus:
+        if isinstance(data, dict) and data.get("status"):
+            try:
+                status = ProviderStatus(data["status"])
+                return ProviderStatus.DEGRADED if status is ProviderStatus.OK and warnings else status
+            except ValueError:
+                pass
+        return ProviderStatus.DEGRADED if warnings else ProviderStatus.OK
 
     def _scope_name(self, method: Callable[..., Any], operation: str) -> str:
         parameters = inspect.signature(method).parameters
@@ -706,8 +731,9 @@ class ThaiRagProvider:
                 if connection is not None:
                     connection.execute("SELECT 1").fetchone()
                     storage_ready = True
-                    connection.execute("SELECT 1 FROM fts_conversation LIMIT 1").fetchone()
-                    fts_ready = True
+                    fts_ready = connection.execute(
+                        "SELECT 1 FROM fts_code_symbols LIMIT 1"
+                    ).fetchone() is not None
             except Exception:
                 pass
             collection = getattr(storage, "code_collection", None)
@@ -721,7 +747,11 @@ class ThaiRagProvider:
             embedding_ready = bool(embedder is None or not hasattr(embedder, "is_alive") or embedder.is_alive())
         except Exception:
             embedding_ready = False
-        workspace_ready = bool(workspace_id and self._supports_canonical_code_scope() and self._has_scoped_code_api())
+        workspace_ready = bool(
+            workspace_id
+            and self._supports_canonical_code_scope()
+            and self._has_owned_code_index(storage, workspace_id)
+        )
         return {
             "storage_ready": storage_ready,
             "fts_ready": fts_ready,
@@ -729,6 +759,27 @@ class ThaiRagProvider:
             "embedding_ready": embedding_ready,
             "workspace_ready": workspace_ready,
         }
+
+    def _has_owned_code_index(self, storage: Any, workspace_id: str) -> bool:
+        if not self._has_scoped_code_api():
+            return False
+        connection = getattr(storage, "sqlite_conn", None)
+        if connection is None:
+            return False
+        try:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM fts_code_symbols f
+                JOIN code_symbols s ON s.file_path = f.file_path
+                WHERE s.workspace = ?
+                LIMIT 1
+                """,
+                (workspace_id,),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
 
     def _has_scoped_code_api(self) -> bool:
         for name in ("pre_edit_context", "code_index", "index_status", "code_search", "code_context", "code_blast_radius"):

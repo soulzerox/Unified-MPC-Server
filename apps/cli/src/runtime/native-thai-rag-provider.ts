@@ -96,14 +96,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.sessions.pin(SERVER_NAME);
     this.started = true;
     for (const workspaceId of this.workspaceRoots.keys()) this.pendingReindexIds.add(workspaceId);
-    const postStartRefresh = await this.refreshWorkspaceRoots();
-    if (!postStartRefresh.ok) {
-      this.started = false;
-      this.sessions.unpin(SERVER_NAME);
-      await this.sessions.close().catch(() => undefined);
-      return postStartRefresh;
-    }
-    return this.refreshHealth(signal);
+    const health = await this.refreshHealth(signal);
+    if (!health.ok) return health;
+    void this.refreshWorkspaceRoots().catch(() => undefined);
+    return health;
   }
 
   public async health(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {

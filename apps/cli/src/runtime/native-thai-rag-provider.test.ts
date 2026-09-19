@@ -47,6 +47,33 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('does not block startup on workspace reindexing', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') await indexBlocked;
+          return success('ok');
+        },
+      }),
+    });
+
+    const started = await Promise.race([
+      driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('startup waited for reindex')), 100)),
+    ]);
+
+    expect(started.ok).toBe(true);
+    releaseIndex?.();
+    await driver.stop();
+  });
+
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -231,7 +258,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
     const second = createDriver(relinkedRoot);
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace === workspaceId && call.args.force === true)).toBe(true);
+    await expect.poll(() => calls.some((call) => call.tool === 'code_index' && call.args.workspace === workspaceId && call.args.force === true)).toBe(true);
     await second.stop();
   });
 

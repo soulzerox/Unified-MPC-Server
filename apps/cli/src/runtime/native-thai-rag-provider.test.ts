@@ -3,12 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '@unified-mpc/extensions';
+import {
+  THAI_RAG_CONTRACT_FINGERPRINT,
+  THAI_RAG_REQUIRED_CAPABILITIES,
+} from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 
 const roots: string[] = [];
 const workspaceId = '11111111-1111-4111-8111-111111111111';
 const recoveredWorkspaceId = '22222222-2222-4222-8222-222222222222';
-const tools = ['remember', 'recall', 'pre_edit_context', 'code_blast_radius', 'forget', 'code_index', 'index_status', 'code_search', 'code_context'];
+const tools = ['remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius', 'forget', 'code_index', 'index_status', 'code_search', 'code_context', 'health', 'version'];
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'native-thai-rag-driver-'));
@@ -375,8 +379,9 @@ describe('NativeThaiRagProviderDriver', () => {
     const indexCall = calls.find((call) => call.tool === 'code_index');
     expect(indexCall?.args).toMatchObject({
       workspace_path: workspaceRoot,
-      workspace: workspaceId,
-      background: false,
+       workspace_id: workspaceId,
+       background: false,
+
     });
     await driver.stop();
   });
@@ -549,7 +554,35 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
-  it('fails startup when the worker lacks the explicit workspace namespace contract', async () => {
+  it.each([
+    ['contract version', { contract_version: '2.0' }],
+    ['fingerprint', { contract_fingerprint: 'wrong' }],
+    ['generation', {
+      embedding_index_generation: 2,
+      generation: {
+        contract: THAI_RAG_CONTRACT_FINGERPRINT,
+        embedding: 'nomic-embed-text-v2-moe',
+        index: '2',
+        storage: 'sqlite',
+      },
+    }],
+  ])('fails closed on handshake %s mismatch', async (_name, change) => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: { ...defaultHandshake(), ...change } }),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(false);
+    await driver.stop();
+  });
+
+  it('uses handshake metadata instead of raw code_index schema compatibility', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     const driver = new NativeThaiRagProviderDriver({
@@ -559,18 +592,13 @@ describe('NativeThaiRagProviderDriver', () => {
       clientFactory: clientFactory({ codeIndexSupportsWorkspace: false }),
     });
 
-    const started = await driver.start({
-      providerRoot: path.join(dataRoot, 'thai-rag'),
-      ownerId: 'owner',
-      providerVersion: '4.61.0',
-      embeddingIndexGeneration: 1,
-    });
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
 
-    expect(started.ok).toBe(false);
-    if (!started.ok) expect(started.error.message).toContain('explicit workspace namespace contract');
+    expect(started.ok).toBe(true);
+    await driver.stop();
   });
 
-  it('fails startup when the worker lacks the scoped forget category contract', async () => {
+  it('does not couple startup to legacy forget.category', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     const driver = new NativeThaiRagProviderDriver({
@@ -582,8 +610,8 @@ describe('NativeThaiRagProviderDriver', () => {
 
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
 
-    expect(started.ok).toBe(false);
-    if (!started.ok) expect(started.error.message).toContain('forget does not support the workspace category contract');
+    expect(started.ok).toBe(true);
+    await driver.stop();
   });
 
   it('rejects malformed workspace IDs before creating source aliases', async () => {
@@ -626,8 +654,8 @@ describe('NativeThaiRagProviderDriver', () => {
     const result = await driver.call('pre_edit_context', { workspace: recoveredWorkspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(true);
-    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace === recoveredWorkspaceId && call.args.force === true)).toBe(true);
-    expect(calls.at(-1)?.args).toMatchObject({ workspace: recoveredWorkspaceId, file_path: `${recoveredWorkspaceId}/src/index.ts` });
+    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === recoveredWorkspaceId && call.args.force === true)).toBe(true);
+    expect(calls.at(-1)?.args).toMatchObject({ workspace_id: recoveredWorkspaceId, file_path: `${recoveredWorkspaceId}/src/index.ts` });
     await expect(access(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).rejects.toThrow();
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', recoveredWorkspaceId))).resolves.toBe(await realpath(recoveredRoot));
     await driver.stop();
@@ -656,7 +684,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
     const second = createDriver(relinkedRoot);
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    await expect.poll(() => calls.some((call) => call.tool === 'code_index' && call.args.workspace === workspaceId && call.args.force === true)).toBe(true);
+    await expect.poll(() => calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === workspaceId && call.args.force === true)).toBe(true);
     await second.stop();
   });
 
@@ -696,6 +724,7 @@ function clientFactory(options: {
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
   readonly codeIndexSupportsWorkspace?: boolean;
   readonly forgetSupportsCategory?: boolean;
+  readonly handshake?: Record<string, unknown>;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
@@ -714,6 +743,8 @@ function clientFactory(options: {
         },
         async listResources(): Promise<[]> { return []; },
         async callTool(tool, args): Promise<unknown> {
+          if (tool === 'version') return success('version', options.handshake ?? defaultHandshake());
+          if (tool === 'health') return success('health', options.handshake ?? defaultHandshake());
           return options.onCall === undefined ? success('ok') : options.onCall(tool, args);
         },
         async close(): Promise<void> { options.onClose?.(); },
@@ -722,8 +753,49 @@ function clientFactory(options: {
   };
 }
 
-function success(result: string): unknown {
-  return { content: [{ type: 'text', text: result }], structuredContent: { result } };
+function success(result: string, data?: Record<string, unknown>): unknown {
+  return {
+    content: [{ type: 'text', text: result }],
+    structuredContent: data === undefined ? { result } : { result, data },
+  };
+}
+
+function defaultHandshake(): Record<string, unknown> {
+  return {
+    provider_id: 'thai-rag',
+    provider_version: '0.1.0',
+    contract_version: '1.0',
+    compatibility_range: { min: '1.0', max: '1.x' },
+    contract_fingerprint: THAI_RAG_CONTRACT_FINGERPRINT,
+    index_job_contract_version: '1.0',
+    capabilities: [...THAI_RAG_REQUIRED_CAPABILITIES],
+    workspace_scope_model: 'explicit_workspace_id',
+    state: 'ready',
+    workspace_ready: true,
+    embedding_index_generation: 1,
+    components: {
+      worker_reachable: true,
+      sqlite_available: true,
+      fts_available: true,
+      vector_store_available: true,
+      embedder_available: true,
+      lexical_retrieval_available: true,
+      semantic_retrieval_available: true,
+      active_jobs: [],
+    },
+    embedding: {
+      profile: 'nomic-embed-text-v2-moe',
+      model: 'nomic-embed-text-v2-moe@sha256:abc',
+      dimension: 768,
+      preprocessing_version: '1',
+    },
+    generation: {
+      contract: THAI_RAG_CONTRACT_FINGERPRINT,
+      embedding: 'nomic-embed-text-v2-moe',
+      index: '1',
+      storage: 'sqlite',
+    },
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

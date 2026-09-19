@@ -601,8 +601,9 @@ export class UpgradeRuntimeService {
         },
       };
     }
-    const upgradeNames = new Set(UPGRADE_TOOL_CATALOG.map((entry) => entry.name));
-    const primitiveNames = registered.filter((tool) => !upgradeNames.has(tool.name)).map((tool) => tool.name);
+    const primitiveNames = registered
+      .filter((tool) => this.searchCatalog().find((entry) => entry.name === tool.name)?.primitive === true)
+      .map((tool) => tool.name);
     return {
       primitiveToolsRemainAvailable: primitiveNames.every((name) => this.isToolExposed(name)),
       harnessSurface: {

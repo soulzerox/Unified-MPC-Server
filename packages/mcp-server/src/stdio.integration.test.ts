@@ -112,17 +112,9 @@ describe('MCP stdio transport', () => {
       expect(listed.tools.some((tool) => tool.name === 'workspace_bootstrap')).toBe(true);
       const prepare = listed.tools.find((tool) => tool.name === 'prepare_code_change');
       expect(prepare).toBeDefined();
-      expect(prepare?.inputSchema).toMatchObject({
-        type: 'object',
-        additionalProperties: false,
-        required: ['workspaceId', 'filePath'],
-        properties: {
-          workspaceId: { type: 'string' },
-          filePath: { type: 'string' },
-          proposedSymbol: { type: 'string' },
-          runGodkillerSafetyCheck: { type: 'boolean' },
-        },
-      });
+      const canonical = new ToolRegistry({}, { clientId: 'canonical-test', clientName: 'canonical-test' });
+      expect(prepare?.inputSchema).toEqual(canonical.describeInputJsonSchema('prepare_code_change'));
+      expect(listed.tools.find((tool) => tool.name === 'workspace_bootstrap')?.inputSchema).toEqual(canonical.describeInputJsonSchema('workspace_bootstrap'));
       expect(client.getServerCapabilities()?.tasks).toEqual({ list: {}, cancel: {} });
     } finally {
       await client.close();
@@ -147,17 +139,9 @@ describe('MCP stdio transport', () => {
       expect(first.tools.some((tool) => tool.name === 'workspace_bootstrap')).toBe(true);
       const prepare = first.tools.find((tool) => tool.name === 'prepare_code_change');
       expect(prepare).toBeDefined();
-      expect(prepare?.inputSchema).toMatchObject({
-        type: 'object',
-        additionalProperties: false,
-        required: ['workspaceId', 'filePath'],
-        properties: {
-          workspaceId: { type: 'string' },
-          filePath: { type: 'string' },
-          proposedSymbol: { type: 'string' },
-          runGodkillerSafetyCheck: { type: 'boolean' },
-        },
-      });
+      const canonical = new ToolRegistry({}, { clientId: 'canonical-test', clientName: 'canonical-test' });
+      expect(prepare?.inputSchema).toEqual(canonical.describeInputJsonSchema('prepare_code_change'));
+      expect(first.tools.find((tool) => tool.name === 'workspace_bootstrap')?.inputSchema).toEqual(canonical.describeInputJsonSchema('workspace_bootstrap'));
       expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
       expect(client.getServerCapabilities()?.tasks).toBeUndefined();
       expect(client.getServerCapabilities()?.extensions?.[MODERN_TASKS_EXTENSION_ID]).toEqual({});

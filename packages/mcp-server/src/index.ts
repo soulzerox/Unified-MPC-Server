@@ -18,5 +18,6 @@ export * from './plugin-sdk.js';
 export * from './tool-schema-registry.js';
 export * from './upgrade-catalog.js';
 export * from './tools/tool-types.js';
+export * from './tools/schemas.js';
 
 export * from './request-scope.js';

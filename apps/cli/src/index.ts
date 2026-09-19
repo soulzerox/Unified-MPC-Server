@@ -497,7 +497,7 @@ export function createDefaultCliDependencies(): CliDependencies {
     web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
       const registry = new ToolRegistry({ extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) }, { clientId: 'cli', clientName: 'unified-mpc-cli' });
-      return registry.list().map((tool) => ({
+      return registry.listExposedDefinitions().map((tool) => ({
         name: tool.name,
         description: tool.description,
       }));

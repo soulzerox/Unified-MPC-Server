@@ -1,4 +1,4 @@
-import { type Result } from '@unified-mpc/domain';
+import { type Result, type ResultBudget } from '@unified-mpc/domain';
 import { TreeReader, type TreeOptions, type TreeResult } from '@unified-mpc/filesystem';
 import { WorkspacePathGuard, type WorkspaceRepository } from '@unified-mpc/workspace';
 import type { FileActor } from './file-service.js';
@@ -15,13 +15,13 @@ export class WorkspaceQueryService {
     private readonly treeReader: TreeReader = new TreeReader(),
   ) {}
 
-  public async tree(actor: FileActor, workspaceId: string | undefined, request: TreeRequest = {}): Promise<Result<TreeResult>> {
+  public async tree(actor: FileActor, workspaceId: string | undefined, request: TreeRequest = {}, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<TreeResult>> {
     void actor;
     const hintPath = request.path ?? '.';
     const workspace = await resolveWorkspaceForPath(this.workspaces, workspaceId, hintPath);
     if (!workspace.ok) return workspace;
     const resolved = await this.guard.resolveForRead(workspace.value, hintPath);
     if (!resolved.ok) return resolved;
-    return this.treeReader.read(resolved.value.realPath ?? resolved.value.absolutePath, request);
+    return this.treeReader.read(resolved.value.realPath ?? resolved.value.absolutePath, request, budget, signal);
   }
 }

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type ResultBudget } from '@unified-mpc/domain';
 import {
   ThaiRagProviderCoordinator,
   type ThaiRagProviderDriver,
@@ -107,6 +107,79 @@ describe('ThaiRagProviderCoordinator', () => {
     expect(results.every((result) => result.ok)).toBe(true);
     expect(maxInFlight).toBe(1);
     expect(calls).toHaveLength(4);
+
+    await follower.close();
+    await owner.close();
+  });
+
+  it('propagates result budgets through follower and owner sockets', async () => {
+    const dataRoot = await root();
+    let observedBudget: ResultBudget | undefined;
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async (_tool, _args, _signal, budget) => { observedBudget = budget; return ok({ bounded: true }); } }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'follower',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => { throw new Error('follower driver must not run'); } }),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    const budget: ResultBudget = { maxItems: 2, maxTextBytes: 3, maxStructuredBytes: 4, maxBinaryBytes: 5, maxBase64Bytes: 6 };
+    await follower.call('code_search', { query: 'needle' }, undefined, budget);
+
+    expect(observedBudget).toEqual(budget);
+    await follower.close();
+    await owner.close();
+  });
+
+  it('propagates follower cancellation to the owner producer', async () => {
+    const dataRoot = await root();
+    let producerAborted = false;
+    let releaseProducer!: () => void;
+    let startProducer!: () => void;
+    const producerStarted = new Promise<void>((resolve) => { startProducer = resolve; });
+    const producerStopped = new Promise<void>((resolve) => { releaseProducer = resolve; });
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({
+        call: async (_tool, _args, signal) => new Promise((resolve) => {
+          startProducer();
+          signal?.addEventListener('abort', () => {
+            producerAborted = true;
+            releaseProducer();
+            resolve(ok({ cancelled: true }));
+          }, { once: true });
+        }),
+      }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'follower',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => { throw new Error('follower driver must not run'); } }),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    const controller = new AbortController();
+    const pending = follower.call('code_search', { query: 'needle' }, controller.signal);
+    await producerStarted;
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+    await producerStopped;
+    expect(producerAborted).toBe(true);
 
     await follower.close();
     await owner.close();

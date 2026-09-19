@@ -23,6 +23,55 @@ afterEach(() => {
 });
 
 describe('MCP tool registry', () => {
+  it('hands result budgets through native RAG and working-memory wrappers', async () => {
+    const budgets: unknown[] = [];
+    const registry = new ToolRegistry({
+      thaiRag: {
+        async health() { return ok({}); },
+        async call(_tool: string, _args: Readonly<Record<string, unknown>>, _signal: AbortSignal, budget: unknown) {
+          budgets.push(budget);
+          return ok({ recorded: true });
+        },
+      },
+    } as never, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' }),
+      maxToolResultBytes: 512,
+    });
+
+    await registry.invoke('rag_remember', { workspaceId: 'workspace-1', content: 'note' });
+    await registry.invoke('working_memory_search', { workspaceId: 'workspace-1', query: 'needle' });
+
+    expect(budgets).toHaveLength(2);
+    expect(budgets[0]).toMatchObject({ maxItems: Number.MAX_SAFE_INTEGER, maxStructuredBytes: 512 });
+    expect(budgets[1]).toMatchObject({ maxItems: Number.MAX_SAFE_INTEGER, maxStructuredBytes: 512 });
+  });
+
+  it.each([10, 50, 100])('passes %dMB byte limits before producer materialization', async (megabytes) => {
+    const limit = megabytes * 1024 * 1024;
+    let producerMaterializedOversizedResult = false;
+    let request: unknown;
+    const registry = new ToolRegistry({
+      search: {
+        async searchText(_actor, _workspaceId, options): Promise<ReturnType<typeof ok>> {
+          request = options;
+          if (options.resultBudget === undefined) producerMaterializedOversizedResult = true;
+          return ok({ matches: [] });
+        },
+      },
+    }, actor, { maxToolResultBytes: limit });
+
+    await registry.invoke('search_text', { workspaceId: 'workspace-1', query: 'needle' });
+
+    expect(request).toMatchObject({ resultBudget: {
+      maxItems: Number.MAX_SAFE_INTEGER,
+      maxTextBytes: limit,
+      maxStructuredBytes: limit,
+      maxBinaryBytes: limit,
+      maxBase64Bytes: limit,
+    } });
+    expect(producerMaterializedOversizedResult).toBe(false);
+  });
+
   it.each([
     ['/tmp/Project', '/tmp/Project/src'],
     ['E:\\Project', 'E:\\Project\\src'],

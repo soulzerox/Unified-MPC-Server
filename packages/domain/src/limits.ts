@@ -7,3 +7,11 @@ export const DEFAULT_TREE_DEPTH = 4;
 export const MAX_TREE_DEPTH = 8;
 export const DEFAULT_TREE_ENTRIES = 2000;
 export const MAX_TREE_ENTRIES = 5000;
+
+export interface ResultBudget {
+  readonly maxItems: number;
+  readonly maxTextBytes: number;
+  readonly maxStructuredBytes: number;
+  readonly maxBinaryBytes: number;
+  readonly maxBase64Bytes: number;
+}

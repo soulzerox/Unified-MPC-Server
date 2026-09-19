@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { err, ok, type Result } from '@unified-mpc/domain';
+import { err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
 import type { McpApplicationServices } from './tools/tool-types.js';
 import { BoundedRetentionMap } from './bounded-retention-map.js';
@@ -59,27 +59,31 @@ export class FilePageEngine {
     });
   }
 
-  public async readPage(request: FilePageRequest): Promise<Result<FilePageResult>> {
+  public async readPage(request: FilePageRequest, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<FilePageResult>> {
     const validation = validateRequest(request);
     if (!validation.ok) return validation;
     return this.readAt({
       ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
       path: request.path,
       nextStartLine: request.startLine ?? 1,
-      pageSize: request.pageSize ?? DEFAULT_PAGE_SIZE,
-      ...(request.responseTargetBytes === undefined ? {} : { responseTargetBytes: request.responseTargetBytes }),
-    });
+      pageSize: Math.min(request.pageSize ?? DEFAULT_PAGE_SIZE, budget?.maxItems ?? Number.MAX_SAFE_INTEGER),
+      ...(request.responseTargetBytes === undefined && budget === undefined ? {} : { responseTargetBytes: Math.min(request.responseTargetBytes ?? MAX_RESPONSE_TARGET_BYTES, budget?.maxTextBytes ?? MAX_RESPONSE_TARGET_BYTES) }),
+    }, signal);
   }
 
-  public async continue(token: string, pageSize?: number): Promise<Result<FilePageResult>> {
+  public async continue(token: string, pageSize?: number, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<FilePageResult>> {
     const continuation = this.continuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'File continuation token is invalid or expired', recoverable: false });
-    const next = pageSize === undefined ? continuation.pageSize : pageSize;
+    const next = Math.min(pageSize === undefined ? continuation.pageSize : pageSize, budget?.maxItems ?? Number.MAX_SAFE_INTEGER);
     if (!Number.isInteger(next) || next < 1 || next > MAX_PAGE_SIZE) return err({ code: 'INVALID_INPUT', message: 'File pageSize is invalid', recoverable: false });
-    return this.readAt({ ...continuation, pageSize: next });
+    return this.readAt({
+      ...continuation,
+      pageSize: next,
+      ...(continuation.responseTargetBytes === undefined && budget === undefined ? {} : { responseTargetBytes: Math.min(continuation.responseTargetBytes ?? MAX_RESPONSE_TARGET_BYTES, budget?.maxTextBytes ?? MAX_RESPONSE_TARGET_BYTES) }),
+    }, signal);
   }
 
-  private async readAt(input: Continuation): Promise<Result<FilePageResult>> {
+  private async readAt(input: Continuation, signal?: AbortSignal): Promise<Result<FilePageResult>> {
     if (this.services.file === undefined) return err({ code: 'INTERNAL_ERROR', message: 'File service is unavailable', recoverable: true });
     const requestedEndLine = input.nextStartLine + input.pageSize;
     try {
@@ -87,6 +91,12 @@ export class FilePageEngine {
         path: input.path,
         startLine: input.nextStartLine,
         endLine: requestedEndLine,
+      }, undefined, signal, {
+        maxItems: input.pageSize,
+        maxTextBytes: input.responseTargetBytes ?? MAX_RESPONSE_TARGET_BYTES,
+        maxStructuredBytes: input.responseTargetBytes ?? MAX_RESPONSE_TARGET_BYTES,
+        maxBinaryBytes: input.responseTargetBytes ?? MAX_RESPONSE_TARGET_BYTES,
+        maxBase64Bytes: input.responseTargetBytes ?? MAX_RESPONSE_TARGET_BYTES,
       });
       if (!result.ok) return result;
       if (result.value.encoding === 'base64') {

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
+import { type ResultBudget } from '@unified-mpc/domain';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 import { LocalExtensionsService } from './extensions-service.js';
 import { bundledSkillRootCandidates } from './create-local-extensions.js';
@@ -450,8 +451,13 @@ describe('LocalExtensionsService MCP bridge', () => {
       }) },
     });
 
-    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) }))
-      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('result exceeds') } });
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) }, undefined, {
+      maxItems: 100,
+      maxTextBytes: 128,
+      maxStructuredBytes: 128,
+      maxBinaryBytes: 128,
+      maxBase64Bytes: 128,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: 'Child MCP result exceeds 128 bytes' } });
     await service.close();
   });
 
@@ -559,6 +565,51 @@ describe('LocalExtensionsService MCP bridge', () => {
     await service.close();
   });
 
+  it('does not execute a queued child MCP call after cancellation', async () => {
+    let active = false;
+    let release!: () => void;
+    const calls: string[] = [];
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async (name, _args, signal): Promise<unknown> => {
+        calls.push(name);
+        if (!active) {
+          active = true;
+          await new Promise<void>((resolve) => { release = resolve; });
+        }
+        if (signal?.aborted) throw new Error('child call cancelled');
+        return { content: [] };
+      },
+      close: async () => undefined,
+    };
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => session },
+    });
+    const contract = await currentMockContract(service);
+    const started = new Promise<void>((resolve) => {
+      const wait = (): void => {
+        if (active) resolve();
+        else setImmediate(wait);
+      };
+      wait();
+    });
+    const first = service.callMcpTool({ server: 'mock', tool: 'ping', ...contract });
+    await started;
+    const controller = new AbortController();
+    const second = service.callMcpTool({ server: 'mock', tool: 'ping', ...contract }, controller.signal);
+    controller.abort();
+    release();
+
+    await expect(first).resolves.toMatchObject({ ok: true });
+    await expect(second).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+    expect(calls).toEqual(['ping']);
+    await service.close();
+  });
+
   it('aborts an in-flight child MCP call and closes its managed session', async () => {
     let observedSignal: AbortSignal | undefined;
     let releaseStarted!: () => void;
@@ -613,6 +664,65 @@ describe('LocalExtensionsService MCP bridge', () => {
     dispose();
     expect(stderr.listenerCount('error')).toBe(initialErrorListeners);
     stderr.destroy();
+  });
+
+  it('uses normal child callTool when bounded transport support is unavailable for small results', async () => {
+    let calls = 0;
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => { calls += 1; return { content: [{ type: 'text', text: 'pong' }] }; },
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
+    const budget: ResultBudget = { maxItems: 1, maxTextBytes: 128, maxStructuredBytes: 128, maxBinaryBytes: 128, maxBase64Bytes: 128 };
+
+    await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
+      ok: true,
+      value: { content: [{ type: 'text', text: 'pong' }] },
+    });
+    expect(calls).toBe(1);
+    await manager.close();
+  });
+
+  it('rejects oversized results from the normal child fallback', async () => {
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'x'.repeat(64) }] }),
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
+    const budget: ResultBudget = { maxItems: 1, maxTextBytes: 10, maxStructuredBytes: 10, maxBinaryBytes: 10, maxBase64Bytes: 10 };
+
+    await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    await manager.close();
+  });
+
+  it('passes bounded budgets to child transport and rejects oversized bounded results', async () => {
+    let observedBudget: ResultBudget | undefined;
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'unbounded fallback' }] }),
+      callToolBounded: async (_name, _args, callBudget) => {
+        observedBudget = callBudget;
+        return { content: [{ type: 'text', text: 'x'.repeat(64) }] };
+      },
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
+    const budget: ResultBudget = { maxItems: 2, maxTextBytes: 128, maxStructuredBytes: 32, maxBinaryBytes: 128, maxBase64Bytes: 128 };
+
+    await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    expect(observedBudget).toEqual({ ...budget, maxStructuredBytes: 32 });
+    await manager.close();
   });
 
   it('shares one child connection across concurrent calls', async () => {

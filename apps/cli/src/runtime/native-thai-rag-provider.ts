@@ -1,6 +1,6 @@
 import { lstat, mkdir, readdir, readlink, rm, symlink, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import {
   McpSessionManager,
   type McpClientFactory,
@@ -118,7 +118,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return this.refreshHealth(signal);
   }
 
-  public async call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
+  public async call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
@@ -130,10 +130,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${args.job_id}`))
         : ok(job);
     }
-    if (tool === 'code_index') return this.codeIndex(args, signal);
+    if (tool === 'code_index') return this.codeIndex(args, signal, budget);
     const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
     if (!normalizedArgs.ok) return normalizedArgs;
-    return this.callWorker(tool, normalizedArgs.value, signal);
+    return this.callWorker(tool, normalizedArgs.value, signal, budget);
   }
 
   public async stop(): Promise<Result<void>> {
@@ -144,7 +144,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return ok(undefined);
   }
 
-  private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
+  private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
     const workspaceValue = typeof args.workspace_path === 'string' ? args.workspace_path : '';
     const workspace = this.resolveIndexWorkspace(workspaceValue);
     if (!workspace.ok) return workspace;
@@ -156,11 +156,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       force,
       background: false,
     };
-    if (!background) return this.callWorker('code_index', childArgs, signal);
+    if (!background) return this.callWorker('code_index', childArgs, signal, budget);
 
     const job = await this.jobs.create(workspace.value.workspaceId, force);
     const operation = this.enqueueWorker(async () => {
-      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs);
+      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
       const result = normalizeWorkerCallResult('code_index', raw);
       if (result.ok) await this.jobs.complete(job.jobId, result.value);
       else await this.jobs.fail(job.jobId, result.error.message);
@@ -275,8 +275,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<unknown>> {
-    const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal));
+    const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget));
     return normalizeWorkerCallResult(tool, raw);
   }
 

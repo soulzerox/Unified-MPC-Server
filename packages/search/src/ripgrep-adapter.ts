@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { opendir } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
-import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result } from '@unified-mpc/domain';
+import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { createProcessTreeTerminator, createSpawnInvocationFactory, PathExecutableResolver, type ExecutableResolver, type ProcessTreeTerminator, type SpawnInvocationFactory } from '@unified-mpc/process';
 import {
   classifyContextPath,
@@ -27,6 +29,7 @@ export interface ProcessRunOptions {
    * This keeps high-volume tools such as ripgrep from flooding Electron's main loop.
    */
   readonly stopAfterStdoutLine?: (line: string) => boolean;
+  readonly maxStdoutBytes?: number;
 }
 
 export interface ProcessRunner {
@@ -62,10 +65,13 @@ export class DirectProcessRunner implements ProcessRunner {
       let settled = false;
       let terminationPending = false;
       let pendingExitCode: number | null = null;
+      const stdoutLimit = typeof options.maxStdoutBytes === 'number' && Number.isFinite(options.maxStdoutBytes) && options.maxStdoutBytes > 0
+        ? Math.min(MAX_PROCESS_LOG_BYTES, Math.floor(options.maxStdoutBytes))
+        : MAX_PROCESS_LOG_BYTES;
 
-      const appendBounded = (chunks: Buffer[], currentBytes: number, chunk: Buffer): number => {
-        if (currentBytes >= MAX_PROCESS_LOG_BYTES) return currentBytes;
-        const remaining = MAX_PROCESS_LOG_BYTES - currentBytes;
+      const appendBounded = (chunks: Buffer[], currentBytes: number, chunk: Buffer, maxBytes = MAX_PROCESS_LOG_BYTES): number => {
+        if (currentBytes >= maxBytes) return currentBytes;
+        const remaining = maxBytes - currentBytes;
         const kept = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
         if (kept.length > 0) chunks.push(Buffer.from(kept));
         return currentBytes + kept.length;
@@ -103,19 +109,19 @@ export class DirectProcessRunner implements ProcessRunner {
       const captureStdout = (chunk: Buffer): void => {
         const observer = options.stopAfterStdoutLine;
         if (observer === undefined) {
-          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, chunk);
+          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, chunk, stdoutLimit);
           return;
         }
         if (stoppedEarly || timedOut) return;
         stdoutLinePending += chunk.toString('utf8');
-        if (Buffer.byteLength(stdoutLinePending, 'utf8') > MAX_PROCESS_LOG_BYTES) {
+        if (Buffer.byteLength(stdoutLinePending, 'utf8') > stdoutLimit) {
           requestStop('early');
           return;
         }
         const lines = stdoutLinePending.split(/\r?\n/);
         stdoutLinePending = lines.pop() ?? '';
         for (const line of lines) {
-          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, Buffer.from(`${line}\n`, 'utf8'));
+          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, Buffer.from(`${line}\n`, 'utf8'), stdoutLimit);
           if (observer(line)) {
             stdoutLinePending = '';
             requestStop('early');
@@ -166,6 +172,7 @@ export interface SearchTextRequest {
   readonly maxResults?: number;
   readonly discovery?: ContextDiscoveryMode;
   readonly signal?: AbortSignal;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchMatch {
@@ -185,6 +192,7 @@ export interface SearchFilesRequest {
   readonly maxResults?: number;
   readonly discovery?: ContextDiscoveryMode;
   readonly signal?: AbortSignal;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchFilesResult {
@@ -201,7 +209,7 @@ export class RipgrepAdapter {
   ) {}
 
   public async searchText(request: SearchTextRequest): Promise<Result<SearchTextResult>> {
-    const maxResults = request.maxResults ?? DEFAULT_SEARCH_RESULTS;
+    const maxResults = Math.min(request.maxResults ?? DEFAULT_SEARCH_RESULTS, request.resultBudget?.maxItems ?? Number.MAX_SAFE_INTEGER);
     if (request.query.length === 0 || !Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_SEARCH_RESULTS) {
       return err({ code: 'INVALID_INPUT', message: 'Search query or result limit is invalid', recoverable: false });
     }
@@ -219,6 +227,7 @@ export class RipgrepAdapter {
     const processResult = await this.runner.run(executable.value, args, request.rootPath, {
       timeoutMs: SEARCH_PROCESS_TIMEOUT_MS,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
+      ...(request.resultBudget === undefined ? {} : { maxStdoutBytes: request.resultBudget.maxStructuredBytes }),
       stopAfterStdoutLine: (line) => {
         const match = this.parseMatch(line);
         if (match === null) return false;
@@ -232,22 +241,25 @@ export class RipgrepAdapter {
       return err({ code: 'INTERNAL_ERROR', message: searchProcessError(processResult.stderr), recoverable: true });
     }
     const matches: SearchMatch[] = [];
+    let resultBytes = 0;
     let hasAdditionalMatch = false;
     for (const line of processResult.stdout.split(/\r?\n/)) {
       const match = this.parseMatch(line);
       if (match === null) continue;
       if (discovery === 'automatic' && !classifyContextPath(match.path, discovery).discoverable) continue;
-      if (matches.length >= maxResults) {
+      const matchBytes = Buffer.byteLength(JSON.stringify(match), 'utf8');
+      if (matches.length >= maxResults || resultBytes + matchBytes > (request.resultBudget?.maxStructuredBytes ?? Number.MAX_SAFE_INTEGER)) {
         hasAdditionalMatch = true;
         break;
       }
       matches.push(match);
+      resultBytes += matchBytes;
     }
     return ok({ matches, truncated: processResult.timedOut === true || processResult.stoppedEarly === true || hasAdditionalMatch });
   }
 
   public async searchFiles(request: SearchFilesRequest): Promise<Result<SearchFilesResult>> {
-    const maxResults = request.maxResults ?? DEFAULT_SEARCH_RESULTS;
+    const maxResults = Math.min(request.maxResults ?? DEFAULT_SEARCH_RESULTS, request.resultBudget?.maxItems ?? Number.MAX_SAFE_INTEGER);
     if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_SEARCH_RESULTS) {
       return err({ code: 'INVALID_INPUT', message: 'Search result limit is invalid', recoverable: false });
     }
@@ -265,6 +277,7 @@ export class RipgrepAdapter {
     const processResult = await this.runner.run(executable.value, args, request.rootPath, {
       timeoutMs: SEARCH_PROCESS_TIMEOUT_MS,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
+      ...(request.resultBudget === undefined ? {} : { maxStdoutBytes: request.resultBudget.maxStructuredBytes }),
       stopAfterStdoutLine: (line) => {
         if (line.length === 0) return false;
         if (discovery === 'automatic' && !classifyContextPath(line, discovery).discoverable) return false;
@@ -295,6 +308,9 @@ export class RipgrepAdapter {
     const discovery = request.discovery ?? 'automatic';
     const matches: SearchMatch[] = [];
     const deadline = Date.now() + SEARCH_PROCESS_TIMEOUT_MS;
+    const maxResultBytes = request.resultBudget?.maxStructuredBytes ?? Number.MAX_SAFE_INTEGER;
+    const maxLineBytes = Math.min(maxResultBytes, MAX_PROCESS_LOG_BYTES);
+    let resultBytes = 0;
     let truncated = false;
     try {
       for await (const relativePath of this.walkFallbackFiles(request.rootPath, discovery, request.signal)) {
@@ -303,31 +319,84 @@ export class RipgrepAdapter {
           break;
         }
         if (!this.matchesFallbackGlob(relativePath, request.glob)) continue;
-        let content: Buffer;
+        const stream = createReadStream(path.join(request.rootPath, relativePath));
+        let aborted = false;
+        const abort = (): void => {
+          aborted = true;
+          stream.destroy();
+        };
+        request.signal?.addEventListener('abort', abort, { once: true });
+        let lineNumber = 1;
+        let pending = '';
+        let oversizedLine = false;
+        const decoder = new StringDecoder('utf8');
         try {
-          content = await readFile(path.join(request.rootPath, relativePath));
-        } catch {
-          continue;
-        }
-        if (content.subarray(0, Math.min(content.byteLength, 8192)).includes(0)) continue;
-        const text = content.toString('utf8');
-        const lines = text.split(/\r?\n/);
-        if (text.endsWith('\n')) lines.pop();
-        for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-          const line = lines[lineIndex] ?? '';
-          pattern.lastIndex = 0;
-          if (!pattern.test(line)) continue;
-          if (matches.length >= maxResults) {
-            truncated = true;
-            break;
+          for await (const chunk of stream) {
+            if (aborted || (request.signal?.aborted ?? false) || Date.now() >= deadline) {
+              truncated = true;
+              break;
+            }
+            const text = decoder.write(chunk as Buffer);
+            let start = 0;
+            for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+              const line = oversizedLine ? '' : pending + text.slice(start, end).replace(/\r$/, '');
+              pending = '';
+              oversizedLine = false;
+              start = end + 1;
+              pattern.lastIndex = 0;
+              if (!pattern.test(line)) {
+                lineNumber += 1;
+                continue;
+              }
+              const candidate = { path: relativePath, line: lineNumber, text: line };
+              const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+              if (matches.length >= maxResults || resultBytes + candidateBytes > maxResultBytes) {
+                truncated = true;
+                break;
+              }
+              matches.push(candidate);
+              resultBytes += candidateBytes;
+              lineNumber += 1;
+            }
+            if (truncated) break;
+            if (start > 0) {
+              pending = '';
+              oversizedLine = false;
+            }
+            pending += text.slice(start);
+            if (Buffer.byteLength(pending, 'utf8') > maxLineBytes) {
+              pending = '';
+              oversizedLine = true;
+              truncated = true;
+            }
           }
-          matches.push({ path: relativePath, line: lineIndex + 1, text: line });
+          if (!truncated && !oversizedLine) {
+            const line = pending + decoder.end();
+            pattern.lastIndex = 0;
+            if (pattern.test(line)) {
+              const candidate = { path: relativePath, line: lineNumber, text: line };
+              const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+              if (matches.length >= maxResults || resultBytes + candidateBytes > maxResultBytes) truncated = true;
+              else {
+                matches.push(candidate);
+                resultBytes += candidateBytes;
+              }
+            }
+          }
+        } catch (error: unknown) {
+          if (!aborted) throw error;
+          truncated = true;
+        } finally {
+          request.signal?.removeEventListener('abort', abort);
+          stream.destroy();
         }
         if (truncated) break;
       }
     } catch (error: unknown) {
+      if (request.signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Search was cancelled', recoverable: true });
       return err({ code: 'INTERNAL_ERROR', message: searchProcessError(error instanceof Error ? error.message : ''), recoverable: true });
     }
+    if (request.signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Search was cancelled', recoverable: true });
     return ok({ matches, truncated });
   }
 
@@ -360,30 +429,26 @@ export class RipgrepAdapter {
     return ok({ paths, truncated });
   }
 
-  private async *walkFallbackFiles(rootPath: string, discovery: ContextDiscoveryMode, signal?: AbortSignal): AsyncGenerator<string> {
-    const directories = [''];
-    for (let index = 0; index < directories.length; index += 1) {
-      if (signal?.aborted === true) return;
-      const relativeDirectory = directories[index] ?? '';
-      const absoluteDirectory = relativeDirectory.length === 0 ? rootPath : path.join(rootPath, relativeDirectory);
-      let entries;
-      try {
-        entries = await readdir(absoluteDirectory, { withFileTypes: true });
-      } catch (error: unknown) {
-        if (relativeDirectory.length === 0) throw error;
-        continue;
-      }
-      entries.sort((left, right) => left.name.localeCompare(right.name));
-      for (const entry of entries) {
+  private async *walkFallbackFiles(rootPath: string, discovery: ContextDiscoveryMode, signal?: AbortSignal, relativeDirectory = ''): AsyncGenerator<string> {
+    if (signal?.aborted === true) return;
+    const absoluteDirectory = relativeDirectory.length === 0 ? rootPath : path.join(rootPath, relativeDirectory);
+    let directory;
+    try {
+      directory = await opendir(absoluteDirectory);
+    } catch (error: unknown) {
+      if (relativeDirectory.length === 0) throw error;
+      return;
+    }
+    try {
+      for await (const entry of directory) {
+        if (signal !== undefined && signal.aborted) return;
         const relativePath = relativeDirectory.length === 0 ? entry.name : path.join(relativeDirectory, entry.name);
-        if (entry.isDirectory()) {
-          if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
-          directories.push(relativePath);
-        } else if (entry.isFile()) {
-          if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
-          yield relativePath;
-        }
+        if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
+        if (entry.isDirectory()) yield* this.walkFallbackFiles(rootPath, discovery, signal, relativePath);
+        else if (entry.isFile()) yield relativePath;
       }
+    } finally {
+      await directory.close().catch(() => undefined);
     }
   }
 

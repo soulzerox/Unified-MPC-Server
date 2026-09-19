@@ -9,6 +9,7 @@ import {
   type InvocationAuthorizationMode,
   type InvocationAuthorizationSource,
   type Result,
+  type ResultBudget,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
 import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
@@ -242,11 +243,11 @@ export class ToolRegistry {
       bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
-      workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
-      workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
-      ragRecall: (workspaceId, query, category, limit, signal) => this.ragRecall(workspaceId, query, category, limit, signal),
-      ragRemember: (workspaceId, content, category, signal) => this.ragRemember(workspaceId, content, category, signal),
-      nativeRagCall: (workspaceId, tool, args, signal) => this.nativeRagCall(workspaceId, tool, args, signal),
+      workingMemorySearch: (workspaceId, query, signal, budget) => this.workingMemorySearch(workspaceId, query, signal, budget),
+      workingMemoryRecord: (workspaceId, name, entityType, observations, signal, budget) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal, budget),
+      ragRecall: (workspaceId, query, category, limit, signal, budget) => this.ragRecall(workspaceId, query, category, limit, signal, budget),
+      ragRemember: (workspaceId, content, category, signal, budget) => this.ragRemember(workspaceId, content, category, signal, budget),
+        nativeRagCall: (workspaceId, tool, args, signal, budget) => this.nativeRagCall(workspaceId, tool, args, signal, budget),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
     const filePageEngine = new FilePageEngine(services, actor);
@@ -830,8 +831,8 @@ export class ToolRegistry {
     return ok({ ready: true, filePath, checks });
   }
 
-  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal);
+  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal, budget?: ResultBudget): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal, budget);
   }
 
   private async workingMemoryRecord(
@@ -840,12 +841,13 @@ export class ToolRegistry {
     entityType: string,
     observations: readonly string[],
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'workspace_memory_record', {
       name,
       category: entityType,
       observations,
-    }, signal);
+    }, signal, budget);
   }
 
   private async ragRecall(
@@ -854,11 +856,12 @@ export class ToolRegistry {
     category: string | undefined,
     limit: number | undefined,
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'recall', {
       query: category === undefined ? query : `[${category}] ${query}`,
       ...(limit === undefined ? {} : { limit }),
-    }, signal);
+    }, signal, budget);
   }
 
   private async ragRemember(
@@ -866,10 +869,11 @@ export class ToolRegistry {
     content: string,
     category: string | undefined,
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'remember', {
       content: category === undefined ? content : `[${category}] ${content}`,
-    }, signal);
+    }, signal, budget);
   }
 
   private async nativeRagCall(
@@ -877,6 +881,7 @@ export class ToolRegistry {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const scope = await this.resolveActiveWorkspaceScope(workspaceId);
     if (scope === null || scope.workspaceId !== workspaceId) {
@@ -928,7 +933,7 @@ export class ToolRegistry {
       };
     }
 
-    const result = await thaiRag.call(providerTool, providerArgs, signal);
+    const result = await thaiRag.call(providerTool, providerArgs, signal, budget);
     if (!result.ok) return result;
     if (tool === 'index_status' && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {
       return err(appError('PERMISSION_DENIED', `Native Thai-RAG index job belongs to another workspace: ${result.value.workspaceId}`));
@@ -1251,8 +1256,16 @@ export class ToolRegistry {
         }
         try {
           const maxBytes = tool.name === 'mcp_call' ? this.maxMcpCallResultBytes : this.maxToolResultBytes;
-          operation = tool.execute(input, controller.signal, authorization).then((result) => mapResult(result, {
+          const budget: ResultBudget = {
+        maxItems: Number.MAX_SAFE_INTEGER,
+        maxTextBytes: maxBytes,
+            maxStructuredBytes: maxBytes,
+            maxBinaryBytes: maxBytes,
+            maxBase64Bytes: maxBytes,
+          };
+          operation = tool.execute(input, controller.signal, authorization, budget).then((result) => mapResult(result, {
             maxBytes,
+            budget,
             toolName: tool.name,
             onTruncated: ({ originalBytes }) => this.diagnostic?.({
               name: 'ToolResultBudgetExceeded',

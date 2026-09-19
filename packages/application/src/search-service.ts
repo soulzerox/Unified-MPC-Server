@@ -1,4 +1,4 @@
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { RipgrepAdapter, type ContextDiscoveryMode, type SearchFilesRequest as AdapterFilesRequest, type SearchFilesResult, type SearchTextRequest as AdapterTextRequest, type SearchTextResult } from '@unified-mpc/search';
 import type { WorkspaceRepository } from '@unified-mpc/workspace';
 import type { FileActor } from './file-service.js';
@@ -10,6 +10,7 @@ export interface SearchTextRequest {
   readonly glob?: string;
   readonly maxResults?: number;
   readonly discovery?: ContextDiscoveryMode;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchFilesRequest {
@@ -17,6 +18,7 @@ export interface SearchFilesRequest {
   readonly glob?: string;
   readonly maxResults?: number;
   readonly discovery?: ContextDiscoveryMode;
+  readonly resultBudget?: ResultBudget;
 }
 
 export interface SearchAdapter {
@@ -43,6 +45,7 @@ export class SearchService {
       ...(request.glob === undefined ? {} : { glob: request.glob }),
       ...(request.maxResults === undefined ? {} : { maxResults: request.maxResults }),
       ...(request.discovery === undefined ? {} : { discovery: request.discovery }),
+      ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       ...(signal === undefined ? {} : { signal }),
     });
   }
@@ -58,6 +61,7 @@ export class SearchService {
       ...(request.glob === undefined ? {} : { glob: request.glob }),
       ...(request.maxResults === undefined ? {} : { maxResults: request.maxResults }),
       ...(request.discovery === undefined ? {} : { discovery: request.discovery }),
+      ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       ...(signal === undefined ? {} : { signal }),
     });
   }

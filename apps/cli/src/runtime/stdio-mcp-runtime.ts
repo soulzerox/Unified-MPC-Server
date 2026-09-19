@@ -162,10 +162,10 @@ export function createStdioMcpRuntime(
       if (!started.ok) return { ok: false, error: started.error };
       return thaiRagCoordinator.health(signal);
     },
-    async call(tool, args, signal) {
+    async call(tool, args, signal, budget) {
       const started = await ensureThaiRagStarted();
       if (!started.ok) return { ok: false, error: started.error };
-      return thaiRagCoordinator.call(tool, args, signal);
+      return thaiRagCoordinator.call(tool, args, signal, budget);
     },
   };
   const initializeThaiRag = async (): Promise<void> => {

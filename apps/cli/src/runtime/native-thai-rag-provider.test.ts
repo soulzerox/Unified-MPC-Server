@@ -118,6 +118,36 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('rejects a real job queried through a different workspace', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const otherWorkspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: workspaceRoot },
+        { id: recoveredWorkspaceId, realRootPath: otherWorkspaceRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('indexed');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const scheduled = await driver.call('code_index', { workspace_path: workspaceRoot, background: true });
+    if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await expect(driver.call('index_status', { job_id: scheduled.value.job_id, workspace: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    expect(calls).not.toContain('index_status');
+    await driver.stop();
+  });
+
   it('does not expose index status to a foreign provider owner', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

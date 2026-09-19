@@ -579,21 +579,37 @@ def remember_turn(
     summary: str = "",
     tags: str = "",
     turn_id: str = "",
-) -> str:
-    """Record an interaction turn or decision immediately during chat into persistent memory.
-
-    ``turn_id`` is optional and lets callers retry the same logical turn without
-    creating a duplicate record.
-    """
+    workspace_id: Optional[str] = None,
+):
+    """Record an interaction turn through the provider contract."""
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-    return get_server().remember_turn(
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().remember_turn(
         role=role,
         content=content,
-        workspace=workspace,
-        summary=summary,
+        workspace_id=scoped_workspace,
+        summary=summary or None,
         tags=tag_list,
         turn_id=turn_id or None,
-    )
+    ).to_dict()
+
+@mcp.tool()
+def record_event(
+    event_type: str,
+    content: str,
+    workspace_id: Optional[str] = None,
+    summary: str = "",
+    tags: str = "",
+):
+    """Record a selective workspace event through the provider contract."""
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    return get_server().provider().record_event(
+        event_type=event_type,
+        content=content,
+        workspace_id=workspace_id,
+        summary=summary or None,
+        tags=tag_list,
+    ).to_dict()
 
 @mcp.tool()
 def pre_edit_context(

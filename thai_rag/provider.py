@@ -105,7 +105,7 @@ class ProviderResult:
 
 class ThaiRagProvider:
     capabilities = frozenset(_CONTRACT_SHAPE["operations"])
-    _CANONICAL_SCOPE_OPERATIONS = frozenset({"remember", "recall", "record_event", "forget"})
+    _CANONICAL_SCOPE_OPERATIONS = frozenset({"remember", "remember_turn", "recall", "record_event", "forget"})
 
     def __init__(self, core: Any, provider_version: str = PROVIDER_VERSION):
         self.core = core
@@ -122,7 +122,7 @@ class ThaiRagProvider:
     def health(self, workspace_id: Optional[str] = None) -> ProviderResult:
         readiness = self._readiness(workspace_id)
         embedding_ready = readiness["embedding_ready"]
-        ready = readiness["storage_ready"] and readiness["fts_ready"]
+        ready = self._is_ready(readiness)
         status = ProviderStatus.OK if ready and embedding_ready else ProviderStatus.DEGRADED
         warnings = []
         if not readiness["storage_ready"]:
@@ -169,6 +169,21 @@ class ThaiRagProvider:
             "forget",
             workspace_id,
             lambda: self._call_scoped("forget", memory_id, workspace_id),
+        )
+
+    def remember_turn(
+        self,
+        role: str,
+        content: str,
+        workspace_id: Optional[str] = None,
+        summary: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        turn_id: Optional[str] = None,
+    ) -> ProviderResult:
+        return self._scoped(
+            "remember_turn",
+            workspace_id,
+            lambda: self._remember_turn(role, content, workspace_id, summary, tags, turn_id),
         )
 
     def record_event(
@@ -237,7 +252,8 @@ class ThaiRagProvider:
             if not isinstance(raw, dict):
                 raise TypeError("core pre_edit_context must return a mapping")
             constraints = raw.get("constraints") or []
-            evidence = dict(raw.get("evidence") or {})
+            raw_evidence = raw.get("evidence")
+            evidence = dict(raw_evidence or {})
             evidence.setdefault("code_context", "available" if raw.get("code_context") else "missing")
             evidence.setdefault("cpg", "available" if raw.get("blast_radius") else "missing")
             evidence.setdefault("code_index", "unknown")
@@ -253,6 +269,14 @@ class ThaiRagProvider:
             elif evidence.get("storage") in {"unavailable", "missing"}:
                 status = ProviderStatus.UNAVAILABLE
                 evidence_state = "storage_unavailable"
+                can_proceed = False
+            elif raw_evidence and evidence.get("storage") in {"unknown", "stale"}:
+                status = ProviderStatus.DEGRADED
+                evidence_state = f"storage_{evidence['storage']}"
+                can_proceed = False
+            elif raw_evidence and evidence.get("code_index") in {"unknown", "stale", "missing", "unavailable"}:
+                status = ProviderStatus.DEGRADED
+                evidence_state = f"code_index_{evidence['code_index']}"
                 can_proceed = False
             elif not raw.get("code_context") and not raw.get("blast_radius") and not raw.get("evidence"):
                 status = ProviderStatus.DEGRADED
@@ -355,6 +379,26 @@ class ThaiRagProvider:
             "index_status",
             workspace_id,
             lambda: self._call_scoped("index_status", job_id, workspace_id),
+        )
+
+    def _remember_turn(
+        self,
+        role: str,
+        content: str,
+        workspace_id: str,
+        summary: Optional[str],
+        tags: Optional[list[str]],
+        turn_id: Optional[str],
+    ) -> Any:
+        method = getattr(self.core, "remember_turn")
+        scope_name = self._scope_name(method, "remember_turn")
+        return method(
+            role=role,
+            content=content,
+            **{scope_name: workspace_id},
+            summary=summary,
+            tags=tags or [],
+            turn_id=turn_id,
         )
 
     def _record_event(
@@ -488,8 +532,8 @@ class ThaiRagProvider:
             "providerVersion": self.provider_version,
             "contract_version": CONTRACT_VERSION,
             "compatibility_range": dict(COMPATIBILITY_RANGE),
-            "lifecycle_state": "ready" if readiness["storage_ready"] else "degraded",
-            "state": "ready" if readiness["storage_ready"] else "degraded",
+            "lifecycle_state": "ready" if self._is_ready(readiness) else "degraded",
+            "state": "ready" if self._is_ready(readiness) else "degraded",
             "embedding_index_generation": EMBEDDING_INDEX_GENERATION,
             "embeddingIndexGeneration": EMBEDDING_INDEX_GENERATION,
             "started_at": None,
@@ -563,6 +607,10 @@ class ThaiRagProvider:
             "index": str(index_generation),
             "storage": str(storage_generation),
         }
+
+    @staticmethod
+    def _is_ready(readiness: dict[str, bool]) -> bool:
+        return all(readiness[key] for key in ("storage_ready", "fts_ready", "embedding_ready"))
 
     def _readiness(self, workspace_id: Optional[str]) -> dict[str, bool]:
         storage = getattr(self.core, "storage", None)

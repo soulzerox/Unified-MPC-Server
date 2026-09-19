@@ -69,6 +69,8 @@ def test_health_reports_degraded_embedding_state():
 
     assert result.status is ProviderStatus.DEGRADED
     assert result.data["embedding_ready"] is False
+    assert result.data["ready"] is False
+    assert result.data["state"] == "degraded"
     assert result.warnings
 
 
@@ -171,6 +173,42 @@ def test_pre_edit_reports_degraded_when_evidence_is_missing():
 
     assert result.status is ProviderStatus.DEGRADED
     assert result.data["evidence_state"] == "evidence_unavailable"
+    assert result.data["can_proceed"] is False
+
+
+def test_pre_edit_fails_closed_for_unknown_storage_and_index_evidence():
+    provider = ThaiRagProvider(
+        core=RecordingCore(
+            {
+                "constraints": [],
+                "code_context": {"file_path": "auth.py"},
+                "blast_radius": {"callers": []},
+                "evidence": {"storage": "unknown", "code_index": "ready"},
+            }
+        )
+    )
+
+    result = provider.pre_edit_context(file_path="auth.py", workspace_id="ws-123")
+
+    assert result.status is ProviderStatus.DEGRADED
+    assert result.data["evidence_state"] == "storage_unknown"
+    assert result.data["can_proceed"] is False
+
+    provider = ThaiRagProvider(
+        core=RecordingCore(
+            {
+                "constraints": [],
+                "code_context": {"file_path": "auth.py"},
+                "blast_radius": {"callers": []},
+                "evidence": {"storage": "ready", "code_index": "unknown"},
+            }
+        )
+    )
+
+    result = provider.pre_edit_context(file_path="auth.py", workspace_id="ws-123")
+
+    assert result.status is ProviderStatus.DEGRADED
+    assert result.data["evidence_state"] == "code_index_unknown"
     assert result.data["can_proceed"] is False
 
 
@@ -364,6 +402,78 @@ def test_standalone_code_search_delegates_to_provider_scope(monkeypatch):
     monkeypatch.setattr(server_module, "get_server", lambda: Server())
 
     result = server_module.code_search("auth", workspace_id="ws-123")
+
+    assert result["workspace_id"] == "ws-123"
+
+
+def test_standalone_remember_turn_delegates_to_provider_with_canonical_scope(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Result:
+        def to_dict(self):
+            return {"status": "ok", "data": {"turn_id": "turn-1"}}
+
+    class Provider:
+        def remember_turn(self, **kwargs):
+            assert kwargs == {
+                "role": "assistant",
+                "content": "decision",
+                "workspace_id": "ws-123",
+                "summary": "summary",
+                "tags": ["decision"],
+                "turn_id": "turn-1",
+            }
+            return Result()
+
+    class Server:
+        def provider(self):
+            return Provider()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+
+    result = server_module.remember_turn(
+        role="assistant",
+        content="decision",
+        workspace="ws-123",
+        summary="summary",
+        tags="decision",
+        turn_id="turn-1",
+    )
+
+    assert result["status"] == "ok"
+
+
+def test_standalone_record_event_delegates_to_provider_with_structured_scope(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Result:
+        def to_dict(self):
+            return {"status": "ok", "workspace_id": "ws-123"}
+
+    class Provider:
+        def record_event(self, **kwargs):
+            assert kwargs == {
+                "event_type": "decision",
+                "content": "Use SQLite",
+                "workspace_id": "ws-123",
+                "summary": "storage",
+                "tags": ["architecture", "decision"],
+            }
+            return Result()
+
+    class Server:
+        def provider(self):
+            return Provider()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+
+    result = server_module.record_event(
+        event_type="decision",
+        content="Use SQLite",
+        workspace_id="ws-123",
+        summary="storage",
+        tags="architecture, decision",
+    )
 
     assert result["workspace_id"] == "ws-123"
 

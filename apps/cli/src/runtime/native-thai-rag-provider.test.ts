@@ -117,6 +117,46 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(indexActive).toBe(false);
   });
 
+  it('drains queued calls before closing the worker on stop', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    let closed = false;
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        onClose(): void { closed = true; },
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            markIndexStarted?.();
+            await indexBlocked;
+          }
+          if (closed) throw new Error('worker called after close');
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await indexStarted;
+    const call = driver.call('recall', { query: 'queued during stop' });
+    const stopping = driver.stop();
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    releaseIndex?.();
+    expect((await call).ok).toBe(true);
+    expect((await stopping).ok).toBe(true);
+    expect(calls).toContain('recall');
+    expect(closed).toBe(true);
+  });
+
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -337,6 +377,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
 function clientFactory(options: {
   readonly onConnect?: (config: McpServerLaunchConfig) => void;
+  readonly onClose?: () => void;
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
   readonly codeIndexSupportsWorkspace?: boolean;
   readonly forgetSupportsCategory?: boolean;
@@ -360,7 +401,7 @@ function clientFactory(options: {
         async callTool(tool, args): Promise<unknown> {
           return options.onCall === undefined ? success('ok') : options.onCall(tool, args);
         },
-        async close(): Promise<void> {},
+        async close(): Promise<void> { options.onClose?.(); },
       };
     },
   };

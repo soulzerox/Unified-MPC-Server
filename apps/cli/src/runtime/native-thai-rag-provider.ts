@@ -50,6 +50,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private started = false;
   private lifecycleGeneration = 0;
   private backgroundRefresh: Promise<Result<void>> | undefined;
+  private shuttingDown = false;
+  private activeOperations = 0;
+  private idleWaiters: Array<() => void> = [];
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
     this.sessions = new McpSessionManager({
@@ -62,6 +65,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   public async start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
+    this.shuttingDown = false;
     await this.jobs.initialize();
     const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
     if (!providerRoot.ok) return providerRoot;
@@ -101,11 +105,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const health = await this.refreshHealth(signal);
     if (!health.ok) return health;
     const generation = this.lifecycleGeneration;
-    this.backgroundRefresh = this.refreshWorkspaceRoots(generation);
+    this.backgroundRefresh = this.refreshWorkspaceRoots(generation).then((result) => result, () => ok(undefined));
     return health;
   }
 
-  public async health(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
+  public health(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
+    return this.withOperation(() => this.healthStarted(signal));
+  }
+
+  private async healthStarted(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
@@ -121,7 +129,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return this.refreshHealth(signal);
   }
 
-  public async call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
+  public call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
+    return this.withOperation(() => this.callStarted(tool, args, signal, budget));
+  }
+
+  private async callStarted(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
@@ -141,8 +153,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   public async stop(): Promise<Result<void>> {
     this.started = false;
+    this.shuttingDown = true;
     const generation = ++this.lifecycleGeneration;
     await this.jobs.interruptRunning();
+    await this.waitForOperations();
+    await this.workerQueue.catch(() => undefined);
     const backgroundRefresh = this.backgroundRefresh;
     if (backgroundRefresh !== undefined) await backgroundRefresh.catch(() => undefined);
     if (generation === this.lifecycleGeneration) this.backgroundRefresh = undefined;
@@ -231,6 +246,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const aliases = await syncWorkspaceSourceAliases(sourcesRoot, workspaces);
     if (!aliases.ok) return aliases;
+    if (generation !== this.lifecycleGeneration) return ok(undefined);
     for (const workspaceId of aliases.value) this.pendingReindexIds.add(workspaceId);
     const relinked = workspaces.filter((workspace) => {
       const previousRoot = this.workspaceRoots.get(workspace.id);
@@ -350,6 +366,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const pending = this.workerQueue.then(operation, operation);
     this.workerQueue = pending.then(() => undefined, () => undefined);
     return pending;
+  }
+
+  private async withOperation<T>(operation: () => Promise<Result<T>>): Promise<Result<T>> {
+    if (this.shuttingDown) return err(appError('CONFLICT', 'Native Thai-RAG worker is stopping', true));
+    this.activeOperations += 1;
+    try {
+      return await operation();
+    } finally {
+      this.activeOperations -= 1;
+      if (this.activeOperations === 0) {
+        const waiters = this.idleWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+      }
+    }
+  }
+
+  private waitForOperations(): Promise<void> {
+    if (this.activeOperations === 0) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 }
 

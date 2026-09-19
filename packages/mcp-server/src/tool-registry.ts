@@ -939,7 +939,7 @@ export class ToolRegistry {
     input: unknown,
     signal?: AbortSignal,
   ): Promise<ReturnType<typeof err> | undefined> {
-    if (workspaceId === undefined) return undefined;
+    if (workspaceId === undefined || this.services.thaiRag === undefined) return undefined;
     const paths = codeMutationPaths(toolName, input);
     if (paths.length === 0) return undefined;
     const context = this.harnessContext(workspaceId);

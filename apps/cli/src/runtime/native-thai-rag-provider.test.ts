@@ -47,6 +47,36 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('does not interrupt another owner job during provider startup', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 2, jobs: [{
+      jobId: 'idx_umcp_owner_a',
+      workspaceId,
+      ownerId: 'owner-a',
+      status: 'running',
+      force: true,
+      startedAt: '2026-09-17T01:00:00.000Z',
+    }] }));
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-b', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    expect(persisted.jobs).toEqual([expect.objectContaining({
+      jobId: 'idx_umcp_owner_a',
+      ownerId: 'owner-a',
+      status: 'running',
+    })]);
+    await driver.stop();
+  });
+
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

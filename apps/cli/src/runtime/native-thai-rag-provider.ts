@@ -61,14 +61,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   public async start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
-    await this.jobs.initialize();
+    this.ownerId = options.ownerId;
+    await this.jobs.initialize(this.ownerId);
     const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
     if (!providerRoot.ok) return providerRoot;
     const refreshed = await this.refreshWorkspaceRoots();
     if (!refreshed.ok) return refreshed;
     const sourcesRoot = path.join(providerRoot.value, 'sources');
 
-    this.ownerId = options.ownerId;
     this.launchConfig = {
       ...this.options.launchConfig,
       cwd: sourcesRoot,

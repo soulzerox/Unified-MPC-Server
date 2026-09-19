@@ -34,7 +34,7 @@ describe('ThaiRagIndexJobStore', () => {
     const job = await first.create('11111111-1111-4111-8111-111111111111', true, 'owner-a');
 
     const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'));
-    await replacement.initialize();
+    await replacement.initialize('owner-a');
     const restored = await replacement.get(job.jobId, 'owner-a', '11111111-1111-4111-8111-111111111111');
     expect(restored).toMatchObject({
       status: 'interrupted',
@@ -42,6 +42,21 @@ describe('ThaiRagIndexJobStore', () => {
       error: expect.stringContaining('restarted'),
     });
     expect(await replacement.active('owner-a')).toEqual([]);
+  });
+
+  it('does not interrupt another owner job during startup', async () => {
+    const dataRoot = await root();
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:00.000Z'));
+    const job = await first.create('11111111-1111-4111-8111-111111111111', true, 'owner-a');
+
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'));
+    await replacement.initialize('owner-b');
+
+    await expect(replacement.get(job.jobId, 'owner-a', '11111111-1111-4111-8111-111111111111')).resolves.toMatchObject({
+      status: 'running',
+      ownerId: 'owner-a',
+    });
+    expect(await replacement.active('owner-b')).toEqual([]);
   });
 
   it('rejects unscoped jobs and foreign owners', async () => {

@@ -35,7 +35,7 @@ export class ThaiRagIndexJobStore {
     this.filePath = path.join(root.value, 'index-jobs.json');
   }
 
-  public async initialize(): Promise<void> {
+  public async initialize(ownerId?: string): Promise<void> {
     if (this.initialized) return;
     await mkdir(path.dirname(this.filePath), { recursive: true });
     try {
@@ -58,7 +58,7 @@ export class ThaiRagIndexJobStore {
     const finishedAt = this.now().toISOString();
     let changed = false;
     for (const [id, job] of this.jobs) {
-      if (job.status !== 'running') continue;
+      if (job.status !== 'running' || job.ownerId !== ownerId) continue;
       this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: 'Provider restarted before the indexing job completed' });
       changed = true;
     }

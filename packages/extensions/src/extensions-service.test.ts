@@ -564,6 +564,51 @@ describe('LocalExtensionsService MCP bridge', () => {
     await service.close();
   });
 
+  it('does not execute a queued child MCP call after cancellation', async () => {
+    let active = false;
+    let release!: () => void;
+    const calls: string[] = [];
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async (name, _args, signal): Promise<unknown> => {
+        calls.push(name);
+        if (!active) {
+          active = true;
+          await new Promise<void>((resolve) => { release = resolve; });
+        }
+        if (signal?.aborted) throw new Error('child call cancelled');
+        return { content: [] };
+      },
+      close: async () => undefined,
+    };
+    const service = new LocalExtensionsService({
+      settings: settingsWithMockServer(),
+      homeDir: process.cwd(),
+      appDataDir: process.cwd(),
+      clientFactory: { connect: async (): Promise<McpClientSession> => session },
+    });
+    const contract = await currentMockContract(service);
+    const started = new Promise<void>((resolve) => {
+      const wait = (): void => {
+        if (active) resolve();
+        else setImmediate(wait);
+      };
+      wait();
+    });
+    const first = service.callMcpTool({ server: 'mock', tool: 'ping', ...contract });
+    await started;
+    const controller = new AbortController();
+    const second = service.callMcpTool({ server: 'mock', tool: 'ping', ...contract }, controller.signal);
+    controller.abort();
+    release();
+
+    await expect(first).resolves.toMatchObject({ ok: true });
+    await expect(second).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+    expect(calls).toEqual(['ping']);
+    await service.close();
+  });
+
   it('aborts an in-flight child MCP call and closes its managed session', async () => {
     let observedSignal: AbortSignal | undefined;
     let releaseStarted!: () => void;

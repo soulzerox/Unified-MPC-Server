@@ -246,7 +246,7 @@ export class ToolRegistry {
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
       ragRecall: (workspaceId, query, category, limit, signal, budget) => this.ragRecall(workspaceId, query, category, limit, signal, budget),
-      ragRemember: (workspaceId, content, category, signal) => this.ragRemember(workspaceId, content, category, signal),
+      ragRemember: (workspaceId, content, category, signal, budget) => this.ragRemember(workspaceId, content, category, signal, budget),
         nativeRagCall: (workspaceId, tool, args, signal, budget) => this.nativeRagCall(workspaceId, tool, args, signal, budget),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
@@ -861,10 +861,11 @@ export class ToolRegistry {
     content: string,
     category: string | undefined,
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'remember', {
       content: category === undefined ? content : `[${category}] ${content}`,
-    }, signal);
+    }, signal, budget);
   }
 
   private async nativeRagCall(

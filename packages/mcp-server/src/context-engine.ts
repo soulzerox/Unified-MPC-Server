@@ -206,12 +206,24 @@ export class ContextEngine {
     if (!workspaceIds.ok) return workspaceIds;
     if (workspaceIds.value.length === 0) return err({ code: 'WORKSPACE_NOT_FOUND', message: 'No registered workspace is available', recoverable: false });
 
-    const settled = await Promise.allSettled(workspaceIds.value.map((workspaceId) => this.collectWorkspace(workspaceId, boundedRequest, signal)));
     const successful: WorkspaceCollection[] = [];
     let firstError: AppError | undefined;
-    for (const entry of settled) {
-      if (entry.status === 'fulfilled' && entry.value.ok) successful.push(entry.value.value);
-      else if (entry.status === 'fulfilled' && !entry.value.ok && firstError === undefined) firstError = entry.value.error;
+    let collectedCandidates = 0;
+    const candidateLimit = boundedRequest.resultBudget?.maxItems ?? Number.MAX_SAFE_INTEGER;
+    for (const workspaceId of workspaceIds.value) {
+      if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Context search was cancelled', recoverable: true });
+      const remaining = candidateLimit - collectedCandidates;
+      if (remaining <= 0) break;
+      const workspaceRequest = boundedRequest.resultBudget === undefined ? boundedRequest : {
+        ...boundedRequest,
+        pageSize: Math.min(boundedRequest.pageSize ?? DEFAULT_PAGE_SIZE[boundedRequest.mode ?? 'optimized'], remaining),
+        resultBudget: { ...boundedRequest.resultBudget, maxItems: remaining },
+      };
+      const result = await this.collectWorkspace(workspaceId, workspaceRequest, signal);
+      if (result.ok) {
+        successful.push(result.value);
+        collectedCandidates += result.value.candidates.length;
+      } else if (firstError === undefined) firstError = result.error;
     }
     if (successful.length === 0) {
       return err(firstError ?? { code: 'INTERNAL_ERROR', message: 'Context search failed', recoverable: true });
@@ -255,11 +267,11 @@ export class ContextEngine {
     let successfulWorkspaces = 0;
     for (const workspaceId of workspaceIds.value) {
       if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Search was cancelled', recoverable: true });
-      const producerLimit = maxResults;
-      const [text, files] = await Promise.all([
-        this.safeSearchText(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, producerLimit, signal),
-        this.safeSearchFiles(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, producerLimit, request.glob, signal),
-      ]);
+      let remaining = maxResults - matches.length - paths.length;
+      if (remaining <= 0) { hasMore = true; break; }
+      const producerLimit = effectiveBudget === undefined ? maxResults : remaining;
+      const searchRequest = { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) };
+      const text = await this.safeSearchText(workspaceId, searchRequest, producerLimit, signal);
       successfulWorkspaces += 1;
       if (text.ok) {
         matches.push(...text.value.matches
@@ -268,9 +280,13 @@ export class ContextEngine {
             if (!allowed) this.economy.recordSkipped(match.path);
             return allowed;
           })
+          .slice(0, remaining)
           .map((match) => ({ workspaceId, path: match.path, line: match.line, text: match.text })));
         hasMore ||= text.value.truncated;
       }
+      remaining = maxResults - matches.length - paths.length;
+      if (effectiveBudget !== undefined && remaining <= 0) { hasMore = true; break; }
+      const files = await this.safeSearchFiles(workspaceId, searchRequest, effectiveBudget === undefined ? maxResults : remaining, request.glob, signal);
       if (files.ok) {
         paths.push(...files.value.paths
           .filter((path) => {
@@ -278,6 +294,7 @@ export class ContextEngine {
             if (!allowed) this.economy.recordSkipped(path);
             return allowed;
           })
+          .slice(0, remaining)
           .map((path) => ({ workspaceId, path })));
         hasMore ||= files.value.truncated;
       }

@@ -120,7 +120,7 @@ export class McpSessionManager {
       const activeManaged = managed;
       if (isAborted(signal)) return cancelledCall();
       const resources = await withTimeout(
-        (callSignal) => this.enqueue(activeManaged, () => activeManaged.session.listResources(callSignal)),
+        (callSignal) => this.enqueue(activeManaged, () => activeManaged.session.listResources(callSignal), callSignal),
         this.callTimeoutMs,
         `Timed out listing resources for ${server}`,
         signal,
@@ -164,13 +164,13 @@ export class McpSessionManager {
       const inputError = validateDeclaredInput(declaredTool, args);
       if (inputError !== undefined) return err(appError('INVALID_INPUT', `Child MCP input schema mismatch for ${server}/${tool}: ${inputError}`));
       const result = await withTimeout(
-        (callSignal) => this.enqueue(activeManaged, () => activeManaged.session.callTool(tool, args, callSignal)),
+        (callSignal) => this.enqueue(activeManaged, () => activeManaged.session.callTool(tool, args, callSignal), callSignal),
         this.callTimeoutMs,
         `Timed out calling ${server}/${tool}`,
         signal,
       );
       const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
-      if (jsonByteLength(result) > resultLimit) {
+      if (boundedJsonByteLength(result, resultLimit) > resultLimit) {
         return err(appError('INVALID_INPUT', `Child MCP result exceeds ${resultLimit} bytes`));
       }
       const outputError = validateDeclaredOutput(declaredTool, result);
@@ -331,7 +331,7 @@ export class McpSessionManager {
     signal?: AbortSignal,
   ): Promise<{ readonly detected: boolean; readonly previousCatalogFingerprint?: string }> {
     const listedTools = await withTimeout(
-      (callSignal) => this.enqueue(managed, () => managed.session.listTools(callSignal)),
+      (callSignal) => this.enqueue(managed, () => managed.session.listTools(callSignal), callSignal),
       this.callTimeoutMs,
       `Timed out refreshing tool catalog for ${server}`,
       signal,
@@ -348,8 +348,12 @@ export class McpSessionManager {
       : { detected: true, previousCatalogFingerprint: previousFingerprint };
   }
 
-  private enqueue<T>(managed: ManagedSession, operation: () => Promise<T>): Promise<T> {
-    const next = managed.queue.then(operation, operation);
+  private enqueue<T>(managed: ManagedSession, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const run = async (): Promise<T> => {
+      if (isAborted(signal)) throw new Error('Child MCP operation was cancelled');
+      return operation();
+    };
+    const next = managed.queue.then(run, run);
     managed.queue = next.then(() => undefined, () => undefined);
     return next;
   }
@@ -682,6 +686,51 @@ function stableJson(value: unknown): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
     .join(',')}}`;
+}
+
+function boundedJsonByteLength(value: unknown, limit: number): number {
+  return boundedJsonBytes(value, limit, new WeakSet<object>());
+}
+
+function boundedJsonBytes(value: unknown, limit: number, seen: WeakSet<object>): number {
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'string') {
+      let bytes = 2;
+      for (let index = 0; index < value.length; index += 1) {
+        const code = value.charCodeAt(index);
+        bytes += code === 34 || code === 92 ? 2 : code <= 0x1f ? (code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6) : Buffer.byteLength(value[index] ?? '', 'utf8');
+        if (bytes > limit) return limit + 1;
+      }
+      return bytes;
+    }
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? 0 : Buffer.byteLength(serialized, 'utf8');
+  }
+  if (seen.has(value)) return limit + 1;
+  seen.add(value);
+  let bytes = Array.isArray(value) ? 2 : 2;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      bytes += boundedJsonBytes(entry, Math.max(0, limit - bytes), seen) + 1;
+      if (bytes > limit) {
+        seen.delete(value);
+        return limit + 1;
+      }
+    }
+    seen.delete(value);
+    return bytes;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    bytes += Buffer.byteLength(JSON.stringify(key), 'utf8') + 1;
+    bytes += boundedJsonBytes(record[key], Math.max(0, limit - bytes), seen) + 1;
+    if (bytes > limit) {
+      seen.delete(value);
+      return limit + 1;
+    }
+  }
+  seen.delete(value);
+  return bytes;
 }
 
 function jsonByteLength(value: unknown): number {

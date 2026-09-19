@@ -174,7 +174,7 @@ export interface McpToolContext {
   /** Search parent-owned native Thai-RAG within one canonical workspace. */
   readonly ragRecall?: (workspaceId: string, query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Persist one bounded long-term memory through the parent-owned native Thai-RAG capability. */
-  readonly ragRemember?: (workspaceId: string, content: string, category: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly ragRemember?: (workspaceId: string, content: string, category: string | undefined, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Invoke one parent-owned native Thai-RAG operation after canonical workspace validation. */
   readonly nativeRagCall?: (workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
 }

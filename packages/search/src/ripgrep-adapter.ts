@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { opendir } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
 import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
@@ -429,30 +429,26 @@ export class RipgrepAdapter {
     return ok({ paths, truncated });
   }
 
-  private async *walkFallbackFiles(rootPath: string, discovery: ContextDiscoveryMode, signal?: AbortSignal): AsyncGenerator<string> {
-    const directories = [''];
-    for (let index = 0; index < directories.length; index += 1) {
-      if (signal?.aborted === true) return;
-      const relativeDirectory = directories[index] ?? '';
-      const absoluteDirectory = relativeDirectory.length === 0 ? rootPath : path.join(rootPath, relativeDirectory);
-      let entries;
-      try {
-        entries = await readdir(absoluteDirectory, { withFileTypes: true });
-      } catch (error: unknown) {
-        if (relativeDirectory.length === 0) throw error;
-        continue;
-      }
-      entries.sort((left, right) => left.name.localeCompare(right.name));
-      for (const entry of entries) {
+  private async *walkFallbackFiles(rootPath: string, discovery: ContextDiscoveryMode, signal?: AbortSignal, relativeDirectory = ''): AsyncGenerator<string> {
+    if (signal?.aborted === true) return;
+    const absoluteDirectory = relativeDirectory.length === 0 ? rootPath : path.join(rootPath, relativeDirectory);
+    let directory;
+    try {
+      directory = await opendir(absoluteDirectory);
+    } catch (error: unknown) {
+      if (relativeDirectory.length === 0) throw error;
+      return;
+    }
+    try {
+      for await (const entry of directory) {
+        if (signal !== undefined && signal.aborted) return;
         const relativePath = relativeDirectory.length === 0 ? entry.name : path.join(relativeDirectory, entry.name);
-        if (entry.isDirectory()) {
-          if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
-          directories.push(relativePath);
-        } else if (entry.isFile()) {
-          if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
-          yield relativePath;
-        }
+        if (discovery === 'automatic' && !classifyContextPath(relativePath, discovery).discoverable) continue;
+        if (entry.isDirectory()) yield* this.walkFallbackFiles(rootPath, discovery, signal, relativePath);
+        else if (entry.isFile()) yield relativePath;
       }
+    } finally {
+      await directory.close().catch(() => undefined);
     }
   }
 

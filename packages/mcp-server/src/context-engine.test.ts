@@ -168,6 +168,34 @@ describe('context engine', () => {
     await expect(engine.searchAll({ query: 'login', workspaceId: 'workspace-1' }, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });
 
+  it('stops cross-workspace search at one global result budget', async () => {
+    const searched: string[] = [];
+    const source = {
+      ...services(),
+      search: {
+        ...services().search!,
+        searchText: async (_actor: unknown, workspaceId: string) => {
+          searched.push(workspaceId);
+          return ok({ matches: [{ path: `${workspaceId}/match.ts`, line: 1, text: 'match' }], truncated: false });
+        },
+        searchFiles: async (_actor: unknown, workspaceId: string) => {
+          searched.push(workspaceId);
+          return ok({ paths: [`${workspaceId}/file.ts`], truncated: false });
+        },
+      },
+    } as McpApplicationServices;
+    const result = await new ContextEngine(source, actor).searchAll({ query: 'login' }, {
+      maxItems: 2,
+      maxTextBytes: 1024,
+      maxStructuredBytes: 1024,
+      maxBinaryBytes: 1024,
+      maxBase64Bytes: 1024,
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { matches: [{ workspaceId: 'workspace-1' }], paths: [{ workspaceId: 'workspace-1' }] } });
+    expect(searched).toEqual(['workspace-1', 'workspace-1']);
+  });
+
   it('supports cross-workspace search, paged full scans, and parallel many-file reads', async () => {
     const engine = new ContextEngine(services(), actor);
     const search = await engine.searchAll({ query: 'login' });

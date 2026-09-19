@@ -12,6 +12,7 @@ from thai_rag.provider import (
 class RecordingCore:
     pre_edit_result: dict
     supports_canonical_workspace_scope = True
+    supports_canonical_code_scope = True
 
     def remember(self, content, workspace_id, category="general"):
         return f"remembered:{content}:{workspace_id}:{category}"
@@ -67,7 +68,7 @@ def test_health_reports_degraded_embedding_state():
 
     result = ThaiRagProvider(core=Core()).health()
 
-    assert result.status is ProviderStatus.DEGRADED
+    assert result.status is ProviderStatus.UNAVAILABLE
     assert result.data["embedding_ready"] is False
     assert result.data["ready"] is False
     assert result.data["state"] == "degraded"
@@ -108,7 +109,7 @@ def test_health_fails_closed_when_vector_or_workspace_readiness_is_missing():
     Core.storage.sqlite_conn.execute("CREATE TABLE fts_conversation (content TEXT)")
     result = ThaiRagProvider(core=Core()).health(workspace_id="ws-123")
 
-    assert result.status is ProviderStatus.DEGRADED
+    assert result.status is ProviderStatus.UNAVAILABLE
     assert result.data["ready"] is False
     assert result.data["readiness"]["vector_store_ready"] is False
     assert result.data["readiness"]["workspace_ready"] is False
@@ -296,7 +297,7 @@ def test_provider_converts_core_failures_to_machine_readable_errors():
     result = provider.code_search(query="auth", workspace_id="ws-123")
 
     assert result.status is ProviderStatus.UNAVAILABLE
-    assert result.errors[0].code is ErrorCode.INTERNAL_FAILURE
+    assert result.errors[0].code is ErrorCode.STORAGE_UNAVAILABLE
     assert result.errors[0].details["exception"] == "RuntimeError"
 
 
@@ -625,3 +626,59 @@ def test_standalone_wrapper_delegates_to_provider_and_returns_structured_result(
     result = server_module.remember("decision", workspace_id="ws-123")
 
     assert result == {"status": "ok", "data": {"id": "mem-1"}}
+
+
+def test_pre_edit_rejects_core_without_canonical_code_ownership():
+    class MatchingOnlyCore(RecordingCore):
+        supports_canonical_code_scope = False
+
+    result = ThaiRagProvider(core=MatchingOnlyCore({"constraints": [], "code_context": {}, "blast_radius": {}})).pre_edit_context(
+        file_path="auth.py", workspace_id="ws-123"
+    )
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert result.errors[0].code is ErrorCode.SCOPE_DENIED
+
+
+def test_health_distinguishes_storage_unavailable_from_degraded_components():
+    import sqlite3
+
+    class Embedder:
+        @staticmethod
+        def is_alive():
+            return False
+
+    class BrokenStorage:
+        sqlite_conn = sqlite3.connect(":memory:")
+        code_collection = None
+
+    BrokenStorage.sqlite_conn.close()
+
+    class Core:
+        storage = BrokenStorage()
+        embedder = Embedder()
+        supports_canonical_code_scope = True
+
+        def pre_edit_context(self, file_path, workspace_id=None, proposed_symbol=None):
+            return {}
+
+        def code_index(self, workspace_path, workspace_id, force=False, background=False):
+            return None
+
+        def index_status(self, job_id, workspace_id):
+            return None
+
+        def code_search(self, query, workspace_id, top_k=5, path_filter=None):
+            return []
+
+        def code_context(self, file_path, workspace_id, line_number, window=25):
+            return None
+
+        def code_blast_radius(self, symbol_name, workspace_id, max_depth=2):
+            return None
+
+    result = ThaiRagProvider(core=Core()).health(workspace_id="ws-123")
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert ErrorCode.STORAGE_UNAVAILABLE in {error.code for error in result.errors}
+    assert ErrorCode.EMBEDDING_UNAVAILABLE in {error.code for error in result.errors}

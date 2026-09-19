@@ -261,11 +261,6 @@ class StorageManager:
             except Exception:
                 where_filter = None
 
-        # BUG-R5: fetch a generous candidate pool whenever path_filter is set.
-        # With a workspace where_filter the old code fetched only top_k rows,
-        # then the python-side path filter depleted that pool — an exact-file
-        # filter returned zero hits even for indexed files. Always fetch up to
-        # max(top_k*40, 200) so the path filter has candidates to narrow.
         fetch_k = min(col_count, max(top_k * 40, 200) if path_filter else top_k)
 
         results = self.code_collection.query(
@@ -278,8 +273,7 @@ class StorageManager:
             for i in range(len(results["ids"][0])):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
                 file_path = meta.get("file_path", "")
-                # BUG-10: normalized path filter check here too
-                if rel_filter and rel_filter.lower() not in file_path.lower():
+                if rel_filter and not self._path_matches_filter(file_path, rel_filter):
                     continue
 
                 items.append({
@@ -307,50 +301,37 @@ class StorageManager:
         if not words:
             words = [clean_query]
         fts_expr = " OR ".join(f'"{w}"*' for w in words)
-
-        # BUG-10: normalized path_filter — match relative stored paths from absolute inputs
         rel_filter = self._normalize_abs_to_rel(path_filter) if path_filter else None
+        fetch_limit = max(top_k * 40, 200) if rel_filter else top_k
 
         with self._lock:
             cur = self.sqlite_conn.cursor()
-            try:
-                if rel_filter and workspace:
-                    rows = cur.execute("""
-                        SELECT f.doc_id, f.symbol_name, f.file_path, f.rank
-                        FROM fts_code_symbols f
-                        JOIN code_symbols s ON s.file_path = f.file_path
-                        WHERE fts_code_symbols MATCH ? AND f.file_path LIKE ? AND s.workspace = ?
-                        ORDER BY f.rank
-                        LIMIT ?
-                    """, (fts_expr, f"%{rel_filter}%", workspace, top_k)).fetchall()
-                elif rel_filter:
-                    rows = cur.execute("""
-                        SELECT doc_id, symbol_name, file_path, rank
-                        FROM fts_code_symbols
-                        WHERE fts_code_symbols MATCH ? AND file_path LIKE ?
-                        ORDER BY rank
-                        LIMIT ?
-                    """, (fts_expr, f"%{rel_filter}%", top_k)).fetchall()
-                elif workspace:
-                    rows = cur.execute("""
-                        SELECT f.doc_id, f.symbol_name, f.file_path, f.rank
-                        FROM fts_code_symbols f
-                        JOIN code_symbols s ON s.file_path = f.file_path
-                        WHERE fts_code_symbols MATCH ? AND s.workspace = ?
-                        ORDER BY f.rank
-                        LIMIT ?
-                    """, (fts_expr, workspace, top_k)).fetchall()
-                else:
-                    rows = cur.execute("""
-                        SELECT doc_id, symbol_name, file_path, rank
-                        FROM fts_code_symbols
-                        WHERE fts_code_symbols MATCH ?
-                        ORDER BY rank
-                        LIMIT ?
-                    """, (fts_expr, top_k)).fetchall()
-                return [dict(r) for r in rows]
-            except Exception:
-                return []
+            if workspace:
+                rows = cur.execute("""
+                    SELECT DISTINCT f.doc_id, f.symbol_name, f.file_path, f.rank
+                    FROM fts_code_symbols f
+                    JOIN code_symbols s ON s.file_path = f.file_path
+                    WHERE fts_code_symbols MATCH ? AND s.workspace = ?
+                    ORDER BY f.rank
+                    LIMIT ?
+                """, (fts_expr, workspace, fetch_limit)).fetchall()
+            else:
+                rows = cur.execute("""
+                    SELECT doc_id, symbol_name, file_path, rank
+                    FROM fts_code_symbols
+                    WHERE fts_code_symbols MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (fts_expr, fetch_limit)).fetchall()
+            if rel_filter:
+                rows = [row for row in rows if self._path_matches_filter(row["file_path"], rel_filter)]
+            return [dict(row) for row in rows[:top_k]]
+
+    @staticmethod
+    def _path_matches_filter(file_path: str, path_filter: str) -> bool:
+        stored = file_path.replace("\\", "/").strip("/").lower()
+        requested = path_filter.replace("\\", "/").strip("/").lower()
+        return stored == requested or stored.startswith(f"{requested}/")
 
     @staticmethod
     def _normalize_abs_to_rel(path_filter: Optional[str]) -> Optional[str]:
@@ -764,26 +745,23 @@ class StorageManager:
         ws = workspace if workspace else None
         with self._lock:
             cur = self.sqlite_conn.cursor()
-            # BUG-R3: match both canonical ('ws/rel') and legacy bare ('rel') rows.
             canonical = self._canonicalize_index_path(file_path, workspace or "")
-            rel_suffix = f"%/{Path(canonical).name}"
             orig = file_path.replace("\\", "/")
             if ws:
                 rows = cur.execute(
                     """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace
                        FROM code_symbols
-                       WHERE (file_path = ? OR file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
-                         AND workspace = ?
+                       WHERE (file_path = ? OR file_path = ?) AND workspace = ?
                        ORDER BY line_start ASC""",
-                    (canonical, orig, f"%/{canonical}", rel_suffix, ws)
+                    (canonical, orig, ws)
                 ).fetchall()
             else:
                 rows = cur.execute(
                     """SELECT file_path, symbol_name, symbol_type, line_start, line_end, workspace
                        FROM code_symbols
-                       WHERE file_path = ? OR file_path = ? OR file_path LIKE ? OR file_path LIKE ?
+                       WHERE file_path = ? OR file_path = ?
                        ORDER BY line_start ASC""",
-                    (canonical, orig, f"%/{canonical}", rel_suffix)
+                    (canonical, orig)
                 ).fetchall()
             return [dict(r) for r in rows]
 

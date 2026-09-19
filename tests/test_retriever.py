@@ -348,3 +348,16 @@ def test_delete_workspace_namespace_escapes_like_wildcards(temp_env):
     paths = {row[0] for row in rows}
     assert "legacy_repo/module.py" not in paths
     assert "legacyXrepo/module.py" in paths
+
+
+def test_path_filter_uses_file_or_directory_boundaries(temp_env):
+    retriever, _ = temp_env
+    retriever.index_file("wsA/module1.py", "def target_one(): return 1")
+    retriever.index_file("wsA/module10.py", "def target_ten(): return 10")
+    retriever.index_file("wsA/module1/child.py", "def target_child(): return 11")
+
+    exact = retriever.search("target", path_filter="wsA/module1.py")
+    assert {result["file_path"] for result in exact} == {"wsA/module1.py"}
+
+    directory = retriever.search("target", path_filter="wsA/module1")
+    assert {result["file_path"] for result in directory} == {"wsA/module1/child.py"}

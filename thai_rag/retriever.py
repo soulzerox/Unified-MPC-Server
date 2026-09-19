@@ -351,14 +351,13 @@ class HybridRetriever:
         # Sort by RRF score descending
         ranked_parents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # BUG-10: use normalized path for the final Python-side filter too
         rel_filter = self.storage._normalize_abs_to_rel(path_filter) if path_filter else None
         results = []
         for p_id, score in ranked_parents:
             p_doc = parent_map.get(p_id)
             if not p_doc:
                 continue
-            if rel_filter and rel_filter.lower() not in p_doc["file_path"].lower():
+            if rel_filter and not self.storage._path_matches_filter(p_doc["file_path"], rel_filter):
                 continue
 
             results.append({
@@ -384,52 +383,38 @@ class HybridRetriever:
     ) -> Optional[Dict[str, Any]]:
         """Retrieve the enclosing parent document or surrounding lines for a file and line number."""
         cur = self.storage.sqlite_conn.cursor()
-        # BUG-R6: normalize absolute input to stored '<ws>/<rel>' form so an
-        # absolute path (e.g. /home/qwerty/.../webtrans_prepaid/tsconfig.json)
-        # still matches the rel parent row (webtrans_prepaid/tsconfig.json).
         candidates = {file_path}
         rel = self.storage._normalize_abs_to_rel(file_path)
         if rel and rel != file_path:
             candidates.add(rel)
+        if workspace:
+            candidates.add(self.storage._canonicalize_index_path(file_path, workspace))
+            if rel:
+                candidates.add(f"{workspace.rstrip('/')}/{rel.lstrip('/')}")
         placeholders = " OR ".join("file_path = ?" for _ in candidates)
-        scope_clause = " AND file_path LIKE ? ESCAPE '\\'" if workspace else ""
-        escaped_workspace = (workspace.rstrip('/')
-                             .replace('\\', '\\\\')
-                             .replace('%', '\\%')
-                             .replace('_', '\\_')) if workspace else ""
-        scope_params = (f"{escaped_workspace}/%",) if workspace else ()
-        # Find exact enclosing parent doc (support exact or suffix match)
+        params = (*sorted(candidates), line_number, line_number)
         row = cur.execute(f"""
             SELECT * FROM parent_documents
-            WHERE ({placeholders} OR file_path LIKE ? OR file_path LIKE ?)
-              {scope_clause}
+            WHERE ({placeholders})
               AND start_line <= ? AND end_line >= ?
             ORDER BY (end_line - start_line) ASC
             LIMIT 1
-        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", *scope_params, line_number, line_number)).fetchone()
+        """, params).fetchone()
+
+        if row is None and not workspace:
+            rows = cur.execute("""
+                SELECT * FROM parent_documents
+                WHERE start_line <= ? AND end_line >= ?
+            """, (line_number, line_number)).fetchall()
+            requested = tuple(part.lower() for part in file_path.replace("\\", "/").strip("/").split("/") if part)
+            for candidate in rows:
+                stored = tuple(part.lower() for part in candidate["file_path"].replace("\\", "/").strip("/").split("/") if part)
+                if requested and len(stored) >= len(requested) and stored[-len(requested):] == requested:
+                    row = candidate
+                    break
 
         if row:
             doc = dict(row)
-            return {
-                "file_path": doc["file_path"],
-                "start_line": doc["start_line"],
-                "end_line": doc["end_line"],
-                "symbol_name": doc.get("symbol_name", ""),
-                "content": doc["content"]
-            }
-
-        # If not indexed as a parent doc, look up any parent from this file
-        # (BUG-R6: same absolute->rel normalization applied here)
-        fallback = cur.execute(f"""
-            SELECT * FROM parent_documents
-            WHERE ({placeholders} OR file_path LIKE ? OR file_path LIKE ?)
-              {scope_clause}
-            ORDER BY ABS(start_line - ?) ASC
-            LIMIT 1
-        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", *scope_params, line_number)).fetchone()
-
-        if fallback:
-            doc = dict(fallback)
             return {
                 "file_path": doc["file_path"],
                 "start_line": doc["start_line"],

@@ -378,10 +378,10 @@ def test_path_filter_vector_search_does_not_deplete_fetch_pool():
             assert exact[0]["metadata"]["file_path"] == "wsA/module199.py"
 
             # directory-prefix filter keeps working
-            pref = st.search_code_vector(q, top_k=5, path_filter="wsA/module1")
+            pref = st.search_code_vector(q, top_k=5, path_filter="wsA")
             assert all(
-                "wsA/module1" in r["metadata"]["file_path"] for r in pref
-            ), "prefix path_filter leaked non-matching files"
+                r["metadata"]["file_path"].startswith("wsA/") for r in pref
+            ), "directory path_filter leaked non-matching files"
         finally:
             server.close()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import sqlite3
 import json
 from dataclasses import dataclass, field
 from enum import Enum
@@ -124,7 +125,8 @@ class ThaiRagProvider:
         readiness = self._readiness(workspace_id)
         embedding_ready = readiness["embedding_ready"]
         ready = self._is_ready(readiness)
-        status = ProviderStatus.OK if ready and embedding_ready else ProviderStatus.DEGRADED
+        unavailable = not readiness["storage_ready"] or not readiness["fts_ready"] or not readiness["workspace_ready"]
+        status = ProviderStatus.UNAVAILABLE if unavailable else (ProviderStatus.OK if ready else ProviderStatus.DEGRADED)
         warnings = []
         if not readiness["storage_ready"]:
             warnings.append("storage unavailable")
@@ -146,6 +148,7 @@ class ThaiRagProvider:
             },
             workspace_id=workspace_id,
             warnings=warnings,
+            errors=self._readiness_errors(readiness, workspace_id),
             metadata=self._metadata(workspace_id),
         )
 
@@ -246,6 +249,8 @@ class ThaiRagProvider:
         if not workspace_id or not workspace_id.strip():
             return self._scope_error("pre_edit_context")
         try:
+            if not self._supports_canonical_code_scope():
+                raise ScopeContractError("core does not prove canonical code workspace ownership")
             method = self.core.pre_edit_context
             self._canonical_scope_name(method, "pre_edit_context")
             kwargs: dict[str, Any] = {
@@ -484,7 +489,7 @@ class ThaiRagProvider:
         return getattr(self.core, "supports_canonical_workspace_scope", False) is True
 
     def _supports_canonical_code_scope(self) -> bool:
-        return getattr(self.core, "supports_canonical_code_scope", False) is True or self._supports_canonical_scope()
+        return getattr(self.core, "supports_canonical_code_scope", False) is True
 
     def _scope_error(self, operation: str) -> ProviderResult:
         return self._error(
@@ -495,7 +500,7 @@ class ThaiRagProvider:
         )
 
     def _failure(self, operation: str, workspace_id: Optional[str], exc: Exception) -> ProviderResult:
-        code = ErrorCode.SCOPE_DENIED if isinstance(exc, ScopeContractError) else ErrorCode.INTERNAL_FAILURE
+        code = self._exception_code(exc)
         return ProviderResult(
             status=ProviderStatus.UNAVAILABLE,
             workspace_id=workspace_id,
@@ -509,6 +514,27 @@ class ThaiRagProvider:
             metadata=self._metadata(workspace_id),
         )
 
+    def _exception_code(self, exc: Exception) -> ErrorCode:
+        if isinstance(exc, ScopeContractError):
+            return ErrorCode.SCOPE_DENIED
+        if isinstance(exc, sqlite3.Error):
+            return ErrorCode.STORAGE_UNAVAILABLE
+        return self._error_code(str(exc))
+
+    def _readiness_errors(self, readiness: dict[str, bool], workspace_id: Optional[str]) -> list[ProviderError]:
+        errors = []
+        if not readiness["storage_ready"]:
+            errors.append(ProviderError(ErrorCode.STORAGE_UNAVAILABLE, "SQLite storage unavailable", {"operation": "health"}))
+        if not readiness["fts_ready"]:
+            errors.append(ProviderError(ErrorCode.LEXICAL_RETRIEVAL_UNAVAILABLE, "SQLite FTS unavailable", {"operation": "health"}))
+        if not readiness["vector_store_ready"]:
+            errors.append(ProviderError(ErrorCode.VECTOR_RETRIEVAL_DEGRADED, "vector store unavailable", {"operation": "health"}))
+        if not readiness["embedding_ready"]:
+            errors.append(ProviderError(ErrorCode.EMBEDDING_UNAVAILABLE, "embedding backend unavailable", {"operation": "health"}))
+        if not readiness["workspace_ready"]:
+            errors.append(ProviderError(ErrorCode.SCOPE_DENIED, "canonical code workspace ownership unavailable", {"operation": "health", "workspace_id": workspace_id}))
+        return errors
+
     def _error_status(self, message: str) -> ProviderStatus:
         return ProviderStatus.DEGRADED if self._error_code(message) in {
             ErrorCode.EMBEDDING_UNAVAILABLE,
@@ -519,6 +545,8 @@ class ThaiRagProvider:
         lower = message.lower()
         if "embedding" in lower or "ollama" in lower:
             return ErrorCode.EMBEDDING_UNAVAILABLE
+        if "fts" in lower or "lexical" in lower:
+            return ErrorCode.LEXICAL_RETRIEVAL_UNAVAILABLE
         if "storage" in lower or "sqlite" in lower or "chroma" in lower:
             return ErrorCode.STORAGE_UNAVAILABLE
         if "outside workspace scope" in lower or "scope" in lower and "workspace" in lower:
@@ -640,13 +668,18 @@ class ThaiRagProvider:
                     fts_ready = True
             except Exception:
                 pass
-            vector_ready = getattr(storage, "code_collection", None) is not None
+            collection = getattr(storage, "code_collection", None)
+            try:
+                collection.count()
+                vector_ready = True
+            except Exception:
+                vector_ready = False
         embedder = getattr(self.core, "embedder", None)
         try:
             embedding_ready = bool(embedder is None or not hasattr(embedder, "is_alive") or embedder.is_alive())
         except Exception:
             embedding_ready = False
-        workspace_ready = bool(workspace_id and (self._supports_canonical_scope() or self._has_scoped_code_api()))
+        workspace_ready = bool(workspace_id and self._supports_canonical_code_scope() and self._has_scoped_code_api())
         return {
             "storage_ready": storage_ready,
             "fts_ready": fts_ready,

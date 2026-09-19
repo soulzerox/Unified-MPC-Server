@@ -40,6 +40,62 @@ describe('FileService', () => {
     expect(result).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } });
   });
 
+  it('enforces the aggregate file item budget before reading extra files', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-files-item-budget-'));
+    temporaryRoots.push(root);
+    const workspace: Workspace = { id: 'workspace-item-budget', displayName: 'Item Budget Fixture', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString() };
+    await writeFile(path.join(root, 'one.txt'), 'one', 'utf8');
+    await writeFile(path.join(root, 'two.txt'), 'two', 'utf8');
+    const readPaths: string[] = [];
+    const reader = {
+      async read(filePath: string) {
+        readPaths.push(filePath);
+        return { ok: true as const, value: { content: 'one', startLine: 1, endLine: 1 } };
+      },
+    } as unknown as TextFileReader;
+    const service = new FileService(repository(workspace), undefined, reader);
+
+    const result = await service.readFiles(
+      { clientId: 'test', clientName: 'test' },
+      workspace.id,
+      { files: [{ path: 'one.txt' }, { path: 'two.txt' }] },
+      undefined,
+      undefined,
+      { maxItems: 1, maxTextBytes: 100, maxStructuredBytes: 100, maxBinaryBytes: 100, maxBase64Bytes: 100 },
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } });
+    expect(readPaths).toHaveLength(0);
+  });
+
+  it('enforces the aggregate structured budget across multi-file reads', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-files-structured-budget-'));
+    temporaryRoots.push(root);
+    const workspace: Workspace = { id: 'workspace-structured-budget', displayName: 'Structured Budget Fixture', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString() };
+    await writeFile(path.join(root, 'one.txt'), 'one', 'utf8');
+    await writeFile(path.join(root, 'two.txt'), 'two', 'utf8');
+    const readPaths: string[] = [];
+    const reader = {
+      async read(filePath: string) {
+        readPaths.push(filePath);
+        return { ok: true as const, value: { content: 'x'.repeat(20), startLine: 1, endLine: 1 } };
+      },
+    } as unknown as TextFileReader;
+    const service = new FileService(repository(workspace), undefined, reader);
+
+    const result = await service.readFiles(
+      { clientId: 'test', clientName: 'test' },
+      workspace.id,
+      { files: [{ path: 'one.txt' }, { path: 'two.txt' }] },
+      undefined,
+      undefined,
+      { maxItems: 20, maxTextBytes: 1_000, maxStructuredBytes: 100, maxBinaryBytes: 1_000, maxBase64Bytes: 1_000 },
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } });
+    expect(readPaths).toHaveLength(1);
+  });
+
   it('passes one shrinking aggregate budget across multi-file reads', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-files-budget-'));
     temporaryRoots.push(root);
@@ -61,7 +117,7 @@ describe('FileService', () => {
       { files: [{ path: 'one.txt' }, { path: 'two.txt' }] },
       undefined,
       undefined,
-      { maxItems: 20, maxTextBytes: 10, maxStructuredBytes: 10, maxBinaryBytes: 10, maxBase64Bytes: 10 },
+      { maxItems: 20, maxTextBytes: 10, maxStructuredBytes: 100, maxBinaryBytes: 10, maxBase64Bytes: 10 },
     );
 
     expect(result).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } });

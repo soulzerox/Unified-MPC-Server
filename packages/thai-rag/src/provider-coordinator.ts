@@ -133,6 +133,8 @@ export class ThaiRagProviderCoordinator {
 
     const server = createServer((socket) => {
       socket.setEncoding('utf8');
+      const requestController = new AbortController();
+      socket.once('close', () => requestController.abort());
       let buffer = '';
       socket.on('data', (chunk: string) => {
         buffer += chunk;
@@ -140,7 +142,7 @@ export class ThaiRagProviderCoordinator {
         if (newline < 0) return;
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        void this.handleOwnerRequest(line).then((response) => {
+        void this.handleOwnerRequest(line, requestController.signal).then((response) => {
           socket.end(`${JSON.stringify(response)}\n`);
         }).catch((error: unknown) => {
           socket.end(`${JSON.stringify({ id: 'unknown', ok: false, error: errorMessage(error) } satisfies ProviderResponse)}\n`);
@@ -171,13 +173,13 @@ export class ThaiRagProviderCoordinator {
     return ok(undefined);
   }
 
-  private async handleOwnerRequest(line: string): Promise<ProviderResponse> {
+  private async handleOwnerRequest(line: string, signal?: AbortSignal): Promise<ProviderResponse> {
     const parsed = parseRequest(line);
     if (!parsed.ok) return { id: 'unknown', ok: false, error: parsed.error.message };
     if (parsed.value.method === 'health') {
       return { id: parsed.value.id, ok: true, value: this.runtime.health() };
     }
-    const result = await this.runtime.call(parsed.value.tool, parsed.value.args, undefined, parsed.value.budget);
+    const result = await this.runtime.call(parsed.value.tool, parsed.value.args, signal, parsed.value.budget);
     return result.ok
       ? { id: parsed.value.id, ok: true, value: result.value }
       : { id: parsed.value.id, ok: false, error: result.error.message };

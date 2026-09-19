@@ -140,6 +140,51 @@ describe('ThaiRagProviderCoordinator', () => {
     await owner.close();
   });
 
+  it('propagates follower cancellation to the owner producer', async () => {
+    const dataRoot = await root();
+    let producerAborted = false;
+    let releaseProducer!: () => void;
+    let startProducer!: () => void;
+    const producerStarted = new Promise<void>((resolve) => { startProducer = resolve; });
+    const producerStopped = new Promise<void>((resolve) => { releaseProducer = resolve; });
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({
+        call: async (_tool, _args, signal) => new Promise((resolve) => {
+          startProducer();
+          signal?.addEventListener('abort', () => {
+            producerAborted = true;
+            releaseProducer();
+            resolve(ok({ cancelled: true }));
+          }, { once: true });
+        }),
+      }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'follower',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => { throw new Error('follower driver must not run'); } }),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    const controller = new AbortController();
+    const pending = follower.call('code_search', { query: 'needle' }, controller.signal);
+    await producerStarted;
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+    await producerStopped;
+    expect(producerAborted).toBe(true);
+
+    await follower.close();
+    await owner.close();
+  });
+
   it('allows a follower to become owner after the prior owner shuts down cleanly', async () => {
     const dataRoot = await root();
     const first = new ThaiRagProviderCoordinator({

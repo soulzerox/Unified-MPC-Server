@@ -313,6 +313,9 @@ export class FileService {
     if (!Array.isArray(request.files) || request.files.length > 20) {
       return err(appError('INVALID_INPUT', 'At most 20 files may be read'));
     }
+    if (budget !== undefined && request.files.length > budget.maxItems) {
+      return err(appError('FILE_TOO_LARGE', 'Requested file count exceeds the result item budget'));
+    }
     const firstPath = request.files[0]?.path;
     if (typeof firstPath !== 'string') return err(appError('INVALID_INPUT', 'At least one file is required'));
     const workspaceResult = await resolveWorkspaceForPath(this.workspaces, workspaceId, firstPath, authorization);
@@ -321,6 +324,7 @@ export class FileService {
 
     const files: ReadFileResult[] = [];
     let totalBytes = 0;
+    let structuredBytes = Buffer.byteLength('{"files":[');
     const aggregateLimit = Math.min(
       trustedWorkspace ? Number.MAX_SAFE_INTEGER : MAX_MULTI_FILE_BYTES,
       budget === undefined ? Number.MAX_SAFE_INTEGER : Math.min(budget.maxTextBytes, budget.maxBinaryBytes, budget.maxBase64Bytes),
@@ -333,10 +337,12 @@ export class FileService {
         return err(appError('PATH_OUTSIDE_WORKSPACE', 'All files must be in the same workspace'));
       }
       const remainingBudget = Math.max(0, aggregateLimit - totalBytes);
-      if (remainingBudget === 0) return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
+      const remainingStructuredBudget = budget === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, budget.maxStructuredBytes - structuredBytes);
+      if (remainingBudget === 0 || remainingStructuredBudget === 0) return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
       const fileBudget = budget === undefined ? undefined : {
         ...budget,
-        maxTextBytes: Math.min(budget.maxTextBytes, remainingBudget),
+        maxTextBytes: Math.min(budget.maxTextBytes, remainingBudget, remainingStructuredBudget),
+        maxStructuredBytes: Math.min(budget.maxStructuredBytes, remainingStructuredBudget),
         maxBinaryBytes: Math.min(budget.maxBinaryBytes, remainingBudget),
         maxBase64Bytes: Math.min(budget.maxBase64Bytes, remainingBudget),
       };
@@ -346,6 +352,12 @@ export class FileService {
         ?? Buffer.byteLength(result.value.content, result.value.encoding === 'base64' ? 'base64' : 'utf8');
       if (totalBytes > aggregateLimit) {
         return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
+      }
+      const serializedFile = JSON.stringify(result.value);
+      const serializedFileBytes = Buffer.byteLength(serializedFile, 'utf8');
+      structuredBytes += serializedFileBytes + (files.length === 0 ? 0 : 1);
+      if (budget !== undefined && structuredBytes + Buffer.byteLength(']}', 'utf8') > budget.maxStructuredBytes) {
+        return err(appError('FILE_TOO_LARGE', 'Total file result exceeds the structured output budget'));
       }
       files.push(result.value);
     }

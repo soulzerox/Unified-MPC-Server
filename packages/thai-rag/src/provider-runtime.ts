@@ -8,7 +8,7 @@ import {
   type ThaiRagProviderHealth,
 } from './provider-contract.js';
 
-export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents & Pick<ThaiRagProviderHealth, 'compatibilityRange' | 'contractFingerprint' | 'generation'> & { readonly degradation?: readonly string[] };
+export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents & Pick<ThaiRagProviderHealth, 'compatibilityRange' | 'contractFingerprint' | 'contractVersion' | 'generation'> & { readonly degradation?: readonly string[] };
 
 export interface ThaiRagProviderDriverStartOptions {
   readonly providerRoot: string;
@@ -209,6 +209,7 @@ function healthFromComponents(
     schemaVersion: base.schemaVersion,
     providerId: base.providerId,
     providerVersion: base.providerVersion,
+    ...(components.contractVersion === undefined ? {} : { contractVersion: components.contractVersion }),
     ...(components.compatibilityRange === undefined ? {} : { compatibilityRange: components.compatibilityRange }),
     ...(components.contractFingerprint === undefined ? {} : { contractFingerprint: components.contractFingerprint }),
     ...(components.generation === undefined ? {} : { generation: components.generation }),

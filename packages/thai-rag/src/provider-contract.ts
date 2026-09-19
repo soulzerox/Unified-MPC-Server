@@ -14,6 +14,10 @@ export const THAI_RAG_CONFORMANCE_FIXTURE_VERSION = '1.0';
 export const THAI_RAG_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
 export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
 export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
+export const THAI_RAG_EMBEDDING_COMPATIBILITY = {
+  '0.9': { profile: `${THAI_RAG_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_EMBEDDING_MODEL}:latest` },
+  '1.0': { profile: THAI_RAG_EMBEDDING_PROFILE, model: THAI_RAG_EMBEDDING_MODEL, preprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION },
+} as const;
 export const THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES = ['vector_store', 'embedder', 'semantic_retrieval'] as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE = {
   version: THAI_RAG_CONFORMANCE_FIXTURE_VERSION,
@@ -116,6 +120,7 @@ export interface ThaiRagProviderHealth {
   readonly schemaVersion: typeof THAI_RAG_PROVIDER_SCHEMA_VERSION;
   readonly providerId: typeof THAI_RAG_PROVIDER_ID;
   readonly providerVersion: string;
+  readonly contractVersion?: string;
   readonly state: ThaiRagProviderLifecycleState;
   readonly compatibilityRange?: ThaiRagProviderHandshake['compatibilityRange'];
   readonly contractFingerprint?: string;

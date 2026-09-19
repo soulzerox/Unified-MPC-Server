@@ -639,11 +639,26 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
     await expect(driver.health()).resolves.toMatchObject({ ok: true, value: {
+      contractVersion: '1.0',
       compatibilityRange: { min: '1.0', max: '1.x' },
       contractFingerprint: THAI_RAG_CONTRACT_FINGERPRINT,
       generation: { contract: THAI_RAG_CONTRACT_FINGERPRINT, index: '1' },
       degradation: ['semantic-retrieval-unavailable'],
     } });
+    await driver.stop();
+  });
+
+  it('rejects provider schema drift when required workspace field is omitted', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ schemaDrift: 'recall' }),
+    });
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+    expect(started).toMatchObject({ ok: false, error: { details: { reason: 'contract-drift', contractDrift: 'recall' } } });
     await driver.stop();
   });
 
@@ -803,6 +818,7 @@ function clientFactory(options: {
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
   readonly handshake?: Record<string, unknown>;
   readonly scopeDrift?: string;
+  readonly schemaDrift?: string;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
@@ -812,7 +828,7 @@ function clientFactory(options: {
           return tools.map((name) => ({
             name,
             description: name,
-            inputSchema: THAI_RAG_REQUIRED_CAPABILITIES.includes(name as typeof THAI_RAG_REQUIRED_CAPABILITIES[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift
+            inputSchema: THAI_RAG_REQUIRED_CAPABILITIES.includes(name as typeof THAI_RAG_REQUIRED_CAPABILITIES[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
               ? { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }
              : { type: 'object' },
           }));

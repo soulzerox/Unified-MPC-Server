@@ -67,6 +67,7 @@ export interface ThaiRagProviderPort {
   health(signal?: AbortSignal): Promise<Result<{
     readonly providerId: 'thai-rag';
     readonly state: string;
+    readonly contractVersion?: string;
     readonly compatibilityRange?: { readonly min: string; readonly max: string };
     readonly contractFingerprint?: string;
     readonly generation?: { readonly contract: string; readonly embedding: string; readonly index: string; readonly storage: string };

@@ -12,9 +12,7 @@ import {
   resolveThaiRagProviderRoot,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
   THAI_RAG_CONFORMANCE_FIXTURE,
-  THAI_RAG_EMBEDDING_MODEL,
-  THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
-  THAI_RAG_EMBEDDING_PROFILE,
+  THAI_RAG_EMBEDDING_COMPATIBILITY,
   THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
   type ThaiRagProviderDriver,
@@ -115,14 +113,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const toolNames = new Set(described.value.tools.map((tool) => tool.name));
     const missing = [...REQUIRED_TOOLS].filter((tool) => !toolNames.has(tool));
-    const scopeDrift = described.value.tools
-      .filter((tool) => toolNames.has(tool.name) && THAI_RAG_CONFORMANCE_FIXTURE.operations[tool.name as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations]?.scope === 'workspace_id')
-      .filter((tool) => !hasWorkspaceScope(isRecord(tool.inputSchema) ? tool.inputSchema : {}))
-      .map((tool) => tool.name);
-    if (missing.length > 0 || scopeDrift.length > 0) {
+    const contractDrift = described.value.tools.flatMap((tool) => {
+      const operation = THAI_RAG_CONFORMANCE_FIXTURE.operations[tool.name as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations];
+      if (operation === undefined) return [];
+      return validateToolSchema(tool.name, isRecord(tool.inputSchema) ? tool.inputSchema : {}, operation);
+    });
+    if (missing.length > 0 || contractDrift.length > 0) {
       await this.sessions.close().catch(() => undefined);
       const reason = missing.length > 0 ? 'missing-capability' : 'contract-drift';
-      return err(appError('CONFLICT', `Native Thai-RAG worker handshake ${reason}: ${[...missing, ...scopeDrift].join(', ')}`, true, { reason, missing: missing.join(','), scopeDrift: scopeDrift.join(',') }));
+      return err(appError('CONFLICT', `Native Thai-RAG worker handshake ${reason}: ${[...missing, ...contractDrift].join(', ')}`, true, { reason, missing: missing.join(','), scopeDrift: contractDrift.join(','), contractDrift: contractDrift.join(',') }));
     }
     const version = await this.callWorker('version', {}, signal);
     if (!version.ok) {
@@ -137,9 +136,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const compatible = validateThaiRagHandshake(handshake.value, {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
-      expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
-      expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL,
-      expectedPreprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
+      ...embeddingCompatibility(handshake.value.contractVersion),
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!compatible.ok) {
@@ -159,9 +156,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const healthy = validateThaiRagHandshake(healthHandshake.value, {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: healthHandshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
-      expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
-      expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL,
-      expectedPreprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
+      ...embeddingCompatibility(healthHandshake.value.contractVersion),
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!healthy.ok) {
@@ -451,9 +446,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const compatible = validateThaiRagHandshake(handshake.value, {
       embeddingIndexGeneration: this.expectedEmbeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
-      expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
-      expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL,
-      expectedPreprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
+      ...embeddingCompatibility(handshake.value.contractVersion),
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!compatible.ok) return compatible;
@@ -463,6 +456,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const activeJobs = await this.jobs.active(this.ownerId ?? '');
     const health: ThaiRagProviderDriverHealth = {
       ...handshake.value.components,
+      contractVersion: handshake.value.contractVersion,
       ...(handshake.value.compatibilityRange === undefined ? {} : { compatibilityRange: handshake.value.compatibilityRange }),
       contractFingerprint: handshake.value.contractFingerprint,
       generation: handshake.value.generation,
@@ -675,10 +669,30 @@ function parseProviderComponents(value: Record<string, unknown>): ThaiRagProvide
   };
 }
 
-function hasWorkspaceScope(schema: Record<string, unknown>): boolean {
-  const properties = isRecord(schema.properties) ? schema.properties : undefined;
-  return properties !== undefined && isRecord(properties.workspace_id)
-    && Array.isArray(schema.required) && schema.required.includes('workspace_id');
+function validateToolSchema(
+  name: string,
+  value: Record<string, unknown>,
+  operation: { readonly scope: string; readonly required?: readonly string[] },
+): string[] {
+  const properties = isRecord(value.properties) ? value.properties : undefined;
+  const required = Array.isArray(value.required) && value.required.every((field) => typeof field === 'string') ? value.required : undefined;
+  if (operation.scope !== 'workspace_id') return [];
+  if (properties === undefined || required === undefined) return [name];
+  if (!isRecord(properties.workspace_id) || !required.includes('workspace_id')) return [name];
+  return (operation.required ?? []).filter((field) => !isRecord(properties[field]) || !required.includes(field)).map(() => name);
+}
+
+function embeddingCompatibility(contractVersion: string): {
+  readonly expectedEmbeddingProfile?: string;
+  readonly expectedEmbeddingModel?: string;
+  readonly expectedPreprocessingVersion?: string;
+} {
+  const compatibility = THAI_RAG_EMBEDDING_COMPATIBILITY[contractVersion as keyof typeof THAI_RAG_EMBEDDING_COMPATIBILITY];
+  if (compatibility === undefined) return {};
+  if ('preprocessingVersion' in compatibility) {
+    return { expectedEmbeddingProfile: compatibility.profile, expectedEmbeddingModel: compatibility.model, expectedPreprocessingVersion: compatibility.preprocessingVersion };
+  }
+  return { expectedEmbeddingProfile: compatibility.profile, expectedEmbeddingModel: compatibility.model };
 }
 
 function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {

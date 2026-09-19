@@ -114,6 +114,37 @@ def test_health_probes_code_fts_instead_of_conversation_fts():
     assert ErrorCode.LEXICAL_RETRIEVAL_UNAVAILABLE in {error.code for error in result.errors}
 
 
+def test_health_treats_empty_code_fts_table_as_ready_when_probe_succeeds():
+    import sqlite3
+
+    class Collection:
+        @staticmethod
+        def count():
+            return 0
+
+    class Storage:
+        sqlite_conn = sqlite3.connect(":memory:")
+        code_collection = Collection()
+
+    Storage.sqlite_conn.execute(
+        "CREATE VIRTUAL TABLE fts_code_symbols USING fts5(doc_id UNINDEXED, symbol_name, file_path, content)"
+    )
+
+    class Embedder:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class Core:
+        storage = Storage()
+        embedder = Embedder()
+
+    result = ThaiRagProvider(core=Core()).health()
+
+    assert result.data["readiness"]["fts_ready"] is True
+    assert ErrorCode.LEXICAL_RETRIEVAL_UNAVAILABLE not in {error.code for error in result.errors}
+
+
 def test_health_verifies_workspace_has_owned_index_rows():
     import sqlite3
 
@@ -1056,7 +1087,7 @@ def test_pre_edit_rejects_core_without_canonical_code_ownership():
     assert result.errors[0].code is ErrorCode.SCOPE_DENIED
 
 
-def test_provider_preserves_structured_core_error_status_and_code():
+def test_provider_preserves_structured_core_error_status_code_and_workspace_id():
     class Core(RecordingCore):
         def code_index(self, workspace_path=".", workspace_id=None, force=False, background=False, structured=False):
             return {"status": "degraded", "code": "embedding_unavailable", "error": "embedding backend unavailable", "workspace_id": workspace_id}
@@ -1069,8 +1100,10 @@ def test_provider_preserves_structured_core_error_status_and_code():
     status = provider.index_status("idx-1", workspace_id="ws-123")
 
     assert index.status is ProviderStatus.DEGRADED
+    assert index.workspace_id == "ws-123"
     assert index.errors[0].code is ErrorCode.EMBEDDING_UNAVAILABLE
     assert status.status is ProviderStatus.UNAVAILABLE
+    assert status.workspace_id == "ws-123"
     assert status.errors[0].code is ErrorCode.STORAGE_UNAVAILABLE
 
 

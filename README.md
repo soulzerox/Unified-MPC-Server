@@ -36,7 +36,7 @@ Client -> Unified MCP -> Native Thai-RAG Provider
                          └-> optional standalone MCP adapter
 ```
 
-`thai_rag.provider.ThaiRagProvider` is transport-independent. It exposes versioned capability metadata, explicit `workspace_id` scope, structured status/result/error fields, selective event memory, retrieval/index operations, and health/version metadata. Unified owns public tool names and final presentation. Standalone stdio remains supported for local development and compatibility, but is not authoritative and does not require Unified.
+`thai_rag.provider.ThaiRagProvider` is transport-independent. It exposes versioned capability metadata, explicit canonical `workspace_id` scope, structured status/result/error fields, selective event memory, retrieval/index operations, and health/version metadata. Every workspace-bound operation requires canonical workspace ownership and an explicit `workspace_id`; the provider never infers scope from filesystem paths, categories, or legacy aliases. Unified owns public tool names and final presentation. Standalone stdio remains supported for local development and compatibility, but is not authoritative and does not require Unified.
 
 Provider contract returns structured `scope_denied` when canonical workspace ownership/query support is unavailable; storage migration belongs to #2/#13. It never treats category as workspace authorization and never requires raw `remember_turn` for normal operation.
 
@@ -404,7 +404,7 @@ index_status(job_id="idx_xxxxxxxx")
 - Job อยู่ใน memory ของ MCP process เดียว (restart server แล้วหาย — รัน `code_index` ใหม่ได้เพราะ incremental cache)
 - Floating HUD ยังแสดง progress ตามเดิมผ่าน `ProgressReporter`
 - `workspace_path` เป็น root จริงที่ใช้เดินไฟล์และถูก canonicalize ด้วย `Path.resolve()` ส่วน `workspace` เป็น namespace เชิงตรรกะสำหรับ path, FTS, vectors และ CPG
-- `workspace_id` ต้องส่งเป็น stable logical namespace เมื่อเรียก `code_index`; ระบบจะไม่อนุมาน namespace จาก filesystem path
+- ทุก operation ที่ผูกกับ workspace ต้องส่ง `workspace_id` แบบ canonical และ stable; ระบบจะไม่อนุมาน namespace จาก filesystem path, category หรือ legacy alias
 
 ### 3. ดูดประวัติแชตย้อนหลังเข้าสู่ Memory (Historical Chat Ingestion)
 ```bash

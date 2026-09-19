@@ -623,10 +623,12 @@ class ThaiRagProvider:
         return ErrorCode.INTERNAL_FAILURE
 
     def _error(self, status: ProviderStatus, code: ErrorCode, message: str, **details: Any) -> ProviderResult:
+        workspace_id = details.get("workspace_id")
         return ProviderResult(
             status=status,
+            workspace_id=workspace_id,
             errors=[ProviderError(code=code, message=message, details=details)],
-            metadata=self._metadata(details.get("workspace_id")),
+            metadata=self._metadata(workspace_id),
         )
 
     def _contract_data(self, workspace_id: Optional[str]) -> dict[str, Any]:
@@ -731,9 +733,8 @@ class ThaiRagProvider:
                 if connection is not None:
                     connection.execute("SELECT 1").fetchone()
                     storage_ready = True
-                    fts_ready = connection.execute(
-                        "SELECT 1 FROM fts_code_symbols LIMIT 1"
-                    ).fetchone() is not None
+                    connection.execute("SELECT 1 FROM fts_code_symbols LIMIT 1")
+                    fts_ready = True
             except Exception:
                 pass
             collection = getattr(storage, "code_collection", None)

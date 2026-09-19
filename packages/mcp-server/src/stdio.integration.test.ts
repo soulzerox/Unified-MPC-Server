@@ -72,7 +72,7 @@ function rawRequest(id: string, method: string, params: Record<string, unknown>)
   };
 }
 
-function createClientAndTransport(options: { readonly legacy?: boolean } = {}): { readonly client: Client; readonly transport: StdioClientTransport; diagnostics(): string } {
+function createClientAndTransport(options: { readonly legacy?: boolean; readonly clientName?: string } = {}): { readonly client: Client; readonly transport: StdioClientTransport; diagnostics(): string } {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fixturePath],
@@ -83,7 +83,7 @@ function createClientAndTransport(options: { readonly legacy?: boolean } = {}): 
     capturedDiagnostics += chunk.toString('utf8');
   });
   const client = new Client(
-    { name: options.legacy === true ? 'cline-4.1.17-compat-test' : 'unified-mpc-stdio-test-client', version: '0.1.0' },
+      { name: options.clientName ?? (options.legacy === true ? 'cline-4.1.17-compat-test' : 'unified-mpc-stdio-test-client'), version: '0.1.0' },
     options.legacy === true
       ? { versionNegotiation: { mode: 'legacy' } }
       : {
@@ -150,6 +150,32 @@ describe('MCP stdio transport', () => {
       await client.close();
     }
   }, 30_000);
+
+  for (const clientName of ['Cline', 'OpenCode', 'Antigravity', 'standalone-mcp-client']) {
+    it(`keeps harness lifecycle callable for ${clientName} over stdio`, async () => {
+      const { client, transport, diagnostics } = createClientAndTransport({ clientName });
+
+      try {
+        try {
+          await client.connect(transport);
+        } catch (error: unknown) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`${detail}; child diagnostics: ${diagnostics().trim() || '[none]'}`, { cause: error });
+        }
+        const listed = await client.listTools();
+        expect(listed.tools.some((tool) => tool.name === 'workspace_bootstrap')).toBe(true);
+        expect(listed.tools.some((tool) => tool.name === 'prepare_code_change')).toBe(true);
+        const bootstrap = await client.callTool({ name: 'workspace_bootstrap', arguments: { workspaceId: 'workspace-stdio' } });
+        expect(bootstrap.isError).not.toBe(true);
+        const prepared = await client.callTool({ name: 'prepare_code_change', arguments: { workspaceId: 'workspace-stdio', filePath: `src/${clientName}.ts` } });
+        expect(prepared.isError).not.toBe(true);
+        const mutation = await client.callTool({ name: 'write_file', arguments: { workspaceId: 'workspace-stdio', path: `src/${clientName}.ts`, content: 'export const client = true;\\n' } });
+        expect(mutation.isError).not.toBe(true);
+      } finally {
+        await client.close();
+      }
+    }, 30_000);
+  }
 
   it('serves the modern tasks extension lifecycle over the real stdio child process', async () => {
     const { client, transport, diagnostics } = createClientAndTransport();

@@ -142,6 +142,23 @@ describe('CLI default dependency lifecycle', () => {
     }
   });
 
+  it('projects canonical harness contracts through CLI tools list', async () => {
+    const dependencies = createDefaultCliDependencies();
+    const tools = await dependencies.toolsList?.();
+    const bootstrap = tools?.find((tool) => tool.name === 'workspace_bootstrap');
+    const prepare = tools?.find((tool) => tool.name === 'prepare_code_change');
+    expect(bootstrap).toMatchObject({
+      inputSchema: { type: 'object', additionalProperties: false, required: ['workspaceId'] },
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    });
+    expect(prepare).toMatchObject({
+      inputSchema: { type: 'object', additionalProperties: false, required: ['workspaceId', 'filePath'] },
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    });
+  });
+
   it('wires the standalone tools facade to extension services so child MCP inspection is available', async () => {
     const dependencies = createDefaultCliDependencies();
     const result = await dependencies.toolsCall?.('mcp_list', {});

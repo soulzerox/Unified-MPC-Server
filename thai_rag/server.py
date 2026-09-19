@@ -257,15 +257,31 @@ class LocalContextServer:
         except Exception as e:
             return f"Error indexing workspace: {str(e)}"
 
-    def index_status(self, job_id: str, workspace_id: Optional[str] = None, workspace: Optional[str] = None) -> str:
+    def index_status(self, job_id: str, workspace_id: Optional[str] = None, workspace: Optional[str] = None, structured: bool = False):
         """Poll a background code_index job by its job_id."""
         workspace = workspace_id if workspace_id is not None else workspace
         with _INDEX_JOBS_LOCK:
             job = _INDEX_JOBS.get(job_id)
         if not job:
+            if structured:
+                return {"status": "unknown", "job_id": job_id}
             return f"⚠️ Warning: Unknown job_id `{job_id}`. Jobs do not survive server restarts — re-run code_index."
         if workspace is not None and job.get("workspace_id") != workspace:
+            if structured:
+                return {"status": "scope_denied", "job_id": job_id, "workspace_id": workspace}
             return f"Error: Index job `{job_id}` is outside workspace scope."
+
+        if structured:
+            return {
+                "status": job["status"],
+                "job_id": job["job_id"],
+                "workspace_id": job.get("workspace_id"),
+                "indexed_files": job["indexed_files"],
+                "skipped_files": job["skipped_files"],
+                "total_files": job["total_files"],
+                "result": job.get("result"),
+                "error": job.get("error"),
+            }
 
         if job["status"] == "running":
             return (
@@ -293,7 +309,8 @@ class LocalContextServer:
         path_filter: Optional[str] = None,
         workspace_id: Optional[str] = None,
         workspace: Optional[str] = None,
-    ) -> str:
+        structured: bool = False,
+    ):
         """Search code symbols and semantic logic across the indexed codebase."""
         if not query.strip():
             return "Error: Search query cannot be empty."
@@ -310,6 +327,13 @@ class LocalContextServer:
                 path_filter=path_filter,
                 workspace=workspace,
             )
+            if structured:
+                return {
+                    "query": query,
+                    "workspace_id": workspace,
+                    "items": results,
+                    "warnings": ["semantic ranking degraded"] if degraded else [],
+                }
             if not results:
                 base = f"No code snippets found matching '{query}'."
                 return base + ("  ⚠️ semantic ranking degraded (Ollama unreachable) — FTS5 results only" if degraded else "")
@@ -336,7 +360,8 @@ class LocalContextServer:
         window: int = 25,
         workspace_id: Optional[str] = None,
         workspace: Optional[str] = None,
-    ) -> str:
+        structured: bool = False,
+    ):
         """Retrieve the enclosing function/class context or surrounding lines for a file."""
         workspace = workspace_id if workspace_id is not None else workspace
         try:
@@ -346,6 +371,13 @@ class LocalContextServer:
                 window_lines=window,
                 workspace=workspace,
             )
+            if structured:
+                return {
+                    "file_path": file_path,
+                    "line_number": line_number,
+                    "workspace_id": workspace,
+                    "context": ctx,
+                }
             if not ctx:
                 return f"No context found for {file_path}:{line_number}."
 
@@ -534,7 +566,8 @@ class LocalContextServer:
         workspace_id: Optional[str] = None,
         max_depth: int = 2,
         workspace: str = "",
-    ) -> str:
+        structured: bool = False,
+    ):
         """Analyze Code Property Graph (CPG-Lite) blast radius: find all direct/transitive callers and impacted files."""
         workspace = workspace_id if workspace_id is not None else workspace
         blast = self.storage.get_symbol_blast_radius(symbol_name, workspace=workspace or None, max_depth=max_depth)
@@ -542,6 +575,14 @@ class LocalContextServer:
         callers = blast.get("callers", [])
         callees = blast.get("callees", [])
         impacted = blast.get("impacted_files", [])
+        if structured:
+            return {
+                "symbol_name": symbol_name,
+                "workspace_id": workspace,
+                "callers": callers,
+                "callees": callees,
+                "impacted_files": impacted,
+            }
 
         out = [f"### 💥 Blast Radius Analysis for `{symbol_name}`:"]
         out.append(f"- **Direct & Transitive Callers**: {len(callers)}")
@@ -585,6 +626,18 @@ def get_server() -> LocalContextServer:
     if _server is None:
         _server = LocalContextServer()
     return _server
+
+@mcp.tool()
+def health(workspace_id: Optional[str] = None):
+    """Report provider readiness and dependency health."""
+    return get_server().provider().health(workspace_id=workspace_id).to_dict()
+
+
+@mcp.tool()
+def version(workspace_id: Optional[str] = None):
+    """Report provider contract and compatibility metadata."""
+    return get_server().provider().version(workspace_id=workspace_id).to_dict()
+
 
 @mcp.tool()
 def remember(content: str, category: str = "general", workspace_id: Optional[str] = None):

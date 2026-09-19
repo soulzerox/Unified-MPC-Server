@@ -383,14 +383,15 @@ class HybridRetriever:
     ) -> Optional[Dict[str, Any]]:
         """Retrieve the enclosing parent document or surrounding lines for a file and line number."""
         cur = self.storage.sqlite_conn.cursor()
-        candidates = {file_path}
         rel = self.storage._normalize_abs_to_rel(file_path)
-        if rel and rel != file_path:
-            candidates.add(rel)
         if workspace:
-            candidates.add(self.storage._canonicalize_index_path(file_path, workspace))
+            candidates = {self.storage._canonicalize_index_path(file_path, workspace)}
             if rel:
                 candidates.add(f"{workspace.rstrip('/')}/{rel.lstrip('/')}")
+        else:
+            candidates = {file_path}
+            if rel and rel != file_path:
+                candidates.add(rel)
         placeholders = " OR ".join("file_path = ?" for _ in candidates)
         params = (*sorted(candidates), line_number, line_number)
         row = cur.execute(f"""

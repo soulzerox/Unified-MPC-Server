@@ -421,10 +421,10 @@ def test_real_core_code_provider_isolates_two_workspaces(tmp_path):
         result_a = server.provider().code_search("auth", workspace_id="ws-a")
         result_b = server.provider().code_search("auth", workspace_id="ws-b")
 
-        assert "auth_a" in result_a.data
-        assert "auth_b" not in result_a.data
-        assert "auth_b" in result_b.data
-        assert "auth_a" not in result_b.data
+        assert "auth_a" in result_a.data["items"][0]["content"]
+        assert all("auth_b" not in item["content"] for item in result_a.data["items"])
+        assert "auth_b" in result_b.data["items"][0]["content"]
+        assert all("auth_a" not in item["content"] for item in result_b.data["items"])
     finally:
         server.close()
 
@@ -455,6 +455,45 @@ def test_real_core_pre_edit_propagates_workspace_id_to_context(tmp_path, monkeyp
         assert result.data["evidence"]["storage"] == "ready"
     finally:
         server.close()
+
+
+def test_provider_rejects_legacy_memory_workspace_even_with_capability_flag():
+    class LegacyMemoryCore:
+        supports_canonical_workspace_scope = True
+        supports_canonical_code_scope = True
+
+        def remember(self, content, workspace, category="general"):
+            return {"content": content, "workspace": workspace, "category": category}
+
+    result = ThaiRagProvider(core=LegacyMemoryCore()).remember("decision", workspace_id="ws-123")
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert result.errors[0].code is ErrorCode.SCOPE_DENIED
+
+
+def test_provider_returns_structured_code_data():
+    provider = ThaiRagProvider(core=RecordingCore({"constraints": [], "code_context": None}))
+
+    search = provider.code_search("auth", workspace_id="ws-123")
+    context = provider.code_context("auth.py", line_number=1, workspace_id="ws-123")
+    blast = provider.code_blast_radius("auth", workspace_id="ws-123")
+
+    assert search.data["items"] == []
+    assert context.data["file_path"] == "auth.py"
+    assert blast.data["symbol_name"] == "auth"
+
+
+def test_provider_returns_structured_unknown_index_status():
+    class Core(RecordingCore):
+        def index_status(self, job_id, workspace_id, structured=False):
+            return {"status": "unknown", "job_id": job_id} if structured else "Warning: Unknown job"
+
+    result = ThaiRagProvider(core=Core({"constraints": [], "code_context": None})).index_status(
+        "idx-missing", workspace_id="ws-123"
+    )
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert result.errors[0].code is ErrorCode.WORKSPACE_NOT_FOUND
 
 
 def test_real_core_code_provider_preserves_workspace_scope(tmp_path):
@@ -498,6 +537,48 @@ def test_real_core_index_status_rejects_other_workspace(tmp_path):
         assert "outside workspace scope" in result.errors[0].message
     finally:
         server.close()
+
+
+def test_code_context_scoped_parent_document_uses_exact_workspace(tmp_path):
+    from thai_rag.server import LocalContextServer
+
+    server = LocalContextServer(sqlite_path=tmp_path / "context.db", chroma_path=str(tmp_path / "chroma"))
+    try:
+        server.storage.save_parent_doc("ws-a", "ws-a/src/auth.py", 1, 10, "A", "auth")
+        server.storage.save_parent_doc("ws-b", "ws-b/src/auth.py", 1, 10, "B", "auth")
+
+        result = server.provider().code_context("src/auth.py", line_number=5, workspace_id="ws-a")
+
+        assert result.data["context"]["content"] == "A"
+    finally:
+        server.close()
+
+
+def test_standalone_health_and_version_delegate_to_provider(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Result:
+        def __init__(self, value):
+            self.value = value
+
+        def to_dict(self):
+            return self.value
+
+    class Provider:
+        def health(self, workspace_id=None):
+            return Result({"status": "ok", "workspace_id": workspace_id})
+
+        def version(self, workspace_id=None):
+            return Result({"status": "ok", "workspace_id": workspace_id})
+
+    class Server:
+        def provider(self):
+            return Provider()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+
+    assert server_module.health("ws-123")["workspace_id"] == "ws-123"
+    assert server_module.version("ws-123")["workspace_id"] == "ws-123"
 
 
 def test_standalone_code_search_delegates_to_provider_scope(monkeypatch):

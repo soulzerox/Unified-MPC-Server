@@ -397,7 +397,7 @@ class ThaiRagProvider:
         turn_id: Optional[str],
     ) -> Any:
         method = getattr(self.core, "remember_turn")
-        scope_name = self._scope_name(method, "remember_turn")
+        scope_name = self._canonical_scope_name(method, "remember_turn")
         return method(
             role=role,
             content=content,
@@ -420,7 +420,7 @@ class ThaiRagProvider:
         record_event = getattr(self.core, "record_event", None)
         if record_event is None:
             raise ScopeContractError("core does not provide canonical selective event storage")
-        scope_name = self._scope_name(record_event, "record_event")
+        scope_name = self._canonical_scope_name(record_event, "record_event")
         return record_event(
             event_type=event_type,
             content=content,
@@ -432,7 +432,11 @@ class ThaiRagProvider:
     def _call_scoped(self, method_name: str, value: Any, workspace_id: str, **kwargs: Any) -> Any:
         method = getattr(self.core, method_name)
         scope_name = self._canonical_scope_name(method, method_name) if method_name in self._CANONICAL_CODE_OPERATIONS else self._scope_name(method, method_name)
+        if method_name in self._CANONICAL_SCOPE_OPERATIONS and scope_name != "workspace_id":
+            raise ScopeContractError(f"core method {method_name} does not expose canonical workspace_id scope")
         named = {scope_name: workspace_id, **kwargs}
+        if method_name in self._CANONICAL_CODE_OPERATIONS and "structured" in inspect.signature(method).parameters:
+            named["structured"] = True
         if method_name == "code_search":
             return method(value, **named)
         if method_name == "code_context":
@@ -454,7 +458,7 @@ class ThaiRagProvider:
             return self._failure(operation, workspace_id, ScopeContractError("core does not expose canonical workspace_id scope"))
         try:
             data = action()
-            if isinstance(data, str) and data.startswith("Error"):
+            if isinstance(data, str) and (data.startswith("Error") or "unknown job" in data.lower()):
                 code = self._error_code(data)
                 return self._error(
                     self._error_status(data),
@@ -462,6 +466,17 @@ class ThaiRagProvider:
                     data,
                     operation=operation,
                     workspace_id=workspace_id,
+                )
+            if operation == "index_status" and isinstance(data, dict) and data.get("status") in {"unknown", "scope_denied"}:
+                code = ErrorCode.WORKSPACE_NOT_FOUND if data["status"] == "unknown" else ErrorCode.SCOPE_DENIED
+                message = "index job is unknown" if data["status"] == "unknown" else "index job is outside workspace scope"
+                return self._error(
+                    ProviderStatus.UNAVAILABLE,
+                    code,
+                    message,
+                    operation=operation,
+                    workspace_id=workspace_id,
+                    job_id=data.get("job_id"),
                 )
             return ProviderResult(
                 status=ProviderStatus.OK,

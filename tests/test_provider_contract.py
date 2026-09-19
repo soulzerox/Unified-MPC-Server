@@ -354,6 +354,12 @@ def test_real_core_memory_and_event_operations_isolate_two_workspaces(tmp_path):
         events_b = server.storage.search_conversation_turns("workspace event", workspace="ws-b")
         assert [item["content"] for item in events_a] == ["alpha workspace event"]
         assert [item["content"] for item in events_b] == ["beta workspace event"]
+        recalled_events_a = provider.recall("workspace event", workspace_id="ws-a")
+        recalled_events_b = provider.recall("workspace event", workspace_id="ws-b")
+        assert "alpha workspace event" in recalled_events_a.data
+        assert "beta workspace event" not in recalled_events_a.data
+        assert "beta workspace event" in recalled_events_b.data
+        assert "alpha workspace event" not in recalled_events_b.data
         memory_id = memory_a.data.split("[ID: ", 1)[1].split("]", 1)[0]
         denied = provider.forget(memory_id, workspace_id="ws-b")
         assert denied.status is ProviderStatus.UNAVAILABLE
@@ -468,8 +474,22 @@ def test_real_core_code_provider_isolates_two_workspaces(tmp_path):
     (ws_a / "auth.py").write_text("def auth_a():\n    return 'A'\n")
     (ws_b / "auth.py").write_text("def auth_b():\n    return 'B'\n")
     try:
-        assert server.provider().code_index(str(ws_a), workspace_id="ws-a").status is ProviderStatus.OK
-        assert server.provider().code_index(str(ws_b), workspace_id="ws-b").status is ProviderStatus.OK
+        index_a = server.provider().code_index(str(ws_a), workspace_id="ws-a")
+        index_b = server.provider().code_index(str(ws_b), workspace_id="ws-b")
+        assert index_a.status is ProviderStatus.OK
+        assert index_b.status is ProviderStatus.OK
+        assert isinstance(index_a.data, dict)
+        assert index_a.data["workspace_id"] == "ws-a"
+        assert index_a.data["indexed"] == 1
+        core_search = server.code_search("auth", workspace_id="ws-a", structured=True)
+        core_context = server.code_context("auth.py", 1, workspace_id="ws-a", structured=True)
+        core_blast = server.code_blast_radius("auth_a", workspace_id="ws-a", structured=True)
+        assert isinstance(core_search, dict)
+        assert isinstance(core_context, dict)
+        assert isinstance(core_blast, dict)
+        assert core_search["items"]
+        assert core_context["context"]["file_path"] == "ws-a/auth.py"
+        assert core_blast["symbol_name"] == "auth_a"
 
         result_a = server.provider().code_search("auth", workspace_id="ws-a")
         result_b = server.provider().code_search("auth", workspace_id="ws-b")
@@ -634,12 +654,51 @@ def test_standalone_health_and_version_delegate_to_provider(monkeypatch):
     assert server_module.version("ws-123")["workspace_id"] == "ws-123"
 
 
-def test_standalone_code_search_delegates_to_provider_scope(monkeypatch):
+def test_standalone_code_search_formats_provider_results(monkeypatch):
     from thai_rag import server as server_module
 
     class Result:
         def to_dict(self):
-            return {"status": "ok", "data": {"items": []}, "workspace_id": "ws-123"}
+            return {
+                "status": "ok",
+                "data": {
+                    "query": "auth",
+                    "items": [{
+                        "file_path": "ws-123/auth.py",
+                        "start_line": 1,
+                        "end_line": 2,
+                        "symbol_name": "auth",
+                        "score": 0.5,
+                        "content": "def auth(): pass",
+                    }],
+                    "warnings": [],
+                },
+                "workspace_id": "ws-123",
+            }
+
+    class Provider:
+        def code_search(self, **kwargs):
+            return Result()
+
+    class Server:
+        def provider(self):
+            return Provider()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+
+    result = server_module.code_search("auth", workspace_id="ws-123")
+
+    assert result.startswith("### 🔎 Code Matches for 'auth':")
+    assert "ws-123/auth.py:1-2" in result
+    assert "def auth(): pass" in result
+
+
+def test_standalone_code_search_formats_empty_provider_results(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Result:
+        def to_dict(self):
+            return {"status": "ok", "data": {"query": "auth", "items": []}, "workspace_id": "ws-123"}
 
     class Provider:
         def code_search(self, **kwargs):
@@ -659,7 +718,7 @@ def test_standalone_code_search_delegates_to_provider_scope(monkeypatch):
 
     result = server_module.code_search("auth", workspace_id="ws-123")
 
-    assert result["workspace_id"] == "ws-123"
+    assert result == "No code snippets found matching 'auth'."
 
 
 def test_standalone_remember_turn_delegates_to_provider_with_canonical_scope(monkeypatch):

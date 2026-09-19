@@ -206,7 +206,8 @@ class LocalContextServer:
         background: bool = False,
         workspace_id: Optional[str] = None,
         workspace: Optional[str] = None,
-    ) -> str:
+        structured: bool = False,
+    ) -> str | dict:
         """Index all source code files in a workspace with SHA256 incremental caching.
 
         background=True returns a job_id immediately; poll with index_status().
@@ -215,7 +216,7 @@ class LocalContextServer:
         workspace = workspace or Path(workspace_path).resolve().name
         err = self._check_ollama()
         if err:
-            return err
+            return {"status": "error", "workspace_id": workspace, "error": err} if structured else err
 
         if background:
             job = _new_index_job(workspace_path, force, workspace=workspace)
@@ -248,6 +249,13 @@ class LocalContextServer:
 
             t = threading.Thread(target=_run, daemon=True)
             t.start()
+            if structured:
+                return {
+                    "status": "running",
+                    "job_id": job_id,
+                    "workspace_id": workspace,
+                    "workspace_path": workspace_path,
+                }
             return (
                 f"🚀 Indexing started in background [Job: {job_id}]\n"
                 f"- Workspace: `{workspace_path}`\n"
@@ -259,6 +267,8 @@ class LocalContextServer:
             res = self.retriever.index_workspace(
                 workspace_path, force=force, progress_reporter=reporter, workspace=workspace
             )
+            if structured:
+                return {"status": "done", "workspace_id": workspace, **res}
             out = (
                 f"📁 **Code Indexing Completed:**\n"
                 f"- Indexed: `{res['indexed']} files`\n"
@@ -270,6 +280,8 @@ class LocalContextServer:
                 out += f"\n- ⚠️ Embed fallbacks (zero-vector): `{res['embed_fallbacks']}` chunks — check Ollama health"
             return out
         except Exception as e:
+            if structured:
+                return {"status": "error", "workspace_id": workspace, "error": str(e)}
             return f"Error indexing workspace: {str(e)}"
 
     def index_status(self, job_id: str, workspace_id: Optional[str] = None, workspace: Optional[str] = None, structured: bool = False):
@@ -729,6 +741,61 @@ def pre_edit_context(
         workspace_id=scoped_workspace,
         proposed_symbol=proposed_symbol or None,
     ).to_dict()
+def _format_code_search(data: dict) -> str:
+    query = data.get("query", "")
+    items = data.get("items", [])
+    warnings = data.get("warnings", [])
+    if not items:
+        return f"No code snippets found matching '{query}'."
+    out = [f"### 🔎 Code Matches for '{query}':"]
+    for idx, item in enumerate(items, 1):
+        symbol = f" (`{item['symbol_name']}`)" if item.get("symbol_name") else ""
+        out.append(
+            f"#### {idx}. [{item['file_path']}:{item['start_line']}-{item['end_line']}]{symbol} (RRF Score: {item['score']})\n"
+            f"```{Path(item['file_path']).suffix.lstrip('.') or 'text'}\n"
+            f"{item['content']}\n"
+            f"```"
+        )
+    out.extend(warnings)
+    return "\n\n".join(out)
+
+
+def _format_code_context(data: dict) -> str:
+    file_path = data.get("file_path", "")
+    line_number = data.get("line_number", 0)
+    context = data.get("context")
+    if not context:
+        return f"No context found for {file_path}:{line_number}."
+    symbol = f" (Scope: `{context['symbol_name']}`)" if context.get("symbol_name") else ""
+    return (
+        f"### 📍 Context around [{context['file_path']}:{context['start_line']}-{context['end_line']}]{symbol}:\n"
+        f"```{Path(file_path).suffix.lstrip('.') or 'text'}\n"
+        f"{context['content']}\n"
+        f"```"
+    )
+
+
+def _format_code_blast(data: dict) -> str:
+    symbol_name = data.get("symbol_name", "")
+    callers = data.get("callers", [])
+    callees = data.get("callees", [])
+    impacted = data.get("impacted_files", [])
+    out = [f"### 💥 Blast Radius Analysis for `{symbol_name}`:"]
+    out.append(f"- **Direct & Transitive Callers**: {len(callers)}")
+    out.append(f"- **Callees / Dependencies**: {len(callees)}")
+    out.append(f"- **Impacted Files**: {len(impacted)}")
+    if callers:
+        out.append("\n#### 📞 Inbound Callers (Who will be affected):")
+        out.extend(f"- `depth {item.get('depth', 1)}`: `{item.get('source_symbol')}` in `{item.get('source_file')}` ({item.get('edge_type')})" for item in callers[:10])
+    if callees:
+        out.append("\n#### 🎯 Outbound Callees (What this depends on):")
+        out.extend(f"- `depth {item.get('depth', 1)}`: calls `{item.get('target_symbol')}` ({item.get('edge_type')})" for item in callees[:10])
+    if impacted:
+        out.append("\n#### 📁 Impacted External Files:")
+        out.extend(f"- `{file_path}`" for file_path in impacted[:10])
+    return "\n".join(out)
+
+
 @mcp.tool()
 def code_blast_radius(
     symbol_name: str,
@@ -738,11 +805,12 @@ def code_blast_radius(
 ):
     """Analyze Code Property Graph (CPG) blast radius: find all direct/transitive callers and impacted files before modifying a symbol."""
     scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
-    return get_server().provider().code_blast_radius(
+    result = get_server().provider().code_blast_radius(
         symbol_name=symbol_name,
         workspace_id=scoped_workspace,
         max_depth=max_depth,
     ).to_dict()
+    return _format_code_blast(result["data"]) if result["status"] == "ok" else result
 
 @mcp.tool()
 def forget(memory_id: str, category: str = None, workspace_id: Optional[str] = None):
@@ -762,12 +830,28 @@ def code_index(
     background=True returns a job_id immediately; poll with index_status().
     """
     scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
-    return get_server().provider().code_index(
+    result = get_server().provider().code_index(
         workspace_path=workspace_path,
         workspace_id=scoped_workspace,
         force=force,
         background=background,
     ).to_dict()
+    if result["status"] != "ok":
+        return result
+    data = result["data"]
+    if data.get("status") == "running":
+        return (
+            f"🚀 Indexing started in background [Job: {data['job_id']}]\n"
+            f"- Workspace: `{data['workspace_path']}`\n"
+            f"- Poll with `index_status(\"{data['job_id']}\")`."
+        )
+    return (
+        f"📁 **Code Indexing Completed:**\n"
+        f"- Indexed: `{data['indexed']} files`\n"
+        f"- Skipped (unchanged): `{data['skipped']} files`\n"
+        f"- Duration: `{data['duration_s']}s`\n"
+        f"- Workspace: `{data['workspace']}`"
+    )
 
 
 @mcp.tool()
@@ -778,7 +862,26 @@ def index_status(
 ):
     """Poll a background code_index job by its job_id."""
     scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
-    return get_server().provider().index_status(job_id=job_id, workspace_id=scoped_workspace).to_dict()
+    result = get_server().provider().index_status(job_id=job_id, workspace_id=scoped_workspace).to_dict()
+    if result["status"] != "ok":
+        return result
+    data = result["data"]
+    if data["status"] == "running":
+        return (
+            f"⏳ Indexing in progress [{data['job_id']}]\n"
+            f"- Indexed: {data['indexed_files']}/{data['total_files']}\n"
+            f"- Skipped: {data['skipped_files']}\n"
+            f"- Workspace: `{data['workspace_id']}`"
+        )
+    if data["status"] == "error":
+        return f"❌ Indexing failed [{data['job_id']}]: {data['error']}"
+    return (
+        f"✅ Indexing complete [{data['job_id']}]\n"
+        f"- Indexed: `{data.get('result', {}).get('indexed', data['indexed_files'])} files`\n"
+        f"- Skipped: `{data.get('result', {}).get('skipped', data['skipped_files'])} files`\n"
+        f"- Duration: `{data.get('result', {}).get('duration_s', '?')}s`\n"
+        f"- Workspace: `{data['workspace_id']}`"
+    )
 
 @mcp.tool()
 def code_search(
@@ -790,12 +893,13 @@ def code_search(
 ):
     """Search code symbols and semantic logic across the indexed codebase."""
     scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
-    return get_server().provider().code_search(
+    result = get_server().provider().code_search(
         query=query,
         workspace_id=scoped_workspace,
         top_k=top_k,
         path_filter=path_filter,
     ).to_dict()
+    return _format_code_search(result["data"]) if result["status"] == "ok" else result
 
 @mcp.tool()
 def code_context(
@@ -807,12 +911,13 @@ def code_context(
 ):
     """Retrieve the enclosing function/class context or surrounding lines for a file."""
     scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
-    return get_server().provider().code_context(
+    result = get_server().provider().code_context(
         file_path=file_path,
         line_number=line_number,
         workspace_id=scoped_workspace,
         window=window,
     ).to_dict()
+    return _format_code_context(result["data"]) if result["status"] == "ok" else result
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -467,6 +467,8 @@ class ThaiRagProvider:
                     operation=operation,
                     workspace_id=workspace_id,
                 )
+            if operation in self._CANONICAL_CODE_OPERATIONS and not isinstance(data, dict):
+                raise TypeError(f"core method {operation} must return structured mapping")
             if operation == "index_status" and isinstance(data, dict) and data.get("status") in {"unknown", "scope_denied"}:
                 code = ErrorCode.WORKSPACE_NOT_FOUND if data["status"] == "unknown" else ErrorCode.SCOPE_DENIED
                 message = "index job is unknown" if data["status"] == "unknown" else "index job is outside workspace scope"

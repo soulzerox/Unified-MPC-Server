@@ -502,7 +502,7 @@ class StorageManager:
                 embeddings=[embedding],
                 documents=[doc_text],
                 metadatas=[{
-                    "workspace": workspace,
+                    "workspace_id": workspace,
                     "role": role,
                     "tags": tags_str,
                     "type": "turn",

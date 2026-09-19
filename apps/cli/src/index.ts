@@ -24,6 +24,7 @@ import {
   type PruneSkillInput,
   type PruneSkillResult,
   type SyncTarget,
+  type ExtensionsService,
 } from '@unified-mpc/extensions';
 import { formatDoctorReport } from './commands/doctor.js';
 import {
@@ -391,6 +392,7 @@ async function runWorkspaceSelectionCommand(
 
 export interface DefaultCliDependenciesOptions {
   readonly thaiRagDriver?: StdioMcpRuntimeOptions['thaiRagDriver'];
+  readonly extensions?: ExtensionsService;
 }
 
 export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
@@ -451,9 +453,10 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     if (workspace !== undefined) {
       mcpRuntime = createStdioMcpRuntime(resolveDataPathFromShared(), workspace, true, {
         ...(options.thaiRagDriver === undefined ? {} : { thaiRagDriver: options.thaiRagDriver }),
+        ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
       });
     }
-    const services = mcpRuntime?.services ?? { extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) };
+    const services = mcpRuntime?.services ?? { extensions: options.extensions ?? getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) };
     toolRegistry = new ToolRegistry(
       services,
       { clientId: 'cli', clientName: 'unified-mpc-cli' },

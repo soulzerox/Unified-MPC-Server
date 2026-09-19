@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok, err } from '@unified-mpc/domain';
+import type { ExtensionsService } from '@unified-mpc/extensions';
 import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
 
 describe('CLI argument parser', () => {
@@ -180,9 +181,20 @@ describe('CLI default dependency lifecycle', () => {
       call: async (): Promise<ReturnType<typeof ok<{ readonly ready: boolean }>>> => ok({ ready: true }),
       stop: async (): Promise<ReturnType<typeof ok<void>>> => ok(undefined),
     };
+    const extensions: ExtensionsService = {
+      listSkills: async () => ok({ skills: [] }),
+      readSkill: async (input) => ok({ id: input.skillId, name: 'ask-matt', description: 'test router', source: 'test', trustTier: 'bundled', path: 'ask-matt/SKILL.md', content: '# Ask Matt' }),
+      listMcpServers: async () => ok({ servers: [] }),
+      runtimePolicySnapshot: async () => ok({ ready: true, policies: [{ priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true, resolvedResourceId: 'ask-matt' }] }),
+      bootstrapMandatoryMcpServers: async () => ok({ ready: true, servers: [] }),
+      describeMcpServer: async (input) => err({ code: 'INTERNAL_ERROR', message: `unknown server ${input.server}`, recoverable: true }),
+      listMcpResources: async (input) => err({ code: 'INTERNAL_ERROR', message: `unknown server ${input.server}`, recoverable: true }),
+      callMcpTool: async () => err({ code: 'INTERNAL_ERROR', message: 'no test MCP server', recoverable: true }),
+      close: async () => undefined,
+    };
     try {
       await writeFile(path.join(root, 'AGENTS.md'), '# CLI harness rules\\n');
-      const dependencies = createDefaultCliDependencies({ thaiRagDriver });
+      const dependencies = createDefaultCliDependencies({ thaiRagDriver, extensions });
       const workspace = await dependencies.workspaceAdd(root);
       expect(workspace.ok).toBe(true);
       if (!workspace.ok) return;

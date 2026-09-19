@@ -102,8 +102,15 @@ describe('worktree dependency/cache policy', () => {
     expect(strategy.ecosystem).toBe('node-npm');
     expect(strategy.packageManager).toBe('npm');
     expect(strategy.packageManagerVersion).toBe('11.6.0');
-    expect(strategy.commands[0]).toMatchObject({ executable: 'npm', args: ['ci', '--prefer-offline', '--cache', path.join(shared, 'npm', 'cache')] });
-    expect(strategy.versionCheck).toEqual({ executable: 'npm', args: ['--version'], expectedVersion: '11.6.0' });
+    expect(strategy.commands[0]).toMatchObject({
+      executable: 'corepack',
+      args: ['npm@11.6.0', 'ci', '--prefer-offline', '--cache', path.join(shared, 'npm', 'cache')],
+    });
+    expect(strategy.versionCheck).toEqual({
+      executable: 'corepack',
+      args: ['npm@11.6.0', '--version'],
+      expectedVersion: '11.6.0',
+    });
   });
 
   it('requires a Node lockfile in frozen mode but permits explicit mutable bootstrap', async () => {

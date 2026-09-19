@@ -3,6 +3,11 @@ import { parseCanonicalWorkspaceId, type CanonicalWorkspaceId } from './canonica
 
 export type ThaiRagLegacyDataClass = 'memory' | 'conversation' | 'code-index' | 'code-vector' | 'cpg';
 
+export type ThaiRagLegacyMigrationClassification =
+  | { readonly source: string; readonly dataClass: ThaiRagLegacyDataClass; readonly classification: 'imported'; readonly workspaceId: CanonicalWorkspaceId; readonly reason: 'canonical-workspace-id' | 'exact-registered-root' }
+  | { readonly source: string; readonly dataClass: ThaiRagLegacyDataClass; readonly classification: 'legacy'; readonly reason: 'basename-only-not-identity-proof' | 'ambiguous-workspace-identity' | 'unscoped-or-unproven' }
+  | { readonly source: string; readonly dataClass: ThaiRagLegacyDataClass; readonly classification: 'reindex_required'; readonly workspaceId: CanonicalWorkspaceId; readonly reason: 'basename-only-not-identity-proof' };
+
 export interface ThaiRagRegisteredWorkspace {
   readonly id: string;
   readonly displayName: string;
@@ -64,6 +69,21 @@ export function planLegacyScopeMigration(input: {
 
 function normalizeAbsolute(value: string): string {
   return path.posix.normalize(value.trim()).replace(/\/$/, '') || '/';
+}
+
+export function classifyLegacyScopeMigration(input: {
+  readonly scope: string;
+  readonly dataClass: ThaiRagLegacyDataClass;
+  readonly workspaces: readonly ThaiRagRegisteredWorkspace[];
+}): ThaiRagLegacyMigrationClassification {
+  const decision = planLegacyScopeMigration(input);
+  if (decision.action === 'preserve-legacy') {
+    return { source: input.scope, dataClass: input.dataClass, classification: 'legacy', reason: decision.reason };
+  }
+  if (decision.action === 'reindex') {
+    return { source: input.scope, dataClass: input.dataClass, classification: 'reindex_required', workspaceId: decision.workspaceId, reason: decision.reason };
+  }
+  return { source: input.scope, dataClass: input.dataClass, classification: 'imported', workspaceId: decision.workspaceId, reason: decision.reason };
 }
 
 function preserve(reason: Extract<ThaiRagLegacyMigrationDecision, { action: 'preserve-legacy' }>['reason']): ThaiRagLegacyMigrationDecision {

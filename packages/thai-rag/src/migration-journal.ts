@@ -2,8 +2,10 @@ import { cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
+import type { ThaiRagLegacyMigrationClassification } from './legacy-migration.js';
 
 export type ThaiRagMigrationState = 'prepared' | 'in-progress' | 'completed';
+export type ThaiRagMigrationClassification = ThaiRagLegacyMigrationClassification;
 
 export interface ThaiRagMigrationRecord {
   readonly migrationId: string;
@@ -14,6 +16,7 @@ export interface ThaiRagMigrationRecord {
   readonly backupCompletedAt: string;
   readonly importedTurnIds: readonly string[];
   readonly reindexWorkspaceIds: readonly string[];
+  readonly classifications: readonly ThaiRagMigrationClassification[];
   readonly completedAt?: string;
   readonly updatedAt: string;
 }
@@ -26,6 +29,7 @@ interface StoredMigrationRecord {
   readonly backupCompletedAt: string;
   readonly importedTurnIds: readonly string[];
   readonly reindexWorkspaceIds: readonly string[];
+  readonly classifications: readonly ThaiRagMigrationClassification[];
   readonly completedAt?: string;
   readonly updatedAt: string;
 }
@@ -64,6 +68,7 @@ export class ThaiRagMigrationJournal {
         backupCompletedAt: timestamp,
         importedTurnIds: [],
         reindexWorkspaceIds: [],
+        classifications: [],
         updatedAt: timestamp,
       };
       return this.persist(paths.value.journalPath, stored);
@@ -89,17 +94,31 @@ export class ThaiRagMigrationJournal {
   public async checkpoint(migrationId: string, progress: {
     readonly importedTurnIds?: readonly string[];
     readonly reindexWorkspaceIds?: readonly string[];
+    readonly classifications?: readonly ThaiRagMigrationClassification[];
   }): Promise<Result<ThaiRagMigrationRecord>> {
     const current = await this.get(migrationId);
     if (!current.ok) return current;
     if (current.value === null) return err(appError('CONFLICT', 'Thai-RAG migration backup must be prepared before checkpointing', true));
     if (current.value.state === 'completed') return ok(current.value);
+    const importedTurnIds = union(current.value.importedTurnIds, progress.importedTurnIds ?? []);
+    const reindexWorkspaceIds = union(
+      current.value.reindexWorkspaceIds,
+      [...(progress.reindexWorkspaceIds ?? []), ...(progress.classifications ?? [])
+        .filter((entry): entry is Extract<ThaiRagMigrationClassification, { classification: 'reindex_required' }> => entry.classification === 'reindex_required')
+        .map((entry) => entry.workspaceId)],
+    );
+    const classifications = unionClassifications(current.value.classifications, progress.classifications ?? []);
+    if (current.value.state === 'in-progress'
+      && importedTurnIds.length === current.value.importedTurnIds.length
+      && reindexWorkspaceIds.length === current.value.reindexWorkspaceIds.length
+      && classifications.length === current.value.classifications.length) return ok(current.value);
     const timestamp = this.now().toISOString();
     const stored: StoredMigrationRecord = {
       ...withoutJournalPath(current.value),
       state: 'in-progress',
-      importedTurnIds: union(current.value.importedTurnIds, progress.importedTurnIds ?? []),
-      reindexWorkspaceIds: union(current.value.reindexWorkspaceIds, progress.reindexWorkspaceIds ?? []),
+      importedTurnIds,
+      reindexWorkspaceIds,
+      classifications,
       updatedAt: timestamp,
     };
     return this.persist(current.value.journalPath, stored);
@@ -159,6 +178,7 @@ function withoutJournalPath(record: ThaiRagMigrationRecord): StoredMigrationReco
     backupCompletedAt: record.backupCompletedAt,
     importedTurnIds: record.importedTurnIds,
     reindexWorkspaceIds: record.reindexWorkspaceIds,
+    classifications: record.classifications,
     ...(record.completedAt === undefined ? {} : { completedAt: record.completedAt }),
     updatedAt: record.updatedAt,
   };
@@ -177,6 +197,7 @@ function parseRecord(value: unknown, migrationId: string, backupRoot: string): S
     || typeof value.backupCompletedAt !== 'string'
     || !isStringArray(value.importedTurnIds)
     || !isStringArray(value.reindexWorkspaceIds)
+    || (value.classifications !== undefined && !isClassificationArray(value.classifications))
     || typeof value.updatedAt !== 'string'
     || (value.completedAt !== undefined && typeof value.completedAt !== 'string')) return null;
   return {
@@ -187,6 +208,7 @@ function parseRecord(value: unknown, migrationId: string, backupRoot: string): S
     backupCompletedAt: value.backupCompletedAt,
     importedTurnIds: value.importedTurnIds,
     reindexWorkspaceIds: value.reindexWorkspaceIds,
+    classifications: value.classifications === undefined ? [] : value.classifications,
     ...(value.completedAt === undefined ? {} : { completedAt: value.completedAt }),
     updatedAt: value.updatedAt,
   };
@@ -194,6 +216,30 @@ function parseRecord(value: unknown, migrationId: string, backupRoot: string): S
 
 function union(left: readonly string[], right: readonly string[]): string[] {
   return [...new Set([...left, ...right])];
+}
+
+function unionClassifications(
+  left: readonly ThaiRagMigrationClassification[],
+  right: readonly ThaiRagMigrationClassification[],
+): ThaiRagMigrationClassification[] {
+  const values = new Map(left.map((entry) => [classificationKey(entry), entry]));
+  for (const entry of right) values.set(classificationKey(entry), entry);
+  return [...values.values()];
+}
+
+function classificationKey(value: ThaiRagMigrationClassification): string {
+  return JSON.stringify(value);
+}
+
+function isClassificationArray(value: unknown): value is ThaiRagMigrationClassification[] {
+  return Array.isArray(value) && value.every((entry) => isRecord(entry)
+    && typeof entry.source === 'string'
+    && typeof entry.dataClass === 'string'
+    && typeof entry.classification === 'string'
+    && typeof entry.reason === 'string'
+    && (entry.classification === 'legacy'
+      ? !('workspaceId' in entry)
+      : (entry.classification === 'imported' || entry.classification === 'reindex_required') && typeof entry.workspaceId === 'string'));
 }
 
 function isState(value: unknown): value is ThaiRagMigrationState {

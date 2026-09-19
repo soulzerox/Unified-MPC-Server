@@ -2,9 +2,12 @@ import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promise
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ThaiRagMigrationJournal } from './migration-journal.js';
+import { parseCanonicalWorkspaceId } from './canonical-workspace.js';
+import { ThaiRagMigrationJournal, type ThaiRagMigrationClassification } from './migration-journal.js';
 
 const roots: string[] = [];
+const workspaceId = parseCanonicalWorkspaceId('86a0931e-0851-4a1f-b802-0f2e1500b4ec');
+if (!workspaceId.ok) throw new Error(workspaceId.error.message);
 
 async function temp(prefix: string): Promise<string> {
   const value = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -69,6 +72,27 @@ describe('ThaiRagMigrationJournal', () => {
 
     const resumed = await new ThaiRagMigrationJournal(dataRoot).get('legacy-v1');
     expect(resumed).toEqual(progressed);
+  });
+
+  it('records explicit legacy classifications idempotently without deleting source data', async () => {
+    const dataRoot = await temp('unified-data-');
+    const legacyRoot = await temp('thai-rag-legacy-');
+    await writeFile(path.join(legacyRoot, 'local_context.db'), 'db');
+    const journal = new ThaiRagMigrationJournal(dataRoot);
+    expect((await journal.prepare('legacy-v2', legacyRoot)).ok).toBe(true);
+
+    const classifications: readonly ThaiRagMigrationClassification[] = [
+      { source: 'Unified MCP Server', dataClass: 'conversation', classification: 'legacy', reason: 'basename-only-not-identity-proof' },
+      { source: 'Unified MCP Server', dataClass: 'code-index', classification: 'reindex_required', workspaceId: workspaceId.value, reason: 'basename-only-not-identity-proof' },
+    ];
+    const first = await journal.checkpoint('legacy-v2', { classifications });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.value.classifications).toEqual(classifications);
+    expect(first.value.reindexWorkspaceIds).toEqual([workspaceId.value]);
+    const second = await new ThaiRagMigrationJournal(dataRoot).checkpoint('legacy-v2', { classifications });
+    expect(second).toEqual(first);
+    await expect(readFile(path.join(legacyRoot, 'local_context.db'), 'utf8')).resolves.toBe('db');
   });
 
   it('cannot complete before backup preparation exists', async () => {

@@ -84,9 +84,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return err(appError('CONFLICT', `Native Thai-RAG worker is missing required tools: ${missing.join(', ')}`, true));
     }
     const codeIndexTool = described.value.tools.find((tool) => tool.name === 'code_index');
-    if (codeIndexTool === undefined || !toolAcceptsWorkspaceNamespace(codeIndexTool.inputSchema)) {
+    if (codeIndexTool === undefined || !toolAcceptsProperty(codeIndexTool.inputSchema, 'workspace_id')) {
       await this.sessions.close().catch(() => undefined);
-      return err(appError('CONFLICT', 'Native Thai-RAG worker code_index does not support the explicit workspace namespace contract', true));
+      return err(appError('CONFLICT', 'Native Thai-RAG worker code_index does not support the explicit workspace namespace contract (workspace_id)', true));
     }
     const forgetTool = described.value.tools.find((tool) => tool.name === 'forget');
     if (forgetTool === undefined || !toolAcceptsProperty(forgetTool.inputSchema, 'category')) {
@@ -128,14 +128,19 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const refreshed = await this.refreshWorkspaceRoots();
     if (!refreshed.ok) return refreshed;
-    if (tool === 'index_status' && typeof args.job_id === 'string' && args.job_id.startsWith('idx_umcp_')) {
+    if (tool === 'index_status' && typeof args.job_id === 'string') {
+      const workspace = this.requireWorkspaceId(args, false);
+      if (!workspace.ok) return workspace;
       const job = await this.jobs.get(args.job_id);
-      return job === null
-        ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${args.job_id}`))
-        : ok(job);
+      if (job === null) return err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${args.job_id}`));
+      return job.workspaceId === workspace.value
+        ? ok(job)
+        : err(appError('PERMISSION_DENIED', `Native Thai-RAG index job belongs to another workspace: ${job.workspaceId}`));
     }
     if (tool === 'code_index') return this.codeIndex(args, signal);
-    const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
+    const scopedArgs = this.scopeWorkerArgs(tool, args);
+    if (!scopedArgs.ok) return scopedArgs;
+    const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(scopedArgs.value) : ok(scopedArgs.value);
     if (!normalizedArgs.ok) return normalizedArgs;
     return this.callWorker(tool, normalizedArgs.value, signal);
   }
@@ -149,13 +154,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
-    const workspaceValue = typeof args.workspace_path === 'string' ? args.workspace_path : '';
+    const workspaceValue = typeof args.workspace_id === 'string'
+      ? args.workspace_id
+      : typeof args.workspace_path === 'string' ? args.workspace_path : '';
     const workspace = this.resolveIndexWorkspace(workspaceValue);
     if (!workspace.ok) return workspace;
     const force = args.force === true;
     const background = args.background === true;
     const childArgs = {
       workspace_path: workspace.value.rootPath,
+      workspace_id: workspace.value.workspaceId,
       workspace: workspace.value.workspaceId,
       force,
       background: false,
@@ -173,7 +181,24 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     void operation.catch(async (error: unknown) => {
       await this.jobs.fail(job.jobId, errorMessage(error)).catch(() => undefined);
     });
-    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value.workspaceId });
+    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspace.value.workspaceId, workspace: workspace.value.workspaceId });
+  }
+
+  private requireWorkspaceId(args: Readonly<Record<string, unknown>>, allowLegacyWorkspace = true): Result<string> {
+    const workspaceValue = typeof args.workspace_id === 'string'
+      ? args.workspace_id
+      : allowLegacyWorkspace && typeof args.workspace === 'string' ? args.workspace : '';
+    const parsed = parseCanonicalWorkspaceId(workspaceValue);
+    if (!parsed.ok) return parsed;
+    return this.workspaceRoots.has(parsed.value)
+      ? ok(parsed.value)
+      : err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${parsed.value}`));
+  }
+
+  private scopeWorkerArgs(tool: string, args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {
+    if (!['remember', 'recall', 'forget', 'pre_edit_context', 'code_blast_radius', 'code_search', 'code_context', 'index_status'].includes(tool)) return ok(args);
+    const workspace = this.requireWorkspaceId(args);
+    return workspace.ok ? ok({ ...args, workspace_id: workspace.value }) : workspace;
   }
 
   private resolveIndexWorkspace(workspaceValue: string): Result<{ readonly workspaceId: string; readonly rootPath: string }> {
@@ -241,6 +266,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           'code_index',
           await this.sessions.call(SERVER_NAME, this.launchConfig, 'code_index', {
             workspace_path: path.resolve(workspace.realRootPath),
+            workspace_id: workspace.id,
             workspace: workspace.id,
             force: true,
             background: false,
@@ -285,7 +311,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {
-    const workspaceValue = typeof args.workspace === 'string' ? args.workspace : '';
+    const workspaceValue = typeof args.workspace_id === 'string'
+      ? args.workspace_id
+      : typeof args.workspace === 'string' ? args.workspace : '';
     const workspace = parseCanonicalWorkspaceId(workspaceValue);
     if (!workspace.ok) return workspace;
     const root = this.workspaceRoots.get(workspace.value);
@@ -364,8 +392,6 @@ async function syncWorkspaceSourceAliases(
         await rollbackWorkspaceAliases(changed);
         return err(appError('CONFLICT', `Thai-RAG source alias path is occupied by a non-symlink: ${alias}`, true));
       }
-      changed.push({ alias, previousTarget: await readlink(alias) });
-      await unlink(alias);
     }
 
     for (const [workspaceId, target] of expected) {
@@ -438,10 +464,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNodeError(value: unknown, code: string): value is NodeJS.ErrnoException {
   return value instanceof Error && 'code' in value && value.code === code;
-}
-
-function toolAcceptsWorkspaceNamespace(inputSchema: unknown): boolean {
-  return toolAcceptsProperty(inputSchema, 'workspace');
 }
 
 function toolAcceptsProperty(inputSchema: unknown, property: string): boolean {

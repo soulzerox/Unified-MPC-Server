@@ -110,7 +110,7 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
     expect(nativeRagArguments[0]).toEqual({
       tool: 'pre_edit_context',
-      args: { file_path: 'src/app.ts', workspace: 'workspace-1' },
+      args: { file_path: 'src/app.ts', workspace_id: 'workspace-1', workspace: 'workspace-1' },
     });
     expect(writes).toEqual(['src/app.ts']);
 
@@ -138,7 +138,7 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
     expect(nativeRagArguments).toEqual([{
       tool: 'pre_edit_context',
-      args: { file_path: 'src/shared.ts', proposed_symbol: 'shared', workspace: 'workspace-1' },
+      args: { file_path: 'src/shared.ts', proposed_symbol: 'shared', workspace_id: 'workspace-1', workspace: 'workspace-1' },
     }]);
 
     const mutationRegistry = new ToolRegistry(services, actor, options);

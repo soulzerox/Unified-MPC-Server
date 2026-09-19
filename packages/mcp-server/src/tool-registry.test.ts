@@ -234,7 +234,7 @@ describe('MCP tool registry', () => {
     const result = await registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
 
     expect(result.isError).not.toBe(true);
-    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath, workspace: workspaceId } }]);
+    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath, workspace_id: workspaceId, workspace: workspaceId } }]);
   });
 
   it('lets an already-started call settle after disable while blocking future calls', async () => {

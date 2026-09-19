@@ -90,8 +90,8 @@ describe('mandatory independent host approval', () => {
     expect(remembered.isError).not.toBe(true);
     expect(approvals).toEqual([]);
     expect(nativeCalls).toEqual([
-      { tool: 'recall', arguments: { query: '[decision] architecture decision', category: 'workspace:workspace-a', limit: 5 } },
-      { tool: 'remember', arguments: { content: '[decision] Prefer native curated RAG operations.', category: 'workspace:workspace-a' } },
+      { tool: 'recall', arguments: { query: '[decision] architecture decision', category: 'workspace:workspace-a', limit: 5, workspace_id: 'workspace-a' } },
+      { tool: 'remember', arguments: { content: '[decision] Prefer native curated RAG operations.', category: 'workspace:workspace-a', workspace_id: 'workspace-a' } },
     ]);
   });
 
@@ -116,7 +116,7 @@ describe('mandatory independent host approval', () => {
     expect(result.isError).not.toBe(true);
     expect(nativeCalls).toEqual([{
       tool: 'forget',
-      arguments: { memory_id: 'memory-1', category: 'workspace:workspace-a' },
+      arguments: { memory_id: 'memory-1', category: 'workspace:workspace-a', workspace_id: 'workspace-a' },
     }]);
   });
 

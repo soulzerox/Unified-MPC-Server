@@ -72,22 +72,105 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
 
-    const scheduled = await driver.call('code_index', { workspace_path: workspaceRoot, force: false, background: true });
+    const scheduled = await driver.call('code_index', { workspace_id: workspaceId, workspace_path: workspaceRoot, force: false, background: true });
     expect(scheduled.ok).toBe(true);
     if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
     const foreground = driver.call('recall', { query: 'after index' });
     await foreground;
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const status = await driver.call('index_status', { job_id: scheduled.value.job_id });
+    const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId });
 
     expect(status.ok && isRecord(status.value) && status.value.status).toBe('completed');
     expect(maxInFlight).toBe(1);
     const indexCall = calls.find((call) => call.tool === 'code_index');
     expect(indexCall?.args).toMatchObject({
       workspace_path: workspaceRoot,
+      workspace_id: workspaceId,
       workspace: workspaceId,
       background: false,
     });
+    await driver.stop();
+  });
+
+  it('requires exact workspace scope when reading an index job status', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: workspaceRoot },
+        { id: recoveredWorkspaceId, realRootPath: await tempRoot() },
+      ],
+      clientFactory: clientFactory(),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    const scheduled = await driver.call('code_index', { workspace_id: workspaceId, workspace_path: workspaceRoot, background: true });
+    expect(scheduled.ok).toBe(true);
+    if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
+
+    const unscoped = await driver.call('index_status', { job_id: scheduled.value.job_id });
+    expect(unscoped.ok).toBe(false);
+    if (!unscoped.ok) expect(unscoped.error.code).toBe('INVALID_INPUT');
+    const wrongWorkspace = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: recoveredWorkspaceId });
+    expect(wrongWorkspace.ok).toBe(false);
+    if (!wrongWorkspace.ok) expect(wrongWorkspace.error.code).toBe('PERMISSION_DENIED');
+    const scoped = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId });
+    expect(scoped.ok).toBe(true);
+    if (scoped.ok) expect(scoped.value).toMatchObject({ workspaceId });
+    await driver.stop();
+  });
+
+  it('rejects unscoped worker writes instead of forwarding them', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          return success('ok');
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    const result = await driver.call('remember', { content: 'unscoped' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('INVALID_INPUT');
+    expect(calls.some((call) => call.tool === 'remember')).toBe(false);
+    await driver.stop();
+  });
+
+  it('keeps same-basename workspaces isolated in index requests', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const secondRoot = await tempRoot();
+    const secondId = '22222222-2222-4222-8222-222222222222';
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: firstRoot },
+        { id: secondId, realRootPath: secondRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') calls.push({ tool, args });
+          return success('indexed');
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    expect((await driver.call('code_index', { workspace_id: workspaceId, workspace_path: firstRoot })).ok).toBe(true);
+    expect((await driver.call('code_index', { workspace_id: secondId, workspace_path: secondRoot })).ok).toBe(true);
+    expect(calls.slice(-2).map((call) => call.args.workspace_id)).toEqual([workspaceId, secondId]);
     await driver.stop();
   });
 
@@ -116,7 +199,7 @@ describe('NativeThaiRagProviderDriver', () => {
     });
 
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    expect((await driver.call('code_index', { workspace_path: workspaceRoot })).ok).toBe(true);
+    expect((await driver.call('code_index', { workspace_id: workspaceId, workspace_path: workspaceRoot })).ok).toBe(true);
     const preEdit = await driver.call('pre_edit_context', { workspace: workspaceId, file_path: 'src/example.py' });
 
     expect(preEdit).toMatchObject({ ok: true, value: { structuredContent: { result: 'context-found' } } });
@@ -198,12 +281,12 @@ describe('NativeThaiRagProviderDriver', () => {
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
 
     current = [{ id: recoveredWorkspaceId, realRootPath: recoveredRoot }];
-    const result = await driver.call('pre_edit_context', { workspace: recoveredWorkspaceId, file_path: 'src/index.ts' });
+    const result = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, workspace: recoveredWorkspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(true);
     expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace === recoveredWorkspaceId && call.args.force === true)).toBe(true);
     expect(calls.at(-1)?.args).toMatchObject({ workspace: recoveredWorkspaceId, file_path: `${recoveredWorkspaceId}/src/index.ts` });
-    await expect(access(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).rejects.toThrow();
+    await expect(access(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBeUndefined();
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', recoveredWorkspaceId))).resolves.toBe(await realpath(recoveredRoot));
     await driver.stop();
   });
@@ -257,7 +340,7 @@ describe('NativeThaiRagProviderDriver', () => {
     current = [{ id: workspaceId, realRootPath: relinkedRoot }];
     failIndex = true;
 
-    const result = await driver.call('pre_edit_context', { workspace: workspaceId, file_path: 'src/index.ts' });
+    const result = await driver.call('pre_edit_context', { workspace_id: workspaceId, workspace: workspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(false);
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
@@ -269,6 +352,7 @@ function clientFactory(options: {
   readonly onConnect?: (config: McpServerLaunchConfig) => void;
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
   readonly codeIndexSupportsWorkspace?: boolean;
+  readonly codeIndexSupportsWorkspaceId?: boolean;
   readonly forgetSupportsCategory?: boolean;
 } = {}): McpClientFactory {
   return {
@@ -280,7 +364,10 @@ function clientFactory(options: {
             name,
             description: name,
             inputSchema: name === 'code_index' && options.codeIndexSupportsWorkspace !== false
-              ? { type: 'object', properties: { workspace: { type: 'string' } } }
+              ? { type: 'object', properties: {
+                  workspace: { type: 'string' },
+                  ...(options.codeIndexSupportsWorkspaceId === false ? {} : { workspace_id: { type: 'string' } }),
+                } }
               : name === 'forget' && options.forgetSupportsCategory !== false
                 ? { type: 'object', properties: { category: { type: 'string' } } }
                 : { type: 'object' },

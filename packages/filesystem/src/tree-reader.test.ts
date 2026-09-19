@@ -61,6 +61,17 @@ describe('TreeReader', () => {
     await expect(new TreeReader().read(root, {}, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });
 
+  it('stops enumerating a directory once entry cap is reached', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-large-'));
+    temporaryRoots.push(root);
+    await Promise.all(Array.from({ length: 10_000 }, (_, index) => writeFile(path.join(root, `entry-${index}.txt`), 'x', 'utf8')));
+
+    const result = await new TreeReader().read(root, { maxDepth: 1, maxEntries: 2 });
+
+    expect(result).toMatchObject({ ok: true, value: { entries: expect.any(Array), truncated: true } });
+    if (result.ok) expect(result.value.entries).toHaveLength(2);
+  });
+
   it('marks the result when the entry cap is reached', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-'));
     temporaryRoots.push(root);

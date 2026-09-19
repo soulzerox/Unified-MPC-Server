@@ -223,6 +223,39 @@ describe('RipgrepAdapter', () => {
     }
   });
 
+  it('bounds fallback search output and stops an in-flight large read when cancelled', async () => {
+    const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const rootPath = await mkdtemp(path.join(tmpdir(), 'unified-mpc-search-large-'));
+    const resolver: ExecutableResolver = {
+      resolve: async (): Promise<Result<string>> => ({
+        ok: false,
+        error: { code: 'EXECUTABLE_NOT_FOUND', message: "Executable 'rg' was not found", recoverable: true },
+      }),
+    };
+    const adapter = new RipgrepAdapter(resolver);
+
+    try {
+      await writeFile(path.join(rootPath, 'large.txt'), `${'needle '.repeat(256)}\n`.repeat(20_000), 'utf8');
+      const bounded = await adapter.searchText({
+        rootPath,
+        query: 'needle',
+        maxResults: 500,
+        resultBudget: { maxItems: 500, maxTextBytes: 1024, maxStructuredBytes: 256, maxBinaryBytes: 1024, maxBase64Bytes: 1024 },
+      });
+      expect(bounded).toMatchObject({ ok: true, value: { truncated: true } });
+      if (bounded.ok) expect(bounded.value.matches.length).toBeLessThan(500);
+
+      const controller = new AbortController();
+      const pending = adapter.searchText({ rootPath, query: 'needle', signal: controller.signal });
+      setImmediate(() => controller.abort());
+      await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
   it('applies context-economy filters to automatic discovery and allows explicit enumeration', async () => {
     let receivedArgs: readonly string[] = [];
     const runner: ProcessRunner = {

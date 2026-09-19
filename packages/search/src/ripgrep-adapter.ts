@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { readdir } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
 import { DEFAULT_SEARCH_RESULTS, err, MAX_PROCESS_LOG_BYTES, MAX_SEARCH_RESULTS, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { createProcessTreeTerminator, createSpawnInvocationFactory, PathExecutableResolver, type ExecutableResolver, type ProcessTreeTerminator, type SpawnInvocationFactory } from '@unified-mpc/process';
@@ -306,6 +308,9 @@ export class RipgrepAdapter {
     const discovery = request.discovery ?? 'automatic';
     const matches: SearchMatch[] = [];
     const deadline = Date.now() + SEARCH_PROCESS_TIMEOUT_MS;
+    const maxResultBytes = request.resultBudget?.maxStructuredBytes ?? Number.MAX_SAFE_INTEGER;
+    const maxLineBytes = Math.min(maxResultBytes, MAX_PROCESS_LOG_BYTES);
+    let resultBytes = 0;
     let truncated = false;
     try {
       for await (const relativePath of this.walkFallbackFiles(request.rootPath, discovery, request.signal)) {
@@ -314,31 +319,84 @@ export class RipgrepAdapter {
           break;
         }
         if (!this.matchesFallbackGlob(relativePath, request.glob)) continue;
-        let content: Buffer;
+        const stream = createReadStream(path.join(request.rootPath, relativePath));
+        let aborted = false;
+        const abort = (): void => {
+          aborted = true;
+          stream.destroy();
+        };
+        request.signal?.addEventListener('abort', abort, { once: true });
+        let lineNumber = 1;
+        let pending = '';
+        let oversizedLine = false;
+        const decoder = new StringDecoder('utf8');
         try {
-          content = await readFile(path.join(request.rootPath, relativePath));
-        } catch {
-          continue;
-        }
-        if (content.subarray(0, Math.min(content.byteLength, 8192)).includes(0)) continue;
-        const text = content.toString('utf8');
-        const lines = text.split(/\r?\n/);
-        if (text.endsWith('\n')) lines.pop();
-        for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-          const line = lines[lineIndex] ?? '';
-          pattern.lastIndex = 0;
-          if (!pattern.test(line)) continue;
-          if (matches.length >= maxResults) {
-            truncated = true;
-            break;
+          for await (const chunk of stream) {
+            if (aborted || (request.signal?.aborted ?? false) || Date.now() >= deadline) {
+              truncated = true;
+              break;
+            }
+            const text = decoder.write(chunk as Buffer);
+            let start = 0;
+            for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+              const line = oversizedLine ? '' : pending + text.slice(start, end).replace(/\r$/, '');
+              pending = '';
+              oversizedLine = false;
+              start = end + 1;
+              pattern.lastIndex = 0;
+              if (!pattern.test(line)) {
+                lineNumber += 1;
+                continue;
+              }
+              const candidate = { path: relativePath, line: lineNumber, text: line };
+              const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+              if (matches.length >= maxResults || resultBytes + candidateBytes > maxResultBytes) {
+                truncated = true;
+                break;
+              }
+              matches.push(candidate);
+              resultBytes += candidateBytes;
+              lineNumber += 1;
+            }
+            if (truncated) break;
+            if (start > 0) {
+              pending = '';
+              oversizedLine = false;
+            }
+            pending += text.slice(start);
+            if (Buffer.byteLength(pending, 'utf8') > maxLineBytes) {
+              pending = '';
+              oversizedLine = true;
+              truncated = true;
+            }
           }
-          matches.push({ path: relativePath, line: lineIndex + 1, text: line });
+          if (!truncated && !oversizedLine) {
+            const line = pending + decoder.end();
+            pattern.lastIndex = 0;
+            if (pattern.test(line)) {
+              const candidate = { path: relativePath, line: lineNumber, text: line };
+              const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+              if (matches.length >= maxResults || resultBytes + candidateBytes > maxResultBytes) truncated = true;
+              else {
+                matches.push(candidate);
+                resultBytes += candidateBytes;
+              }
+            }
+          }
+        } catch (error: unknown) {
+          if (!aborted) throw error;
+          truncated = true;
+        } finally {
+          request.signal?.removeEventListener('abort', abort);
+          stream.destroy();
         }
         if (truncated) break;
       }
     } catch (error: unknown) {
+      if (request.signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Search was cancelled', recoverable: true });
       return err({ code: 'INTERNAL_ERROR', message: searchProcessError(error instanceof Error ? error.message : ''), recoverable: true });
     }
+    if (request.signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Search was cancelled', recoverable: true });
     return ok({ matches, truncated });
   }
 

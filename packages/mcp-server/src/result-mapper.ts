@@ -53,14 +53,16 @@ export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}):
   }
   const structuredContent = toStructuredContent(result.value);
   const hasStructuredPayload = typeof result.value === 'object' && result.value !== null;
-  if (hasStructuredPayload && structuredContent !== undefined) {
-    const structuredBytes = estimateJsonBytes(structuredContent, budget.maxStructuredBytes);
-    if (structuredBytes > budget.maxStructuredBytes) return truncatedResponse(options, structuredBytes, budget.maxStructuredBytes, 'structured');
-  }
-  const textBytes = hasStructuredPayload ? 0 : estimateJsonBytes(result.value, budget.maxTextBytes);
+  const structuredBytes = structuredContent === undefined ? 0 : estimateJsonBytes(structuredContent, budget.maxStructuredBytes);
+  if (structuredBytes > budget.maxStructuredBytes) return truncatedResponse(options, structuredBytes, budget.maxStructuredBytes, 'structured');
+  const textBytes = estimateJsonBytes(result.value, budget.maxTextBytes);
   if (textBytes > budget.maxTextBytes) {
     if (image === undefined) return truncatedResponse(options, textBytes, budget.maxTextBytes, 'text');
     return { content: [image] };
+  }
+  const aggregateBudget = maxBytes ?? budget.maxStructuredBytes;
+  if (hasStructuredPayload && structuredBytes + textBytes > aggregateBudget) {
+    return truncatedResponse(options, structuredBytes + textBytes, aggregateBudget, 'structured');
   }
   const text = toText(result.value);
   return {

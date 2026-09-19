@@ -88,9 +88,21 @@ describe('mapResult image payloads', () => {
     expect(response.structuredContent).toBeUndefined();
   });
 
+  it('enforces an aggregate budget across structured and text representations', () => {
+    const response = mapResult({ ok: true as const, value: { answer: 'x'.repeat(200) } }, {
+      budget: { maxTextBytes: 256, maxStructuredBytes: 256, maxBinaryBytes: 1024, maxBase64Bytes: 1024 },
+    });
+
+    const content = response.content[0];
+    const envelope = JSON.parse(content && content.type === 'text' ? content.text : '{}') as Record<string, unknown>;
+    expect(envelope).toMatchObject({ truncated: true, limitType: 'structured' });
+    expect(response.structuredContent).toBeUndefined();
+  });
+
   it('keeps filesystem error messages instead of Operation failed', () => {
     const response = mapError({ code: 'FILE_NOT_FOUND', message: 'File or directory was not found', recoverable: false });
-    expect(response.content[0]?.text).toBe('FILE_NOT_FOUND: File or directory was not found');
+    const content = response.content[0];
+    expect(content?.type === 'text' ? content.text : undefined).toBe('FILE_NOT_FOUND: File or directory was not found');
   });
 
   it('preserves structured recovery details on provider failures', () => {

@@ -1,4 +1,4 @@
-import { lstat, readdir, realpath } from 'node:fs/promises';
+import { lstat, opendir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { DEFAULT_TREE_DEPTH, DEFAULT_TREE_ENTRIES, err, MAX_TREE_DEPTH, MAX_TREE_ENTRIES, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { isWithin } from '@unified-mpc/workspace';
@@ -38,32 +38,47 @@ export class TreeReader {
     let truncated = false;
     const walk = async (currentPath: string, relativeDirectory: string, depth: number): Promise<void> => {
       if (truncated || depth > maxDepth || signal?.aborted === true) return;
-      let directoryEntries;
+      let directory;
       try {
-        directoryEntries = await readdir(currentPath, { withFileTypes: true });
+        directory = await opendir(currentPath);
       } catch {
         return;
       }
-      directoryEntries.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
-      for (const directoryEntry of directoryEntries) {
-        if (signal?.aborted) return;
+      const remaining = maxEntries - entries.length;
+      const candidates: Array<{ readonly absolutePath: string; readonly entry: import('node:fs').Dirent }> = [];
+      let hasMoreCandidates = false;
+      try {
+        for await (const directoryEntry of directory) {
+          if (signal?.aborted) return;
+          const absoluteEntryPath = path.join(currentPath, directoryEntry.name);
+          let entryRealPath: string;
+          try {
+            entryRealPath = await realpath(absoluteEntryPath);
+          } catch {
+            continue;
+          }
+          if (!isWithin(rootRealPath, entryRealPath)) continue;
+          if (!directoryEntry.isDirectory() && !directoryEntry.isFile()) continue;
+          candidates.push({ absolutePath: absoluteEntryPath, entry: directoryEntry });
+          candidates.sort((left, right) => left.entry.name.localeCompare(right.entry.name, undefined, { sensitivity: 'base' }));
+          if (candidates.length > remaining) {
+            candidates.pop();
+            hasMoreCandidates = true;
+          }
+        }
+      } catch {
+        return;
+      }
+      if (hasMoreCandidates) truncated = true;
+      for (const candidate of candidates) {
         if (entries.length >= maxEntries) {
           truncated = true;
           return;
         }
-        const absoluteEntryPath = path.join(currentPath, directoryEntry.name);
-        let entryRealPath: string;
-        try {
-          entryRealPath = await realpath(absoluteEntryPath);
-        } catch {
-          continue;
-        }
-        if (!isWithin(rootRealPath, entryRealPath)) continue;
-        const relativePath = path.join(relativeDirectory, directoryEntry.name);
-        const isDirectory = directoryEntry.isDirectory();
-        if (!isDirectory && !directoryEntry.isFile()) continue;
+        const relativePath = path.join(relativeDirectory, candidate.entry.name);
+        const isDirectory = candidate.entry.isDirectory();
         entries.push({ path: relativePath, type: isDirectory ? 'directory' : 'file' });
-        if (isDirectory && depth < maxDepth) await walk(absoluteEntryPath, relativePath, depth + 1);
+        if (isDirectory && depth < maxDepth) await walk(candidate.absolutePath, relativePath, depth + 1);
       }
     };
 

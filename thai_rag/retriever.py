@@ -338,7 +338,7 @@ class HybridRetriever:
             p_id = item["doc_id"]
             rrf_scores[p_id] = rrf_scores.get(p_id, 0.0) + (1.0 / (k + rank + 1))
             if p_id not in parent_map:
-                parent_map[p_id] = self.storage.get_parent_doc(p_id)
+                parent_map[p_id] = self.storage.get_parent_doc(p_id, workspace=workspace)
 
         # Rank Vector results (map child metadata parent_id to parent)
         for rank, item in enumerate(vec_matches):
@@ -346,7 +346,7 @@ class HybridRetriever:
             p_id = meta.get("parent_id") or item["id"]
             rrf_scores[p_id] = rrf_scores.get(p_id, 0.0) + (1.0 / (k + rank + 1))
             if p_id not in parent_map:
-                parent_map[p_id] = self.storage.get_parent_doc(p_id)
+                parent_map[p_id] = self.storage.get_parent_doc(p_id, workspace=workspace)
 
         # Sort by RRF score descending
         ranked_parents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)

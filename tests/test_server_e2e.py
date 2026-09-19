@@ -138,7 +138,8 @@ def test_remember_turn_and_pre_edit_context_e2e(test_server):
         file_path="auth.py",
         workspace="test_ws"
     )
-    assert pre_res["can_proceed"] is True
+    assert pre_res["can_proceed"] is False
+    assert pre_res["evidence"]["code_index"] == "missing"
     assert len(pre_res["constraints"]) >= 1
     assert "authenticate_user" in pre_res["constraints"][0]["content"]
     assert "boolean" in pre_res["constraints"][0]["content"]

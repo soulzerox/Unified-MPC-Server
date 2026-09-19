@@ -89,7 +89,8 @@ def test_pre_edit_context_integration(temp_env):
         workspace="webtrans_violentmonkey"
     )
 
-    assert result["can_proceed"] is True
+    assert result["can_proceed"] is False
+    assert result["evidence"]["code_index"] == "missing"
     assert result["file_path"] == "src/webtrans/quote_fixer.ts"
     assert len(result["constraints"]) >= 1
     assert "restoreMissingQuotationMarks" in result["constraints"][0]["content"]

@@ -203,10 +203,16 @@ class StorageManager:
                     VALUES (?, ?, ?, ?)
                 """, (doc_id, symbol_name or "", file_path, content))
 
-    def get_parent_doc(self, doc_id: str) -> Optional[Dict[str, Any]]:
+    def get_parent_doc(self, doc_id: str, workspace: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._lock:
             cur = self.sqlite_conn.cursor()
-            row = cur.execute("SELECT * FROM parent_documents WHERE id = ?", (doc_id,)).fetchone()
+            if workspace:
+                row = cur.execute(
+                    "SELECT * FROM parent_documents WHERE id = ? AND file_path LIKE ?",
+                    (doc_id, f"{workspace}/%"),
+                ).fetchone()
+            else:
+                row = cur.execute("SELECT * FROM parent_documents WHERE id = ?", (doc_id,)).fetchone()
             if not row:
                 return None
             return dict(row)

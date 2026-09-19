@@ -106,6 +106,7 @@ class ProviderResult:
 class ThaiRagProvider:
     capabilities = frozenset(_CONTRACT_SHAPE["operations"])
     _CANONICAL_SCOPE_OPERATIONS = frozenset({"remember", "remember_turn", "recall", "record_event", "forget"})
+    _CANONICAL_CODE_OPERATIONS = frozenset({"pre_edit_context", "code_search", "code_context", "code_blast_radius", "code_index", "index_status"})
 
     def __init__(self, core: Any, provider_version: str = PROVIDER_VERSION):
         self.core = core
@@ -129,6 +130,10 @@ class ThaiRagProvider:
             warnings.append("storage unavailable")
         if not readiness["fts_ready"]:
             warnings.append("FTS retrieval unavailable")
+        if not readiness["vector_store_ready"]:
+            warnings.append("vector store unavailable")
+        if not readiness["workspace_ready"]:
+            warnings.append("canonical workspace scope unavailable")
         if not embedding_ready:
             warnings.append("embedding backend unavailable; lexical retrieval may be degraded")
         return ProviderResult(
@@ -242,10 +247,10 @@ class ThaiRagProvider:
             return self._scope_error("pre_edit_context")
         try:
             method = self.core.pre_edit_context
-            scope_name = self._scope_name(method, "pre_edit_context")
+            self._canonical_scope_name(method, "pre_edit_context")
             kwargs: dict[str, Any] = {
                 "file_path": file_path,
-                scope_name: workspace_id,
+                "workspace_id": workspace_id,
                 "proposed_symbol": proposed_symbol,
             }
             raw = method(**kwargs)
@@ -266,27 +271,23 @@ class ThaiRagProvider:
                 status = ProviderStatus.REVIEW_REQUIRED
                 evidence_state = "constraints_found"
                 can_proceed = False
-            elif evidence.get("storage") in {"unavailable", "missing"}:
-                status = ProviderStatus.UNAVAILABLE
-                evidence_state = "storage_unavailable"
-                can_proceed = False
-            elif raw_evidence and evidence.get("storage") in {"unknown", "stale"}:
-                status = ProviderStatus.DEGRADED
-                evidence_state = f"storage_{evidence['storage']}"
-                can_proceed = False
-            elif raw_evidence and evidence.get("code_index") in {"unknown", "stale", "missing", "unavailable"}:
-                status = ProviderStatus.DEGRADED
-                evidence_state = f"code_index_{evidence['code_index']}"
-                can_proceed = False
-            elif not raw.get("code_context") and not raw.get("blast_radius") and not raw.get("evidence"):
+            elif not raw_evidence and not raw.get("code_context") and not raw.get("blast_radius"):
                 status = ProviderStatus.DEGRADED
                 evidence_state = "evidence_unavailable"
                 can_proceed = False
-            elif evidence.get("code_index") in {"stale", "missing", "unavailable"}:
+            elif not evidence_fresh:
+                status = ProviderStatus.DEGRADED
+                evidence_state = "evidence_stale"
+                can_proceed = False
+            elif evidence.get("storage") in {"unknown", "stale", "missing", "unavailable"}:
+                status = ProviderStatus.UNAVAILABLE if evidence["storage"] == "unavailable" else ProviderStatus.DEGRADED
+                evidence_state = f"storage_{evidence['storage']}"
+                can_proceed = False
+            elif evidence.get("code_index") in {"unknown", "stale", "missing", "unavailable"}:
                 status = ProviderStatus.DEGRADED
                 evidence_state = f"code_index_{evidence['code_index']}"
                 can_proceed = False
-            elif evidence.get("cpg") in {"stale", "missing", "unavailable"}:
+            elif evidence.get("cpg") in {"unknown", "stale", "missing", "unavailable"}:
                 status = ProviderStatus.DEGRADED
                 evidence_state = f"cpg_{evidence['cpg']}"
                 can_proceed = False
@@ -294,9 +295,9 @@ class ThaiRagProvider:
                 status = ProviderStatus.DEGRADED
                 evidence_state = "evidence_stale"
                 can_proceed = False
-            elif not raw.get("code_context") and not raw.get("blast_radius"):
+            elif not raw.get("code_context") or not raw.get("blast_radius"):
                 status = ProviderStatus.DEGRADED
-                evidence_state = "evidence_unavailable"
+                evidence_state = "evidence_partial"
                 can_proceed = False
             data = dict(raw)
             data.update(
@@ -425,7 +426,7 @@ class ThaiRagProvider:
 
     def _call_scoped(self, method_name: str, value: Any, workspace_id: str, **kwargs: Any) -> Any:
         method = getattr(self.core, method_name)
-        scope_name = self._scope_name(method, method_name)
+        scope_name = self._canonical_scope_name(method, method_name) if method_name in self._CANONICAL_CODE_OPERATIONS else self._scope_name(method, method_name)
         named = {scope_name: workspace_id, **kwargs}
         if method_name == "code_search":
             return method(value, **named)
@@ -444,6 +445,8 @@ class ThaiRagProvider:
             return self._scope_error(operation)
         if operation in self._CANONICAL_SCOPE_OPERATIONS and not self._supports_canonical_scope():
             return self._failure(operation, workspace_id, ScopeContractError("core does not prove canonical workspace ownership"))
+        if operation in self._CANONICAL_CODE_OPERATIONS and not self._supports_canonical_code_scope():
+            return self._failure(operation, workspace_id, ScopeContractError("core does not expose canonical workspace_id scope"))
         try:
             data = action()
             if isinstance(data, str) and data.startswith("Error"):
@@ -472,8 +475,16 @@ class ThaiRagProvider:
             return "workspace"
         raise ScopeContractError(f"core method {operation} does not expose workspace scope")
 
+    def _canonical_scope_name(self, method: Callable[..., Any], operation: str) -> str:
+        if "workspace_id" not in inspect.signature(method).parameters:
+            raise ScopeContractError(f"core method {operation} does not expose canonical workspace_id scope")
+        return "workspace_id"
+
     def _supports_canonical_scope(self) -> bool:
         return getattr(self.core, "supports_canonical_workspace_scope", False) is True
+
+    def _supports_canonical_code_scope(self) -> bool:
+        return getattr(self.core, "supports_canonical_code_scope", False) is True or self._supports_canonical_scope()
 
     def _scope_error(self, operation: str) -> ProviderResult:
         return self._error(
@@ -510,7 +521,9 @@ class ThaiRagProvider:
             return ErrorCode.EMBEDDING_UNAVAILABLE
         if "storage" in lower or "sqlite" in lower or "chroma" in lower:
             return ErrorCode.STORAGE_UNAVAILABLE
-        if "workspace" in lower and "not" in lower:
+        if "outside workspace scope" in lower or "scope" in lower and "workspace" in lower:
+            return ErrorCode.SCOPE_DENIED
+        if "workspace" in lower and ("not" in lower or "unknown" in lower):
             return ErrorCode.WORKSPACE_NOT_FOUND
         return ErrorCode.INTERNAL_FAILURE
 
@@ -610,7 +623,7 @@ class ThaiRagProvider:
 
     @staticmethod
     def _is_ready(readiness: dict[str, bool]) -> bool:
-        return all(readiness[key] for key in ("storage_ready", "fts_ready", "embedding_ready"))
+        return all(readiness[key] for key in ("storage_ready", "fts_ready", "vector_store_ready", "embedding_ready", "workspace_ready"))
 
     def _readiness(self, workspace_id: Optional[str]) -> dict[str, bool]:
         storage = getattr(self.core, "storage", None)
@@ -627,7 +640,7 @@ class ThaiRagProvider:
                     fts_ready = True
             except Exception:
                 pass
-            vector_ready = getattr(storage, "memory_collection", None) is not None
+            vector_ready = getattr(storage, "code_collection", None) is not None
         embedder = getattr(self.core, "embedder", None)
         try:
             embedding_ready = bool(embedder is None or not hasattr(embedder, "is_alive") or embedder.is_alive())
@@ -643,12 +656,12 @@ class ThaiRagProvider:
         }
 
     def _has_scoped_code_api(self) -> bool:
-        for name in ("code_index", "code_search", "code_context", "code_blast_radius"):
+        for name in ("pre_edit_context", "code_index", "index_status", "code_search", "code_context", "code_blast_radius"):
             method = getattr(self.core, name, None)
             if method is None:
                 return False
             try:
-                self._scope_name(method, name)
+                self._canonical_scope_name(method, name)
             except ScopeContractError:
                 return False
         return True

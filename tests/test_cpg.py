@@ -145,7 +145,8 @@ def test_pre_edit_context_with_cpg_blast_radius():
         server = _hermetic_server(storage=storage)
         res = server.pre_edit_context(file_path=file_path, proposed_symbol="validate", workspace="test_ws")
         
-        assert res["can_proceed"] is True
+        assert res["can_proceed"] is False
+        assert res["evidence"]["code_context"] == "missing"
         assert "blast_radius" in res
         assert any("run_job" in c["source_symbol"] for c in res["blast_radius"]["callers"])
 

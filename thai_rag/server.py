@@ -93,6 +93,7 @@ class LocalContextServer:
     """Core server logic for Local Context & Code RAG."""
 
     supports_canonical_workspace_scope = False
+    supports_canonical_code_scope = True
 
     def __init__(
         self,
@@ -188,12 +189,15 @@ class LocalContextServer:
         workspace_path: str = ".",
         force: bool = False,
         background: bool = False,
+        workspace_id: Optional[str] = None,
         workspace: Optional[str] = None,
     ) -> str:
         """Index all source code files in a workspace with SHA256 incremental caching.
 
         background=True returns a job_id immediately; poll with index_status().
         """
+        workspace = workspace_id if workspace_id is not None else workspace
+        workspace = workspace or Path(workspace_path).resolve().name
         err = self._check_ollama()
         if err:
             return err
@@ -253,8 +257,9 @@ class LocalContextServer:
         except Exception as e:
             return f"Error indexing workspace: {str(e)}"
 
-    def index_status(self, job_id: str, workspace: Optional[str] = None) -> str:
+    def index_status(self, job_id: str, workspace_id: Optional[str] = None, workspace: Optional[str] = None) -> str:
         """Poll a background code_index job by its job_id."""
+        workspace = workspace_id if workspace_id is not None else workspace
         with _INDEX_JOBS_LOCK:
             job = _INDEX_JOBS.get(job_id)
         if not job:
@@ -286,11 +291,13 @@ class LocalContextServer:
         query: str,
         top_k: int = 5,
         path_filter: Optional[str] = None,
+        workspace_id: Optional[str] = None,
         workspace: Optional[str] = None,
     ) -> str:
         """Search code symbols and semantic logic across the indexed codebase."""
         if not query.strip():
             return "Error: Search query cannot be empty."
+        workspace = workspace_id if workspace_id is not None else workspace
 
         # BUG-R1: no hard Ollama gate — retriever.search() already degrades to
         # FTS-only when embeddings are unavailable. Surface a warning suffix.
@@ -327,9 +334,11 @@ class LocalContextServer:
         file_path: str,
         line_number: int,
         window: int = 25,
+        workspace_id: Optional[str] = None,
         workspace: Optional[str] = None,
     ) -> str:
         """Retrieve the enclosing function/class context or surrounding lines for a file."""
+        workspace = workspace_id if workspace_id is not None else workspace
         try:
             ctx = self.retriever.get_context(
                 file_path,
@@ -431,11 +440,26 @@ class LocalContextServer:
     def pre_edit_context(
         self,
         file_path: str,
+        workspace_id: Optional[str] = None,
+        proposed_symbol: Optional[str] = None,
         workspace: Optional[str] = None,
-        proposed_symbol: Optional[str] = None
     ) -> dict:
         """Verify constraints, blast radius, and enclosing context before editing a file."""
-        constraints = self.storage.get_file_constraints(file_path, workspace=workspace)
+        scoped_workspace = workspace_id if workspace_id is not None else workspace
+        if not scoped_workspace:
+            return {
+                "file_path": file_path,
+                "workspace": "",
+                "evidence": {"storage": "unavailable", "code_index": "unavailable", "cpg": "unavailable"},
+                "can_proceed": False,
+                "constraints": [],
+                "code_context": None,
+                "blast_radius": None,
+                "message": "canonical workspace_id is required",
+            }
+        workspace_id = scoped_workspace
+        workspace = workspace_id
+        constraints = self.storage.get_file_constraints(file_path, workspace=workspace_id)
 
         file_symbols = self.storage.get_file_symbols(file_path, workspace=workspace)
 
@@ -463,18 +487,25 @@ class LocalContextServer:
                         target_line = max(1, (match["line_start"] + match["line_end"]) // 2)
                 elif file_symbols:
                     target_line = max(1, (file_symbols[0]["line_start"] + file_symbols[0]["line_end"]) // 2)
-                code_ctx = self.retriever.get_context(file_path, target_line, window_lines=30)
+                code_ctx = self.retriever.get_context(file_path, target_line, window_lines=30, workspace=workspace_id)
         except Exception:
             pass
 
+        can_proceed = bool(file_symbols and code_ctx and blast_radius)
         return {
             "file_path": file_path,
-            "workspace": workspace or "",
-            "can_proceed": True,
+            "workspace": workspace_id,
+            "evidence": {
+                "storage": "ready",
+                "code_index": "available" if file_symbols else "missing",
+                "code_context": "available" if code_ctx else "missing",
+                "cpg": "available" if blast_radius else "missing",
+            },
+            "can_proceed": can_proceed,
             "constraints": constraints,
             "code_context": code_ctx,
             "blast_radius": blast_radius,
-            "message": f"Found {len(constraints)} past constraints for {file_path}." if constraints else "No prior constraints found, safe to proceed."
+            "message": f"Found {len(constraints)} past constraints for {file_path}." if constraints else ("Evidence complete; safe to proceed." if can_proceed else "Evidence incomplete; review required before proceeding.")
         }
 
     @staticmethod
@@ -500,11 +531,14 @@ class LocalContextServer:
     def code_blast_radius(
         self,
         symbol_name: str,
+        workspace_id: Optional[str] = None,
+        max_depth: int = 2,
         workspace: str = "",
-        max_depth: int = 2
     ) -> str:
-        """Analyze Code Property Graph (CPG) blast radius: find all direct/transitive callers and impacted files."""
+        """Analyze Code Property Graph (CPG-Lite) blast radius: find all direct/transitive callers and impacted files."""
+        workspace = workspace_id if workspace_id is not None else workspace
         blast = self.storage.get_symbol_blast_radius(symbol_name, workspace=workspace or None, max_depth=max_depth)
+
         callers = blast.get("callers", [])
         callees = blast.get("callees", [])
         impacted = blast.get("impacted_files", [])

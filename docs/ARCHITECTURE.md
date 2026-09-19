@@ -118,17 +118,21 @@ ChatGPT / MCP client
 workspace_bootstrap(workspaceId)
         │
         ├── read + SHA-256 fingerprint AGENTS.md (fail closed if unavailable)
-        ├── resolve parent-owned native capabilities
-        │     ├── workspace memory (selective, ON_DEMAND)
-        │     └── Thai-RAG code context (SAFETY_PRE_CHECK)
-        ├── reject workspace MCP definitions for native capability replacement
-        └── verify the parent-owned capability contract
+         ├── discover mandatory native memory child
+         │     └── memory
+         ├── initialize parent-owned native Thai-RAG provider
+         ├── reject workspace-scoped definitions for mandatory-native promotion
+         ├── connect + pin trusted child sessions
+         ├── fingerprint provider and child contracts
+         └── verify required capabilities
+
               │
               ▼
 prepare_code_change(workspaceId, filePath)
         │
         ├── revalidate AGENTS.md fingerprint
-        └── native Thai-RAG / rag_pre_edit_context
+         └── native Thai-RAG provider / pre_edit_context
+
               │
               ▼
       one-path authorization
@@ -139,9 +143,9 @@ prepare_code_change(workspaceId, filePath)
               └── authorization consumed after success
 ```
 
-Native workspace memory and Thai-RAG are parent-owned capabilities, not mandatory child MCP dependencies. Workspace memory is selective and `ON_DEMAND`; native Thai-RAG code context is `SAFETY_PRE_CHECK` and is enforced before each guarded development-artifact mutation. Bootstrap validates the parent-owned capability contract and the `AGENTS.md` fingerprint; repository-controlled `.cursor/mcp.json`, `.claude/mcp.json`, or other workspace MCP files cannot replace or shadow these capabilities. Missing native capabilities or an unreadable `AGENTS.md` fail closed. `godkiller` stays outside workspace readiness as an optional `ON_DEMAND` safety analyzer. For high-risk work, `prepare_code_change(..., runGodkillerSafetyCheck=true)` uses a curated parent-owned route that accepts only a non-workspace-scoped, drift-free Godkiller contract and invokes the fixed `gk_task(action=edit_safe)` operation with live fingerprints.
+The default mandatory set is the native `memory` child plus parent-owned native Thai-RAG. Bootstrap only accepts globally/user-configured child definitions for trusted mandatory promotion; a repository-controlled `.cursor/mcp.json`, `.claude/mcp.json`, or other workspace MCP file cannot replace trusted dependencies. The bootstrap validates memory capabilities (`search_nodes`, `create_entities`, `add_observations`) and the Thai-RAG provider handshake: contract version, fingerprint, capabilities, explicit `workspace_id` scope, index-job contract, health, and embedding/index generation. Missing dependencies, incompatible provider metadata, stale contracts, or an unreadable `AGENTS.md` all fail closed. `godkiller` stays outside workspace readiness as an optional `ON_DEMAND` safety analyzer. For high-risk work, `prepare_code_change(..., runGodkillerSafetyCheck=true)` uses a curated parent-owned route that accepts only a non-workspace-scoped, drift-free Godkiller contract and invokes the fixed `gk_task(action=edit_safe)` operation with live fingerprints.
 
-`working_memory_search` and `working_memory_record` are curated first-party native surfaces over workspace-scoped memory. They are not adapters over, or a flattened view of, a child `memory` server. This keeps the ChatGPT-facing surface stable while preserving the parent-owned capability contract.
+`working_memory_search` and `working_memory_record` are curated first-party adapters over the pinned `memory` child. The child server is not flattened wholesale into the top-level MCP catalog. This keeps the ChatGPT-facing surface stable while preserving child contract fingerprints at dispatch time.
 
 HTTP and stdio transports share the same harness ledger across request-scoped `ToolRegistry` recreation, so bootstrap/pre-edit state follows the MCP transport session rather than one transient request object. MCP `instructions` explicitly tell coding clients to call `workspace_bootstrap` before the first code mutation and `prepare_code_change` before each development-artifact mutation; the registry still enforces both rules even if a client ignores those instructions.
 

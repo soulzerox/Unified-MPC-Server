@@ -833,6 +833,88 @@ def test_pre_edit_rejects_core_without_canonical_code_ownership():
     assert result.errors[0].code is ErrorCode.SCOPE_DENIED
 
 
+def test_provider_preserves_structured_core_error_status_and_code():
+    class Core(RecordingCore):
+        def code_index(self, workspace_path=".", workspace_id=None, force=False, background=False, structured=False):
+            return {"status": "degraded", "code": "embedding_unavailable", "error": "embedding backend unavailable", "workspace_id": workspace_id}
+
+        def index_status(self, job_id, workspace_id, structured=False):
+            return {"status": "unavailable", "code": "storage_unavailable", "error": "storage unavailable", "job_id": job_id, "workspace_id": workspace_id}
+
+    provider = ThaiRagProvider(core=Core({"constraints": [], "code_context": None}))
+    index = provider.code_index("/repo", workspace_id="ws-123")
+    status = provider.index_status("idx-1", workspace_id="ws-123")
+
+    assert index.status is ProviderStatus.DEGRADED
+    assert index.errors[0].code is ErrorCode.EMBEDDING_UNAVAILABLE
+    assert status.status is ProviderStatus.UNAVAILABLE
+    assert status.errors[0].code is ErrorCode.STORAGE_UNAVAILABLE
+
+
+def test_global_health_reports_ready_without_workspace_scope():
+    import sqlite3
+
+    class Collection:
+        @staticmethod
+        def count():
+            return 0
+
+    class Storage:
+        sqlite_conn = sqlite3.connect(":memory:")
+        code_collection = Collection()
+
+    Storage.sqlite_conn.execute("CREATE TABLE fts_conversation (content TEXT)")
+
+    class Embedder:
+        model = "test"
+
+        @staticmethod
+        def is_alive():
+            return True
+
+    class Core:
+        storage = Storage()
+        embedder = Embedder()
+        supports_canonical_code_scope = True
+
+        def pre_edit_context(self, file_path, workspace_id=None, proposed_symbol=None): return {}
+        def code_index(self, workspace_path, workspace_id, force=False, background=False): return {}
+        def index_status(self, job_id, workspace_id): return {}
+        def code_search(self, query, workspace_id, top_k=5, path_filter=None): return {}
+        def code_context(self, file_path, workspace_id, line_number, window=25): return {}
+        def code_blast_radius(self, symbol_name, workspace_id, max_depth=2): return {}
+
+    provider = ThaiRagProvider(core=Core())
+    global_health = provider.health()
+    scoped_health = provider.health(workspace_id="ws-exact")
+
+    assert global_health.status is ProviderStatus.OK
+    assert global_health.data["ready"] is True
+    assert global_health.data["readiness"]["workspace_ready"] is False
+    assert global_health.errors == []
+    assert scoped_health.status is ProviderStatus.OK
+    assert scoped_health.data["readiness"]["workspace_ready"] is True
+
+
+def test_standalone_index_adapters_return_structured_errors(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Result:
+        def __init__(self, value): self.value = value
+        def to_dict(self): return self.value
+
+    class Provider:
+        def code_index(self, **kwargs): return Result({"status": "unavailable", "errors": [{"code": "storage_unavailable"}]})
+        def index_status(self, **kwargs): return Result({"status": "unavailable", "errors": [{"code": "workspace_not_found"}]})
+
+    class Server:
+        def provider(self): return Provider()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+    assert server_module.code_index(workspace_id="ws-123") == {"status": "unavailable", "errors": [{"code": "storage_unavailable"}]}
+    assert server_module.index_status("idx-missing", workspace_id="ws-123") == {"status": "unavailable", "errors": [{"code": "workspace_not_found"}]}
+
+
 def test_health_distinguishes_storage_unavailable_from_degraded_components():
     import sqlite3
 

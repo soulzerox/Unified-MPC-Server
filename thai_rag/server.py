@@ -836,7 +836,7 @@ def code_index(
         force=force,
         background=background,
     ).to_dict()
-    if result["status"] != "ok":
+    if result.get("status") != "ok" or not isinstance(result.get("data"), dict):
         return result
     data = result["data"]
     if data.get("status") == "running":
@@ -863,7 +863,7 @@ def index_status(
     """Poll a background code_index job by its job_id."""
     scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
     result = get_server().provider().index_status(job_id=job_id, workspace_id=scoped_workspace).to_dict()
-    if result["status"] != "ok":
+    if result.get("status") != "ok" or not isinstance(result.get("data"), dict):
         return result
     data = result["data"]
     if data["status"] == "running":

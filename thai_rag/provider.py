@@ -124,8 +124,10 @@ class ThaiRagProvider:
     def health(self, workspace_id: Optional[str] = None) -> ProviderResult:
         readiness = self._readiness(workspace_id)
         embedding_ready = readiness["embedding_ready"]
-        ready = self._is_ready(readiness)
-        unavailable = not readiness["storage_ready"] or not readiness["fts_ready"] or not readiness["workspace_ready"]
+        global_ready = self._is_ready(readiness)
+        scope_ready = workspace_id is None or readiness["workspace_ready"]
+        ready = global_ready and scope_ready
+        unavailable = not readiness["storage_ready"] or not readiness["fts_ready"] or not scope_ready
         status = ProviderStatus.UNAVAILABLE if unavailable else (ProviderStatus.OK if ready else ProviderStatus.DEGRADED)
         warnings = []
         if not readiness["storage_ready"]:
@@ -134,7 +136,7 @@ class ThaiRagProvider:
             warnings.append("FTS retrieval unavailable")
         if not readiness["vector_store_ready"]:
             warnings.append("vector store unavailable")
-        if not readiness["workspace_ready"]:
+        if workspace_id is not None and not readiness["workspace_ready"]:
             warnings.append("canonical workspace scope unavailable")
         if not embedding_ready:
             warnings.append("embedding backend unavailable; lexical retrieval may be degraded")
@@ -148,7 +150,7 @@ class ThaiRagProvider:
             },
             workspace_id=workspace_id,
             warnings=warnings,
-            errors=self._readiness_errors(readiness, workspace_id),
+            errors=self._readiness_errors(readiness, workspace_id, scope_ready),
             metadata=self._metadata(workspace_id),
         )
 
@@ -480,6 +482,8 @@ class ThaiRagProvider:
                     workspace_id=workspace_id,
                     job_id=data.get("job_id"),
                 )
+            if operation in self._CANONICAL_CODE_OPERATIONS and isinstance(data, dict) and data.get("status") not in {None, "ok", "running", "done"}:
+                return self._structured_error(operation, workspace_id, data)
             return ProviderResult(
                 status=ProviderStatus.OK,
                 data=data,
@@ -538,7 +542,7 @@ class ThaiRagProvider:
             return ErrorCode.STORAGE_UNAVAILABLE
         return self._error_code(str(exc))
 
-    def _readiness_errors(self, readiness: dict[str, bool], workspace_id: Optional[str]) -> list[ProviderError]:
+    def _readiness_errors(self, readiness: dict[str, bool], workspace_id: Optional[str], scope_ready: bool) -> list[ProviderError]:
         errors = []
         if not readiness["storage_ready"]:
             errors.append(ProviderError(ErrorCode.STORAGE_UNAVAILABLE, "SQLite storage unavailable", {"operation": "health"}))
@@ -548,9 +552,30 @@ class ThaiRagProvider:
             errors.append(ProviderError(ErrorCode.VECTOR_RETRIEVAL_DEGRADED, "vector store unavailable", {"operation": "health"}))
         if not readiness["embedding_ready"]:
             errors.append(ProviderError(ErrorCode.EMBEDDING_UNAVAILABLE, "embedding backend unavailable", {"operation": "health"}))
-        if not readiness["workspace_ready"]:
+        if not scope_ready:
             errors.append(ProviderError(ErrorCode.SCOPE_DENIED, "canonical code workspace ownership unavailable", {"operation": "health", "workspace_id": workspace_id}))
         return errors
+
+    def _structured_error(self, operation: str, workspace_id: str, data: dict[str, Any]) -> ProviderResult:
+        message = str(data.get("error") or data.get("message") or f"{operation} failed")
+        code = self._error_code_value(data.get("code")) or self._error_code(message)
+        status = self._provider_status(data.get("status"), message)
+        details = {key: value for key, value in data.items() if key not in {"status", "code", "error", "message"}}
+        details.update({"operation": operation, "workspace_id": workspace_id})
+        return self._error(status, code, message, **details)
+
+    @staticmethod
+    def _error_code_value(value: Any) -> Optional[ErrorCode]:
+        try:
+            return ErrorCode(value) if value is not None else None
+        except ValueError:
+            return None
+
+    def _provider_status(self, value: Any, message: str) -> ProviderStatus:
+        try:
+            return ProviderStatus(value)
+        except ValueError:
+            return self._error_status(message)
 
     def _error_status(self, message: str) -> ProviderStatus:
         return ProviderStatus.DEGRADED if self._error_code(message) in {
@@ -668,7 +693,7 @@ class ThaiRagProvider:
 
     @staticmethod
     def _is_ready(readiness: dict[str, bool]) -> bool:
-        return all(readiness[key] for key in ("storage_ready", "fts_ready", "vector_store_ready", "embedding_ready", "workspace_ready"))
+        return all(readiness[key] for key in ("storage_ready", "fts_ready", "vector_store_ready", "embedding_ready"))
 
     def _readiness(self, workspace_id: Optional[str]) -> dict[str, bool]:
         storage = getattr(self.core, "storage", None)

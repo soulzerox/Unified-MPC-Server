@@ -107,7 +107,7 @@ describe('TreeReader', () => {
     if (result.ok) expect(result.value.entries).toHaveLength(2);
   });
 
-  it('does not enumerate entries after the retained budget is full', async () => {
+  it('enumerates only one lookahead entry after the retained budget is full', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-stop-'));
     temporaryRoots.push(root);
     await writeFile(path.join(root, 'a.txt'), 'a', 'utf8');
@@ -137,10 +137,10 @@ describe('TreeReader', () => {
     }).read(root, { maxDepth: 1, maxEntries: 1 });
 
     expect(result.ok).toBe(true);
-    expect(enumerated).toBe(1);
+    expect(enumerated).toBe(2);
   });
 
-  it('marks the result when the entry cap is reached', async () => {
+  it('marks the result when an entry exists beyond the entry cap', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-'));
     temporaryRoots.push(root);
     await writeFile(path.join(root, 'a.txt'), 'a', 'utf8');
@@ -154,6 +154,23 @@ describe('TreeReader', () => {
       value: {
         entries: [{ type: 'file' }, { type: 'file' }],
         truncated: true,
+      },
+    });
+  });
+
+  it('does not mark an exact-cap tree as truncated', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-exact-cap-'));
+    temporaryRoots.push(root);
+    await writeFile(path.join(root, 'a.txt'), 'a', 'utf8');
+    await writeFile(path.join(root, 'b.txt'), 'b', 'utf8');
+
+    const result = await new TreeReader().read(root, { maxDepth: 1, maxEntries: 2 });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        entries: [{ type: 'file' }, { type: 'file' }],
+        truncated: false,
       },
     });
   });

@@ -46,26 +46,30 @@ describe('MCP tool registry', () => {
     expect(budgets[1]).toMatchObject({ maxItems: Number.MAX_SAFE_INTEGER, maxStructuredBytes: 512 });
   });
 
-  it('passes effective result budget to controlled search producers before materialization', async () => {
+  it.each([10, 50, 100])('passes %dMB byte limits before producer materialization', async (megabytes) => {
+    const limit = megabytes * 1024 * 1024;
+    let producerMaterializedOversizedResult = false;
     let request: unknown;
     const registry = new ToolRegistry({
       search: {
         async searchText(_actor, _workspaceId, options): Promise<ReturnType<typeof ok>> {
           request = options;
+          if (options.resultBudget === undefined) producerMaterializedOversizedResult = true;
           return ok({ matches: [] });
         },
       },
-    }, actor, { maxToolResultBytes: 1_024 });
+    }, actor, { maxToolResultBytes: limit });
 
     await registry.invoke('search_text', { workspaceId: 'workspace-1', query: 'needle' });
 
     expect(request).toMatchObject({ resultBudget: {
       maxItems: Number.MAX_SAFE_INTEGER,
-      maxTextBytes: 1_024,
-      maxStructuredBytes: 1_024,
-      maxBinaryBytes: 1_024,
-      maxBase64Bytes: 1_024,
+      maxTextBytes: limit,
+      maxStructuredBytes: limit,
+      maxBinaryBytes: limit,
+      maxBase64Bytes: limit,
     } });
+    expect(producerMaterializedOversizedResult).toBe(false);
   });
 
   it.each([

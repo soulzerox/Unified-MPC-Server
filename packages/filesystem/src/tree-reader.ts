@@ -68,7 +68,7 @@ export class TreeReader {
           if (!directoryEntry.isDirectory() && !directoryEntry.isFile()) continue;
           candidates.push({ absolutePath: absoluteEntryPath, entry: directoryEntry });
           candidates.sort((left, right) => left.entry.name.localeCompare(right.entry.name, undefined, { sensitivity: 'base' }));
-          if (candidates.length >= remaining) {
+          if (candidates.length > remaining) {
             hasMoreCandidates = true;
             break;
           }

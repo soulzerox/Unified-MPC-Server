@@ -153,6 +153,9 @@ export class ThaiRagIndexJobStore {
 
 function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndexJob; readonly migrated: boolean } | null {
   if (!isRecord(value) || typeof value.jobId !== 'string' || value.jobId.trim().length === 0) return null;
+  if (value.status === 'legacy-unavailable' && isRecord(value.legacyData)) {
+    return { job: value as unknown as ThaiRagIndexJob, migrated: false };
+  }
   const workspaceId = typeof value.workspaceId === 'string' && value.workspaceId.trim().length > 0
     ? value.workspaceId
     : 'legacy-unavailable';

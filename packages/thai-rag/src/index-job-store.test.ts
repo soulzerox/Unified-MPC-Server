@@ -97,5 +97,14 @@ describe('ThaiRagIndexJobStore', () => {
         legacyData: expect.objectContaining({ result: { indexed: 3 }, workspaceId: 'legacy-workspace-name' }),
       }),
     ]));
+
+    const migratedBytes = await readFile(filePath, 'utf8');
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T03:00:00.000Z'));
+    await replacement.initialize();
+    expect(await readFile(filePath, 'utf8')).toBe(migratedBytes);
+
+    const secondReplacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T04:00:00.000Z'));
+    await secondReplacement.initialize();
+    expect(await readFile(filePath, 'utf8')).toBe(migratedBytes);
   });
 });

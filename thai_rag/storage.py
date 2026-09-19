@@ -105,10 +105,16 @@ class StorageManager:
                     id TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
                     category TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
             """)
+            memory_columns = {row[1] for row in cur.execute("PRAGMA table_info(memories)").fetchall()}
+            if "workspace_id" not in memory_columns:
+                cur.execute("ALTER TABLE memories ADD COLUMN workspace_id TEXT")
+            cur.execute("DELETE FROM memories WHERE workspace_id IS NULL OR TRIM(workspace_id) = ''")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_workspace ON memories(workspace_id, id)")
 
             # File cache table for incremental indexing
             cur.execute("""
@@ -129,9 +135,13 @@ class StorageManager:
                     content TEXT NOT NULL,
                     summary TEXT,
                     tags TEXT,
+                    event_type TEXT,
                     created_at TEXT NOT NULL
                 );
             """)
+            turn_columns = {row[1] for row in cur.execute("PRAGMA table_info(conversation_turns)").fetchall()}
+            if "event_type" not in turn_columns:
+                cur.execute("ALTER TABLE conversation_turns ADD COLUMN event_type TEXT")
 
             cur.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS fts_conversation USING fts5(
@@ -351,25 +361,36 @@ class StorageManager:
 
     # --- Agent Memory CRUD (Replacing OpenViking) ---
 
+    @staticmethod
+    def _require_workspace_id(workspace_id: str) -> str:
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            raise ValueError("workspace_id is required for memory operations")
+        return workspace_id.strip()
+
     def save_memory(
         self,
         memory_id: str,
         content: str,
         category: str,
         vector: List[float],
-        workspace_id: Optional[str] = None,
+        workspace_id: str,
     ):
+        workspace_id = self._require_workspace_id(workspace_id)
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._lock:
             with self.sqlite_conn:
+                existing = self.sqlite_conn.execute(
+                    "SELECT workspace_id FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                if existing is not None and existing[0] != workspace_id:
+                    raise ValueError(f"memory {memory_id} belongs to another workspace")
                 self.sqlite_conn.execute("""
-                    INSERT OR REPLACE INTO memories (id, content, category, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (memory_id, content, category, now, now))
+                    INSERT OR REPLACE INTO memories (id, content, category, workspace_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (memory_id, content, category, workspace_id, now, now))
 
-        metadata = {"category": category, "created_at": now}
-        if workspace_id:
-            metadata["workspace_id"] = workspace_id
+        metadata = {"category": category, "workspace_id": workspace_id, "created_at": now}
         self.memory_collection.upsert(
             ids=[memory_id],
             embeddings=[vector],
@@ -377,10 +398,14 @@ class StorageManager:
             metadatas=[metadata]
         )
 
-    def get_memory(self, memory_id: str) -> Optional[Dict[str, Any]]:
+    def get_memory(self, memory_id: str, workspace_id: str) -> Optional[Dict[str, Any]]:
+        workspace_id = self._require_workspace_id(workspace_id)
         with self._lock:
             cur = self.sqlite_conn.cursor()
-            row = cur.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+            row = cur.execute(
+                "SELECT * FROM memories WHERE id = ? AND workspace_id = ?",
+                (memory_id, workspace_id),
+            ).fetchone()
             if not row:
                 return None
             return dict(row)
@@ -389,29 +414,23 @@ class StorageManager:
         self,
         memory_id: str,
         category: Optional[str] = None,
-        workspace_id: Optional[str] = None,
+        workspace_id: str = "",
     ) -> bool:
-        if workspace_id:
-            try:
-                metadata = self.memory_collection.get(ids=[memory_id]).get("metadatas", [[]])[0]
-            except Exception:
-                metadata = None
-            if not metadata or metadata.get("workspace_id") != workspace_id:
-                return False
+        workspace_id = self._require_workspace_id(workspace_id)
         with self._lock:
             with self.sqlite_conn:
                 row = self.sqlite_conn.execute(
-                    "SELECT category FROM memories WHERE id = ?",
-                    (memory_id,),
+                    "SELECT category FROM memories WHERE id = ? AND workspace_id = ?",
+                    (memory_id, workspace_id),
                 ).fetchone()
                 if row is None or (category is not None and row[0] != category):
                     return False
-                cur = self.sqlite_conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+                cur = self.sqlite_conn.execute(
+                    "DELETE FROM memories WHERE id = ? AND workspace_id = ?",
+                    (memory_id, workspace_id),
+                )
                 deleted = cur.rowcount > 0
-        try:
-            self.memory_collection.delete(ids=[memory_id])
-        except Exception:
-            pass
+        self.memory_collection.delete(ids=[memory_id])
         return deleted
 
     def search_memories_vector(
@@ -419,8 +438,9 @@ class StorageManager:
         query_vector: List[float],
         limit: int = 5,
         category: Optional[str] = None,
-        workspace_id: Optional[str] = None,
+        workspace_id: str = "",
     ) -> List[Dict[str, Any]]:
+        workspace_id = self._require_workspace_id(workspace_id)
         if self.memory_collection.count() == 0:
             return []
 
@@ -429,13 +449,14 @@ class StorageManager:
         # remember() (metadata["category"]) and remember_turn() (now unified) are matched.
         results = self.memory_collection.query(
             query_embeddings=[query_vector],
-            n_results=limit * 8
+            n_results=limit * 8,
+            where={"workspace_id": workspace_id},
         )
         items = []
         if results and results["ids"] and len(results["ids"][0]) > 0:
             for i in range(len(results["ids"][0])):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                if workspace_id and meta.get("workspace_id") != workspace_id:
+                if meta.get("workspace_id") != workspace_id:
                     continue
                 raw_cat = (meta.get("category") or "").strip().lower()
                 row_category = raw_cat if raw_cat else derive_category_from_tags(
@@ -468,7 +489,8 @@ class StorageManager:
         content: str,
         summary: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        embedding: Optional[List[float]] = None
+        embedding: Optional[List[float]] = None,
+        event_type: Optional[str] = None,
     ):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         # BUG-9: guard — accept str or list; never join a string per-character
@@ -483,9 +505,9 @@ class StorageManager:
         with self._lock:
             with self.sqlite_conn:
                 self.sqlite_conn.execute("""
-                    INSERT OR REPLACE INTO conversation_turns (turn_id, workspace, role, content, summary, tags, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (turn_id, workspace, role, content, summary or "", tags_str, now))
+                    INSERT OR REPLACE INTO conversation_turns (turn_id, workspace, role, content, summary, tags, event_type, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (turn_id, workspace, role, content, summary or "", tags_str, event_type, now))
                 self.sqlite_conn.execute("DELETE FROM fts_conversation WHERE turn_id = ?", (turn_id,))
                 self.sqlite_conn.execute("""
                     INSERT INTO fts_conversation (turn_id, workspace, content, summary, tags)
@@ -505,9 +527,10 @@ class StorageManager:
                     "workspace_id": workspace,
                     "role": role,
                     "tags": tags_str,
-                    "type": "turn",
+                    "type": "event" if event_type else "turn",
                     "category": category,
                     "created_at": now,
+                    **({"event_type": event_type} if event_type else {}),
                 }]
             )
 

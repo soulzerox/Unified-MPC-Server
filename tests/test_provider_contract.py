@@ -45,6 +45,15 @@ class RecordingCore:
         return self.pre_edit_result
 
 
+def test_readme_describes_selective_remember_turn_contract():
+    from pathlib import Path
+
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+
+    assert "not an automatic mandatory primitive" in readme
+    assert "record_event(event_type, content, workspace_id, summary, tags)" in readme
+
+
 def test_provider_exposes_versioned_capabilities_and_scope_contract():
     provider = ThaiRagProvider(core=RecordingCore({"constraints": [], "code_context": None}))
 
@@ -358,6 +367,11 @@ def test_real_core_memory_and_event_operations_isolate_two_workspaces(tmp_path):
         recalled_events_b = provider.recall("workspace event", workspace_id="ws-b")
         assert "alpha workspace event" in recalled_events_a.data
         assert "beta workspace event" not in recalled_events_a.data
+        event_row = server.storage.sqlite_conn.execute(
+            "SELECT event_type FROM conversation_turns WHERE workspace = ? AND content = ?",
+            ("ws-a", "alpha workspace event"),
+        ).fetchone()
+        assert event_row[0] == "decision"
         assert "beta workspace event" in recalled_events_b.data
         assert "alpha workspace event" not in recalled_events_b.data
         memory_id = memory_a.data.split("[ID: ", 1)[1].split("]", 1)[0]
@@ -366,6 +380,38 @@ def test_real_core_memory_and_event_operations_isolate_two_workspaces(tmp_path):
         assert denied.errors[0].code is ErrorCode.SCOPE_DENIED
     finally:
         server.close()
+
+
+def test_record_event_preserves_embedding_failure_truthfully(tmp_path, monkeypatch):
+    from thai_rag.server import LocalContextServer
+    from tests.fakes import DeterministicEmbeddingAdapter
+
+    server = LocalContextServer(sqlite_path=tmp_path / "context.db", chroma_path=str(tmp_path / "chroma"))
+    embedder = DeterministicEmbeddingAdapter()
+    server.embedder = embedder
+    monkeypatch.setattr(embedder, "is_alive", lambda: True)
+    monkeypatch.setattr(embedder, "embed_document", lambda value: (_ for _ in ()).throw(RuntimeError("embed down")))
+    try:
+        result = server.provider().record_event("decision", "event content", workspace_id="ws-a")
+
+        assert result.status is ProviderStatus.OK
+        assert result.data["warnings"] == ["embedding failed: embed down; FTS storage succeeded"]
+        row = server.storage.sqlite_conn.execute(
+            "SELECT event_type FROM conversation_turns WHERE workspace = ? AND content = ?",
+            ("ws-a", "event content"),
+        ).fetchone()
+        assert row[0] == "decision"
+    finally:
+        server.close()
+
+
+def test_provider_rejects_unscoped_memory_writes():
+    provider = ThaiRagProvider(core=RecordingCore({"constraints": [], "code_context": None}))
+
+    result = provider.remember(content="decision")
+
+    assert result.status is ProviderStatus.UNAVAILABLE
+    assert result.errors[0].code is ErrorCode.WORKSPACE_SCOPE_REQUIRED
 
 
 def test_provider_rejects_legacy_memory_workspace_aliases():

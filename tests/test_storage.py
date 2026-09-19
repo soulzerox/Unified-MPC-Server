@@ -44,32 +44,44 @@ def test_memory_crud_and_vector_search(temp_storage):
     # Orthogonal 768-dim vectors
     vec1 = [1.0] + [0.0] * 767
     vec2 = [0.0, 1.0] + [0.0] * 766
-    temp_storage.save_memory("mem_1", "ใช้ Zorin OS บนแล็ปท็อป", "preference", vec1)
-    temp_storage.save_memory("mem_2", "โปรเจกต์ใช้ FastMCP", "architecture", vec2)
+    temp_storage.save_memory("mem_1", "ใช้ Zorin OS บนแล็ปท็อป", "preference", vec1, workspace_id="ws-a")
+    temp_storage.save_memory("mem_2", "โปรเจกต์ใช้ FastMCP", "architecture", vec2, workspace_id="ws-a")
 
-    results = temp_storage.search_memories_vector(vec1, limit=1)
+    results = temp_storage.search_memories_vector(vec1, limit=1, workspace_id="ws-a")
     assert len(results) == 1
     assert results[0]["id"] == "mem_1"
     assert "Zorin OS" in results[0]["content"]
 
     # Filter by category
-    results_cat = temp_storage.search_memories_vector(vec1, limit=5, category="architecture")
+    results_cat = temp_storage.search_memories_vector(vec1, limit=5, category="architecture", workspace_id="ws-a")
     assert len(results_cat) == 1
     assert results_cat[0]["id"] == "mem_2"
 
     # Delete
-    deleted = temp_storage.delete_memory("mem_1")
+    deleted = temp_storage.delete_memory("mem_1", workspace_id="ws-a")
     assert deleted is True
-    assert temp_storage.get_memory("mem_1") is None
+    assert temp_storage.get_memory("mem_1", workspace_id="ws-a") is None
 
 
 def test_memory_delete_respects_category_scope(temp_storage):
-    temp_storage.save_memory("mem_scoped", "workspace memory", "workspace:one", [1.0] + [0.0] * 767)
+    temp_storage.save_memory("mem_scoped", "workspace memory", "workspace:one", [1.0] + [0.0] * 767, workspace_id="ws-a")
 
-    assert temp_storage.delete_memory("mem_scoped", category="workspace:two") is False
-    assert temp_storage.get_memory("mem_scoped") is not None
-    assert temp_storage.delete_memory("mem_scoped", category="workspace:one") is True
-    assert temp_storage.get_memory("mem_scoped") is None
+    assert temp_storage.delete_memory("mem_scoped", category="workspace:two", workspace_id="ws-a") is False
+    assert temp_storage.get_memory("mem_scoped", workspace_id="ws-b") is None
+    assert temp_storage.get_memory("mem_scoped", workspace_id="ws-a") is not None
+    assert temp_storage.delete_memory("mem_scoped", category="workspace:one", workspace_id="ws-a") is True
+    assert temp_storage.get_memory("mem_scoped", workspace_id="ws-a") is None
+
+
+def test_memory_operations_require_workspace_id(temp_storage):
+    with pytest.raises(ValueError):
+        temp_storage.save_memory("mem_unscoped", "content", "general", [1.0] + [0.0] * 767, workspace_id="")
+    with pytest.raises(ValueError):
+        temp_storage.get_memory("mem_unscoped", workspace_id="")
+    with pytest.raises(ValueError):
+        temp_storage.delete_memory("mem_unscoped", workspace_id="")
+    with pytest.raises(ValueError):
+        temp_storage.search_memories_vector([1.0] + [0.0] * 767, workspace_id="")
 
 def test_file_cache_and_cleanup(temp_storage):
     temp_storage.set_file_hash("src/app.py", 1700000000.0, "abcdef123456")

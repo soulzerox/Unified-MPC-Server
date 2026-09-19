@@ -122,7 +122,7 @@ def test_remember_turn_warns_on_embed_failure(monkeypatch):
                 lambda *a, **k: (_ for _ in ()).throw(RuntimeError("embed down")),
             )
 
-            res = server.remember_turn(role="user", content="decision: use jwt", tags=["decision"])
+            res = server.remember_turn(role="user", content="decision: use jwt", workspace="ws", tags=["decision"])
             assert "⚠️" in res
             cur = server.storage.sqlite_conn.cursor()
             row = cur.execute(

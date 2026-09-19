@@ -77,7 +77,7 @@ def test_ollama_unreachable_handling():
 def test_long_document_auto_truncation(diag_server):
     # Very long text that would otherwise exceed 512 context tokens in Ollama
     very_long_doc = "นี่คือข้อความทดสอบขนาดยาวมาก " * 200 + "def very_long_function(): pass\n" * 100
-    res = diag_server.remember(very_long_doc, category="test_long")
+    res = diag_server.remember(very_long_doc, workspace_id="diagnosis", category="test_long")
     assert "Remembered" in res
 
     # Long search query

@@ -165,8 +165,8 @@ def test_recall_category_returns_turns(temp_env):
     storage, retriever, embedder, chunker = temp_env
     server = _hermetic_server(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
     server.remember_turn(role="user", content="ตัดสินใจ: ใช้ JWT ไม่ใช่ session", workspace="ws", tags=["decision"])
-    server.remember("ผู้ใช้ชอบธีมสีมืด", category="preference")
-    res = server.recall("ตัดสินใจ JWT", category="decision", limit=5)
+    server.remember("ผู้ใช้ชอบธีมสีมืด", workspace_id="ws", category="preference")
+    res = server.recall("ตัดสินใจ JWT", workspace_id="ws", category="decision", limit=5)
     assert "JWT" in res, f"recall(category=decision) should return the turn, got: {res[:200]}"
     server.close()
 
@@ -186,7 +186,7 @@ def test_recall_turn_shows_date_and_category(temp_env):
     storage, retriever, embedder, chunker = temp_env
     server = _hermetic_server(sqlite_path=storage.sqlite_path, chroma_path=storage.chroma_path)
     server.remember_turn(role="assistant", content="สรุป bug fix", workspace="ws", tags=["constraint"], summary="bug")
-    res = server.recall("bug fix", limit=5)
+    res = server.recall("bug fix", workspace_id="ws", limit=5)
     assert "Date:" in res
     assert "Category:" in res
     # Turn category must be displayed (max shown via metadata), never empty date for a typed turn
@@ -205,7 +205,7 @@ def test_untagged_turn_passes_category_filter(temp_env):
         tags=["session-audit"],
         summary="JWT auth decision",
     )
-    res = server.recall("ตัดสินใจใช้ JWT", category="decision", limit=5)
+    res = server.recall("ตัดสินใจใช้ JWT", workspace_id="ws", category="decision", limit=5)
     assert "JWT" in res, f"untagged turn should pass category filter, got: {res[:300]}"
     server.close()
 
@@ -221,7 +221,7 @@ def test_explicit_mismatch_still_excluded(temp_env):
         tags=["preference"],
         summary="dark theme preference",
     )
-    res = server.recall("ธีมสีมืด", category="decision", limit=5)
+    res = server.recall("ธีมสีมืด", workspace_id="ws", category="decision", limit=5)
     # The turn was correctly excluded — verify the query term only appears in the
     # "No memories found" fallback message, not as actual returned content.
     assert "dark theme preference" not in res, f"preference turn must not match decision filter, got: {res[:300]}"

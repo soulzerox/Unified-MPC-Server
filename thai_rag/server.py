@@ -432,11 +432,12 @@ class LocalContextServer:
         event_tags.append(event_type)
         turn_id = f"event_{uuid.uuid4().hex[:12]}"
         vector = None
+        embedding_error = None
         if self.embedder.is_alive():
             try:
                 vector = self.embedder.embed_document(f"[{workspace_id}] event: {summary or content}")
-            except Exception:
-                pass
+            except Exception as exc:
+                embedding_error = str(exc)
         self.storage.save_conversation_turn(
             turn_id=turn_id,
             workspace=workspace_id,
@@ -445,14 +446,18 @@ class LocalContextServer:
             summary=summary,
             tags=event_tags,
             embedding=vector,
+            event_type=event_type,
         )
-        return {
+        result = {
             "event_type": event_type,
             "workspace_id": workspace_id,
             "content": content,
             "summary": summary,
             "tags": event_tags,
         }
+        if embedding_error:
+            result["warnings"] = [f"embedding failed: {embedding_error}; FTS storage succeeded"]
+        return result
 
     def remember_turn(
         self,

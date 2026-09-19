@@ -34,35 +34,35 @@ def test_memory_tools_lifecycle(test_server):
     server, _ = test_server
     
     # 1. Remember
-    res = server.remember("ผู้ใช้ชอบใช้ธีมสีมืดและคีย์ลัด vim", category="preference")
+    res = server.remember("ผู้ใช้ชอบใช้ธีมสีมืดและคีย์ลัด vim", workspace_id="test_ws", category="preference")
     assert "Remembered" in res
     
     # 2. Recall
-    recall_res = server.recall("คีย์ลัดที่ผู้ใช้ชอบ")
+    recall_res = server.recall("คีย์ลัดที่ผู้ใช้ชอบ", workspace_id="test_ws")
     assert "คีย์ลัด vim" in recall_res
 
     # 3. Recall with filter
-    recall_cat = server.recall("ผู้ใช้", category="preference")
+    recall_cat = server.recall("ผู้ใช้", workspace_id="test_ws", category="preference")
     assert "ธีมสีมืด" in recall_cat
 
     # 4. Forget
     mem_id = [line for line in recall_res.splitlines() if "ID:" in line][0].split("ID:")[1].split("]")[0].strip()
-    forget_res = server.forget(mem_id)
+    forget_res = server.forget(mem_id, workspace_id="test_ws")
     assert "Deleted" in forget_res
 
     # 5. Verify forgotten
-    after_forget = server.recall("คีย์ลัด vim")
+    after_forget = server.recall("คีย์ลัด vim", workspace_id="test_ws")
     assert mem_id not in after_forget
 
 
 def test_forget_does_not_cross_workspace_category(test_server):
     server, _ = test_server
-    server.storage.save_memory("mem_scoped", "workspace memory", "workspace:one", [1.0] + [0.0] * 767)
+    server.storage.save_memory("mem_scoped", "workspace memory", "workspace:one", [1.0] + [0.0] * 767, workspace_id="ws-a")
 
-    wrong_scope = server.forget("mem_scoped", category="workspace:two")
+    wrong_scope = server.forget("mem_scoped", workspace_id="ws-a", category="workspace:two")
 
-    assert "not found" in wrong_scope
-    assert server.storage.get_memory("mem_scoped") is not None
+    assert "outside workspace scope" in wrong_scope
+    assert server.storage.get_memory("mem_scoped", workspace_id="ws-a") is not None
 
 def test_code_rag_tools_lifecycle(test_server):
     server, ws_dir = test_server

@@ -99,7 +99,7 @@ flowchart TD
 
 ## MCP Adapter Compatibility Surface
 
-The stdio adapter exposes legacy-compatible tools for standalone development only. Unified integrations should call `ThaiRagProvider` directly and map `ProviderResult` to public `rag_*` capabilities. `remember_turn` remains legacy compatibility; selective provider memory uses `record_event` with meaningful event types and no mandatory turn ID.
+The stdio adapter exposes legacy-compatible tools for standalone development only. Unified integrations should call `ThaiRagProvider` directly and map `ProviderResult` to public `rag_*` capabilities. `remember_turn` remains legacy compatibility; selective provider memory uses `record_event` with meaningful event types and no mandatory turn ID. `remember_turn` is not an automatic mandatory primitive.
 
 ## 🛠️ สารบบเครื่องมือ MCP (Available MCP Tools)
 
@@ -108,7 +108,7 @@ Optional standalone adapter exposes legacy-compatible tools through Model Contex
 | ชื่อเครื่องมือ | พารามิเตอร์ | การทำงานหลัก | จังหวะที่ Agent ต้องเรียก |
 |---|---|---|---|
 | **`pre_edit_context`** | `file_path` (str)<br>`workspace` (str, opt)<br>`proposed_symbol` (str, opt) | **JIT Pre-Edit Verification**: ดึงข้อตกลงเดิมในอดีต + โค้ดขอบเขตฟังก์ชัน + CPG Blast Radius ที่จะได้รับผลกระทบ | 🔴 **บังคับเรียกทุกครั้งก่อนเริ่มแก้ไขไฟล์ใดๆ** |
-| **`remember_turn`** | `role` (str)<br>`content` (str)<br>`workspace` (str, opt)<br>`summary` (str, opt)<br>`tags` (str, opt) | บันทึกประวัติบทสนทนาหรือข้อตกลงที่เพิ่งเกิดขึ้นทันทีลง FTS5 และ Vector | 🟢 **เรียกทุกครั้งเมื่อ User สั่งคำสั่งสำคัญหรือเปลี่ยนแนวทาง** |
+| **`remember_turn`** | `role` (str)<br>`content` (str)<br>`workspace` (str, opt)<br>`summary` (str, opt)<br>`tags` (str, opt) | Legacy-compatible raw turn storage for explicit caller-selected conversation turns | ⚪ **ใช้เมื่อ caller ต้องการเก็บ raw turn โดยตั้งใจ; ไม่ใช่ primitive อัตโนมัติที่ต้องเรียกทุกครั้ง** |
 | **`code_blast_radius`** | `symbol_name` (str)<br>`workspace` (str, opt)<br>`max_depth` (int, default=2) | วิเคราะห์กราฟ CPG ค้นหาว่ามีฟังก์ชันไหนในไฟล์ใดเรียกใช้สัญลักษณ์นี้บ้าง (Multi-Hop Callers) | 🟡 **เรียกเมื่อวางแผน Refactor หรือลบ/เปลี่ยนชื่อฟังก์ชัน** |
 | **`code_search`** | `query` (str)<br>`top_k` (int, default=5)<br>`path_filter` (str, opt) | ค้นหาโค้ดแบบ Hybrid (BM25 + Semantic Vector) รองรับคำค้นหาภาษาไทย | 🟡 **เรียกก่อน grep เพื่อหาตำแหน่งไฟล์และบรรทัดที่เกี่ยวข้อง** |
 | **`code_context`** | `file_path` (str)<br>`line_number` (int)<br>`window` (int, default=25) | ดึงขอบเขตของฟังก์ชันหรือคลาสทั้งบล็อกตามเลขบรรทัด | 🟡 **เรียกหลังจากได้ตำแหน่งบรรทัดจาก `code_search`** |
@@ -349,7 +349,7 @@ Runtime dependencies ถูกประกาศใน `pyproject.toml` ด้�
 ### กฎเหล็กสรุปสั้น ๆ (ฉบับเต็มอยู่ที่ [`AGENTS.md`](AGENTS.md))
 
 1. **JIT Pre-Edit Verification** — เรียก `pre_edit_context(file_path, proposed_symbol?)` ก่อนแก้ไขไฟล์ใดๆ เสมอ เพื่อดูข้อตกลงเดิม โค้ดขอบเขต และ CPG Blast Radius
-2. **Realtime Conversational Memory** — เรียก `remember_turn(role, content, summary, tags)` ทันทีเมื่อผู้ใช้ระบุข้อกำหนดใหม่ การตัดสินใจออกแบบ หรือข้อห้าม ห้ามรอจนจบเซสชัน
+2. **Selective Conversational Memory** — ใช้ `record_event(event_type, content, workspace_id, summary, tags)` สำหรับข้อกำหนดหรือการตัดสินใจที่เลือกเก็บอย่างชัดเจน; ใช้ `remember_turn` เฉพาะเมื่อ caller ต้องการ raw turn โดยตั้งใจ ไม่ใช่ automatic mandatory primitive
 3. **Retrieval-First Coding** — ใช้ `code_search` → `code_context` ก่อน grep/อ่านไฟล์ทั้งไฟล์ และเรียก `code_blast_radius` เมื่อต้อง Refactor หรือเปลี่ยน Signature
 4. **ห้ามบอกว่า "จำไม่ได้"** — เมื่อผู้ใช้ถามถึงงานเดิมหรือการตัดสินใจในอดีต ต้องเรียก `recall` หรือ `pre_edit_context` ก่อนตอบ ห้ามเดาเอาเอง
 

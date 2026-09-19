@@ -243,8 +243,8 @@ export class ToolRegistry {
       bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
-      workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
-      workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
+      workingMemorySearch: (workspaceId, query, signal, budget) => this.workingMemorySearch(workspaceId, query, signal, budget),
+      workingMemoryRecord: (workspaceId, name, entityType, observations, signal, budget) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal, budget),
       ragRecall: (workspaceId, query, category, limit, signal, budget) => this.ragRecall(workspaceId, query, category, limit, signal, budget),
       ragRemember: (workspaceId, content, category, signal, budget) => this.ragRemember(workspaceId, content, category, signal, budget),
         nativeRagCall: (workspaceId, tool, args, signal, budget) => this.nativeRagCall(workspaceId, tool, args, signal, budget),
@@ -824,8 +824,8 @@ export class ToolRegistry {
     return ok({ ready: true, filePath, checks });
   }
 
-  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal);
+  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal, budget?: ResultBudget): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal, budget);
   }
 
   private async workingMemoryRecord(
@@ -834,12 +834,13 @@ export class ToolRegistry {
     entityType: string,
     observations: readonly string[],
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'workspace_memory_record', {
       name,
       category: entityType,
       observations,
-    }, signal);
+    }, signal, budget);
   }
 
   private async ragRecall(

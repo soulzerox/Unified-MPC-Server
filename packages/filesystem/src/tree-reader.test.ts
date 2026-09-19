@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, opendir, rm, writeFile, type Dir } from 'node:fs/promises';
+import { mkdir, mkdtemp, opendir, rm, writeFile } from 'node:fs/promises';
+import type { Dir } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -59,6 +60,40 @@ describe('TreeReader', () => {
     controller.abort();
 
     await expect(new TreeReader().read(root, {}, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+  });
+
+  it('returns cancellation when enumeration aborts before metadata resolves', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-cancel-'));
+    temporaryRoots.push(root);
+    await writeFile(path.join(root, 'a.txt'), 'a', 'utf8');
+    const controller = new AbortController();
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    const resultPromise = new TreeReader(async (directoryPath) => {
+      const directory = await opendir(directoryPath);
+      return {
+        close: () => directory.close(),
+        [Symbol.asyncIterator]: () => {
+          const iterator = directory[Symbol.asyncIterator]();
+          return {
+            next: async (): Promise<IteratorResult<unknown>> => {
+              const value = await iterator.next();
+              if (!value.done) await paused;
+              return value;
+            },
+            return: async (): Promise<IteratorResult<unknown>> => {
+              await directory.close();
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      } as unknown as Dir;
+    }).read(root, { maxDepth: 1, maxEntries: 1 }, undefined, controller.signal);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    controller.abort();
+    release();
+
+    await expect(resultPromise).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });
 
   it('stops enumerating a directory once entry cap is reached', async () => {

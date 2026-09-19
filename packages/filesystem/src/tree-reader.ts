@@ -49,14 +49,19 @@ export class TreeReader {
       const remaining = maxEntries - entries.length;
       const candidates: Array<{ readonly absolutePath: string; readonly entry: import('node:fs').Dirent }> = [];
       let hasMoreCandidates = false;
+      const iterator = directory[Symbol.asyncIterator]();
       try {
-        for await (const directoryEntry of directory) {
+        while (true) {
+          const next = await nextDirectoryEntry(iterator, signal);
+          if (next.done === true) break;
           if (signal?.aborted) return;
+          const directoryEntry = next.value;
           const absoluteEntryPath = path.join(currentPath, directoryEntry.name);
           let entryRealPath: string;
           try {
-            entryRealPath = await realpath(absoluteEntryPath);
+            entryRealPath = await cancellable(realpath(absoluteEntryPath), signal);
           } catch {
+            if (signal?.aborted) return;
             continue;
           }
           if (!isWithin(rootRealPath, entryRealPath)) continue;
@@ -70,6 +75,8 @@ export class TreeReader {
         }
       } catch {
         return;
+      } finally {
+        await directory.close().catch(() => undefined);
       }
       if (hasMoreCandidates) truncated = true;
       for (const candidate of candidates) {
@@ -93,6 +100,38 @@ export class TreeReader {
     if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Tree read was cancelled', recoverable: true });
     return ok({ entries, truncated });
   }
+}
+
+async function nextDirectoryEntry(iterator: AsyncIterator<import('node:fs').Dirent>, signal?: AbortSignal): Promise<IteratorResult<import('node:fs').Dirent>> {
+  if (signal?.aborted) return { done: true, value: undefined } as IteratorResult<import('node:fs').Dirent>;
+  if (signal === undefined) return iterator.next();
+  return new Promise<IteratorResult<import('node:fs').Dirent>>((resolve, reject) => {
+    const onAbort = (): void => resolve({ done: true, value: undefined } as IteratorResult<import('node:fs').Dirent>);
+    signal.addEventListener('abort', onAbort, { once: true });
+    iterator.next().then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
+}
+
+async function cancellable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return operation;
+  if (signal.aborted) throw new Error('Tree read was cancelled');
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new Error('Tree read was cancelled'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
 }
 
 export * from './text-file-reader.js';

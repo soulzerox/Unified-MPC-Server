@@ -168,9 +168,9 @@ export interface McpToolContext {
   /** Run mandatory pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path. */
   readonly prepareCodeChange?: (workspaceId: string, filePath: string, proposedSymbol: string | undefined, runGodkillerSafetyCheck: boolean, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Search the pinned native working-memory child through its curated read surface. */
-  readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Create or append a work-log entity through the pinned native working-memory child. */
-  readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Search parent-owned native Thai-RAG within one canonical workspace. */
   readonly ragRecall?: (workspaceId: string, query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Persist one bounded long-term memory through the parent-owned native Thai-RAG capability. */

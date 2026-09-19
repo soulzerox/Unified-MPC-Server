@@ -683,6 +683,29 @@ describe('LocalExtensionsService MCP bridge', () => {
     await manager.close();
   });
 
+  it('passes bounded budgets to child transport and rejects oversized bounded results', async () => {
+    let observedBudget: ResultBudget | undefined;
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'unbounded fallback' }] }),
+      callToolBounded: async (_name, _args, callBudget) => {
+        observedBudget = callBudget;
+        return { content: [{ type: 'text', text: 'x'.repeat(64) }] };
+      },
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
+    const budget: ResultBudget = { maxItems: 2, maxTextBytes: 128, maxStructuredBytes: 32, maxBinaryBytes: 128, maxBase64Bytes: 128 };
+
+    await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    expect(observedBudget).toEqual({ ...budget, maxStructuredBytes: 32 });
+    await manager.close();
+  });
+
   it('shares one child connection across concurrent calls', async () => {
     let connects = 0;
     const session: McpClientSession = {

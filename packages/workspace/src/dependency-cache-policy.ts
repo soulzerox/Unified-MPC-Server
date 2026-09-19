@@ -597,8 +597,8 @@ function buildStrategy(input: {
   let versionCheck: DependencyVersionCheck | undefined;
   let status: WorktreeDependencyStrategy['status'] = input.blockingReasons.length === 0 ? 'ready' : 'blocked';
 
-  const shared = (label: string, suffix: string): string => {
-    const value = path.join(sharedCacheRoot, suffix);
+  const shared = (label: string, ...segments: readonly string[]): string => {
+    const value = path.join(sharedCacheRoot, ...segments);
     paths.push({ class: 'shared_reusable', label, path: value });
     return value;
   };

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FileService } from './file-service.js';
+import { TextFileReader } from '@unified-mpc/filesystem';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 
 const temporaryRoots: string[] = [];
@@ -37,6 +38,34 @@ describe('FileService', () => {
     );
 
     expect(result).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } });
+  });
+
+  it('passes one shrinking aggregate budget across multi-file reads', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-files-budget-'));
+    temporaryRoots.push(root);
+    const workspace: Workspace = { id: 'workspace-budget', displayName: 'Budget Fixture', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString() };
+    await writeFile(path.join(root, 'one.txt'), 'one', 'utf8');
+    await writeFile(path.join(root, 'two.txt'), 'two', 'utf8');
+    const observedBudgets: number[] = [];
+    const reader = {
+      async read(_filePath: string, _range: unknown, maxBytes?: number) {
+        observedBudgets.push(maxBytes ?? -1);
+        return { ok: true as const, value: { content: 'x'.repeat(6), startLine: 1, endLine: 1 } };
+      },
+    } as unknown as TextFileReader;
+    const service = new FileService(repository(workspace), undefined, reader);
+
+    const result = await service.readFiles(
+      { clientId: 'test', clientName: 'test' },
+      workspace.id,
+      { files: [{ path: 'one.txt' }, { path: 'two.txt' }] },
+      undefined,
+      undefined,
+      { maxItems: 20, maxTextBytes: 10, maxStructuredBytes: 10, maxBinaryBytes: 10, maxBase64Bytes: 10 },
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } });
+    expect(observedBudgets).toEqual([10, 4]);
   });
 
   it('denies secret file reads by default', async () => {

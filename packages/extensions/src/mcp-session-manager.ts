@@ -164,14 +164,13 @@ export class McpSessionManager {
       }
       const inputError = validateDeclaredInput(declaredTool, args);
       if (inputError !== undefined) return err(appError('INVALID_INPUT', `Child MCP input schema mismatch for ${server}/${tool}: ${inputError}`));
-      if (budget !== undefined && activeManaged.session.callToolBounded === undefined) {
-        return err(appError('CONFLICT', `Child MCP transport cannot enforce bounded results for ${server}/${tool}`, true));
-      }
       const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
       const result = await withTimeout(
         (callSignal) => this.enqueue(activeManaged, () => budget === undefined
           ? activeManaged.session.callTool(tool, args, callSignal)
-          : activeManaged.session.callToolBounded!(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal), callSignal),
+          : activeManaged.session.callToolBounded === undefined
+            ? activeManaged.session.callTool(tool, args, callSignal)
+            : activeManaged.session.callToolBounded(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal), callSignal),
         this.callTimeoutMs,
         `Timed out calling ${server}/${tool}`,
         signal,

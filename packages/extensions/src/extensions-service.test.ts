@@ -457,7 +457,7 @@ describe('LocalExtensionsService MCP bridge', () => {
       maxStructuredBytes: 128,
       maxBinaryBytes: 128,
       maxBase64Bytes: 128,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT', message: 'Child MCP transport cannot enforce bounded results for mock/ping' } });
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: 'Child MCP result exceeds 128 bytes' } });
     await service.close();
   });
 
@@ -666,11 +666,30 @@ describe('LocalExtensionsService MCP bridge', () => {
     stderr.destroy();
   });
 
-  it('fails closed when bounded child results lack bounded transport support', async () => {
+  it('uses normal child callTool when bounded transport support is unavailable for small results', async () => {
+    let calls = 0;
     const session: McpClientSession = {
       listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
       listResources: async () => [],
-      callTool: async () => ({ content: [{ type: 'text', text: 'pong' }] }),
+      callTool: async () => { calls += 1; return { content: [{ type: 'text', text: 'pong' }] }; },
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
+    const budget: ResultBudget = { maxItems: 1, maxTextBytes: 128, maxStructuredBytes: 128, maxBinaryBytes: 128, maxBase64Bytes: 128 };
+
+    await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
+      ok: true,
+      value: { content: [{ type: 'text', text: 'pong' }] },
+    });
+    expect(calls).toBe(1);
+    await manager.close();
+  });
+
+  it('rejects oversized results from the normal child fallback', async () => {
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'x'.repeat(64) }] }),
       close: async () => undefined,
     };
     const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
@@ -678,7 +697,7 @@ describe('LocalExtensionsService MCP bridge', () => {
 
     await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
       ok: false,
-      error: { code: 'CONFLICT' },
+      error: { code: 'INVALID_INPUT' },
     });
     await manager.close();
   });

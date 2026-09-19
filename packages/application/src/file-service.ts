@@ -321,6 +321,10 @@ export class FileService {
 
     const files: ReadFileResult[] = [];
     let totalBytes = 0;
+    const aggregateLimit = Math.min(
+      trustedWorkspace ? Number.MAX_SAFE_INTEGER : MAX_MULTI_FILE_BYTES,
+      budget === undefined ? Number.MAX_SAFE_INTEGER : Math.min(budget.maxTextBytes, budget.maxBinaryBytes, budget.maxBase64Bytes),
+    );
     for (const fileRequest of request.files) {
       if (isAborted(signal)) return cancelledFileMutation();
       const fileWorkspace = await resolveWorkspaceForPath(this.workspaces, workspaceId, fileRequest.path, authorization);
@@ -328,11 +332,19 @@ export class FileService {
       if (fileWorkspace.value.id !== workspaceResult.value.id) {
         return err(appError('PATH_OUTSIDE_WORKSPACE', 'All files must be in the same workspace'));
       }
-      const result = await this.readFile(actor, fileWorkspace.value.id, fileRequest, authorization, signal, budget);
+      const remainingBudget = Math.max(0, aggregateLimit - totalBytes);
+      if (remainingBudget === 0) return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
+      const fileBudget = budget === undefined ? undefined : {
+        ...budget,
+        maxTextBytes: Math.min(budget.maxTextBytes, remainingBudget),
+        maxBinaryBytes: Math.min(budget.maxBinaryBytes, remainingBudget),
+        maxBase64Bytes: Math.min(budget.maxBase64Bytes, remainingBudget),
+      };
+      const result = await this.readFile(actor, fileWorkspace.value.id, fileRequest, authorization, signal, fileBudget);
       if (!result.ok) return result;
       totalBytes += result.value.byteLength
         ?? Buffer.byteLength(result.value.content, result.value.encoding === 'base64' ? 'base64' : 'utf8');
-      if (!trustedWorkspace && totalBytes > MAX_MULTI_FILE_BYTES) {
+      if (totalBytes > aggregateLimit) {
         return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
       }
       files.push(result.value);

@@ -266,6 +266,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
     const sourcesRoot = path.join(providerRoot.value, 'sources');
     const previousWorkspaces: readonly NativeThaiRagWorkspace[] = [...this.workspaceRoots].map(([id, realRootPath]) => ({ id, realRootPath }));
+    const previousRoots = new Map(this.workspaceRoots);
+    const previousRootIds = new Map(this.workspaceRootIds);
     try {
       await mkdir(sourcesRoot, { recursive: true });
     } catch (error: unknown) {
@@ -274,7 +276,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.refreshIsCurrent(generation)) return ok(undefined);
     const aliases = await syncWorkspaceSourceAliases(sourcesRoot, workspaces, () => this.refreshIsCurrent(generation));
     if (!aliases.ok) return aliases;
-    if (generation !== this.lifecycleGeneration) return ok(undefined);
+    if (!this.refreshIsCurrent(generation)) return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
     for (const workspaceId of aliases.value) this.pendingReindexIds.add(workspaceId);
     const relinked = workspaces.filter((workspace) => {
       const previousRoot = this.workspaceRoots.get(workspace.id);
@@ -293,10 +295,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             background: false,
             }),
           );
-        if (generation !== this.lifecycleGeneration || !this.started) return ok(undefined);
+        if (!this.refreshIsCurrent(generation) || !this.started) {
+          return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
+        }
         if (!indexed.ok) {
           for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
-           const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces, () => this.refreshIsCurrent(generation));
+           const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
           if (!rolledBack.ok) {
             this.workspaceRoots.clear();
             this.workspaceRootIds.clear();
@@ -308,7 +312,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       }
     }
 
-    if (generation !== this.lifecycleGeneration) return ok(undefined);
+    if (!this.refreshIsCurrent(generation)) return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
     const nextRoots = new Map<string, string>();
     const nextRootIds = new Map<string, string>();
     for (const workspace of workspaces) {
@@ -322,6 +326,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.workspaceRootIds.clear();
     for (const [id, root] of nextRoots) this.workspaceRoots.set(id, root);
     for (const [root, id] of nextRootIds) this.workspaceRootIds.set(root, id);
+    return ok(undefined);
+  }
+
+  private async restoreRefreshState(
+    sourcesRoot: string,
+    previousWorkspaces: readonly NativeThaiRagWorkspace[],
+    previousRoots: ReadonlyMap<string, string>,
+    previousRootIds: ReadonlyMap<string, string>,
+  ): Promise<Result<void>> {
+    const aliases = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
+    if (!aliases.ok) {
+      this.workspaceRoots.clear();
+      this.workspaceRootIds.clear();
+      return err(appError('CONFLICT', `Native Thai-RAG refresh could not restore aliases after shutdown: ${aliases.error.message}`, true));
+    }
+    this.workspaceRoots.clear();
+    this.workspaceRootIds.clear();
+    for (const [id, root] of previousRoots) this.workspaceRoots.set(id, root);
+    for (const [root, id] of previousRootIds) this.workspaceRootIds.set(root, id);
     return ok(undefined);
   }
 
@@ -444,7 +467,7 @@ async function syncWorkspaceSourceAliases(
       if (!isCurrent()) return staleAliasResult(changed);
       const metadata = await lstat(alias);
       if (!metadata.isSymbolicLink()) {
-        await rollbackWorkspaceAliases(changed);
+        if (!await rollbackWorkspaceAliases(changed)) return err(appError('CONFLICT', `Unable to restore Thai-RAG aliases after conflict: ${alias}`, true));
         return err(appError('CONFLICT', `Thai-RAG source alias path is occupied by a non-symlink: ${alias}`, true));
       }
       changed.push({ alias, previousTarget: await readlink(alias) });
@@ -459,7 +482,7 @@ async function syncWorkspaceSourceAliases(
       try {
         const metadata = await lstat(alias);
         if (!metadata.isSymbolicLink()) {
-          await rollbackWorkspaceAliases(changed);
+          if (!await rollbackWorkspaceAliases(changed)) return err(appError('CONFLICT', `Unable to restore Thai-RAG aliases after conflict: ${alias}`, true));
           return err(appError('CONFLICT', `Thai-RAG source alias path is occupied by a non-symlink: ${alias}`, true));
         }
         existingTarget = await readlink(alias);
@@ -482,21 +505,27 @@ async function syncWorkspaceSourceAliases(
     }
     return ok([...changedWorkspaceIds]);
   } catch (error: unknown) {
-    await rollbackWorkspaceAliases(changed);
+    if (!await rollbackWorkspaceAliases(changed)) return err(appError('CONFLICT', `Unable to restore Thai-RAG aliases after refresh failure: ${errorMessage(error)}`, true));
     return err(appError('INTERNAL_ERROR', `Unable to refresh Thai-RAG workspace aliases: ${errorMessage(error)}`, true));
   }
 }
 
 async function staleAliasResult(changed: readonly { readonly alias: string; readonly previousTarget: string | null }[]): Promise<Result<readonly string[]>> {
-  await rollbackWorkspaceAliases(changed);
+  if (!await rollbackWorkspaceAliases(changed)) return err(appError('CONFLICT', 'Unable to restore stale Thai-RAG aliases after lifecycle invalidation', true));
   return ok([]);
 }
 
-async function rollbackWorkspaceAliases(changed: readonly { readonly alias: string; readonly previousTarget: string | null }[]): Promise<void> {
-  await Promise.all([...changed].reverse().map(async ({ alias, previousTarget }) => {
-    await rm(alias, { force: true, recursive: true }).catch(() => undefined);
-    if (previousTarget !== null) await symlink(previousTarget, alias, 'dir').catch(() => undefined);
-  }));
+async function rollbackWorkspaceAliases(changed: readonly { readonly alias: string; readonly previousTarget: string | null }[]): Promise<boolean> {
+  let restored = true;
+  for (const { alias, previousTarget } of [...changed].reverse()) {
+    try {
+      await rm(alias, { force: true, recursive: true });
+      if (previousTarget !== null) await symlink(previousTarget, alias, 'dir');
+    } catch {
+      restored = false;
+    }
+  }
+  return restored;
 }
 
 function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {

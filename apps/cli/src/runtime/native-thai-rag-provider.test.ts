@@ -227,6 +227,50 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(workspaceRoot));
   });
 
+  it('restores previous alias when stop invalidates an in-flight reindex', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const relinkedRoot = await tempRoot();
+    let current = [{ id: workspaceId, realRootPath: firstRoot }];
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let markRelinkIndexStarted: (() => void) | undefined;
+    const relinkIndexStarted = new Promise<void>((resolve) => { markRelinkIndexStarted = resolve; });
+    let indexCalls = 0;
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => current,
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            indexCalls += 1;
+            if (indexCalls === 1) markIndexStarted?.();
+            else markRelinkIndexStarted?.();
+            await indexBlocked;
+          }
+          return success('indexed');
+        },
+      }),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    await indexStarted;
+    releaseIndex?.();
+    current = [{ id: workspaceId, realRootPath: relinkedRoot }];
+    const refreshing = driver.call('recall', { query: 'relink before stop' });
+    await relinkIndexStarted;
+    const stopping = driver.stop();
+    releaseIndex?.();
+
+    await refreshing;
+    expect((await stopping).ok).toBe(true);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
+  });
+
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

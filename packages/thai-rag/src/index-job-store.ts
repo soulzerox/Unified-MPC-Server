@@ -15,6 +15,7 @@ export interface ThaiRagIndexJob {
   readonly finishedAt?: string;
   readonly result?: unknown;
   readonly error?: string;
+  readonly legacyData?: Readonly<Record<string, unknown>>;
 }
 
 interface JobFile {
@@ -151,25 +152,24 @@ export class ThaiRagIndexJobStore {
 }
 
 function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndexJob; readonly migrated: boolean } | null {
-  if (!isRecord(value)
-    || typeof value.jobId !== 'string'
-    || typeof value.workspaceId !== 'string'
-    || value.workspaceId.trim().length === 0
-    || (value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed' && value.status !== 'interrupted' && value.status !== 'legacy-unavailable')
-    || typeof value.force !== 'boolean'
-    || typeof value.startedAt !== 'string') return null;
+  if (!isRecord(value) || typeof value.jobId !== 'string' || value.jobId.trim().length === 0) return null;
+  const workspaceId = typeof value.workspaceId === 'string' && value.workspaceId.trim().length > 0
+    ? value.workspaceId
+    : 'legacy-unavailable';
   const ownerId = typeof value.ownerId === 'string' && value.ownerId.trim().length > 0 ? value.ownerId : undefined;
-  const legacy = ownerId === undefined || !parseCanonicalWorkspaceId(value.workspaceId).ok;
+  const validStatus = value.status === 'running' || value.status === 'completed' || value.status === 'failed' || value.status === 'interrupted' || value.status === 'legacy-unavailable';
+  const legacy = ownerId === undefined || !parseCanonicalWorkspaceId(workspaceId).ok || !validStatus;
+  const status: ThaiRagIndexJobStatus = legacy ? 'legacy-unavailable' : value.status as ThaiRagIndexJobStatus;
   return {
     migrated: legacy,
     job: {
       jobId: value.jobId,
-      workspaceId: value.workspaceId,
+      workspaceId,
       ...(ownerId === undefined ? {} : { ownerId }),
-      status: legacy ? 'legacy-unavailable' : value.status,
-      force: value.force,
-      startedAt: value.startedAt,
-      ...(legacy ? { finishedAt: typeof value.finishedAt === 'string' ? value.finishedAt : now().toISOString(), error: 'Legacy index job has no owner and is unavailable' } : {}),
+      status,
+      force: typeof value.force === 'boolean' ? value.force : false,
+      startedAt: typeof value.startedAt === 'string' ? value.startedAt : now().toISOString(),
+      ...(legacy ? { finishedAt: typeof value.finishedAt === 'string' ? value.finishedAt : now().toISOString(), error: 'Legacy index job is unavailable', legacyData: value } : {}),
       ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),
       ...(Object.hasOwn(value, 'result') ? { result: value.result } : {}),
       ...(typeof value.error === 'string' ? { error: value.error } : {}),

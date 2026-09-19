@@ -72,7 +72,7 @@ describe('ThaiRagIndexJobStore', () => {
         startedAt: '2026-09-17T01:00:00.000Z',
       },
       {
-        jobId: 'idx_umcp_legacy_noncanonical',
+        jobId: 'legacy-arbitrary-id',
         workspaceId: 'legacy-workspace-name',
         status: 'completed',
         force: false,
@@ -85,11 +85,17 @@ describe('ThaiRagIndexJobStore', () => {
     await store.initialize();
 
     await expect(store.get('idx_umcp_legacy', 'owner-a', '11111111-1111-4111-8111-111111111111')).resolves.toBeNull();
-    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { schemaVersion: number; jobs: Array<Record<string, unknown>> };
+    expect(persisted.schemaVersion).toBe(2);
     expect(persisted.jobs).toHaveLength(2);
     expect(persisted.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({ jobId: 'idx_umcp_legacy', status: 'legacy-unavailable' }),
-      expect.objectContaining({ jobId: 'idx_umcp_legacy_noncanonical', workspaceId: 'legacy-workspace-name', status: 'legacy-unavailable' }),
+      expect.objectContaining({
+        jobId: 'legacy-arbitrary-id',
+        workspaceId: 'legacy-workspace-name',
+        status: 'legacy-unavailable',
+        legacyData: expect.objectContaining({ result: { indexed: 3 }, workspaceId: 'legacy-workspace-name' }),
+      }),
     ]));
   });
 });

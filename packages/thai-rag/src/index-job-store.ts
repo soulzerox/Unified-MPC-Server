@@ -1,13 +1,14 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
+import { parseCanonicalWorkspaceId, resolveThaiRagProviderRoot } from './canonical-workspace.js';
 
 export type ThaiRagIndexJobStatus = 'running' | 'completed' | 'failed' | 'interrupted';
 
 export interface ThaiRagIndexJob {
   readonly jobId: string;
   readonly workspaceId: string;
+  readonly ownerId: string;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
   readonly startedAt: string;
@@ -58,11 +59,15 @@ export class ThaiRagIndexJobStore {
     if (changed) await this.persist();
   }
 
-  public async create(workspaceId: string, force: boolean): Promise<ThaiRagIndexJob> {
+  public async create(workspaceId: string, force: boolean, ownerId: string): Promise<ThaiRagIndexJob> {
+    const parsedWorkspaceId = parseCanonicalWorkspaceId(workspaceId);
+    if (!parsedWorkspaceId.ok) throw new Error(parsedWorkspaceId.error.message);
+    if (ownerId.trim().length === 0) throw new Error('Thai-RAG index job owner is required');
     await this.initialize();
     const job: ThaiRagIndexJob = {
       jobId: `idx_umcp_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
-      workspaceId,
+      workspaceId: parsedWorkspaceId.value,
+      ownerId,
       status: 'running',
       force,
       startedAt: this.now().toISOString(),
@@ -72,44 +77,46 @@ export class ThaiRagIndexJobStore {
     return job;
   }
 
-  public async complete(jobId: string, result: unknown): Promise<ThaiRagIndexJob | null> {
-    return this.finish(jobId, 'completed', { result });
+  public async complete(jobId: string, result: unknown, ownerId: string): Promise<ThaiRagIndexJob | null> {
+    return this.finish(jobId, 'completed', { result }, ownerId);
   }
 
-  public async fail(jobId: string, error: string): Promise<ThaiRagIndexJob | null> {
-    return this.finish(jobId, 'failed', { error });
+  public async fail(jobId: string, error: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
+    return this.finish(jobId, 'failed', { error }, ownerId);
   }
 
-  public async interruptRunning(reason = 'Provider stopped before the indexing job completed'): Promise<void> {
+  public async interruptRunning(ownerId: string, reason = 'Provider stopped before the indexing job completed'): Promise<void> {
     await this.initialize();
     const finishedAt = this.now().toISOString();
     let changed = false;
     for (const [id, job] of this.jobs) {
-      if (job.status !== 'running') continue;
+      if (job.status !== 'running' || job.ownerId !== ownerId) continue;
       this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: reason });
       changed = true;
     }
     if (changed) await this.persist();
   }
 
-  public async get(jobId: string): Promise<ThaiRagIndexJob | null> {
+  public async get(jobId: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
     await this.initialize();
-    return this.jobs.get(jobId) ?? null;
+    const job = this.jobs.get(jobId);
+    return job !== undefined && job.ownerId === ownerId ? job : null;
   }
 
-  public async active(): Promise<readonly ThaiRagIndexJob[]> {
+  public async active(ownerId: string): Promise<readonly ThaiRagIndexJob[]> {
     await this.initialize();
-    return [...this.jobs.values()].filter((job) => job.status === 'running');
+    return [...this.jobs.values()].filter((job) => job.status === 'running' && job.ownerId === ownerId);
   }
 
   private async finish(
     jobId: string,
     status: 'completed' | 'failed',
     detail: { readonly result?: unknown; readonly error?: string },
+    ownerId: string,
   ): Promise<ThaiRagIndexJob | null> {
     await this.initialize();
     const current = this.jobs.get(jobId);
-    if (current === undefined) return null;
+    if (current === undefined || current.ownerId !== ownerId) return null;
     const next: ThaiRagIndexJob = {
       ...current,
       status,
@@ -134,13 +141,18 @@ function parseJob(value: unknown): ThaiRagIndexJob | null {
   if (!isRecord(value)
     || typeof value.jobId !== 'string'
     || typeof value.workspaceId !== 'string'
+    || typeof value.ownerId !== 'string'
+    || value.ownerId.trim().length === 0
+    || !parseCanonicalWorkspaceId(value.workspaceId).ok
     || (value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed' && value.status !== 'interrupted')
     || typeof value.force !== 'boolean'
     || typeof value.startedAt !== 'string') return null;
-  return {
-    jobId: value.jobId,
-    workspaceId: value.workspaceId,
-    status: value.status,
+    return {
+      jobId: value.jobId,
+      workspaceId: value.workspaceId,
+      ownerId: value.ownerId,
+      status: value.status,
+
     force: value.force,
     startedAt: value.startedAt,
     ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),

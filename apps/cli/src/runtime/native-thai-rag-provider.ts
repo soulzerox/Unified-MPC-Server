@@ -41,6 +41,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly jobs: ThaiRagIndexJobStore;
   private readonly healthRefreshMs: number;
   private launchConfig: McpServerLaunchConfig | undefined;
+  private ownerId: string | undefined;
   private lastHealth: ThaiRagProviderDriverHealth | undefined;
   private lastHealthAt = 0;
   private workerQueue: Promise<unknown> = Promise.resolve();
@@ -67,6 +68,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!refreshed.ok) return refreshed;
     const sourcesRoot = path.join(providerRoot.value, 'sources');
 
+    this.ownerId = options.ownerId;
     this.launchConfig = {
       ...this.options.launchConfig,
       cwd: sourcesRoot,
@@ -112,7 +114,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const refreshed = await this.refreshWorkspaceRoots();
     if (!refreshed.ok) return refreshed;
-    const activeJobs = await this.jobs.active();
+    const activeJobs = await this.jobs.active(this.ownerId!);
     if (activeJobs.length > 0 && this.lastHealth !== undefined) {
       return ok({ ...this.lastHealth, activeJobs: activeJobs.map((job) => job.jobId) });
     }
@@ -129,7 +131,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const refreshed = await this.refreshWorkspaceRoots();
     if (!refreshed.ok) return refreshed;
     if (tool === 'index_status' && typeof args.job_id === 'string' && args.job_id.startsWith('idx_umcp_')) {
-      const job = await this.jobs.get(args.job_id);
+      const job = await this.jobs.get(args.job_id, this.ownerId!);
       return job === null
         ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${args.job_id}`))
         : ok(job);
@@ -142,7 +144,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   public async stop(): Promise<Result<void>> {
     this.started = false;
-    await this.jobs.interruptRunning();
+    await this.jobs.interruptRunning(this.ownerId!);
     this.sessions.unpin(SERVER_NAME);
     await this.sessions.close().catch(() => undefined);
     return ok(undefined);
@@ -162,17 +164,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     };
     if (!background) return this.callWorker('code_index', childArgs, signal, budget);
 
-    const job = await this.jobs.create(workspace.value.workspaceId, force);
+    const job = await this.jobs.create(workspace.value.workspaceId, force, this.ownerId!);
     const operation = this.enqueueWorker(async () => {
       const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
       const result = normalizeWorkerCallResult('code_index', raw);
-      if (result.ok) await this.jobs.complete(job.jobId, result.value);
-      else await this.jobs.fail(job.jobId, result.error.message);
+      if (result.ok) await this.jobs.complete(job.jobId, result.value, this.ownerId!);
+      else await this.jobs.fail(job.jobId, result.error.message, this.ownerId!);
       return result;
     });
-    void operation.catch(async (error: unknown) => {
-      await this.jobs.fail(job.jobId, errorMessage(error)).catch(() => undefined);
-    });
+      void operation.catch(async (error: unknown) => {
+        await this.jobs.fail(job.jobId, errorMessage(error), this.ownerId!).catch(() => undefined);
+      });
+
     return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value.workspaceId });
   }
 
@@ -324,7 +327,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       }, signal));
       semanticAvailable = semanticProbe.ok && !toolResultIsError(semanticProbe.value);
     }
-    const activeJobs = await this.jobs.active();
+    const activeJobs = await this.jobs.active(this.ownerId!);
     const health: ThaiRagProviderDriverHealth = {
       workerReachable: true,
       sqliteAvailable: storageAvailable,

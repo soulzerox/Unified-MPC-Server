@@ -93,12 +93,25 @@ describe('Thai-RAG provider handshake', () => {
     for (const change of [
       { compatibilityRange: { min: '2.0', max: '2.x' } },
       { embedding: { ...baseHandshake.embedding, model: 'other@sha256:abc' } },
+      { embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe@sha256:bad digest' } },
       { embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' } },
+      { embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined } },
       { generation: { ...baseHandshake.generation, embedding: 'other-profile' } },
     ]) {
-      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:def', expectedPreprocessingVersion: '1' });
+      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' });
       expect(result.ok).toBe(false);
     }
+  });
+
+  it('accepts model-family metadata without requiring a digest', () => {
+    expect(validateThaiRagHandshake({ ...baseHandshake, embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe' } }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' }).ok).toBe(true);
+  });
+
+  it('enforces digest only when expected model publishes trusted digest', () => {
+    const matching = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:abc', expectedPreprocessingVersion: '1' });
+    const drifted = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:def', expectedPreprocessingVersion: '1' });
+    expect(matching.ok).toBe(true);
+    expect(drifted.ok).toBe(false);
   });
 
   it('requires explicit degraded capability allowlist', () => {

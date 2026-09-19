@@ -12,6 +12,8 @@ export const THAI_RAG_LEGACY_ADAPTERS = {
 } as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE_VERSION = '1.0';
 export const THAI_RAG_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
+export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
+export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
 export const THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES = ['vector_store', 'embedder', 'semantic_retrieval'] as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE = {
   topLevel: ['provider_id', 'provider_version', 'contract_version', 'compatibility_range', 'contract_fingerprint', 'index_job_contract_version', 'capabilities', 'workspace_scope_model', 'state', 'workspace_ready', 'embedding', 'generation', 'embedding_index_generation', 'components'],
@@ -192,9 +194,10 @@ export function validateThaiRagHandshake(
   if (!Number.isSafeInteger(handshake.embedding.dimension) || handshake.embedding.dimension <= 0) return fail('embedding-metadata-invalid', 'embedding dimension is invalid');
   if (handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion.trim().length === 0) return fail('embedding-metadata-invalid', 'embedding preprocessing version is invalid');
   if (options.expectedEmbeddingProfile !== undefined && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported', { expected: options.expectedEmbeddingProfile, actual: handshake.embedding.profile });
-  if (options.expectedEmbeddingModel !== undefined && handshake.embedding.model !== options.expectedEmbeddingModel) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
-  if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
-  if (!isEmbeddingModelMetadataValid(handshake.embedding.profile, handshake.embedding.model)) return fail('embedding-metadata-invalid', 'embedding model does not match embedding profile');
+  const attestedLegacy = adapter !== undefined && options.allowLegacyAdapter === true;
+  if (options.expectedEmbeddingModel !== undefined && !attestedLegacy && !isExpectedEmbeddingModel(handshake.embedding.model, options.expectedEmbeddingModel)) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
+  if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion && !attestedLegacy) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
+  if (!isEmbeddingModelMetadataValid(handshake.embedding.profile, handshake.embedding.model, attestedLegacy)) return fail('embedding-metadata-invalid', 'embedding model does not match embedding profile');
   return ok(handshake);
 }
 
@@ -217,10 +220,22 @@ function parseVersion(value: string): readonly [number, number] | undefined {
   return match === null ? undefined : [Number(match[1]), Number(match[2])];
 }
 
-function isEmbeddingModelMetadataValid(profile: string, model: string): boolean {
+function isExpectedEmbeddingModel(model: string, expected: string): boolean {
+  const [expectedName, expectedDigest] = expected.split('@sha256:');
+  const [modelName, modelDigest] = model.split('@sha256:');
+  if (modelName !== expectedName) return false;
+  if (expectedDigest !== undefined) return modelDigest === expectedDigest;
+  return modelDigest === undefined || isEmbeddingDigestValid(modelDigest);
+}
+
+function isEmbeddingModelMetadataValid(profile: string, model: string, allowLegacyMetadata = false): boolean {
   if (profile.trim().length === 0 || model.trim().length === 0) return false;
   const [modelName, digest] = model.split('@sha256:');
-  return modelName === profile && (digest === undefined || /^[a-f0-9]{3,}$/i.test(digest));
+  return (modelName === profile || allowLegacyMetadata) && (digest === undefined || isEmbeddingDigestValid(digest));
+}
+
+function isEmbeddingDigestValid(digest: string | undefined): boolean {
+  return digest !== undefined && /^[a-f0-9]{3,}$/i.test(digest);
 }
 
 export function isEmbeddingIndexGenerationCompatible(

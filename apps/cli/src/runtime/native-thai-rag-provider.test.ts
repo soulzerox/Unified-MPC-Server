@@ -597,6 +597,9 @@ describe('NativeThaiRagProviderDriver', () => {
     const workspaceRoot = await tempRoot();
     const production = {
       ...defaultHandshake(),
+      contract_version: '0.9',
+      compatibility_range: { min: '0.9', max: '1.x' },
+      legacy_adapter: 'thai-rag-provider-1.0-production-bridge',
       state: 'degraded',
       embedding: { profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', dimension: 768 },
       generation: { contract: THAI_RAG_CONTRACT_FINGERPRINT, embedding: 'nomic-embed-text-v2-moe:latest', index: 'unknown', storage: 'sqlite' },

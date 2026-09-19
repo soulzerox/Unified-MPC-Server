@@ -11,6 +11,8 @@ import {
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
+  THAI_RAG_EMBEDDING_MODEL,
+  THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
   THAI_RAG_EMBEDDING_PROFILE,
   THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
@@ -130,6 +132,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
       expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+      expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL,
+      expectedPreprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!compatible.ok) {
@@ -150,6 +154,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: healthHandshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
       expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+      expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL,
+      expectedPreprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!healthy.ok) {
@@ -444,6 +450,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       embeddingIndexGeneration: this.expectedEmbeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
       expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+      expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL,
+      expectedPreprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!compatible.ok) return compatible;

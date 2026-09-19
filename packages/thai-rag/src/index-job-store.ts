@@ -103,12 +103,15 @@ export class ThaiRagIndexJobStore {
     if (changed) await this.persist();
   }
 
-  public async get(jobId: string, ownerId: string, workspaceId?: string): Promise<ThaiRagIndexJob | null> {
+  public async get(jobId: string, ownerId: string, workspaceId: string): Promise<ThaiRagIndexJob | null> {
+    if (typeof jobId !== 'string' || typeof ownerId !== 'string' || typeof workspaceId !== 'string'
+      || jobId.trim().length === 0 || ownerId.trim().length === 0 || workspaceId.trim().length === 0) return null;
     await this.initialize();
     const job = this.jobs.get(jobId);
     return job !== undefined
+      && job.status !== 'legacy-unavailable'
       && job.ownerId === ownerId
-      && (workspaceId === undefined || job.workspaceId === workspaceId)
+      && job.workspaceId === workspaceId
       ? job
       : null;
   }
@@ -151,12 +154,12 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
   if (!isRecord(value)
     || typeof value.jobId !== 'string'
     || typeof value.workspaceId !== 'string'
-    || !parseCanonicalWorkspaceId(value.workspaceId).ok
+    || value.workspaceId.trim().length === 0
     || (value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed' && value.status !== 'interrupted' && value.status !== 'legacy-unavailable')
     || typeof value.force !== 'boolean'
     || typeof value.startedAt !== 'string') return null;
   const ownerId = typeof value.ownerId === 'string' && value.ownerId.trim().length > 0 ? value.ownerId : undefined;
-  const legacy = ownerId === undefined;
+  const legacy = ownerId === undefined || !parseCanonicalWorkspaceId(value.workspaceId).ok;
   return {
     migrated: legacy,
     job: {

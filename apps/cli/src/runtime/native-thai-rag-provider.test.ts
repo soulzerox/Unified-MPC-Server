@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -114,6 +114,59 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.call('index_status', { job_id: 'arbitrary-id', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    expect(calls).not.toContain('index_status');
+    await driver.stop();
+  });
+
+  it('preserves noncanonical legacy index jobs as unavailable', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 1, jobs: [{
+      jobId: 'idx_umcp_legacy_noncanonical',
+      workspaceId: 'legacy-workspace-name',
+      status: 'completed',
+      force: false,
+      startedAt: '2026-09-17T01:00:00.000Z',
+      result: { indexed: 3 },
+    }] }));
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_legacy_noncanonical', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    expect(persisted.jobs).toEqual([expect.objectContaining({
+      jobId: 'idx_umcp_legacy_noncanonical',
+      workspaceId: 'legacy-workspace-name',
+      status: 'legacy-unavailable',
+    })]);
+    await driver.stop();
+  });
+
+  it('rejects missing index status workspace scope', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('indexed');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_any' })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(calls).not.toContain('index_status');
     await driver.stop();
   });

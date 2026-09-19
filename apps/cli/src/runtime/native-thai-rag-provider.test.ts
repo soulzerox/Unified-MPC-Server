@@ -50,7 +50,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const probes: Array<[typeof productionToolNames[number], Readonly<Record<string, unknown>>]> = [
       ['remember', { workspace_id: workspaceId, content: 'probe' }],
       ['recall', { workspace_id: workspaceId, query: 'probe' }],
-      ['record_event', { workspace_id: workspaceId, event: 'probe' }],
+      ['record_event', { workspace_id: workspaceId, event_type: 'probe', content: 'probe' }],
       ['forget', { workspace_id: workspaceId, memory_id: 'probe' }],
       ['pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' }],
       ['code_search', { workspace_id: workspaceId, query: 'probe' }],
@@ -942,8 +942,10 @@ function clientFactory(options: {
             name,
             description: name,
             inputSchema: productionToolNames.includes(name as typeof productionToolNames[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
-              ? { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }
-             : { type: 'object' },
+            ? name === 'record_event'
+              ? { type: 'object', properties: { workspace_id: { type: 'string' }, event_type: { type: 'string' }, content: { type: 'string' } }, required: ['workspace_id', 'event_type', 'content'] }
+                : { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }
+              : { type: 'object' },
           }));
         },
         async listResources(): Promise<[]> { return []; },

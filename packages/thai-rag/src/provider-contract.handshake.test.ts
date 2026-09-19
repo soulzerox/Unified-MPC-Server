@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   THAI_RAG_CONTRACT_FINGERPRINT,
   THAI_RAG_CONTRACT_VERSION,
+  THAI_RAG_PRODUCTION_BRIDGE,
   THAI_RAG_REQUIRED_CAPABILITIES,
   validateThaiRagHandshake,
   type ThaiRagProviderHandshake,
@@ -57,12 +58,24 @@ describe('Thai-RAG provider handshake', () => {
     if (!result.ok) expect(result.error.details).toMatchObject({ reason: 'contract-version-mismatch', expected: '1.0', actual: '0.9' });
   });
 
-  it('accepts production bridge metadata with unknown index and omitted preprocessing', () => {
+  it('rejects production bridge metadata when current-contract embedding drifts', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      embedding: { ...baseHandshake.embedding, dimension: 1024 },
+      legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE,
+    }, { allowLegacyAdapter: true });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
+  });
+
+  it('accepts production bridge metadata with mapped legacy embedding metadata', () => {
     const production = {
       ...baseHandshake,
+      contractVersion: '0.9',
+      compatibilityRange: { min: '0.9', max: '1.x' },
+      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest', index: 'unknown' },
       health: 'degraded',
-      embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined },
-      generation: { ...baseHandshake.generation, index: 'unknown' },
       components: {
         workerReachable: true,
         sqliteAvailable: true,
@@ -73,7 +86,30 @@ describe('Thai-RAG provider handshake', () => {
         semanticRetrievalAvailable: false,
         activeJobs: [],
       },
-      legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
+      legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE,
+    };
+    expect(validateThaiRagHandshake(production, { embeddingIndexGeneration: 1, allowLegacyAdapter: true, allowedDegradedCapabilities: ['vector_store', 'embedder', 'semantic_retrieval'] })).toMatchObject({ ok: true });
+  });
+
+  it('accepts production bridge metadata with unknown index and omitted preprocessing', () => {
+    const production = {
+      ...baseHandshake,
+      contractVersion: '0.9',
+      compatibilityRange: { min: '0.9', max: '1.x' },
+      health: 'degraded',
+      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest', index: 'unknown' },
+      components: {
+        workerReachable: true,
+        sqliteAvailable: true,
+        ftsAvailable: true,
+        vectorStoreAvailable: false,
+        embedderAvailable: false,
+        lexicalRetrievalAvailable: true,
+        semanticRetrievalAvailable: false,
+        activeJobs: [],
+      },
+      legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE,
     };
     expect(validateThaiRagHandshake(production, { embeddingIndexGeneration: 1, allowLegacyAdapter: true, allowedDegradedCapabilities: ['vector_store', 'embedder', 'semantic_retrieval'] })).toEqual({ ok: true, value: production });
   });
@@ -191,8 +227,10 @@ describe('Thai-RAG provider handshake', () => {
       ...baseHandshake,
       contractVersion: '0.9',
       compatibilityRange: { min: '0.9', max: '1.x' },
+      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest' },
       capabilities: [...baseHandshake.capabilities],
-      legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
+      legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE,
     }, { allowLegacyAdapter: true });
     expect(legacy.ok).toBe(true);
   });

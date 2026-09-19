@@ -20,8 +20,8 @@ export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
 export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
 export const THAI_RAG_EMBEDDING_DIMENSION = 768;
 export const THAI_RAG_EMBEDDING_COMPATIBILITY = {
-  '0.9': { profile: `${THAI_RAG_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_EMBEDDING_MODEL}:latest` },
-  '1.0': { profile: THAI_RAG_EMBEDDING_PROFILE, model: THAI_RAG_EMBEDDING_MODEL, preprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION },
+  '0.9': { profile: `${THAI_RAG_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_EMBEDDING_MODEL}:latest`, dimension: THAI_RAG_EMBEDDING_DIMENSION },
+  '1.0': { profile: THAI_RAG_EMBEDDING_PROFILE, model: THAI_RAG_EMBEDDING_MODEL, dimension: THAI_RAG_EMBEDDING_DIMENSION, preprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION },
 } as const;
 export const THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES = ['vector_store', 'embedder', 'semantic_retrieval'] as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE = {
@@ -31,7 +31,7 @@ export const THAI_RAG_CONFORMANCE_FIXTURE = {
   operations: {
     remember: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
     recall: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
-    record_event: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    record_event: { scope: 'workspace_id', required: ['workspace_id', 'event_type', 'content'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
     forget: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
     pre_edit_context: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED', 'CONFLICT'] },
     code_search: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
@@ -220,14 +220,15 @@ export function validateThaiRagHandshake(
   }
   if (!Number.isSafeInteger(handshake.embedding.dimension) || handshake.embedding.dimension <= 0) return fail('embedding-metadata-invalid', 'embedding dimension is invalid');
   if (handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion.trim().length === 0) return fail('embedding-metadata-invalid', 'embedding preprocessing version is invalid');
-  const attestedLegacy = adapter !== undefined && options.allowLegacyAdapter === true;
-  if (!attestedLegacy && handshake.contractVersion === THAI_RAG_CONTRACT_VERSION && handshake.embedding.dimension !== THAI_RAG_EMBEDDING_DIMENSION) return fail('embedding-metadata-invalid', 'embedding dimension is unsupported', { expected: THAI_RAG_EMBEDDING_DIMENSION, actual: handshake.embedding.dimension });
+  const attestedLegacy = legacy && adapter !== undefined && options.allowLegacyAdapter === true;
+  const expectedEmbedding = THAI_RAG_EMBEDDING_COMPATIBILITY[handshake.contractVersion as keyof typeof THAI_RAG_EMBEDDING_COMPATIBILITY];
+  if (expectedEmbedding !== undefined && handshake.embedding.dimension !== expectedEmbedding.dimension) return fail('embedding-metadata-invalid', 'embedding dimension is unsupported', { expected: expectedEmbedding.dimension, actual: handshake.embedding.dimension });
   if (options.expectedEmbeddingProfile !== undefined && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported', { expected: options.expectedEmbeddingProfile, actual: handshake.embedding.profile });
   if (options.expectedEmbeddingModel !== undefined && !attestedLegacy && !isExpectedEmbeddingModel(handshake.embedding.model, options.expectedEmbeddingModel)) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
   if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion && !attestedLegacy) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
   if (!isEmbeddingModelMetadataValid(handshake.embedding.profile, handshake.embedding.model, attestedLegacy)) return fail('embedding-metadata-invalid', 'embedding model does not match embedding profile');
   const normalized = normalizeSupportedEmbeddingMetadata(handshake);
-  if (!attestedLegacy && handshake.contractVersion === THAI_RAG_CONTRACT_VERSION && (normalized.embedding.profile !== THAI_RAG_EMBEDDING_PROFILE || normalized.embedding.model.split('@sha256:')[0] !== THAI_RAG_EMBEDDING_MODEL || normalized.embedding.preprocessingVersion !== THAI_RAG_EMBEDDING_PREPROCESSING_VERSION)) return fail('embedding-metadata-invalid', 'embedding metadata drifts from supported contract profile', { expected: { profile: THAI_RAG_EMBEDDING_PROFILE, model: THAI_RAG_EMBEDDING_MODEL, preprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION }, actual: handshake.embedding });
+  if (expectedEmbedding !== undefined && (normalized.embedding.profile !== expectedEmbedding.profile || normalized.embedding.model.split('@sha256:')[0] !== expectedEmbedding.model || ('preprocessingVersion' in expectedEmbedding && normalized.embedding.preprocessingVersion !== expectedEmbedding.preprocessingVersion))) return fail('embedding-metadata-invalid', 'embedding metadata drifts from supported contract profile', { expected: expectedEmbedding, actual: handshake.embedding });
   return ok(normalized);
 }
 

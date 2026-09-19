@@ -322,6 +322,11 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagArguments.map(({ args }) => args.event_type)).toEqual([
       'decision', 'requirement', 'constraint', 'preference', 'milestone', 'handoff', 'root_cause_fix', 'explicit_remember', 'explicit_remember',
     ]);
+    expect(nativeRagArguments[0]?.args).toMatchObject({
+      workspace_id: 'workspace-1',
+      event_type: 'decision',
+      content: '[decision] decision\n- value',
+    });
   });
 
   it('exposes curated native working-memory tools after bootstrap', async () => {

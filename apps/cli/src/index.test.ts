@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -158,6 +158,52 @@ describe('CLI default dependency lifecycle', () => {
       annotations: { readOnlyHint: true, destructiveHint: false },
     });
   });
+
+  it('executes CLI harness bootstrap, prepare, and mutation with native Thai-RAG wiring', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-harness-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-data-'));
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    const components = {
+      workerReachable: true,
+      sqliteAvailable: true,
+      ftsAvailable: true,
+      vectorStoreAvailable: true,
+      embedderAvailable: true,
+      lexicalRetrievalAvailable: true,
+      semanticRetrievalAvailable: true,
+      activeJobs: [],
+    } as const;
+    const thaiRagDriver = {
+      start: async (): Promise<ReturnType<typeof ok<typeof components>>> => ok(components),
+      health: async (): Promise<ReturnType<typeof ok<typeof components>>> => ok(components),
+      call: async (): Promise<ReturnType<typeof ok<{ readonly ready: boolean }>>> => ok({ ready: true }),
+      stop: async (): Promise<ReturnType<typeof ok<void>>> => ok(undefined),
+    };
+    try {
+      await writeFile(path.join(root, 'AGENTS.md'), '# CLI harness rules\\n');
+      const dependencies = createDefaultCliDependencies({ thaiRagDriver });
+      const workspace = await dependencies.workspaceAdd(root);
+      expect(workspace.ok).toBe(true);
+      if (!workspace.ok) return;
+      const bootstrap = await dependencies.toolsCall?.('workspace_bootstrap', { workspaceId: workspace.value.id });
+      expect(bootstrap).toMatchObject({ ok: true, value: { structuredContent: { ready: true } } });
+      const prepared = await dependencies.toolsCall?.('prepare_code_change', { workspaceId: workspace.value.id, filePath: 'src/cli.ts' });
+      expect(prepared).toMatchObject({ ok: true, value: { structuredContent: { ready: true, filePath: 'src/cli.ts' } } });
+      const mutation = await dependencies.toolsCall?.('write_file', {
+        workspaceId: workspace.value.id,
+        path: 'src/cli.ts',
+        content: 'export const cli = true;\\n',
+      });
+      expect(mutation).toMatchObject({ ok: true, value: { structuredContent: { path: 'src/cli.ts' } } });
+      await expect(readFile(path.join(root, 'src/cli.ts'), 'utf8')).resolves.toBe('export const cli = true;\\n');
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      await rm(root, { recursive: true, force: true });
+      await rm(dataPath, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('wires the standalone tools facade to extension services so child MCP inspection is available', async () => {
     const dependencies = createDefaultCliDependencies();

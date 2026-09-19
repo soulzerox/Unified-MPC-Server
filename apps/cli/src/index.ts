@@ -6,6 +6,7 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
@@ -388,7 +389,11 @@ async function runWorkspaceSelectionCommand(
   return 0;
 }
 
-export function createDefaultCliDependencies(): CliDependencies {
+export interface DefaultCliDependenciesOptions {
+  readonly thaiRagDriver?: StdioMcpRuntimeOptions['thaiRagDriver'];
+}
+
+export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
   let workspaceState: {
     readonly repository: SqliteWorkspaceRepository;
     readonly settings: SqliteSettingsRepository;
@@ -437,11 +442,34 @@ export function createDefaultCliDependencies(): CliDependencies {
     return extensions;
   };
   let toolRegistry: ToolRegistry | undefined;
-  const getToolRegistry = (): ToolRegistry => {
-    toolRegistry ??= new ToolRegistry(
-      { extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) },
+  let mcpRuntime: StdioMcpRuntime | undefined;
+  const harnessActivationLedger = new HarnessActivationLedger();
+  const getToolRegistry = async (): Promise<ToolRegistry> => {
+    const workspaces = await getWorkspaceService().list();
+    const workspace = workspaces[0];
+    if (toolRegistry !== undefined && (mcpRuntime !== undefined || workspace === undefined)) return toolRegistry;
+    if (workspace !== undefined) {
+      mcpRuntime = createStdioMcpRuntime(resolveDataPathFromShared(), workspace, true, {
+        ...(options.thaiRagDriver === undefined ? {} : { thaiRagDriver: options.thaiRagDriver }),
+      });
+    }
+    const services = mcpRuntime?.services ?? { extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) };
+    toolRegistry = new ToolRegistry(
+      services,
       { clientId: 'cli', clientName: 'unified-mpc-cli' },
-      { harnessActivationLedger: new HarnessActivationLedger(), sessionId: 'cli' },
+      {
+        harnessActivationLedger,
+        sessionId: 'cli',
+        ...(mcpRuntime === undefined ? {} : {
+          activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
+          activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,
+          profileProvider: mcpRuntime.profileProvider,
+          allowAiDeleteProvider: mcpRuntime.allowAiDeleteProvider,
+          destructivePolicyProvider: mcpRuntime.destructivePolicyProvider,
+          codexToolsEnabled: mcpRuntime.codexToolsEnabled,
+          ponytailModeProvider: (): StdioMcpRuntime['ponytailMode'] => mcpRuntime!.ponytailMode,
+        }),
+      },
     );
     return toolRegistry;
   };
@@ -505,7 +533,7 @@ export function createDefaultCliDependencies(): CliDependencies {
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
     web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
-      const registry = getToolRegistry();
+      const registry = await getToolRegistry();
       return registry.listExposedDefinitions().map((tool) => {
         const inputSchema = registry.describeInputJsonSchema(tool.name);
         return {
@@ -518,7 +546,7 @@ export function createDefaultCliDependencies(): CliDependencies {
       });
     },
     toolsCall: async (name: string, args: Record<string, unknown>): Promise<Result<unknown>> => {
-      const response = await getToolRegistry().invoke(name, args);
+      const response = await (await getToolRegistry()).invoke(name, args);
       if (response.isError) {
         const errorText = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
         return err(appError('INTERNAL_ERROR', errorText || `Tool ${name} failed`));

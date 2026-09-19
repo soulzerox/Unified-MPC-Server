@@ -19,6 +19,8 @@ export interface TreeResult {
 }
 
 export class TreeReader {
+  public constructor(private readonly openDirectory: typeof opendir = opendir) {}
+
   public async read(rootPath: string, options: TreeOptions = {}, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<TreeResult>> {
     if (signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Tree read was cancelled', recoverable: true });
     const maxDepth = options.maxDepth ?? DEFAULT_TREE_DEPTH;
@@ -40,7 +42,7 @@ export class TreeReader {
       if (truncated || depth > maxDepth || signal?.aborted === true) return;
       let directory;
       try {
-        directory = await opendir(currentPath);
+        directory = await this.openDirectory(currentPath);
       } catch {
         return;
       }
@@ -61,9 +63,9 @@ export class TreeReader {
           if (!directoryEntry.isDirectory() && !directoryEntry.isFile()) continue;
           candidates.push({ absolutePath: absoluteEntryPath, entry: directoryEntry });
           candidates.sort((left, right) => left.entry.name.localeCompare(right.entry.name, undefined, { sensitivity: 'base' }));
-          if (candidates.length > remaining) {
-            candidates.pop();
+          if (candidates.length >= remaining) {
             hasMoreCandidates = true;
+            break;
           }
         }
       } catch {

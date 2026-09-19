@@ -8,6 +8,7 @@ export interface McpClientSession {
   listTools(signal?: AbortSignal): Promise<readonly McpToolSummary[]>;
   listResources(signal?: AbortSignal): Promise<readonly McpResourceSummary[]>;
   callTool(name: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<unknown>;
+  callToolBounded?(name: string, args: Readonly<Record<string, unknown>>, budget: ResultBudget, signal?: AbortSignal): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -163,13 +164,18 @@ export class McpSessionManager {
       }
       const inputError = validateDeclaredInput(declaredTool, args);
       if (inputError !== undefined) return err(appError('INVALID_INPUT', `Child MCP input schema mismatch for ${server}/${tool}: ${inputError}`));
+      if (budget !== undefined && activeManaged.session.callToolBounded === undefined) {
+        return err(appError('CONFLICT', `Child MCP transport cannot enforce bounded results for ${server}/${tool}`, true));
+      }
+      const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
       const result = await withTimeout(
-        (callSignal) => this.enqueue(activeManaged, () => activeManaged.session.callTool(tool, args, callSignal), callSignal),
+        (callSignal) => this.enqueue(activeManaged, () => budget === undefined
+          ? activeManaged.session.callTool(tool, args, callSignal)
+          : activeManaged.session.callToolBounded!(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal), callSignal),
         this.callTimeoutMs,
         `Timed out calling ${server}/${tool}`,
         signal,
       );
-      const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
       if (boundedJsonByteLength(result, resultLimit) > resultLimit) {
         return err(appError('INVALID_INPUT', `Child MCP result exceeds ${resultLimit} bytes`));
       }

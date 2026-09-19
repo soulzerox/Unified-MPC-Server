@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type ResultBudget } from '@unified-mpc/domain';
 import {
   ThaiRagProviderCoordinator,
   type ThaiRagProviderDriver,
@@ -108,6 +108,34 @@ describe('ThaiRagProviderCoordinator', () => {
     expect(maxInFlight).toBe(1);
     expect(calls).toHaveLength(4);
 
+    await follower.close();
+    await owner.close();
+  });
+
+  it('propagates result budgets through follower and owner sockets', async () => {
+    const dataRoot = await root();
+    let observedBudget: ResultBudget | undefined;
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async (_tool, _args, _signal, budget) => { observedBudget = budget; return ok({ bounded: true }); } }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'follower',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => { throw new Error('follower driver must not run'); } }),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    const budget: ResultBudget = { maxItems: 2, maxTextBytes: 3, maxStructuredBytes: 4, maxBinaryBytes: 5, maxBase64Bytes: 6 };
+    await follower.call('code_search', { query: 'needle' }, undefined, budget);
+
+    expect(observedBudget).toEqual(budget);
     await follower.close();
     await owner.close();
   });

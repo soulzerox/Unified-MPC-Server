@@ -1,7 +1,7 @@
 import { unlink } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
   ThaiRagProviderRuntime,
@@ -30,7 +30,7 @@ export interface ThaiRagProviderCoordinatorStartResult {
 
 type ProviderRequest =
   | { readonly id: string; readonly method: 'health' }
-  | { readonly id: string; readonly method: 'call'; readonly tool: string; readonly args: Readonly<Record<string, unknown>> };
+  | { readonly id: string; readonly method: 'call'; readonly tool: string; readonly args: Readonly<Record<string, unknown>>; readonly budget?: ResultBudget };
 
 type ProviderResponse =
   | { readonly id: string; readonly ok: true; readonly value: unknown }
@@ -103,10 +103,11 @@ export class ThaiRagProviderCoordinator {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<unknown>> {
-    if (this.role === 'owner') return this.runtime.call(tool, args, signal);
+    if (this.role === 'owner') return this.runtime.call(tool, args, signal, budget);
     if (this.role === 'follower') {
-      return this.request({ id: this.requestId(), method: 'call', tool, args }, signal);
+      return this.request({ id: this.requestId(), method: 'call', tool, args, ...(budget === undefined ? {} : { budget }) }, signal);
     }
     return err(appError('CONFLICT', 'Thai-RAG provider coordinator is not started', true));
   }
@@ -176,7 +177,7 @@ export class ThaiRagProviderCoordinator {
     if (parsed.value.method === 'health') {
       return { id: parsed.value.id, ok: true, value: this.runtime.health() };
     }
-    const result = await this.runtime.call(parsed.value.tool, parsed.value.args);
+    const result = await this.runtime.call(parsed.value.tool, parsed.value.args, undefined, parsed.value.budget);
     return result.ok
       ? { id: parsed.value.id, ok: true, value: result.value }
       : { id: parsed.value.id, ok: false, error: result.error.message };
@@ -252,12 +253,17 @@ function parseRequest(line: string): Result<ProviderRequest> {
     }
     if (value.method === 'health') return ok({ id: value.id, method: 'health' });
     if (value.method === 'call' && typeof value.tool === 'string' && isRecord(value.args)) {
-      return ok({ id: value.id, method: 'call', tool: value.tool, args: value.args });
+    return ok({ id: value.id, method: 'call', tool: value.tool, args: value.args, ...(isResultBudget(value.budget) ? { budget: value.budget } : {}) });
     }
     return err(appError('INVALID_INPUT', 'Unsupported Thai-RAG provider request'));
   } catch {
     return err(appError('INVALID_INPUT', 'Invalid Thai-RAG provider request JSON'));
   }
+}
+
+function isResultBudget(value: unknown): value is ResultBudget {
+  return isRecord(value)
+    && ['maxItems', 'maxTextBytes', 'maxStructuredBytes', 'maxBinaryBytes', 'maxBase64Bytes'].every((key) => typeof value[key] === 'number' && Number.isSafeInteger(value[key]) && value[key] > 0);
 }
 
 function parseResponse(line: string): Result<ProviderResponse> {

@@ -1,6 +1,6 @@
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
   createProviderHealth,
@@ -20,7 +20,7 @@ export interface ThaiRagProviderDriverStartOptions {
 export interface ThaiRagProviderDriver {
   start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>>;
   health(signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>>;
-  call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>>;
+  call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>>;
   stop(signal?: AbortSignal): Promise<Result<void>>;
 }
 
@@ -108,11 +108,12 @@ export class ThaiRagProviderRuntime {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     if (this.healthState.state !== 'ready' && this.healthState.state !== 'degraded') {
       return err(appError('CONFLICT', `Thai-RAG provider is not callable while ${this.healthState.state}`, true));
     }
-    const operation = (): Promise<Result<unknown>> => this.options.driver.call(tool, args, signal);
+    const operation = (): Promise<Result<unknown>> => this.options.driver.call(tool, args, signal, budget);
     const pending = this.callQueue.then(operation, operation);
     this.callQueue = pending.then(() => undefined, () => undefined);
     return pending;

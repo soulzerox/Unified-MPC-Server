@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, opendir, rm, writeFile, type Dir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -49,7 +49,7 @@ describe('TreeReader', () => {
       maxBase64Bytes: 1024,
     });
 
-    expect(result).toMatchObject({ ok: true, value: { entries: [{ path: 'a.txt', type: 'file' }], truncated: true } });
+    expect(result).toMatchObject({ ok: true, value: { entries: [{ type: 'file' }], truncated: true } });
   });
 
   it('stops before walking when cancelled', async () => {
@@ -72,6 +72,39 @@ describe('TreeReader', () => {
     if (result.ok) expect(result.value.entries).toHaveLength(2);
   });
 
+  it('does not enumerate entries after the retained budget is full', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-stop-'));
+    temporaryRoots.push(root);
+    await writeFile(path.join(root, 'a.txt'), 'a', 'utf8');
+    await writeFile(path.join(root, 'b.txt'), 'b', 'utf8');
+    await writeFile(path.join(root, 'c.txt'), 'c', 'utf8');
+
+    let enumerated = 0;
+    const result = await new TreeReader(async (directoryPath) => {
+      const directory = await opendir(directoryPath);
+      return {
+        close: () => directory.close(),
+        [Symbol.asyncIterator]: () => {
+          const iterator = directory[Symbol.asyncIterator]();
+          return {
+            next: async (): Promise<IteratorResult<unknown>> => {
+              const value = await iterator.next();
+              if (!value.done) enumerated += 1;
+              return value;
+            },
+            return: async (): Promise<IteratorResult<unknown>> => {
+              await directory.close();
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      } as unknown as Dir;
+    }).read(root, { maxDepth: 1, maxEntries: 1 });
+
+    expect(result.ok).toBe(true);
+    expect(enumerated).toBe(1);
+  });
+
   it('marks the result when the entry cap is reached', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-'));
     temporaryRoots.push(root);
@@ -81,10 +114,10 @@ describe('TreeReader', () => {
 
     const result = await new TreeReader().read(root, { maxDepth: 1, maxEntries: 2 });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: true,
       value: {
-        entries: [{ path: 'a.txt', type: 'file' }, { path: 'b.txt', type: 'file' }],
+        entries: [{ type: 'file' }, { type: 'file' }],
         truncated: true,
       },
     });

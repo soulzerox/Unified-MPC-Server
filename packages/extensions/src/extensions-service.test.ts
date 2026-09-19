@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
+import { type ResultBudget } from '@unified-mpc/domain';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 import { LocalExtensionsService } from './extensions-service.js';
 import { bundledSkillRootCandidates } from './create-local-extensions.js';
@@ -456,7 +457,7 @@ describe('LocalExtensionsService MCP bridge', () => {
       maxStructuredBytes: 128,
       maxBinaryBytes: 128,
       maxBase64Bytes: 128,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: 'Child MCP result exceeds 128 bytes' } });
+    })).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT', message: 'Child MCP transport cannot enforce bounded results for mock/ping' } });
     await service.close();
   });
 
@@ -663,6 +664,23 @@ describe('LocalExtensionsService MCP bridge', () => {
     dispose();
     expect(stderr.listenerCount('error')).toBe(initialErrorListeners);
     stderr.destroy();
+  });
+
+  it('fails closed when bounded child results lack bounded transport support', async () => {
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'ping', description: 'Ping tool' }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'pong' }] }),
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({ clientFactory: { connect: async (): Promise<McpClientSession> => session } });
+    const budget: ResultBudget = { maxItems: 1, maxTextBytes: 10, maxStructuredBytes: 10, maxBinaryBytes: 10, maxBase64Bytes: 10 };
+
+    await expect(manager.call('mock', { command: 'node' }, 'ping', {}, undefined, {}, budget)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT' },
+    });
+    await manager.close();
   });
 
   it('shares one child connection across concurrent calls', async () => {

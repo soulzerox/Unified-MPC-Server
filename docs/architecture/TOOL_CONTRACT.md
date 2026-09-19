@@ -262,7 +262,7 @@ Run `pnpm docs:tools` after intentionally changing the registry; CI runs `pnpm d
 | 241 | `lsp_rename` | WRITE | default | dependency_gated | truthful_unavailable | no | no |
 | 242 | `debug_attach` | EXECUTE | default | dependency_gated | truthful_unavailable | no | no |
 | 243 | `debug_step` | EXECUTE | default | dependency_gated | truthful_unavailable | no | no |
-| 244 | `git_worktree_spawn` | WRITE | default | dependency_gated | deterministic_operation | no | no |
+| 244 | `git_worktree_spawn` | EXECUTE | default | dependency_gated | deterministic_operation | no | no |
 | 245 | `git_worktree_remove` | DANGEROUS | default | dependency_gated | deterministic_operation | no | yes |
 | 246 | `db_inspect` | READ | default | dependency_gated | truthful_unavailable | yes | no |
 | 247 | `db_query` | READ | default | dependency_gated | truthful_unavailable | yes | no |

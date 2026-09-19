@@ -1,4 +1,4 @@
-﻿import { mkdtemp } from 'node:fs/promises';
+﻿import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -55,6 +55,84 @@ describe('upgrade runtime multi-session persistence', () => {
     ]));
   });
 
+  it('bootstraps a new npm worktree through the shared cache without network dependencies', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-deps-'));
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
+    const worktreeRoot = path.join(directory, '.worktrees', 'bootstrap');
+    await mkdir(worktreeRoot, { recursive: true });
+    await writeFile(path.join(worktreeRoot, 'package.json'), JSON.stringify({
+      name: 'fixture',
+      version: '1.0.0',
+    }), 'utf8');
+    await writeFile(path.join(worktreeRoot, 'package-lock.json'), JSON.stringify({
+      name: 'fixture',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        '': { name: 'fixture', version: '1.0.0' },
+      },
+    }), 'utf8');
+
+    const services = {
+      runtimeStatePath,
+      workspaceInfo: {
+        async info(): Promise<ReturnType<typeof ok>> {
+          return ok({
+            id: 'ws-deps',
+            displayName: 'fixture',
+            rootPath: directory,
+            realRootPath: directory,
+            createdAt: new Date(0).toISOString(),
+            kind: 'project',
+          });
+        },
+      },
+      git: {
+        async run(): Promise<ReturnType<typeof ok>> {
+          return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
+        },
+      },
+    };
+
+    try {
+      const result = await new UpgradeRuntimeService(services, actorA).execute('git_worktree_spawn', {
+        workspaceId: 'ws-deps',
+        worktreePath: '.worktrees/bootstrap',
+        ref: 'main',
+        dryRun: false,
+        userConfirmed: true,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        value: {
+          status: 'completed',
+          dependencyPolicy: {
+            status: 'ready',
+            packageManager: 'npm',
+            lastBootstrapResult: 'installed',
+            integration: 'bounded_runtime_v1',
+          },
+        },
+      });
+      await expect(access(path.join(directory, 'dependency-cache', 'npm', 'cache'))).resolves.toBeUndefined();
+      const shared = await new UpgradeRuntimeStateStore(runtimeStatePath, 'audit-deps').readShared();
+      expect(shared.worktrees).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          worktreePath: '.worktrees/bootstrap',
+          dependencyPolicy: expect.objectContaining({
+            status: 'ready',
+            packageManager: 'npm',
+            lastBootstrapResult: 'installed',
+          }),
+        }),
+      ]));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('keeps shared worktree ledger entries session-owned', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-concurrency-'));
     const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
@@ -94,5 +172,43 @@ describe('upgrade runtime multi-session persistence', () => {
       workspaceId: 'ws-1', worktreePath: '.worktrees/session-b', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
     expect(calls).toHaveLength(4);
+  });
+
+  it('grandfathers legacy worktree ledger rows after restart', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-legacy-worktree-'));
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    await store.updateShared((current) => ({
+      plugins: current.plugins,
+      worktrees: [{
+        workspaceId: 'ws-legacy',
+        worktreePath: '.worktrees/legacy',
+        ref: 'main',
+        owner: actorA.clientId,
+        ownerSessionId: actorA.sessionId,
+        createdAt: new Date(0).toISOString(),
+      }],
+    }));
+
+    try {
+      const runtime = new UpgradeRuntimeService({ runtimeStatePath }, actorA);
+      await expect(runtime.execute('git_worktree_remove', {
+        workspaceId: 'ws-legacy',
+        worktreePath: '.worktrees/legacy',
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          dryRun: true,
+          dependencyPolicy: {
+            policyVersion: 1,
+            disposition: 'grandfather',
+            status: 'grandfathered',
+            lastBootstrapResult: 'skipped',
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

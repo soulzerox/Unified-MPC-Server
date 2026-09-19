@@ -63,9 +63,9 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       async bootstrapMandatoryMcpServers() {
         bootstrapEvents.push('mandatory_mcp');
         return ok({
-          ready: true,
+          ready: false,
           servers: [
-            { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'], requiredTools: ['search_nodes', 'create_entities', 'add_observations'] },
+            { name: 'memory', required: true, connected: false, pinned: false, tools: [], requiredTools: ['search_nodes', 'create_entities', 'add_observations'], error: 'native provider handled by parent capability' },
           ],
         });
       },
@@ -240,53 +240,70 @@ describe('workspace engineering harness enforcement', () => {
     });
   });
 
-  it('fails workspace bootstrap when a mandatory child lacks a required harness capability', async () => {
-    const { services } = createHarnessServices();
-    const originalBootstrap = services.extensions!.bootstrapMandatoryMcpServers.bind(services.extensions);
-    services.extensions = {
-      ...services.extensions,
-      async bootstrapMandatoryMcpServers(signal?: AbortSignal) {
-        const result = await originalBootstrap(signal);
-        if (!result.ok) return result;
-        return ok({
-          ...result.value,
-          servers: result.value.servers.map((server) => server.name === 'memory' ? { ...server, tools: [] } : server),
-        });
-      },
-    } as typeof services.extensions;
-    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
-
-    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
-      isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('search_nodes') } },
-    });
-  });
-
-  it('enforces required child capabilities declared by runtime policy instead of a hardcoded server-name map', async () => {
+  it('does not gate workspace bootstrap on optional child readiness', async () => {
     const { services } = createHarnessServices();
     services.extensions = {
       ...services.extensions,
       async bootstrapMandatoryMcpServers() {
         return ok({
-          ready: true,
-          servers: [{
-            name: 'custom-policy-server',
-            required: true,
-            connected: true,
-            pinned: true,
-            descriptorFingerprint: 'd'.repeat(64),
-            catalogFingerprint: '4'.repeat(64),
-            requiredTools: ['custom-capability'],
-            tools: [],
-          }],
+          ready: false,
+          servers: [],
         });
       },
     } as typeof services.extensions;
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
+      structuredContent: { ready: true },
+    });
+  });
+
+  it('fails workspace bootstrap when required external MCP servers are unavailable', async () => {
+    const { services } = createHarnessServices();
+    services.extensions = {
+      ...services.extensions,
+      async bootstrapMandatoryMcpServers() {
+        return ok({ ready: false, servers: [{ name: 'external-required', required: true, connected: false, pinned: false, tools: [], requiredTools: [], error: 'offline' }] });
+      },
+    } as typeof services.extensions;
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('custom-capability') } },
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('external-required') } },
     });
+  });
+
+  it('fails workspace bootstrap when required native capabilities are unavailable', async () => {
+    const { services } = createHarnessServices();
+    services.extensions = {
+      ...services.extensions,
+      async runtimePolicySnapshot() {
+        return ok({ ready: false, policies: [
+          { priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true },
+          { priority: 'P2', id: 'code:pre-edit-context', resourceId: 'native-thai-rag', resourceType: 'capability', mandatory: true, enforcement: 'SAFETY_PRE_CHECK', directive: 'Use native Thai-RAG.', source: 'configured', available: false },
+        ] });
+      },
+    } as typeof services.extensions;
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('Required native capability') } },
+    });
+  });
+
+  it('scopes native index status through active workspace', async () => {
+    const { services, nativeRagCalls, nativeRagArguments } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider,
+    });
+
+    const result = await registry.invoke('rag_index_status', { workspaceId: 'workspace-1', jobId: 'idx_umcp_test' });
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['index_status']);
+    expect(nativeRagArguments[0]).toEqual({ tool: 'index_status', args: { job_id: 'idx_umcp_test', workspace: 'workspace-1' } });
   });
 
   it('exposes curated native working-memory tools after bootstrap', async () => {

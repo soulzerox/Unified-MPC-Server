@@ -73,14 +73,14 @@ The Ponytail harness embeds senior engineering discipline into every AI turn:
 
 ---
 
-## 5. Runtime Workspace Bootstrap & Mandatory Native Children
+## 5. Runtime Workspace Bootstrap & Native Capabilities
 
 For coding clients—especially ChatGPT Web—the engineering harness is a runtime state machine, not only a synchronized prompt file.
 
 1. `workspace_bootstrap` reads and fingerprints the registered workspace `AGENTS.md`. If the file service cannot return readable text, bootstrap fails closed.
-2. The extension layer eagerly connects and pins the mandatory native child MCPs (`memory`, `thai-rag-mcp`). A workspace-scoped MCP config cannot be promoted into this trusted set. Godkiller remains optional and is connected only when on-demand safety analysis is warranted.
-3. Bootstrap fingerprints child launch/catalog contracts and verifies the exact capabilities required by the native harness before declaring the workspace ready.
-4. `prepare_code_change` revalidates the `AGENTS.md` fingerprint and runs mandatory Thai-RAG `pre_edit_context` for one development-artifact path. High-risk work sets `runGodkillerSafetyCheck=true` to add the curated optional Godkiller `gk_task(action=edit_safe)` check after source, drift, and fingerprint validation.
+2. The parent-owned native capability layer provides canonical memory and Thai-RAG operations. Configured child MCP connections remain optional, cannot replace canonical native tools, and workspace-scoped MCP config cannot be promoted into a trusted set. Godkiller remains optional and is connected only when on-demand safety analysis is warranted.
+3. Bootstrap fingerprints any configured child launch/catalog contracts and verifies exact required native capabilities before declaring the workspace ready; unavailable required capabilities fail closed.
+4. `prepare_code_change` revalidates the `AGENTS.md` fingerprint and runs canonical native Thai-RAG `pre_edit_context` for one development-artifact path. If that required capability is unavailable, preparation fails closed. High-risk work sets `runGodkillerSafetyCheck=true` to add the curated optional Godkiller `gk_task(action=edit_safe)` check after source, drift, and fingerprint validation.
 5. A successful code mutation consumes that path authorization. A second mutation requires a fresh pre-edit check, and any `AGENTS.md` change invalidates the whole bootstrap.
 6. Working memory is exposed through the curated `working_memory_search` and `working_memory_record` first-party tools instead of flattening all child-MCP schemas into the client context.
 

@@ -704,6 +704,10 @@ export class ToolRegistry {
     if (sessionStart?.resolvedResourceId === undefined) {
       return err(appError('CONFLICT', 'Mandatory session-start skill ask-matt is unavailable in the live runtime policy', true));
     }
+    const unavailable = policy.value.policies.filter((entry) => entry.mandatory && entry.resourceType === 'capability' && !entry.available);
+    if (unavailable.length > 0) {
+      return err(appError('CONFLICT', `Required native capability or policy is unavailable: ${unavailable.map((entry) => entry.resourceId).join(', ')}`, true));
+    }
     if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
     const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
     if (!sessionStartSkill.ok) return sessionStartSkill;
@@ -737,19 +741,16 @@ export class ToolRegistry {
     const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
     const extensions = this.services.extensions;
-    if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
-    const mandatoryMcp = await extensions.bootstrapMandatoryMcpServers(signal);
-    if (!mandatoryMcp.ok) return mandatoryMcp;
-    if (!mandatoryMcp.value.ready) {
-      const failed = mandatoryMcp.value.servers.filter((server) => !server.connected || !server.pinned).map((server) => server.name).join(', ');
-      return err(appError('CONFLICT', `Mandatory child MCP bootstrap is not ready: ${failed || 'unknown server'}`, true));
-    }
-    for (const server of mandatoryMcp.value.servers) {
-      const required = server.requiredTools ?? [];
-      const missing = required.filter((tool) => !server.tools.includes(tool));
-      if (missing.length > 0) {
-        return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));
-      }
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime extension services are unavailable', true));
+    const mandatoryMcpResult = await extensions.bootstrapMandatoryMcpServers(signal);
+    if (!mandatoryMcpResult.ok) return mandatoryMcpResult;
+    const externalMandatoryMcp = mandatoryMcpResult.value.servers.filter((server) => !isNativeProviderServer(server.name));
+    const mandatoryMcp: import('@unified-mpc/extensions').MandatoryMcpBootstrapResult = {
+      ...mandatoryMcpResult.value,
+      ready: externalMandatoryMcp.every((server) => server.connected && server.pinned),
+    };
+    if (!mandatoryMcp.ready) {
+      return err(appError('CONFLICT', `Required external MCP server is unavailable: ${externalMandatoryMcp.map((server) => server.name).join(', ')}`, true));
     }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
@@ -760,7 +761,7 @@ export class ToolRegistry {
     }
     const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
     if (!agentsMdHash.ok) return agentsMdHash;
-    const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp.value);
+    const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp);
     let preferredGoal = null;
     try {
       preferredGoal = await this.services.preferredGoal?.get(workspaceId) ?? null;
@@ -773,7 +774,7 @@ export class ToolRegistry {
       agentsMdHash: agentsMdHash.value,
       harnessFingerprint: state.harnessFingerprint,
       sessionStartSkill: taskContext.value.sessionStartSkill,
-      mandatoryMcp: mandatoryMcp.value,
+      mandatoryMcp,
       thaiRag: thaiRagHealth.value,
       preferredGoal,
     });
@@ -916,6 +917,8 @@ export class ToolRegistry {
       providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_index') {
       providerArgs = { ...args, workspace_path: scope.rootPath, workspace: workspaceId };
+    } else if (tool === 'index_status') {
+      providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
       const pathFilter = requestedFilter.length === 0
@@ -947,7 +950,7 @@ export class ToolRegistry {
     input: unknown,
     signal?: AbortSignal,
   ): Promise<ReturnType<typeof err> | undefined> {
-    if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return undefined;
+    if (workspaceId === undefined || this.services.thaiRag === undefined) return undefined;
     const paths = codeMutationPaths(toolName, input);
     if (paths.length === 0) return undefined;
     const context = this.harnessContext(workspaceId);
@@ -1414,6 +1417,11 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
     .filter((scope) => isAbsoluteActivityPath(scope.rootPath) && activityPathContains(scope.rootPath, candidate))
     .sort((left, right) => normalizedActivityPath(right.rootPath).length - normalizedActivityPath(left.rootPath).length);
   return matches[0] ?? null;
+}
+
+function isNativeProviderServer(name: string): boolean {
+  const key = name.trim().toLowerCase();
+  return key === 'memory' || key === 'thai-rag-mcp';
 }
 
 function nativeThaiRagReadyForHarness(health: {

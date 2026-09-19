@@ -101,7 +101,7 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'workspace_bootstrap',
-      description: 'Load and fingerprint the workspace engineering harness, then eagerly connect and pin mandatory child MCP servers before code mutation.',
+      description: 'Load and fingerprint the workspace engineering harness, verify required native capabilities, and fail closed when they are unavailable before code mutation. Optional child MCP connections cannot replace canonical native tools.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceBootstrapSchema,
@@ -111,7 +111,7 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'prepare_code_change',
-      description: 'Run mandatory Thai-RAG pre-edit diagnostics for one development-artifact path and authorize that path for the current harness session. Set runGodkillerSafetyCheck=true to add the trusted optional Godkiller edit_safe analysis for high-risk changes.',
+      description: 'Run required canonical native Thai-RAG pre-edit diagnostics for one development-artifact path and authorize that path for the current harness session; fail closed when the capability is unavailable. Set runGodkillerSafetyCheck=true to add the trusted optional Godkiller edit_safe analysis for high-risk changes.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: prepareCodeChangeSchema,

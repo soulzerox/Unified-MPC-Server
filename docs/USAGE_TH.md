@@ -174,16 +174,16 @@ Unified-MPC-Server ใช้ Runtime Policy ที่ผู้ใช้แก้
 
 ### Runtime Harness สำหรับ ChatGPT Web
 
-หลังเชื่อม Unified-MPC เป็น MCP connector แล้ว การมี child MCP อยู่ในเครื่อง **ไม่ได้หมายความว่า ChatGPT จะได้สิทธิ์ใช้เป็น mandatory native โดยอัตโนมัติ** ระบบจะบังคับลำดับที่ runtime ดังนี้:
+หลังเชื่อม Unified-MPC เป็น MCP connector แล้ว native memory และ Thai-RAG เป็นความสามารถที่ Unified MCP เป็นเจ้าของโดยตรง ไม่ใช่ mandatory child MCP ที่ client ต้องค้นหาหรือเชื่อมต่อ ระบบจะบังคับลำดับที่ runtime ดังนี้:
 
 1. ก่อนแก้ source/config ครั้งแรก Client ต้องเรียก `workspace_bootstrap` พร้อม `workspaceId` ของโปรเจกต์
 2. Runtime จะอ่านและสร้าง fingerprint ของ `AGENTS.md` ถ้าไฟล์หายหรืออ่านไม่ได้ bootstrap จะ fail closed
-3. Runtime จะเชื่อมและ pin เฉพาะ mandatory native MCP คือ `memory` กับ `thai-rag-mcp` และตรวจว่าแต่ละตัวมี tool ที่ harness ต้องใช้จริง ส่วน `godkiller` จะไม่เป็น dependency ของ bootstrap และจะถูกเรียกแบบ on-demand เมื่องานมีความเสี่ยงหรือ blast radius สูง
-4. MCP ที่มาจากไฟล์ใน workspace เช่น `.cursor/mcp.json` จะไม่สามารถปลอมชื่อมาทับ mandatory native MCP ได้
-5. ก่อนแก้ development artifact แต่ละ path ต้องเรียก `prepare_code_change`; mandatory preflight จะรัน `thai-rag-mcp/pre_edit_context` หากเป็น refactor ใหญ่, migration, งาน security-sensitive หรือ blast radius ยังไม่ชัด ให้ตั้ง `runGodkillerSafetyCheck=true` เพื่อเพิ่ม curated `godkiller/gk_task(action=edit_safe)` โดย parent จะตรวจว่าไม่ใช่ workspace-scoped shadow และ contract ไม่ drift ก่อนเรียก
+3. Runtime จะตรวจความพร้อมของ parent-owned native capabilities ตาม policy: workspace memory ใช้แบบเลือกเฉพาะและ `ON_DEMAND`; native Thai-RAG code context ใช้แบบ `SAFETY_PRE_CHECK` ส่วน `godkiller` ไม่เป็น dependency ของ bootstrap และถูกเรียกแบบ on-demand เมื่องานมีความเสี่ยงหรือ blast radius สูง
+4. MCP ที่มาจากไฟล์ใน workspace เช่น `.cursor/mcp.json` จะไม่สามารถแทนที่หรือ shadow native capabilities ของ Unified MCP ได้
+5. ก่อนแก้ development artifact แต่ละ path ต้องเรียก `prepare_code_change`; preflight จะเรียก `rag_pre_edit_context` ผ่าน native Thai-RAG โดยตรง หากเป็น refactor ใหญ่, migration, งาน security-sensitive หรือ blast radius ยังไม่ชัด ให้ตั้ง `runGodkillerSafetyCheck=true` เพื่อเพิ่ม curated `godkiller/gk_task(action=edit_safe)` โดย parent จะตรวจว่าไม่ใช่ workspace-scoped shadow และ contract ไม่ drift ก่อนเรียก
 6. สิทธิ์ pre-edit ใช้ได้หนึ่ง mutation ที่สำเร็จเท่านั้น จากนั้นต้องตรวจใหม่ก่อนแก้ path เดิมอีกครั้ง
 7. ถ้า `AGENTS.md` ถูกแก้ระหว่าง session bootstrap เดิมจะถูกยกเลิกและต้องเรียก `workspace_bootstrap` ใหม่
-8. Working memory สำหรับ ChatGPT ใช้ native surface `working_memory_search` และ `working_memory_record` แทนการยก tool ทั้งหมดของ child `memory` ขึ้นมาไว้ใน top-level catalog
+8. Working memory สำหรับ ChatGPT ใช้ first-party native surface `working_memory_search` และ `working_memory_record` ภายใต้ workspace เดียวกัน ไม่ได้ยก tool จาก child `memory` ขึ้นมาไว้ใน top-level catalog
 
 MCP `instructions` ของ Unified-MPC จะบอก flow นี้กับ Client โดยตรง แต่ enforcement อยู่ที่ `ToolRegistry` อีกชั้น ดังนั้นแม้ Client ไม่ทำตาม prompt การแก้โค้ดก็ยังถูกบล็อกก่อน mutation
 

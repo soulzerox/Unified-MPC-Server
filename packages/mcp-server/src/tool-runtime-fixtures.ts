@@ -61,7 +61,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   workspace_set_primary: service({ workspaceId }, 'workspaceSelection.setPrimary'),
   workspace_register: service({ path: 'E:\\project' }, 'workspaceInfo.register'),
   workspace_info: service({ workspaceId }, 'workspaceInfo.info'),
-  workspace_bootstrap: service({ workspaceId }, 'extensions.bootstrapMandatoryMcpServers'),
+  workspace_bootstrap: service({ workspaceId }, 'thaiRag.health'),
   prepare_code_change: service({ workspaceId, filePath: 'src/smoke.ts', proposedSymbol: 'smoke' }, 'thaiRag.call:pre_edit_context', 'workspace_bootstrap'),
   workspace_tree: service({}, 'workspaceQuery.tree'),
   project_snapshot: service({ workspaceId }, 'projectSnapshot.snapshot'),

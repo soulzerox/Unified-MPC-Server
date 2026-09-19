@@ -95,7 +95,7 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 
 ### 3. Two-Tier Context Preservation Catalog
 - **LLM Context Optimization**: Traditional MCP gateways flood the AI model's context window with dozens of massive tool schemas, inflating token costs and causing instruction distraction.
-- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets and optional child MCP servers on demand. Mandatory workspace-harness children are pinned only after `workspace_bootstrap`; optional children connect for discovery/calls and may be released again when idle.
+- **Dynamic Tiering**: Advertises high-frequency tier-1 tools by default, while lazily loading specialized toolsets and optional child MCP servers on demand. Workspace bootstrap verifies required native capabilities and external mandatory MCP readiness; optional children connect only for explicit discovery/calls and may be released again when idle.
 - **Native Workspace-Scoped Thai-RAG**: Unified MCP owns `rag_recall`, `rag_remember`, `workspace_memory_record`, pre-edit context, code search/context, blast-radius, and indexing tools. Memory is selective, carries canonical workspace scope, and never captures every conversation turn automatically. Native RAG calls do not route through generic `mcp_call`; arbitrary child MCP mutations remain separately guarded.
 
 ### 4. Bifurcated Dynamic Ingestion Engine
@@ -124,7 +124,7 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 - **Built-in Engineering Discipline**: Enforces the **Ponytail** development philosophy directly at the tool registry layer.
 - **YAGNI & Minimalism**: Prompts agents to reach for standard libraries before external dependencies, write minimal diffs, and question unnecessary abstractions.
 - **Fail-Closed Workspace Bootstrap**: Coding clients call `workspace_bootstrap` before their first source/config mutation. The runtime must read and SHA-256 fingerprint the registered workspace `AGENTS.md`; a missing or unreadable harness is a blocking error, not an empty-policy fallback.
-- **Native Workspace Capability**: Unified MCP owns native memory, RAG, and code-context operations. `memory` and `thai-rag-mcp` are not mandatory child MCP dependencies; optional child MCPs remain independently governed. `godkiller` remains optional and is not required for workspace readiness.
+- **Native Workspace Capability**: Unified MCP owns native memory, RAG, and code-context operations. Native working memory is selective and optional; it does not require raw realtime turn logging. `memory` and `thai-rag-mcp` are not mandatory child MCP dependencies. Required external MCP capabilities remain fail-closed; optional child MCPs remain independently governed. `godkiller` remains optional and is not required for workspace readiness.
 - **Single-Use Pre-Edit Gate**: Every development-artifact path must pass `prepare_code_change` before mutation. The gate uses the parent-owned native Thai-RAG provider; successful authorization is consumed after one successful mutation and must be refreshed before another edit. High-risk changes can set `runGodkillerSafetyCheck=true` for curated optional safety analysis.
 - **Curated Working Memory**: ChatGPT/Web clients get stable first-party `working_memory_search` and `working_memory_record` tools rather than flattening the entire `memory` child server into the top-level MCP catalog.
 - **Policy Drift Detection**: `AGENTS.md` is re-fingerprinted before pre-edit and code-mutation dispatch. Any change invalidates the session bootstrap and requires `workspace_bootstrap` again.
@@ -274,7 +274,7 @@ See [`docs/DEPLOYMENT_LINUX.md`](docs/DEPLOYMENT_LINUX.md) for installation, env
 | **Workspace Path Containment** | `packages/filesystem/` & `packages/extensions/` | Blocks path traversal (`../`) attacks outside authorized project workspace boundaries. |
 | **Cryptographic Secret Redaction** | `packages/audit/src/redactor.ts` | Automatically sanitizes API tokens, private keys, and passwords from logs and activity journals. |
 | **Self-Aggregation Block** | `packages/extensions/src/mcp-config-loader.ts` | Prevents infinite loops caused by Unified-MPC-Server discovering and invoking itself as a child. |
-| **Workspace Harness & Mandatory Child Trust** | `packages/mcp-server/src/harness-runtime.ts` + `packages/extensions/src/extensions-service.ts` | Requires a readable `AGENTS.md`, fingerprints policy/child contracts, rejects workspace-scoped mandatory-child impersonation, and consumes per-path pre-edit authorization after each successful code mutation. |
+| **Workspace Harness & Capability Trust** | `packages/mcp-server/src/harness-runtime.ts` + `packages/extensions/src/extensions-service.ts` | Requires a readable `AGENTS.md`, fingerprints policy and external MCP contracts, fails closed when required capabilities are unavailable, and consumes per-path pre-edit authorization after each successful code mutation. |
 | **Permission Profiles** | `packages/permissions/src/profiles.ts` | Enforces tiered capability access (`safe` default, `balanced`, and audited `full` bypass). |
 
 ---

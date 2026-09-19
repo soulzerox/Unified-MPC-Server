@@ -81,7 +81,7 @@ Fetches the live reconciled P1–Pn runtime policy. Semantic IDs remain stable w
       "id": "p1-memory-priority",
       "name": "P1 Working Memory Priority",
       "enabled": true,
-      "description": "Realtime working memory log required before and after operations"
+      "description": "Optional selective working memory for durable decisions and explicit recall"
     }
   ]
 }

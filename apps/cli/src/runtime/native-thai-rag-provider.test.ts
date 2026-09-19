@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -44,6 +44,36 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(started.ok).toBe(true);
     expect(connectedConfig?.cwd).toBe(path.join(dataRoot, 'thai-rag', 'sources'));
     expect(connectedConfig?.env?.THAI_RAG_CACHE_DIR).toBe(path.join(dataRoot, 'thai-rag', 'runtime'));
+    await driver.stop();
+  });
+
+  it('does not interrupt another owner job during provider startup', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 2, jobs: [{
+      jobId: 'idx_umcp_owner_a',
+      workspaceId,
+      ownerId: 'owner-a',
+      status: 'running',
+      force: true,
+      startedAt: '2026-09-17T01:00:00.000Z',
+    }] }));
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-b', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    expect(persisted.jobs).toEqual([expect.objectContaining({
+      jobId: 'idx_umcp_owner_a',
+      ownerId: 'owner-a',
+      status: 'running',
+    })]);
     await driver.stop();
   });
 
@@ -338,7 +368,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const foreground = driver.call('recall', { query: 'after index' });
     await foreground;
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const status = await driver.call('index_status', { job_id: scheduled.value.job_id });
+    const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace: workspaceId });
 
     expect(status.ok && isRecord(status.value) && status.value.status).toBe('completed');
     expect(maxInFlight).toBe(1);
@@ -349,6 +379,141 @@ describe('NativeThaiRagProviderDriver', () => {
       background: false,
     });
     await driver.stop();
+  });
+
+  it('rejects arbitrary and foreign index status IDs without calling worker', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: workspaceRoot },
+        { id: recoveredWorkspaceId, realRootPath: await tempRoot() },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('unexpected-worker-call');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('index_status', { job_id: 'arbitrary-id', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    expect(calls).not.toContain('index_status');
+    await driver.stop();
+  });
+
+  it('preserves noncanonical legacy index jobs as unavailable', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 1, jobs: [{
+      jobId: 'idx_umcp_legacy_noncanonical',
+      workspaceId: 'legacy-workspace-name',
+      status: 'completed',
+      force: false,
+      startedAt: '2026-09-17T01:00:00.000Z',
+      result: { indexed: 3 },
+    }] }));
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory(),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_legacy_noncanonical', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    expect(persisted.jobs).toEqual([expect.objectContaining({
+      jobId: 'idx_umcp_legacy_noncanonical',
+      workspaceId: 'legacy-workspace-name',
+      status: 'legacy-unavailable',
+    })]);
+    await driver.stop();
+  });
+
+  it('rejects missing index status workspace scope', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('indexed');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_any' })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(calls).not.toContain('index_status');
+    await driver.stop();
+  });
+
+  it('rejects a real job queried through a different workspace', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const otherWorkspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: workspaceRoot },
+        { id: recoveredWorkspaceId, realRootPath: otherWorkspaceRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('indexed');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const scheduled = await driver.call('code_index', { workspace_path: workspaceRoot, background: true });
+    if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await expect(driver.call('index_status', { job_id: scheduled.value.job_id, workspace: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    expect(calls).not.toContain('index_status');
+    await driver.stop();
+  });
+
+  it('does not expose index status to a foreign provider owner', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> { return success(tool === 'code_index' ? 'indexed' : 'ok'); },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const scheduled = await first.call('code_index', { workspace_path: workspaceRoot, background: true });
+    if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await first.stop();
+
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-b', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('index_status', { job_id: scheduled.value.job_id, workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await second.stop();
   });
 
   it('resolves pre-edit context through the UUID source alias', async () => {

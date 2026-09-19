@@ -1,6 +1,6 @@
 # Unified-MPC-Server — Master Specification
 
-> **Status**: `runtime-harness-hardening-verified-locally` (workspace bootstrap, mandatory child-MCP trust, pre-edit enforcement, focused/full package verification complete; final repository/push evidence is recorded separately)
+> **Status**: `runtime-harness-hardening-verified-locally` (workspace bootstrap, required external MCP readiness, pre-edit enforcement, focused/full package verification complete; final repository/push evidence is recorded separately)
 > **Target Version**: `4.61.0`
 > **Source Base**: `engasnm111/lnwjud` (Clean Option A Pivot: Linux-only, Zero Backward Compat)  
 > **Repository**: `soulzerox/Unified-MPC-Server`  
@@ -210,7 +210,7 @@ Embedded in `packages/mcp-server` and backed by `packages/extensions`:
 - **Fail-Closed Workspace Bootstrap**:
   - `workspace_bootstrap(workspaceId)` must successfully read and SHA-256 fingerprint the workspace `AGENTS.md`; unavailable or unreadable harness content blocks readiness.
   - Native Thai-RAG is a parent-owned workspace capability; `memory` and `thai-rag-mcp` are not mandatory child MCP dependencies. `godkiller` is optional and does not participate in workspace readiness by default.
-  - Workspace bootstrap verifies native Thai-RAG health and configured optional-child readiness without promoting repository-controlled child definitions into trusted native capabilities.
+  - Workspace bootstrap verifies native Thai-RAG health and required native policy capabilities; optional child readiness never gates native workspace readiness, and repository-controlled child definitions cannot become trusted native capabilities.
 - **Single-Use Code Mutation Preflight**:
   - `prepare_code_change(workspaceId, filePath, proposedSymbol?, runGodkillerSafetyCheck?)` revalidates `AGENTS.md` and calls the parent-owned native Thai-RAG pre-edit provider. When `runGodkillerSafetyCheck=true`, the parent invokes only the curated optional `gk_task(action=edit_safe)` route.
   - A successful development-artifact mutation consumes that path's prepared authorization. Repeated edits require a new preflight.

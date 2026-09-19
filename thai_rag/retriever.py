@@ -385,9 +385,12 @@ class HybridRetriever:
         cur = self.storage.sqlite_conn.cursor()
         rel = self.storage._normalize_abs_to_rel(file_path)
         if workspace:
-            candidates = {self.storage._canonicalize_index_path(file_path, workspace)}
-            if rel:
-                candidates.add(f"{workspace.rstrip('/')}/{rel.lstrip('/')}")
+            normalized = file_path.replace("\\", "/").strip("/")
+            prefix = f"{workspace.rstrip('/')}/"
+            if normalized == workspace.rstrip("/") or normalized.startswith(prefix):
+                candidates = {normalized}
+            else:
+                candidates = {f"{workspace.rstrip('/')}/{normalized}"}
         else:
             candidates = {file_path}
             if rel and rel != file_path:

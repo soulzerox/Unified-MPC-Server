@@ -92,7 +92,7 @@ class JobProgressReporter(NullProgressReporter):
 class LocalContextServer:
     """Core server logic for Local Context & Code RAG."""
 
-    supports_canonical_workspace_scope = False
+    supports_canonical_workspace_scope = True
     supports_canonical_code_scope = True
 
     def __init__(
@@ -119,7 +119,7 @@ class LocalContextServer:
 
     # --- Domain A: Agent Memory (Replacing OpenViking) ---
 
-    def remember(self, content: str, category: str = "general") -> str:
+    def remember(self, content: str, workspace_id: Optional[str] = None, category: str = "general") -> str:
         """Record a persistent long-term memory or project rule/decision."""
         if not content.strip():
             return "Error: Memory content cannot be empty."
@@ -131,12 +131,18 @@ class LocalContextServer:
         mem_id = f"mem_{uuid.uuid4().hex[:12]}"
         try:
             vec = self.embedder.embed_document(content)
-            self.storage.save_memory(mem_id, content.strip(), category.strip(), vec)
+            self.storage.save_memory(mem_id, content.strip(), category.strip(), vec, workspace_id=workspace_id)
             return f"✅ Remembered [ID: {mem_id}] (Category: {category}):\n{content.strip()}"
         except Exception as e:
             return f"Error remembering content: {str(e)}"
 
-    def recall(self, query: str, category: Optional[str] = None, limit: int = 5) -> str:
+    def recall(
+        self,
+        query: str,
+        workspace_id: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 5,
+    ) -> str:
         """Retrieve memories and past context matching a semantic query."""
         if not query.strip():
             return "Error: Query cannot be empty."
@@ -154,7 +160,10 @@ class LocalContextServer:
 
         try:
             q_vec = self.embedder.embed_query(query)
-            matches = self.storage.search_memories_vector(q_vec, limit=limit, category=category)
+            search_kwargs = {"limit": limit, "category": category}
+            if workspace_id:
+                search_kwargs["workspace_id"] = workspace_id
+            matches = self.storage.search_memories_vector(q_vec, **search_kwargs)
             if not matches:
                 return f"No memories found matching '{query}'."
 
@@ -171,15 +180,21 @@ class LocalContextServer:
         except Exception as e:
             return f"Error recalling memories: {str(e)}"
 
-    def forget(self, memory_id: str, category: Optional[str] = None) -> str:
+    def forget(self, memory_id: str, workspace_id: Optional[str] = None, category: Optional[str] = None) -> str:
         """Delete an obsolete memory entry by its ID."""
         if not memory_id.strip():
             return "Error: Memory ID cannot be empty."
 
         scoped_category = category.strip() if category is not None and category.strip() else None
-        deleted = self.storage.delete_memory(memory_id.strip(), category=scoped_category)
+        deleted = self.storage.delete_memory(
+            memory_id.strip(),
+            category=scoped_category,
+            workspace_id=workspace_id,
+        )
         if deleted:
             return f"🗑️ Deleted memory ID: {memory_id}"
+        if workspace_id:
+            return f"Error: Memory ID {memory_id} is outside workspace scope."
         return f"Warning: Memory ID {memory_id} not found."
 
     # --- Domain B: Code RAG ---
@@ -431,7 +446,8 @@ class LocalContextServer:
         self,
         role: str,
         content: str,
-        workspace: str = "",
+        workspace_id: Optional[str] = None,
+        workspace: Optional[str] = None,
         summary: Optional[str] = None,
         tags: Optional[list] = None,
         turn_id: Optional[str] = None,
@@ -445,12 +461,13 @@ class LocalContextServer:
         if not content.strip():
             return "Error: Content cannot be empty."
 
+        workspace_id = workspace_id or workspace or "general"
         turn_id = (turn_id or "").strip() or f"turn_{uuid.uuid4().hex[:12]}"
         vector = None
         embed_failed = False
         if self.embedder.is_alive():
             try:
-                vector = self.embedder.embed_document(f"[{workspace}] {role}: {summary or content}")
+                vector = self.embedder.embed_document(f"[{workspace_id}] {role}: {summary or content}")
             except Exception:
                 # BUG-4: turn still saved to SQLite (FTS search works), but Chroma
                 # vector is skipped — surface a warning so silent data loss is visible.
@@ -458,7 +475,7 @@ class LocalContextServer:
 
         self.storage.save_conversation_turn(
             turn_id=turn_id,
-            workspace=workspace or "general",
+            workspace=workspace_id,
             role=role,
             content=content,
             summary=summary,

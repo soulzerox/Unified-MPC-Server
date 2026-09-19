@@ -314,7 +314,7 @@ def test_provider_adapts_legacy_workspace_core_signature_without_type_error():
     assert result.errors[0].code is ErrorCode.SCOPE_DENIED
 
 
-def test_provider_refuses_real_core_event_write_without_canonical_ownership(tmp_path):
+def test_real_core_memory_and_event_operations_isolate_two_workspaces(tmp_path):
     from thai_rag.server import LocalContextServer
     from tests.fakes import DeterministicEmbeddingAdapter
 
@@ -322,19 +322,72 @@ def test_provider_refuses_real_core_event_write_without_canonical_ownership(tmp_
         sqlite_path=tmp_path / "context.db",
         chroma_path=str(tmp_path / "chroma"),
     )
-    server.embedder = DeterministicEmbeddingAdapter()
+    embedder = DeterministicEmbeddingAdapter()
+    server.embedder = embedder
     try:
-        result = server.provider().record_event(
+        provider = server.provider()
+        memory_a = provider.remember("alpha workspace decision", workspace_id="ws-a")
+        memory_b = provider.remember("beta workspace decision", workspace_id="ws-b")
+        event_a = provider.record_event(
             event_type="decision",
-            content="Use SQLite",
-            workspace_id="ws-123",
+            content="alpha workspace event",
+            workspace_id="ws-a",
+        )
+        event_b = provider.record_event(
+            event_type="decision",
+            content="beta workspace event",
+            workspace_id="ws-b",
         )
 
-        assert result.status is ProviderStatus.UNAVAILABLE
-        assert result.errors[0].code is ErrorCode.SCOPE_DENIED
-        assert server.storage.sqlite_conn.execute("SELECT COUNT(*) FROM conversation_turns").fetchone()[0] == 0
+        assert memory_a.status is ProviderStatus.OK
+        assert memory_b.status is ProviderStatus.OK
+        assert event_a.status is ProviderStatus.OK
+        assert event_b.status is ProviderStatus.OK
+        recall_a = provider.recall("workspace decision", workspace_id="ws-a")
+        recall_b = provider.recall("workspace decision", workspace_id="ws-b")
+        assert recall_a.status is ProviderStatus.OK
+        assert "alpha workspace decision" in recall_a.data
+        assert "beta workspace decision" not in recall_a.data
+        assert "beta workspace decision" in recall_b.data
+        assert "alpha workspace decision" not in recall_b.data
+        events_a = server.storage.search_conversation_turns("workspace event", workspace="ws-a")
+        events_b = server.storage.search_conversation_turns("workspace event", workspace="ws-b")
+        assert [item["content"] for item in events_a] == ["alpha workspace event"]
+        assert [item["content"] for item in events_b] == ["beta workspace event"]
+        memory_id = memory_a.data.split("[ID: ", 1)[1].split("]", 1)[0]
+        denied = provider.forget(memory_id, workspace_id="ws-b")
+        assert denied.status is ProviderStatus.UNAVAILABLE
+        assert denied.errors[0].code is ErrorCode.SCOPE_DENIED
     finally:
         server.close()
+
+
+def test_provider_rejects_legacy_memory_workspace_aliases():
+    class LegacyMemoryCore:
+        supports_canonical_workspace_scope = True
+
+        def remember(self, content, workspace, category="general"):
+            return {"content": content, "workspace": workspace, "category": category}
+
+        def recall(self, query, workspace, category=None, limit=5):
+            return {"query": query, "workspace": workspace, "category": category, "limit": limit}
+
+        def forget(self, memory_id, workspace):
+            return {"memory_id": memory_id, "workspace": workspace}
+
+        def record_event(self, event_type, content, workspace, summary=None, tags=None):
+            return {"event_type": event_type, "content": content, "workspace": workspace}
+
+    provider = ThaiRagProvider(core=LegacyMemoryCore())
+    results = [
+        provider.remember("decision", workspace_id="ws-123"),
+        provider.recall("decision", workspace_id="ws-123"),
+        provider.forget("mem-1", workspace_id="ws-123"),
+        provider.record_event("decision", "Use SQLite", workspace_id="ws-123"),
+    ]
+
+    assert all(result.status is ProviderStatus.UNAVAILABLE for result in results)
+    assert all(result.errors[0].code is ErrorCode.SCOPE_DENIED for result in results)
 
 
 def test_provider_real_core_pre_edit_adapts_workspace_argument(tmp_path):

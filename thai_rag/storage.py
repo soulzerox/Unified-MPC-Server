@@ -356,7 +356,8 @@ class StorageManager:
         memory_id: str,
         content: str,
         category: str,
-        vector: List[float]
+        vector: List[float],
+        workspace_id: Optional[str] = None,
     ):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._lock:
@@ -366,11 +367,14 @@ class StorageManager:
                     VALUES (?, ?, ?, ?, ?)
                 """, (memory_id, content, category, now, now))
 
+        metadata = {"category": category, "created_at": now}
+        if workspace_id:
+            metadata["workspace_id"] = workspace_id
         self.memory_collection.upsert(
             ids=[memory_id],
             embeddings=[vector],
             documents=[content],
-            metadatas=[{"category": category, "created_at": now}]
+            metadatas=[metadata]
         )
 
     def get_memory(self, memory_id: str) -> Optional[Dict[str, Any]]:
@@ -381,7 +385,19 @@ class StorageManager:
                 return None
             return dict(row)
 
-    def delete_memory(self, memory_id: str, category: Optional[str] = None) -> bool:
+    def delete_memory(
+        self,
+        memory_id: str,
+        category: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> bool:
+        if workspace_id:
+            try:
+                metadata = self.memory_collection.get(ids=[memory_id]).get("metadatas", [[]])[0]
+            except Exception:
+                metadata = None
+            if not metadata or metadata.get("workspace_id") != workspace_id:
+                return False
         with self._lock:
             with self.sqlite_conn:
                 row = self.sqlite_conn.execute(
@@ -402,7 +418,8 @@ class StorageManager:
         self,
         query_vector: List[float],
         limit: int = 5,
-        category: Optional[str] = None
+        category: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if self.memory_collection.count() == 0:
             return []
@@ -418,6 +435,8 @@ class StorageManager:
         if results and results["ids"] and len(results["ids"][0]) > 0:
             for i in range(len(results["ids"][0])):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                if workspace_id and meta.get("workspace_id") != workspace_id:
+                    continue
                 raw_cat = (meta.get("category") or "").strip().lower()
                 row_category = raw_cat if raw_cat else derive_category_from_tags(
                     (meta.get("tags", "") or "").split(",")

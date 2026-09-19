@@ -29,9 +29,9 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
       description: 'Recall persistent context from the parent-owned native Thai-RAG provider, isolated to one canonical workspace.',
       ...readOnly,
       inputSchema: ragRecallSchema,
-      handler: async (input, signal) => context.ragRecall === undefined
+      handler: async (input, signal, _authorization, budget) => context.ragRecall === undefined
         ? missingService()
-        : context.ragRecall(input.workspaceId, input.query, input.category, input.limit, signal),
+        : context.ragRecall(input.workspaceId, input.query, input.category, input.limit, signal, budget),
     }),
     defineTool({
       name: 'rag_remember',

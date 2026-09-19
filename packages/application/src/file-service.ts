@@ -11,6 +11,7 @@ import {
   ok,
   type InvocationAuthorization,
   type Result,
+  type ResultBudget,
 } from '@unified-mpc/domain';
 import {
   AtomicFileWriter,
@@ -259,23 +260,29 @@ export class FileService {
     workspaceId: string | undefined,
     request: ReadFileRequest,
     authorization?: InvocationAuthorization,
+    signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<ReadFileResult>> {
     void actor;
+    if (isAborted(signal)) return cancelledFileMutation();
     const workspaceResult = await resolveWorkspaceForPath(this.workspaces, workspaceId, request.path, authorization);
+    if (isAborted(signal)) return cancelledFileMutation();
     if (!workspaceResult.ok) return workspaceResult;
     const workspace = workspaceResult.value;
     const resolved = await this.guard.resolveForRead(workspace, request.path, authorization);
+    if (isAborted(signal)) return cancelledFileMutation();
     if (!resolved.ok) return resolved;
 
     const absolute = resolved.value.realPath ?? resolved.value.absolutePath;
     if (this.isTrustedWorkspace(workspace)) {
       if (request.startLine !== undefined || request.endLine !== undefined) {
-        const textResult = await this.reader.read(absolute, request);
+        const textResult = await this.reader.read(absolute, request, budget?.maxTextBytes, signal);
         if (textResult.ok) {
           return ok({ path: resultPath(resolved.value), ...textResult.value, encoding: 'utf8', mimeType: 'text/plain' });
         }
       }
-      const unbounded = await this.unboundedReader.read(absolute);
+      const unbounded = await this.unboundedReader.read(absolute, budget?.maxBinaryBytes ?? budget?.maxTextBytes, signal);
+      if (isAborted(signal)) return cancelledFileMutation();
       if (!unbounded.ok) return unbounded;
       return ok({
         path: resultPath(resolved.value),
@@ -288,7 +295,8 @@ export class FileService {
       });
     }
 
-    const readResult = await this.reader.read(absolute, request);
+    const readResult = await this.reader.read(absolute, request, budget?.maxTextBytes, signal);
+    if (isAborted(signal)) return cancelledFileMutation();
     if (!readResult.ok) return readResult;
     return ok({ path: resultPath(resolved.value), ...readResult.value, encoding: 'utf8' });
   }
@@ -298,6 +306,8 @@ export class FileService {
     workspaceId: string | undefined,
     request: ReadFilesRequest,
     authorization?: InvocationAuthorization,
+    signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<ReadFilesResult>> {
     void actor;
     if (!Array.isArray(request.files) || request.files.length > 20) {
@@ -312,12 +322,13 @@ export class FileService {
     const files: ReadFileResult[] = [];
     let totalBytes = 0;
     for (const fileRequest of request.files) {
+      if (isAborted(signal)) return cancelledFileMutation();
       const fileWorkspace = await resolveWorkspaceForPath(this.workspaces, workspaceId, fileRequest.path, authorization);
       if (!fileWorkspace.ok) return fileWorkspace;
       if (fileWorkspace.value.id !== workspaceResult.value.id) {
         return err(appError('PATH_OUTSIDE_WORKSPACE', 'All files must be in the same workspace'));
       }
-      const result = await this.readFile(actor, fileWorkspace.value.id, fileRequest, authorization);
+      const result = await this.readFile(actor, fileWorkspace.value.id, fileRequest, authorization, signal, budget);
       if (!result.ok) return result;
       totalBytes += result.value.byteLength
         ?? Buffer.byteLength(result.value.content, result.value.encoding === 'base64' ? 'base64' : 'utf8');

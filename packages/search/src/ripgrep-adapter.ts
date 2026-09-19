@@ -27,6 +27,7 @@ export interface ProcessRunOptions {
    * This keeps high-volume tools such as ripgrep from flooding Electron's main loop.
    */
   readonly stopAfterStdoutLine?: (line: string) => boolean;
+  readonly maxStdoutBytes?: number;
 }
 
 export interface ProcessRunner {
@@ -62,10 +63,13 @@ export class DirectProcessRunner implements ProcessRunner {
       let settled = false;
       let terminationPending = false;
       let pendingExitCode: number | null = null;
+      const stdoutLimit = typeof options.maxStdoutBytes === 'number' && Number.isFinite(options.maxStdoutBytes) && options.maxStdoutBytes > 0
+        ? Math.min(MAX_PROCESS_LOG_BYTES, Math.floor(options.maxStdoutBytes))
+        : MAX_PROCESS_LOG_BYTES;
 
-      const appendBounded = (chunks: Buffer[], currentBytes: number, chunk: Buffer): number => {
-        if (currentBytes >= MAX_PROCESS_LOG_BYTES) return currentBytes;
-        const remaining = MAX_PROCESS_LOG_BYTES - currentBytes;
+      const appendBounded = (chunks: Buffer[], currentBytes: number, chunk: Buffer, maxBytes = MAX_PROCESS_LOG_BYTES): number => {
+        if (currentBytes >= maxBytes) return currentBytes;
+        const remaining = maxBytes - currentBytes;
         const kept = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
         if (kept.length > 0) chunks.push(Buffer.from(kept));
         return currentBytes + kept.length;
@@ -103,19 +107,19 @@ export class DirectProcessRunner implements ProcessRunner {
       const captureStdout = (chunk: Buffer): void => {
         const observer = options.stopAfterStdoutLine;
         if (observer === undefined) {
-          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, chunk);
+          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, chunk, stdoutLimit);
           return;
         }
         if (stoppedEarly || timedOut) return;
         stdoutLinePending += chunk.toString('utf8');
-        if (Buffer.byteLength(stdoutLinePending, 'utf8') > MAX_PROCESS_LOG_BYTES) {
+        if (Buffer.byteLength(stdoutLinePending, 'utf8') > stdoutLimit) {
           requestStop('early');
           return;
         }
         const lines = stdoutLinePending.split(/\r?\n/);
         stdoutLinePending = lines.pop() ?? '';
         for (const line of lines) {
-          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, Buffer.from(`${line}\n`, 'utf8'));
+          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, Buffer.from(`${line}\n`, 'utf8'), stdoutLimit);
           if (observer(line)) {
             stdoutLinePending = '';
             requestStop('early');
@@ -221,6 +225,7 @@ export class RipgrepAdapter {
     const processResult = await this.runner.run(executable.value, args, request.rootPath, {
       timeoutMs: SEARCH_PROCESS_TIMEOUT_MS,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
+      ...(request.resultBudget === undefined ? {} : { maxStdoutBytes: request.resultBudget.maxStructuredBytes }),
       stopAfterStdoutLine: (line) => {
         const match = this.parseMatch(line);
         if (match === null) return false;
@@ -270,6 +275,7 @@ export class RipgrepAdapter {
     const processResult = await this.runner.run(executable.value, args, request.rootPath, {
       timeoutMs: SEARCH_PROCESS_TIMEOUT_MS,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
+      ...(request.resultBudget === undefined ? {} : { maxStdoutBytes: request.resultBudget.maxStructuredBytes }),
       stopAfterStdoutLine: (line) => {
         if (line.length === 0) return false;
         if (discovery === 'automatic' && !classifyContextPath(line, discovery).discoverable) return false;

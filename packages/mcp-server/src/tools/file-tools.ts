@@ -23,13 +23,13 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: readFileSchema,
-      handler: async (input, _signal, authorization) => context.services.file === undefined
+      handler: async (input, signal, authorization, budget) => context.services.file === undefined
         ? missingService()
         : context.services.file.readFile(context.actor, input.workspaceId, {
           path: input.path,
           ...(input.startLine === undefined ? {} : { startLine: input.startLine }),
           ...(input.endLine === undefined ? {} : { endLine: input.endLine }),
-        }, authorization),
+        }, authorization, signal, budget),
     }),
     defineTool({
       name: 'read_files',
@@ -37,7 +37,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: readFilesSchema,
-      handler: async (input, _signal, authorization) => context.services.file === undefined
+      handler: async (input, signal, authorization, budget) => context.services.file === undefined
         ? missingService()
         : context.services.file.readFiles(context.actor, input.workspaceId, {
           files: input.files.map((file) => ({
@@ -45,7 +45,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
             ...(file.startLine === undefined ? {} : { startLine: file.startLine }),
             ...(file.endLine === undefined ? {} : { endLine: file.endLine }),
           })),
-        }, authorization),
+        }, authorization, signal, budget),
     }),
     defineTool({
       name: 'write_file',

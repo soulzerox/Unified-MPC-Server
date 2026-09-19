@@ -450,8 +450,13 @@ describe('LocalExtensionsService MCP bridge', () => {
       }) },
     });
 
-    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) }))
-      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('result exceeds') } });
+    await expect(service.callMcpTool({ server: 'mock', tool: 'ping', ...await currentMockContract(service) }, undefined, {
+      maxItems: 100,
+      maxTextBytes: 128,
+      maxStructuredBytes: 128,
+      maxBinaryBytes: 128,
+      maxBase64Bytes: 128,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: 'Child MCP result exceeds 128 bytes' } });
     await service.close();
   });
 

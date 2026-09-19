@@ -11,13 +11,13 @@ export function filePageTools(engine: FilePageEngine): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: readFilePageSchema,
-      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.readPage({
+      handler: async (input, signal, _authorization, budget: ResultBudget | undefined) => engine.readPage({
         ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
         path: input.path,
         ...(input.startLine === undefined ? {} : { startLine: input.startLine }),
         ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize }),
         ...(input.responseTargetBytes === undefined ? {} : { responseTargetBytes: input.responseTargetBytes }),
-      }, budget),
+      }, budget, signal),
     }),
     defineTool({
       name: 'read_file_page_continue',
@@ -25,7 +25,7 @@ export function filePageTools(engine: FilePageEngine): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: readFilePageContinueSchema,
-      handler: async (input, _signal, _authorization, budget: ResultBudget | undefined) => engine.continue(input.continuationToken, input.pageSize, budget),
+      handler: async (input, signal, _authorization, budget: ResultBudget | undefined) => engine.continue(input.continuationToken, input.pageSize, budget, signal),
     }),
   ];
 }

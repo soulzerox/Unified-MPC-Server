@@ -44,6 +44,13 @@ export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}):
     if (binaryBytes > budget.maxBinaryBytes) return truncatedResponse(options, binaryBytes, budget.maxBinaryBytes, 'binary');
     if (base64Bytes > budget.maxBase64Bytes) return truncatedResponse(options, base64Bytes, budget.maxBase64Bytes, 'base64');
   }
+  const encoded = extractEncodedContent(result.value);
+  if (encoded !== undefined) {
+    const binaryBytes = Buffer.byteLength(encoded.data, 'base64');
+    const base64Bytes = Buffer.byteLength(encoded.data, 'utf8');
+    if (binaryBytes > budget.maxBinaryBytes) return truncatedResponse(options, binaryBytes, budget.maxBinaryBytes, 'binary');
+    if (base64Bytes > budget.maxBase64Bytes) return truncatedResponse(options, base64Bytes, budget.maxBase64Bytes, 'base64');
+  }
   const structuredContent = toStructuredContent(result.value);
   const hasStructuredPayload = typeof result.value === 'object' && result.value !== null;
   if (hasStructuredPayload && structuredContent !== undefined) {
@@ -155,6 +162,14 @@ function toText(value: unknown): string {
 function toStructuredContent(value: unknown): Readonly<Record<string, unknown>> | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return { value };
   return value as Readonly<Record<string, unknown>>;
+}
+
+function extractEncodedContent(value: unknown): { readonly data: string } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.encoding === 'base64' && typeof record.content === 'string') return { data: record.content };
+  if (typeof record.data_base64 === 'string') return { data: record.data_base64 };
+  return extractEncodedContent(record.image);
 }
 
 function extractImageContent(value: unknown): McpImageContent | undefined {

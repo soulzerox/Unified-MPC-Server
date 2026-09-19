@@ -1,6 +1,6 @@
 import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { DEFAULT_TREE_DEPTH, DEFAULT_TREE_ENTRIES, err, MAX_TREE_DEPTH, MAX_TREE_ENTRIES, ok, type Result } from '@unified-mpc/domain';
+import { DEFAULT_TREE_DEPTH, DEFAULT_TREE_ENTRIES, err, MAX_TREE_DEPTH, MAX_TREE_ENTRIES, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { isWithin } from '@unified-mpc/workspace';
 
 export interface TreeOptions {
@@ -19,9 +19,10 @@ export interface TreeResult {
 }
 
 export class TreeReader {
-  public async read(rootPath: string, options: TreeOptions = {}): Promise<Result<TreeResult>> {
+  public async read(rootPath: string, options: TreeOptions = {}, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<TreeResult>> {
+    if (signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Tree read was cancelled', recoverable: true });
     const maxDepth = options.maxDepth ?? DEFAULT_TREE_DEPTH;
-    const maxEntries = options.maxEntries ?? DEFAULT_TREE_ENTRIES;
+    const maxEntries = Math.min(options.maxEntries ?? DEFAULT_TREE_ENTRIES, budget?.maxItems ?? Number.MAX_SAFE_INTEGER);
     if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > MAX_TREE_DEPTH || !Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > MAX_TREE_ENTRIES) {
       return err({ code: 'INVALID_INPUT', message: 'Tree bounds are invalid', recoverable: false });
     }
@@ -36,7 +37,7 @@ export class TreeReader {
     const entries: TreeEntry[] = [];
     let truncated = false;
     const walk = async (currentPath: string, relativeDirectory: string, depth: number): Promise<void> => {
-      if (truncated || depth > maxDepth) return;
+      if (truncated || depth > maxDepth || signal?.aborted === true) return;
       let directoryEntries;
       try {
         directoryEntries = await readdir(currentPath, { withFileTypes: true });
@@ -45,6 +46,7 @@ export class TreeReader {
       }
       directoryEntries.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
       for (const directoryEntry of directoryEntries) {
+        if (signal?.aborted) return;
         if (entries.length >= maxEntries) {
           truncated = true;
           return;
@@ -71,6 +73,7 @@ export class TreeReader {
       return err({ code: 'FILE_NOT_FOUND', message: 'Tree root was not found', recoverable: false });
     }
     await walk(rootPath, '', 1);
+    if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Tree read was cancelled', recoverable: true });
     return ok({ entries, truncated });
   }
 }

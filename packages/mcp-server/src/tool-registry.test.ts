@@ -37,7 +37,7 @@ describe('MCP tool registry', () => {
     await registry.invoke('search_text', { workspaceId: 'workspace-1', query: 'needle' });
 
     expect(request).toMatchObject({ resultBudget: {
-      maxItems: 100,
+      maxItems: Number.MAX_SAFE_INTEGER,
       maxTextBytes: 1_024,
       maxStructuredBytes: 1_024,
       maxBinaryBytes: 1_024,

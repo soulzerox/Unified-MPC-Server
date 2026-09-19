@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Client, SSEClientTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { ExternalMcpContractDrift, McpResourceSummary, McpServerLaunchConfig, McpToolSummary } from './types.js';
 
 export interface McpClientSession {
@@ -142,6 +142,7 @@ export class McpSessionManager {
     args: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
     expected: { readonly catalogFingerprint?: string } = {},
+    budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     let managed: ManagedSession | undefined;
     try {
@@ -168,8 +169,9 @@ export class McpSessionManager {
         `Timed out calling ${server}/${tool}`,
         signal,
       );
-      if (jsonByteLength(result) > MAX_EXTERNAL_MCP_RESULT_BYTES) {
-        return err(appError('INVALID_INPUT', `Child MCP result exceeds ${MAX_EXTERNAL_MCP_RESULT_BYTES} bytes`));
+      const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
+      if (jsonByteLength(result) > resultLimit) {
+        return err(appError('INVALID_INPUT', `Child MCP result exceeds ${resultLimit} bytes`));
       }
       const outputError = validateDeclaredOutput(declaredTool, result);
       if (outputError !== undefined) return err(appError('INVALID_INPUT', `Child MCP output schema mismatch for ${server}/${tool}: ${outputError}`));

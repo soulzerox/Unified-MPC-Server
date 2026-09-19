@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory } from './mcp-session-manager.js';
 import { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
@@ -256,7 +256,7 @@ export class LocalExtensionsService implements ExtensionsService {
     readonly arguments?: Readonly<Record<string, unknown>>;
     readonly descriptorFingerprint?: string;
     readonly catalogFingerprint?: string;
-  }, signal?: AbortSignal): Promise<Result<unknown>> {
+  }, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
     if (isAborted(signal)) return cancelledMcpCall();
     const server = await this.findServer(input.server);
     if (isAborted(signal)) return cancelledMcpCall();
@@ -282,6 +282,7 @@ export class LocalExtensionsService implements ExtensionsService {
       input.arguments ?? {},
       signal,
       expected,
+      budget,
     );
   }
 

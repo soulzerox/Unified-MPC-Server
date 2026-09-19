@@ -35,6 +35,32 @@ describe('TreeReader', () => {
     expect(result.value.truncated).toBe(false);
   });
 
+  it('applies result item budgets before walking entries', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-'));
+    temporaryRoots.push(root);
+    await writeFile(path.join(root, 'a.txt'), 'a', 'utf8');
+    await writeFile(path.join(root, 'b.txt'), 'b', 'utf8');
+
+    const result = await new TreeReader().read(root, { maxDepth: 1, maxEntries: 20 }, {
+      maxItems: 1,
+      maxTextBytes: 1024,
+      maxStructuredBytes: 1024,
+      maxBinaryBytes: 1024,
+      maxBase64Bytes: 1024,
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { entries: [{ path: 'a.txt', type: 'file' }], truncated: true } });
+  });
+
+  it('stops before walking when cancelled', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-'));
+    temporaryRoots.push(root);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(new TreeReader().read(root, {}, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+  });
+
   it('marks the result when the entry cap is reached', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-'));
     temporaryRoots.push(root);

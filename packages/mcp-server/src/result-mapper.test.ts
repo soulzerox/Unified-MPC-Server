@@ -78,6 +78,16 @@ describe('mapResult image payloads', () => {
     expect(JSON.parse(image.content[0]?.type === 'text' ? image.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'binary' });
   });
 
+  it('rejects oversized non-image base64 payloads before text serialization', () => {
+    const response = mapResult({ ok: true as const, value: {
+      content: 'x'.repeat(2_000), encoding: 'base64', mimeType: 'application/pdf',
+    } }, { budget: { maxBinaryBytes: 128, maxBase64Bytes: 256 } });
+
+    const envelope = JSON.parse(response.content[0]?.type === 'text' ? response.content[0].text : '{}') as Record<string, unknown>;
+    expect(envelope).toMatchObject({ truncated: true, limitType: 'binary', maxBytes: 128 });
+    expect(response.structuredContent).toBeUndefined();
+  });
+
   it('keeps filesystem error messages instead of Operation failed', () => {
     const response = mapError({ code: 'FILE_NOT_FOUND', message: 'File or directory was not found', recoverable: false });
     expect(response.content[0]?.text).toBe('FILE_NOT_FOUND: File or directory was not found');

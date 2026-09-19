@@ -196,16 +196,17 @@ export class ContextEngine {
     this.scanContinuations = new BoundedRetentionMap(options);
   }
 
-  public async collect(request: WorkspaceContextRequest, budget?: ResultBudget): Promise<Result<WorkspaceContextResult>> {
+  public async collect(request: WorkspaceContextRequest, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<WorkspaceContextResult>> {
     this.economy.beginRequest();
     const boundedRequest = boundContextRequest(request, budget);
     const validation = validateRequest(boundedRequest);
     if (!validation.ok) return validation;
+    if (signal?.aborted === true) return err({ code: 'PROCESS_TIMEOUT', message: 'Context collection was cancelled', recoverable: true });
     const workspaceIds = await this.resolveWorkspaceIds(boundedRequest.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
     if (workspaceIds.value.length === 0) return err({ code: 'WORKSPACE_NOT_FOUND', message: 'No registered workspace is available', recoverable: false });
 
-    const settled = await Promise.allSettled(workspaceIds.value.map((workspaceId) => this.collectWorkspace(workspaceId, boundedRequest)));
+    const settled = await Promise.allSettled(workspaceIds.value.map((workspaceId) => this.collectWorkspace(workspaceId, boundedRequest, signal)));
     const successful: WorkspaceCollection[] = [];
     let firstError: AppError | undefined;
     for (const entry of settled) {
@@ -217,23 +218,30 @@ export class ContextEngine {
     }
 
     const merged = mergeCollections(successful);
-    return this.materialize(merged.candidates, boundedRequest, {
-      scannedFiles: merged.scannedFiles,
-      totalMatches: merged.totalMatches,
-      searchTruncated: merged.searchTruncated,
-    });
+    try {
+      return await this.materialize(merged.candidates, boundedRequest, {
+        scannedFiles: merged.scannedFiles,
+        totalMatches: merged.totalMatches,
+        searchTruncated: merged.searchTruncated,
+      }, signal);
+    } catch (error: unknown) {
+      if (signal?.aborted || error instanceof Error && error.message === 'File read was cancelled') {
+        return err({ code: 'PROCESS_TIMEOUT', message: 'Context materialization was cancelled', recoverable: true });
+      }
+      return err({ code: 'INTERNAL_ERROR', message: 'Context materialization failed', recoverable: true });
+    }
   }
 
-  public async continue(token: string, pageSize?: number, budget?: ResultBudget): Promise<Result<WorkspaceContextResult>> {
+  public async continue(token: string, pageSize?: number, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<WorkspaceContextResult>> {
     const continuation = this.continuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Continuation token is invalid or expired', recoverable: false });
     return this.materialize(continuation.candidates, boundContextRequest({
       ...continuation.request,
       ...(pageSize === undefined ? {} : { pageSize }),
-    }, budget), continuation);
+    }, budget), continuation, signal);
   }
 
-  public async searchAll(request: SearchAllRequest, budget?: ResultBudget): Promise<Result<SearchAllResult>> {
+  public async searchAll(request: SearchAllRequest, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<SearchAllResult>> {
     this.economy.beginRequest();
     if (request.query.trim().length === 0) return err({ code: 'INVALID_INPUT', message: 'Search query is required', recoverable: false });
     const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
@@ -241,51 +249,52 @@ export class ContextEngine {
     if (this.services.search === undefined) return err({ code: 'INTERNAL_ERROR', message: 'Search service is unavailable', recoverable: true });
     const effectiveBudget = budget ?? request.resultBudget;
     const maxResults = Math.max(1, Math.min(500, Math.floor(Math.min(request.maxResults ?? 500, effectiveBudget?.maxItems ?? Number.MAX_SAFE_INTEGER))));
-    const settled = await Promise.allSettled(workspaceIds.value.map(async (workspaceId) => {
-      const [text, files] = await Promise.all([
-      this.safeSearchText(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, maxResults),
-      this.safeSearchFiles(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, maxResults, request.glob),
-      ]);
-      return { workspaceId, text, files };
-    }));
     const matches: ContextMatch[] = [];
     const paths: Array<{ readonly workspaceId: string; readonly path: string }> = [];
     let hasMore = false;
     let successfulWorkspaces = 0;
-    for (const entry of settled) {
-      if (entry.status !== 'fulfilled') continue;
+    for (const workspaceId of workspaceIds.value) {
+      if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Search was cancelled', recoverable: true });
+      const producerLimit = maxResults;
+      const [text, files] = await Promise.all([
+        this.safeSearchText(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, producerLimit, signal),
+        this.safeSearchFiles(workspaceId, { query: request.query, ...(request.includeIgnored === undefined ? {} : { includeIgnored: request.includeIgnored }), ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, producerLimit, request.glob, signal),
+      ]);
       successfulWorkspaces += 1;
-      if (entry.value.text.ok) {
-        matches.push(...entry.value.text.value.matches
+      if (text.ok) {
+        matches.push(...text.value.matches
           .filter((match) => {
             const allowed = request.includeIgnored === true || classifyContextPath(match.path, 'automatic').discoverable;
             if (!allowed) this.economy.recordSkipped(match.path);
             return allowed;
           })
-          .map((match) => ({ workspaceId: entry.value.workspaceId, path: match.path, line: match.line, text: match.text })));
-        hasMore ||= entry.value.text.value.truncated;
+          .map((match) => ({ workspaceId, path: match.path, line: match.line, text: match.text })));
+        hasMore ||= text.value.truncated;
       }
-      if (entry.value.files.ok) {
-        paths.push(...entry.value.files.value.paths
+      if (files.ok) {
+        paths.push(...files.value.paths
           .filter((path) => {
             const allowed = request.includeIgnored === true || classifyContextPath(path, 'automatic').discoverable;
             if (!allowed) this.economy.recordSkipped(path);
             return allowed;
           })
-          .map((path) => ({ workspaceId: entry.value.workspaceId, path })));
-        hasMore ||= entry.value.files.value.truncated;
+          .map((path) => ({ workspaceId, path })));
+        hasMore ||= files.value.truncated;
       }
+      if (matches.length + paths.length >= maxResults) hasMore = true;
     }
+    const boundedMatches = matches.slice(0, maxResults);
+    const boundedPaths = dedupePaths(paths).slice(0, maxResults);
     return ok({
-      matches,
-      paths: dedupePaths(paths),
+      matches: boundedMatches,
+      paths: boundedPaths,
       scannedWorkspaces: successfulWorkspaces,
-      totalMatches: matches.length,
-      hasMore,
+      totalMatches: boundedMatches.length,
+      hasMore: hasMore || matches.length > boundedMatches.length || paths.length > boundedPaths.length,
     });
   }
 
-  public async fullScan(request: WorkspaceFullScanRequest, budget?: ResultBudget): Promise<Result<WorkspaceFullScanResult>> {
+  public async fullScan(request: WorkspaceFullScanRequest, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<WorkspaceFullScanResult>> {
     this.economy.beginRequest();
     const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
@@ -296,21 +305,20 @@ export class ContextEngine {
     if (this.services.search === undefined) return err({ code: 'INTERNAL_ERROR', message: 'Search service is unavailable', recoverable: true });
     const effectiveBudget = budget ?? request.resultBudget;
     const maxResults = Math.max(1, Math.min(500, effectiveBudget?.maxItems ?? 500));
-    const settled = await Promise.allSettled(workspaceIds.value.map(async (workspaceId) => ({
-      workspaceId,
-      result: await this.safeSearchFiles(workspaceId, { query: '*', includeIgnored: request.includeIgnored !== false, ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, maxResults, request.glob),
-    })));
     const files: Array<{ readonly workspaceId: string; readonly path: string }> = [];
     let hasMore = false;
     let scannedWorkspaces = 0;
-    for (const entry of settled) {
-      if (entry.status !== 'fulfilled') continue;
+    for (const workspaceId of workspaceIds.value) {
+      if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Workspace scan was cancelled', recoverable: true });
+      const remaining = Math.max(1, maxResults - files.length);
+      const result = await this.safeSearchFiles(workspaceId, { query: '*', includeIgnored: request.includeIgnored !== false, ...(request.path === undefined ? {} : { path: request.path }), ...(effectiveBudget === undefined ? {} : { resultBudget: effectiveBudget }) }, Math.min(maxResults, remaining), request.glob, signal);
       scannedWorkspaces += 1;
-      if (!entry.value.result.ok) continue;
-      files.push(...entry.value.result.value.paths.map((path) => ({ workspaceId: entry.value.workspaceId, path })));
-      hasMore ||= entry.value.result.value.truncated;
+      if (!result.ok) continue;
+      files.push(...result.value.paths.map((path) => ({ workspaceId, path })));
+      hasMore ||= result.value.truncated;
+      if (files.length >= maxResults) hasMore = true;
     }
-    const deduped = dedupePaths(files);
+    const deduped = dedupePaths(files).slice(0, maxResults);
     const pageSize = normalizePageSize(request.pageSize ?? 200);
     const page = deduped.slice(0, pageSize);
     const remaining = deduped.slice(page.length);
@@ -329,7 +337,8 @@ export class ContextEngine {
     });
   }
 
-  public async continueFullScan(token: string, pageSize?: number, budget?: ResultBudget): Promise<Result<WorkspaceFullScanResult>> {
+  public async continueFullScan(token: string, pageSize?: number, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<WorkspaceFullScanResult>> {
+    if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Workspace scan was cancelled', recoverable: true });
     const continuation = this.scanContinuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Scan continuation token is invalid or expired', recoverable: false });
     const size = normalizePageSize(Math.min(pageSize ?? 200, budget?.maxItems ?? Number.MAX_SAFE_INTEGER));
@@ -349,26 +358,34 @@ export class ContextEngine {
     });
   }
 
-  public async readMany(request: ReadManyFilesRequest, budget?: ResultBudget): Promise<Result<ReadManyFilesResult>> {
+  public async readMany(request: ReadManyFilesRequest, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<ReadManyFilesResult>> {
     if (this.services.file === undefined) return err({ code: 'INTERNAL_ERROR', message: 'File service is unavailable', recoverable: true });
     const workspaceIds = await this.resolveWorkspaceIds(request.workspaceId);
     if (!workspaceIds.ok) return workspaceIds;
     const workspaceId = request.workspaceId ?? workspaceIds.value[0];
     if (workspaceId === undefined) return err({ code: 'WORKSPACE_NOT_FOUND', message: 'No workspace is available', recoverable: false });
     const filesToRead = request.files.slice(0, budget?.maxItems ?? Number.MAX_SAFE_INTEGER);
-    const settled = await Promise.allSettled(filesToRead.map(async (file) => {
+    const files: ReadManyFileResult[] = [];
+    let consumedBytes = 0;
+    for (const file of filesToRead) {
+      if (signal?.aborted) {
+        files.push({ workspaceId, path: file.path, error: { code: 'PROCESS_TIMEOUT', message: 'File read was cancelled' } });
+        break;
+      }
       try {
-        const result = await this.services.file!.readFile(this.actor, workspaceId, file);
-        return result.ok
+        const remainingBytes = budget === undefined ? undefined : Math.max(1, budget.maxStructuredBytes - consumedBytes);
+        const fileBudget = budget === undefined || remainingBytes === undefined ? budget : { ...budget, maxTextBytes: Math.min(budget.maxTextBytes, remainingBytes), maxBinaryBytes: Math.min(budget.maxBinaryBytes, remainingBytes), maxBase64Bytes: Math.min(budget.maxBase64Bytes, remainingBytes) };
+        const result = await this.services.file!.readFile(this.actor, workspaceId, file, undefined, signal, fileBudget);
+        const entry = result.ok
           ? { workspaceId, path: file.path, result: result.value }
           : { workspaceId, path: file.path, error: { code: result.error.code, message: result.error.message } };
+        files.push(entry);
+        if (result.ok) consumedBytes += Buffer.byteLength(JSON.stringify(result.value), 'utf8');
+        if (budget !== undefined && consumedBytes >= budget.maxStructuredBytes) break;
       } catch {
-        return { workspaceId, path: file.path, error: { code: 'INTERNAL_ERROR', message: 'File read failed' } };
+        files.push({ workspaceId, path: file.path, error: { code: 'INTERNAL_ERROR', message: 'File read failed' } });
       }
-    }));
-    const files = settled.map((entry, index) => entry.status === 'fulfilled'
-      ? entry.value
-      : { workspaceId, path: filesToRead[index]?.path ?? '', error: { code: 'INTERNAL_ERROR', message: 'File read failed' } });
+    }
     return ok({ files, totalFiles: files.length, failedFiles: files.filter((file) => file.error !== undefined).length });
   }
 
@@ -424,13 +441,14 @@ export class ContextEngine {
     return ok(ids);
   }
 
-  private async collectWorkspace(workspaceId: string, request: WorkspaceContextRequest): Promise<Result<WorkspaceCollection>> {
+  private async collectWorkspace(workspaceId: string, request: WorkspaceContextRequest, signal?: AbortSignal): Promise<Result<WorkspaceCollection>> {
     if (this.services.search === undefined) return err({ code: 'INTERNAL_ERROR', message: 'Search service is unavailable', recoverable: true });
     const limit = SEARCH_LIMIT[request.mode ?? 'optimized'];
-    const searchTextPromise = this.safeSearchText(workspaceId, request, limit);
-    const searchFilesPromise = this.safeSearchFiles(workspaceId, request, limit);
+    const searchTextPromise = this.safeSearchText(workspaceId, request, limit, signal);
+    const searchFilesPromise = this.safeSearchFiles(workspaceId, request, limit, undefined, signal);
     const gitPromise = this.safeGitStatus(workspaceId);
     const [textResult, filesResult, gitResult] = await Promise.all([searchTextPromise, searchFilesPromise, gitPromise]);
+    if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Context search was cancelled', recoverable: true });
     if (!textResult.ok && !filesResult.ok) return err(textResult.error);
 
     const changed = new Set<string>();
@@ -512,7 +530,7 @@ export class ContextEngine {
     });
   }
 
-  private async safeSearchText(workspaceId: string, request: WorkspaceContextRequest, maxResults: number): Promise<Awaited<ReturnType<SearchService['searchText']>>> {
+  private async safeSearchText(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, signal?: AbortSignal): Promise<Awaited<ReturnType<SearchService['searchText']>>> {
     try {
       return await this.services.search!.searchText(this.actor, workspaceId, {
         query: request.query,
@@ -520,13 +538,13 @@ export class ContextEngine {
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(request.path === undefined ? {} : { path: request.path }),
         ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
-      });
+      }, signal);
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context text search failed', recoverable: true });
     }
   }
 
-  private async safeSearchFiles(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, glob?: string): Promise<Awaited<ReturnType<SearchService['searchFiles']>>> {
+  private async safeSearchFiles(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, glob?: string, signal?: AbortSignal): Promise<Awaited<ReturnType<SearchService['searchFiles']>>> {
     try {
       return await this.services.search!.searchFiles(this.actor, workspaceId, {
         maxResults,
@@ -534,7 +552,7 @@ export class ContextEngine {
         ...(glob === undefined ? {} : { glob }),
         ...(request.path === undefined ? {} : { path: request.path }),
         ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
-      });
+      }, signal);
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context filename search failed', recoverable: true });
     }
@@ -553,6 +571,7 @@ export class ContextEngine {
     candidates: readonly Candidate[],
     request: WorkspaceContextRequest,
     metadata: Pick<Continuation, 'scannedFiles' | 'totalMatches' | 'searchTruncated'>,
+    signal?: AbortSignal,
   ): Promise<Result<WorkspaceContextResult>> {
     if (this.services.file === undefined) return err({ code: 'INTERNAL_ERROR', message: 'File service is unavailable', recoverable: true });
     const mode = request.mode ?? 'optimized';
@@ -560,9 +579,21 @@ export class ContextEngine {
     const targetBytes = normalizeResponseTarget(request.responseTargetBytes);
     const selectedCandidates = candidates.slice(0, pageSize);
     const contextId = randomUUID();
-    const selected = await Promise.all(selectedCandidates.map((candidate) => this.readCandidate(candidate, request, contextId)));
+    const selected: ContextFile[] = [];
+    let estimatedBytes = 0;
+    for (const candidate of selectedCandidates) {
+      if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'Context materialization was cancelled', recoverable: true });
+      const remainingBytes = request.resultBudget === undefined ? undefined : Math.max(1, request.resultBudget.maxStructuredBytes - estimatedBytes);
+      const candidateRequest = remainingBytes === undefined ? request : {
+        ...request,
+        resultBudget: { ...request.resultBudget!, maxTextBytes: Math.min(request.resultBudget!.maxTextBytes, remainingBytes), maxBinaryBytes: Math.min(request.resultBudget!.maxBinaryBytes, remainingBytes), maxBase64Bytes: Math.min(request.resultBudget!.maxBase64Bytes, remainingBytes) },
+      };
+      const file = await this.readCandidate(candidate, candidateRequest, contextId, signal);
+      selected.push(file);
+      estimatedBytes += Buffer.byteLength(JSON.stringify(file), 'utf8');
+      if (request.resultBudget !== undefined && estimatedBytes >= request.resultBudget.maxStructuredBytes) break;
+    }
     let consumed = selected.length;
-    let estimatedBytes = selected.reduce((total, file) => total + Buffer.byteLength(JSON.stringify(file), 'utf8'), 0);
     while (selected.length > 1 && estimatedBytes > targetBytes) {
       const removed = selected.pop();
       if (removed !== undefined) estimatedBytes -= Buffer.byteLength(JSON.stringify(removed), 'utf8');
@@ -596,10 +627,11 @@ export class ContextEngine {
     });
   }
 
-  private async readCandidate(candidate: Candidate, request: WorkspaceContextRequest, contextId: string): Promise<ContextFile> {
+  private async readCandidate(candidate: Candidate, request: WorkspaceContextRequest, contextId: string, signal?: AbortSignal): Promise<ContextFile> {
     try {
-      const result = await this.services.file!.readFile(this.actor, candidate.workspaceId, { path: candidate.path });
+      const result = await this.services.file!.readFile(this.actor, candidate.workspaceId, { path: candidate.path }, undefined, signal, request.resultBudget);
       if (!result.ok) {
+        if (result.error.code === 'PROCESS_TIMEOUT') throw new Error('File read was cancelled');
         return {
           workspaceId: candidate.workspaceId,
           path: candidate.path,
@@ -641,7 +673,8 @@ export class ContextEngine {
       };
       this.economy.recordDelivery(prepared, Buffer.byteLength(JSON.stringify(file), 'utf8'));
       return file;
-    } catch {
+    } catch (error: unknown) {
+      if (signal?.aborted || error instanceof Error && error.message === 'File read was cancelled') throw error;
       return {
         workspaceId: candidate.workspaceId,
         path: candidate.path,

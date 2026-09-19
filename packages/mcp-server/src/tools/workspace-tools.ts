@@ -125,13 +125,13 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceTreeSchema,
-      handler: async (input) => context.services.workspaceQuery === undefined
+      handler: async (input, signal, _authorization, budget) => context.services.workspaceQuery === undefined
         ? missingService()
         : context.services.workspaceQuery.tree(context.actor, input.workspaceId, {
           ...(input.path === undefined ? {} : { path: input.path }),
           ...(input.maxDepth === undefined ? {} : { maxDepth: input.maxDepth }),
           ...(input.maxEntries === undefined ? {} : { maxEntries: input.maxEntries }),
-        }),
+        }, signal, budget),
     }),
     defineTool({
       name: 'project_snapshot',

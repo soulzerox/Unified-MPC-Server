@@ -87,7 +87,7 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
       description: 'Call a tool on a discovered local MCP server. Standard mode fails closed as an opaque mutation unless the parent runtime policy explicitly lists this exact child tool in readOnlyTools and the supplied descriptor/catalog fingerprints match the live drift-free MCP contract; only that verified case is classified as a read without mutation approval. All other child calls preserve explicit chat plus host exact-action approval. Trusted Full Bypass skips unified-mpc application approval; the child server still enforces its own policy.',
       ...opaqueChildMutation,
       inputSchema: mcpCallSchema,
-      handler: async (input, signal) => context.services.extensions === undefined
+      handler: async (input, signal, _authorization, budget) => context.services.extensions === undefined
         ? missingService()
         : context.services.extensions.callMcpTool({
           server: input.server,
@@ -95,7 +95,7 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.arguments === undefined ? {} : { arguments: input.arguments }),
           ...(input.descriptorFingerprint === undefined ? {} : { descriptorFingerprint: input.descriptorFingerprint }),
           ...(input.catalogFingerprint === undefined ? {} : { catalogFingerprint: input.catalogFingerprint }),
-        }, signal),
+        }, signal, budget),
     }),
   ];
 }

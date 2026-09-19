@@ -98,6 +98,26 @@ describe('context engine', () => {
     if (result.ok) expect(result.value.files).toHaveLength(1);
   });
 
+  it('stops before producer materialization when the caller is cancelled', async () => {
+    let reads = 0;
+    const source = {
+      ...services(),
+      file: {
+        readFile: async (...args: Parameters<NonNullable<McpApplicationServices['file']>['readFile']>) => {
+          reads += 1;
+          return services().file!.readFile(...args);
+        },
+      },
+    } as McpApplicationServices;
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await new ContextEngine(source, actor).collect({ query: 'login', workspaceId: 'workspace-1' }, undefined, controller.signal);
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+    expect(reads).toBe(0);
+  });
+
   it('returns a continuation token without discarding candidates outside the response page', async () => {
     const engine = new ContextEngine(services(), actor);
     const first = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
@@ -112,6 +132,40 @@ describe('context engine', () => {
     if (!next.ok) return;
     expect(next.value.files).toHaveLength(1);
     expect(next.value.files[0]?.path).not.toBe(first.value.files[0]?.path);
+  });
+
+  it('preserves caller search limits and stops before producers when cancelled', async () => {
+    const originalSearch = services().search!;
+    const textLimits: number[] = [];
+    const fileLimits: number[] = [];
+    const source = {
+      ...services(),
+      search: {
+        ...originalSearch,
+        searchText: async (...args: Parameters<typeof originalSearch.searchText>) => {
+          textLimits.push(args[2].maxResults ?? 0);
+          return originalSearch.searchText(...args);
+        },
+        searchFiles: async (...args: Parameters<typeof originalSearch.searchFiles>) => {
+          fileLimits.push(args[2].maxResults ?? 0);
+          return originalSearch.searchFiles(...args);
+        },
+      },
+    } as McpApplicationServices;
+    const engine = new ContextEngine(source, actor);
+
+    const limited = await engine.searchAll({ query: 'login', workspaceId: 'workspace-1', maxResults: 2 });
+    expect(limited).toMatchObject({ ok: true, value: { totalMatches: expect.any(Number) } });
+    if (limited.ok) {
+      expect(limited.value.matches.length).toBeLessThanOrEqual(2);
+      expect(limited.value.paths.length).toBeLessThanOrEqual(2);
+    }
+    expect(textLimits).toEqual([2]);
+    expect(fileLimits).toEqual([2]);
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(engine.searchAll({ query: 'login', workspaceId: 'workspace-1' }, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });
 
   it('supports cross-workspace search, paged full scans, and parallel many-file reads', async () => {

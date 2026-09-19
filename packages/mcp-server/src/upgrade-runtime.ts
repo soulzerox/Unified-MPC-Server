@@ -2230,7 +2230,7 @@ function runDependencyCommand(
         windowsHide: true,
         shell: false,
         detached: platform !== 'win32',
-        env: { ...sanitizedDiagnosticEnvironment(), ...command.environment },
+        env: { ...process.env, ...command.environment },
       });
     } catch {
       resolve(err(appError('PROCESS_NOT_FOUND', `${command.executable} could not be started for dependency bootstrap`, true)));

@@ -198,6 +198,35 @@ describe('NativeThaiRagProviderDriver', () => {
     expect((await stopping).ok).toBe(true);
   });
 
+  it('skips stale alias sync when stop claims shutdown during refresh', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let workspaceReads = 0;
+    let releaseRefresh: (() => void) | undefined;
+    const refreshBlocked = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => {
+        workspaceReads += 1;
+        if (workspaceReads > 1) await refreshBlocked;
+        return [{ id: workspaceId, realRootPath: workspaceRoot }];
+      },
+      clientFactory: clientFactory(),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    const refreshing = driver.call('recall', { query: 'refresh before stop' });
+    await expect.poll(() => workspaceReads).toBe(2);
+    const stopping = driver.stop();
+    releaseRefresh?.();
+
+    await refreshing;
+    expect((await stopping).ok).toBe(true);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(workspaceRoot));
+  });
+
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

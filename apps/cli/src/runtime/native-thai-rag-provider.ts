@@ -271,8 +271,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     } catch (error: unknown) {
       return err(appError('INTERNAL_ERROR', `Unable to prepare Native Thai-RAG sources: ${errorMessage(error)}`, true));
     }
-    if (generation !== this.lifecycleGeneration) return ok(undefined);
-    const aliases = await syncWorkspaceSourceAliases(sourcesRoot, workspaces, () => generation === this.lifecycleGeneration);
+    if (!this.refreshIsCurrent(generation)) return ok(undefined);
+    const aliases = await syncWorkspaceSourceAliases(sourcesRoot, workspaces, () => this.refreshIsCurrent(generation));
     if (!aliases.ok) return aliases;
     if (generation !== this.lifecycleGeneration) return ok(undefined);
     for (const workspaceId of aliases.value) this.pendingReindexIds.add(workspaceId);
@@ -296,7 +296,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         if (generation !== this.lifecycleGeneration || !this.started) return ok(undefined);
         if (!indexed.ok) {
           for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
-           const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces, () => generation === this.lifecycleGeneration);
+           const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces, () => this.refreshIsCurrent(generation));
           if (!rolledBack.ok) {
             this.workspaceRoots.clear();
             this.workspaceRootIds.clear();
@@ -419,6 +419,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const pending = this.lifecycleQueue.then(operation, operation);
     this.lifecycleQueue = pending.then(() => undefined, () => undefined);
     return pending;
+  }
+
+  private refreshIsCurrent(generation: number): boolean {
+    return !this.stopRequested && generation === this.lifecycleGeneration;
   }
 }
 

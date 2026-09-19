@@ -392,8 +392,12 @@ class HybridRetriever:
         if rel and rel != file_path:
             candidates.add(rel)
         placeholders = " OR ".join("file_path = ?" for _ in candidates)
-        scope_clause = " AND file_path LIKE ?" if workspace else ""
-        scope_params = (f"{workspace}/%",) if workspace else ()
+        scope_clause = " AND file_path LIKE ? ESCAPE '\\'" if workspace else ""
+        escaped_workspace = (workspace.rstrip('/')
+                             .replace('\\', '\\\\')
+                             .replace('%', '\\%')
+                             .replace('_', '\\_')) if workspace else ""
+        scope_params = (f"{escaped_workspace}/%",) if workspace else ()
         # Find exact enclosing parent doc (support exact or suffix match)
         row = cur.execute(f"""
             SELECT * FROM parent_documents

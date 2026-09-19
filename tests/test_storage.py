@@ -110,3 +110,19 @@ def test_search_code_vector_with_path_filter(temp_storage):
     results = temp_storage.search_code_vector(vec1, top_k=5, path_filter="webtrans_violentmonkey")
     assert len(results) == 1
     assert results[0]["id"] == "c1"
+
+
+def test_parent_doc_workspace_scope_escapes_underscore(temp_storage):
+    temp_storage.save_parent_doc("ws-doc", "ws_/module.py", 1, 1, "owned", "owned")
+    temp_storage.save_parent_doc("wsx-doc", "wsX/module.py", 1, 1, "sibling", "sibling")
+
+    assert temp_storage.get_parent_doc("ws-doc", workspace="ws_")["content"] == "owned"
+    assert temp_storage.get_parent_doc("wsx-doc", workspace="ws_") is None
+
+
+def test_parent_doc_workspace_scope_does_not_match_hyphenated_sibling(temp_storage):
+    temp_storage.save_parent_doc("ws-doc", "ws/module.py", 1, 1, "owned", "owned")
+    temp_storage.save_parent_doc("wsb-doc", "ws-b/module.py", 1, 1, "sibling", "sibling")
+
+    assert temp_storage.get_parent_doc("ws-doc", workspace="ws")["content"] == "owned"
+    assert temp_storage.get_parent_doc("wsb-doc", workspace="ws") is None

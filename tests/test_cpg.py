@@ -190,3 +190,24 @@ def test_cpg_workspace_filter_exact_case():
         filtered_callees = storage.find_callees("run_job", workspace="My-WorkSpace", max_depth=1)
         assert any("validate" in c["target_symbol"] for c in filtered_callees)
         storage.close()
+
+
+def test_cpg_workspace_scope_requires_exact_owner():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        storage = StorageManager(sqlite_path=os.path.join(tmpdir, "t.db"), chroma_path=os.path.join(tmpdir, "chroma"))
+        for workspace in ("ws_", "wsX", "ws", "ws-b"):
+            symbols, edges = extract_cpg(f"{workspace}/engine.py", PYTHON_SAMPLE, workspace=workspace)
+            storage.save_code_graph(f"{workspace}/engine.py", symbols, edges, workspace=workspace)
+
+        callers = storage.find_callers("validate", workspace="ws_", max_depth=1)
+        assert callers
+        assert {row["source_file"].split("/", 1)[0] for row in callers} == {"ws_"}
+
+        callers = storage.find_callers("validate", workspace="ws", max_depth=1)
+        assert callers
+        assert {row["source_file"].split("/", 1)[0] for row in callers} == {"ws"}
+
+        callees = storage.find_callees("run_job", workspace="ws-b", max_depth=1)
+        assert callees
+        assert {row["source_file"].split("/", 1)[0] for row in callees} == {"ws-b"}
+        storage.close()

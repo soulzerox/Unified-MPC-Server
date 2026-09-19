@@ -254,8 +254,7 @@ def test_get_file_symbols_matches_bare_and_canonical():
 
             found = st.get_file_symbols("plan.md", workspace="ws1")
             paths = {r["file_path"] for r in found}
-            assert "ws1/plan.md" in paths, f"canonical row not found: {found}"
-            assert "plan.md" in paths, f"legacy bare row not found (R3 regression): {found}"
+            assert paths == {"ws1/plan.md"}, f"workspace scope leaked ownerless legacy row: {found}"
         finally:
             server.close()
 

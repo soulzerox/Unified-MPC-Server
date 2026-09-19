@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -269,6 +269,42 @@ describe('NativeThaiRagProviderDriver', () => {
     await refreshing;
     expect((await stopping).ok).toBe(true);
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
+  });
+
+  it('reports stop failure when stale alias restoration is unsafe', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    let releaseIndex: (() => void) | undefined;
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            markIndexStarted?.();
+            await indexBlocked;
+          }
+          return success('indexed');
+        },
+      }),
+    });
+    const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
+
+    expect((await driver.start(options)).ok).toBe(true);
+    await indexStarted;
+    const alias = path.join(dataRoot, 'thai-rag', 'sources', workspaceId);
+    await rm(alias, { recursive: true, force: true });
+    await mkdir(alias);
+    const stopping = driver.stop();
+    releaseIndex?.();
+
+    const stopped = await stopping;
+    expect(stopped.ok).toBe(false);
+    expect((await lstat(alias)).isSymbolicLink()).toBe(false);
   });
 
   it('indexes through the explicit UUID namespace when the directory basename differs', async () => {

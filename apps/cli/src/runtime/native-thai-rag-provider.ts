@@ -56,6 +56,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private activeOperations = 0;
   private idleWaiters: Array<() => void> = [];
   private lifecycleQueue: Promise<unknown> = Promise.resolve();
+  private stopPromise: Promise<Result<void>> | undefined;
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
     this.sessions = new McpSessionManager({
@@ -172,9 +173,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   public stop(): Promise<Result<void>> {
-    if (this.stopRequested) return this.lifecycleQueue.then(() => ok(undefined));
+    if (this.stopPromise !== undefined) return this.stopPromise;
     this.stopRequested = true;
-    return this.enqueueLifecycle(() => this.stopNow());
+    this.stopPromise = this.enqueueLifecycle(() => this.stopNow());
+    return this.stopPromise;
   }
 
   private async stopNow(): Promise<Result<void>> {
@@ -185,12 +187,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     await this.waitForOperations();
     await this.workerQueue.catch(() => undefined);
     const backgroundRefresh = this.backgroundRefresh;
-    if (backgroundRefresh !== undefined) await backgroundRefresh.catch(() => undefined);
+    const refreshResult = backgroundRefresh === undefined
+      ? ok(undefined)
+      : await backgroundRefresh.catch((error: unknown) => err(appError('CONFLICT', `Native Thai-RAG background refresh failed during shutdown: ${errorMessage(error)}`, true)));
     if (generation === this.lifecycleGeneration) this.backgroundRefresh = undefined;
     this.sessions.unpin(SERVER_NAME);
     await this.sessions.close().catch(() => undefined);
     this.stopped = true;
-    return ok(undefined);
+    return refreshResult;
   }
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {

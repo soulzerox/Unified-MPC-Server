@@ -16,7 +16,15 @@ import type { FileActor } from '@unified-mpc/application';
 import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescriptor } from '@unified-mpc/capabilities';
 import { createProcessTreeTerminator } from '@unified-mpc/process';
 import { normalizeProjectProfile } from '@unified-mpc/shared';
-import { hostPathApi, isAbsoluteHostPath, normalizeHostPath } from '@unified-mpc/workspace';
+import {
+  WORKTREE_DEPENDENCY_POLICY_VERSION,
+  hostPathApi,
+  isAbsoluteHostPath,
+  normalizeHostPath,
+  prepareDependencyBootstrap,
+  type DependencyBootstrapPlan,
+  type DependencyInstallCommand,
+} from '@unified-mpc/workspace';
 import { z } from 'zod';
 import type { McpApplicationServices, McpToolDefinition } from './tools/tool-types.js';
 import { ContextEngine } from './context-engine.js';
@@ -108,6 +116,22 @@ interface RuntimePluginDescriptor {
   readonly namespace: string;
 }
 
+interface WorktreeDependencyPolicyState {
+  readonly policyVersion: typeof WORKTREE_DEPENDENCY_POLICY_VERSION;
+  readonly disposition: 'adopt' | 'grandfather';
+  readonly status: 'pending_bootstrap' | 'ready' | 'blocked' | 'unsupported' | 'skipped' | 'bootstrap_failed' | 'grandfathered';
+  readonly installMode: 'frozen' | 'mutable';
+  readonly lastBootstrapResult: 'pending' | 'installed' | 'skipped' | 'failed';
+  readonly strategyId?: string;
+  readonly ecosystem?: string;
+  readonly packageManager?: string;
+  readonly packageManagerVersion?: string;
+  readonly sharedStoreIdentity?: string;
+  readonly localRuntimeIdentity?: string;
+  readonly blockingReasons: readonly string[];
+  readonly integration: 'bounded_runtime_v1';
+}
+
 interface WorktreeLedgerEntry {
   readonly workspaceId: string;
   readonly worktreePath: string;
@@ -115,6 +139,7 @@ interface WorktreeLedgerEntry {
   readonly owner: string;
   readonly ownerSessionId?: string;
   readonly createdAt: string;
+  readonly dependencyPolicy: WorktreeDependencyPolicyState;
 }
 
 interface SelfHealFix {
@@ -403,7 +428,7 @@ export class UpgradeRuntimeService {
       case 'self_heal_apply':
         return this.selfHealApply(input, authorization);
       case 'git_worktree_spawn':
-        return this.gitWorktreeSpawn(input, authorization);
+        return this.gitWorktreeSpawn(input, signal, authorization);
       case 'event_watch':
       case 'crash_trace':
         return this.eventLogQuery(name, input, signal);
@@ -1296,7 +1321,11 @@ export class UpgradeRuntimeService {
     });
   }
 
-  private async gitWorktreeSpawn(input: Record<string, unknown>, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
+  private async gitWorktreeSpawn(
+    input: Record<string, unknown>,
+    signal?: AbortSignal,
+    authorization?: InvocationAuthorization,
+  ): Promise<Result<unknown>> {
     const workspaceId = readString(input, 'workspaceId');
     if (workspaceId === undefined) return err(appError('INVALID_INPUT', 'workspaceId is required for a Git worktree'));
     const worktreePath = readString(input, 'worktreePath') ?? `.worktrees/agent-${randomUUID().slice(0, 8)}`;
@@ -1317,6 +1346,9 @@ export class UpgradeRuntimeService {
     }
     const ref = readString(input, 'ref') ?? 'HEAD';
     if (ref.includes('\0') || ref.length > 256) return err(appError('INVALID_INPUT', 'Git worktree ref is invalid'));
+    const installMode = input.dependencyInstallMode === 'mutable' ? 'mutable' : 'frozen';
+    const bootstrapDependencies = input.bootstrapDependencies !== false;
+    const dependencyPolicy = pendingDependencyPolicy(installMode);
     const plan = {
       tool: 'git_worktree_spawn',
       workspaceId,
@@ -1326,6 +1358,8 @@ export class UpgradeRuntimeService {
       ownerSessionId: actorSessionId(this.actor),
       collisionPolicy: 'one-owner-per-worktree-path',
       mutationPolicy: 'explicit-confirmation-and-dry-run',
+      dependencyPolicy,
+      bootstrapDependencies,
       sideEffectsStarted: false,
     };
     const dryRun = input.dryRun !== false && input.dry_run !== false;
@@ -1342,11 +1376,128 @@ export class UpgradeRuntimeService {
       ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
     }, undefined, authorization);
     if (!result.ok) return result;
-    const ledgerEntry: WorktreeLedgerEntry = { workspaceId, worktreePath: normalizedPath, ref, owner: this.actor.clientId, ownerSessionId: actorSessionId(this.actor), createdAt: new Date().toISOString() };
+
+    const ledgerEntry: WorktreeLedgerEntry = {
+      workspaceId,
+      worktreePath: normalizedPath,
+      ref,
+      owner: this.actor.clientId,
+      ownerSessionId: actorSessionId(this.actor),
+      createdAt: new Date().toISOString(),
+      dependencyPolicy,
+    };
     await this.mutateSharedState((_plugins, worktrees) => {
-      if (!worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath)) worktrees.push(ledgerEntry);
+      if (!worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath)) {
+        worktrees.push(ledgerEntry);
+      }
     });
-    return ok({ ...plan, dryRun: false, sideEffectsStarted: true, status: 'completed', result: result.value, ownershipLedger: true });
+
+    const dependencyBootstrap = bootstrapDependencies
+      ? await this.bootstrapNewWorktreeDependencies(workspaceId, normalizedPath, installMode, input, signal)
+      : ok(skippedDependencyPolicy(installMode, 'Dependency bootstrap was explicitly disabled for this worktree.'));
+    if (!dependencyBootstrap.ok) return dependencyBootstrap;
+
+    await this.mutateSharedState((_plugins, worktrees) => {
+      const index = worktrees.findIndex((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath);
+      if (index !== -1) worktrees[index] = { ...worktrees[index]!, dependencyPolicy: dependencyBootstrap.value };
+    });
+
+    if (dependencyBootstrap.value.status === 'blocked' || dependencyBootstrap.value.status === 'bootstrap_failed') {
+      return err(appError(
+        'CONFLICT',
+        `Worktree was created but dependency bootstrap did not complete: ${dependencyBootstrap.value.blockingReasons.join('; ') || dependencyBootstrap.value.status}`,
+        true,
+      ));
+    }
+
+    return ok({
+      ...plan,
+      dryRun: false,
+      sideEffectsStarted: true,
+      status: 'completed',
+      result: result.value,
+      ownershipLedger: true,
+      dependencyPolicy: dependencyBootstrap.value,
+    });
+  }
+
+  private async bootstrapNewWorktreeDependencies(
+    workspaceId: string,
+    worktreePath: string,
+    installMode: 'frozen' | 'mutable',
+    input: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Result<WorktreeDependencyPolicyState>> {
+    if (this.services.workspaceInfo === undefined) {
+      return ok(skippedDependencyPolicy(installMode, 'Workspace metadata service is unavailable.'));
+    }
+
+    const workspaceInfo = await this.services.workspaceInfo.info(this.actor, workspaceId);
+    if (!workspaceInfo.ok) return err(workspaceInfo.error);
+    const workspaceRoot = workspaceRootFromInfo(workspaceInfo.value);
+    if (workspaceRoot === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Workspace metadata did not include a usable root path', true));
+    }
+
+    const platform = this.diagnostics.platform;
+    const pathApi = hostPathApi(platform);
+    const nativeWorktreePath = worktreePath.split('/').join(pathApi.sep);
+    const worktreeRoot = isAbsoluteHostPath(worktreePath, platform)
+      ? normalizeHostPath(worktreePath, platform)
+      : pathApi.resolve(workspaceRoot, nativeWorktreePath);
+    if (worktreeRoot === null) return err(appError('INVALID_INPUT', 'Worktree path could not be normalized for dependency bootstrap'));
+
+    const sharedCacheRoot = this.services.runtimeStatePath === undefined
+      ? pathApi.join(os.homedir(), '.unified-mpc', 'dependency-cache')
+      : pathApi.join(pathApi.dirname(this.services.runtimeStatePath), 'dependency-cache');
+
+    let prepared: DependencyBootstrapPlan;
+    try {
+      prepared = await prepareDependencyBootstrap({
+        rootPath: worktreeRoot,
+        sharedCacheRoot,
+        installMode,
+        worktree: { isNew: true },
+      });
+    } catch (error: unknown) {
+      return ok(failedDependencyPolicy(installMode, `Dependency policy resolution failed: ${errorMessage(error)}`));
+    }
+
+    const policy = dependencyPolicyFromPlan(prepared);
+    if (prepared.status === 'unsupported') return ok({ ...policy, lastBootstrapResult: 'skipped' });
+    if (prepared.status !== 'ready') return ok(policy);
+
+    const timeoutMs = dependencyBootstrapTimeout(input);
+    if (prepared.strategy.versionCheck !== undefined) {
+      const checkCommand: DependencyInstallCommand = {
+        executable: prepared.strategy.versionCheck.executable,
+        args: prepared.strategy.versionCheck.args,
+        cwd: prepared.strategy.rootPath,
+        environment: {},
+        phase: 'setup',
+      };
+      const checked = await runDependencyCommand(checkCommand, signal, timeoutMs, platform);
+      if (!checked.ok) return ok(failedDependencyPolicy(installMode, checked.error.message, policy));
+      const actualVersion = checked.value.stdout.trim();
+      if (actualVersion !== prepared.strategy.versionCheck.expectedVersion) {
+        return ok(failedDependencyPolicy(
+          installMode,
+          `Expected ${prepared.strategy.packageManager}@${prepared.strategy.versionCheck.expectedVersion} but found ${actualVersion || 'unknown version'}.`,
+          policy,
+        ));
+      }
+    }
+
+    for (const command of prepared.strategy.commands) {
+      const executed = await runDependencyCommand(command, signal, timeoutMs, platform);
+      if (!executed.ok) return ok(failedDependencyPolicy(installMode, executed.error.message, policy));
+    }
+
+    return ok({
+      ...policy,
+      status: 'ready',
+      lastBootstrapResult: prepared.strategy.commands.length === 0 ? 'skipped' : 'installed',
+    });
   }
 
   private async gitWorktreeRemove(input: Record<string, unknown>, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
@@ -1371,6 +1522,7 @@ export class UpgradeRuntimeService {
       tool: 'git_worktree_remove', workspaceId, worktreePath,
       owner: entry.owner,
       mutationPolicy: 'explicit-confirmation-and-dry-run',
+      dependencyPolicy: entry.dependencyPolicy,
     };
     if (input.dryRun !== false && input.dry_run !== false) return ok({ ...plan, dryRun: true });
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Removing a Git worktree requires explicit user confirmation'));
@@ -1914,7 +2066,7 @@ export class UpgradeRuntimeService {
       const normalized = normalizePlugin(plugin);
       if (normalized !== undefined) this.plugins.set(normalized.name, normalized);
     }
-    for (const worktree of state.worktrees) if (isWorktreeLedgerEntry(worktree)) this.worktrees.push(worktree);
+    for (const worktree of state.worktrees) { const normalized = normalizeWorktreeLedgerEntry(worktree); if (normalized !== undefined) this.worktrees.push(normalized); }
   }
 
   private async refreshSharedState(): Promise<boolean> {
@@ -1945,7 +2097,7 @@ export class UpgradeRuntimeService {
           const normalized = normalizePlugin(plugin);
           if (normalized !== undefined) plugins.set(normalized.name, normalized);
         }
-        for (const worktree of current.worktrees) if (isWorktreeLedgerEntry(worktree)) worktrees.push(worktree);
+        for (const worktree of current.worktrees) { const normalized = normalizeWorktreeLedgerEntry(worktree); if (normalized !== undefined) worktrees.push(normalized); }
         mutate(plugins, worktrees);
         return { plugins: [...plugins.values()], worktrees };
       });
@@ -1981,6 +2133,168 @@ export class UpgradeRuntimeService {
     }
   }
 
+}
+
+function pendingDependencyPolicy(installMode: 'frozen' | 'mutable'): WorktreeDependencyPolicyState {
+  return {
+    policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
+    disposition: 'adopt',
+    status: 'pending_bootstrap',
+    installMode,
+    lastBootstrapResult: 'pending',
+    blockingReasons: [],
+    integration: 'bounded_runtime_v1',
+  };
+}
+
+function skippedDependencyPolicy(installMode: 'frozen' | 'mutable', reason: string): WorktreeDependencyPolicyState {
+  return {
+    policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
+    disposition: 'adopt',
+    status: 'skipped',
+    installMode,
+    lastBootstrapResult: 'skipped',
+    blockingReasons: [reason],
+    integration: 'bounded_runtime_v1',
+  };
+}
+
+function dependencyPolicyFromPlan(plan: DependencyBootstrapPlan): WorktreeDependencyPolicyState {
+  const diagnostics = plan.strategy.diagnostics;
+  return {
+    policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
+    disposition: 'adopt',
+    status: plan.status,
+    installMode: diagnostics.installMode,
+    lastBootstrapResult: plan.status === 'unsupported' ? 'skipped' : plan.status === 'blocked' ? 'failed' : 'pending',
+    strategyId: diagnostics.strategyId,
+    ecosystem: diagnostics.ecosystem,
+    packageManager: diagnostics.packageManager,
+    ...(diagnostics.packageManagerVersion === undefined ? {} : { packageManagerVersion: diagnostics.packageManagerVersion }),
+    ...(diagnostics.sharedStoreIdentity === undefined ? {} : { sharedStoreIdentity: diagnostics.sharedStoreIdentity }),
+    localRuntimeIdentity: diagnostics.localRuntimeIdentity,
+    blockingReasons: [
+      ...diagnostics.blockingReasons,
+      ...plan.isolation.violations.map((entry) => `Mutable runtime path ${entry.path} points outside the worktree to ${entry.target}.`),
+      ...(!plan.strategy.migration.mayReplaceMutableRuntimeState ? [plan.strategy.migration.reason] : []),
+    ],
+    integration: 'bounded_runtime_v1',
+  };
+}
+
+function failedDependencyPolicy(
+  installMode: 'frozen' | 'mutable',
+  reason: string,
+  base?: WorktreeDependencyPolicyState,
+): WorktreeDependencyPolicyState {
+  return {
+    ...(base ?? pendingDependencyPolicy(installMode)),
+    status: 'bootstrap_failed',
+    lastBootstrapResult: 'failed',
+    blockingReasons: [...(base?.blockingReasons ?? []), reason],
+  };
+}
+
+function workspaceRootFromInfo(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.rootPath === 'string' && value.rootPath.trim().length > 0
+    ? value.rootPath
+    : undefined;
+}
+
+function dependencyBootstrapTimeout(input: Record<string, unknown>): number {
+  const requested = typeof input.dependencyBootstrapTimeoutMs === 'number'
+    ? input.dependencyBootstrapTimeoutMs
+    : 600_000;
+  return Math.min(1_800_000, Math.max(1_000, Math.floor(requested)));
+}
+
+function runDependencyCommand(
+  command: DependencyInstallCommand,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  platform: NodeJS.Platform,
+): Promise<Result<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve(err(appError('PROCESS_TIMEOUT', `${command.executable} dependency bootstrap was cancelled`, true)));
+      return;
+    }
+
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command.executable, [...command.args], {
+        cwd: command.cwd,
+        windowsHide: true,
+        shell: false,
+        detached: platform !== 'win32',
+        env: { ...sanitizedDiagnosticEnvironment(), ...command.environment },
+      });
+    } catch {
+      resolve(err(appError('PROCESS_NOT_FOUND', `${command.executable} could not be started for dependency bootstrap`, true)));
+      return;
+    }
+
+    const maxBytes = 8 * 1024 * 1024;
+    const append = (current: string, chunk: Buffer): string => {
+      if (Buffer.byteLength(current, 'utf8') >= maxBytes) return current;
+      const remaining = maxBytes - Buffer.byteLength(current, 'utf8');
+      return current + chunk.subarray(0, remaining).toString('utf8');
+    };
+    const finish = (result: Result<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(result);
+    };
+    const terminator = createProcessTreeTerminator(platform);
+    let terminationRequested = false;
+    let terminationInFlight: Promise<void> | undefined;
+    const requestTermination = (message: string): void => {
+      if (settled || terminationRequested) return;
+      terminationRequested = true;
+      terminationInFlight = (async (): Promise<void> => {
+        const pid = child.pid;
+        if (!Number.isInteger(pid) || (pid ?? 0) <= 0) {
+          finish(err(appError('PROCESS_TIMEOUT', `${message}; process termination could not be verified`, true)));
+          return;
+        }
+        try {
+          await terminator.stop(child, pid as number);
+          finish(err(appError('PROCESS_TIMEOUT', message, true)));
+        } catch {
+          finish(err(appError('PROCESS_TIMEOUT', `${message}; process termination could not be verified`, true)));
+        }
+      })();
+    };
+    const timer = setTimeout(() => requestTermination(`${command.executable} dependency bootstrap timed out`), timeoutMs);
+    const onAbort = (): void => requestTermination(`${command.executable} dependency bootstrap was cancelled`);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    child.once('error', () => finish(err(appError('PROCESS_NOT_FOUND', `${command.executable} is unavailable for dependency bootstrap`, true))));
+    child.once('close', (code) => {
+      if (terminationRequested) {
+        void terminationInFlight;
+        return;
+      }
+      const exitCode = code ?? -1;
+      if (exitCode !== 0) {
+        const detail = stderr.trim().slice(0, 2_000);
+        finish(err(appError(
+          'INTERNAL_ERROR',
+          `${command.executable} dependency bootstrap failed with exit code ${exitCode}${detail.length > 0 ? `: ${detail}` : ''}`,
+          true,
+        )));
+        return;
+      }
+      finish(ok({ exitCode, stdout, stderr }));
+    });
+    child.stdin?.end();
+  });
 }
 
 function runBoundedProcess(
@@ -2636,15 +2950,61 @@ function containsAsciiControlCharacter(value: string): boolean {
   return false;
 }
 
-function isWorktreeLedgerEntry(value: unknown): value is WorktreeLedgerEntry {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+function normalizeWorktreeLedgerEntry(value: unknown): WorktreeLedgerEntry | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  return typeof record.workspaceId === 'string'
-    && typeof record.worktreePath === 'string'
-    && typeof record.ref === 'string'
-    && typeof record.owner === 'string'
-    && (record.ownerSessionId === undefined || typeof record.ownerSessionId === 'string')
-    && typeof record.createdAt === 'string';
+  if (typeof record.workspaceId !== 'string'
+    || typeof record.worktreePath !== 'string'
+    || typeof record.ref !== 'string'
+    || typeof record.owner !== 'string'
+    || (record.ownerSessionId !== undefined && typeof record.ownerSessionId !== 'string')
+    || typeof record.createdAt !== 'string') return undefined;
+  return {
+    workspaceId: record.workspaceId,
+    worktreePath: record.worktreePath,
+    ref: record.ref,
+    owner: record.owner,
+    ...(record.ownerSessionId === undefined ? {} : { ownerSessionId: record.ownerSessionId }),
+    createdAt: record.createdAt,
+    dependencyPolicy: normalizeWorktreeDependencyPolicy(record.dependencyPolicy),
+  };
+}
+
+function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPolicyState {
+  if (isRecord(value)
+    && value.policyVersion === WORKTREE_DEPENDENCY_POLICY_VERSION
+    && (value.disposition === 'adopt' || value.disposition === 'grandfather')
+    && ['pending_bootstrap', 'ready', 'blocked', 'unsupported', 'skipped', 'bootstrap_failed', 'grandfathered'].includes(String(value.status))
+    && (value.installMode === 'frozen' || value.installMode === 'mutable')
+    && ['pending', 'installed', 'skipped', 'failed'].includes(String(value.lastBootstrapResult))
+    && value.integration === 'bounded_runtime_v1'
+    && Array.isArray(value.blockingReasons)
+    && value.blockingReasons.every((entry) => typeof entry === 'string')) {
+    return {
+      policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
+      disposition: value.disposition,
+      status: value.status as WorktreeDependencyPolicyState['status'],
+      installMode: value.installMode,
+      lastBootstrapResult: value.lastBootstrapResult as WorktreeDependencyPolicyState['lastBootstrapResult'],
+      ...(typeof value.strategyId === 'string' ? { strategyId: value.strategyId } : {}),
+      ...(typeof value.ecosystem === 'string' ? { ecosystem: value.ecosystem } : {}),
+      ...(typeof value.packageManager === 'string' ? { packageManager: value.packageManager } : {}),
+      ...(typeof value.packageManagerVersion === 'string' ? { packageManagerVersion: value.packageManagerVersion } : {}),
+      ...(typeof value.sharedStoreIdentity === 'string' ? { sharedStoreIdentity: value.sharedStoreIdentity } : {}),
+      ...(typeof value.localRuntimeIdentity === 'string' ? { localRuntimeIdentity: value.localRuntimeIdentity } : {}),
+      blockingReasons: value.blockingReasons as string[],
+      integration: 'bounded_runtime_v1',
+    };
+  }
+  return {
+    policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
+    disposition: 'grandfather',
+    status: 'grandfathered',
+    installMode: 'frozen',
+    lastBootstrapResult: 'skipped',
+    blockingReasons: ['Legacy worktree has no dependency-policy state; preserving its current runtime layout.'],
+    integration: 'bounded_runtime_v1',
+  };
 }
 
 function isRuntimeTask(value: unknown): value is RuntimeTask {

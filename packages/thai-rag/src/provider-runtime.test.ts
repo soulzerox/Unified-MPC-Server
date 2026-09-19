@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { appError, err, ok } from '@unified-mpc/domain';
+import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
   ThaiRagProviderRuntime,
   type ThaiRagProviderDriver,
@@ -131,6 +131,30 @@ describe('ThaiRagProviderRuntime', () => {
     });
     await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({ ownerId: 'live-owner', pid: process.pid, startedAt: '2026-01-01T00:00:00.000Z' }));
     expect((await denied.start()).ok).toBe(false);
+  });
+
+  it('passes result budgets to every provider producer', async () => {
+    const dataRoot = await root();
+    let observedBudget: ResultBudget | undefined;
+    const runtime = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({
+        call: async (_tool, _args, _signal, budget) => {
+          observedBudget = budget;
+          return ok({ bounded: true });
+        },
+      }),
+    });
+    expect((await runtime.start()).ok).toBe(true);
+
+    const budget: ResultBudget = { maxItems: 2, maxTextBytes: 3, maxStructuredBytes: 4, maxBinaryBytes: 5, maxBase64Bytes: 6 };
+    await runtime.call('code_search', { query: 'needle' }, undefined, budget);
+
+    expect(observedBudget).toEqual(budget);
+    await runtime.stop();
   });
 
   it('reports degraded readiness without pretending semantic retrieval is healthy', async () => {

@@ -15,7 +15,8 @@ export interface TextFileResult {
 }
 
 export class TextFileReader {
-  public async read(filePath: string, range: LineRange = {}): Promise<Result<TextFileResult>> {
+  public async read(filePath: string, range: LineRange = {}, maxBytes?: number, signal?: AbortSignal): Promise<Result<TextFileResult>> {
+    if (signal !== undefined && signal.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'File read was cancelled', recoverable: true });
     if (!this.isValidRange(range)) return err({ code: 'INVALID_INPUT', message: 'Line range is invalid', recoverable: false });
 
     let size: number;
@@ -24,15 +25,23 @@ export class TextFileReader {
     } catch {
       return err({ code: 'FILE_NOT_FOUND', message: 'File was not found', recoverable: false });
     }
-    if (size > MAX_FILE_READ_BYTES) {
+    const effectiveMaxBytes = typeof maxBytes === 'number' && Number.isFinite(maxBytes) && maxBytes > 0
+      ? Math.min(MAX_FILE_READ_BYTES, Math.floor(maxBytes))
+      : MAX_FILE_READ_BYTES;
+    if (size > effectiveMaxBytes) {
       return err({ code: 'FILE_TOO_LARGE', message: 'File exceeds the maximum read size', recoverable: false });
     }
 
     let data: Buffer;
     try {
-      data = await readFile(filePath);
+      data = await readFile(filePath, signal === undefined ? undefined : { signal });
     } catch {
+      if (signal?.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'File read was cancelled', recoverable: true });
       return err({ code: 'FILE_NOT_FOUND', message: 'File was not found', recoverable: false });
+    }
+    if (signal !== undefined && signal.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'File read was cancelled', recoverable: true });
+    if (data.byteLength > effectiveMaxBytes) {
+      return err({ code: 'FILE_TOO_LARGE', message: 'File exceeds the maximum read size', recoverable: false });
     }
     if (data.subarray(0, 8192).includes(0)) {
       return err({ code: 'BINARY_FILE', message: 'Binary files cannot be read as text', recoverable: false });

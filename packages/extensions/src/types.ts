@@ -1,4 +1,4 @@
-import type { Result } from '@unified-mpc/domain';
+import type { Result, ResultBudget } from '@unified-mpc/domain';
 
 export type ExtensionsMode = 'enable_all' | 'allowlist';
 export type PolicyResourceType = 'server' | 'skill' | 'capability';
@@ -154,7 +154,7 @@ export interface ExtensionsService {
     readonly arguments?: Readonly<Record<string, unknown>>;
     readonly descriptorFingerprint?: string;
     readonly catalogFingerprint?: string;
-  }, signal?: AbortSignal): Promise<Result<unknown>>;
+  }, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>>;
   close(): Promise<void>;
 }
 

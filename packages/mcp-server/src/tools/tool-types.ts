@@ -1,4 +1,4 @@
-import { err, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
+import { err, ok, type InvocationAuthorization, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
@@ -80,7 +80,7 @@ export interface ThaiRagProviderPort {
       readonly activeJobs: readonly unknown[];
     };
   }>>;
-  call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>>;
+  call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>>;
 }
 
 export interface McpApplicationServices {
@@ -148,7 +148,7 @@ export interface McpToolDefinition {
   readonly outputSchema: z.ZodType;
   readonly execution: McpToolExecution;
   parse(input: unknown): Result<unknown>;
-  execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>>;
+  execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization, budget?: ResultBudget): Promise<Result<unknown>>;
 }
 
 export interface McpToolContext {
@@ -168,15 +168,15 @@ export interface McpToolContext {
   /** Run mandatory pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path. */
   readonly prepareCodeChange?: (workspaceId: string, filePath: string, proposedSymbol: string | undefined, runGodkillerSafetyCheck: boolean, signal: AbortSignal) => Promise<Result<unknown>>;
   /** Search the pinned native working-memory child through its curated read surface. */
-  readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Create or append a work-log entity through the pinned native working-memory child. */
-  readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Search parent-owned native Thai-RAG within one canonical workspace. */
-  readonly ragRecall?: (workspaceId: string, query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly ragRecall?: (workspaceId: string, query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Persist one bounded long-term memory through the parent-owned native Thai-RAG capability. */
-  readonly ragRemember?: (workspaceId: string, content: string, category: string | undefined, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly ragRemember?: (workspaceId: string, content: string, category: string | undefined, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Invoke one parent-owned native Thai-RAG operation after canonical workspace validation. */
-  readonly nativeRagCall?: (workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>, signal: AbortSignal) => Promise<Result<unknown>>;
+  readonly nativeRagCall?: (workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
 }
 
 export interface ToolConfig<T extends z.ZodType> {
@@ -187,7 +187,7 @@ export interface ToolConfig<T extends z.ZodType> {
   readonly inputSchema: T;
   readonly outputSchema?: z.ZodType;
   readonly execution?: Partial<McpToolExecution>;
-  handler(input: z.infer<T>, signal: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>>;
+  handler(input: z.infer<T>, signal: AbortSignal, authorization?: InvocationAuthorization, budget?: ResultBudget): Promise<Result<unknown>>;
 }
 
 const defaultStructuredOutputSchema = z.object({}).catchall(z.unknown());
@@ -210,8 +210,8 @@ export function defineTool<T extends z.ZodType>(config: ToolConfig<T>): McpToolD
       const parsed = config.inputSchema.safeParse(input);
       return parsed.success ? ok(parsed.data) : err({ code: 'INVALID_INPUT', message: 'Tool input is invalid', recoverable: false });
     },
-    execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
-      return config.handler(input as z.infer<T>, signal, authorization);
+    execute(input: unknown, signal: AbortSignal, authorization?: InvocationAuthorization, budget?: ResultBudget): Promise<Result<unknown>> {
+      return config.handler(input as z.infer<T>, signal, authorization, budget);
     },
   };
 }

@@ -7,6 +7,8 @@ import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
+import { ok, type ResultBudget } from '@unified-mpc/domain';
+import type { ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
 import { createStdioMcpRuntime } from './stdio-mcp-runtime.js';
 import { sharedActivityLeaseDirectoryPath } from '@unified-mpc/mcp-server';
 
@@ -45,6 +47,27 @@ afterEach(async () => {
 });
 
 describe('stdio MCP runtime', () => {
+  it('propagates result budgets through the stdio Thai-RAG port', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-rag-budget-'));
+    temporaryRoots.push(dataPath);
+    let observedBudget: ResultBudget | undefined;
+    const driver: ThaiRagProviderDriver = {
+      start: async () => ok({ workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] }),
+      health: async () => ok({ workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] }),
+      call: async (_tool, _args, _signal, budget) => { observedBudget = budget; return ok({ bounded: true }); },
+      stop: async () => ok(undefined),
+    };
+    const runtime = createStdioMcpRuntime(dataPath, workspace, false, { thaiRagDriver: driver });
+    try {
+      await runtime.initializeThaiRag();
+      const budget: ResultBudget = { maxItems: 2, maxTextBytes: 3, maxStructuredBytes: 4, maxBinaryBytes: 5, maxBase64Bytes: 6 };
+      await runtime.services.thaiRag?.call('code_search', { query: 'needle' }, undefined, budget);
+      expect(observedBudget).toEqual(budget);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('defaults Ponytail to OFF and loads a persisted mode for direct STDIO', async () => {
     const defaultDataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-ponytail-default-'));
     const persistedDataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-ponytail-persisted-'));

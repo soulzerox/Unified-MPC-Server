@@ -11,6 +11,7 @@ import {
   ok,
   type InvocationAuthorization,
   type Result,
+  type ResultBudget,
 } from '@unified-mpc/domain';
 import {
   AtomicFileWriter,
@@ -259,23 +260,29 @@ export class FileService {
     workspaceId: string | undefined,
     request: ReadFileRequest,
     authorization?: InvocationAuthorization,
+    signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<ReadFileResult>> {
     void actor;
+    if (isAborted(signal)) return cancelledFileMutation();
     const workspaceResult = await resolveWorkspaceForPath(this.workspaces, workspaceId, request.path, authorization);
+    if (isAborted(signal)) return cancelledFileMutation();
     if (!workspaceResult.ok) return workspaceResult;
     const workspace = workspaceResult.value;
     const resolved = await this.guard.resolveForRead(workspace, request.path, authorization);
+    if (isAborted(signal)) return cancelledFileMutation();
     if (!resolved.ok) return resolved;
 
     const absolute = resolved.value.realPath ?? resolved.value.absolutePath;
     if (this.isTrustedWorkspace(workspace)) {
       if (request.startLine !== undefined || request.endLine !== undefined) {
-        const textResult = await this.reader.read(absolute, request);
+        const textResult = await this.reader.read(absolute, request, budget?.maxTextBytes, signal);
         if (textResult.ok) {
           return ok({ path: resultPath(resolved.value), ...textResult.value, encoding: 'utf8', mimeType: 'text/plain' });
         }
       }
-      const unbounded = await this.unboundedReader.read(absolute);
+      const unbounded = await this.unboundedReader.read(absolute, budget?.maxBinaryBytes ?? budget?.maxTextBytes, signal);
+      if (isAborted(signal)) return cancelledFileMutation();
       if (!unbounded.ok) return unbounded;
       return ok({
         path: resultPath(resolved.value),
@@ -288,7 +295,8 @@ export class FileService {
       });
     }
 
-    const readResult = await this.reader.read(absolute, request);
+    const readResult = await this.reader.read(absolute, request, budget?.maxTextBytes, signal);
+    if (isAborted(signal)) return cancelledFileMutation();
     if (!readResult.ok) return readResult;
     return ok({ path: resultPath(resolved.value), ...readResult.value, encoding: 'utf8' });
   }
@@ -298,10 +306,15 @@ export class FileService {
     workspaceId: string | undefined,
     request: ReadFilesRequest,
     authorization?: InvocationAuthorization,
+    signal?: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<Result<ReadFilesResult>> {
     void actor;
     if (!Array.isArray(request.files) || request.files.length > 20) {
       return err(appError('INVALID_INPUT', 'At most 20 files may be read'));
+    }
+    if (budget !== undefined && request.files.length > budget.maxItems) {
+      return err(appError('FILE_TOO_LARGE', 'Requested file count exceeds the result item budget'));
     }
     const firstPath = request.files[0]?.path;
     if (typeof firstPath !== 'string') return err(appError('INVALID_INPUT', 'At least one file is required'));
@@ -311,18 +324,40 @@ export class FileService {
 
     const files: ReadFileResult[] = [];
     let totalBytes = 0;
+    let structuredBytes = Buffer.byteLength('{"files":[');
+    const aggregateLimit = Math.min(
+      trustedWorkspace ? Number.MAX_SAFE_INTEGER : MAX_MULTI_FILE_BYTES,
+      budget === undefined ? Number.MAX_SAFE_INTEGER : Math.min(budget.maxTextBytes, budget.maxBinaryBytes, budget.maxBase64Bytes),
+    );
     for (const fileRequest of request.files) {
+      if (isAborted(signal)) return cancelledFileMutation();
       const fileWorkspace = await resolveWorkspaceForPath(this.workspaces, workspaceId, fileRequest.path, authorization);
       if (!fileWorkspace.ok) return fileWorkspace;
       if (fileWorkspace.value.id !== workspaceResult.value.id) {
         return err(appError('PATH_OUTSIDE_WORKSPACE', 'All files must be in the same workspace'));
       }
-      const result = await this.readFile(actor, fileWorkspace.value.id, fileRequest, authorization);
+      const remainingBudget = Math.max(0, aggregateLimit - totalBytes);
+      const remainingStructuredBudget = budget === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, budget.maxStructuredBytes - structuredBytes);
+      if (remainingBudget === 0 || remainingStructuredBudget === 0) return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
+      const fileBudget = budget === undefined ? undefined : {
+        ...budget,
+        maxTextBytes: Math.min(budget.maxTextBytes, remainingBudget, remainingStructuredBudget),
+        maxStructuredBytes: Math.min(budget.maxStructuredBytes, remainingStructuredBudget),
+        maxBinaryBytes: Math.min(budget.maxBinaryBytes, remainingBudget),
+        maxBase64Bytes: Math.min(budget.maxBase64Bytes, remainingBudget),
+      };
+      const result = await this.readFile(actor, fileWorkspace.value.id, fileRequest, authorization, signal, fileBudget);
       if (!result.ok) return result;
       totalBytes += result.value.byteLength
         ?? Buffer.byteLength(result.value.content, result.value.encoding === 'base64' ? 'base64' : 'utf8');
-      if (!trustedWorkspace && totalBytes > MAX_MULTI_FILE_BYTES) {
+      if (totalBytes > aggregateLimit) {
         return err(appError('FILE_TOO_LARGE', 'Total file content exceeds the maximum read size'));
+      }
+      const serializedFile = JSON.stringify(result.value);
+      const serializedFileBytes = Buffer.byteLength(serializedFile, 'utf8');
+      structuredBytes += serializedFileBytes + (files.length === 0 ? 0 : 1);
+      if (budget !== undefined && structuredBytes + Buffer.byteLength(']}', 'utf8') > budget.maxStructuredBytes) {
+        return err(appError('FILE_TOO_LARGE', 'Total file result exceeds the structured output budget'));
       }
       files.push(result.value);
     }

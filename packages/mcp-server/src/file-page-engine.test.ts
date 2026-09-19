@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { ok, type ResultBudget } from '@unified-mpc/domain';
 import type { McpApplicationServices } from './tools/tool-types.js';
 import { FilePageEngine, type FilePageRequest } from './file-page-engine.js';
 
@@ -71,6 +71,19 @@ describe('file page engine', () => {
     await expect(engine.continue(first.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     now = 101;
     await expect(engine.continue(second.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('bounds page size and response bytes before reading', async () => {
+    const engine = new FilePageEngine(services(), actor);
+    const result = await engine.readPage({ workspaceId: 'workspace-1', path: 'src/file.ts', pageSize: 5 }, {
+      maxItems: 2,
+      maxTextBytes: 4,
+      maxStructuredBytes: 4,
+      maxBinaryBytes: 4,
+      maxBase64Bytes: 4,
+    } satisfies ResultBudget);
+
+    expect(result).toMatchObject({ ok: true, value: { endLine: 1, content: 'one' } });
   });
 
   it('rejects an unknown continuation token without changing the source read contract', async () => {

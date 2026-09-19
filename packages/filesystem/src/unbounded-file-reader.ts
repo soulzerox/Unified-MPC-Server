@@ -16,14 +16,21 @@ export interface BinaryFileResult {
  * UTF-8 text without NULs is returned as utf8; otherwise base64.
  */
 export class UnboundedFileReader {
-  public async read(filePath: string): Promise<Result<BinaryFileResult>> {
+  public async read(filePath: string, maxBytes?: number, signal?: AbortSignal): Promise<Result<BinaryFileResult>> {
+    if (signal !== undefined && signal.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'File read was cancelled', recoverable: true });
     let data: Buffer;
     try {
       const size = (await stat(filePath)).size;
-      void size;
-      data = await readFile(filePath);
+      if (typeof maxBytes === 'number' && Number.isFinite(maxBytes) && maxBytes > 0 && size > Math.floor(maxBytes)) {
+        return err({ code: 'FILE_TOO_LARGE', message: 'File exceeds the maximum read size', recoverable: false });
+      }
+      data = await readFile(filePath, signal === undefined ? undefined : { signal });
     } catch {
       return err({ code: 'FILE_NOT_FOUND', message: 'File was not found', recoverable: false });
+    }
+    if (signal !== undefined && signal.aborted) return err({ code: 'PROCESS_TIMEOUT', message: 'File read was cancelled', recoverable: true });
+    if (typeof maxBytes === 'number' && Number.isFinite(maxBytes) && maxBytes > 0 && data.byteLength > Math.floor(maxBytes)) {
+      return err({ code: 'FILE_TOO_LARGE', message: 'File exceeds the maximum read size', recoverable: false });
     }
 
     const mimeType = guessMimeType(filePath);

@@ -22,6 +22,17 @@ describe('TextFileReader', () => {
     await expect(reader.read(filePath, { startLine: 2, endLine: 2 })).resolves.toEqual({ ok: true, value: { content: 'two\n', startLine: 2, endLine: 2 } });
   });
 
+  it('stops before reading when cancelled', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-reader-'));
+    temporaryRoots.push(root);
+    const filePath = path.join(root, 'notes.txt');
+    await writeFile(filePath, 'one\n', 'utf8');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(new TextFileReader().read(filePath, {}, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
+  });
+
   it('rejects binary files and files larger than 2 MiB', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-reader-'));
     temporaryRoots.push(root);

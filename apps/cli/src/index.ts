@@ -6,9 +6,10 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
-import { ToolRegistry } from '@unified-mpc/mcp-server';
+import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
   IdeSyncService,
@@ -23,6 +24,7 @@ import {
   type PruneSkillInput,
   type PruneSkillResult,
   type SyncTarget,
+  type ExtensionsService,
 } from '@unified-mpc/extensions';
 import { formatDoctorReport } from './commands/doctor.js';
 import {
@@ -388,7 +390,12 @@ async function runWorkspaceSelectionCommand(
   return 0;
 }
 
-export function createDefaultCliDependencies(): CliDependencies {
+export interface DefaultCliDependenciesOptions {
+  readonly thaiRagDriver?: StdioMcpRuntimeOptions['thaiRagDriver'];
+  readonly extensions?: ExtensionsService;
+}
+
+export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
   let workspaceState: {
     readonly repository: SqliteWorkspaceRepository;
     readonly settings: SqliteSettingsRepository;
@@ -435,6 +442,39 @@ export function createDefaultCliDependencies(): CliDependencies {
   const getExtensions = (): ReturnType<typeof createLocalExtensionsService> => {
     extensions ??= createLocalExtensionsService({ workspaceRootProvider: async (): Promise<string> => process.cwd() });
     return extensions;
+  };
+  let toolRegistry: ToolRegistry | undefined;
+  let mcpRuntime: StdioMcpRuntime | undefined;
+  const harnessActivationLedger = new HarnessActivationLedger();
+  const getToolRegistry = async (): Promise<ToolRegistry> => {
+    const workspaces = await getWorkspaceService().list();
+    const workspace = workspaces[0];
+    if (toolRegistry !== undefined && (mcpRuntime !== undefined || workspace === undefined)) return toolRegistry;
+    if (workspace !== undefined) {
+      mcpRuntime = createStdioMcpRuntime(resolveDataPathFromShared(), workspace, true, {
+        ...(options.thaiRagDriver === undefined ? {} : { thaiRagDriver: options.thaiRagDriver }),
+        ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
+      });
+    }
+    const services = mcpRuntime?.services ?? { extensions: options.extensions ?? getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) };
+    toolRegistry = new ToolRegistry(
+      services,
+      { clientId: 'cli', clientName: 'unified-mpc-cli' },
+      {
+        harnessActivationLedger,
+        sessionId: 'cli',
+        ...(mcpRuntime === undefined ? {} : {
+          activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
+          activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,
+          profileProvider: mcpRuntime.profileProvider,
+          allowAiDeleteProvider: mcpRuntime.allowAiDeleteProvider,
+          destructivePolicyProvider: mcpRuntime.destructivePolicyProvider,
+          codexToolsEnabled: mcpRuntime.codexToolsEnabled,
+          ponytailModeProvider: (): StdioMcpRuntime['ponytailMode'] => mcpRuntime!.ponytailMode,
+        }),
+      },
+    );
+    return toolRegistry;
   };
 
   return {
@@ -496,15 +536,20 @@ export function createDefaultCliDependencies(): CliDependencies {
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
     web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
-      const registry = new ToolRegistry({ extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) }, { clientId: 'cli', clientName: 'unified-mpc-cli' });
-      return registry.list().map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-      }));
+      const registry = await getToolRegistry();
+      return registry.listExposedDefinitions().map((tool) => {
+        const inputSchema = registry.describeInputJsonSchema(tool.name);
+        return {
+          name: tool.name,
+          description: tool.description,
+          ...(inputSchema === undefined ? {} : { inputSchema }),
+          permission: tool.permission,
+          annotations: tool.annotations,
+        };
+      });
     },
     toolsCall: async (name: string, args: Record<string, unknown>): Promise<Result<unknown>> => {
-      const registry = new ToolRegistry({ extensions: getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) }, { clientId: 'cli', clientName: 'unified-mpc-cli' });
-      const response = await registry.invoke(name, args);
+      const response = await (await getToolRegistry()).invoke(name, args);
       if (response.isError) {
         const errorText = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
         return err(appError('INTERNAL_ERROR', errorText || `Tool ${name} failed`));

@@ -117,6 +117,10 @@ describe('MCP tool registry', () => {
   it('adds a registry-level confirmation envelope to every advertised tool schema', () => {
     const registry = new ToolRegistry({}, actor);
     for (const tool of registry.list()) {
+      if (tool.name === 'workspace_bootstrap' || tool.name === 'prepare_code_change') {
+        expect(tool.inputSchema).not.toHaveProperty('shape.userConfirmed');
+        continue;
+      }
       if (tool.inputSchema instanceof z.ZodObject) {
         expect(tool.inputSchema.shape, tool.name).toHaveProperty('userConfirmed');
         continue;

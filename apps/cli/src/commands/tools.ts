@@ -7,6 +7,14 @@ export type ToolsCommand =
 export interface ToolSummary {
   readonly name: string;
   readonly description?: string;
+  readonly inputSchema?: Record<string, unknown>;
+  readonly permission?: string;
+  readonly annotations?: {
+    readonly readOnlyHint: boolean;
+    readonly destructiveHint: boolean;
+    readonly idempotentHint: boolean;
+    readonly openWorldHint: boolean;
+  };
 }
 
 export function parseToolsArgs(args: readonly string[]): Result<ToolsCommand> {

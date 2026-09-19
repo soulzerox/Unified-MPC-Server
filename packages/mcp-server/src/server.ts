@@ -132,7 +132,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
   else registerModernTasksProtocol(server, options.services, { actor });
 
   const registeredTools = new Map<string, RegisteredTool>();
-  const initiallyExposed = new Set(registry.list().map((tool) => tool.name));
+  const initiallyExposed = new Set(registry.listExposedDefinitions().map((tool) => tool.name));
   for (const tool of registry.listAll()) {
     const registeredTool = server.registerTool(tool.name, {
       description: tool.description,
@@ -163,7 +163,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
   }
 
   const syncRegisteredToolAvailability = (): void => {
-    const exposed = new Set(registry.list().map((tool) => tool.name));
+    const exposed = new Set(registry.listExposedDefinitions().map((tool) => tool.name));
     for (const [name, registeredTool] of registeredTools) {
       const shouldEnable = exposed.has(name);
       if (registeredTool.enabled === shouldEnable) continue;

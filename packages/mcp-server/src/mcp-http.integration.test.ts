@@ -28,8 +28,24 @@ describe('MCP localhost HTTP transport', () => {
             return workspaceListImpl();
           },
         },
-      },
+        file: {
+          async readFile() { return ok({ path: 'AGENTS.md', content: '# Rules\n', startLine: 1, endLine: 1 }); },
+          async writeFile(_actor: unknown, _workspaceId: string, request: { path: string }) { return ok({ path: request.path, replacedExisting: false }); },
+        },
+        thaiRag: {
+          async health() {
+            return ok({ providerId: 'thai-rag' as const, state: 'ready', embeddingIndexGeneration: 1, components: { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] } });
+          },
+          async call() { return ok({ content: [{ type: 'text', text: 'ok' }] }); },
+        },
+        extensions: {
+          async runtimePolicySnapshot() { return ok({ ready: true, policies: [{ priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true }] }); },
+          async readSkill(input: { skillId: string }) { return ok({ id: input.skillId, name: 'ask-matt', description: 'Router', source: 'agents-skills', path: '/skills/ask-matt/SKILL.md', content: '# Ask Matt' }); },
+          async bootstrapMandatoryMcpServers() { return ok({ ready: true, servers: [] }); },
+        },
+      } as unknown as McpApplicationServices,
       actor: { clientId: 'http-test', clientName: 'http-test' },
+      activeWorkspaceScopeProvider: async () => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' }),
       activityTracker,
     });
   });
@@ -59,19 +75,18 @@ describe('MCP localhost HTTP transport', () => {
       expect(first.tools.some((tool) => tool.name === 'workspace_bootstrap')).toBe(true);
       const prepare = first.tools.find((tool) => tool.name === 'prepare_code_change');
       expect(prepare).toBeDefined();
-      expect(prepare?.inputSchema).toMatchObject({
-        type: 'object',
-        additionalProperties: false,
-        required: ['workspaceId', 'filePath'],
-        properties: {
-          workspaceId: { type: 'string' },
-          filePath: { type: 'string' },
-          proposedSymbol: { type: 'string' },
-          runGodkillerSafetyCheck: { type: 'boolean' },
-        },
-      });
-      expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
-    } finally {
+      const canonical = new ToolRegistry({}, { clientId: 'canonical-test', clientName: 'canonical-test' });
+      expect(prepare?.inputSchema).toEqual(canonical.describeInputJsonSchema('prepare_code_change'));
+      expect(first.tools.find((tool) => tool.name === 'workspace_bootstrap')?.inputSchema).toEqual(canonical.describeInputJsonSchema('workspace_bootstrap'));
+       expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
+
+       const bootstrap = await client.callTool({ name: 'workspace_bootstrap', arguments: { workspaceId: 'workspace-1' } });
+       expect(bootstrap.isError).not.toBe(true);
+       const prepared = await client.callTool({ name: 'prepare_code_change', arguments: { workspaceId: 'workspace-1', filePath: 'src/http.ts' } });
+       expect(prepared.isError).not.toBe(true);
+       const mutation = await client.callTool({ name: 'write_file', arguments: { workspaceId: 'workspace-1', path: 'src/http.ts', content: 'export const http = true;\\n' } });
+       expect(mutation.isError).not.toBe(true);
+     } finally {
       await client.close();
     }
   });
@@ -132,16 +147,16 @@ describe('MCP localhost HTTP transport', () => {
       port: 0,
       services: {
         file: {
-          async readFile(_actor, _workspaceId, request) {
+          async readFile(_actor: unknown, _workspaceId: string, request: { readonly path: string }) {
             return ok({ path: request.path, content: '{}', startLine: 1, endLine: 1 });
           },
-          async writeFile(_actor, _workspaceId, request) {
+          async writeFile(_actor: unknown, _workspaceId: string, request: { readonly path: string }) {
             writes.push(request.path);
             return ok({ path: request.path, replacedExisting: false });
           },
         },
         extensions: {
-          async readSkill(input) {
+          async readSkill(input: { readonly skillId: string }) {
             return ok({
               id: input.skillId,
               name: 'ponytail',

@@ -85,6 +85,7 @@ export interface StdioMcpRuntimeOptions {
   readonly thaiRagProviderPath?: string;
   /** Test seam for the parent-owned provider worker. */
   readonly thaiRagDriver?: ThaiRagProviderDriver;
+  readonly extensions?: ExtensionsService;
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
 }
@@ -220,7 +221,7 @@ export function createStdioMcpRuntime(
   });
   const gitService = new GitService(workspaceRepository);
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
-  const extensions = createLocalExtensionsService({
+  const extensions = options.extensions ?? createLocalExtensionsService({
     settingsJsonProvider: (): string | null => settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
     dataDir: dataPath,
     workspaceRootProvider: primaryWorkspaceRoot,

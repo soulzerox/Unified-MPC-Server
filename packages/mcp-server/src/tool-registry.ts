@@ -300,7 +300,14 @@ export class ToolRegistry {
   }
 
   public list(): readonly McpToolDefinition[] {
+    return this.listExposedDefinitions();
+  }
+  public listExposedDefinitions(): readonly McpToolDefinition[] {
     return this.allTools.filter((tool) => this.isEffectivelyExposed(tool.name));
+  }
+  public describeExposedDefinition(name: string): McpToolDefinition | undefined {
+    const tool = this.allTools.find((candidate) => candidate.name === name);
+    return tool !== undefined && this.isEffectivelyExposed(name) ? tool : undefined;
   }
   public listAll(): readonly McpToolDefinition[] { return this.allTools; }
   public listInFlight(): ReturnType<ActivityTracker['listInFlight']> { return this.activity.listInFlight(); }
@@ -1459,6 +1466,7 @@ function withToolEnvelopes(tool: McpToolDefinition): McpToolDefinition {
 }
 
 function withApprovalEnvelope(tool: McpToolDefinition): McpToolDefinition {
+  if (tool.name === 'workspace_bootstrap' || tool.name === 'prepare_code_change') return tool;
   const extendObjectSchema = (schema: z.ZodObject): z.ZodObject =>
     schema.safeExtend({ userConfirmed: approvalEnvelopeSchema.optional() });
   const inputSchema = tool.inputSchema instanceof z.ZodObject

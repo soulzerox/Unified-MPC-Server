@@ -6,7 +6,7 @@ export function harnessTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'working_memory_search',
-      description: 'Search the pinned mandatory working-memory MCP through a stable native unified-mpc surface.',
+      description: 'Search the canonical parent-owned native working-memory capability through a stable unified-mpc surface.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workingMemorySearchSchema,
@@ -16,7 +16,7 @@ export function harnessTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'working_memory_record',
-      description: 'Create or append a working-memory entity through a stable native unified-mpc surface.',
+      description: 'Create or append a working-memory entity through the canonical parent-owned native capability and stable unified-mpc surface.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: workingMemoryRecordSchema,

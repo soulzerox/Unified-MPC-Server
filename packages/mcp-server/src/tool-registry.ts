@@ -737,18 +737,18 @@ export class ToolRegistry {
     const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
     const extensions = this.services.extensions;
-    if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
+    if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Workspace capability verification service is unavailable', true));
     const mandatoryMcp = await extensions.bootstrapMandatoryMcpServers(signal);
     if (!mandatoryMcp.ok) return mandatoryMcp;
     if (!mandatoryMcp.value.ready) {
       const failed = mandatoryMcp.value.servers.filter((server) => !server.connected || !server.pinned).map((server) => server.name).join(', ');
-      return err(appError('CONFLICT', `Mandatory child MCP bootstrap is not ready: ${failed || 'unknown server'}`, true));
+      return err(appError('CONFLICT', `Optional child MCP capability is unavailable: ${failed || 'unknown server'}`, true));
     }
     for (const server of mandatoryMcp.value.servers) {
       const required = server.requiredTools ?? [];
       const missing = required.filter((tool) => !server.tools.includes(tool));
       if (missing.length > 0) {
-        return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));
+        return err(appError('CONFLICT', `Optional child MCP ${server.name} is missing declared capability: ${missing.join(', ')}`, true));
       }
     }
     const thaiRag = this.services.thaiRag;

@@ -163,13 +163,13 @@ export interface McpToolContext {
   readonly setPonytailSessionSuppressed?: (workspaceId: string, goalId: string | undefined, suppressed: boolean) => Promise<boolean>;
   /** Resolve live policy, load the mandatory session-start routing skill, and register the correlated turn when supplied. */
   readonly bootstrapTaskContext?: (signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Bootstrap the effective workspace engineering harness and mandatory child MCP connections. */
+  /** Bootstrap the effective workspace engineering harness and verify required native capabilities; optional child MCP connections cannot replace them. */
   readonly bootstrapWorkspaceHarness?: (workspaceId: string, signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Run mandatory pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path. */
+  /** Run required canonical native pre-edit diagnostics, optionally add Godkiller safety analysis, and authorize one development-artifact path; unavailable required capabilities fail closed. */
   readonly prepareCodeChange?: (workspaceId: string, filePath: string, proposedSymbol: string | undefined, runGodkillerSafetyCheck: boolean, signal: AbortSignal) => Promise<Result<unknown>>;
-  /** Search the pinned native working-memory child through its curated read surface. */
+  /** Search the canonical parent-owned native working-memory capability through its curated read surface. */
   readonly workingMemorySearch?: (workspaceId: string, query: string, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
-  /** Create or append a work-log entity through the pinned native working-memory child. */
+  /** Create or append a work-log entity through the canonical parent-owned native working-memory capability. */
   readonly workingMemoryRecord?: (workspaceId: string, name: string, entityType: string, observations: readonly string[], signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;
   /** Search parent-owned native Thai-RAG within one canonical workspace. */
   readonly ragRecall?: (workspaceId: string, query: string, category: string | undefined, limit: number | undefined, signal: AbortSignal, budget?: ResultBudget) => Promise<Result<unknown>>;

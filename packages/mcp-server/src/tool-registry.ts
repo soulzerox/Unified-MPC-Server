@@ -916,6 +916,8 @@ export class ToolRegistry {
       providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_index') {
       providerArgs = { ...args, workspace_path: scope.rootPath, workspace: workspaceId };
+    } else if (tool === 'index_status') {
+      providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
       const pathFilter = requestedFilter.length === 0

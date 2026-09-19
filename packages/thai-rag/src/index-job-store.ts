@@ -3,12 +3,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCanonicalWorkspaceId, resolveThaiRagProviderRoot } from './canonical-workspace.js';
 
-export type ThaiRagIndexJobStatus = 'running' | 'completed' | 'failed' | 'interrupted';
+export type ThaiRagIndexJobStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'legacy-unavailable';
 
 export interface ThaiRagIndexJob {
   readonly jobId: string;
   readonly workspaceId: string;
-  readonly ownerId: string;
+  readonly ownerId?: string;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
   readonly startedAt: string;
@@ -18,7 +18,7 @@ export interface ThaiRagIndexJob {
 }
 
 interface JobFile {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly jobs: readonly ThaiRagIndexJob[];
 }
 
@@ -26,6 +26,7 @@ export class ThaiRagIndexJobStore {
   private readonly filePath: string;
   private jobs = new Map<string, ThaiRagIndexJob>();
   private initialized = false;
+  private migrated = false;
 
   public constructor(dataRoot: string, private readonly now: () => Date = () => new Date()) {
     const root = resolveThaiRagProviderRoot(dataRoot);
@@ -38,11 +39,16 @@ export class ThaiRagIndexJobStore {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     try {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'));
-      if (isRecord(parsed) && parsed.schemaVersion === 1 && Array.isArray(parsed.jobs)) {
+      if (isRecord(parsed) && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2) && Array.isArray(parsed.jobs)) {
+        this.migrated = parsed.schemaVersion === 1;
         for (const value of parsed.jobs) {
-          const job = parseJob(value);
-          if (job !== null) this.jobs.set(job.jobId, job);
+          const parsedJob = parseJob(value, this.now);
+          if (parsedJob !== null) {
+            this.jobs.set(parsedJob.job.jobId, parsedJob.job);
+            this.migrated ||= parsedJob.migrated;
+          }
         }
+        if (this.migrated) await this.persist();
       }
     } catch (error: unknown) {
       if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
@@ -97,10 +103,14 @@ export class ThaiRagIndexJobStore {
     if (changed) await this.persist();
   }
 
-  public async get(jobId: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
+  public async get(jobId: string, ownerId: string, workspaceId?: string): Promise<ThaiRagIndexJob | null> {
     await this.initialize();
     const job = this.jobs.get(jobId);
-    return job !== undefined && job.ownerId === ownerId ? job : null;
+    return job !== undefined
+      && job.ownerId === ownerId
+      && (workspaceId === undefined || job.workspaceId === workspaceId)
+      ? job
+      : null;
   }
 
   public async active(ownerId: string): Promise<readonly ThaiRagIndexJob[]> {
@@ -130,34 +140,37 @@ export class ThaiRagIndexJobStore {
   }
 
   private async persist(): Promise<void> {
-    const payload: JobFile = { schemaVersion: 1, jobs: [...this.jobs.values()] };
+    const payload: JobFile = { schemaVersion: 2, jobs: [...this.jobs.values()] };
     const temporary = `${this.filePath}.tmp-${process.pid}-${randomUUID()}`;
     await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, this.filePath);
   }
 }
 
-function parseJob(value: unknown): ThaiRagIndexJob | null {
+function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndexJob; readonly migrated: boolean } | null {
   if (!isRecord(value)
     || typeof value.jobId !== 'string'
     || typeof value.workspaceId !== 'string'
-    || typeof value.ownerId !== 'string'
-    || value.ownerId.trim().length === 0
     || !parseCanonicalWorkspaceId(value.workspaceId).ok
-    || (value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed' && value.status !== 'interrupted')
+    || (value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed' && value.status !== 'interrupted' && value.status !== 'legacy-unavailable')
     || typeof value.force !== 'boolean'
     || typeof value.startedAt !== 'string') return null;
-    return {
+  const ownerId = typeof value.ownerId === 'string' && value.ownerId.trim().length > 0 ? value.ownerId : undefined;
+  const legacy = ownerId === undefined;
+  return {
+    migrated: legacy,
+    job: {
       jobId: value.jobId,
       workspaceId: value.workspaceId,
-      ownerId: value.ownerId,
-      status: value.status,
-
-    force: value.force,
-    startedAt: value.startedAt,
-    ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),
-    ...(Object.hasOwn(value, 'result') ? { result: value.result } : {}),
-    ...(typeof value.error === 'string' ? { error: value.error } : {}),
+      ...(ownerId === undefined ? {} : { ownerId }),
+      status: legacy ? 'legacy-unavailable' : value.status,
+      force: value.force,
+      startedAt: value.startedAt,
+      ...(legacy ? { finishedAt: typeof value.finishedAt === 'string' ? value.finishedAt : now().toISOString(), error: 'Legacy index job has no owner and is unavailable' } : {}),
+      ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),
+      ...(Object.hasOwn(value, 'result') ? { result: value.result } : {}),
+      ...(typeof value.error === 'string' ? { error: value.error } : {}),
+    },
   };
 }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -55,5 +55,26 @@ describe('ThaiRagIndexJobStore', () => {
     await expect(store.get(job.jobId, 'owner-b')).resolves.toBeNull();
     await expect(store.complete(job.jobId, { indexed: 1 }, 'owner-b')).resolves.toBeNull();
     await expect(store.complete(job.jobId, { indexed: 1 }, 'owner-a')).resolves.toMatchObject({ status: 'completed' });
+  });
+
+  it('preserves legacy records without owner IDs as unavailable instead of dropping them', async () => {
+    const dataRoot = await root();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 1, jobs: [{
+      jobId: 'idx_umcp_legacy',
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      status: 'running',
+      force: true,
+      startedAt: '2026-09-17T01:00:00.000Z',
+    }] }));
+
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'));
+    await store.initialize();
+
+    await expect(store.get('idx_umcp_legacy', 'owner-a')).resolves.toBeNull();
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    expect(persisted.jobs).toHaveLength(1);
+    expect(persisted.jobs[0]).toMatchObject({ jobId: 'idx_umcp_legacy', status: 'legacy-unavailable' });
   });
 });

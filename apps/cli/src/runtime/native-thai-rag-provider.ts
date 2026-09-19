@@ -130,10 +130,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const refreshed = await this.refreshWorkspaceRoots();
     if (!refreshed.ok) return refreshed;
-    if (tool === 'index_status' && typeof args.job_id === 'string' && args.job_id.startsWith('idx_umcp_')) {
-      const job = await this.jobs.get(args.job_id, this.ownerId!);
+    if (tool === 'index_status') {
+      const jobId = typeof args.job_id === 'string' ? args.job_id : '';
+      const workspaceValue = typeof args.workspace === 'string' ? args.workspace : '';
+      const workspace = this.resolveIndexWorkspace(workspaceValue);
+      if (!workspace.ok) return workspace;
+      const job = await this.jobs.get(jobId, this.ownerId!, workspace.value.workspaceId);
       return job === null
-        ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${args.job_id}`))
+        ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`))
         : ok(job);
     }
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);

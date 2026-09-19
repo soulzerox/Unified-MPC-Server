@@ -289,6 +289,19 @@ describe('workspace engineering harness enforcement', () => {
     });
   });
 
+  it('scopes native index status through active workspace', async () => {
+    const { services, nativeRagCalls, nativeRagArguments } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider,
+    });
+
+    const result = await registry.invoke('rag_index_status', { workspaceId: 'workspace-1', jobId: 'idx_umcp_test' });
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['index_status']);
+    expect(nativeRagArguments[0]).toEqual({ tool: 'index_status', args: { job_id: 'idx_umcp_test', workspace: 'workspace-1' } });
+  });
+
   it('exposes curated native working-memory tools after bootstrap', async () => {
     const { services, nativeRagCalls } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, {

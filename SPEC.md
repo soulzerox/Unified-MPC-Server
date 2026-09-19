@@ -1,6 +1,6 @@
 # Unified-MPC-Server — Master Specification
 
-> **Status**: `runtime-harness-hardening-verified-locally` (workspace bootstrap, mandatory child-MCP trust, pre-edit enforcement, focused/full package verification complete; final repository/push evidence is recorded separately)
+> **Status**: `runtime-harness-hardening-verified-locally` (workspace bootstrap, required external MCP readiness, pre-edit enforcement, focused/full package verification complete; final repository/push evidence is recorded separately)
 > **Target Version**: `4.61.0`
 > **Source Base**: `engasnm111/lnwjud` (Clean Option A Pivot: Linux-only, Zero Backward Compat)  
 > **Repository**: `soulzerox/Unified-MPC-Server`  

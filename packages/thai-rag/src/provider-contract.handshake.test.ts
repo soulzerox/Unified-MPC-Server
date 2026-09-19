@@ -107,6 +107,38 @@ describe('Thai-RAG provider handshake', () => {
     expect(validateThaiRagHandshake({ ...baseHandshake, embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe' } }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' }).ok).toBe(true);
   });
 
+  it('normalizes supported provider model tags', () => {
+    const tagged = {
+      ...baseHandshake,
+      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest' },
+      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest' },
+    };
+    expect(validateThaiRagHandshake(tagged)).toMatchObject({ ok: true, value: {
+      embedding: { profile: 'nomic-embed-text-v2-moe', model: 'nomic-embed-text-v2-moe' },
+      generation: { embedding: 'nomic-embed-text-v2-moe' },
+    } });
+  });
+
+  it.each([
+    ['unsupported dimension', { embedding: { ...baseHandshake.embedding, dimension: 1024 } }],
+    ['profile drift', { embedding: { ...baseHandshake.embedding, profile: 'other-profile', model: 'other-profile' }, generation: { ...baseHandshake.generation, embedding: 'other-profile' } }],
+    ['preprocessing drift', { embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' } }],
+  ])('rejects same-contract embedding %s', (_name, change) => {
+    const result = validateThaiRagHandshake({ ...baseHandshake, ...change });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
+  });
+
+  it('rejects model drift even when dimension stays compatible', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      embedding: { ...baseHandshake.embedding, profile: 'other-profile', model: 'other-profile' },
+      generation: { ...baseHandshake.generation, embedding: 'other-profile' },
+    }, { expectedEmbeddingProfile: 'nomic-embed-text-v2-moe', expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
+  });
+
   it('enforces digest only when expected model publishes trusted digest', () => {
     const matching = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', expectedPreprocessingVersion: '1' });
     const drifted = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210', expectedPreprocessingVersion: '1' });

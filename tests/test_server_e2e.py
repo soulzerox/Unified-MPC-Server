@@ -68,11 +68,11 @@ def test_code_rag_tools_lifecycle(test_server):
     server, ws_dir = test_server
 
     # 1. Code Index
-    index_res = server.code_index(str(ws_dir))
+    index_res = server.code_index(str(ws_dir), workspace_id="test_ws")
     assert "Indexed: `1 files`" in index_res
 
     # 2. Incremental Index (should skip unchanged)
-    reindex_res = server.code_index(str(ws_dir))
+    reindex_res = server.code_index(str(ws_dir), workspace_id="test_ws")
     assert "Skipped (unchanged): `1 files`" in reindex_res
 
     # 3. Code Search exact symbol
@@ -94,15 +94,15 @@ def test_code_index_force_reindex(test_server):
     server, ws_dir = test_server
 
     # First index
-    res1 = server.code_index(str(ws_dir))
+    res1 = server.code_index(str(ws_dir), workspace_id="test_ws")
     assert "Indexed: `1 files`" in res1
 
     # Normal reindex skips
-    res2 = server.code_index(str(ws_dir), force=False)
+    res2 = server.code_index(str(ws_dir), force=False, workspace_id="test_ws")
     assert "Skipped (unchanged): `1 files`" in res2
 
     # Forced reindex re-indexes all
-    res3 = server.code_index(str(ws_dir), force=True)
+    res3 = server.code_index(str(ws_dir), force=True, workspace_id="test_ws")
     assert "Indexed: `1 files`" in res3
     assert "Skipped (unchanged): `0 files`" in res3
 
@@ -151,7 +151,7 @@ def test_background_index_returns_job_id_immediately(test_server):
 
     server, ws_dir = test_server
     t0 = _time.time()
-    res = server.code_index(str(ws_dir), background=True)
+    res = server.code_index(str(ws_dir), background=True, workspace_id="test_ws")
     elapsed = _time.time() - t0
     assert "Job:" in res, f"expected job_id in response, got: {res[:200]}"
     assert elapsed < 2.0, f"background call must return fast, took {elapsed:.2f}s"
@@ -164,7 +164,7 @@ def test_index_status_transitions_to_done(test_server):
     import time as _time
 
     server, ws_dir = test_server
-    res = server.code_index(str(ws_dir), background=True)
+    res = server.code_index(str(ws_dir), background=True, workspace_id="test_ws")
     job_id = res.split("Job:")[1].split("]")[0].strip()
     final = ""
     for _ in range(60):

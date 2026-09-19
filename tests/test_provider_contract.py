@@ -229,6 +229,21 @@ def test_provider_forwards_explicit_workspace_id_without_transport():
     assert result.data["workspace"] == "ws-123"
 
 
+def test_core_code_index_rejects_missing_workspace_id(tmp_path):
+    from thai_rag.server import LocalContextServer
+
+    server = LocalContextServer(
+        sqlite_path=tmp_path / "context.db",
+        chroma_path=str(tmp_path / "chroma"),
+    )
+    try:
+        result = server.code_index(str(tmp_path))
+        assert result == "Error: canonical workspace_id is required."
+        assert not server.storage.sqlite_conn.execute("SELECT COUNT(*) FROM parent_documents").fetchone()[0]
+    finally:
+        server.close()
+
+
 def test_provider_rejects_missing_workspace_id_for_scoped_memory():
     provider = ThaiRagProvider(core=RecordingCore({"constraints": [], "code_context": None}))
 
@@ -510,6 +525,35 @@ def test_real_core_memory_and_event_operations_isolate_two_workspaces(tmp_path):
         denied = provider.forget(memory_id, workspace_id="ws-b")
         assert denied.status is ProviderStatus.UNAVAILABLE
         assert denied.errors[0].code is ErrorCode.SCOPE_DENIED
+    finally:
+        server.close()
+
+
+def test_recall_keeps_scoped_event_when_vector_results_are_unrelated(tmp_path, monkeypatch):
+    from thai_rag.server import LocalContextServer
+    from tests.fakes import DeterministicEmbeddingAdapter
+
+    server = LocalContextServer(sqlite_path=tmp_path / "context.db", chroma_path=str(tmp_path / "chroma"))
+    embedder = DeterministicEmbeddingAdapter()
+    server.embedder = embedder
+    try:
+        server.provider().record_event("decision", "scoped event marker", workspace_id="ws-a")
+        monkeypatch.setattr(
+            server.storage,
+            "search_memories_vector",
+            lambda *args, **kwargs: [{
+                "id": "unrelated",
+                "content": "unrelated vector result",
+                "metadata": {"workspace_id": "ws-a", "category": "general"},
+                "distance": 0.01,
+            }],
+        )
+
+        result = server.provider().recall("scoped event marker", workspace_id="ws-a", limit=1)
+
+        assert result.status is ProviderStatus.OK
+        assert "scoped event marker" in result.data
+        assert "unrelated vector result" not in result.data
     finally:
         server.close()
 

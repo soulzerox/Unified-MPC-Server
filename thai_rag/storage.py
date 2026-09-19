@@ -560,7 +560,7 @@ class StorageManager:
             try:
                 if workspace:
                     rows = cur.execute("""
-                        SELECT t.turn_id, t.workspace, t.role, t.content, t.summary, t.tags, t.created_at, f.rank
+                        SELECT t.turn_id, t.workspace, t.role, t.content, t.summary, t.tags, t.event_type, t.created_at, f.rank
                         FROM fts_conversation f
                         JOIN conversation_turns t ON f.turn_id = t.turn_id
                         WHERE fts_conversation MATCH ? AND t.workspace = ?
@@ -569,7 +569,7 @@ class StorageManager:
                     """, (fts_expr, workspace, limit)).fetchall()
                 else:
                     rows = cur.execute("""
-                        SELECT t.turn_id, t.workspace, t.role, t.content, t.summary, t.tags, t.created_at, f.rank
+                        SELECT t.turn_id, t.workspace, t.role, t.content, t.summary, t.tags, t.event_type, t.created_at, f.rank
                         FROM fts_conversation f
                         JOIN conversation_turns t ON f.turn_id = t.turn_id
                         WHERE fts_conversation MATCH ?

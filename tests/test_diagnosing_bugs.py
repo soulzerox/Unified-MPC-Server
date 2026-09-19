@@ -53,7 +53,7 @@ def test_binary_and_unusual_files_in_workspace(diag_server):
     (ws_path / "empty.py").write_text("", encoding="utf-8")
 
     # Indexing must not crash
-    res = diag_server.code_index(temp_ws)
+    res = diag_server.code_index(temp_ws, workspace_id="diagnosis")
     assert "Code Indexing Completed" in res
     assert "Indexed:" in res
 

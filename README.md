@@ -91,7 +91,7 @@ flowchart TD
 
 | เสาหลัก | เทคโนโลยีที่ใช้ | ประโยชน์ต่อ AI Agent |
 |---|---|---|
-| **1. Personal Second Brain** | SQLite FTS5 + PyThaiNLP Tokenization + ChromaDB | บันทึกประวัติคุยทีละ Turn แบบ Realtime ดึงข้อตกลงย้อนหลังได้ใน **0.4 ms** แม้จะปิดโปรแกรมแล้วเปิดใหม่ |
+| **1. Personal Second Brain** | SQLite FTS5 + PyThaiNLP Tokenization + ChromaDB | บันทึก Event ที่เลือกอย่างชัดเจน เช่น ข้อตกลงหรือการตัดสินใจ และดึงกลับมาได้ใน **0.4 ms** แม้จะปิดโปรแกรมแล้วเปิดใหม่ |
 | **2. Code Property Graph (CPG-Lite)** | Python AST + SQLite `WITH RECURSIVE` CTE | วิเคราะห์ความสัมพันธ์ของฟังก์ชัน/คลาสข้ามไฟล์ หา Inbound Callers และคำนวณ Blast Radius ใน **< 1 ms** โดยไม่ต้องพึ่งพา LLM |
 | **3. Hybrid Local RAG** | SQLite FTS5 (BM25) + ChromaDB Cosine + RRF | ค้นหาโค้ดและบริบทแบบผสมผสาน ได้ทั้ง Exact Match ของชื่อตัวแปร และความหมายภาษาไทย |
 
@@ -112,7 +112,7 @@ Optional standalone adapter exposes legacy-compatible tools through Model Contex
 | **`code_blast_radius`** | `symbol_name` (str)<br>`workspace` (str, opt)<br>`max_depth` (int, default=2) | วิเคราะห์กราฟ CPG ค้นหาว่ามีฟังก์ชันไหนในไฟล์ใดเรียกใช้สัญลักษณ์นี้บ้าง (Multi-Hop Callers) | 🟡 **เรียกเมื่อวางแผน Refactor หรือลบ/เปลี่ยนชื่อฟังก์ชัน** |
 | **`code_search`** | `query` (str)<br>`top_k` (int, default=5)<br>`path_filter` (str, opt) | ค้นหาโค้ดแบบ Hybrid (BM25 + Semantic Vector) รองรับคำค้นหาภาษาไทย | 🟡 **เรียกก่อน grep เพื่อหาตำแหน่งไฟล์และบรรทัดที่เกี่ยวข้อง** |
 | **`code_context`** | `file_path` (str)<br>`line_number` (int)<br>`window` (int, default=25) | ดึงขอบเขตของฟังก์ชันหรือคลาสทั้งบล็อกตามเลขบรรทัด | 🟡 **เรียกหลังจากได้ตำแหน่งบรรทัดจาก `code_search`** |
-| **`code_index`** | `workspace_path` (str)<br>`workspace` (str, opt)<br>`force` (bool, default=False)<br>`background` (bool, default=False) | สแกนและดัชนีโค้ดด้วย SHA256 cache พร้อมสกัด CPG AST; `workspace_path` คือ filesystem root ส่วน `workspace` คือ logical namespace ที่ stable (เช่น Unified workspace UUID) (`background=True` คืน job_id ทันที) | 🔵 **เรียกเมื่อเปิดโปรเจกต์ใหม่ หรือหลัง git pull ครั้งใหญ่ (workspace ใหญ่ใช้ background)** |
+| **`code_index`** | `workspace_path` (str)<br>`workspace_id` (str, required)<br>`force` (bool, default=False)<br>`background` (bool, default=False) | สแกนและดัชนีโค้ดด้วย SHA256 cache พร้อมสกัด CPG AST; `workspace_path` คือ filesystem root ส่วน `workspace_id` คือ logical namespace ที่ stable (เช่น Unified workspace UUID) (`background=True` คืน job_id ทันที) | 🔵 **เรียกเมื่อเปิดโปรเจกต์ใหม่ หรือหลัง git pull ครั้งใหญ่ (workspace ใหญ่ใช้ background)** |
 | **`index_status`** | `job_id` (str) | Poll ผล background `code_index` (running/done/error) | 🔵 **เรียก poll หลังสั่ง `code_index(background=True)`** |
 | **`remember`** | `content` (str)<br>`category` (str, default="general") | บันทึกความจำถาวรหรือกฎระยะยาวของโปรเจกต์ | 🟢 **บันทึกกฎถาวร เช่น Architecture Decision Records (ADR)** |
 | **`recall`** | `query` (str)<br>`category` (str, opt)<br>`limit` (int, default=5) | ค้นหาความจำถาวรด้วย Semantic Vector Search (turn ที่ไม่มี tag หมวดหมู่จะถูกนับเป็น `general` และผ่านทุก category filter) | 🟡 **ค้นหาข้อตกลงในอดีตเกี่ยวกับ Preference หรือ Rules** |
@@ -369,7 +369,8 @@ Runtime dependencies ถูกประกาศใน `pyproject.toml` ด้�
 2. เรียก: code_context(file_path="thai_rag/storage.py", line_number=355)
    -> เห็นเนื้อหาฟังก์ชันแบบสมบูรณ์
 3. ทำการแก้ไขโค้ดโดยไม่ละเมิดข้อจำกัดเดิม และไม่กระทบ caller ทั้ง 9 จุด
-4. เรียก: remember_turn(role="assistant", content="Updated save_conversation_turn to support multi-tagging while preserving PyThaiNLP tokenization", tags="storage,cpg")
+4. หากเป็นข้อกำหนดหรือการตัดสินใจที่ควรจำ เรียก: record_event(event_type="decision", content="Updated save_conversation_turn to support multi-tagging while preserving PyThaiNLP tokenization", workspace_id="stable-project-id", tags="storage,cpg")
+   `remember_turn` ใช้เฉพาะเมื่อ caller ต้องการเก็บ raw turn โดยตั้งใจ ไม่ใช่ขั้นตอนบังคับของทุก turn
 ```
 
 ---
@@ -403,7 +404,7 @@ index_status(job_id="idx_xxxxxxxx")
 - Job อยู่ใน memory ของ MCP process เดียว (restart server แล้วหาย — รัน `code_index` ใหม่ได้เพราะ incremental cache)
 - Floating HUD ยังแสดง progress ตามเดิมผ่าน `ProgressReporter`
 - `workspace_path` เป็น root จริงที่ใช้เดินไฟล์และถูก canonicalize ด้วย `Path.resolve()` ส่วน `workspace` เป็น namespace เชิงตรรกะสำหรับ path, FTS, vectors และ CPG
-- หากไม่ส่ง `workspace` ระบบจะใช้ basename ของ root เพื่อความเข้ากันได้กับ standalone callers เดิม; callers ที่มี registry identity ควรส่ง namespace ที่ stable เสมอ
+- `workspace_id` ต้องส่งเป็น stable logical namespace เมื่อเรียก `code_index`; ระบบจะไม่อนุมาน namespace จาก filesystem path
 
 ### 3. ดูดประวัติแชตย้อนหลังเข้าสู่ Memory (Historical Chat Ingestion)
 ```bash

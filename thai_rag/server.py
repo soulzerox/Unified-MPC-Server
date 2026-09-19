@@ -167,20 +167,28 @@ class LocalContextServer:
             else:
                 warnings.append("embedding backend unavailable; FTS fallback used")
 
-            if not matches:
-                turns = self.storage.search_conversation_turns(query, workspace=workspace_id, limit=limit)
-                matches = [
-                    {
-                        "id": turn["turn_id"],
-                        "content": turn["content"],
-                        "metadata": {
-                            "category": "general",
-                            "created_at": turn.get("created_at", ""),
-                        },
-                        "distance": 0.0,
-                    }
-                    for turn in turns
-                ]
+            turns = self.storage.search_conversation_turns(query, workspace=workspace_id, limit=limit)
+            fts_matches = [
+                {
+                    "id": turn["turn_id"],
+                    "content": turn["content"],
+                    "metadata": {
+                        "category": turn.get("event_type") or "general",
+                        "created_at": turn.get("created_at", ""),
+                        "event_type": turn.get("event_type"),
+                        "type": "event" if turn.get("event_type") else "turn",
+                    },
+                    "distance": 0.0,
+                }
+                for turn in turns
+                if not category
+                or turn.get("event_type") == category
+                or not turn.get("event_type")
+            ]
+            fts_matches.sort(key=lambda match: match["metadata"]["type"] != "event")
+            existing_ids = {match.get("id") for match in fts_matches}
+            matches = fts_matches + [match for match in matches if match.get("id") not in existing_ids]
+            matches = matches[:limit]
             if not matches:
                 result = f"No memories found matching '{query}'."
                 return f"{result}  ⚠️ {'; '.join(warnings)}" if warnings else result
@@ -233,7 +241,10 @@ class LocalContextServer:
         background=True returns a job_id immediately; poll with index_status().
         """
         workspace = workspace_id if workspace_id is not None else workspace
-        workspace = workspace or Path(workspace_path).resolve().name
+        if not isinstance(workspace, str) or not workspace.strip():
+            message = "Error: canonical workspace_id is required."
+            return {"status": "error", "workspace_id": None, "code": "workspace_scope_required", "error": message} if structured else message
+        workspace = workspace.strip()
         err = self._check_ollama()
         if err:
             return {"status": "error", "workspace_id": workspace, "error": err} if structured else err

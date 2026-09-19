@@ -10,7 +10,7 @@ import {
   ThaiRagIndexJobStore,
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
-  THAI_RAG_CONTRACT_FINGERPRINT,
+  THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
   THAI_RAG_EMBEDDING_PROFILE,
   THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
@@ -121,7 +121,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return version;
     }
-    const handshake = parseProviderHandshake(version.value, true);
+    const handshake = parseProviderHandshake(version.value);
     if (!handshake.ok) {
       await this.sessions.close().catch(() => undefined);
       return handshake;
@@ -130,6 +130,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
       expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+      allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!compatible.ok) {
       await this.sessions.close().catch(() => undefined);
@@ -140,7 +141,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return healthProbe;
     }
-    const healthHandshake = parseProviderHandshake(healthProbe.value, true);
+    const healthHandshake = parseProviderHandshake(healthProbe.value);
     if (!healthHandshake.ok) {
       await this.sessions.close().catch(() => undefined);
       return healthHandshake;
@@ -149,6 +150,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: healthHandshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
       expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+      allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!healthy.ok) {
       await this.sessions.close().catch(() => undefined);
@@ -436,12 +438,13 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || config === undefined) return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     const raw = normalizeWorkerCallResult('health', await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, config, 'health', {}, signal)));
     if (!raw.ok) return raw;
-    const handshake = parseProviderHandshake(raw.value, true);
+    const handshake = parseProviderHandshake(raw.value);
     if (!handshake.ok) return handshake;
     const compatible = validateThaiRagHandshake(handshake.value, {
       embeddingIndexGeneration: this.expectedEmbeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
       expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE,
+      allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
     if (!compatible.ok) return compatible;
     if (handshake.value.components === undefined) {
@@ -572,7 +575,7 @@ async function rollbackWorkspaceAliases(changed: readonly { readonly alias: stri
   return restored;
 }
 
-function parseProviderHandshake(value: unknown, allowProductionBridge = false): Result<ThaiRagProviderHandshake> {
+function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake> {
   const outer = isRecord(value) && isRecord(value.structuredContent) && isRecord(value.structuredContent.data)
     ? value.structuredContent.data
     : isRecord(value) && isRecord(value.data) ? value.data : value;
@@ -630,11 +633,7 @@ function parseProviderHandshake(value: unknown, allowProductionBridge = false): 
     ...(typeof data.workspace_ready === 'boolean' ? { workspaceReady: data.workspace_ready } : {}),
     ...(components === undefined ? {} : { components }),
     embeddingIndexGeneration: data.embedding_index_generation,
-    ...(typeof data.legacy_adapter === 'string'
-      ? { legacyAdapter: data.legacy_adapter }
-      : allowProductionBridge && data.contract_version === '1.0' && data.contract_fingerprint === THAI_RAG_CONTRACT_FINGERPRINT
-        ? { legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE }
-        : {}),
+    ...(typeof data.legacy_adapter === 'string' ? { legacyAdapter: data.legacy_adapter } : {}),
   });
 }
 

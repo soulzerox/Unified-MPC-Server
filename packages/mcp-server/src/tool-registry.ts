@@ -890,48 +890,42 @@ export class ToolRegistry {
     }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    const scopedCategory = `workspace:${workspaceId}`;
     let providerTool = tool;
-    let providerArgs: Readonly<Record<string, unknown>> = args;
+    let providerArgs: Readonly<Record<string, unknown>> = { ...args, workspace_id: workspaceId };
 
-    if (tool === 'remember') {
-      providerArgs = { ...args, category: scopedCategory };
-    } else if (tool === 'recall') {
-      providerArgs = { ...args, category: scopedCategory };
-    } else if (tool === 'forget') {
-      providerArgs = { ...args, category: scopedCategory };
-    } else if (tool === 'workspace_memory_record') {
+    if (tool === 'workspace_memory_record') {
       const name = typeof args.name === 'string' ? args.name : 'workspace-note';
       const observations = Array.isArray(args.observations)
         ? args.observations.filter((value): value is string => typeof value === 'string')
         : [];
-      const category = typeof args.category === 'string' && args.category.trim().length > 0 ? args.category.trim() : 'working-memory';
-      providerTool = 'remember';
+      const category = typeof args.category === 'string' && args.category.trim().length > 0 ? args.category.trim() : 'explicit_remember';
+      providerTool = 'record_event';
       providerArgs = {
-        category: scopedCategory,
+        workspace_id: workspaceId,
+        event_type: category,
         content: `[${category}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
       };
     } else if (tool === 'pre_edit_context') {
-      providerArgs = { ...args, workspace: workspaceId };
+      providerArgs = { ...providerArgs };
     } else if (tool === 'code_blast_radius') {
-      providerArgs = { ...args, workspace: workspaceId };
+      providerArgs = { ...providerArgs };
     } else if (tool === 'code_index') {
-      providerArgs = { ...args, workspace_path: scope.rootPath, workspace: workspaceId };
+      providerArgs = { ...providerArgs, workspace_path: scope.rootPath };
     } else if (tool === 'index_status') {
-      providerArgs = { ...args, workspace: workspaceId };
+      providerArgs = { ...providerArgs };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
       const pathFilter = requestedFilter.length === 0
         ? workspaceId
         : requestedFilter.startsWith(`${workspaceId}/`) ? requestedFilter : `${workspaceId}/${requestedFilter}`;
-      providerArgs = { ...args, path_filter: pathFilter };
+      providerArgs = { ...providerArgs, path_filter: pathFilter };
     } else if (tool === 'code_context') {
       const requestedPath = typeof args.file_path === 'string' ? args.file_path.trim().replaceAll('\\', '/').replace(/^\.\//, '') : '';
       if (requestedPath.length === 0 || requestedPath === '..' || requestedPath.startsWith('../')) {
         return err(appError('INVALID_INPUT', 'Native Thai-RAG code_context requires a workspace-relative file path'));
       }
       providerArgs = {
-        ...args,
+        ...providerArgs,
         file_path: requestedPath.startsWith(`${workspaceId}/`) ? requestedPath : `${workspaceId}/${requestedPath}`,
       };
     }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '@unified-mpc/extensions';
 import {
+  THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_CONTRACT_FINGERPRINT,
   THAI_RAG_REQUIRED_CAPABILITIES,
 } from '@unified-mpc/thai-rag';
@@ -27,6 +28,11 @@ afterEach(async () => {
 describe('NativeThaiRagProviderDriver', () => {
   it('keeps native tool fixture aligned with provider conformance capabilities', () => {
     expect(new Set(tools)).toEqual(new Set(THAI_RAG_REQUIRED_CAPABILITIES));
+    const handshake = defaultHandshake();
+    expect(Object.keys(handshake).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.topLevel].sort());
+    expect(Object.keys(handshake.embedding).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.embedding].sort());
+    expect(Object.keys(handshake.generation).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.generation].sort());
+    expect(Object.keys(handshake.components ?? {}).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.components].sort());
   });
 
   it('launches without the obsolete remember_turn dependency', async () => {

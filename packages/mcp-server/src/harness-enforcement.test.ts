@@ -110,7 +110,7 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
     expect(nativeRagArguments[0]).toEqual({
       tool: 'pre_edit_context',
-      args: { file_path: 'src/app.ts', workspace: 'workspace-1' },
+      args: { file_path: 'src/app.ts', workspace_id: 'workspace-1' },
     });
     expect(writes).toEqual(['src/app.ts']);
 
@@ -138,7 +138,7 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
     expect(nativeRagArguments).toEqual([{
       tool: 'pre_edit_context',
-      args: { file_path: 'src/shared.ts', proposed_symbol: 'shared', workspace: 'workspace-1' },
+      args: { file_path: 'src/shared.ts', proposed_symbol: 'shared', workspace_id: 'workspace-1' },
     }]);
 
     const mutationRegistry = new ToolRegistry(services, actor, options);
@@ -303,7 +303,7 @@ describe('workspace engineering harness enforcement', () => {
     const result = await registry.invoke('rag_index_status', { workspaceId: 'workspace-1', jobId: 'idx_umcp_test' });
     expect(result.isError).not.toBe(true);
     expect(nativeRagCalls).toEqual(['index_status']);
-    expect(nativeRagArguments[0]).toEqual({ tool: 'index_status', args: { job_id: 'idx_umcp_test', workspace: 'workspace-1' } });
+    expect(nativeRagArguments[0]).toEqual({ tool: 'index_status', args: { job_id: 'idx_umcp_test', workspace_id: 'workspace-1' } });
   });
 
   it('exposes curated native working-memory tools after bootstrap', async () => {
@@ -322,7 +322,7 @@ describe('workspace engineering harness enforcement', () => {
       observations: ['Implemented harness bootstrap'],
     });
     expect(recorded.isError).not.toBe(true);
-    expect(nativeRagCalls).toEqual(['recall', 'remember']);
+    expect(nativeRagCalls).toEqual(['recall', 'record_event']);
   });
 
   it('re-bootstraps and re-runs pre-edit checks when AGENTS.md changes', async () => {

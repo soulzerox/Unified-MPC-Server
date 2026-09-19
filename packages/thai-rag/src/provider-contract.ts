@@ -7,8 +7,18 @@ export const THAI_RAG_CONTRACT_VERSION = '1.0';
 export const THAI_RAG_INDEX_JOB_CONTRACT_VERSION = '1.0';
 export const THAI_RAG_CONTRACT_FINGERPRINT = 'c271073944e379a4932a3377a351dc7d45f421f4866e404eda277ec0f0bfa1bc';
 export const THAI_RAG_PRODUCTION_BRIDGE = 'thai-rag-provider-1.0-production-bridge';
+export const THAI_RAG_LEGACY_ADAPTERS = {
+  [THAI_RAG_PRODUCTION_BRIDGE]: { sourceContractVersion: '0.9', targetContractVersion: THAI_RAG_CONTRACT_VERSION },
+} as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE_VERSION = '1.0';
 export const THAI_RAG_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
+export const THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES = ['vector_store', 'embedder', 'semantic_retrieval'] as const;
+export const THAI_RAG_CONFORMANCE_FIXTURE = {
+  topLevel: ['provider_id', 'provider_version', 'contract_version', 'compatibility_range', 'contract_fingerprint', 'index_job_contract_version', 'capabilities', 'workspace_scope_model', 'state', 'workspace_ready', 'embedding', 'generation', 'embedding_index_generation', 'components'],
+  embedding: ['profile', 'model', 'dimension', 'preprocessing_version'],
+  generation: ['contract', 'embedding', 'index', 'storage'],
+  components: ['worker_reachable', 'sqlite_available', 'fts_available', 'vector_store_available', 'embedder_available', 'lexical_retrieval_available', 'semantic_retrieval_available', 'active_jobs'],
+} as const;
 export const THAI_RAG_CONFORMANCE_OPERATIONS = [
   'remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search',
   'code_context', 'code_blast_radius', 'code_index', 'index_status', 'health', 'version',
@@ -51,6 +61,7 @@ export interface ThaiRagHandshakeValidationOptions {
   readonly expectedEmbeddingProfile?: string;
   readonly expectedEmbeddingModel?: string;
   readonly expectedPreprocessingVersion?: string;
+  readonly allowedDegradedCapabilities?: readonly string[];
 }
 
 export type ThaiRagProviderLifecycleState = 'stopped' | 'starting' | 'ready' | 'degraded' | 'stopping';
@@ -136,29 +147,36 @@ export function validateThaiRagHandshake(
   handshake: ThaiRagProviderHandshake,
   options: ThaiRagHandshakeValidationOptions = {},
 ): Result<ThaiRagProviderHandshake> {
-  const fail = (reason: string, message: string): Result<ThaiRagProviderHandshake> => err(appError(
+  const fail = (reason: string, message: string, details: Readonly<Record<string, unknown>> = {}): Result<ThaiRagProviderHandshake> => err(appError(
     'CONFLICT',
     `Thai-RAG provider handshake rejected: ${message}`,
     true,
-    { reason, providerId: handshake.providerId, contractVersion: handshake.contractVersion },
+    { reason, providerId: handshake.providerId, contractVersion: handshake.contractVersion, ...details },
   ));
   const legacy = handshake.contractVersion !== THAI_RAG_CONTRACT_VERSION;
-  const productionBridge = options.allowLegacyAdapter === true && handshake.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE;
-  if (legacy && !productionBridge) {
-    return fail('contract-version-mismatch', `unsupported contract version ${handshake.contractVersion}`);
+  const adapter = handshake.legacyAdapter === undefined ? undefined : THAI_RAG_LEGACY_ADAPTERS[handshake.legacyAdapter as keyof typeof THAI_RAG_LEGACY_ADAPTERS];
+  if (legacy && !(options.allowLegacyAdapter === true && adapter !== undefined && adapter.sourceContractVersion === handshake.contractVersion)) {
+    return fail('contract-version-mismatch', `unsupported contract version ${handshake.contractVersion}`, { expected: THAI_RAG_CONTRACT_VERSION, actual: handshake.contractVersion, legacyAdapter: handshake.legacyAdapter });
   }
-  if (handshake.providerId !== THAI_RAG_PROVIDER_ID) return fail('provider-id-mismatch', `unexpected provider ${handshake.providerId}`);
-  if (handshake.contractFingerprint !== THAI_RAG_CONTRACT_FINGERPRINT) return fail('fingerprint-mismatch', 'contract fingerprint does not match supported conformance fixture');
-  if (handshake.indexJobContractVersion !== THAI_RAG_INDEX_JOB_CONTRACT_VERSION) return fail('index-job-contract-mismatch', 'index job contract version is unsupported');
-  if (!isCompatibleRange(handshake.compatibilityRange)) return fail('compatibility-range-invalid', 'compatibility range does not include supported contract version');
+  if (handshake.providerId !== THAI_RAG_PROVIDER_ID) return fail('provider-id-mismatch', `unexpected provider ${handshake.providerId}`, { expected: THAI_RAG_PROVIDER_ID, actual: handshake.providerId });
+  if (handshake.contractFingerprint !== THAI_RAG_CONTRACT_FINGERPRINT) return fail('fingerprint-mismatch', 'contract fingerprint does not match supported conformance fixture', { expected: THAI_RAG_CONTRACT_FINGERPRINT, actual: handshake.contractFingerprint });
+  if (handshake.indexJobContractVersion !== THAI_RAG_INDEX_JOB_CONTRACT_VERSION) return fail('index-job-contract-mismatch', 'index job contract version is unsupported', { expected: THAI_RAG_INDEX_JOB_CONTRACT_VERSION, actual: handshake.indexJobContractVersion });
+  if (!isCompatibleRange(handshake.compatibilityRange)) return fail('compatibility-range-invalid', 'compatibility range does not include supported contract version', { expected: THAI_RAG_CONTRACT_VERSION, actual: handshake.compatibilityRange });
   if (handshake.workspaceScopeModel !== 'explicit_workspace_id') return fail('workspace-scope-model-mismatch', 'canonical workspace_id scope is required');
   const missing = THAI_RAG_REQUIRED_CAPABILITIES.filter((capability) => !handshake.capabilities.includes(capability));
   if (missing.length > 0) return fail('missing-capability', `required capabilities missing: ${missing.join(', ')}`);
   if (handshake.health === 'unavailable') return fail('health-unavailable', 'provider health is unavailable');
   if (handshake.health === 'degraded') {
     const components = handshake.components;
-    if (components === undefined || !components.workerReachable || !components.sqliteAvailable || !components.ftsAvailable || !components.lexicalRetrievalAvailable) {
-      return fail('health-degraded', 'degraded provider lacks required native capabilities');
+    const allowed = new Set(options.allowedDegradedCapabilities ?? []);
+    const degradedCapabilities = components === undefined ? ['components'] : [
+      ...(components.vectorStoreAvailable ? [] : ['vector_store']),
+      ...(components.embedderAvailable ? [] : ['embedder']),
+      ...(components.semanticRetrievalAvailable ? [] : ['semantic_retrieval']),
+    ];
+    const disallowed = degradedCapabilities.filter((capability) => !allowed.has(capability));
+    if (components === undefined || !components.workerReachable || !components.sqliteAvailable || !components.ftsAvailable || !components.lexicalRetrievalAvailable || disallowed.length > 0) {
+      return fail('health-degraded', 'degraded provider lacks required native capabilities', { allowed: [...allowed], actual: degradedCapabilities, disallowed });
     }
   } else if (handshake.health !== 'ready') return fail('health-degraded', `provider health is ${handshake.health}`);
   if (handshake.workspaceId !== undefined && handshake.workspaceReady !== true) return fail('workspace-scope-unavailable', `provider did not confirm workspace ${handshake.workspaceId}`);
@@ -166,16 +184,16 @@ export function validateThaiRagHandshake(
     return fail('workspace-scope-unavailable', `provider did not confirm workspace ${options.workspaceId}`);
   }
   if (options.embeddingIndexGeneration !== undefined && handshake.embeddingIndexGeneration !== options.embeddingIndexGeneration) {
-    return fail('generation-drift', `provider generation ${handshake.embeddingIndexGeneration} does not match expected ${options.embeddingIndexGeneration}`);
+    return fail('generation-drift', `provider generation ${handshake.embeddingIndexGeneration} does not match expected ${options.embeddingIndexGeneration}`, { expected: options.embeddingIndexGeneration, actual: handshake.embeddingIndexGeneration });
   }
   if (handshake.generation.contract !== THAI_RAG_CONTRACT_FINGERPRINT || handshake.generation.embedding !== handshake.embedding.profile || (handshake.generation.index !== 'unknown' && handshake.generation.index !== String(handshake.embeddingIndexGeneration))) {
-    return fail('generation-drift', 'active generation metadata does not match handshake embedding or contract identity');
+    return fail('generation-drift', 'active generation metadata does not match handshake embedding or contract identity', { expected: { contract: THAI_RAG_CONTRACT_FINGERPRINT, embedding: handshake.embedding.profile, index: String(handshake.embeddingIndexGeneration) }, actual: handshake.generation });
   }
   if (!Number.isSafeInteger(handshake.embedding.dimension) || handshake.embedding.dimension <= 0) return fail('embedding-metadata-invalid', 'embedding dimension is invalid');
   if (handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion.trim().length === 0) return fail('embedding-metadata-invalid', 'embedding preprocessing version is invalid');
-  if (options.expectedEmbeddingProfile !== undefined && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported');
-  if (options.expectedEmbeddingModel !== undefined && handshake.embedding.model !== options.expectedEmbeddingModel) return fail('embedding-metadata-invalid', 'embedding model is unsupported');
-  if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported');
+  if (options.expectedEmbeddingProfile !== undefined && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported', { expected: options.expectedEmbeddingProfile, actual: handshake.embedding.profile });
+  if (options.expectedEmbeddingModel !== undefined && handshake.embedding.model !== options.expectedEmbeddingModel) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
+  if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
   if (!isEmbeddingModelMetadataValid(handshake.embedding.profile, handshake.embedding.model)) return fail('embedding-metadata-invalid', 'embedding model does not match embedding profile');
   return ok(handshake);
 }

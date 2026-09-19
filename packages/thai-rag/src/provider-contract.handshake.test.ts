@@ -51,6 +51,12 @@ describe('Thai-RAG provider handshake', () => {
     if (!result.ok) expect(result.error.code).toBe('CONFLICT');
   });
 
+  it('rejects legacy metadata without producer-attested adapter mapping', () => {
+    const result = validateThaiRagHandshake({ ...baseHandshake, contractVersion: '0.9' }, { allowLegacyAdapter: true });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details).toMatchObject({ reason: 'contract-version-mismatch', expected: '1.0', actual: '0.9' });
+  });
+
   it('accepts production bridge metadata with unknown index and omitted preprocessing', () => {
     const production = {
       ...baseHandshake,
@@ -69,7 +75,7 @@ describe('Thai-RAG provider handshake', () => {
       },
       legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
     };
-    expect(validateThaiRagHandshake(production, { embeddingIndexGeneration: 1, allowLegacyAdapter: true })).toEqual({ ok: true, value: production });
+    expect(validateThaiRagHandshake(production, { embeddingIndexGeneration: 1, allowLegacyAdapter: true, allowedDegradedCapabilities: ['vector_store', 'embedder', 'semantic_retrieval'] })).toEqual({ ok: true, value: production });
   });
 
   it('rejects production bridge when native capabilities are unavailable', () => {
@@ -78,7 +84,7 @@ describe('Thai-RAG provider handshake', () => {
       health: 'degraded',
       components: { ...baseHandshake.components, lexicalRetrievalAvailable: false },
       legacyAdapter: 'thai-rag-provider-1.0-production-bridge',
-    }, { allowLegacyAdapter: true });
+    }, { allowLegacyAdapter: true, allowedDegradedCapabilities: ['vector_store', 'embedder', 'semantic_retrieval'] });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.details?.reason).toBe('health-degraded');
   });
@@ -90,9 +96,19 @@ describe('Thai-RAG provider handshake', () => {
       { embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' } },
       { generation: { ...baseHandshake.generation, embedding: 'other-profile' } },
     ]) {
-      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedPreprocessingVersion: '1' });
+      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:def', expectedPreprocessingVersion: '1' });
       expect(result.ok).toBe(false);
     }
+  });
+
+  it('requires explicit degraded capability allowlist', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      health: 'degraded',
+      components: { ...baseHandshake.components, vectorStoreAvailable: false, embedderAvailable: false, semanticRetrievalAvailable: false },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details).toMatchObject({ reason: 'health-degraded', disallowed: ['vector_store', 'embedder', 'semantic_retrieval'] });
   });
 
   it('rejects unavailable health and workspace scope mismatch', () => {

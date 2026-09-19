@@ -48,6 +48,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly workspaceRootIds = new Map<string, string>();
   private readonly pendingReindexIds = new Set<string>();
   private started = false;
+  private lifecycleGeneration = 0;
+  private backgroundRefresh: Promise<Result<void>> | undefined;
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
     this.sessions = new McpSessionManager({
@@ -98,7 +100,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     for (const workspaceId of this.workspaceRoots.keys()) this.pendingReindexIds.add(workspaceId);
     const health = await this.refreshHealth(signal);
     if (!health.ok) return health;
-    void this.refreshWorkspaceRoots().catch(() => undefined);
+    const generation = this.lifecycleGeneration;
+    this.backgroundRefresh = this.refreshWorkspaceRoots(generation);
     return health;
   }
 
@@ -138,7 +141,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   public async stop(): Promise<Result<void>> {
     this.started = false;
+    const generation = ++this.lifecycleGeneration;
     await this.jobs.interruptRunning();
+    const backgroundRefresh = this.backgroundRefresh;
+    if (backgroundRefresh !== undefined) await backgroundRefresh.catch(() => undefined);
+    if (generation === this.lifecycleGeneration) this.backgroundRefresh = undefined;
     this.sessions.unpin(SERVER_NAME);
     await this.sessions.close().catch(() => undefined);
     return ok(undefined);
@@ -193,11 +200,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       : ok({ workspaceId, rootPath });
   }
 
-  private refreshWorkspaceRoots(): Promise<Result<void>> {
-    return this.enqueueWorker(() => this.refreshWorkspaceRootsNow());
+  private refreshWorkspaceRoots(generation = this.lifecycleGeneration): Promise<Result<void>> {
+    return this.enqueueWorker(() => this.refreshWorkspaceRootsNow(generation));
   }
 
-  private async refreshWorkspaceRootsNow(): Promise<Result<void>> {
+  private async refreshWorkspaceRootsNow(generation: number): Promise<Result<void>> {
     const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
     if (!providerRoot.ok) return providerRoot;
     let rawWorkspaces: readonly NativeThaiRagWorkspace[];
@@ -230,7 +237,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return previousRoot !== undefined && previousRoot !== path.resolve(workspace.realRootPath);
     });
     for (const workspace of relinked) this.pendingReindexIds.add(workspace.id);
-    if (this.started && this.launchConfig !== undefined) {
+    if (generation === this.lifecycleGeneration && this.started && this.launchConfig !== undefined) {
       const pending = new Set(this.pendingReindexIds);
       for (const workspace of workspaces.filter((entry) => pending.has(entry.id))) {
         const indexed = normalizeWorkerCallResult(
@@ -240,8 +247,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             workspace: workspace.id,
             force: true,
             background: false,
-          }),
-        );
+            }),
+          );
+        if (generation !== this.lifecycleGeneration || !this.started) return ok(undefined);
         if (!indexed.ok) {
           for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
           const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
@@ -255,6 +263,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         this.pendingReindexIds.delete(workspace.id);
       }
     }
+
+    if (generation !== this.lifecycleGeneration) return ok(undefined);
     const nextRoots = new Map<string, string>();
     const nextRootIds = new Map<string, string>();
     for (const workspace of workspaces) {

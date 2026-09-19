@@ -740,7 +740,18 @@ export class ToolRegistry {
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
-    const mandatoryMcp: import('@unified-mpc/extensions').MandatoryMcpBootstrapResult = { ready: true, servers: [] };
+    const extensions = this.services.extensions;
+    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime extension services are unavailable', true));
+    const mandatoryMcpResult = await extensions.bootstrapMandatoryMcpServers(signal);
+    if (!mandatoryMcpResult.ok) return mandatoryMcpResult;
+    const externalMandatoryMcp = mandatoryMcpResult.value.servers.filter((server) => !isNativeProviderServer(server.name));
+    const mandatoryMcp: import('@unified-mpc/extensions').MandatoryMcpBootstrapResult = {
+      ...mandatoryMcpResult.value,
+      ready: externalMandatoryMcp.every((server) => server.connected && server.pinned),
+    };
+    if (!mandatoryMcp.ready) {
+      return err(appError('CONFLICT', `Required external MCP server is unavailable: ${externalMandatoryMcp.map((server) => server.name).join(', ')}`, true));
+    }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
     const thaiRagHealth = await thaiRag.health(signal);
@@ -1406,6 +1417,11 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
     .filter((scope) => isAbsoluteActivityPath(scope.rootPath) && activityPathContains(scope.rootPath, candidate))
     .sort((left, right) => normalizedActivityPath(right.rootPath).length - normalizedActivityPath(left.rootPath).length);
   return matches[0] ?? null;
+}
+
+function isNativeProviderServer(name: string): boolean {
+  const key = name.trim().toLowerCase();
+  return key === 'memory' || key === 'thai-rag-mcp';
 }
 
 function nativeThaiRagReadyForHarness(health: {

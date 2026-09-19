@@ -63,9 +63,9 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       async bootstrapMandatoryMcpServers() {
         bootstrapEvents.push('mandatory_mcp');
         return ok({
-          ready: true,
+          ready: false,
           servers: [
-            { name: 'memory', required: true, connected: true, pinned: true, descriptorFingerprint: 'a'.repeat(64), catalogFingerprint: '1'.repeat(64), tools: ['search_nodes', 'create_entities', 'add_observations'], requiredTools: ['search_nodes', 'create_entities', 'add_observations'] },
+            { name: 'memory', required: true, connected: false, pinned: false, tools: [], requiredTools: ['search_nodes', 'create_entities', 'add_observations'], error: 'native provider handled by parent capability' },
           ],
         });
       },
@@ -105,7 +105,7 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
     });
     expect(first.isError).not.toBe(true);
-    expect(bootstrapEvents).toEqual(['policy_snapshot', 'skill_load:agents-skills/ask-matt']);
+    expect(bootstrapEvents).toEqual(['policy_snapshot', 'skill_load:agents-skills/ask-matt', 'mandatory_mcp']);
     expect(childCalls).toEqual([]);
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
     expect(nativeRagArguments[0]).toEqual({
@@ -247,7 +247,7 @@ describe('workspace engineering harness enforcement', () => {
       async bootstrapMandatoryMcpServers() {
         return ok({
           ready: false,
-          servers: [{ name: 'optional-child', required: true, connected: false, pinned: false, tools: [], requiredTools: [], error: 'offline' }],
+          servers: [],
         });
       },
     } as typeof services.extensions;
@@ -255,6 +255,22 @@ describe('workspace engineering harness enforcement', () => {
 
     await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
       structuredContent: { ready: true },
+    });
+  });
+
+  it('fails workspace bootstrap when required external MCP servers are unavailable', async () => {
+    const { services } = createHarnessServices();
+    services.extensions = {
+      ...services.extensions,
+      async bootstrapMandatoryMcpServers() {
+        return ok({ ready: false, servers: [{ name: 'external-required', required: true, connected: false, pinned: false, tools: [], requiredTools: [], error: 'offline' }] });
+      },
+    } as typeof services.extensions;
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('external-required') } },
     });
   });
 
@@ -325,6 +341,6 @@ describe('workspace engineering harness enforcement', () => {
     expect(writes).toEqual(['src/app.ts', 'src/app.ts']);
     expect(childCalls).toEqual([]);
     expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
-    expect(bootstrapEvents.filter((entry) => entry === 'mandatory_mcp')).toHaveLength(0);
+    expect(bootstrapEvents.filter((entry) => entry === 'mandatory_mcp')).toHaveLength(2);
   });
 });

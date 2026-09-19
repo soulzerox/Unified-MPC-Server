@@ -92,7 +92,7 @@ describe('core tool readiness', () => {
     await executeParsed(registry, 'prepare_code_change', { workspaceId, filePath: 'src/smoke.ts', proposedSymbol: 'smoke' });
     await executeParsed(registry, 'working_memory_search', { workspaceId, query: 'current smoke task' });
     await executeParsed(registry, 'working_memory_record', { workspaceId, name: 'goal:smoke', observations: ['smoke progress'] });
-    expect(calls).not.toContain('extensions.bootstrapMandatoryMcpServers');
+    expect(calls).toContain('extensions.bootstrapMandatoryMcpServers');
     expect(calls.filter((entry) => entry.startsWith('thaiRag.call:')).length).toBeGreaterThanOrEqual(3);
 
     const context = record(await executeParsed(registry, 'workspace_context', { workspaceId, query: 'smoke', pageSize: 1 }));

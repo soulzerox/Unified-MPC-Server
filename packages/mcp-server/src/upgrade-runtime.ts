@@ -1460,7 +1460,7 @@ export class UpgradeRuntimeService {
         worktree: { isNew: true },
       });
     } catch (error: unknown) {
-      return ok(failedDependencyPolicy(installMode, `Dependency policy resolution failed: ${errorMessage(error)}`));
+      return ok(failedDependencyPolicy(installMode, `Dependency policy resolution failed: ${error instanceof Error ? error.message : String(error)}`));
     }
 
     const policy = dependencyPolicyFromPlan(prepared);

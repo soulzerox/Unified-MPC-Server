@@ -6,14 +6,13 @@ import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '
 import {
   THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_CONTRACT_FINGERPRINT,
-  THAI_RAG_REQUIRED_CAPABILITIES,
 } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 
 const roots: string[] = [];
 const workspaceId = '11111111-1111-4111-8111-111111111111';
 const recoveredWorkspaceId = '22222222-2222-4222-8222-222222222222';
-const tools = ['remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius', 'forget', 'code_index', 'index_status', 'code_search', 'code_context', 'health', 'version'];
+const productionToolNames = ['remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius', 'code_index', 'index_status', 'health', 'version'] as const;
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'native-thai-rag-driver-'));
@@ -26,14 +25,44 @@ afterEach(async () => {
 });
 
 describe('NativeThaiRagProviderDriver', () => {
-  it('keeps native tool fixture aligned with provider conformance capabilities', () => {
-    expect(new Set(tools)).toEqual(new Set(THAI_RAG_REQUIRED_CAPABILITIES));
+  it('matches production-shaped operation and scope contract', () => {
     expect(THAI_RAG_CONFORMANCE_FIXTURE.workspaceScope).toEqual({ field: 'workspace_id', canonical: true });
-    expect(Object.keys(THAI_RAG_CONFORMANCE_FIXTURE.operations)).toEqual([...THAI_RAG_REQUIRED_CAPABILITIES]);
-    for (const operation of THAI_RAG_REQUIRED_CAPABILITIES) {
-      expect(THAI_RAG_CONFORMANCE_FIXTURE.operations[operation].scope).toBe(operation === 'health' || operation === 'version' ? 'provider' : 'workspace_id');
-      expect(THAI_RAG_CONFORMANCE_FIXTURE.operations[operation].errors.length).toBeGreaterThan(0);
+    expect(Object.keys(THAI_RAG_CONFORMANCE_FIXTURE.operations)).toEqual([...productionToolNames]);
+    for (const operation of productionToolNames) {
+      const contract = THAI_RAG_CONFORMANCE_FIXTURE.operations[operation];
+      expect(contract.errors.length).toBeGreaterThan(0);
+      if (contract.scope === 'workspace_id') expect('required' in contract && contract.required).toContain('workspace_id');
+      else expect('required' in contract).toBe(false);
     }
+    expect(THAI_RAG_CONFORMANCE_FIXTURE.operations.health.scope).toBe('provider');
+    expect(THAI_RAG_CONFORMANCE_FIXTURE.operations.version.scope).toBe('provider');
+  });
+
+  it('tests semantic scope and structured error behavior against production-shaped responses', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index') return success('indexed');
+          if (tool === 'recall' && args.workspace_id === workspaceId) return { structuredContent: { data: { status: 'ok', workspace_id: workspaceId, data: { items: [] } } } };
+          return { structuredContent: { data: { status: 'unavailable', workspace_id: args.workspace_id, errors: [{ code: 'workspace_scope_required', message: 'canonical workspace_id is required', details: {} }] } } };
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('recall', { workspace_id: workspaceId, query: 'scope' })).resolves.toMatchObject({ ok: true, value: { structuredContent: { data: { status: 'ok', workspace_id: workspaceId } } } });
+    expect(calls.at(-1)?.args.workspace_id).toBe(workspaceId);
+    await expect(driver.call('recall', { workspace_id: 'other-workspace', query: 'scope' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT', details: { reason: 'workspace_scope_required' } },
+    });
+    await driver.stop();
   });
 
   it('launches without the obsolete remember_turn dependency', async () => {
@@ -825,10 +854,10 @@ function clientFactory(options: {
       options.onConnect?.(config);
       return {
         async listTools(): Promise<Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>> {
-          return tools.map((name) => ({
+          return productionToolNames.map((name) => ({
             name,
             description: name,
-            inputSchema: THAI_RAG_REQUIRED_CAPABILITIES.includes(name as typeof THAI_RAG_REQUIRED_CAPABILITIES[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
+            inputSchema: productionToolNames.includes(name as typeof productionToolNames[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
               ? { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }
              : { type: 'object' },
           }));
@@ -860,7 +889,7 @@ function defaultHandshake(): Record<string, unknown> {
     compatibility_range: { min: '1.0', max: '1.x' },
     contract_fingerprint: THAI_RAG_CONTRACT_FINGERPRINT,
     index_job_contract_version: '1.0',
-    capabilities: [...THAI_RAG_REQUIRED_CAPABILITIES],
+    capabilities: [...productionToolNames],
     workspace_scope_model: 'explicit_workspace_id',
     state: 'ready',
     workspace_ready: true,

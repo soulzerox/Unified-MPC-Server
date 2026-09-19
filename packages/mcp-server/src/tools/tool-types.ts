@@ -68,6 +68,9 @@ export interface ThaiRagProviderPort {
     readonly providerId: 'thai-rag';
     readonly state: string;
     readonly contractVersion?: string;
+    readonly capabilities?: readonly string[];
+    readonly workspaceScopeModel?: string;
+    readonly embedding?: { readonly profile: string; readonly model: string; readonly dimension: number; readonly preprocessingVersion?: string };
     readonly compatibilityRange?: { readonly min: string; readonly max: string };
     readonly contractFingerprint?: string;
     readonly generation?: { readonly contract: string; readonly embedding: string; readonly index: string; readonly storage: string };

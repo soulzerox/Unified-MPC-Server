@@ -306,6 +306,24 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagArguments[0]).toEqual({ tool: 'index_status', args: { job_id: 'idx_umcp_test', workspace_id: 'workspace-1' } });
   });
 
+  it('maps working-memory categories to canonical Thai-RAG event types', async () => {
+    const { services, nativeRagCalls, nativeRagArguments } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    for (const entityType of ['decision', 'requirement', 'constraint', 'preference', 'milestone', 'handoff', 'root_cause_fix', 'explicit_remember']) {
+      expect((await registry.invoke('working_memory_record', { workspaceId: 'workspace-1', name: entityType, entityType, observations: ['value'] })).isError).not.toBe(true);
+    }
+    expect((await registry.invoke('working_memory_record', { workspaceId: 'workspace-1', name: 'default', observations: ['value'] })).isError).not.toBe(true);
+    const rejected = await registry.invoke('working_memory_record', { workspaceId: 'workspace-1', name: 'invalid', entityType: 'hypothesis', observations: ['value'] });
+
+    expect(rejected).toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT', details: { reason: 'unsupported-event-type', entityType: 'hypothesis' } } } });
+    expect(nativeRagCalls).toHaveLength(9);
+    expect(nativeRagArguments.map(({ args }) => args.event_type)).toEqual([
+      'decision', 'requirement', 'constraint', 'preference', 'milestone', 'handoff', 'root_cause_fix', 'explicit_remember', 'explicit_remember',
+    ]);
+  });
+
   it('exposes curated native working-memory tools after bootstrap', async () => {
     const { services, nativeRagCalls } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, {

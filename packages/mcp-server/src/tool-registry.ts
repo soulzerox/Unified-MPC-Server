@@ -74,6 +74,9 @@ import { skillTools } from './tools/skill-tools.js';
 import { workspaceTools } from './tools/workspace-tools.js';
 import type { McpApplicationServices, McpToolContext, McpToolDefinition } from './tools/tool-types.js';
 
+const THAI_RAG_EVENT_TYPES = ['decision', 'requirement', 'constraint', 'preference', 'milestone', 'handoff', 'root_cause_fix', 'explicit_remember'] as const;
+const THAI_RAG_EVENT_TYPE_SET = new Set<string>(THAI_RAG_EVENT_TYPES);
+
 export type { McpApplicationServices } from './tools/tool-types.js';
 export type { ActiveProjectScope, WorkspaceScope } from './destructive-scope.js';
 export type AuthorizationMode = InvocationAuthorizationMode;
@@ -846,7 +849,7 @@ export class ToolRegistry {
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'workspace_memory_record', {
       name,
-      category: entityType,
+      entityType,
       observations,
     }, signal, budget);
   }
@@ -898,12 +901,20 @@ export class ToolRegistry {
       const observations = Array.isArray(args.observations)
         ? args.observations.filter((value): value is string => typeof value === 'string')
         : [];
-      const category = typeof args.category === 'string' && args.category.trim().length > 0 ? args.category.trim() : 'explicit_remember';
+      const entityType = typeof args.entityType === 'string' && args.entityType.trim().length > 0
+        ? args.entityType.trim()
+        : typeof args.category === 'string' && args.category.trim().length > 0
+          ? args.category.trim()
+          : 'work-log';
+      const eventType = entityType === 'work-log' ? 'explicit_remember' : entityType;
+      if (!THAI_RAG_EVENT_TYPE_SET.has(eventType)) {
+        return err(appError('INVALID_INPUT', `Unsupported workspace memory event type: ${entityType}`, false, { reason: 'unsupported-event-type', entityType, supportedEventTypes: THAI_RAG_EVENT_TYPES.join(',') }));
+      }
       providerTool = 'record_event';
       providerArgs = {
         workspace_id: workspaceId,
-        event_type: category,
-        content: `[${category}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
+        event_type: eventType,
+        content: `[${eventType}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
       };
     } else if (tool === 'pre_edit_context') {
       providerArgs = { ...providerArgs };

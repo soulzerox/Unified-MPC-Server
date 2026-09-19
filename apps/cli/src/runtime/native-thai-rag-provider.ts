@@ -456,6 +456,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const activeJobs = await this.jobs.active(this.ownerId ?? '');
     const health: ThaiRagProviderDriverHealth = {
       ...handshake.value.components,
+      capabilities: handshake.value.capabilities,
+      workspaceScopeModel: handshake.value.workspaceScopeModel,
+      embedding: handshake.value.embedding,
       contractVersion: handshake.value.contractVersion,
       ...(handshake.value.compatibilityRange === undefined ? {} : { compatibilityRange: handshake.value.compatibilityRange }),
       contractFingerprint: handshake.value.contractFingerprint,
@@ -697,10 +700,39 @@ function embeddingCompatibility(contractVersion: string): {
 
 function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {
   if (!result.ok) return result;
+  const structuredError = structuredProviderError(result.value);
+  if (structuredError !== undefined) {
+    return err(appError(
+      mapProviderErrorCode(structuredError.code),
+      `Native Thai-RAG ${tool} failed: ${structuredError.message}`,
+      true,
+      { reason: structuredError.code, providerStatus: structuredError.status },
+    ));
+  }
   const text = toolResultText(result.value)?.trim();
   return text !== undefined && /^(?:❌\s*)?Error\b/i.test(text)
     ? err(appError('CONFLICT', `Native Thai-RAG ${tool} failed: ${text}`, true))
     : result;
+}
+
+function structuredProviderError(value: unknown): { readonly code: string; readonly message: string; readonly status: string } | undefined {
+  if (!isRecord(value) || !isRecord(value.structuredContent) || !isRecord(value.structuredContent.data)) return undefined;
+  const data = value.structuredContent.data;
+  if (!Array.isArray(data.errors) || data.errors.length === 0 || !isRecord(data.errors[0])) return undefined;
+  const error = data.errors[0];
+  if (typeof error.code !== 'string' || typeof error.message !== 'string') return undefined;
+  return {
+    code: error.code,
+    message: error.message,
+    status: typeof data.status === 'string' ? data.status : 'unavailable',
+  };
+}
+
+function mapProviderErrorCode(code: string): 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NOT_FOUND' | 'CONFLICT' {
+  if (code === 'workspace_scope_required' || code === 'invalid_input') return 'INVALID_INPUT';
+  if (code === 'scope_denied' || code === 'permission_denied') return 'PERMISSION_DENIED';
+  if (code === 'workspace_not_found' || code === 'file_not_found') return 'FILE_NOT_FOUND';
+  return 'CONFLICT';
 }
 
 function toolResultText(value: unknown): string | undefined {

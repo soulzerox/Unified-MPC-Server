@@ -11,6 +11,10 @@ export const THAI_RAG_LEGACY_ADAPTERS = {
   [THAI_RAG_PRODUCTION_BRIDGE]: { sourceContractVersion: '0.9', targetContractVersion: THAI_RAG_CONTRACT_VERSION },
 } as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE_VERSION = '1.0';
+export const THAI_RAG_CONFORMANCE_OPERATIONS = [
+  'remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search',
+  'code_context', 'code_blast_radius', 'code_index', 'index_status', 'health', 'version',
+] as const;
 export const THAI_RAG_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
 export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
 export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
@@ -38,8 +42,7 @@ export const THAI_RAG_CONFORMANCE_FIXTURE = {
     version: { scope: 'provider', errors: ['CONFLICT'] },
   },
 } as const;
-export const THAI_RAG_CONFORMANCE_OPERATIONS = Object.keys(THAI_RAG_CONFORMANCE_FIXTURE.operations) as Array<keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations>;
-export const THAI_RAG_REQUIRED_CAPABILITIES = THAI_RAG_CONFORMANCE_OPERATIONS;
+export const THAI_RAG_REQUIRED_CAPABILITIES = [...THAI_RAG_CONFORMANCE_OPERATIONS];
 
 export interface ThaiRagProviderHandshake {
   readonly providerId: typeof THAI_RAG_PROVIDER_ID;
@@ -121,6 +124,9 @@ export interface ThaiRagProviderHealth {
   readonly providerId: typeof THAI_RAG_PROVIDER_ID;
   readonly providerVersion: string;
   readonly contractVersion?: string;
+  readonly capabilities?: readonly string[];
+  readonly workspaceScopeModel?: string;
+  readonly embedding?: ThaiRagProviderHandshake['embedding'];
   readonly state: ThaiRagProviderLifecycleState;
   readonly compatibilityRange?: ThaiRagProviderHandshake['compatibilityRange'];
   readonly contractFingerprint?: string;

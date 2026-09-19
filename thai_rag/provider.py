@@ -1,12 +1,41 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
 CONTRACT_VERSION = "1.0"
+PROVIDER_SCHEMA_VERSION = 1
+PROVIDER_ID = "thai-rag"
 PROVIDER_VERSION = "0.1.0"
+COMPATIBILITY_RANGE = {"min": CONTRACT_VERSION, "max": "1.x"}
+INDEX_JOB_CONTRACT_VERSION = "1.0"
+EMBEDDING_INDEX_GENERATION = 1
+_CONTRACT_SHAPE = {
+    "operations": [
+        "remember",
+        "recall",
+        "record_event",
+        "forget",
+        "pre_edit_context",
+        "code_search",
+        "code_context",
+        "code_blast_radius",
+        "code_index",
+        "index_status",
+        "health",
+        "version",
+    ],
+    "statuses": ["ok", "review_required", "degraded", "unavailable"],
+    "scope": "explicit_workspace_id",
+    "index_job_contract_version": INDEX_JOB_CONTRACT_VERSION,
+}
+CONTRACT_FINGERPRINT = hashlib.sha256(
+    json.dumps(_CONTRACT_SHAPE, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
 
 
 class ProviderStatus(str, Enum):
@@ -75,59 +104,44 @@ class ProviderResult:
 
 
 class ThaiRagProvider:
-    capabilities = frozenset(
-        {
-            "remember",
-            "recall",
-            "record_event",
-            "forget",
-            "pre_edit_context",
-            "code_search",
-            "code_context",
-            "code_blast_radius",
-            "code_index",
-            "index_status",
-            "health",
-            "version",
-        }
-    )
+    capabilities = frozenset(_CONTRACT_SHAPE["operations"])
+    _CANONICAL_SCOPE_OPERATIONS = frozenset({"remember", "recall", "record_event", "forget"})
 
     def __init__(self, core: Any, provider_version: str = PROVIDER_VERSION):
         self.core = core
         self.provider_version = provider_version
 
-    def version(self) -> ProviderResult:
+    def version(self, workspace_id: Optional[str] = None) -> ProviderResult:
         return ProviderResult(
             status=ProviderStatus.OK,
-            data={
-                "provider_version": self.provider_version,
-                "contract_version": CONTRACT_VERSION,
-                "capabilities": sorted(self.capabilities),
-                "workspace_scope_model": "explicit_workspace_id",
-                "result_model": "structured_provider_result",
-                "error_model": "machine_readable_error",
-            },
-            metadata=self._metadata(),
+            data=self._contract_data(workspace_id),
+            workspace_id=workspace_id,
+            metadata=self._metadata(workspace_id),
         )
 
-    def health(self) -> ProviderResult:
-        embedder = getattr(self.core, "embedder", None)
-        embedding_ready = True
-        if embedder is not None and hasattr(embedder, "is_alive"):
-            embedding_ready = bool(embedder.is_alive())
-        status = ProviderStatus.OK if embedding_ready else ProviderStatus.DEGRADED
-        warnings = [] if embedding_ready else ["embedding backend unavailable; lexical retrieval may be degraded"]
+    def health(self, workspace_id: Optional[str] = None) -> ProviderResult:
+        readiness = self._readiness(workspace_id)
+        embedding_ready = readiness["embedding_ready"]
+        ready = readiness["storage_ready"] and readiness["fts_ready"]
+        status = ProviderStatus.OK if ready and embedding_ready else ProviderStatus.DEGRADED
+        warnings = []
+        if not readiness["storage_ready"]:
+            warnings.append("storage unavailable")
+        if not readiness["fts_ready"]:
+            warnings.append("FTS retrieval unavailable")
+        if not embedding_ready:
+            warnings.append("embedding backend unavailable; lexical retrieval may be degraded")
         return ProviderResult(
             status=status,
             data={
-                "ready": True,
+                **self._contract_data(workspace_id),
+                "ready": ready and embedding_ready,
                 "embedding_ready": embedding_ready,
-                "contract_version": CONTRACT_VERSION,
-                "capabilities": sorted(self.capabilities),
-                "workspace_scope_model": "explicit_workspace_id",
+                "readiness": readiness,
             },
+            workspace_id=workspace_id,
             warnings=warnings,
-            metadata=self._metadata(),
+            metadata=self._metadata(workspace_id),
         )
 
     def remember(self, content: str, workspace_id: Optional[str] = None, category: str = "general") -> ProviderResult:
@@ -172,7 +186,16 @@ class ThaiRagProvider:
                 "event_type and content cannot be empty",
                 operation="record_event",
             )
-        allowed = {"decision", "requirement", "constraint", "preference", "milestone", "handoff", "root_cause_fix", "explicit_remember"}
+        allowed = {
+            "decision",
+            "requirement",
+            "constraint",
+            "preference",
+            "milestone",
+            "handoff",
+            "root_cause_fix",
+            "explicit_remember",
+        }
         if event_type not in allowed:
             return self._error(
                 ProviderStatus.UNAVAILABLE,
@@ -204,41 +227,60 @@ class ThaiRagProvider:
             return self._scope_error("pre_edit_context")
         try:
             method = self.core.pre_edit_context
-            parameters = inspect.signature(method).parameters
-            if "workspace_id" not in parameters:
-                raise ScopeContractError("core method pre_edit_context does not expose canonical workspace scope")
-            raw = method(
-                file_path=file_path,
-                workspace_id=workspace_id,
-                proposed_symbol=proposed_symbol,
-            )
+            scope_name = self._scope_name(method, "pre_edit_context")
+            kwargs: dict[str, Any] = {
+                "file_path": file_path,
+                scope_name: workspace_id,
+                "proposed_symbol": proposed_symbol,
+            }
+            raw = method(**kwargs)
+            if not isinstance(raw, dict):
+                raise TypeError("core pre_edit_context must return a mapping")
             constraints = raw.get("constraints") or []
-            has_code_context = bool(raw.get("code_context"))
-            has_blast_radius = bool(raw.get("blast_radius"))
-            evidence_available = has_code_context or has_blast_radius
+            evidence = dict(raw.get("evidence") or {})
+            evidence.setdefault("code_context", "available" if raw.get("code_context") else "missing")
+            evidence.setdefault("cpg", "available" if raw.get("blast_radius") else "missing")
+            evidence.setdefault("code_index", "unknown")
+            evidence.setdefault("storage", "unknown")
             evidence_fresh = raw.get("evidence_fresh", True)
+            evidence_state = "evidence_available"
+            status = ProviderStatus.OK
+            can_proceed = True
             if constraints:
                 status = ProviderStatus.REVIEW_REQUIRED
                 evidence_state = "constraints_found"
+                can_proceed = False
+            elif evidence.get("storage") in {"unavailable", "missing"}:
+                status = ProviderStatus.UNAVAILABLE
+                evidence_state = "storage_unavailable"
+                can_proceed = False
+            elif not raw.get("code_context") and not raw.get("blast_radius") and not raw.get("evidence"):
+                status = ProviderStatus.DEGRADED
+                evidence_state = "evidence_unavailable"
+                can_proceed = False
+            elif evidence.get("code_index") in {"stale", "missing", "unavailable"}:
+                status = ProviderStatus.DEGRADED
+                evidence_state = f"code_index_{evidence['code_index']}"
+                can_proceed = False
+            elif evidence.get("cpg") in {"stale", "missing", "unavailable"}:
+                status = ProviderStatus.DEGRADED
+                evidence_state = f"cpg_{evidence['cpg']}"
                 can_proceed = False
             elif not evidence_fresh:
                 status = ProviderStatus.DEGRADED
                 evidence_state = "evidence_stale"
                 can_proceed = False
-            elif not evidence_available:
+            elif not raw.get("code_context") and not raw.get("blast_radius"):
                 status = ProviderStatus.DEGRADED
                 evidence_state = "evidence_unavailable"
                 can_proceed = False
-            else:
-                status = ProviderStatus.OK
-                evidence_state = "evidence_available"
-                can_proceed = True
             data = dict(raw)
             data.update(
                 {
                     "status": status.value,
+                    "evidence": evidence,
                     "evidence_state": evidence_state,
-                    "evidence_fresh": bool(evidence_fresh and evidence_available),
+                    "evidence_fresh": bool(evidence_fresh and can_proceed),
                     "can_proceed": can_proceed,
                 }
             )
@@ -246,7 +288,7 @@ class ThaiRagProvider:
                 status=status,
                 data=data,
                 workspace_id=workspace_id,
-                metadata=self._metadata(),
+                metadata=self._metadata(workspace_id),
             )
         except Exception as exc:
             return self._failure("pre_edit_context", workspace_id, exc)
@@ -323,49 +365,71 @@ class ThaiRagProvider:
         summary: Optional[str],
         tags: Optional[list[str]],
     ) -> Any:
+        if not self._supports_canonical_scope():
+            raise ScopeContractError("core does not prove canonical workspace ownership")
         record_event = getattr(self.core, "record_event", None)
         if record_event is None:
-            raise RuntimeError("core does not provide selective event storage")
+            raise ScopeContractError("core does not provide canonical selective event storage")
+        scope_name = self._scope_name(record_event, "record_event")
         return record_event(
             event_type=event_type,
             content=content,
-            workspace_id=workspace_id,
+            **{scope_name: workspace_id},
             summary=summary,
             tags=tags or [],
         )
 
     def _call_scoped(self, method_name: str, value: Any, workspace_id: str, **kwargs: Any) -> Any:
         method = getattr(self.core, method_name)
-        parameters = inspect.signature(method).parameters
-        scope_name = "workspace_id" if "workspace_id" in parameters else "workspace" if "workspace" in parameters else None
-        if scope_name is None:
-            raise ScopeContractError(f"core method {method_name} does not expose canonical workspace scope")
+        scope_name = self._scope_name(method, method_name)
+        named = {scope_name: workspace_id, **kwargs}
+        if method_name == "code_search":
+            return method(value, **named)
+        if method_name == "code_context":
+            return method(value, **named)
+        if method_name == "code_blast_radius":
+            return method(value, **named)
+        if method_name == "code_index":
+            return method(value, **named)
         if method_name == "index_status":
-            return method(value, **{scope_name: workspace_id})
-        if method_name == "forget":
-            return method(value, **{scope_name: workspace_id})
-        return method(value, **{scope_name: workspace_id}, **kwargs)
+            return method(value, **named)
+        return method(value, **named)
 
     def _scoped(self, operation: str, workspace_id: Optional[str], action: Callable[[], Any]) -> ProviderResult:
         if not workspace_id or not workspace_id.strip():
             return self._scope_error(operation)
+        if operation in self._CANONICAL_SCOPE_OPERATIONS and not self._supports_canonical_scope():
+            return self._failure(operation, workspace_id, ScopeContractError("core does not prove canonical workspace ownership"))
         try:
             data = action()
             if isinstance(data, str) and data.startswith("Error"):
+                code = self._error_code(data)
                 return self._error(
-                    ProviderStatus.UNAVAILABLE,
-                    ErrorCode.INTERNAL_FAILURE,
+                    self._error_status(data),
+                    code,
                     data,
                     operation=operation,
+                    workspace_id=workspace_id,
                 )
             return ProviderResult(
                 status=ProviderStatus.OK,
                 data=data,
                 workspace_id=workspace_id,
-                metadata=self._metadata(),
+                metadata=self._metadata(workspace_id),
             )
         except Exception as exc:
             return self._failure(operation, workspace_id, exc)
+
+    def _scope_name(self, method: Callable[..., Any], operation: str) -> str:
+        parameters = inspect.signature(method).parameters
+        if "workspace_id" in parameters:
+            return "workspace_id"
+        if "workspace" in parameters:
+            return "workspace"
+        raise ScopeContractError(f"core method {operation} does not expose workspace scope")
+
+    def _supports_canonical_scope(self) -> bool:
+        return getattr(self.core, "supports_canonical_workspace_scope", False) is True
 
     def _scope_error(self, operation: str) -> ProviderResult:
         return self._error(
@@ -387,19 +451,156 @@ class ThaiRagProvider:
                     details={"operation": operation, "exception": type(exc).__name__},
                 )
             ],
-            metadata=self._metadata(),
+            metadata=self._metadata(workspace_id),
         )
+
+    def _error_status(self, message: str) -> ProviderStatus:
+        return ProviderStatus.DEGRADED if self._error_code(message) in {
+            ErrorCode.EMBEDDING_UNAVAILABLE,
+            ErrorCode.VECTOR_RETRIEVAL_DEGRADED,
+        } else ProviderStatus.UNAVAILABLE
+
+    def _error_code(self, message: str) -> ErrorCode:
+        lower = message.lower()
+        if "embedding" in lower or "ollama" in lower:
+            return ErrorCode.EMBEDDING_UNAVAILABLE
+        if "storage" in lower or "sqlite" in lower or "chroma" in lower:
+            return ErrorCode.STORAGE_UNAVAILABLE
+        if "workspace" in lower and "not" in lower:
+            return ErrorCode.WORKSPACE_NOT_FOUND
+        return ErrorCode.INTERNAL_FAILURE
 
     def _error(self, status: ProviderStatus, code: ErrorCode, message: str, **details: Any) -> ProviderResult:
         return ProviderResult(
             status=status,
             errors=[ProviderError(code=code, message=message, details=details)],
-            metadata=self._metadata(),
+            metadata=self._metadata(details.get("workspace_id")),
         )
 
-    def _metadata(self) -> dict[str, Any]:
+    def _contract_data(self, workspace_id: Optional[str]) -> dict[str, Any]:
+        readiness = self._readiness(workspace_id)
+        return {
+            "schema_version": PROVIDER_SCHEMA_VERSION,
+            "schemaVersion": PROVIDER_SCHEMA_VERSION,
+            "provider_id": PROVIDER_ID,
+            "providerId": PROVIDER_ID,
+            "provider_version": self.provider_version,
+            "providerVersion": self.provider_version,
+            "contract_version": CONTRACT_VERSION,
+            "compatibility_range": dict(COMPATIBILITY_RANGE),
+            "lifecycle_state": "ready" if readiness["storage_ready"] else "degraded",
+            "state": "ready" if readiness["storage_ready"] else "degraded",
+            "embedding_index_generation": EMBEDDING_INDEX_GENERATION,
+            "embeddingIndexGeneration": EMBEDDING_INDEX_GENERATION,
+            "started_at": None,
+            "ready_at": None,
+            "owner_id": None,
+            "contract_fingerprint": CONTRACT_FINGERPRINT,
+            "index_job_contract_version": INDEX_JOB_CONTRACT_VERSION,
+            "capabilities": sorted(self.capabilities),
+            "workspace_scope_model": "explicit_workspace_id",
+            "result_model": "structured_provider_result",
+            "error_model": "machine_readable_error",
+            "generation": self._generation(),
+            "embedding": self._embedding_metadata(),
+            "readiness": readiness,
+            "components": {
+                "worker_reachable": True,
+                "sqlite_available": readiness["storage_ready"],
+                "fts_available": readiness["fts_ready"],
+                "vector_store_available": readiness["vector_store_ready"],
+                "embedder_available": readiness["embedding_ready"],
+                "lexical_retrieval_available": readiness["fts_ready"],
+                "semantic_retrieval_available": readiness["vector_store_ready"] and readiness["embedding_ready"],
+                "active_jobs": [],
+            },
+            "degradation": [
+                key for key, value in (
+                    ("storage-unavailable", readiness["storage_ready"]),
+                    ("fts-unavailable", readiness["fts_ready"]),
+                    ("embedder-unavailable", readiness["embedding_ready"]),
+                ) if not value
+            ],
+            "workspaces": [] if workspace_id is None else [{
+                "workspaceId": workspace_id,
+                "indexGeneration": EMBEDDING_INDEX_GENERATION,
+                "ready": readiness["workspace_ready"],
+                "reason": None if readiness["workspace_ready"] else "workspace scope unavailable",
+            }],
+        }
+
+    def _metadata(self, workspace_id: Optional[str]) -> dict[str, Any]:
         return {
             "provider_name": "thai-rag",
             "provider_version": self.provider_version,
             "contract_version": CONTRACT_VERSION,
+            "contract_fingerprint": CONTRACT_FINGERPRINT,
+            "compatibility_range": dict(COMPATIBILITY_RANGE),
+            "index_job_contract_version": INDEX_JOB_CONTRACT_VERSION,
+            "generation": self._generation(),
+            "embedding": self._embedding_metadata(),
+            "readiness": self._readiness(workspace_id),
         }
+
+    def _embedding_metadata(self) -> dict[str, Any]:
+        embedder = getattr(self.core, "embedder", None)
+        model = getattr(embedder, "model", "unknown")
+        dimension = getattr(embedder, "dimension", 768)
+        return {
+            "profile": model,
+            "model": model,
+            "dimension": dimension,
+            "ready": bool(embedder is None or not hasattr(embedder, "is_alive") or embedder.is_alive()),
+        }
+
+    def _generation(self) -> dict[str, str]:
+        storage = getattr(self.core, "storage", None)
+        storage_generation = getattr(storage, "generation", None) or "sqlite"
+        index_generation = getattr(storage, "index_generation", None) or "unknown"
+        return {
+            "contract": CONTRACT_FINGERPRINT,
+            "embedding": str(self._embedding_metadata()["profile"]),
+            "index": str(index_generation),
+            "storage": str(storage_generation),
+        }
+
+    def _readiness(self, workspace_id: Optional[str]) -> dict[str, bool]:
+        storage = getattr(self.core, "storage", None)
+        storage_ready = False
+        fts_ready = False
+        vector_ready = False
+        if storage is not None:
+            connection = getattr(storage, "sqlite_conn", None)
+            try:
+                if connection is not None:
+                    connection.execute("SELECT 1").fetchone()
+                    storage_ready = True
+                    connection.execute("SELECT 1 FROM fts_conversation LIMIT 1").fetchone()
+                    fts_ready = True
+            except Exception:
+                pass
+            vector_ready = getattr(storage, "memory_collection", None) is not None
+        embedder = getattr(self.core, "embedder", None)
+        try:
+            embedding_ready = bool(embedder is None or not hasattr(embedder, "is_alive") or embedder.is_alive())
+        except Exception:
+            embedding_ready = False
+        workspace_ready = bool(workspace_id and (self._supports_canonical_scope() or self._has_scoped_code_api()))
+        return {
+            "storage_ready": storage_ready,
+            "fts_ready": fts_ready,
+            "vector_store_ready": vector_ready,
+            "embedding_ready": embedding_ready,
+            "workspace_ready": workspace_ready,
+        }
+
+    def _has_scoped_code_api(self) -> bool:
+        for name in ("code_index", "code_search", "code_context", "code_blast_radius"):
+            method = getattr(self.core, name, None)
+            if method is None:
+                return False
+            try:
+                self._scope_name(method, name)
+            except ScopeContractError:
+                return False
+        return True

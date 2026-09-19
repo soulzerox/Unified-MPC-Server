@@ -11,6 +11,7 @@ from thai_rag.provider import (
 @dataclass
 class RecordingCore:
     pre_edit_result: dict
+    supports_canonical_workspace_scope = True
 
     def remember(self, content, workspace_id, category="general"):
         return f"remembered:{content}:{workspace_id}:{category}"
@@ -79,7 +80,7 @@ def test_provider_converts_legacy_error_string_to_structured_error():
     result = ThaiRagProvider(core=Core()).code_search(query="auth", workspace_id="ws-123")
 
     assert result.status is ProviderStatus.UNAVAILABLE
-    assert result.errors[0].code is ErrorCode.INTERNAL_FAILURE
+    assert result.errors[0].code is ErrorCode.STORAGE_UNAVAILABLE
 
 
 def test_provider_forwards_explicit_workspace_id_without_transport():
@@ -198,3 +199,198 @@ def test_provider_converts_core_failures_to_machine_readable_errors():
     assert result.status is ProviderStatus.UNAVAILABLE
     assert result.errors[0].code is ErrorCode.INTERNAL_FAILURE
     assert result.errors[0].details["exception"] == "RuntimeError"
+
+
+def test_provider_adapts_legacy_workspace_core_signature_without_type_error():
+    class LegacyScopedCore:
+        def code_search(self, query, top_k=5, path_filter=None, workspace=None):
+            return {"query": query, "workspace": workspace, "top_k": top_k, "path_filter": path_filter}
+
+    result = ThaiRagProvider(core=LegacyScopedCore()).code_search(
+        query="auth", workspace_id="ws-123", top_k=3
+    )
+
+    assert result.status is ProviderStatus.OK
+    assert result.data["workspace"] == "ws-123"
+
+
+def test_provider_refuses_real_core_event_write_without_canonical_ownership(tmp_path):
+    from thai_rag.server import LocalContextServer
+    from tests.fakes import DeterministicEmbeddingAdapter
+
+    server = LocalContextServer(
+        sqlite_path=tmp_path / "context.db",
+        chroma_path=str(tmp_path / "chroma"),
+    )
+    server.embedder = DeterministicEmbeddingAdapter()
+    try:
+        result = server.provider().record_event(
+            event_type="decision",
+            content="Use SQLite",
+            workspace_id="ws-123",
+        )
+
+        assert result.status is ProviderStatus.UNAVAILABLE
+        assert result.errors[0].code is ErrorCode.SCOPE_DENIED
+        assert server.storage.sqlite_conn.execute("SELECT COUNT(*) FROM conversation_turns").fetchone()[0] == 0
+    finally:
+        server.close()
+
+
+def test_provider_real_core_pre_edit_adapts_workspace_argument(tmp_path):
+    from thai_rag.server import LocalContextServer
+    from tests.fakes import DeterministicEmbeddingAdapter
+
+    server = LocalContextServer(
+        sqlite_path=tmp_path / "context.db",
+        chroma_path=str(tmp_path / "chroma"),
+    )
+    server.embedder = DeterministicEmbeddingAdapter()
+    try:
+        result = server.provider().pre_edit_context(
+            file_path="missing.py", workspace_id="ws-123"
+        )
+
+        assert result.status is ProviderStatus.DEGRADED
+        assert result.data["evidence_state"] == "evidence_unavailable"
+        assert result.workspace_id == "ws-123"
+    finally:
+        server.close()
+
+
+def test_provider_metadata_contains_unified_handshake_fields():
+    provider = ThaiRagProvider(core=RecordingCore({"constraints": [], "code_context": None}))
+
+    result = provider.version()
+
+    assert result.data["contract_fingerprint"]
+    assert result.data["compatibility_range"] == {"min": CONTRACT_VERSION, "max": "1.x"}
+    assert result.data["index_job_contract_version"]
+    assert result.data["generation"]
+    assert "embedding" in result.data["generation"]
+    assert "storage" in result.data["generation"]
+    assert "fts_ready" in result.data["readiness"]
+    assert "workspace_ready" in result.data["readiness"]
+
+
+def test_pre_edit_distinguishes_stale_index_from_missing_evidence():
+    provider = ThaiRagProvider(
+        core=RecordingCore(
+            {
+                "constraints": [],
+                "code_context": {"file_path": "auth.py"},
+                "blast_radius": None,
+                "evidence": {
+                    "code_index": "stale",
+                    "cpg": "unavailable",
+                    "storage": "ready",
+                },
+            }
+        )
+    )
+
+    result = provider.pre_edit_context(file_path="auth.py", workspace_id="ws-123")
+
+    assert result.status is ProviderStatus.DEGRADED
+    assert result.data["evidence_state"] == "code_index_stale"
+    assert result.data["evidence"]["cpg"] == "unavailable"
+    assert result.data["can_proceed"] is False
+
+
+def test_real_core_code_provider_preserves_workspace_scope(tmp_path):
+    from thai_rag.server import LocalContextServer
+    from tests.fakes import DeterministicEmbeddingAdapter
+
+    server = LocalContextServer(
+        sqlite_path=tmp_path / "context.db",
+        chroma_path=str(tmp_path / "chroma"),
+    )
+    server.embedder = DeterministicEmbeddingAdapter()
+    try:
+        search = server.provider().code_search(query="auth", workspace_id="ws-123")
+        context = server.provider().code_context(
+            file_path="auth.py",
+            line_number=1,
+            workspace_id="ws-123",
+        )
+
+        assert search.status is ProviderStatus.OK
+        assert context.status is ProviderStatus.OK
+        assert search.workspace_id == "ws-123"
+        assert context.workspace_id == "ws-123"
+    finally:
+        server.close()
+
+
+def test_real_core_index_status_rejects_other_workspace(tmp_path):
+    from thai_rag.server import LocalContextServer, _new_index_job
+
+    server = LocalContextServer(
+        sqlite_path=tmp_path / "context.db",
+        chroma_path=str(tmp_path / "chroma"),
+    )
+    try:
+        job = _new_index_job("/repo", force=False, workspace="ws-a")
+        result = server.provider().index_status(job_id=job["job_id"], workspace_id="ws-b")
+
+        assert result.status is ProviderStatus.UNAVAILABLE
+        assert result.errors[0].code is ErrorCode.INTERNAL_FAILURE
+        assert "outside workspace scope" in result.errors[0].message
+    finally:
+        server.close()
+
+
+def test_standalone_code_search_delegates_to_provider_scope(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Result:
+        def to_dict(self):
+            return {"status": "ok", "data": {"items": []}, "workspace_id": "ws-123"}
+
+    class Provider:
+        def code_search(self, **kwargs):
+            assert kwargs == {
+                "query": "auth",
+                "workspace_id": "ws-123",
+                "top_k": 5,
+                "path_filter": None,
+            }
+            return Result()
+
+    class Server:
+        def provider(self):
+            return Provider()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+
+    result = server_module.code_search("auth", workspace_id="ws-123")
+
+    assert result["workspace_id"] == "ws-123"
+
+
+def test_standalone_wrapper_delegates_to_provider_and_returns_structured_result(monkeypatch):
+    from thai_rag import server as server_module
+
+    class Provider:
+        def remember(self, **kwargs):
+            assert kwargs == {"content": "decision", "workspace_id": "ws-123", "category": "general"}
+            return RecordingCore({}).__class__
+
+    class Result:
+        def to_dict(self):
+            return {"status": "ok", "data": {"id": "mem-1"}}
+
+    class ProviderWithResult:
+        def remember(self, **kwargs):
+            assert kwargs["workspace_id"] == "ws-123"
+            return Result()
+
+    class Server:
+        def provider(self):
+            return ProviderWithResult()
+
+    monkeypatch.setattr(server_module, "get_server", lambda: Server())
+
+    result = server_module.remember("decision", workspace_id="ws-123")
+
+    assert result == {"status": "ok", "data": {"id": "mem-1"}}

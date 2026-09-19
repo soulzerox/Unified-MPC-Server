@@ -233,15 +233,16 @@ class StorageManager:
         self,
         query_vector: List[float],
         top_k: int = 5,
-        path_filter: Optional[str] = None
+        path_filter: Optional[str] = None,
+        workspace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         col_count = self.code_collection.count()
         if col_count == 0:
             return []
 
-        where_filter = None
+        where_filter = {"workspace": workspace} if workspace else None
         rel_filter = self._normalize_abs_to_rel(path_filter) if path_filter else None
-        if path_filter:
+        if path_filter and where_filter is None:
             ws_candidate = (rel_filter or path_filter).strip().rstrip("/").split("/")[0]
             try:
                 test_match = self.code_collection.get(where={"workspace": ws_candidate}, limit=1)
@@ -281,7 +282,13 @@ class StorageManager:
                     break
         return items
 
-    def search_code_fts(self, query: str, top_k: int = 10, path_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search_code_fts(
+        self,
+        query: str,
+        top_k: int = 10,
+        path_filter: Optional[str] = None,
+        workspace: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         clean_query = "".join(c for c in query if c.isalnum() or c in (" ", "_")).strip()
         if not clean_query:
             return []
@@ -297,7 +304,16 @@ class StorageManager:
         with self._lock:
             cur = self.sqlite_conn.cursor()
             try:
-                if rel_filter:
+                if rel_filter and workspace:
+                    rows = cur.execute("""
+                        SELECT f.doc_id, f.symbol_name, f.file_path, f.rank
+                        FROM fts_code_symbols f
+                        JOIN code_symbols s ON s.file_path = f.file_path
+                        WHERE fts_code_symbols MATCH ? AND f.file_path LIKE ? AND s.workspace = ?
+                        ORDER BY f.rank
+                        LIMIT ?
+                    """, (fts_expr, f"%{rel_filter}%", workspace, top_k)).fetchall()
+                elif rel_filter:
                     rows = cur.execute("""
                         SELECT doc_id, symbol_name, file_path, rank
                         FROM fts_code_symbols
@@ -305,6 +321,15 @@ class StorageManager:
                         ORDER BY rank
                         LIMIT ?
                     """, (fts_expr, f"%{rel_filter}%", top_k)).fetchall()
+                elif workspace:
+                    rows = cur.execute("""
+                        SELECT f.doc_id, f.symbol_name, f.file_path, f.rank
+                        FROM fts_code_symbols f
+                        JOIN code_symbols s ON s.file_path = f.file_path
+                        WHERE fts_code_symbols MATCH ? AND s.workspace = ?
+                        ORDER BY f.rank
+                        LIMIT ?
+                    """, (fts_expr, workspace, top_k)).fetchall()
                 else:
                     rows = cur.execute("""
                         SELECT doc_id, symbol_name, file_path, rank

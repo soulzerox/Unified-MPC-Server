@@ -298,7 +298,8 @@ class HybridRetriever:
         self,
         query: str,
         top_k: int = 5,
-        path_filter: Optional[str] = None
+        path_filter: Optional[str] = None,
+        workspace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Hybrid Search: SQLite FTS5 (BM25) + ChromaDB (Dense Vector) with RRF."""
         clean_query = query.strip()
@@ -306,12 +307,22 @@ class HybridRetriever:
             return []
 
         # 1. Lexical Search (FTS5)
-        fts_matches = self.storage.search_code_fts(clean_query, top_k=top_k * 2, path_filter=path_filter)
+        fts_matches = self.storage.search_code_fts(
+            clean_query,
+            top_k=top_k * 2,
+            path_filter=path_filter,
+            workspace=workspace,
+        )
 
         # 2. Vector Search (ChromaDB)
         try:
             q_vec = self.embedder.embed_query(clean_query)
-            vec_matches = self.storage.search_code_vector(q_vec, top_k=top_k * 2, path_filter=path_filter)
+            vec_matches = self.storage.search_code_vector(
+                q_vec,
+                top_k=top_k * 2,
+                path_filter=path_filter,
+                workspace=workspace,
+            )
         except Exception:
             vec_matches = []
 
@@ -368,7 +379,8 @@ class HybridRetriever:
         self,
         file_path: str,
         line_number: int,
-        window_lines: int = 25
+        window_lines: int = 25,
+        workspace: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Retrieve the enclosing parent document or surrounding lines for a file and line number."""
         cur = self.storage.sqlite_conn.cursor()
@@ -380,14 +392,17 @@ class HybridRetriever:
         if rel and rel != file_path:
             candidates.add(rel)
         placeholders = " OR ".join("file_path = ?" for _ in candidates)
+        scope_clause = " AND file_path LIKE ?" if workspace else ""
+        scope_params = (f"{workspace}/%",) if workspace else ()
         # Find exact enclosing parent doc (support exact or suffix match)
         row = cur.execute(f"""
             SELECT * FROM parent_documents
             WHERE ({placeholders} OR file_path LIKE ? OR file_path LIKE ?)
+              {scope_clause}
               AND start_line <= ? AND end_line >= ?
             ORDER BY (end_line - start_line) ASC
             LIMIT 1
-        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", line_number, line_number)).fetchone()
+        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", *scope_params, line_number, line_number)).fetchone()
 
         if row:
             doc = dict(row)
@@ -404,9 +419,10 @@ class HybridRetriever:
         fallback = cur.execute(f"""
             SELECT * FROM parent_documents
             WHERE ({placeholders} OR file_path LIKE ? OR file_path LIKE ?)
+              {scope_clause}
             ORDER BY ABS(start_line - ?) ASC
             LIMIT 1
-        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", line_number)).fetchone()
+        """, (*sorted(candidates), f"%/{file_path}", f"%{file_path}%", *scope_params, line_number)).fetchone()
 
         if fallback:
             doc = dict(fallback)

@@ -23,13 +23,14 @@ _INDEX_JOBS: Dict[str, Dict[str, Any]] = {}
 _INDEX_JOBS_LOCK = threading.Lock()
 
 
-def _new_index_job(workspace_path: str, force: bool) -> Dict[str, Any]:
+def _new_index_job(workspace_path: str, force: bool, workspace: Optional[str] = None) -> Dict[str, Any]:
     job_id = f"idx_{uuid.uuid4().hex[:8]}"
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     job: Dict[str, Any] = {
         "job_id": job_id,
         "status": "running",
         "workspace": workspace_path,
+        "workspace_id": workspace,
         "force": force,
         "indexed_files": 0,
         "skipped_files": 0,
@@ -90,6 +91,8 @@ class JobProgressReporter(NullProgressReporter):
 
 class LocalContextServer:
     """Core server logic for Local Context & Code RAG."""
+
+    supports_canonical_workspace_scope = False
 
     def __init__(
         self,
@@ -196,7 +199,7 @@ class LocalContextServer:
             return err
 
         if background:
-            job = _new_index_job(workspace_path, force)
+            job = _new_index_job(workspace_path, force, workspace=workspace)
             job_id = job["job_id"]
 
             def _run() -> None:
@@ -250,12 +253,14 @@ class LocalContextServer:
         except Exception as e:
             return f"Error indexing workspace: {str(e)}"
 
-    def index_status(self, job_id: str) -> str:
+    def index_status(self, job_id: str, workspace: Optional[str] = None) -> str:
         """Poll a background code_index job by its job_id."""
         with _INDEX_JOBS_LOCK:
             job = _INDEX_JOBS.get(job_id)
         if not job:
             return f"⚠️ Warning: Unknown job_id `{job_id}`. Jobs do not survive server restarts — re-run code_index."
+        if workspace is not None and job.get("workspace_id") != workspace:
+            return f"Error: Index job `{job_id}` is outside workspace scope."
 
         if job["status"] == "running":
             return (
@@ -276,7 +281,13 @@ class LocalContextServer:
             f"- Workspace: `{job['workspace']}`"
         )
 
-    def code_search(self, query: str, top_k: int = 5, path_filter: Optional[str] = None) -> str:
+    def code_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        path_filter: Optional[str] = None,
+        workspace: Optional[str] = None,
+    ) -> str:
         """Search code symbols and semantic logic across the indexed codebase."""
         if not query.strip():
             return "Error: Search query cannot be empty."
@@ -286,7 +297,12 @@ class LocalContextServer:
         degraded = not self.embedder.is_alive()
 
         try:
-            results = self.retriever.search(query, top_k=top_k, path_filter=path_filter)
+            results = self.retriever.search(
+                query,
+                top_k=top_k,
+                path_filter=path_filter,
+                workspace=workspace,
+            )
             if not results:
                 base = f"No code snippets found matching '{query}'."
                 return base + ("  ⚠️ semantic ranking degraded (Ollama unreachable) — FTS5 results only" if degraded else "")
@@ -306,10 +322,21 @@ class LocalContextServer:
         except Exception as e:
             return f"Error searching code: {str(e)}"
 
-    def code_context(self, file_path: str, line_number: int, window: int = 25) -> str:
+    def code_context(
+        self,
+        file_path: str,
+        line_number: int,
+        window: int = 25,
+        workspace: Optional[str] = None,
+    ) -> str:
         """Retrieve the enclosing function/class context or surrounding lines for a file."""
         try:
-            ctx = self.retriever.get_context(file_path, line_number, window_lines=window)
+            ctx = self.retriever.get_context(
+                file_path,
+                line_number,
+                window_lines=window,
+                workspace=workspace,
+            )
             if not ctx:
                 return f"No context found for {file_path}:{line_number}."
 
@@ -526,14 +553,23 @@ def get_server() -> LocalContextServer:
     return _server
 
 @mcp.tool()
-def remember(content: str, category: str = "general") -> str:
+def remember(content: str, category: str = "general", workspace_id: Optional[str] = None):
     """Record a persistent long-term memory or project rule/decision."""
-    return get_server().remember(content, category)
+    return get_server().provider().remember(
+        content=content,
+        workspace_id=workspace_id,
+        category=category,
+    ).to_dict()
 
 @mcp.tool()
-def recall(query: str, category: str = None, limit: int = 5) -> str:
+def recall(query: str, category: str = None, limit: int = 5, workspace_id: Optional[str] = None):
     """Retrieve memories and past context matching a semantic query."""
-    return get_server().recall(query, category=category, limit=limit)
+    return get_server().provider().recall(
+        query=query,
+        workspace_id=workspace_id,
+        category=category,
+        limit=limit,
+    ).to_dict()
 
 @mcp.tool()
 def remember_turn(
@@ -560,69 +596,103 @@ def remember_turn(
     )
 
 @mcp.tool()
-def pre_edit_context(file_path: str, workspace: str = "", proposed_symbol: str = "") -> str:
+def pre_edit_context(
+    file_path: str,
+    workspace: str = "",
+    proposed_symbol: str = "",
+    workspace_id: Optional[str] = None,
+):
     """MANDATORY pre-edit check: Retrieve prior architectural constraints, decisions, enclosing code scope, and CPG blast radius before editing a file."""
-    res = get_server().pre_edit_context(file_path=file_path, workspace=workspace, proposed_symbol=proposed_symbol)
-    
-    out = [f"### 🛡️ Pre-Edit Verification for `{res['file_path']}`:"]
-    out.append(f"**Status**: {'✅ Safe to proceed' if res['can_proceed'] else '⚠️ Review Required'}")
-    out.append(f"**Notice**: {res['message']}\n")
-    
-    if res["constraints"]:
-        out.append("#### 📌 Prior Decisions & Constraints Found:")
-        for idx, c in enumerate(res["constraints"], 1):
-            out.append(f"{idx}. [{c.get('created_at', '')}] **{c.get('role', 'user')}**: {c.get('content')}")
-        out.append("")
-
-    if res.get("blast_radius") and (res["blast_radius"].get("callers") or res["blast_radius"].get("impacted_files")):
-        br = res["blast_radius"]
-        out.append(f"#### 💥 CPG Blast Radius ({len(br.get('callers', []))} Callers, {len(br.get('impacted_files', []))} External Files):")
-        for c in br.get("callers", [])[:5]:
-            out.append(f"- Depth {c.get('depth', 1)} Caller: `{c.get('source_symbol')}` in `{c.get('source_file')}`")
-        if br.get("impacted_files"):
-            out.append(f"- Impacted files: {', '.join(br['impacted_files'][:5])}")
-        out.append("")
-
-    if res.get("code_context") and res["code_context"].get("content"):
-        ctx = res["code_context"]
-        out.append(f"#### 📍 Enclosing Code Scope [{ctx['file_path']}:{ctx['start_line']}-{ctx['end_line']}]:")
-        out.append(f"```text\n{ctx['content']}\n```")
-
-    return "\n".join(out)
-
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().pre_edit_context(
+        file_path=file_path,
+        workspace_id=scoped_workspace,
+        proposed_symbol=proposed_symbol or None,
+    ).to_dict()
 @mcp.tool()
-def code_blast_radius(symbol_name: str, workspace: str = "", max_depth: int = 2) -> str:
+def code_blast_radius(
+    symbol_name: str,
+    workspace: str = "",
+    max_depth: int = 2,
+    workspace_id: Optional[str] = None,
+):
     """Analyze Code Property Graph (CPG) blast radius: find all direct/transitive callers and impacted files before modifying a symbol."""
-    return get_server().code_blast_radius(symbol_name=symbol_name, workspace=workspace, max_depth=max_depth)
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().code_blast_radius(
+        symbol_name=symbol_name,
+        workspace_id=scoped_workspace,
+        max_depth=max_depth,
+    ).to_dict()
 
 @mcp.tool()
-def forget(memory_id: str, category: str = None) -> str:
+def forget(memory_id: str, category: str = None, workspace_id: Optional[str] = None):
     """Delete an obsolete memory entry by ID, optionally requiring its category."""
-    return get_server().forget(memory_id, category=category)
+    return get_server().provider().forget(memory_id=memory_id, workspace_id=workspace_id).to_dict()
 
 @mcp.tool()
-def code_index(workspace_path: str = ".", force: bool = False, background: bool = False, workspace: str = "") -> str:
+def code_index(
+    workspace_path: str = ".",
+    force: bool = False,
+    background: bool = False,
+    workspace: str = "",
+    workspace_id: Optional[str] = None,
+):
     """Index all source code files in a workspace with SHA256 incremental caching.
 
     background=True returns a job_id immediately; poll with index_status().
     """
-    return get_server().code_index(workspace_path, force=force, background=background, workspace=workspace or None)
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().code_index(
+        workspace_path=workspace_path,
+        workspace_id=scoped_workspace,
+        force=force,
+        background=background,
+    ).to_dict()
 
 
 @mcp.tool()
-def index_status(job_id: str) -> str:
+def index_status(
+    job_id: str,
+    workspace: str = "",
+    workspace_id: Optional[str] = None,
+):
     """Poll a background code_index job by its job_id."""
-    return get_server().index_status(job_id)
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().index_status(job_id=job_id, workspace_id=scoped_workspace).to_dict()
 
 @mcp.tool()
-def code_search(query: str, top_k: int = 5, path_filter: str = None) -> str:
+def code_search(
+    query: str,
+    top_k: int = 5,
+    path_filter: str = None,
+    workspace: str = "",
+    workspace_id: Optional[str] = None,
+):
     """Search code symbols and semantic logic across the indexed codebase."""
-    return get_server().code_search(query, top_k=top_k, path_filter=path_filter)
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().code_search(
+        query=query,
+        workspace_id=scoped_workspace,
+        top_k=top_k,
+        path_filter=path_filter,
+    ).to_dict()
 
 @mcp.tool()
-def code_context(file_path: str, line_number: int, window: int = 25) -> str:
+def code_context(
+    file_path: str,
+    line_number: int,
+    window: int = 25,
+    workspace: str = "",
+    workspace_id: Optional[str] = None,
+):
     """Retrieve the enclosing function/class context or surrounding lines for a file."""
-    return get_server().code_context(file_path, line_number, window=window)
+    scoped_workspace = workspace_id if workspace_id is not None else (workspace or None)
+    return get_server().provider().code_context(
+        file_path=file_path,
+        line_number=line_number,
+        workspace_id=scoped_workspace,
+        window=window,
+    ).to_dict()
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

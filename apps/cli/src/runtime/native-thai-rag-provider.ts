@@ -11,6 +11,7 @@ import {
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
+  THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_EMBEDDING_MODEL,
   THAI_RAG_EMBEDDING_PREPROCESSING_VERSION,
   THAI_RAG_EMBEDDING_PROFILE,
@@ -114,9 +115,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const toolNames = new Set(described.value.tools.map((tool) => tool.name));
     const missing = [...REQUIRED_TOOLS].filter((tool) => !toolNames.has(tool));
-    if (missing.length > 0) {
+    const scopeDrift = described.value.tools
+      .filter((tool) => toolNames.has(tool.name) && THAI_RAG_CONFORMANCE_FIXTURE.operations[tool.name as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations]?.scope === 'workspace_id')
+      .filter((tool) => !hasWorkspaceScope(isRecord(tool.inputSchema) ? tool.inputSchema : {}))
+      .map((tool) => tool.name);
+    if (missing.length > 0 || scopeDrift.length > 0) {
       await this.sessions.close().catch(() => undefined);
-      return err(appError('CONFLICT', `Native Thai-RAG worker handshake missing required capabilities: ${missing.join(', ')}`, true, { reason: 'missing-capability' }));
+      const reason = missing.length > 0 ? 'missing-capability' : 'contract-drift';
+      return err(appError('CONFLICT', `Native Thai-RAG worker handshake ${reason}: ${[...missing, ...scopeDrift].join(', ')}`, true, { reason, missing: missing.join(','), scopeDrift: scopeDrift.join(',') }));
     }
     const version = await this.callWorker('version', {}, signal);
     if (!version.ok) {
@@ -208,9 +214,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!refreshed.ok) return refreshed;
     if (tool === 'index_status') {
       const jobId = typeof args.job_id === 'string' ? args.job_id : '';
-      const workspaceValue = typeof args.workspace_id === 'string'
-        ? args.workspace_id
-        : typeof args.workspace === 'string' ? args.workspace : '';
+      const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
       const workspace = parseCanonicalWorkspaceId(workspaceValue);
       if (jobId.trim().length === 0 || !workspace.ok) return err(appError('INVALID_INPUT', 'Thai-RAG index_status requires job_id and workspace_id'));
       const job = await this.jobs.get(jobId, this.ownerId ?? '', workspace.value);
@@ -275,7 +279,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     void operation.catch(async (error: unknown) => {
       await this.jobs.fail(job.jobId, errorMessage(error), this.ownerId ?? '').catch(() => undefined);
     });
-    return ok({ job_id: job.jobId, status: 'running', workspace: workspace.value.workspaceId });
+    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspace.value.workspaceId });
   }
 
   private resolveIndexWorkspace(workspaceValue: string): Result<{ readonly workspaceId: string; readonly rootPath: string }> {
@@ -417,9 +421,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {
-    const workspaceValue = typeof args.workspace_id === 'string'
-      ? args.workspace_id
-      : typeof args.workspace === 'string' ? args.workspace : '';
+    const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
     const workspace = parseCanonicalWorkspaceId(workspaceValue);
     if (!workspace.ok) return workspace;
     const root = this.workspaceRoots.get(workspace.value);
@@ -461,6 +463,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const activeJobs = await this.jobs.active(this.ownerId ?? '');
     const health: ThaiRagProviderDriverHealth = {
       ...handshake.value.components,
+      ...(handshake.value.compatibilityRange === undefined ? {} : { compatibilityRange: handshake.value.compatibilityRange }),
+      contractFingerprint: handshake.value.contractFingerprint,
+      generation: handshake.value.generation,
+      ...(handshake.value.degradedReasons === undefined ? {} : { degradation: handshake.value.degradedReasons }),
       activeJobs: [...new Set([...handshake.value.components.activeJobs, ...activeJobs.map((job) => job.jobId)])],
     };
     this.lastHealth = health;
@@ -611,7 +617,8 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
     || typeof data.generation.embedding !== 'string'
     || typeof data.generation.index !== 'string'
     || typeof data.generation.storage !== 'string'
-    || typeof data.embedding_index_generation !== 'number') {
+    || typeof data.embedding_index_generation !== 'number'
+     || (data.degraded_reasons !== undefined && (!Array.isArray(data.degraded_reasons) || !data.degraded_reasons.every((reason) => typeof reason === 'string')))) {
     return err(appError('CONFLICT', 'Native Thai-RAG worker returned malformed handshake metadata', true, { reason: 'malformed-handshake' }));
   }
   const components = isRecord(data.components) ? parseProviderComponents(data.components) : undefined;
@@ -639,7 +646,8 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
     },
     ...(typeof data.workspace_id === 'string' ? { workspaceId: data.workspace_id } : {}),
     ...(typeof data.workspace_ready === 'boolean' ? { workspaceReady: data.workspace_ready } : {}),
-    ...(components === undefined ? {} : { components }),
+    ...(data.degraded_reasons === undefined ? {} : { degradedReasons: data.degraded_reasons }),
+     ...(components === undefined ? {} : { components }),
     embeddingIndexGeneration: data.embedding_index_generation,
     ...(typeof data.legacy_adapter === 'string' ? { legacyAdapter: data.legacy_adapter } : {}),
   });
@@ -665,6 +673,12 @@ function parseProviderComponents(value: Record<string, unknown>): ThaiRagProvide
     semanticRetrievalAvailable: value.semantic_retrieval_available,
     activeJobs: value.active_jobs,
   };
+}
+
+function hasWorkspaceScope(schema: Record<string, unknown>): boolean {
+  const properties = isRecord(schema.properties) ? schema.properties : undefined;
+  return properties !== undefined && isRecord(properties.workspace_id)
+    && Array.isArray(schema.required) && schema.required.includes('workspace_id');
 }
 
 function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {

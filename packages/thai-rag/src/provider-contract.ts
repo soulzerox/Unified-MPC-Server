@@ -16,15 +16,25 @@ export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
 export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
 export const THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES = ['vector_store', 'embedder', 'semantic_retrieval'] as const;
 export const THAI_RAG_CONFORMANCE_FIXTURE = {
-  topLevel: ['provider_id', 'provider_version', 'contract_version', 'compatibility_range', 'contract_fingerprint', 'index_job_contract_version', 'capabilities', 'workspace_scope_model', 'state', 'workspace_ready', 'embedding', 'generation', 'embedding_index_generation', 'components'],
-  embedding: ['profile', 'model', 'dimension', 'preprocessing_version'],
-  generation: ['contract', 'embedding', 'index', 'storage'],
-  components: ['worker_reachable', 'sqlite_available', 'fts_available', 'vector_store_available', 'embedder_available', 'lexical_retrieval_available', 'semantic_retrieval_available', 'active_jobs'],
+  version: THAI_RAG_CONFORMANCE_FIXTURE_VERSION,
+  workspaceScope: { field: 'workspace_id', canonical: true },
+  errors: ['INVALID_INPUT', 'PERMISSION_DENIED', 'CONFLICT', 'FILE_NOT_FOUND'],
+  operations: {
+    remember: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    recall: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    record_event: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    forget: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    pre_edit_context: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED', 'CONFLICT'] },
+    code_search: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    code_context: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED', 'FILE_NOT_FOUND'] },
+    code_blast_radius: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED'] },
+    code_index: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'PERMISSION_DENIED', 'CONFLICT'] },
+    index_status: { scope: 'workspace_id', required: ['workspace_id'], errors: ['INVALID_INPUT', 'FILE_NOT_FOUND'] },
+    health: { scope: 'provider', errors: ['CONFLICT'] },
+    version: { scope: 'provider', errors: ['CONFLICT'] },
+  },
 } as const;
-export const THAI_RAG_CONFORMANCE_OPERATIONS = [
-  'remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search',
-  'code_context', 'code_blast_radius', 'code_index', 'index_status', 'health', 'version',
-] as const;
+export const THAI_RAG_CONFORMANCE_OPERATIONS = Object.keys(THAI_RAG_CONFORMANCE_FIXTURE.operations) as Array<keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations>;
 export const THAI_RAG_REQUIRED_CAPABILITIES = THAI_RAG_CONFORMANCE_OPERATIONS;
 
 export interface ThaiRagProviderHandshake {
@@ -52,6 +62,7 @@ export interface ThaiRagProviderHandshake {
   readonly workspaceId?: string;
   readonly workspaceReady?: boolean;
   readonly embeddingIndexGeneration: number;
+  readonly degradedReasons?: readonly string[];
   readonly components?: ThaiRagProviderComponents;
   readonly legacyAdapter?: string;
 }
@@ -106,6 +117,9 @@ export interface ThaiRagProviderHealth {
   readonly providerId: typeof THAI_RAG_PROVIDER_ID;
   readonly providerVersion: string;
   readonly state: ThaiRagProviderLifecycleState;
+  readonly compatibilityRange?: ThaiRagProviderHandshake['compatibilityRange'];
+  readonly contractFingerprint?: string;
+  readonly generation?: ThaiRagProviderHandshake['generation'];
   readonly embeddingIndexGeneration: number;
   readonly startedAt?: string;
   readonly readyAt?: string;
@@ -223,8 +237,8 @@ function parseVersion(value: string): readonly [number, number] | undefined {
 function isExpectedEmbeddingModel(model: string, expected: string): boolean {
   const [expectedName, expectedDigest] = expected.split('@sha256:');
   const [modelName, modelDigest] = model.split('@sha256:');
-  if (modelName !== expectedName) return false;
-  if (expectedDigest !== undefined) return modelDigest === expectedDigest;
+  if (modelName !== expectedName || (expectedDigest !== undefined && !isEmbeddingDigestValid(expectedDigest))) return false;
+  if (expectedDigest !== undefined) return modelDigest === expectedDigest && isEmbeddingDigestValid(modelDigest);
   return modelDigest === undefined || isEmbeddingDigestValid(modelDigest);
 }
 
@@ -235,7 +249,7 @@ function isEmbeddingModelMetadataValid(profile: string, model: string, allowLega
 }
 
 function isEmbeddingDigestValid(digest: string | undefined): boolean {
-  return digest !== undefined && /^[a-f0-9]{3,}$/i.test(digest);
+  return digest !== undefined && /^[a-f0-9]{64}$/i.test(digest);
 }
 
 export function isEmbeddingIndexGenerationCompatible(

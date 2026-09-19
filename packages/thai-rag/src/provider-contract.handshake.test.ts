@@ -19,7 +19,7 @@ const baseHandshake: ThaiRagProviderHandshake = {
   health: 'ready',
   embedding: {
     profile: 'nomic-embed-text-v2-moe',
-    model: 'nomic-embed-text-v2-moe@sha256:abc',
+    model: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     dimension: 768,
     preprocessingVersion: '1',
   },
@@ -92,8 +92,8 @@ describe('Thai-RAG provider handshake', () => {
   it('validates compatibility range and supplied embedding metadata', () => {
     for (const change of [
       { compatibilityRange: { min: '2.0', max: '2.x' } },
-      { embedding: { ...baseHandshake.embedding, model: 'other@sha256:abc' } },
-      { embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe@sha256:bad digest' } },
+      { embedding: { ...baseHandshake.embedding, model: 'other@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' } },
+      { embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe@sha256:bad-digest' } },
       { embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' } },
       { embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined } },
       { generation: { ...baseHandshake.generation, embedding: 'other-profile' } },
@@ -108,8 +108,8 @@ describe('Thai-RAG provider handshake', () => {
   });
 
   it('enforces digest only when expected model publishes trusted digest', () => {
-    const matching = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:abc', expectedPreprocessingVersion: '1' });
-    const drifted = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:def', expectedPreprocessingVersion: '1' });
+    const matching = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', expectedPreprocessingVersion: '1' });
+    const drifted = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210', expectedPreprocessingVersion: '1' });
     expect(matching.ok).toBe(true);
     expect(drifted.ok).toBe(false);
   });

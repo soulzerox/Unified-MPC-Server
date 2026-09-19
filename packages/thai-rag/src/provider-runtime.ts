@@ -8,7 +8,7 @@ import {
   type ThaiRagProviderHealth,
 } from './provider-contract.js';
 
-export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents;
+export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents & Pick<ThaiRagProviderHealth, 'compatibilityRange' | 'contractFingerprint' | 'generation'> & { readonly degradation?: readonly string[] };
 
 export interface ThaiRagProviderDriverStartOptions {
   readonly providerRoot: string;
@@ -201,14 +201,17 @@ export class ThaiRagProviderRuntime {
 
 function healthFromComponents(
   base: ThaiRagProviderHealth,
-  components: ThaiRagProviderComponents,
+  components: ThaiRagProviderDriverHealth,
   readyAt: string,
 ): ThaiRagProviderHealth {
-  const degradation = degradationReasons(components);
+  const degradation = [...new Set([...(components.degradation ?? []), ...degradationReasons(components)])];
   return {
     schemaVersion: base.schemaVersion,
     providerId: base.providerId,
     providerVersion: base.providerVersion,
+    ...(components.compatibilityRange === undefined ? {} : { compatibilityRange: components.compatibilityRange }),
+    ...(components.contractFingerprint === undefined ? {} : { contractFingerprint: components.contractFingerprint }),
+    ...(components.generation === undefined ? {} : { generation: components.generation }),
     embeddingIndexGeneration: base.embeddingIndexGeneration,
     ...(base.startedAt === undefined ? {} : { startedAt: base.startedAt }),
     ...(base.ownerId === undefined ? {} : { ownerId: base.ownerId }),

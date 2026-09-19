@@ -28,11 +28,12 @@ afterEach(async () => {
 describe('NativeThaiRagProviderDriver', () => {
   it('keeps native tool fixture aligned with provider conformance capabilities', () => {
     expect(new Set(tools)).toEqual(new Set(THAI_RAG_REQUIRED_CAPABILITIES));
-    const handshake = defaultHandshake();
-    expect(Object.keys(handshake).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.topLevel].sort());
-    expect(Object.keys(handshake.embedding).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.embedding].sort());
-    expect(Object.keys(handshake.generation).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.generation].sort());
-    expect(Object.keys(handshake.components ?? {}).sort()).toEqual([...THAI_RAG_CONFORMANCE_FIXTURE.components].sort());
+    expect(THAI_RAG_CONFORMANCE_FIXTURE.workspaceScope).toEqual({ field: 'workspace_id', canonical: true });
+    expect(Object.keys(THAI_RAG_CONFORMANCE_FIXTURE.operations)).toEqual([...THAI_RAG_REQUIRED_CAPABILITIES]);
+    for (const operation of THAI_RAG_REQUIRED_CAPABILITIES) {
+      expect(THAI_RAG_CONFORMANCE_FIXTURE.operations[operation].scope).toBe(operation === 'health' || operation === 'version' ? 'provider' : 'workspace_id');
+      expect(THAI_RAG_CONFORMANCE_FIXTURE.operations[operation].errors.length).toBeGreaterThan(0);
+    }
   });
 
   it('launches without the obsolete remember_turn dependency', async () => {
@@ -190,7 +191,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
     await indexStarted;
-    const call = driver.call('recall', { query: 'queued during stop' });
+    const call = driver.call('recall', { workspace_id: workspaceId, query: 'queued during stop' });
     const stopping = driver.stop();
     await Promise.resolve();
     expect(closed).toBe(false);
@@ -382,7 +383,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const foreground = driver.call('recall', { query: 'after index' });
     await foreground;
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace: workspaceId });
+    const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId });
 
     expect(status.ok && isRecord(status.value) && status.value.status).toBe('completed');
     expect(maxInFlight).toBe(1);
@@ -416,9 +417,9 @@ describe('NativeThaiRagProviderDriver', () => {
     });
 
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    await expect(driver.call('index_status', { job_id: 'arbitrary-id', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
-    await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
-    await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: 'arbitrary-id', workspace_id: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace_id: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_missing', workspace_id: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     expect(calls).not.toContain('index_status');
     await driver.stop();
   });
@@ -444,7 +445,7 @@ describe('NativeThaiRagProviderDriver', () => {
     });
 
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-a', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    await expect(driver.call('index_status', { job_id: 'idx_umcp_legacy_noncanonical', workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: 'idx_umcp_legacy_noncanonical', workspace_id: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
     expect(persisted.jobs).toEqual([expect.objectContaining({
       jobId: 'idx_umcp_legacy_noncanonical',
@@ -501,7 +502,7 @@ describe('NativeThaiRagProviderDriver', () => {
     if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    await expect(driver.call('index_status', { job_id: scheduled.value.job_id, workspace: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: recoveredWorkspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     expect(calls).not.toContain('index_status');
     await driver.stop();
   });
@@ -527,7 +528,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
     const second = createDriver();
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-b', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    await expect(second.call('index_status', { job_id: scheduled.value.job_id, workspace: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(second.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     await second.stop();
   });
 
@@ -557,7 +558,7 @@ describe('NativeThaiRagProviderDriver', () => {
 
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
     expect((await driver.call('code_index', { workspace_path: workspaceRoot })).ok).toBe(true);
-    const preEdit = await driver.call('pre_edit_context', { workspace: workspaceId, file_path: 'src/example.py' });
+    const preEdit = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/example.py' });
 
     expect(preEdit).toMatchObject({ ok: true, value: { structuredContent: { result: 'context-found' } } });
     expect(await realpath(path.join(sourcesRoot, workspaceId))).toBe(await realpath(workspaceRoot));
@@ -627,6 +628,39 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('exposes handshake diagnostics through health refresh', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: { ...defaultHandshake(), state: 'degraded', degraded_reasons: ['semantic-retrieval-unavailable'] } }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.health()).resolves.toMatchObject({ ok: true, value: {
+      compatibilityRange: { min: '1.0', max: '1.x' },
+      contractFingerprint: THAI_RAG_CONTRACT_FINGERPRINT,
+      generation: { contract: THAI_RAG_CONTRACT_FINGERPRINT, index: '1' },
+      degradation: ['semantic-retrieval-unavailable'],
+    } });
+    await driver.stop();
+  });
+
+  it('rejects provider scope drift even when operation names match', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ scopeDrift: 'recall' }),
+    });
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+    expect(started).toMatchObject({ ok: false, error: { details: { reason: 'contract-drift', scopeDrift: 'recall' } } });
+    await driver.stop();
+  });
+
   it('uses handshake metadata instead of raw code_index schema compatibility', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -634,7 +668,7 @@ describe('NativeThaiRagProviderDriver', () => {
       dataRoot,
       launchConfig: { command: '/python' },
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
-      clientFactory: clientFactory({ codeIndexSupportsWorkspace: false }),
+      clientFactory: clientFactory(),
     });
 
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
@@ -650,7 +684,7 @@ describe('NativeThaiRagProviderDriver', () => {
       dataRoot,
       launchConfig: { command: '/python' },
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
-      clientFactory: clientFactory({ forgetSupportsCategory: false }),
+      clientFactory: clientFactory(),
     });
 
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
@@ -696,7 +730,7 @@ describe('NativeThaiRagProviderDriver', () => {
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
 
     current = [{ id: recoveredWorkspaceId, realRootPath: recoveredRoot }];
-    const result = await driver.call('pre_edit_context', { workspace: recoveredWorkspaceId, file_path: 'src/index.ts' });
+    const result = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(true);
     expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === recoveredWorkspaceId && call.args.force === true)).toBe(true);
@@ -755,7 +789,7 @@ describe('NativeThaiRagProviderDriver', () => {
     current = [{ id: workspaceId, realRootPath: relinkedRoot }];
     failIndex = true;
 
-    const result = await driver.call('pre_edit_context', { workspace: workspaceId, file_path: 'src/index.ts' });
+    const result = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(false);
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
@@ -767,9 +801,8 @@ function clientFactory(options: {
   readonly onConnect?: (config: McpServerLaunchConfig) => void;
   readonly onClose?: () => void;
   readonly onCall?: (tool: string, args: Readonly<Record<string, unknown>>) => Promise<unknown>;
-  readonly codeIndexSupportsWorkspace?: boolean;
-  readonly forgetSupportsCategory?: boolean;
   readonly handshake?: Record<string, unknown>;
+  readonly scopeDrift?: string;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
@@ -779,11 +812,9 @@ function clientFactory(options: {
           return tools.map((name) => ({
             name,
             description: name,
-            inputSchema: name === 'code_index' && options.codeIndexSupportsWorkspace !== false
-              ? { type: 'object', properties: { workspace: { type: 'string' } } }
-              : name === 'forget' && options.forgetSupportsCategory !== false
-                ? { type: 'object', properties: { category: { type: 'string' } } }
-                : { type: 'object' },
+            inputSchema: THAI_RAG_REQUIRED_CAPABILITIES.includes(name as typeof THAI_RAG_REQUIRED_CAPABILITIES[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift
+              ? { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }
+             : { type: 'object' },
           }));
         },
         async listResources(): Promise<[]> { return []; },
@@ -830,7 +861,7 @@ function defaultHandshake(): Record<string, unknown> {
     },
     embedding: {
       profile: 'nomic-embed-text-v2-moe',
-      model: 'nomic-embed-text-v2-moe@sha256:abc',
+      model: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       dimension: 768,
       preprocessing_version: '1',
     },

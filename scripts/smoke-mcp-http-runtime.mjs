@@ -1,4 +1,4 @@
-/* global process */
+/* global process, setTimeout, clearTimeout, URL, fetch, AbortSignal */
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok } from '@unified-mpc/domain';
+import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { LspRuntimeService } from './lsp-runtime.js';
 import type { McpApplicationServices } from './tools/tool-types.js';
 
@@ -25,6 +26,27 @@ describe('LspRuntimeService', () => {
       ok: true, value: { tool: 'lsp_diagnostics', status: 'needs_setup', available: false, ready: false, executed: false },
     });
     expect(spawns).toBe(0);
+  });
+
+  it('does not consume LSP admission for an unconfigured language server', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 1,
+      resourceClassCost: { lsp_process: 8 },
+    });
+    const runtime = new LspRuntimeService(servicesWithRoot('C:\\ws'), actor, {
+      environment: {},
+      resourceAdmissionController: controller,
+      resourceAdmissionSessionId: 'session-a',
+      lspProcessAdmissionCost: 8,
+    });
+
+    await expect(runtime.diagnostics({ workspaceId: 'ws-1', files: ['src/a.ts'] })).resolves.toMatchObject({
+      ok: true, value: { status: 'needs_setup', executed: false },
+    });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0, rejected: 0 });
   });
 
   it('rejects lexical workspace escapes before spawning a language server', async () => {
@@ -60,6 +82,49 @@ describe('LspRuntimeService', () => {
     } finally {
       // The fake server exits on shutdown; nothing to clean up.
     }
+  });
+
+  it('holds LSP capacity for the live process and releases it after cancellation', async () => {
+    const root = path.normalize(await mkdtemp(path.join(tmpdir(), 'unified-mpc-lsp-test-')));
+    await writeFile(path.join(root, 'a.ts'), 'export const broken = 1;\n', 'utf8');
+    const fakeServer = await createFakeServer();
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 1,
+      resourceClassCost: { lsp_process: 8 },
+    });
+    const runtime = new LspRuntimeService(servicesWithRoot(root), actor, {
+      environment: { UNIFIED_MPC_LSP_TYPESCRIPT_COMMAND: JSON.stringify([process.execPath, fakeServer]) },
+      timeoutMs: 10_000,
+      resourceAdmissionController: controller,
+      resourceAdmissionSessionId: 'session-a',
+      lspProcessAdmissionCost: 8,
+    });
+    const cancellation = new AbortController();
+
+    const pending = runtime.renamePlan(
+      { workspaceId: 'ws-1', file: 'a.ts', line: 0, character: 13, newName: 'stall' },
+      cancellation.signal,
+    );
+    for (let attempt = 0; attempt < 50 && controller.snapshot().activeOperations === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 8,
+      activeOperations: 1,
+      activeCostByClass: { lsp_process: 8 },
+      activeCostByWorkspace: { 'ws-1': 8 },
+      activeCostBySession: { 'session-a': 8 },
+    });
+
+    cancellation.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT', recoverable: true } });
+    for (let attempt = 0; attempt < 50 && controller.snapshot().activeOperations > 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
   });
 
   it('returns an approval-gated rename plan without applying it', async () => {
@@ -108,6 +173,7 @@ process.stdin.on('data', (chunk) => {
     } else if (message.method === 'textDocument/didOpen') {
       write({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: message.params.textDocument.uri, diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 1, message: 'fake ไทย TS1234' }] } });
     } else if (message.method === 'textDocument/rename') {
+      if (message.params.newName === 'stall') continue;
       write({ jsonrpc: '2.0', id: message.id, result: { documentChanges: [{ textDocument: { uri: message.params.textDocument.uri, version: 1 }, edits: [{ range: { start: { line: 0, character: 13 }, end: { line: 0, character: 20 } }, newText: message.params.newName }] }] } });
     } else if (message.method === 'shutdown') {
       write({ jsonrpc: '2.0', id: message.id, result: null });

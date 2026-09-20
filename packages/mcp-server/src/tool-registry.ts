@@ -17,6 +17,7 @@ import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capa
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
+  DEFAULT_LSP_PROCESS_ADMISSION_COST,
   tryAdmitChildMcpCall,
   type ResourceAdmissionController,
   type ResourceAdmissionLease,
@@ -132,6 +133,8 @@ export interface ToolRegistryOptions {
   readonly resourceAdmissionController?: ResourceAdmissionController;
   /** Weighted cost charged for each admitted child MCP call. */
   readonly mcpCallAdmissionCost?: number;
+  /** Weighted cost charged while one LSP server process is alive. */
+  readonly lspProcessAdmissionCost?: number;
 }
 
 export interface HostMutationApprovalScope {
@@ -225,6 +228,7 @@ export class ToolRegistry {
   private readonly maxMcpCallResultBytes: number;
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
   private readonly mcpCallAdmissionCost: number;
+  private readonly lspProcessAdmissionCost: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
     this.services = services;
@@ -254,11 +258,18 @@ export class ToolRegistry {
       options.mcpCallAdmissionCost,
       DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
     );
+    this.lspProcessAdmissionCost = normalizePositiveInteger(
+      options.lspProcessAdmissionCost,
+      DEFAULT_LSP_PROCESS_ADMISSION_COST,
+    );
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
       services,
       actor,
       contextEconomy,
+      ...(this.resourceAdmissionController === undefined ? {} : { resourceAdmissionController: this.resourceAdmissionController }),
+      resourceAdmissionSessionId: this.sessionId ?? (this.actor.sessionId?.trim() || this.actor.clientId),
+      lspProcessAdmissionCost: this.lspProcessAdmissionCost,
       isToolExposed: (name) => this.isEffectivelyExposed(name),
       discoveryTools: () => this.allTools,
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),

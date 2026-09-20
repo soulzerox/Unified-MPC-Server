@@ -76,6 +76,8 @@ export interface McpServerOptions {
   readonly resourceAdmissionController?: ResourceAdmissionController;
   /** Weighted admission cost for one proxied child MCP call. */
   readonly mcpCallAdmissionCost?: number;
+  /** Weighted admission cost held while one LSP server process is alive. */
+  readonly lspProcessAdmissionCost?: number;
   /** Compatibility result guard; it must not apply elapsed-time behavior. */
   readonly runBudgetGuard?: RunBudgetGuard;
   /**
@@ -114,6 +116,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.maxMcpCallResultBytes === undefined ? {} : { maxMcpCallResultBytes: options.maxMcpCallResultBytes }),
     resourceAdmissionController: options.resourceAdmissionController ?? sharedProcessResourceAdmissionController(),
     ...(options.mcpCallAdmissionCost === undefined ? {} : { mcpCallAdmissionCost: options.mcpCallAdmissionCost }),
+    ...(options.lspProcessAdmissionCost === undefined ? {} : { lspProcessAdmissionCost: options.lspProcessAdmissionCost }),
   });
   const runBudgetGuard = options.runBudgetGuard ?? new RunBudgetGuard();
   let configuredPonytailMode = DEFAULT_PONYTAIL_MODE;

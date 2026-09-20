@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
+  DEFAULT_LSP_PROCESS_ADMISSION_COST,
   ResourceAdmissionController,
   sharedProcessResourceAdmissionController,
   tryAdmitChildMcpCall,
   tryAdmitDependencyBootstrap,
+  tryAdmitLspProcess,
 } from './resource-admission.js';
 import type { ResourcePressureProbe } from './resource-pressure.js';
 
@@ -84,6 +86,49 @@ describe('resource admission contract', () => {
       activeCostByClass: { dependency_bootstrap: 0, child_mcp_call: 3 },
       activeCostByWorkspace: { 'workspace-a': 3 },
     });
+  });
+
+  it('admits independent LSP processes across two workspaces without globally serializing them', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { lsp_process: 16 },
+    });
+
+    const first = tryAdmitLspProcess(controller, {
+      operationId: 'lsp-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_LSP_PROCESS_ADMISSION_COST,
+    });
+    const second = tryAdmitLspProcess(controller, {
+      operationId: 'lsp-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_LSP_PROCESS_ADMISSION_COST,
+    });
+    const sameWorkspaceRejected = tryAdmitLspProcess(controller, {
+      operationId: 'lsp-a-2',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-c',
+      cost: 1,
+    });
+
+    expect(first).toMatchObject({ admitted: true, lease: { resourceClass: 'lsp_process', workspaceId: 'workspace-a', cost: 8 } });
+    expect(second).toMatchObject({ admitted: true, lease: { resourceClass: 'lsp_process', workspaceId: 'workspace-b', cost: 8 } });
+    expect(sameWorkspaceRejected).toMatchObject({ admitted: false, code: 'RESOURCE_PRESSURE' });
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 16,
+      activeOperations: 2,
+      activeCostByClass: { lsp_process: 16 },
+      activeCostByWorkspace: { 'workspace-a': 8, 'workspace-b': 8 },
+      activeCostBySession: { 'session-a': 8, 'session-b': 8 },
+    });
+    if (!first.admitted || !second.admitted) throw new Error('expected both independent LSP processes to be admitted');
+    expect(controller.release(first.lease)).toBe(true);
+    expect(controller.release(second.lease)).toBe(true);
   });
 
   it('returns one process-owned default controller across runtime owners', () => {

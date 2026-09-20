@@ -35,6 +35,7 @@ export interface ThaiRagProviderRuntimeOptions {
   readonly now?: () => Date;
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly processIdentityProbe?: PosixProcessIdentityProbe;
+  readonly platform?: NodeJS.Platform;
 }
 
 export const THAI_RAG_OWNER_LOCK_CONFLICT_REASON = 'owner-lock';
@@ -66,7 +67,7 @@ export class ThaiRagProviderRuntime {
     this.pid = options.pid ?? process.pid;
     this.now = options.now ?? ((): Date => new Date());
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
-    this.processIdentityProbe = options.processIdentityProbe ?? createPosixProcessIdentityProbe(process.platform);
+    this.processIdentityProbe = options.processIdentityProbe ?? defaultProcessIdentityProbe(options.platform ?? process.platform);
     this.healthState = createProviderHealth(options.providerVersion, options.embeddingIndexGeneration);
   }
 
@@ -286,6 +287,13 @@ function degradationReasons(components: ThaiRagProviderComponents): string[] {
   if (!components.lexicalRetrievalAvailable) reasons.push('lexical-retrieval-unavailable');
   if (!components.semanticRetrievalAvailable) reasons.push('semantic-retrieval-unavailable');
   return reasons;
+}
+
+function defaultProcessIdentityProbe(platform: NodeJS.Platform): PosixProcessIdentityProbe {
+  if (platform === 'darwin' || platform === 'linux') return createPosixProcessIdentityProbe(platform);
+  // No trustworthy process-start probe exists for other supported runtimes yet.
+  // Returning an unverifiable identity keeps live owner locks fail-closed instead of crashing at construction time.
+  return async (): Promise<null> => null;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {

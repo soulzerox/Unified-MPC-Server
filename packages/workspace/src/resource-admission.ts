@@ -1,7 +1,7 @@
 import { ProcessMemoryPressureProbe } from './resource-pressure.js';
 import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
 
-export type ResourceAdmissionClass = 'dependency_bootstrap' | 'child_mcp_call';
+export type ResourceAdmissionClass = 'dependency_bootstrap' | 'child_mcp_call' | 'lsp_process';
 
 export interface ResourceAdmissionLimits {
   readonly globalCost: number;
@@ -40,10 +40,14 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
   resourceClassCost: Object.freeze({
     dependency_bootstrap: 8,
     child_mcp_call: 12,
+    // Preserve cross-project parallelism: two 8-cost LSP processes can run
+    // concurrently when global capacity permits; workspace/session caps stay 8.
+    lsp_process: 16,
   }),
 }) satisfies ResourceAdmissionLimits;
 
 export const DEFAULT_CHILD_MCP_CALL_ADMISSION_COST = 3;
+export const DEFAULT_LSP_PROCESS_ADMISSION_COST = 8;
 
 export interface ResourceAdmissionRequest {
   readonly operationId: string;
@@ -142,6 +146,7 @@ export class ResourceAdmissionController {
       resourceClassCost: {
         dependency_bootstrap: limits.resourceClassCost?.dependency_bootstrap ?? limits.globalCost,
         child_mcp_call: limits.resourceClassCost?.child_mcp_call ?? limits.globalCost,
+        lsp_process: limits.resourceClassCost?.lsp_process ?? limits.globalCost,
       },
     };
 
@@ -219,6 +224,7 @@ export class ResourceAdmissionController {
     const activeCostByClass: Record<ResourceAdmissionClass, number> = {
       dependency_bootstrap: 0,
       child_mcp_call: 0,
+      lsp_process: 0,
     };
     const activeCostByWorkspace: Record<string, number> = {};
     const activeCostBySession: Record<string, number> = {};
@@ -287,6 +293,13 @@ export function tryAdmitChildMcpCall(
   return controller.tryAcquire({ ...request, resourceClass: 'child_mcp_call' });
 }
 
+export function tryAdmitLspProcess(
+  controller: ResourceAdmissionController,
+  request: Omit<ResourceAdmissionRequest, 'resourceClass'>,
+): ResourceAdmissionDecision {
+  return controller.tryAcquire({ ...request, resourceClass: 'lsp_process' });
+}
+
 let processResourceAdmissionController: ResourceAdmissionController | undefined;
 
 /**
@@ -325,7 +338,7 @@ function effectiveGlobalCost(
   return Math.max(1, Math.floor(configuredGlobalCost * ratio));
 }
 
-const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'child_mcp_call'] as const;
+const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'child_mcp_call', 'lsp_process'] as const;
 
 function validateRequest(request: ResourceAdmissionRequest): 'invalid_request' | undefined {
   if (!isBoundedId(request.operationId)
@@ -344,7 +357,7 @@ function isBoundedId(value: unknown): value is string {
 }
 
 function isResourceClass(value: unknown): value is ResourceAdmissionClass {
-  return value === 'dependency_bootstrap' || value === 'child_mcp_call';
+  return value === 'dependency_bootstrap' || value === 'child_mcp_call' || value === 'lsp_process';
 }
 
 function normalizeSessionId(value: string | undefined): string {

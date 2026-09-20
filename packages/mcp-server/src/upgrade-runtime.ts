@@ -25,6 +25,7 @@ import {
   prepareDependencyBootstrap,
   type DependencyBootstrapPlan,
   type DependencyInstallCommand,
+  type ResourceAdmissionController,
 } from '@unified-mpc/workspace';
 import { z } from 'zod';
 import type { McpApplicationServices, McpToolDefinition } from './tools/tool-types.js';
@@ -196,6 +197,12 @@ const SEARCH_ENTRY_INDEX: ReadonlyMap<string, SearchEntryIndex> = new Map(
   SEARCH_CATALOG.map((entry) => [entry.name, indexSearchEntry(entry)]),
 );
 
+export interface UpgradeRuntimeOptions {
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  readonly resourceAdmissionSessionId?: string;
+  readonly lspProcessAdmissionCost?: number;
+}
+
 export class UpgradeRuntimeService {
   private readonly contextEngine: ContextEngine;
   private readonly actor: FileActor;
@@ -224,6 +231,7 @@ export class UpgradeRuntimeService {
     incrementalVerifier: IncrementalVerifier = new IncrementalVerifier(),
     private readonly activityTracker?: ActivityTracker,
     private readonly discoveryTools?: () => readonly McpToolDefinition[],
+    options: UpgradeRuntimeOptions = {},
   ) {
     this.actor = actor;
     this.incrementalVerifier = incrementalVerifier;
@@ -235,7 +243,12 @@ export class UpgradeRuntimeService {
     const platform = services.platform ?? services.sandboxRuntimeOptions?.platform ?? process.platform;
     this.eventLog = new EventLogCapabilityBackend({ ...(services.eventLogRuntimeOptions ?? {}), platform });
     this.database = new DatabaseRuntimeService(services, actor);
-    this.lsp = new LspRuntimeService(services, actor);
+    this.lsp = new LspRuntimeService(services, actor, {
+      platform,
+      ...(options.resourceAdmissionController === undefined ? {} : { resourceAdmissionController: options.resourceAdmissionController }),
+      ...(options.resourceAdmissionSessionId === undefined ? {} : { resourceAdmissionSessionId: options.resourceAdmissionSessionId }),
+      ...(options.lspProcessAdmissionCost === undefined ? {} : { lspProcessAdmissionCost: options.lspProcessAdmissionCost }),
+    });
     this.documents = new DocumentRuntimeService(services, actor);
     this.diagnostics = createPlatformDiagnosticsProvider(platform);
   }
@@ -456,9 +469,9 @@ export class UpgradeRuntimeService {
         }
         return this.database.query(input);
       case 'lsp_diagnostics':
-        return this.lsp.diagnostics(input);
+        return this.lsp.diagnostics(input, signal);
       case 'lsp_rename':
-        return this.lsp.renamePlan(input);
+        return this.lsp.renamePlan(input, signal);
       case 'git_worktree_remove':
         return this.gitWorktreeRemove(input, authorization);
       case 'pdf_extract_tables':

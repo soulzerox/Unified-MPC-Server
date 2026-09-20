@@ -5,7 +5,16 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
-import { hostPathApi, isAbsoluteHostPath, isHostPathWithin, resolveHostPath } from '@unified-mpc/workspace';
+import {
+  DEFAULT_LSP_PROCESS_ADMISSION_COST,
+  hostPathApi,
+  isAbsoluteHostPath,
+  isHostPathWithin,
+  resolveHostPath,
+  tryAdmitLspProcess,
+  type ResourceAdmissionController,
+  type ResourceAdmissionLease,
+} from '@unified-mpc/workspace';
 import type { McpApplicationServices } from './tools/tool-types.js';
 
 /**
@@ -33,6 +42,12 @@ export interface LspRuntimeOptions {
   readonly spawner?: (command: readonly string[]) => Result<ChildProcess>;
   /** Test/fixture override; production uses the actual host platform. */
   readonly platform?: NodeJS.Platform;
+  /** Process-owned admission controller shared with all other expensive subsystems. */
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  /** Stable caller/session owner used for admission accounting. */
+  readonly resourceAdmissionSessionId?: string;
+  /** Weighted cost charged while one LSP server process is alive. */
+  readonly lspProcessAdmissionCost?: number;
 }
 
 /** One JSON-RPC demultiplexer per server process. */
@@ -52,18 +67,43 @@ class LspConnection {
     this.notificationHandler = handler;
   }
 
-  public request(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  public request(method: string, params: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const cleanup = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const rejectPending = (error: Error): void => {
+        if (settled) return;
+        settled = true;
         this.responseWaiters.delete(id);
-        reject(new Error(`LSP ${method} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+        cleanup();
+        reject(error);
+      };
+      const onAbort = (): void => rejectPending(new Error(`LSP ${method} cancelled`));
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      timer = setTimeout(() => rejectPending(new Error(`LSP ${method} timed out after ${timeoutMs}ms`)), timeoutMs);
       this.responseWaiters.set(id, {
-        resolve: (value) => { clearTimeout(timer); resolve(value); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
+        resolve: (value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        },
+        reject: (error) => rejectPending(error),
       });
-      this.write({ jsonrpc: '2.0', id, method, params });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        this.write({ jsonrpc: '2.0', id, method, params });
+      } catch (error) {
+        rejectPending(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -122,7 +162,9 @@ export class LspRuntimeService {
   private readonly timeoutMs: number;
   private readonly spawner: (command: readonly string[]) => Result<ChildProcess>;
   private readonly platform: NodeJS.Platform;
-  private readonly published = new Map<string, unknown[]>();
+  private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
+  private readonly resourceAdmissionSessionId: string;
+  private readonly lspProcessAdmissionCost: number;
 
   public constructor(
     private readonly services: McpApplicationServices,
@@ -133,17 +175,20 @@ export class LspRuntimeService {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.spawner = options.spawner ?? defaultSpawner;
     this.platform = options.platform ?? process.platform;
+    this.resourceAdmissionController = options.resourceAdmissionController;
+    this.resourceAdmissionSessionId = options.resourceAdmissionSessionId ?? (actor.sessionId?.trim() || actor.clientId);
+    this.lspProcessAdmissionCost = normalizePositiveInteger(options.lspProcessAdmissionCost, DEFAULT_LSP_PROCESS_ADMISSION_COST);
   }
 
-  public async diagnostics(input: Record<string, unknown>): Promise<Result<unknown>> {
-    this.published.clear();
+  public async diagnostics(input: Record<string, unknown>, signal?: AbortSignal): Promise<Result<unknown>> {
+    const published = new Map<string, unknown[]>();
     const session = await this.startSession(input, (connection) => {
       connection.onNotification((method, params) => {
         if (method !== 'textDocument/publishDiagnostics') return;
         const uri = typeof params.uri === 'string' ? params.uri : undefined;
-        if (uri !== undefined) this.published.set(uri, Array.isArray(params.diagnostics) ? params.diagnostics : []);
+        if (uri !== undefined) published.set(uri, Array.isArray(params.diagnostics) ? params.diagnostics : []);
       });
-    });
+    }, signal);
     if (!session.ok) {
       if (session.error.message.startsWith('No language server configured for ')) {
         return ok({ tool: 'lsp_diagnostics', status: 'needs_setup', available: false, ready: false, executed: false, requirements: ['configured local language server'] });
@@ -151,24 +196,27 @@ export class LspRuntimeService {
       return session;
     }
     try {
-      await this.openFiles(session.value.connection, session.value.files, session.value.language);
-      await quietPeriod(DIAGNOSTICS_QUIET_MS, DIAGNOSTICS_MAX_WAIT_MS);
+      await this.openFiles(session.value.connection, session.value.files, session.value.language, signal);
+      await quietPeriod(DIAGNOSTICS_QUIET_MS, DIAGNOSTICS_MAX_WAIT_MS, signal);
       return ok({
         tool: 'lsp_diagnostics', status: 'ready', available: true,
         language: session.value.language, server: session.value.command[0],
-        filesChecked: this.published.size,
-        diagnostics: [...this.published.entries()].map(([uri, entries]) => ({ file: uriToPath(uri, this.platform), count: entries.length, entries })),
+        filesChecked: published.size,
+        diagnostics: [...published.entries()].map(([uri, entries]) => ({ file: uriToPath(uri, this.platform), count: entries.length, entries })),
       });
+    } catch (error) {
+      return this.operationFailure('diagnostics', error, signal);
     } finally {
       session.value.connection.close();
+      this.releaseAdmission(session.value.admissionLease);
     }
   }
 
-  public async renamePlan(input: Record<string, unknown>): Promise<Result<unknown>> {
+  public async renamePlan(input: Record<string, unknown>, signal?: AbortSignal): Promise<Result<unknown>> {
     const requestedFile = firstFile(input);
     const newName = readString(input.newName ?? input.new_name);
     if (requestedFile === undefined || newName === undefined) return err(appError('INVALID_INPUT', 'lsp_rename requires file and newName'));
-    const session = await this.startSession(input, () => undefined);
+    const session = await this.startSession(input, () => undefined, signal);
     if (!session.ok) {
       if (session.error.message.startsWith('No language server configured for ')) {
         return ok({ tool: 'lsp_rename', status: 'needs_setup', available: false, ready: false, executed: false, requirements: ['configured local language server'] });
@@ -176,27 +224,31 @@ export class LspRuntimeService {
       return session;
     }
     try {
-      await this.openFiles(session.value.connection, session.value.files, session.value.language);
+      await this.openFiles(session.value.connection, session.value.files, session.value.language, signal);
       const targetFile = session.value.files[0]!;
       const edit = await session.value.connection.request('textDocument/rename', {
         textDocument: { uri: pathToUri(targetFile, this.platform) },
         position: { line: typeof input.line === 'number' ? input.line : 0, character: typeof input.character === 'number' ? input.character : 0 },
         newName,
-      }, this.timeoutMs);
+      }, this.timeoutMs, signal);
       return ok({
         tool: 'lsp_rename', status: 'ready', available: true, applied: false, requiresApproval: true,
         language: session.value.language, file: requestedFile, newName, edit,
         applyHint: 'Review the workspace edit, then apply it through apply_patch/write_file after explicit user confirmation',
       });
+    } catch (error) {
+      return this.operationFailure('rename', error, signal);
     } finally {
       session.value.connection.close();
+      this.releaseAdmission(session.value.admissionLease);
     }
   }
 
   private async startSession(
     input: Record<string, unknown>,
     attach: (connection: LspConnection) => void,
-  ): Promise<Result<{ root: string; language: string; command: readonly string[]; files: readonly string[]; connection: LspConnection }>> {
+    signal?: AbortSignal,
+  ): Promise<Result<{ root: string; language: string; command: readonly string[]; files: readonly string[]; connection: LspConnection; admissionLease?: ResourceAdmissionLease }>> {
     const workspaceId = readString(input.workspaceId);
     if (workspaceId === undefined) return err(appError('INVALID_INPUT', 'LSP tools require workspaceId'));
 
@@ -215,9 +267,37 @@ export class LspRuntimeService {
     if (!root.ok) return root;
     const resolvedFiles = await this.resolveWorkspaceFiles(root.value, requestedFiles);
     if (!resolvedFiles.ok) return resolvedFiles;
+    if (signal?.aborted) return err(appError('PROCESS_TIMEOUT', 'LSP operation was cancelled before process start', true));
+
+    let admissionLease: ResourceAdmissionLease | undefined;
+    if (this.resourceAdmissionController !== undefined) {
+      const admission = tryAdmitLspProcess(this.resourceAdmissionController, {
+        operationId: `lsp:${randomUUID()}`,
+        workspaceId,
+        sessionId: this.resourceAdmissionSessionId,
+        cost: this.lspProcessAdmissionCost,
+      });
+      if (!admission.admitted) {
+        return err(appError(
+          admission.code,
+          `LSP process rejected by resource admission (${admission.reason})`,
+          admission.retryable,
+          {
+            reason: admission.reason,
+            requestedCost: admission.requestedCost,
+            activeCost: admission.snapshot.activeCost,
+            activeOperations: admission.snapshot.activeOperations,
+          },
+        ));
+      }
+      admissionLease = admission.lease;
+    }
 
     const spawned = this.spawner(command);
-    if (!spawned.ok) return spawned;
+    if (!spawned.ok) {
+      this.releaseAdmission(admissionLease);
+      return spawned;
+    }
     const connection = new LspConnection(spawned.value);
     attach(connection);
     try {
@@ -225,13 +305,16 @@ export class LspRuntimeService {
         processId: process.pid,
         rootUri: pathToUri(root.value, this.platform),
         capabilities: { textDocument: { synchronization: { dynamicRegistration: false } } },
-      }, this.timeoutMs);
+      }, this.timeoutMs, signal);
     } catch (error) {
       connection.close();
-      return err(appError('INTERNAL_ERROR', `Language server initialization failed: ${error instanceof Error ? error.message : String(error)}`, true));
+      this.releaseAdmission(admissionLease);
+      return signal?.aborted
+        ? err(appError('PROCESS_TIMEOUT', 'Language server initialization was cancelled', true))
+        : err(appError('INTERNAL_ERROR', `Language server initialization failed: ${error instanceof Error ? error.message : String(error)}`, true));
     }
     connection.notify('initialized', {});
-    return ok({ root: root.value, language, command, files: resolvedFiles.value, connection });
+    return ok({ root: root.value, language, command, files: resolvedFiles.value, connection, ...(admissionLease === undefined ? {} : { admissionLease }) });
   }
 
   private async resolveWorkspaceFiles(root: string, files: readonly string[]): Promise<Result<readonly string[]>> {
@@ -265,14 +348,26 @@ export class LspRuntimeService {
     return ok(resolved);
   }
 
-  private async openFiles(connection: LspConnection, files: readonly string[], language: string): Promise<void> {
+  private async openFiles(connection: LspConnection, files: readonly string[], language: string, signal?: AbortSignal): Promise<void> {
     for (const absolute of files) {
+      if (signal?.aborted) throw new Error('LSP file opening cancelled');
       const content = await readFile(absolute, 'utf8');
+      if (signal?.aborted) throw new Error('LSP file opening cancelled');
       if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) continue;
       connection.notify('textDocument/didOpen', {
         textDocument: { uri: pathToUri(absolute, this.platform), languageId: languageIdForFile(absolute, language), version: 1, text: content },
       });
     }
+  }
+
+  private releaseAdmission(lease: ResourceAdmissionLease | undefined): void {
+    if (lease === undefined || this.resourceAdmissionController === undefined) return;
+    this.resourceAdmissionController.release(lease);
+  }
+
+  private operationFailure(operation: string, error: unknown, signal?: AbortSignal): Result<never> {
+    if (signal?.aborted) return err(appError('PROCESS_TIMEOUT', `LSP ${operation} was cancelled`, true));
+    return err(appError('INTERNAL_ERROR', `LSP ${operation} failed: ${error instanceof Error ? error.message : String(error)}`, true));
   }
 
   private serverCommand(language: string): readonly string[] | undefined {
@@ -321,8 +416,28 @@ function defaultSpawner(command: readonly string[]): Result<ChildProcess> {
   }
 }
 
-function quietPeriod(quietMs: number, maxMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.min(quietMs, maxMs)));
+function quietPeriod(quietMs: number, maxMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('LSP diagnostics wait cancelled'));
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('LSP diagnostics wait cancelled'));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.min(quietMs, maxMs));
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  return Number.isInteger(value) && (value ?? 0) > 0 ? value! : fallback;
 }
 
 function firstFile(input: Record<string, unknown>): string | undefined {

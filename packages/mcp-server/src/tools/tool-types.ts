@@ -1,6 +1,7 @@
 import { err, ok, type InvocationAuthorization, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
+import type { ResourceAdmissionController } from '@unified-mpc/workspace';
 import type {
   AgentSwarmService,
   ApplyPatchRequest,
@@ -162,6 +163,12 @@ export interface McpToolContext {
   readonly actor: FileActor;
   readonly services: McpApplicationServices;
   readonly contextEconomy: ContextEconomyRuntime;
+  /** Process-owned controller shared across transports and expensive runtime subsystems. */
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  /** Stable caller/session owner used for admission accounting. */
+  readonly resourceAdmissionSessionId?: string;
+  /** Weighted cost of one live LSP server process. */
+  readonly lspProcessAdmissionCost?: number;
   /** Dynamic registry exposure predicate used by discovery/ranking helpers. */
   readonly isToolExposed?: (name: string) => boolean;
   /** Live canonical tool definitions used by discovery so meta-catalogs cannot drift from the registry. */

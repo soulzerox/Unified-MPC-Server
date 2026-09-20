@@ -903,6 +903,30 @@ function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
+function nestedValue(value: unknown, key: string, depth = 0): unknown {
+  if (depth > 5) return undefined;
+  const current = depth === 0 ? normalizeWorkerPayload(value) : value;
+  if (!isRecord(current)) return undefined;
+  if (isRecord(current.data)) {
+    const nested = nestedValue(current.data, key, depth + 1);
+    if (nested !== undefined) return nested;
+  }
+  if (isRecord(current.structuredContent)) {
+    const nested = nestedValue(current.structuredContent, key, depth + 1);
+    if (nested !== undefined) return nested;
+  }
+  return Object.hasOwn(current, key) ? current[key] : undefined;
+}
+
+function nestedString(value: unknown, key: string): string | undefined {
+  const nested = nestedValue(value, key);
+  return typeof nested === 'string' && nested.trim().length > 0 ? nested.trim() : undefined;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

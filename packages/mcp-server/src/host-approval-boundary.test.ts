@@ -90,12 +90,12 @@ describe('mandatory independent host approval', () => {
     expect(remembered.isError).not.toBe(true);
     expect(approvals).toEqual([]);
     expect(nativeCalls).toEqual([
-      { tool: 'recall', arguments: { query: '[decision] architecture decision', category: 'workspace:workspace-a', limit: 5 } },
-      { tool: 'remember', arguments: { content: '[decision] Prefer native curated RAG operations.', category: 'workspace:workspace-a' } },
+      { tool: 'recall', arguments: { query: '[decision] architecture decision', workspace_id: 'workspace-a', limit: 5 } },
+      { tool: 'remember', arguments: { content: '[decision] Prefer native curated RAG operations.', workspace_id: 'workspace-a' } },
     ]);
   });
 
-  it('scopes native Thai-RAG forget to the active workspace category', async () => {
+  it('scopes native Thai-RAG forget with canonical workspace_id and no legacy category', async () => {
     const nativeCalls: Array<{ tool: string; arguments: Readonly<Record<string, unknown>> }> = [];
     const services = servicesWithCalls([]);
     services.thaiRag = {
@@ -116,8 +116,29 @@ describe('mandatory independent host approval', () => {
     expect(result.isError).not.toBe(true);
     expect(nativeCalls).toEqual([{
       tool: 'forget',
-      arguments: { memory_id: 'memory-1', category: 'workspace:workspace-a' },
+      arguments: { memory_id: 'memory-1', workspace_id: 'workspace-a' },
     }]);
+  });
+
+  it('passes canonical workspace_id through native code search and context calls', async () => {
+    const nativeCalls: Array<{ tool: string; arguments: Readonly<Record<string, unknown>> }> = [];
+    const services = servicesWithCalls([]);
+    services.thaiRag = {
+      health: async (): Promise<ReturnType<typeof ok>> => ok({ providerId: 'thai-rag', state: 'ready', embeddingIndexGeneration: 1 }),
+      call: async (tool, args): Promise<ReturnType<typeof ok>> => {
+        nativeCalls.push({ tool, arguments: args });
+        return ok({ result: tool });
+      },
+    };
+    const registry = new ToolRegistry(services, actor, { activeWorkspaceScopeProvider: activeScope });
+
+    await registry.invoke('rag_code_search', { workspaceId: 'workspace-a', query: 'needle', pathFilter: 'src' });
+    await registry.invoke('rag_code_context', { workspaceId: 'workspace-a', filePath: 'src/index.ts', lineNumber: 4 });
+
+    expect(nativeCalls).toEqual([
+      { tool: 'code_search', arguments: { query: 'needle', path_filter: 'workspace-a/src', workspace_id: 'workspace-a' } },
+      { tool: 'code_context', arguments: { file_path: 'workspace-a/src/index.ts', line_number: 4, workspace_id: 'workspace-a' } },
+    ]);
   });
 
   it('allows an exact parent-policy read-only child MCP call without native host approval', async () => {

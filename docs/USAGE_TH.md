@@ -178,7 +178,7 @@ Unified-MPC-Server ใช้ Runtime Policy ที่ผู้ใช้แก้
 
 1. ก่อนแก้ source/config ครั้งแรก Client ต้องเรียก `workspace_bootstrap` พร้อม `workspaceId` ของโปรเจกต์
 2. Runtime จะอ่านและสร้าง fingerprint ของ `AGENTS.md` ถ้าไฟล์หายหรืออ่านไม่ได้ bootstrap จะ fail closed
-3. Runtime จะตรวจความพร้อมของ parent-owned native capabilities ตาม policy: workspace memory ใช้แบบเลือกเฉพาะและ `ON_DEMAND`; native Thai-RAG code context ใช้แบบ `SAFETY_PRE_CHECK` ส่วน `godkiller` ไม่เป็น dependency ของ bootstrap และถูกเรียกแบบ on-demand เมื่องานมีความเสี่ยงหรือ blast radius สูง
+3. Runtime จะตรวจความพร้อมของ parent-owned native capabilities ตาม policy: workspace memory ใช้แบบเลือกเฉพาะและ `ON_DEMAND`; native Thai-RAG code context ใช้แบบ `SAFETY_PRE_CHECK` และ startup จะตรวจ versioned provider handshake (version, compatibility range, fingerprint, capability, `workspace_id`, index-job contract, health และ generation) ส่วน `godkiller` ไม่เป็น dependency ของ bootstrap และถูกเรียกแบบ on-demand เมื่องานมีความเสี่ยงหรือ blast radius สูง
 4. MCP ที่มาจากไฟล์ใน workspace เช่น `.cursor/mcp.json` จะไม่สามารถแทนที่หรือ shadow native capabilities ของ Unified MCP ได้
 5. ก่อนแก้ development artifact แต่ละ path ต้องเรียก `prepare_code_change`; preflight จะเรียก `rag_pre_edit_context` ผ่าน native Thai-RAG โดยตรง หากเป็น refactor ใหญ่, migration, งาน security-sensitive หรือ blast radius ยังไม่ชัด ให้ตั้ง `runGodkillerSafetyCheck=true` เพื่อเพิ่ม curated `godkiller/gk_task(action=edit_safe)` โดย parent จะตรวจว่าไม่ใช่ workspace-scoped shadow และ contract ไม่ drift ก่อนเรียก
 6. สิทธิ์ pre-edit ใช้ได้หนึ่ง mutation ที่สำเร็จเท่านั้น จากนั้นต้องตรวจใหม่ก่อนแก้ path เดิมอีกครั้ง

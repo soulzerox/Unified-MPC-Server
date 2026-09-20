@@ -685,6 +685,26 @@ describe('LocalExtensionsService MCP bridge', () => {
     await manager.close();
   });
 
+  it('preserves raw tool schemas when schema validation is disabled', async () => {
+    const inputSchema = { type: 'array' };
+    const session: McpClientSession = {
+      listTools: async () => [{ name: 'legacy', description: 'Legacy tool', inputSchema }],
+      listResources: async () => [],
+      callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
+      close: async () => undefined,
+    };
+    const manager = new McpSessionManager({
+      validateToolSchemas: false,
+      clientFactory: { connect: async (): Promise<McpClientSession> => session },
+    });
+
+    await expect(manager.describe('mock', { command: 'node' })).resolves.toMatchObject({
+      ok: true,
+      value: { tools: [{ name: 'legacy', inputSchema }] },
+    });
+    await manager.close();
+  });
+
   it('rejects oversized results from the normal child fallback', async () => {
     const session: McpClientSession = {
       listTools: async () => [{ name: 'ping', description: 'Ping tool' }],

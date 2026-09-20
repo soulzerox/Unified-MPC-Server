@@ -4,6 +4,7 @@ import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permiss
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 
 const actor = { clientId: 'client-1', clientName: 'test', sessionId: 'session-a' };
+type GoalRequestCancellation = NonNullable<McpApplicationServices['goalRequestCancellation']>;
 
 function activeFence(): ReturnType<typeof ok> {
   return ok({ goalId: 'goal-1', leaseGeneration: 2 });
@@ -198,6 +199,158 @@ describe('scheduled continuation mutation fence', () => {
     expect(hostApproval).toHaveBeenCalledTimes(1);
     expect(callMcpTool).toHaveBeenCalledTimes(1);
     expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('detaches an admitted durable goal mutation from parent request abort but still honors explicit goal cancellation', async (): Promise<void> => {
+    let registeredController: AbortController | undefined;
+    let registeredRequestId: string | undefined;
+    let resolveDone: (() => void) | undefined;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    const cancellation = {
+      register(_goalId: string, requestId: string, controller: AbortController): ReturnType<GoalRequestCancellation['register']> {
+        registeredController = controller;
+        registeredRequestId = requestId;
+        return {
+          accepted: true,
+          done,
+          release(): void { resolveDone?.(); },
+        };
+      },
+      async cancelForGoal(goalId: string): ReturnType<GoalRequestCancellation['cancelForGoal']> {
+        const requested = registeredController === undefined ? 0 : 1;
+        registeredController?.abort();
+        if (requested > 0) await done;
+        return {
+          goalId,
+          requested,
+          stopped: requested,
+          remaining: 0,
+          timedOut: false,
+          requestIds: registeredRequestId === undefined ? [] : [registeredRequestId],
+        };
+      },
+    };
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let started = false;
+    const writeFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+      executionSignal = signal;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        signal?.addEventListener('abort', () => {
+          resolve(ok({ path: 'src/file.ts', bytesWritten: 0 }));
+        }, { once: true });
+      });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      goalRequestCancellation: cancellation,
+      file: { writeFile },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor);
+    const parent = new AbortController();
+
+    const pending = registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+      content: 'durable work',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    }, undefined, parent.signal);
+
+    for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();
+    expect(started).toBe(true);
+
+    parent.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+
+    await expect(cancellation.cancelForGoal('goal-1')).resolves.toMatchObject({
+      requested: 1,
+      stopped: 1,
+      remaining: 0,
+      timedOut: false,
+    });
+    expect(executionSignal?.aborted).toBe(true);
+
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('detaches an admitted durable goal mutation when only the response budget expires', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let settleWrite: (() => void) | undefined;
+    const writeFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+      executionSignal = signal;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        settleWrite = (): void => { resolve(ok({ path: 'src/file.ts', bytesWritten: 1 })); };
+      });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      file: { writeFile },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, { maxToolDurationMs: 10 });
+
+    const response = await registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+      content: 'durable work',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+
+    settleWrite?.();
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps ordinary unfenced mutation execution tied to the parent request lifetime', async (): Promise<void> => {
+    let executionSignal: AbortSignal | undefined;
+    let started = false;
+    const writeFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+      executionSignal = signal;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        signal?.addEventListener('abort', () => {
+          resolve(ok({ path: 'src/file.ts', bytesWritten: 0 }));
+        }, { once: true });
+      });
+    });
+    const registry = new ToolRegistry({ file: { writeFile } } as unknown as McpApplicationServices, actor);
+    const parent = new AbortController();
+
+    const pending = registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+      content: 'request scoped',
+    }, undefined, parent.signal);
+
+    for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();
+    expect(started).toBe(true);
+
+    parent.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(true);
   });
 
   it('rejects a stale opaque child MCP lease before child dispatch', async (): Promise<void> => {

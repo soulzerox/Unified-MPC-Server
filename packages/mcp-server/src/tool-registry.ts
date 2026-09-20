@@ -370,6 +370,7 @@ export class ToolRegistry {
     );
     const started = Date.now();
     let fencedMutationEnd: (() => Promise<void>) | undefined;
+    let durableGoalExecutionAdmitted = false;
     try {
       const tool = this.allTools.find((candidate) => candidate.name === name);
       if (tool === undefined || !this.isEffectivelyExposed(name)) {
@@ -597,6 +598,7 @@ export class ToolRegistry {
           callId,
           admitted.value.leaseGeneration,
         );
+        durableGoalExecutionAdmitted = true;
       }
       const resolvedActivityInput = this.withRememberedActivityTarget(
         name,
@@ -618,6 +620,7 @@ export class ToolRegistry {
         parentSignal,
         goalLease === undefined ? undefined : goalLease.goalId,
         callId,
+        durableGoalExecutionAdmitted,
       );
       const response = execution.response;
       const rawResultTargetSummary = summarizeStructuredResultTarget(response.structuredContent);
@@ -1223,6 +1226,7 @@ export class ToolRegistry {
     parentSignal?: AbortSignal,
     goalId?: string,
     callId?: string,
+    detachExecutionFromParent = false,
   ): Promise<BudgetedToolExecution> {
     const controller = new AbortController();
     const registration = goalId === undefined || callId === undefined || this.services.goalRequestCancellation === undefined
@@ -1248,8 +1252,14 @@ export class ToolRegistry {
         };
         onParentAbort = (): void => {
           deadlineExceeded = true;
-          controller.abort();
-          finish(mapError(appError('PROCESS_TIMEOUT', `MCP tool ${tool.name} was cancelled because its parent request ended; cancellation was requested, but an underlying operation may still be finishing. Check task/process status before retrying.`, true)));
+          if (!detachExecutionFromParent) controller.abort();
+          finish(mapError(appError(
+            'PROCESS_TIMEOUT',
+            detachExecutionFromParent
+              ? `MCP tool ${tool.name} lost its parent request after durable goal dispatch; the response observer detached while the admitted operation continues. Inspect the durable goal before retrying.`
+              : `MCP tool ${tool.name} was cancelled because its parent request ended; cancellation was requested, but an underlying operation may still be finishing. Check task/process status before retrying.`,
+            true,
+          )));
         };
         if (parentSignal?.aborted) {
           onParentAbort();
@@ -1265,8 +1275,14 @@ export class ToolRegistry {
         if (responseBudgetMs !== null) {
           timer = setTimeout(() => {
             deadlineExceeded = true;
-            controller.abort();
-            finish(mapError(appError('PROCESS_TIMEOUT', `MCP tool ${tool.name} exceeded the ${Math.ceil(responseBudgetMs / 1000)}s response budget; cancellation was requested, but an underlying operation may still be finishing. Check task/process status before retrying.`, true)));
+            if (!detachExecutionFromParent) controller.abort();
+            finish(mapError(appError(
+              'PROCESS_TIMEOUT',
+              detachExecutionFromParent
+                ? `MCP tool ${tool.name} exceeded the ${Math.ceil(responseBudgetMs / 1000)}s response budget after durable goal dispatch; the response observer detached while the admitted operation continues. Inspect the durable goal before retrying.`
+                : `MCP tool ${tool.name} exceeded the ${Math.ceil(responseBudgetMs / 1000)}s response budget; cancellation was requested, but an underlying operation may still be finishing. Check task/process status before retrying.`,
+              true,
+            )));
           }, responseBudgetMs);
         }
         try {

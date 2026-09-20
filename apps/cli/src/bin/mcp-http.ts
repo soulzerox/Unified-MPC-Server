@@ -5,7 +5,7 @@ import { createCrossClientHostMutationApprovalProvider, hostApprovalBrokerDirect
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
-import { createWebMcpHttpServerOptions } from '../commands/mcp-http.js';
+import { createWebMcpHttpServerOptions, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
 
 function envPort(): number {
@@ -42,37 +42,46 @@ async function main(): Promise<void> {
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
-  await runtime.initializeThaiRag();
   const brokeredHostMutationApprovalProvider = createCrossClientHostMutationApprovalProvider({
     directory: hostApprovalBrokerDirectory(dataPath),
   });
-  const handle = await startMcpHttp(createWebMcpHttpServerOptions({
-    port: envPort(),
-    services: runtime.services,
-    actor: runtime.actor,
-    activityTracker: runtime.activityTracker,
-    codexToolsEnabled: runtime.codexToolsEnabled,
-    ponytailModeProvider: () => runtime.ponytailMode,
-    profileProvider: runtime.profileProvider,
-    authorizationModeProvider: () => 'standard',
-    allowAiDeleteProvider: runtime.allowAiDeleteProvider,
-    destructivePolicyProvider: runtime.destructivePolicyProvider,
-    activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
-    toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
-    toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
-    allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
-    allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),
-  }, brokeredHostMutationApprovalProvider));
-  process.stderr.write(`Unified-MPC MCP HTTP ready endpoint=${handle.endpoint.href} identity=${new URL('/_unified-mpc/identity', handle.endpoint).href}\n`);
+  const startup = await startMcpHttpBeforeProvider({
+    start: async () => startMcpHttp(createWebMcpHttpServerOptions({
+      port: envPort(),
+      services: runtime.services,
+      actor: runtime.actor,
+      activityTracker: runtime.activityTracker,
+      codexToolsEnabled: runtime.codexToolsEnabled,
+      ponytailModeProvider: () => runtime.ponytailMode,
+      profileProvider: runtime.profileProvider,
+      authorizationModeProvider: () => 'standard',
+      allowAiDeleteProvider: runtime.allowAiDeleteProvider,
+      destructivePolicyProvider: runtime.destructivePolicyProvider,
+      activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
+      toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
+      toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
+      allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
+      allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),
+    }, brokeredHostMutationApprovalProvider)),
+    initializeProvider: runtime.initializeThaiRag,
+  });
+  process.stderr.write(`Unified-MPC MCP HTTP ready endpoint=${startup.handle.endpoint.href} identity=${new URL('/_unified-mpc/identity', startup.handle.endpoint).href} thai-rag=starting\n`);
 
   let closing = false;
+  let exitCode = 0;
+  void startup.providerReady.then(() => {
+    process.stderr.write('Unified-MPC Thai-RAG startup state=ready\n');
+  }).catch((error: unknown) => {
+    exitCode = 1;
+    process.stderr.write(`Unified-MPC Thai-RAG startup state=degraded error=${error instanceof Error ? error.message : String(error)}\n`);
+  });
   const close = async (): Promise<void> => {
     if (closing) return;
     closing = true;
-    await handle.close().catch(() => undefined);
+    await startup.handle.close().catch(() => undefined);
     await runtime.close().catch(() => undefined);
     database.close();
-    process.exit(0);
+    process.exit(exitCode);
   };
   process.once('SIGINT', () => { void close(); });
   process.once('SIGTERM', () => { void close(); });

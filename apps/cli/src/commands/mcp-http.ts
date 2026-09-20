@@ -22,9 +22,43 @@ export interface McpHttpCommandResult {
   readonly handle: McpHttpServerHandle;
 }
 
+export type McpHttpProviderStartupState =
+  | { readonly phase: 'starting' }
+  | { readonly phase: 'ready' }
+  | { readonly phase: 'degraded'; readonly error: string };
+
+export interface McpHttpProviderStartup {
+  readonly handle: McpHttpServerHandle;
+  readonly providerReady: Promise<void>;
+  state(): McpHttpProviderStartupState;
+}
+
+export interface McpHttpProviderStartupOptions {
+  start(): Promise<McpHttpServerHandle>;
+  initializeProvider(): Promise<void>;
+}
+
 const defaultStarter: McpHttpServerStarter = {
   start: startMcpHttp,
 };
+
+export async function startMcpHttpBeforeProvider(
+  options: McpHttpProviderStartupOptions,
+): Promise<McpHttpProviderStartup> {
+  const handle = await options.start();
+  let state: McpHttpProviderStartupState = { phase: 'starting' };
+  const providerReady = options.initializeProvider().then(
+    () => {
+      state = { phase: 'ready' };
+    },
+    (error: unknown) => {
+      state = { phase: 'degraded', error: error instanceof Error ? error.message : String(error) };
+      throw error;
+    },
+  );
+  void providerReady.catch(() => undefined);
+  return { handle, providerReady, state: (): McpHttpProviderStartupState => state };
+}
 
 export type WebMcpHttpServerOptions = Omit<McpHttpServerOptions, 'hostMutationApprovalProvider'> & {
   readonly hostMutationApprovalProvider?: NonNullable<McpHttpServerOptions['hostMutationApprovalProvider']>;

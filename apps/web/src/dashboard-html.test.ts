@@ -52,6 +52,17 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).not.toContain("active ? 'Active' : 'Inactive'");
   });
 
+  it('does not present generic control-plane reachability or static topology as subsystem health', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('Control Plane & Gateway Status');
+    expect(html).toContain('Control Plane Reachability');
+    expect(html).toContain('Control Plane Architecture');
+    expect(html).toContain('MCP Clients');
+    expect(html).toContain('Web / CLI / IDEs');
+    expect(html).not.toContain('Subsystem Status & Downstream Servers');
+    expect(html).not.toContain('Obsidian Control Plane Topology');
+  });
+
   it('renders a user-editable P1-Pn policy editor with reorder and save controls', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('policy-add-btn');

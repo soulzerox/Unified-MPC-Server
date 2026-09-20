@@ -89,4 +89,81 @@ describe('resource admission contract', () => {
     expect(sharedProcessResourceAdmissionController()).toBe(sharedProcessResourceAdmissionController());
   });
 
+  it('limits one session across different workspaces and exposes bounded session usage', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 3,
+      maxOperations: 4,
+      resourceClassCost: { dependency_bootstrap: 8, child_mcp_call: 8 },
+    });
+
+    const first = tryAdmitChildMcpCall(controller, {
+      operationId: 'session-a-call-1',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: 3,
+    });
+    const rejected = tryAdmitChildMcpCall(controller, {
+      operationId: 'session-a-call-2',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-a',
+      cost: 1,
+    });
+    const otherSession = tryAdmitChildMcpCall(controller, {
+      operationId: 'session-b-call-1',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: 1,
+    });
+
+    expect(first).toMatchObject({ admitted: true, lease: { sessionId: 'session-a' } });
+    expect(rejected).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'session_cost_exhausted',
+    });
+    expect(otherSession).toMatchObject({ admitted: true, lease: { sessionId: 'session-b' } });
+    expect(controller.snapshot()).toMatchObject({
+      activeCostBySession: { 'session-a': 3, 'session-b': 1 },
+    });
+  });
+
+  it('caps one admission class without blocking capacity reserved for another class', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { dependency_bootstrap: 4, child_mcp_call: 3 },
+    });
+
+    const child = tryAdmitChildMcpCall(controller, {
+      operationId: 'child-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: 3,
+    });
+    const childRejected = tryAdmitChildMcpCall(controller, {
+      operationId: 'child-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: 1,
+    });
+    const bootstrap = tryAdmitDependencyBootstrap(controller, {
+      operationId: 'bootstrap-a',
+      workspaceId: 'workspace-b',
+      sessionId: 'system',
+      cost: 1,
+    });
+
+    expect(child).toMatchObject({ admitted: true });
+    expect(childRejected).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'resource_class_cost_exhausted',
+    });
+    expect(bootstrap).toMatchObject({ admitted: true, lease: { resourceClass: 'dependency_bootstrap' } });
+  });
+
 });

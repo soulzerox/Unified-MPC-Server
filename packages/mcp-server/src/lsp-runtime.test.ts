@@ -121,6 +121,9 @@ describe('LspRuntimeService', () => {
 
     cancellation.abort();
     await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT', recoverable: true } });
+    for (let attempt = 0; attempt < 50 && controller.snapshot().activeOperations > 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
   });
 

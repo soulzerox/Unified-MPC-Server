@@ -208,7 +208,6 @@ export class LspRuntimeService {
       return this.operationFailure('diagnostics', error, signal);
     } finally {
       session.value.connection.close();
-      this.releaseAdmission(session.value.admissionLease);
     }
   }
 
@@ -240,7 +239,6 @@ export class LspRuntimeService {
       return this.operationFailure('rename', error, signal);
     } finally {
       session.value.connection.close();
-      this.releaseAdmission(session.value.admissionLease);
     }
   }
 
@@ -248,7 +246,7 @@ export class LspRuntimeService {
     input: Record<string, unknown>,
     attach: (connection: LspConnection) => void,
     signal?: AbortSignal,
-  ): Promise<Result<{ root: string; language: string; command: readonly string[]; files: readonly string[]; connection: LspConnection; admissionLease?: ResourceAdmissionLease }>> {
+  ): Promise<Result<{ root: string; language: string; command: readonly string[]; files: readonly string[]; connection: LspConnection }>> {
     const workspaceId = readString(input.workspaceId);
     if (workspaceId === undefined) return err(appError('INVALID_INPUT', 'LSP tools require workspaceId'));
 
@@ -298,8 +296,16 @@ export class LspRuntimeService {
       this.releaseAdmission(admissionLease);
       return spawned;
     }
+    if (admissionLease !== undefined) {
+      spawned.value.once('close', () => this.releaseAdmission(admissionLease));
+    }
     const connection = new LspConnection(spawned.value);
-    attach(connection);
+    try {
+      attach(connection);
+    } catch (error) {
+      connection.close();
+      return err(appError('INTERNAL_ERROR', `Language server session setup failed: ${error instanceof Error ? error.message : String(error)}`, true));
+    }
     try {
       await connection.request('initialize', {
         processId: process.pid,
@@ -308,13 +314,12 @@ export class LspRuntimeService {
       }, this.timeoutMs, signal);
     } catch (error) {
       connection.close();
-      this.releaseAdmission(admissionLease);
       return signal?.aborted
         ? err(appError('PROCESS_TIMEOUT', 'Language server initialization was cancelled', true))
         : err(appError('INTERNAL_ERROR', `Language server initialization failed: ${error instanceof Error ? error.message : String(error)}`, true));
     }
     connection.notify('initialized', {});
-    return ok({ root: root.value, language, command, files: resolvedFiles.value, connection, ...(admissionLease === undefined ? {} : { admissionLease }) });
+    return ok({ root: root.value, language, command, files: resolvedFiles.value, connection });
   }
 
   private async resolveWorkspaceFiles(root: string, files: readonly string[]): Promise<Result<readonly string[]>> {

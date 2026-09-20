@@ -367,8 +367,13 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
         return createLegacySession(request);
       }
 
-      const session = sessions.get(sessionId);
-      if (session === undefined) return sessionNotFoundResponse();
+      const lookup = sessions.getWithEviction(sessionId);
+      if (lookup.state === 'evicted') {
+        await trackSessionEviction(lookup.eviction.key, lookup.eviction.value, 'idle_ttl');
+        return sessionNotFoundResponse();
+      }
+      if (lookup.state === 'missing') return sessionNotFoundResponse();
+      const session = lookup.value;
 
       if (request.method === 'DELETE') explicitCloseReasons.set(sessionId, 'client_delete');
       try {

@@ -294,6 +294,46 @@ describe('MCP tool registry', () => {
     expect(calls.some((call) => Object.values(call.args).includes(`workspace:${workspaceId}`))).toBe(false);
   });
 
+  it('preserves distinct provider memory error semantics at the public RAG boundary', async () => {
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const reasons = ['memory_not_found', 'scope_denied', 'memory_reconciliation_pending'] as const;
+    const expectedCodes = ['FILE_NOT_FOUND', 'PERMISSION_DENIED', 'CONFLICT'] as const;
+    let callIndex = 0;
+    const registry = new ToolRegistry({
+      thaiRag: {
+        async call(): Promise<ReturnType<typeof err>> {
+          const reason = reasons[callIndex++] ?? 'memory_reconciliation_pending';
+          const code = reason === 'scope_denied' ? 'PERMISSION_DENIED' : 'CONFLICT';
+          return err(appError(code, reason, true, {
+            reason,
+            providerStatus: reason === 'memory_reconciliation_pending' ? 'degraded' : 'error',
+          }));
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    for (let index = 0; index < reasons.length; index += 1) {
+      const result = await registry.invoke('rag_forget', {
+        workspaceId,
+        memoryId: `mem-${index}`,
+        userConfirmed: true,
+      });
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: expectedCodes[index],
+            details: { reason: reasons[index] },
+          },
+        },
+      });
+    }
+  });
+
   it('passes the active workspace root to native code indexing', async () => {
     const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
     const workspaceId = '11111111-1111-4111-8111-111111111111';

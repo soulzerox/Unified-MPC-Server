@@ -11,7 +11,6 @@ import {
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
-  THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_EMBEDDING_COMPATIBILITY,
   THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
@@ -114,15 +113,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const toolNames = new Set(described.value.tools.map((tool) => tool.name));
     const missing = [...REQUIRED_TOOLS].filter((tool) => !toolNames.has(tool));
-    const contractDrift = described.value.tools.flatMap((tool) => {
-      const operation = THAI_RAG_CONFORMANCE_FIXTURE.operations[tool.name as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations];
-      if (operation === undefined) return [];
-      return validateToolSchema(tool.name, isRecord(tool.inputSchema) ? tool.inputSchema : {}, operation);
-    });
-    if (missing.length > 0 || contractDrift.length > 0) {
+    if (missing.length > 0) {
       await this.sessions.close().catch(() => undefined);
-      const reason = missing.length > 0 ? 'missing-capability' : 'contract-drift';
-      return err(appError('CONFLICT', `Native Thai-RAG worker handshake ${reason}: ${[...missing, ...contractDrift].join(', ')}`, true, { reason, missing: missing.join(','), scopeDrift: contractDrift.join(','), contractDrift: contractDrift.join(',') }));
+      return err(appError('CONFLICT', `Native Thai-RAG worker handshake missing capabilities: ${missing.join(', ')}`, true, { reason: 'missing-capability', missing: missing.join(',') }));
     }
     const version = await this.callWorker('version', {}, signal);
     if (!version.ok) {
@@ -672,19 +665,6 @@ function parseProviderComponents(value: Record<string, unknown>): ThaiRagProvide
     semanticRetrievalAvailable: value.semantic_retrieval_available,
     activeJobs: value.active_jobs,
   };
-}
-
-function validateToolSchema(
-  name: string,
-  value: Record<string, unknown>,
-  operation: { readonly scope: string; readonly required?: readonly string[] },
-): string[] {
-  const properties = isRecord(value.properties) ? value.properties : undefined;
-  const required = Array.isArray(value.required) && value.required.every((field) => typeof field === 'string') ? value.required : undefined;
-  if (operation.scope !== 'workspace_id') return [];
-  if (properties === undefined || required === undefined) return [name];
-  if (!isRecord(properties.workspace_id) || !required.includes('workspace_id')) return [name];
-  return (operation.required ?? []).filter((field) => !isRecord(properties[field]) || !required.includes(field)).map(() => name);
 }
 
 function embeddingCompatibility(contractVersion: string): {

@@ -556,12 +556,12 @@ function normalizeExternalToolCatalog(tools: readonly McpToolSummary[], validate
     names.add(name);
     const description = tool.description.replace(/\s+/g, ' ').trim().slice(0, 4096);
     const normalized: { name: string; description: string; inputSchema?: unknown; outputSchema?: unknown } = { name, description };
-    if (validateSchemas && tool.inputSchema !== undefined) {
-      validateExternalSchema(tool.inputSchema, name, 'input');
+    if (tool.inputSchema !== undefined) {
+      if (validateSchemas) validateExternalSchema(tool.inputSchema, name, 'input');
       normalized.inputSchema = tool.inputSchema;
     }
-    if (validateSchemas && tool.outputSchema !== undefined) {
-      validateExternalSchema(tool.outputSchema, name, 'output');
+    if (tool.outputSchema !== undefined) {
+      if (validateSchemas) validateExternalSchema(tool.outputSchema, name, 'output');
       normalized.outputSchema = tool.outputSchema;
     }
     return normalized;

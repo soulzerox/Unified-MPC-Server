@@ -782,7 +782,7 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
-  it('rejects provider schema drift when required workspace field is omitted', async () => {
+  it('accepts provider schema drift when the versioned handshake is valid', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     const driver = new NativeThaiRagProviderDriver({
@@ -792,11 +792,11 @@ describe('NativeThaiRagProviderDriver', () => {
       clientFactory: clientFactory({ schemaDrift: 'recall' }),
     });
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
-    expect(started).toMatchObject({ ok: false, error: { details: { reason: 'contract-drift', contractDrift: 'recall' } } });
+    expect(started.ok).toBe(true);
     await driver.stop();
   });
 
-  it('rejects provider scope drift even when operation names match', async () => {
+  it('accepts provider scope schema drift when the versioned handshake is valid', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     const driver = new NativeThaiRagProviderDriver({
@@ -806,7 +806,7 @@ describe('NativeThaiRagProviderDriver', () => {
       clientFactory: clientFactory({ scopeDrift: 'recall' }),
     });
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
-    expect(started).toMatchObject({ ok: false, error: { details: { reason: 'contract-drift', scopeDrift: 'recall' } } });
+    expect(started.ok).toBe(true);
     await driver.stop();
   });
 

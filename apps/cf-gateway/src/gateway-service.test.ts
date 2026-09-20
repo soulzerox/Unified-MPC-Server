@@ -68,6 +68,26 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     expect(gateway.status().state).toBe('SESSION_CONNECTED');
   });
 
+  it('does not treat a local session lease as ChatGPT connector registration', async () => {
+    const gateway = new GatewayService({
+      tunnelProvider: async (): Promise<TunnelHandle> => tunnel(),
+      healthProbe: async (): Promise<number> => 200,
+    });
+    await gateway.start();
+    await gateway.connectSession();
+
+    expect(gateway.status()).toMatchObject({
+      state: 'SESSION_CONNECTED',
+      sessionState: 'leased',
+      connectorRegistration: {
+        state: 'unverified',
+        reason: 'host_projection_unavailable',
+        action: 'reconnect_chatgpt_session',
+      },
+      endToEndState: 'unverified',
+    });
+  });
+
   it('does not resurrect a bridge after a pending start is stopped', async () => {
     let release: ((url: string) => void) | undefined;
     const pending = new Promise<string>((resolve) => { release = resolve; });
@@ -245,6 +265,42 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     await expect.poll(() => starts, { timeout: 500 }).toBeGreaterThanOrEqual(2);
     await expect.poll(() => gateway.status().state, { timeout: 500 }).toBe('SESSION_CONNECTED');
     expect(stops).toBeGreaterThanOrEqual(1);
+    await gateway.stop();
+  });
+
+  it('reports connector recovery as stale after a backend restart', async () => {
+    let starts = 0;
+    let probes = 0;
+    const gateway = new GatewayService({
+      healthMonitorIntervalMs: 10,
+      healthFailureThreshold: 1,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 20,
+      reconnectJitterRatio: 0,
+      tunnelProviderFactory: () => async (): Promise<TunnelHandle> => {
+        starts += 1;
+        return tunnel();
+      },
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return probes === 2 ? 503 : 200;
+      },
+    });
+
+    await gateway.start();
+    await gateway.connectSession();
+    await expect.poll(() => starts, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => gateway.status().state, { timeout: 500 }).toBe('SESSION_CONNECTED');
+
+    expect(gateway.status()).toMatchObject({
+      sessionState: 'leased',
+      connectorRegistration: {
+        state: 'stale',
+        reason: 'backend_restart',
+        action: 'reconnect_chatgpt_session',
+      },
+      endToEndState: 'unverified',
+    });
     await gateway.stop();
   });
 

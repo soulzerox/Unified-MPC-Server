@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { prepareManagedWorktreeDependencyBootstrap } from './dependency-cache-lifecycle.js';
+import { ResourceAdmissionController } from './resource-admission.js';
 
 const temporaryRoots: string[] = [];
 
@@ -19,6 +20,83 @@ afterEach(async () => {
 });
 
 describe('managed worktree dependency lifecycle contract', () => {
+  it('fails closed before dependency probing when weighted admission is exhausted', async () => {
+    const root = await pnpmWorktree();
+    const sharedCacheRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-dependency-shared-'));
+    temporaryRoots.push(sharedCacheRoot);
+    const controller = new ResourceAdmissionController({ globalCost: 1, workspaceCost: 1, maxOperations: 1 });
+    const held = controller.tryAcquire({
+      operationId: 'held-bootstrap',
+      workspaceId: 'workspace-a',
+      resourceClass: 'dependency_bootstrap',
+      cost: 1,
+    });
+    if (!held.admitted) throw new Error('expected held admission');
+
+    const input: Parameters<typeof prepareManagedWorktreeDependencyBootstrap>[0] = {
+      lifecycle: 'goal' as const,
+      rootPath: root,
+      sharedCacheRoot,
+      worktree: { isNew: true },
+      admission: {
+        controller,
+        operationId: 'blocked-bootstrap',
+        workspaceId: 'workspace-b',
+        cost: 1,
+      },
+    };
+
+    await expect(prepareManagedWorktreeDependencyBootstrap(input)).rejects.toMatchObject({
+      code: 'RESOURCE_PRESSURE',
+      reason: 'global_cost_exhausted',
+      lifecycle: 'goal',
+    });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 1, activeOperations: 1, rejected: 1 });
+  });
+
+  it('releases weighted capacity after a successful managed bootstrap', async () => {
+    const root = await pnpmWorktree();
+    const sharedCacheRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-dependency-shared-'));
+    temporaryRoots.push(sharedCacheRoot);
+    const controller = new ResourceAdmissionController({ globalCost: 2, workspaceCost: 2, maxOperations: 1 });
+    const input: Parameters<typeof prepareManagedWorktreeDependencyBootstrap>[0] = {
+      lifecycle: 'delegated' as const,
+      rootPath: root,
+      sharedCacheRoot,
+      worktree: { isNew: true },
+      admission: { controller, operationId: 'bootstrap-a', workspaceId: 'workspace-a', cost: 2 },
+    };
+
+    const result = await prepareManagedWorktreeDependencyBootstrap(input);
+
+    expect(result.plan.status).toBe('ready');
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0, rejected: 0 });
+  });
+
+  it('releases weighted capacity when dependency probing errors', async () => {
+    const root = await pnpmWorktree();
+    const sharedCacheRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-dependency-shared-'));
+    temporaryRoots.push(sharedCacheRoot);
+    const controller = new ResourceAdmissionController({ globalCost: 2, workspaceCost: 2, maxOperations: 1 });
+    const input: Parameters<typeof prepareManagedWorktreeDependencyBootstrap>[0] = {
+      lifecycle: 'goal' as const,
+      rootPath: root,
+      sharedCacheRoot,
+      worktree: { isNew: true },
+      fileSystem: {
+        exists: async () => { throw new Error('probe failed'); },
+        readText: async () => '',
+        lstat: async () => ({ isSymbolicLink: () => false }),
+        readLink: async () => '',
+        ensureDirectory: async () => undefined,
+        removePath: async () => undefined,
+      },
+      admission: { controller, operationId: 'bootstrap-error', workspaceId: 'workspace-a', cost: 2 },
+    };
+
+    await expect(prepareManagedWorktreeDependencyBootstrap(input)).rejects.toThrow('probe failed');
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0, rejected: 0 });
+  });
   it('routes goal and delegated bootstrap through the same #34 policy without package-manager branching', async () => {
     const sharedCacheRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-dependency-shared-'));
     temporaryRoots.push(sharedCacheRoot);

@@ -37,7 +37,7 @@ export function renderDashboardViewsHtml(): string {
       <section>
         <div class="card">
           <div class="card-header">
-            <h2>Subsystem Status & Downstream Servers</h2>
+            <h2>Control Plane & Gateway Status</h2>
             <button class="btn btn-secondary btn-sm" id="refresh-status-btn">Refresh</button>
           </div>
           <div id="servers-telemetry" class="mono" style="font-size: 12px; color: var(--text-secondary);">

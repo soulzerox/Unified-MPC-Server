@@ -313,7 +313,7 @@ export async function resolveDependencyStrategy(input: ResolveDependencyStrategy
     migration: classifyExistingWorktree(input.worktree),
     metadata,
     blockingReasons,
-    runtimeVersions: input.runtimeVersions,
+    ...(input.runtimeVersions === undefined ? {} : { runtimeVersions: input.runtimeVersions }),
   });
 }
 

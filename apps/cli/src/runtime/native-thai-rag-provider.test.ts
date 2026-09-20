@@ -4,6 +4,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '@unified-mpc/extensions';
 import {
+  THAI_RAG_CANCEL_CAPABILITY,
+  THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
   THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_CONTRACT_FINGERPRINT,
 } from '@unified-mpc/thai-rag';
@@ -66,6 +68,154 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(calls.map(({ tool }) => tool)).toEqual(expect.arrayContaining(['remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius', 'code_index']));
     expect(calls.filter(({ tool }) => THAI_RAG_CONFORMANCE_FIXTURE.operations[tool as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations].scope === 'workspace_id').every(({ args }) => args.workspace_id === workspaceId)).toBe(true);
     await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: 'missing' })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await driver.stop();
+  });
+
+  it('mirrors provider-owned cancellable background jobs into durable Unified job status', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    let statusPolls = 0;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      indexJobPollMs: 10,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index') {
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'index_status') {
+            statusPolls += 1;
+            return success('index_status', {
+              status: 'ok',
+              data: statusPolls < 2
+                ? { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId }
+                : { status: 'done', job_id: 'idx_provider_1', workspace_id: workspaceId, result: { indexed: 3 } },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const started = await driver.call('code_index', {
+      workspace_path: workspaceRoot,
+      workspace_id: workspaceId,
+      force: false,
+      background: true,
+    });
+    expect(started).toMatchObject({ ok: true, value: { status: 'running', workspace_id: workspaceId } });
+    if (!started.ok || !isRecord(started.value) || typeof started.value.job_id !== 'string') throw new Error('missing local job id');
+    const localJobId = started.value.job_id;
+
+    await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId })).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'running', providerJobId: 'idx_provider_1' },
+    });
+
+    let terminal: Awaited<ReturnType<typeof driver.call>> | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      terminal = await driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId });
+      if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
+    }
+    expect(terminal).toMatchObject({ ok: true, value: { status: 'completed', result: { indexed: 3 } } });
+    expect(calls.find(({ tool }) => tool === 'code_index')?.args).toMatchObject({
+      workspace_id: workspaceId,
+      background: true,
+    });
+    expect(calls.filter(({ tool }) => tool === 'index_status').length).toBeGreaterThan(0);
+    await driver.stop();
+  });
+
+  it('forwards durable job cancellation to the provider and waits for terminal cancellation', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    let cancellationRequested = false;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      indexJobPollMs: 10,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index') {
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_cancel', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'cancel_index') {
+            cancellationRequested = true;
+            return success('cancel_index', {
+              status: 'ok',
+              data: { status: 'cancelling', job_id: 'idx_provider_cancel', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'index_status') {
+            return success('index_status', {
+              status: 'ok',
+              data: cancellationRequested
+                ? { status: 'cancelled', job_id: 'idx_provider_cancel', workspace_id: workspaceId, result: { cancelled: true } }
+                : { status: 'running', job_id: 'idx_provider_cancel', workspace_id: workspaceId },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const started = await driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId, background: true });
+    if (!started.ok || !isRecord(started.value) || typeof started.value.job_id !== 'string') throw new Error('missing local job id');
+    const localJobId = started.value.job_id;
+
+    await expect(driver.call('cancel_index', { workspace_id: workspaceId, job_id: localJobId })).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'cancelling', providerJobId: 'idx_provider_cancel' },
+    });
+    expect(calls.find(({ tool }) => tool === 'cancel_index')?.args).toEqual({
+      job_id: 'idx_provider_cancel',
+      workspace_id: workspaceId,
+    });
+
+    let terminal: Awaited<ReturnType<typeof driver.call>> | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      terminal = await driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId });
+      if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'cancelled') break;
+    }
+    expect(terminal).toMatchObject({ ok: true, value: { status: 'cancelled', result: { cancelled: true } } });
+    await driver.stop();
+  });
+
+  it('fails startup when a cancellable handshake claims cancel_index but the worker tool is absent', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: cancellableHandshake(), includeCancelIndex: false }),
+    });
+
+    await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({
+      ok: false,
+      error: { details: { reason: 'missing-capability', missing: 'cancel_index' } },
+    });
     await driver.stop();
   });
 
@@ -1043,18 +1193,20 @@ function clientFactory(options: {
   readonly schemaDrift?: string;
   readonly oldProviderSchema?: boolean;
   readonly jsonTextResponses?: boolean;
+  readonly includeCancelIndex?: boolean;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
       options.onConnect?.(config);
       return {
         async listTools(): Promise<Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>> {
-          return productionToolNames.map((name) => ({
+          const advertisedTools = options.includeCancelIndex ? [...productionToolNames, 'cancel_index'] : [...productionToolNames];
+          return advertisedTools.map((name) => ({
             name,
             description: name,
             inputSchema: options.oldProviderSchema && name === 'code_index'
             ? { type: 'array' }
-            : productionToolNames.includes(name as typeof productionToolNames[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
+            : advertisedTools.includes(name) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
             ? name === 'record_event'
               ? { type: 'object', properties: { workspace_id: { type: 'string' }, event_type: { type: 'string' }, content: { type: 'string' } }, required: ['workspace_id', 'event_type', 'content'] }
                 : { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }
@@ -1124,6 +1276,20 @@ function defaultHandshake(): Record<string, unknown> {
       embedding: 'nomic-embed-text-v2-moe',
       index: '1',
       storage: 'sqlite',
+    },
+  };
+}
+
+function cancellableHandshake(): Record<string, unknown> {
+  const base = defaultHandshake();
+  return {
+    ...base,
+    contract_fingerprint: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+    index_job_contract_version: '1.1',
+    capabilities: [...productionToolNames, THAI_RAG_CANCEL_CAPABILITY],
+    generation: {
+      ...(base.generation as Record<string, unknown>),
+      contract: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
     },
   };
 }

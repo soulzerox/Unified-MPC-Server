@@ -9,6 +9,14 @@ interface RetainedValue<V> {
   readonly touchedAt: number;
 }
 
+export type BoundedRetentionEvictionReason = 'ttl' | 'capacity';
+
+export interface BoundedRetentionEviction<K, V> {
+  readonly key: K;
+  readonly value: V;
+  readonly reason: BoundedRetentionEvictionReason;
+}
+
 /** Small LRU+TTL store for transient runtime state that must not grow forever. */
 export class BoundedRetentionMap<K, V> {
   private readonly values = new Map<K, RetainedValue<V>>();
@@ -52,14 +60,19 @@ export class BoundedRetentionMap<K, V> {
   }
 
   public set(key: K, value: V): readonly (readonly [K, V])[] {
-    const evicted = [...this.pruneExpired()];
+    return this.setWithEvictions(key, value).map((entry) => [entry.key, entry.value] as const);
+  }
+
+  public setWithEvictions(key: K, value: V): readonly BoundedRetentionEviction<K, V>[] {
+    const evicted: BoundedRetentionEviction<K, V>[] = this.pruneExpired()
+      .map(([expiredKey, expiredValue]) => ({ key: expiredKey, value: expiredValue, reason: 'ttl' }));
     this.values.delete(key);
     this.values.set(key, { value, touchedAt: this.now() });
     while (this.values.size > this.options.maxEntries) {
       const oldest = this.values.entries().next().value as [K, RetainedValue<V>] | undefined;
       if (oldest === undefined) break;
       this.values.delete(oldest[0]);
-      evicted.push([oldest[0], oldest[1].value]);
+      evicted.push({ key: oldest[0], value: oldest[1].value, reason: 'capacity' });
     }
     return evicted;
   }

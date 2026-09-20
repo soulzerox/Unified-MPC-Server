@@ -17,8 +17,8 @@ import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capa
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
-  ResourceAdmissionController,
   tryAdmitChildMcpCall,
+  type ResourceAdmissionController,
   type ResourceAdmissionLease,
 } from '@unified-mpc/workspace';
 import {

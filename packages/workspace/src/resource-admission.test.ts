@@ -6,6 +6,7 @@ import {
   tryAdmitChildMcpCall,
   tryAdmitDependencyBootstrap,
 } from './resource-admission.js';
+import type { ResourcePressureProbe } from './resource-pressure.js';
 
 describe('resource admission contract', () => {
   it('admits a small dependency bootstrap and exposes active weighted usage', () => {
@@ -164,6 +165,76 @@ describe('resource admission contract', () => {
       reason: 'resource_class_cost_exhausted',
     });
     expect(bootstrap).toMatchObject({ admitted: true, lease: { resourceClass: 'dependency_bootstrap' } });
+  });
+
+  it('reduces effective admission under elevated memory pressure without revoking running leases', () => {
+    const pressureProbe: ResourcePressureProbe = {
+      sample: () => ({
+        state: 'elevated',
+        totalMemoryBytes: 1_000,
+        availableMemoryBytes: 120,
+        availableRatio: 0.12,
+        processRssBytes: 100,
+        sampledAtMs: 1,
+      }),
+    };
+    const controller = new ResourceAdmissionController(
+      { globalCost: 8, workspaceCost: 8, sessionCost: 8, maxOperations: 8 },
+      { pressureProbe, elevatedGlobalCostRatio: 0.5 },
+    );
+
+    const first = tryAdmitChildMcpCall(controller, {
+      operationId: 'pressure-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: 4,
+    });
+    const rejected = tryAdmitChildMcpCall(controller, {
+      operationId: 'pressure-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: 1,
+    });
+
+    expect(first).toMatchObject({ admitted: true });
+    expect(rejected).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'memory_pressure',
+      snapshot: { pressureState: 'elevated', effectiveGlobalCost: 4, activeCost: 4 },
+    });
+    if (!first.admitted) throw new Error('expected pressure-a to be admitted');
+    expect(controller.release(first.lease)).toBe(true);
+  });
+
+  it('stops new expensive admission under critical pressure while preserving bounded observability', () => {
+    const pressureProbe: ResourcePressureProbe = {
+      sample: () => ({
+        state: 'critical',
+        totalMemoryBytes: 1_000,
+        availableMemoryBytes: 50,
+        availableRatio: 0.05,
+        processRssBytes: 100,
+        sampledAtMs: 2,
+      }),
+    };
+    const controller = new ResourceAdmissionController(
+      { globalCost: 8, workspaceCost: 8, sessionCost: 8, maxOperations: 8 },
+      { pressureProbe },
+    );
+
+    const rejected = tryAdmitDependencyBootstrap(controller, {
+      operationId: 'critical-bootstrap',
+      workspaceId: 'workspace-a',
+      cost: 1,
+    });
+
+    expect(rejected).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'memory_pressure',
+      snapshot: { pressureState: 'critical', effectiveGlobalCost: 0, activeOperations: 0 },
+    });
   });
 
 });

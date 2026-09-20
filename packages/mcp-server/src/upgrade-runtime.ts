@@ -2191,25 +2191,36 @@ function pendingDependencyPolicy(installMode: 'frozen' | 'mutable'): WorktreeDep
     status: 'pending_bootstrap',
     installMode,
     lastBootstrapResult: 'pending',
+    migrationPhase: 'migration_pending',
     blockingReasons: [],
-    integration: 'bounded_runtime_v1',
+    integration: 'dependency_resource_manager_v1',
   };
 }
 
-function skippedDependencyPolicy(installMode: 'frozen' | 'mutable', reason: string): WorktreeDependencyPolicyState {
+function skippedDependencyPolicy(
+  installMode: 'frozen' | 'mutable',
+  reason: string,
+  emergencyOverride = false,
+): WorktreeDependencyPolicyState {
   return {
     policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
     disposition: 'adopt',
     status: 'skipped',
     installMode,
     lastBootstrapResult: 'skipped',
+    migrationPhase: 'migration_pending',
+    ...(emergencyOverride ? { emergencyOverride: true as const } : {}),
     blockingReasons: [reason],
-    integration: 'bounded_runtime_v1',
+    integration: 'dependency_resource_manager_v1',
   };
 }
 
-function dependencyPolicyFromPlan(plan: DependencyBootstrapPlan): WorktreeDependencyPolicyState {
+function dependencyPolicyFromPlan(
+  plan: DependencyBootstrapPlan,
+  runtimeVersion?: string,
+): WorktreeDependencyPolicyState {
   const diagnostics = plan.strategy.diagnostics;
+  const resource = diagnostics.resource;
   return {
     policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
     disposition: 'adopt',
@@ -2220,14 +2231,23 @@ function dependencyPolicyFromPlan(plan: DependencyBootstrapPlan): WorktreeDepend
     ecosystem: diagnostics.ecosystem,
     packageManager: diagnostics.packageManager,
     ...(diagnostics.packageManagerVersion === undefined ? {} : { packageManagerVersion: diagnostics.packageManagerVersion }),
+    ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
     ...(diagnostics.sharedStoreIdentity === undefined ? {} : { sharedStoreIdentity: diagnostics.sharedStoreIdentity }),
     localRuntimeIdentity: diagnostics.localRuntimeIdentity,
+    resourcePoolId: resource.resourcePoolId,
+    resourcePoolPath: resource.resourcePoolPath,
+    runtimeView: resource.runtimeView,
+    linkMode: resource.linkMode,
+    crossFilesystem: resource.crossFilesystem,
+    compatibilityIdentity: resource.compatibilityIdentity,
+    migrationPhase: plan.status === 'blocked' ? 'migration_blocked' : resource.migrationPhase,
+    ...(resource.fallbackReason === undefined ? {} : { resourceFallbackReason: resource.fallbackReason }),
     blockingReasons: [
       ...diagnostics.blockingReasons,
       ...plan.isolation.violations.map((entry) => `Mutable runtime path ${entry.path} points outside the worktree to ${entry.target}.`),
       ...(!plan.strategy.migration.mayReplaceMutableRuntimeState ? [plan.strategy.migration.reason] : []),
     ],
-    integration: 'bounded_runtime_v1',
+    integration: 'dependency_resource_manager_v1',
   };
 }
 
@@ -2240,6 +2260,7 @@ function failedDependencyPolicy(
     ...(base ?? pendingDependencyPolicy(installMode)),
     status: 'bootstrap_failed',
     lastBootstrapResult: 'failed',
+    migrationPhase: 'migration_blocked',
     blockingReasons: [...(base?.blockingReasons ?? []), reason],
   };
 }

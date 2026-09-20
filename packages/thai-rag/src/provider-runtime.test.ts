@@ -203,6 +203,41 @@ describe('ThaiRagProviderRuntime', () => {
     if (!started.ok) expect(started.error.details?.reason).toBe('owner-lock');
   });
 
+  it('fails closed instead of crashing when process identity is unavailable on a non-POSIX platform', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const first = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'windows-owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+      platform: 'win32',
+      isProcessAlive: (): boolean => true,
+    });
+
+    expect((await first.start()).ok).toBe(true);
+    const lock = JSON.parse(await readFile(path.join(providerRoot, 'provider.lock'), 'utf8')) as {
+      processIdentity?: string;
+    };
+    expect(lock.processIdentity).toBeUndefined();
+
+    const contender = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'windows-contender',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ start: async () => err(appError('INTERNAL_ERROR', 'must not start')) }),
+      platform: 'win32',
+      isProcessAlive: (): boolean => true,
+    });
+    const denied = await contender.start();
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.error.details?.reason).toBe('owner-lock-unverified');
+
+    expect((await first.stop()).ok).toBe(true);
+  });
+
   it('passes result budgets to every provider producer', async () => {
     const dataRoot = await root();
     let observedBudget: ResultBudget | undefined;

@@ -4,6 +4,7 @@ import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permiss
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 
 const actor = { clientId: 'client-1', clientName: 'test', sessionId: 'session-a' };
+type GoalRequestCancellation = NonNullable<McpApplicationServices['goalRequestCancellation']>;
 
 function activeFence(): ReturnType<typeof ok> {
   return ok({ goalId: 'goal-1', leaseGeneration: 2 });
@@ -206,7 +207,7 @@ describe('scheduled continuation mutation fence', () => {
     let resolveDone: (() => void) | undefined;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const cancellation = {
-      register(_goalId: string, requestId: string, controller: AbortController) {
+      register(_goalId: string, requestId: string, controller: AbortController): ReturnType<GoalRequestCancellation['register']> {
         registeredController = controller;
         registeredRequestId = requestId;
         return {
@@ -215,7 +216,7 @@ describe('scheduled continuation mutation fence', () => {
           release(): void { resolveDone?.(); },
         };
       },
-      async cancelForGoal(goalId: string) {
+      async cancelForGoal(goalId: string): ReturnType<GoalRequestCancellation['cancelForGoal']> {
         const requested = registeredController === undefined ? 0 : 1;
         registeredController?.abort();
         if (requested > 0) await done;

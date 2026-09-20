@@ -730,7 +730,7 @@ function normalizeWorkerPayload(value: unknown): unknown {
 function mapProviderErrorCode(code: string): 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NOT_FOUND' | 'CONFLICT' {
   if (code === 'workspace_scope_required' || code === 'invalid_input') return 'INVALID_INPUT';
   if (code === 'scope_denied' || code === 'permission_denied') return 'PERMISSION_DENIED';
-  if (code === 'workspace_not_found' || code === 'file_not_found') return 'FILE_NOT_FOUND';
+  if (code === 'workspace_not_found' || code === 'file_not_found' || code === 'memory_not_found') return 'FILE_NOT_FOUND';
   return 'CONFLICT';
 }
 

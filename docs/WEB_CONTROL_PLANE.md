@@ -55,16 +55,23 @@ Returns general operational health and gateway status.
 }
 ```
 
-### Projects & Durable Goal Continuation
+### Projects, Web Context & Durable Goal Continuation
 
-The **Projects** view keeps durable work visible without eagerly loading every goal. `GET /api/workspaces` returns each registered project with `openGoalCount` and the validated `preferredGoalId`; the dashboard remains collapsed by default and requests goal details only after the user expands that project.
+The **Projects** view deliberately separates project registration, Web selection/default context, and runtime execution state. The existing `activeWorkspaceIds` selection is presented as **Scope**, while `primaryWorkspaceId` is presented as the **Default** implicit Web context. Neither field is runtime truth: being In Scope does not mean Running, and changing Scope or Default must not start, pause, or cancel project execution.
 
+This distinction is required for concurrent-project execution: multiple projects may eventually run durable goals/tasks at the same time while only one project is the current Web default. Runtime activity and resource state must come from project-scoped runtime/task telemetry rather than being inferred from selection state.
+
+`GET /api/workspaces` returns each registered project with `openGoalCount` and the validated `preferredGoalId`; the dashboard remains collapsed by default and requests goal details only after the user expands that project.
+
+- `PUT /api/workspaces/:workspaceId/active` adds a registered project to the current selection scope. `DELETE` removes it from scope subject to existing selection invariants. These are context controls, not runtime start/stop controls.
+- `PUT /api/workspaces/:workspaceId/primary` changes the current default implicit context. The API name is retained for compatibility, while the UI intentionally says **Default** rather than implying a process-wide execution owner.
+- `DELETE /api/workspaces/:workspaceId` unregisters the project from Unified-MPC without deleting its source directory. Unregister is distinct from durable execution cancellation.
 - `GET /api/workspaces/:workspaceId/goals` returns active goal summaries for that registered project, including objective, current phase, completed/total plan steps, blockers, next action, steps, and `updatedAt`.
-- `PUT /api/workspaces/:workspaceId/goals/:goalId/continue` marks one active goal as the preferred continuation target and activates its workspace. It **does not acquire, renew, or steal the durable goal execution lease**.
+- `PUT /api/workspaces/:workspaceId/goals/:goalId/continue` marks one active goal as the preferred continuation target and adds its workspace to scope. It **does not start execution and does not acquire, renew, or steal the durable goal execution lease**. The endpoint name remains for compatibility; the UI labels this action **Select Goal**.
 - The preferred mapping is persisted in non-secret settings. `workspace_bootstrap` exposes the validated preferred goal as a continuation hint to MCP clients; stale or terminal selections are ignored.
 - Goals with terminal durable status (`completed`, `failed`, `blocked`, or `cancelled`) are excluded from the open-goal count and list.
 
-The expanded dashboard card shows the goal objective (what the goal is trying to accomplish), phase, progress, blockers, last update, and actions. **Open** reveals the next action and step list inline; **Continue** selects the preferred goal without starting work by itself.
+The expanded dashboard card shows the goal objective, phase, progress, blockers, last update, and actions. **Open** reveals the next action and step list inline; **Select Goal** changes only the preferred continuation target. Project-scoped Running/Paused/Blocked state and pause/resume/cancel controls belong to the concurrent durable runtime model and must remain separate from Scope/Default controls.
 
 ---
 

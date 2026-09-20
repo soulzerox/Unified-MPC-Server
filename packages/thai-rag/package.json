@@ -13,7 +13,8 @@
     }
   },
   "dependencies": {
-    "@unified-mpc/domain": "workspace:*"
+    "@unified-mpc/domain": "workspace:*",
+    "@unified-mpc/process": "workspace:*"
   },
   "scripts": {
     "test": "vitest run",

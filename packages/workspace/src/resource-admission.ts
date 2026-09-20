@@ -1,3 +1,6 @@
+import { ProcessMemoryPressureProbe } from './resource-pressure.js';
+import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
+
 export type ResourceAdmissionClass = 'dependency_bootstrap' | 'child_mcp_call';
 
 export interface ResourceAdmissionLimits {
@@ -17,6 +20,17 @@ interface NormalizedResourceAdmissionLimits {
   readonly maxOperations: number;
   readonly resourceClassCost: Readonly<Record<ResourceAdmissionClass, number>>;
 }
+
+export interface ResourceAdmissionControllerOptions {
+  readonly pressureProbe?: ResourcePressureProbe;
+  /** Effective global weighted-cost ceiling while memory pressure is elevated. */
+  readonly elevatedGlobalCostRatio?: number;
+  /** Effective global weighted-cost ceiling while memory pressure is critical. */
+  readonly criticalGlobalCostRatio?: number;
+}
+
+const DEFAULT_ELEVATED_GLOBAL_COST_RATIO = 0.5;
+const DEFAULT_CRITICAL_GLOBAL_COST_RATIO = 0;
 
 export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
   globalCost: 16,
@@ -58,11 +72,16 @@ export interface ResourceAdmissionSnapshot {
   readonly activeCostByWorkspace: Readonly<Record<string, number>>;
   readonly activeCostBySession: Readonly<Record<string, number>>;
   readonly rejected: number;
+  readonly pressureState: ResourcePressureState;
+  readonly effectiveGlobalCost: number;
+  /** Present when a live pressure probe produced the current bounded sample. */
+  readonly pressure?: ResourcePressureSample;
 }
 
 export type ResourceAdmissionRejectionReason =
   | 'invalid_request'
   | 'duplicate_operation'
+  | 'memory_pressure'
   | 'global_cost_exhausted'
   | 'workspace_cost_exhausted'
   | 'session_cost_exhausted'
@@ -101,10 +120,13 @@ export type ResourceAdmissionDecision =
  */
 export class ResourceAdmissionController {
   private readonly limits: NormalizedResourceAdmissionLimits;
+  private readonly pressureProbe: ResourcePressureProbe | undefined;
+  private readonly elevatedGlobalCostRatio: number;
+  private readonly criticalGlobalCostRatio: number;
   private readonly active = new Map<string, ResourceAdmissionLease>();
   private rejected = 0;
 
-  public constructor(limits: ResourceAdmissionLimits) {
+  public constructor(limits: ResourceAdmissionLimits, options: ResourceAdmissionControllerOptions = {}) {
     validateLimit(limits.globalCost, 'globalCost');
     validateLimit(limits.workspaceCost, 'workspaceCost');
     validateLimit(limits.sessionCost ?? limits.globalCost, 'sessionCost');
@@ -122,6 +144,15 @@ export class ResourceAdmissionController {
         child_mcp_call: limits.resourceClassCost?.child_mcp_call ?? limits.globalCost,
       },
     };
+
+    this.pressureProbe = options.pressureProbe;
+    this.elevatedGlobalCostRatio = options.elevatedGlobalCostRatio ?? DEFAULT_ELEVATED_GLOBAL_COST_RATIO;
+    this.criticalGlobalCostRatio = options.criticalGlobalCostRatio ?? DEFAULT_CRITICAL_GLOBAL_COST_RATIO;
+    validateCostRatio(this.elevatedGlobalCostRatio, 'elevatedGlobalCostRatio');
+    validateCostRatio(this.criticalGlobalCostRatio, 'criticalGlobalCostRatio');
+    if (this.criticalGlobalCostRatio > this.elevatedGlobalCostRatio) {
+      throw new Error('criticalGlobalCostRatio must be <= elevatedGlobalCostRatio');
+    }
   }
 
   public tryAcquire(request: ResourceAdmissionRequest): ResourceAdmissionDecision {
@@ -131,12 +162,16 @@ export class ResourceAdmissionController {
     if (this.active.has(request.operationId)) return this.rejectInvalid('duplicate_operation', requestedCost);
 
     const sessionId = normalizeSessionId(request.sessionId);
-    const snapshot = this.snapshot();
+    const pressure = this.readPressure();
+    const snapshot = this.buildSnapshot(pressure);
     const workspaceCost = snapshot.activeCostByWorkspace[request.workspaceId] ?? 0;
     const sessionCost = snapshot.activeCostBySession[sessionId] ?? 0;
     const classCost = snapshot.activeCostByClass[request.resourceClass];
-    const reason = snapshot.activeCost + request.cost > this.limits.globalCost
-      ? 'global_cost_exhausted'
+    const exceedsEffectiveGlobalCost = snapshot.activeCost + request.cost > snapshot.effectiveGlobalCost;
+    const reason = exceedsEffectiveGlobalCost
+      ? snapshot.pressureState === 'normal'
+        ? 'global_cost_exhausted'
+        : 'memory_pressure'
       : workspaceCost + request.cost > this.limits.workspaceCost
         ? 'workspace_cost_exhausted'
         : sessionCost + request.cost > this.limits.sessionCost
@@ -154,7 +189,7 @@ export class ResourceAdmissionController {
         reason,
         requestedCost,
         retryable: true,
-        snapshot: this.snapshot(),
+        snapshot: this.buildSnapshot(pressure),
       };
     }
 
@@ -166,7 +201,7 @@ export class ResourceAdmissionController {
       cost: request.cost,
     };
     this.active.set(lease.operationId, lease);
-    return { admitted: true, lease, snapshot: this.snapshot() };
+    return { admitted: true, lease, snapshot: this.buildSnapshot(pressure) };
   }
 
   public release(lease: ResourceAdmissionLease): boolean {
@@ -177,6 +212,10 @@ export class ResourceAdmissionController {
   }
 
   public snapshot(): ResourceAdmissionSnapshot {
+    return this.buildSnapshot(this.readPressure());
+  }
+
+  private buildSnapshot(pressure: ResourcePressureSample | undefined): ResourceAdmissionSnapshot {
     const activeCostByClass: Record<ResourceAdmissionClass, number> = {
       dependency_bootstrap: 0,
       child_mcp_call: 0,
@@ -190,6 +229,8 @@ export class ResourceAdmissionController {
       activeCostByWorkspace[lease.workspaceId] = (activeCostByWorkspace[lease.workspaceId] ?? 0) + lease.cost;
       activeCostBySession[lease.sessionId] = (activeCostBySession[lease.sessionId] ?? 0) + lease.cost;
     }
+
+    const pressureState = pressure?.state ?? 'normal';
     return {
       activeCost,
       activeOperations: this.active.size,
@@ -197,7 +238,26 @@ export class ResourceAdmissionController {
       activeCostByWorkspace,
       activeCostBySession,
       rejected: this.rejected,
+      pressureState,
+      effectiveGlobalCost: effectiveGlobalCost(
+        this.limits.globalCost,
+        pressureState,
+        this.elevatedGlobalCostRatio,
+        this.criticalGlobalCostRatio,
+      ),
+      ...(pressure === undefined ? {} : { pressure }),
     };
+  }
+
+  private readPressure(): ResourcePressureSample | undefined {
+    if (this.pressureProbe === undefined) return undefined;
+    try {
+      return this.pressureProbe.sample();
+    } catch {
+      // OS/process metric failure must not take down admission; static ceilings
+      // remain in force until the pressure probe can produce a sample again.
+      return undefined;
+    }
   }
 
   private rejectInvalid(reason: 'invalid_request' | 'duplicate_operation', requestedCost: number): ResourceAdmissionDecision {
@@ -236,12 +296,33 @@ let processResourceAdmissionController: ResourceAdmissionController | undefined;
  * the default getter intentionally returns the same instance across transports.
  */
 export function sharedProcessResourceAdmissionController(): ResourceAdmissionController {
-  processResourceAdmissionController ??= new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
+  processResourceAdmissionController ??= new ResourceAdmissionController(
+    DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
+    { pressureProbe: new ProcessMemoryPressureProbe() },
+  );
   return processResourceAdmissionController;
 }
 
 function validateLimit(value: number, label: string): void {
   if (!Number.isInteger(value) || value < 1) throw new Error(`${label} must be a positive integer`);
+}
+
+function validateCostRatio(value: number, label: string): void {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${label} must be a finite ratio between 0 and 1`);
+  }
+}
+
+function effectiveGlobalCost(
+  configuredGlobalCost: number,
+  state: ResourcePressureState,
+  elevatedRatio: number,
+  criticalRatio: number,
+): number {
+  if (state === 'normal') return configuredGlobalCost;
+  const ratio = state === 'critical' ? criticalRatio : elevatedRatio;
+  if (ratio <= 0) return 0;
+  return Math.max(1, Math.floor(configuredGlobalCost * ratio));
 }
 
 const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'child_mcp_call'] as const;

@@ -7,7 +7,7 @@ describe('BoundedRetentionMap eviction evidence', () => {
     const map = new BoundedRetentionMap<string, { readonly id: string }>({
       maxEntries: 2,
       ttlMs: 100,
-      now: () => now,
+      now: (): number => now,
     });
     const value = { id: 'session-1' };
     map.set('session-1', value);
@@ -25,7 +25,7 @@ describe('BoundedRetentionMap eviction evidence', () => {
     const map = new BoundedRetentionMap<string, string>({
       maxEntries: 2,
       ttlMs: 100,
-      now: () => now,
+      now: (): number => now,
     });
     map.set('a', 'A');
     now = 50;

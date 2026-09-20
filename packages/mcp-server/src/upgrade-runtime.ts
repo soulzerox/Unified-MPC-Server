@@ -21,6 +21,7 @@ import {
   hostPathApi,
   isAbsoluteHostPath,
   normalizeHostPath,
+  parseRuntimeVersion,
   prepareDependencyBootstrap,
   type DependencyBootstrapPlan,
   type DependencyInstallCommand,
@@ -126,10 +127,20 @@ interface WorktreeDependencyPolicyState {
   readonly ecosystem?: string;
   readonly packageManager?: string;
   readonly packageManagerVersion?: string;
+  readonly runtimeVersion?: string;
   readonly sharedStoreIdentity?: string;
   readonly localRuntimeIdentity?: string;
+  readonly resourcePoolId?: string;
+  readonly resourcePoolPath?: string;
+  readonly runtimeView?: 'global_virtual_store' | 'centralized_env' | 'local';
+  readonly linkMode?: 'symlink' | 'hardlink' | 'reflink' | 'copy' | 'local';
+  readonly crossFilesystem?: 'unknown';
+  readonly compatibilityIdentity?: string;
+  readonly migrationPhase?: 'legacy_detected' | 'migration_pending' | 'waiting_for_idle' | 'preparing_shared_runtime' | 'validating' | 'activating' | 'reclaiming_legacy_bytes' | 'migrated' | 'migration_blocked';
+  readonly resourceFallbackReason?: string;
+  readonly emergencyOverride?: true;
   readonly blockingReasons: readonly string[];
-  readonly integration: 'bounded_runtime_v1';
+  readonly integration: 'bounded_runtime_v1' | 'dependency_resource_manager_v1';
 }
 
 interface WorktreeLedgerEntry {
@@ -1349,6 +1360,13 @@ export class UpgradeRuntimeService {
     if (ref.includes('\0') || ref.length > 256) return err(appError('INVALID_INPUT', 'Git worktree ref is invalid'));
     const installMode = input.dependencyInstallMode === 'mutable' ? 'mutable' : 'frozen';
     const bootstrapDependencies = input.bootstrapDependencies !== false;
+    const emergencyOverride = !bootstrapDependencies && input.dependencyEmergencyOverride === true;
+    if (!bootstrapDependencies && !emergencyOverride) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Managed worktrees require dependency bootstrap; disabling it is allowed only with dependencyEmergencyOverride for recovery.',
+      ));
+    }
     const dependencyPolicy = pendingDependencyPolicy(installMode);
     const plan = {
       tool: 'git_worktree_spawn',
@@ -1361,6 +1379,7 @@ export class UpgradeRuntimeService {
       mutationPolicy: 'explicit-confirmation-and-dry-run',
       dependencyPolicy,
       bootstrapDependencies,
+      dependencyEmergencyOverride: emergencyOverride,
       sideEffectsStarted: false,
     };
     const dryRun = input.dryRun !== false && input.dry_run !== false;
@@ -1395,7 +1414,11 @@ export class UpgradeRuntimeService {
 
     const dependencyBootstrap = bootstrapDependencies
       ? await this.bootstrapNewWorktreeDependencies(workspaceId, normalizedPath, installMode, input, signal)
-      : ok(skippedDependencyPolicy(installMode, 'Dependency bootstrap was explicitly disabled for this worktree.'));
+      : ok(skippedDependencyPolicy(
+        installMode,
+        'Dependency bootstrap was disabled under the explicit emergency recovery override; migration remains pending.',
+        true,
+      ));
     if (!dependencyBootstrap.ok) return dependencyBootstrap;
 
     await this.mutateSharedState((_plugins, worktrees) => {
@@ -1452,23 +1475,47 @@ export class UpgradeRuntimeService {
       ? pathApi.join(os.homedir(), '.unified-mpc', 'dependency-cache')
       : pathApi.join(pathApi.dirname(this.services.runtimeStatePath), 'dependency-cache');
 
+    const bootstrapInput = {
+      rootPath: worktreeRoot,
+      sharedCacheRoot,
+      installMode,
+      worktree: { isNew: true } as const,
+    };
     let prepared: DependencyBootstrapPlan;
     try {
-      prepared = await prepareDependencyBootstrap({
-        rootPath: worktreeRoot,
-        sharedCacheRoot,
-        installMode,
-        worktree: { isNew: true },
-      });
+      prepared = await prepareDependencyBootstrap(bootstrapInput);
     } catch (error: unknown) {
       return ok(failedDependencyPolicy(installMode, `Dependency policy resolution failed: ${error instanceof Error ? error.message : String(error)}`));
     }
 
-    const policy = dependencyPolicyFromPlan(prepared);
+    const timeoutMs = dependencyBootstrapTimeout(input);
+    let runtimeVersion: string | undefined;
+    if (prepared.status === 'ready' && prepared.strategy.ecosystem === 'python-uv') {
+      const probed = await runDependencyCommand({
+        executable: 'uv',
+        args: ['--version'],
+        cwd: prepared.strategy.rootPath,
+        environment: {},
+        phase: 'setup',
+      }, signal, timeoutMs, platform);
+      if (!probed.ok) return ok(failedDependencyPolicy(installMode, probed.error.message));
+      runtimeVersion = parseRuntimeVersion(probed.value.stdout, 'uv');
+      if (runtimeVersion === undefined) {
+        return ok(failedDependencyPolicy(installMode, `Unable to parse uv runtime version from: ${probed.value.stdout.trim() || '<empty>'}`));
+      }
+      try {
+        prepared = await prepareDependencyBootstrap({
+          ...bootstrapInput,
+          runtimeVersions: { uv: runtimeVersion },
+        });
+      } catch (error: unknown) {
+        return ok(failedDependencyPolicy(installMode, `Dependency resource resolution failed after uv probe: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    }
+
+    const policy = dependencyPolicyFromPlan(prepared, runtimeVersion);
     if (prepared.status === 'unsupported') return ok({ ...policy, lastBootstrapResult: 'skipped' });
     if (prepared.status !== 'ready') return ok(policy);
-
-    const timeoutMs = dependencyBootstrapTimeout(input);
     if (prepared.strategy.versionCheck !== undefined) {
       const checkCommand: DependencyInstallCommand = {
         executable: prepared.strategy.versionCheck.executable,
@@ -1498,6 +1545,7 @@ export class UpgradeRuntimeService {
       ...policy,
       status: 'ready',
       lastBootstrapResult: prepared.strategy.commands.length === 0 ? 'skipped' : 'installed',
+      migrationPhase: 'migrated',
     });
   }
 
@@ -2143,25 +2191,36 @@ function pendingDependencyPolicy(installMode: 'frozen' | 'mutable'): WorktreeDep
     status: 'pending_bootstrap',
     installMode,
     lastBootstrapResult: 'pending',
+    migrationPhase: 'migration_pending',
     blockingReasons: [],
-    integration: 'bounded_runtime_v1',
+    integration: 'dependency_resource_manager_v1',
   };
 }
 
-function skippedDependencyPolicy(installMode: 'frozen' | 'mutable', reason: string): WorktreeDependencyPolicyState {
+function skippedDependencyPolicy(
+  installMode: 'frozen' | 'mutable',
+  reason: string,
+  emergencyOverride = false,
+): WorktreeDependencyPolicyState {
   return {
     policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
     disposition: 'adopt',
     status: 'skipped',
     installMode,
     lastBootstrapResult: 'skipped',
+    migrationPhase: 'migration_pending',
+    ...(emergencyOverride ? { emergencyOverride: true as const } : {}),
     blockingReasons: [reason],
-    integration: 'bounded_runtime_v1',
+    integration: 'dependency_resource_manager_v1',
   };
 }
 
-function dependencyPolicyFromPlan(plan: DependencyBootstrapPlan): WorktreeDependencyPolicyState {
+function dependencyPolicyFromPlan(
+  plan: DependencyBootstrapPlan,
+  runtimeVersion?: string,
+): WorktreeDependencyPolicyState {
   const diagnostics = plan.strategy.diagnostics;
+  const resource = diagnostics.resource;
   return {
     policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
     disposition: 'adopt',
@@ -2172,14 +2231,23 @@ function dependencyPolicyFromPlan(plan: DependencyBootstrapPlan): WorktreeDepend
     ecosystem: diagnostics.ecosystem,
     packageManager: diagnostics.packageManager,
     ...(diagnostics.packageManagerVersion === undefined ? {} : { packageManagerVersion: diagnostics.packageManagerVersion }),
+    ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
     ...(diagnostics.sharedStoreIdentity === undefined ? {} : { sharedStoreIdentity: diagnostics.sharedStoreIdentity }),
     localRuntimeIdentity: diagnostics.localRuntimeIdentity,
+    resourcePoolId: resource.resourcePoolId,
+    resourcePoolPath: resource.resourcePoolPath,
+    runtimeView: resource.runtimeView,
+    linkMode: resource.linkMode,
+    crossFilesystem: resource.crossFilesystem,
+    compatibilityIdentity: resource.compatibilityIdentity,
+    migrationPhase: plan.status === 'blocked' ? 'migration_blocked' : resource.migrationPhase,
+    ...(resource.fallbackReason === undefined ? {} : { resourceFallbackReason: resource.fallbackReason }),
     blockingReasons: [
       ...diagnostics.blockingReasons,
       ...plan.isolation.violations.map((entry) => `Mutable runtime path ${entry.path} points outside the worktree to ${entry.target}.`),
       ...(!plan.strategy.migration.mayReplaceMutableRuntimeState ? [plan.strategy.migration.reason] : []),
     ],
-    integration: 'bounded_runtime_v1',
+    integration: 'dependency_resource_manager_v1',
   };
 }
 
@@ -2192,6 +2260,7 @@ function failedDependencyPolicy(
     ...(base ?? pendingDependencyPolicy(installMode)),
     status: 'bootstrap_failed',
     lastBootstrapResult: 'failed',
+    migrationPhase: 'migration_blocked',
     blockingReasons: [...(base?.blockingReasons ?? []), reason],
   };
 }
@@ -2978,9 +3047,19 @@ function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPo
     && ['pending_bootstrap', 'ready', 'blocked', 'unsupported', 'skipped', 'bootstrap_failed', 'grandfathered'].includes(String(value.status))
     && (value.installMode === 'frozen' || value.installMode === 'mutable')
     && ['pending', 'installed', 'skipped', 'failed'].includes(String(value.lastBootstrapResult))
-    && value.integration === 'bounded_runtime_v1'
+    && (value.integration === 'bounded_runtime_v1' || value.integration === 'dependency_resource_manager_v1')
     && Array.isArray(value.blockingReasons)
     && value.blockingReasons.every((entry) => typeof entry === 'string')) {
+    const legacyResourceLayout = value.integration === 'bounded_runtime_v1';
+    const validMigrationPhases = [
+      'legacy_detected', 'migration_pending', 'waiting_for_idle', 'preparing_shared_runtime',
+      'validating', 'activating', 'reclaiming_legacy_bytes', 'migrated', 'migration_blocked',
+    ];
+    const migrationPhase = legacyResourceLayout
+      ? 'legacy_detected'
+      : validMigrationPhases.includes(String(value.migrationPhase))
+        ? value.migrationPhase as WorktreeDependencyPolicyState['migrationPhase']
+        : 'migration_pending';
     return {
       policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
       disposition: value.disposition,
@@ -2991,10 +3070,27 @@ function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPo
       ...(typeof value.ecosystem === 'string' ? { ecosystem: value.ecosystem } : {}),
       ...(typeof value.packageManager === 'string' ? { packageManager: value.packageManager } : {}),
       ...(typeof value.packageManagerVersion === 'string' ? { packageManagerVersion: value.packageManagerVersion } : {}),
+      ...(typeof value.runtimeVersion === 'string' ? { runtimeVersion: value.runtimeVersion } : {}),
       ...(typeof value.sharedStoreIdentity === 'string' ? { sharedStoreIdentity: value.sharedStoreIdentity } : {}),
       ...(typeof value.localRuntimeIdentity === 'string' ? { localRuntimeIdentity: value.localRuntimeIdentity } : {}),
-      blockingReasons: value.blockingReasons as string[],
-      integration: 'bounded_runtime_v1',
+      ...(typeof value.resourcePoolId === 'string' ? { resourcePoolId: value.resourcePoolId } : {}),
+      ...(typeof value.resourcePoolPath === 'string' ? { resourcePoolPath: value.resourcePoolPath } : {}),
+      ...(value.runtimeView === 'global_virtual_store' || value.runtimeView === 'centralized_env' || value.runtimeView === 'local'
+        ? { runtimeView: value.runtimeView }
+        : {}),
+      ...(value.linkMode === 'symlink' || value.linkMode === 'hardlink' || value.linkMode === 'reflink' || value.linkMode === 'copy' || value.linkMode === 'local'
+        ? { linkMode: value.linkMode }
+        : {}),
+      ...(value.crossFilesystem === 'unknown' ? { crossFilesystem: value.crossFilesystem } : {}),
+      ...(typeof value.compatibilityIdentity === 'string' ? { compatibilityIdentity: value.compatibilityIdentity } : {}),
+      ...(migrationPhase === undefined ? {} : { migrationPhase }),
+      ...(typeof value.resourceFallbackReason === 'string' ? { resourceFallbackReason: value.resourceFallbackReason } : {}),
+      ...(value.emergencyOverride === true ? { emergencyOverride: true as const } : {}),
+      blockingReasons: [
+        ...(value.blockingReasons as string[]),
+        ...(legacyResourceLayout ? ['Legacy #34 dependency layout detected; mandatory #63 migration is pending at the next safe idle boundary.'] : []),
+      ],
+      integration: 'dependency_resource_manager_v1',
     };
   }
   return {
@@ -3003,8 +3099,9 @@ function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPo
     status: 'grandfathered',
     installMode: 'frozen',
     lastBootstrapResult: 'skipped',
-    blockingReasons: ['Legacy worktree has no dependency-policy state; preserving its current runtime layout.'],
-    integration: 'bounded_runtime_v1',
+    migrationPhase: 'legacy_detected',
+    blockingReasons: ['Legacy worktree has no dependency-resource state; preserve it only until the next safe idle migration boundary.'],
+    integration: 'dependency_resource_manager_v1',
   };
 }
 

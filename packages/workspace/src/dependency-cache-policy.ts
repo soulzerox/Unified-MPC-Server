@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { access, lstat, mkdir, readFile, readlink, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { resolveDependencyResourcePlan, type DependencyResourcePlan } from './dependency-resource-manager.js';
 
 export const WORKTREE_DEPENDENCY_POLICY_VERSION = 1 as const;
 
@@ -125,6 +126,7 @@ export interface WorktreeDependencyDiagnostics {
   readonly migrationDisposition: ExistingWorktreeDisposition;
   readonly lockfilePaths: readonly string[];
   readonly blockingReasons: readonly string[];
+  readonly resource: DependencyResourcePlan;
 }
 
 export interface WorktreeDependencyStrategy {
@@ -150,6 +152,7 @@ export interface WorktreeDependencyStrategy {
   readonly directCrossWorktreeMutableSymlinkAllowed: false;
   readonly sharedStorePruneRequiresZeroActiveReferences: true;
   readonly blockingReasons: readonly string[];
+  readonly resource: DependencyResourcePlan;
   readonly diagnostics: WorktreeDependencyDiagnostics;
 }
 
@@ -159,6 +162,7 @@ export interface ResolveDependencyStrategyInput {
   readonly installMode?: DependencyInstallMode;
   readonly worktree?: ExistingWorktreeSignals;
   readonly baseline?: DependencyMetadataSnapshot;
+  readonly runtimeVersions?: Readonly<{ uv?: string }>;
   readonly fileSystem?: DependencyPolicyFileSystem;
 }
 
@@ -309,6 +313,7 @@ export async function resolveDependencyStrategy(input: ResolveDependencyStrategy
     migration: classifyExistingWorktree(input.worktree),
     metadata,
     blockingReasons,
+    ...(input.runtimeVersions === undefined ? {} : { runtimeVersions: input.runtimeVersions }),
   });
 }
 
@@ -587,13 +592,27 @@ function buildStrategy(input: {
   readonly migration: ExistingWorktreeClassification;
   readonly metadata: DependencyMetadataSnapshot;
   readonly blockingReasons: readonly string[];
+  readonly runtimeVersions?: Readonly<{ uv?: string }>;
 }): WorktreeDependencyStrategy {
   const { rootPath, sharedCacheRoot, installMode, detected, migration, metadata } = input;
+  const resource = resolveDependencyResourcePlan({
+    rootPath,
+    sharedCacheRoot,
+    ecosystem: detected.ecosystem,
+    packageManager: detected.packageManager,
+    ...(detected.packageManagerVersion === undefined ? {} : { packageManagerVersion: detected.packageManagerVersion }),
+    ...(detected.ecosystem === 'python-uv' && input.runtimeVersions?.uv !== undefined
+      ? { runtimeVersion: input.runtimeVersions.uv }
+      : {}),
+    ...(metadata.manifestDigest === undefined ? {} : { manifestDigest: metadata.manifestDigest }),
+    ...(metadata.lockfileDigest === undefined ? {} : { lockfileDigest: metadata.lockfileDigest }),
+    migrationDisposition: migration.disposition,
+  });
   const paths: DependencyPathDescriptor[] = [
     { class: 'repo_shared', label: 'Git common objects/refs', path: path.join(rootPath, '.git') },
   ];
   const commands: DependencyInstallCommand[] = [];
-  const environment: Record<string, string> = {};
+  const environment: Record<string, string> = { ...resource.environment };
   let versionCheck: DependencyVersionCheck | undefined;
   let status: WorktreeDependencyStrategy['status'] = input.blockingReasons.length === 0 ? 'ready' : 'blocked';
 
@@ -618,6 +637,7 @@ function buildStrategy(input: {
       executable: 'corepack',
       args: [
         manager,
+        ...resource.managerArguments,
         'install',
         ...(installMode === 'frozen' ? ['--frozen-lockfile'] : []),
         '--prefer-offline',
@@ -750,6 +770,7 @@ function buildStrategy(input: {
     directCrossWorktreeMutableSymlinkAllowed: false,
     sharedStorePruneRequiresZeroActiveReferences: true,
     blockingReasons: input.blockingReasons,
+    resource,
     diagnostics: {
       policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
       strategyId,
@@ -763,6 +784,7 @@ function buildStrategy(input: {
       migrationDisposition: migration.disposition,
       lockfilePaths: detected.lockfilePaths,
       blockingReasons: input.blockingReasons,
+      resource,
     },
   };
 }

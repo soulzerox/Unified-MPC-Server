@@ -377,6 +377,51 @@ describe('upgrade runtime', () => {
     expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'add', '--detach', 'E:/outside/agent-1', 'main'] });
   });
 
+  it('requires an explicit recovery override before dependency bootstrap can be skipped', async () => {
+    const runtime = new UpgradeRuntimeService({
+      platform: 'linux',
+      git: {
+        async run(): Promise<ReturnType<typeof ok>> {
+          return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+        },
+      },
+    }, actor);
+
+    await expect(runtime.execute('git_worktree_spawn', {
+      workspaceId: 'ws-1',
+      worktreePath: '.worktrees/no-deps',
+      ref: 'main',
+      bootstrapDependencies: false,
+      dryRun: false,
+      userConfirmed: true,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+
+    await expect(runtime.execute('git_worktree_spawn', {
+      workspaceId: 'ws-1',
+      worktreePath: '.worktrees/emergency-no-deps',
+      ref: 'main',
+      bootstrapDependencies: false,
+      dependencyEmergencyOverride: true,
+      dryRun: false,
+      userConfirmed: true,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: 'completed',
+        dependencyEmergencyOverride: true,
+        dependencyPolicy: {
+          status: 'skipped',
+          emergencyOverride: true,
+          migrationPhase: 'migration_pending',
+          integration: 'dependency_resource_manager_v1',
+        },
+      },
+    });
+  });
+
   it('uses POSIX worktree syntax without rewriting foreign Windows paths', async () => {
     const calls: unknown[] = [];
     const runtime = new UpgradeRuntimeService({

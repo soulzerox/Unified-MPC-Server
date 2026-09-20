@@ -90,7 +90,7 @@ async function preparedInput(
     case 'git_worktree_spawn': {
       const result = await executeDefinition(registry, 'git_worktree_spawn', {
         workspaceId: 'workspace-1', worktreePath: '.worktrees/runtime-contract', ref: 'HEAD',
-        bootstrapDependencies: false, dryRun: false, userConfirmed: true,
+        bootstrapDependencies: false, dependencyEmergencyOverride: true, dryRun: false, userConfirmed: true,
       });
       if (!result.ok) throw new Error(result.error.message);
       return fixture.input;

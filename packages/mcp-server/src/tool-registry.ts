@@ -938,7 +938,12 @@ export class ToolRegistry {
     }
 
     const result = await thaiRag.call(providerTool, providerArgs, signal);
-    if (!result.ok) return result;
+    if (!result.ok) {
+      if (tool === 'forget' && result.error.details?.reason === 'memory_not_found') {
+        return err(appError('FILE_NOT_FOUND', result.error.message, result.error.recoverable, result.error.details));
+      }
+      return result;
+    }
     if (tool === 'index_status' && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {
       return err(appError('PERMISSION_DENIED', `Native Thai-RAG index job belongs to another workspace: ${result.value.workspaceId}`));
     }

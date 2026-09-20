@@ -663,7 +663,7 @@ describe('durable goal continuation persistence', () => {
       const bothProbed = new Promise<void>((resolve) => {
         releaseProbes = resolve;
       });
-      const createWorkerLiveness = (repository: SqliteGoalRepository) => ({
+      const createWorkerLiveness = (repository: SqliteGoalRepository): { observe: (goalId: string, trackedTasks: readonly GoalTrackedTask[]) => Promise<ScheduledContinuationWorkerLiveness> } => ({
         observe: async (
           goalId: string,
           trackedTasks: readonly GoalTrackedTask[],

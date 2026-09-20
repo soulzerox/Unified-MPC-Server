@@ -71,6 +71,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.sessions = new McpSessionManager({
       ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
       ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
+      validateToolSchemas: false,
       idleTimeoutMs: 24 * 60 * 60_000,
     });
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
@@ -455,6 +456,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const activeJobs = await this.jobs.active(this.ownerId ?? '');
     const health: ThaiRagProviderDriverHealth = {
+      indexJobContractVersion: handshake.value.indexJobContractVersion,
       ...handshake.value.components,
       capabilities: handshake.value.capabilities,
       workspaceScopeModel: handshake.value.workspaceScopeModel,

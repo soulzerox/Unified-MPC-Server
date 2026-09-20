@@ -8,7 +8,7 @@ import {
   type ThaiRagProviderHealth,
 } from './provider-contract.js';
 
-export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents & Pick<ThaiRagProviderHealth, 'capabilities' | 'workspaceScopeModel' | 'embedding' | 'compatibilityRange' | 'contractFingerprint' | 'contractVersion' | 'generation'> & { readonly degradation?: readonly string[] };
+export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents & Pick<ThaiRagProviderHealth, 'capabilities' | 'workspaceScopeModel' | 'embedding' | 'compatibilityRange' | 'contractFingerprint' | 'contractVersion' | 'generation'> & { readonly degradation?: readonly string[]; readonly indexJobContractVersion?: string };
 
 export interface ThaiRagProviderDriverStartOptions {
   readonly providerRoot: string;
@@ -209,6 +209,7 @@ function healthFromComponents(
     schemaVersion: base.schemaVersion,
     providerId: base.providerId,
     providerVersion: base.providerVersion,
+    indexJobContractVersion: components.indexJobContractVersion ?? base.indexJobContractVersion,
     ...(components.contractVersion === undefined ? {} : { contractVersion: components.contractVersion }),
     ...(components.capabilities === undefined ? {} : { capabilities: components.capabilities }),
     ...(components.workspaceScopeModel === undefined ? {} : { workspaceScopeModel: components.workspaceScopeModel }),

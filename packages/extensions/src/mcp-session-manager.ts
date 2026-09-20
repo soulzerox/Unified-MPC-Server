@@ -20,6 +20,8 @@ export interface McpSessionManagerOptions {
   readonly clientFactory?: McpClientFactory;
   readonly callTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
+  /** Native providers validate their versioned handshake instead of tool schemas. */
+  readonly validateToolSchemas?: boolean;
 }
 
 interface ManagedSession {
@@ -50,6 +52,7 @@ export class McpSessionManager {
   private readonly factory: McpClientFactory;
   private readonly callTimeoutMs: number;
   private readonly idleTimeoutMs: number;
+  private readonly validateToolSchemas: boolean;
   private idleTimer: NodeJS.Timeout | undefined;
   private closed = false;
 
@@ -57,6 +60,7 @@ export class McpSessionManager {
     this.factory = options.clientFactory ?? defaultMcpClientFactory;
     this.callTimeoutMs = options.callTimeoutMs ?? 60_000;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60_000;
+    this.validateToolSchemas = options.validateToolSchemas ?? true;
   }
 
   public isConnected(server: string): boolean {
@@ -304,7 +308,7 @@ export class McpSessionManager {
       );
       if (this.closed) throw new Error('Child MCP session manager is closed');
       if (isAborted(signal)) throw new Error('Child MCP connection was cancelled');
-      const tools = normalizeExternalToolCatalog(listedTools);
+      const tools = normalizeExternalToolCatalog(listedTools, this.validateToolSchemas);
       const catalogFingerprint = fingerprintExternalMcpValue(tools);
       const previousLaunchFingerprint = this.lastLaunchFingerprints.get(server);
       const managed: ManagedSession = {
@@ -341,7 +345,7 @@ export class McpSessionManager {
       `Timed out refreshing tool catalog for ${server}`,
       signal,
     );
-    const tools = normalizeExternalToolCatalog(listedTools);
+    const tools = normalizeExternalToolCatalog(listedTools, this.validateToolSchemas);
     const nextFingerprint = fingerprintExternalMcpValue(tools);
     const previousFingerprint = managed.catalogFingerprint;
     managed.tools = tools;
@@ -540,7 +544,7 @@ function cancelledCall(): Result<never> {
   return err(appError('PROCESS_TIMEOUT', 'Child MCP operation was cancelled', true));
 }
 
-function normalizeExternalToolCatalog(tools: readonly McpToolSummary[]): readonly McpToolSummary[] {
+function normalizeExternalToolCatalog(tools: readonly McpToolSummary[], validateSchemas = true): readonly McpToolSummary[] {
   if (tools.length > 512) throw new Error(`Child MCP tool catalog exceeds 512 tools (${tools.length})`);
   const names = new Set<string>();
   return tools.map((tool) => {
@@ -552,11 +556,11 @@ function normalizeExternalToolCatalog(tools: readonly McpToolSummary[]): readonl
     names.add(name);
     const description = tool.description.replace(/\s+/g, ' ').trim().slice(0, 4096);
     const normalized: { name: string; description: string; inputSchema?: unknown; outputSchema?: unknown } = { name, description };
-    if (tool.inputSchema !== undefined) {
+    if (validateSchemas && tool.inputSchema !== undefined) {
       validateExternalSchema(tool.inputSchema, name, 'input');
       normalized.inputSchema = tool.inputSchema;
     }
-    if (tool.outputSchema !== undefined) {
+    if (validateSchemas && tool.outputSchema !== undefined) {
       validateExternalSchema(tool.outputSchema, name, 'output');
       normalized.outputSchema = tool.outputSchema;
     }

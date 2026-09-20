@@ -11,6 +11,7 @@ import {
 
 const roots: string[] = [];
 const healthy: ThaiRagProviderDriverHealth = {
+  indexJobContractVersion: '1.0',
   workerReachable: true,
   sqliteAvailable: true,
   ftsAvailable: true,
@@ -67,6 +68,7 @@ describe('ThaiRagProviderRuntime', () => {
     expect(started.value.state).toBe('ready');
     expect(started.value.ownerId).toBe('http-runtime');
     expect(started.value.components).toEqual(healthy);
+    expect(started.value.indexJobContractVersion).toBe('1.0');
     expect(calls).toEqual([`start:${dataRoot}/thai-rag`]);
 
     const stopped = await runtime.stop();

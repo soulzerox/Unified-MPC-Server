@@ -41,8 +41,19 @@ describe('Thai-RAG provider handshake', () => {
     expect(THAI_RAG_CONTRACT_VERSION).toBe('1.0');
   });
 
+  it('accepts a compatible minor contract when the provider range includes Unified’s contract', () => {
+    const providerMinor = {
+      ...baseHandshake,
+      contractVersion: '1.1',
+      compatibilityRange: { min: '1.0', max: '1.x' },
+    };
+
+    expect(validateThaiRagHandshake(providerMinor)).toEqual({ ok: true, value: providerMinor });
+  });
+
   it.each([
-    ['contract version mismatch', { contractVersion: '2.0' }],
+    ['incompatible major contract', { contractVersion: '2.0', compatibilityRange: { min: '2.0', max: '2.x' } }],
+    ['provider range excludes Unified contract', { contractVersion: '1.1', compatibilityRange: { min: '1.1', max: '1.x' } }],
     ['fingerprint mismatch', { contractFingerprint: 'different' }],
     ['embedding generation fingerprint mismatch', { generation: { ...baseHandshake.generation, embedding: 'other-profile' } }],
     ['generation drift', { embeddingIndexGeneration: 2 }],

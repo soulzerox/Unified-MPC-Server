@@ -124,6 +124,7 @@ export interface ThaiRagProviderHealth {
   readonly schemaVersion: typeof THAI_RAG_PROVIDER_SCHEMA_VERSION;
   readonly providerId: typeof THAI_RAG_PROVIDER_ID;
   readonly providerVersion: string;
+  readonly indexJobContractVersion: string;
   readonly contractVersion?: string;
   readonly capabilities?: readonly string[];
   readonly workspaceScopeModel?: string;
@@ -162,6 +163,7 @@ export function createProviderHealth(
     schemaVersion: THAI_RAG_PROVIDER_SCHEMA_VERSION,
     providerId: THAI_RAG_PROVIDER_ID,
     providerVersion,
+    indexJobContractVersion: THAI_RAG_INDEX_JOB_CONTRACT_VERSION,
     state: 'stopped',
     embeddingIndexGeneration,
   };
@@ -184,7 +186,8 @@ export function validateThaiRagHandshake(
   ));
   const legacy = handshake.contractVersion !== THAI_RAG_CONTRACT_VERSION;
   const adapter = handshake.legacyAdapter === undefined ? undefined : THAI_RAG_LEGACY_ADAPTERS[handshake.legacyAdapter as keyof typeof THAI_RAG_LEGACY_ADAPTERS];
-  if (legacy && !(options.allowLegacyAdapter === true && adapter !== undefined && adapter.sourceContractVersion === handshake.contractVersion)) {
+  const compatible = isCompatibleContractVersion(handshake.contractVersion, handshake.compatibilityRange);
+  if (legacy && !(compatible || (options.allowLegacyAdapter === true && adapter !== undefined && adapter.sourceContractVersion === handshake.contractVersion))) {
     return fail('contract-version-mismatch', `unsupported contract version ${handshake.contractVersion}`, { expected: THAI_RAG_CONTRACT_VERSION, actual: handshake.contractVersion, legacyAdapter: handshake.legacyAdapter });
   }
   if (handshake.providerId !== THAI_RAG_PROVIDER_ID) return fail('provider-id-mismatch', `unexpected provider ${handshake.providerId}`, { expected: THAI_RAG_PROVIDER_ID, actual: handshake.providerId });
@@ -244,6 +247,21 @@ function isCompatibleRange(range: ThaiRagProviderHandshake['compatibilityRange']
   return version !== undefined && min !== undefined && max !== undefined
     && min[0] <= version[0] && (min[0] < version[0] || min[1] <= version[1])
     && (max[0] > version[0] || (max[0] === version[0] && max[1] >= version[1]));
+}
+
+function isCompatibleContractVersion(
+  providerContractVersion: string,
+  range: ThaiRagProviderHandshake['compatibilityRange'],
+): boolean {
+  const provider = parseVersion(providerContractVersion);
+  const supported = parseVersion(THAI_RAG_CONTRACT_VERSION);
+  const min = parseVersion(range.min);
+  const max = range.max.endsWith('.x') ? [Number(range.max.slice(0, -2)), Number.POSITIVE_INFINITY] : parseVersion(range.max);
+  if (provider === undefined || supported === undefined || min === undefined || max === undefined) return false;
+  if (provider[0] !== supported[0]) return false;
+  const providerInRange = provider[0] > min[0] || (provider[0] === min[0] && provider[1] >= min[1]);
+  const providerBelowMax = provider[0] < max[0] || (provider[0] === max[0] && provider[1] <= max[1]);
+  return isCompatibleRange(range) && providerInRange && providerBelowMax;
 }
 
 function parseVersion(value: string): readonly [number, number] | undefined {

@@ -674,6 +674,26 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it.each([
+    ['missing contract version', { contract_version: undefined }],
+    ['malformed compatibility range', { compatibility_range: { min: '1.0' } }],
+  ])('fails closed on %s before provider activation', async (_name, change) => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: { ...defaultHandshake(), ...change } }),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.details?.reason).toBe('malformed-handshake');
+    await driver.stop();
+  });
+
   it('accepts supported tagged model metadata for contract 1.0', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -753,6 +773,7 @@ describe('NativeThaiRagProviderDriver', () => {
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
     await expect(driver.health()).resolves.toMatchObject({ ok: true, value: {
       contractVersion: '1.0',
+      indexJobContractVersion: '1.0',
       compatibilityRange: { min: '1.0', max: '1.x' },
       contractFingerprint: THAI_RAG_CONTRACT_FINGERPRINT,
       generation: { contract: THAI_RAG_CONTRACT_FINGERPRINT, index: '1' },
@@ -797,6 +818,22 @@ describe('NativeThaiRagProviderDriver', () => {
       launchConfig: { command: '/python' },
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory(),
+    });
+
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+
+    expect(started.ok).toBe(true);
+    await driver.stop();
+  });
+
+  it('starts when a valid handshake accompanies an old provider-shaped tool schema', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ oldProviderSchema: true }),
     });
 
     const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
@@ -932,6 +969,7 @@ function clientFactory(options: {
   readonly handshake?: Record<string, unknown>;
   readonly scopeDrift?: string;
   readonly schemaDrift?: string;
+  readonly oldProviderSchema?: boolean;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
@@ -941,7 +979,9 @@ function clientFactory(options: {
           return productionToolNames.map((name) => ({
             name,
             description: name,
-            inputSchema: productionToolNames.includes(name as typeof productionToolNames[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
+            inputSchema: options.oldProviderSchema && name === 'code_index'
+            ? { type: 'array' }
+            : productionToolNames.includes(name as typeof productionToolNames[number]) && name !== 'health' && name !== 'version' && name !== options.scopeDrift && name !== options.schemaDrift
             ? name === 'record_event'
               ? { type: 'object', properties: { workspace_id: { type: 'string' }, event_type: { type: 'string' }, content: { type: 'string' } }, required: ['workspace_id', 'event_type', 'content'] }
                 : { type: 'object', properties: { workspace_id: { type: 'string' } }, required: ['workspace_id'] }

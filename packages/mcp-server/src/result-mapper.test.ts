@@ -90,13 +90,22 @@ describe('mapResult image payloads', () => {
 
   it('enforces an aggregate budget across structured and text representations', () => {
     const response = mapResult({ ok: true as const, value: { answer: 'x'.repeat(200) } }, {
-      budget: { maxTextBytes: 256, maxStructuredBytes: 256, maxBinaryBytes: 1024, maxBase64Bytes: 1024 },
+      maxBytes: 300,
+      budget: { maxTextBytes: 512, maxStructuredBytes: 512, maxBinaryBytes: 1024, maxBase64Bytes: 1024 },
     });
 
     const content = response.content[0];
-    const envelope = JSON.parse(content && content.type === 'text' ? content.text : '{}') as Record<string, unknown>;
-    expect(envelope).toMatchObject({ truncated: true, limitType: 'structured' });
-    expect(response.structuredContent).toBeUndefined();
+    expect(content).toEqual({ type: 'text', text: '[structured content omitted from text representation]' });
+    expect(response.structuredContent).toEqual({ answer: 'x'.repeat(200) });
+  });
+
+  it('retains small structured and text representations unchanged', () => {
+    const response = mapResult({ ok: true as const, value: { answer: 'ok' } });
+
+    expect(response).toEqual({
+      content: [{ type: 'text', text: '{"answer":"ok"}' }],
+      structuredContent: { answer: 'ok' },
+    });
   });
 
   it('keeps filesystem error messages instead of Operation failed', () => {

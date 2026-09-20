@@ -158,11 +158,21 @@ interface Continuation {
   readonly searchTruncated: boolean;
 }
 
-interface ScanContinuation {
-  readonly files: readonly { readonly workspaceId: string; readonly path: string }[];
-  readonly scannedWorkspaces: number;
-  readonly scannedFiles: number;
-}
+type ScanContinuation =
+  | {
+    readonly kind: 'materialized';
+    readonly files: readonly { readonly workspaceId: string; readonly path: string }[];
+    readonly scannedWorkspaces: number;
+    readonly scannedFiles: number;
+  }
+  | {
+    readonly kind: 'indexed';
+    readonly workspaceId: string;
+    readonly requestedPath?: string;
+    readonly lastPath?: string;
+    readonly scannedWorkspaces: number;
+    readonly scannedFiles: number;
+  };
 
 const DEFAULT_RESPONSE_TARGET_BYTES = 256 * 1024;
 const MAX_RESPONSE_TARGET_BYTES = 8 * 1024 * 1024;
@@ -343,7 +353,7 @@ export class ContextEngine {
     let continuationToken: string | undefined;
     if (hasMore) {
       continuationToken = randomUUID();
-      this.scanContinuations.set(continuationToken, { files: remaining, scannedWorkspaces, scannedFiles: deduped.length });
+      this.scanContinuations.set(continuationToken, { kind: 'materialized', files: remaining, scannedWorkspaces, scannedFiles: deduped.length });
     }
     return ok({
       files: page,
@@ -359,6 +369,10 @@ export class ContextEngine {
     const continuation = this.scanContinuations.take(token);
     if (continuation === undefined) return err({ code: 'INVALID_INPUT', message: 'Scan continuation token is invalid or expired', recoverable: false });
     const size = normalizePageSize(Math.min(pageSize ?? 200, budget?.maxItems ?? Number.MAX_SAFE_INTEGER));
+    if (continuation.kind === 'indexed') {
+      return (await this.fullScanFromIndex(continuation.workspaceId, continuation.requestedPath, size, continuation.lastPath))
+        ?? err({ code: 'INTERNAL_ERROR', message: 'Indexed workspace scan is unavailable', recoverable: true });
+    }
     const files = continuation.files.slice(0, size);
     const remaining = continuation.files.slice(files.length);
     let nextToken: string | undefined;
@@ -422,25 +436,53 @@ export class ContextEngine {
     });
   }
 
-  private async fullScanFromIndex(workspaceId: string, requestedPath: string | undefined, pageSize: number | undefined): Promise<Result<WorkspaceFullScanResult> | null> {
+  private async fullScanFromIndex(workspaceId: string, requestedPath: string | undefined, pageSize: number | undefined, lastPath?: string): Promise<Result<WorkspaceFullScanResult> | null> {
     const status = await this.services.workspaceIndex!.status(workspaceId);
     if (!status.ok || status.value.snapshot === null) return null;
     const prefix = requestedPath === undefined ? '' : normalizePath(requestedPath).replace(/^\.\//, '').replace(/\/$/, '');
-    const allFiles = status.value.snapshot.entries
-      .filter((entry) => entry.kind === 'file' || entry.kind === 'symlink')
-      .map((entry) => entry.relativePath)
-      .filter((entry) => prefix.length === 0 || entry === prefix || entry.startsWith(`${prefix}/`))
-      .sort((left, right) => normalizePath(left).localeCompare(normalizePath(right)))
-      .map((path) => ({ workspaceId, path }));
     const size = normalizePageSize(pageSize ?? 200);
-    const files = allFiles.slice(0, size);
-    const remaining = allFiles.slice(files.length);
-    let continuationToken: string | undefined;
-    if (remaining.length > 0) {
-      continuationToken = randomUUID();
-      this.scanContinuations.set(continuationToken, { files: remaining, scannedWorkspaces: 1, scannedFiles: allFiles.length });
+    const entries = status.value.snapshot.entries;
+    const normalizedCursor = lastPath === undefined ? undefined : normalizePath(lastPath);
+    const files: Array<{ readonly workspaceId: string; readonly path: string }> = [];
+    let totalMatchingFiles = 0;
+    let remainingMatchingFiles = 0;
+    for (const entry of entries) {
+      if (entry.kind !== 'file' && entry.kind !== 'symlink') continue;
+      const normalizedPath = normalizePath(entry.relativePath);
+      if (!matchesIndexedPath(normalizedPath, prefix)) continue;
+      totalMatchingFiles += 1;
+      if (normalizedCursor === undefined || normalizedPath > normalizedCursor) remainingMatchingFiles += 1;
     }
-    return ok({ files, scannedWorkspaces: 1, scannedFiles: allFiles.length, hasMore: remaining.length > 0, ...(continuationToken === undefined ? {} : { continuationToken }) });
+    let cursor = normalizedCursor;
+    // ponytail: rescan the bounded page instead of retaining every indexed path; replace with an index cursor when scan latency matters.
+    for (let index = 0; index < size; index += 1) {
+      let next: { readonly originalPath: string; readonly normalizedPath: string } | undefined;
+      for (const entry of entries) {
+        if (entry.kind !== 'file' && entry.kind !== 'symlink') continue;
+        const normalizedPath = normalizePath(entry.relativePath);
+        if (!matchesIndexedPath(normalizedPath, prefix) || (cursor !== undefined && normalizedPath <= cursor)) continue;
+        if (next === undefined || normalizedPath.localeCompare(next.normalizedPath) < 0 || normalizedPath === next.normalizedPath && entry.relativePath.localeCompare(next.originalPath) < 0) {
+          next = { originalPath: entry.relativePath, normalizedPath };
+        }
+      }
+      if (next === undefined) break;
+      files.push({ workspaceId, path: next.originalPath });
+      cursor = next.normalizedPath;
+    }
+    const hasMore = files.length < remainingMatchingFiles;
+    let continuationToken: string | undefined;
+    if (hasMore) {
+      continuationToken = randomUUID();
+      this.scanContinuations.set(continuationToken, {
+        kind: 'indexed',
+        workspaceId,
+        ...(requestedPath === undefined ? {} : { requestedPath }),
+        ...(files.at(-1) === undefined ? {} : { lastPath: files.at(-1)!.path }),
+        scannedWorkspaces: 1,
+        scannedFiles: totalMatchingFiles,
+      });
+    }
+    return ok({ files, scannedWorkspaces: 1, scannedFiles: totalMatchingFiles, hasMore, ...(continuationToken === undefined ? {} : { continuationToken }) });
   }
 
   private async resolveWorkspaceIds(workspaceId: string | undefined): Promise<Result<readonly string[]>> {
@@ -763,6 +805,10 @@ function normalizeResponseTarget(value: number | undefined): number {
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/').toLowerCase();
+}
+
+function matchesIndexedPath(path: string, prefix: string): boolean {
+  return prefix.length === 0 || path === prefix || path.startsWith(`${prefix}/`);
 }
 
 function dedupePaths(paths: readonly { readonly workspaceId: string; readonly path: string }[]): readonly { readonly workspaceId: string; readonly path: string }[] {

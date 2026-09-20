@@ -33,6 +33,8 @@ export interface MapResultOptions {
   readonly onTruncated?: (event: ToolResultTruncationEvent) => void;
 }
 
+const STRUCTURED_ONLY_TEXT = '[structured content omitted from text representation]';
+
 export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}): McpToolResponse {
   if (!result.ok) return mapError(result.error);
   const image = extractImageContent(result.value);
@@ -62,6 +64,13 @@ export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}):
   }
   const aggregateBudget = maxBytes ?? budget.maxStructuredBytes;
   if (hasStructuredPayload && structuredBytes + textBytes > aggregateBudget) {
+    const structuredOnlyBytes = Buffer.byteLength(STRUCTURED_ONLY_TEXT, 'utf8');
+    if (structuredBytes + structuredOnlyBytes <= aggregateBudget) {
+      return {
+        content: [{ type: 'text', text: STRUCTURED_ONLY_TEXT }],
+        ...(structuredContent === undefined ? {} : { structuredContent }),
+      };
+    }
     return truncatedResponse(options, structuredBytes + textBytes, aggregateBudget, 'structured');
   }
   const text = toText(result.value);

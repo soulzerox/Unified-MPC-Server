@@ -232,6 +232,47 @@ describe('context engine', () => {
     expect(many.value.failedFiles).toBe(0);
   });
 
+  it('pages indexed scans from a bounded cursor without retaining the full matching path list', async () => {
+    const entries = Array.from({ length: 10_000 }, (_, index) => ({
+      relativePath: `src/file-${String(index).padStart(5, '0')}.ts`,
+      kind: 'file' as const,
+    }));
+    const source = {
+      ...services(),
+      workspaceIndex: {
+        status: async () => ok({ indexed: true, snapshot: {
+          version: 1 as const,
+          workspaceId: 'workspace-1',
+          rootPath: '/tmp/workspace-1',
+          indexedAt: new Date(0).toISOString(),
+          entries,
+        }, watcher: null, generation: 'generation-1', freshness: 'unverified' as const, stale: false }),
+      },
+    } as McpApplicationServices;
+    const engine = new ContextEngine(source, actor);
+
+    const first = await engine.fullScan({ workspaceId: 'workspace-1', pageSize: 2, includeIgnored: false });
+    expect(first).toMatchObject({ ok: true, value: {
+      files: [
+        { path: 'src/file-00000.ts' },
+        { path: 'src/file-00001.ts' },
+      ],
+      scannedFiles: 10_000,
+      hasMore: true,
+    } });
+    if (!first.ok || first.value.continuationToken === undefined) return;
+
+    const second = await engine.continueFullScan(first.value.continuationToken, 2);
+    expect(second).toMatchObject({ ok: true, value: {
+      files: [
+        { path: 'src/file-00002.ts' },
+        { path: 'src/file-00003.ts' },
+      ],
+      scannedFiles: 10_000,
+      hasMore: true,
+    } });
+  });
+
   it('expires and caps abandoned context and full-scan continuation tokens', async () => {
     let now = 0;
     const engine = new ContextEngine(services(), actor, undefined, {

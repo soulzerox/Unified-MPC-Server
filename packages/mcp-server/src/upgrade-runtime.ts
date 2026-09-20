@@ -3047,9 +3047,19 @@ function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPo
     && ['pending_bootstrap', 'ready', 'blocked', 'unsupported', 'skipped', 'bootstrap_failed', 'grandfathered'].includes(String(value.status))
     && (value.installMode === 'frozen' || value.installMode === 'mutable')
     && ['pending', 'installed', 'skipped', 'failed'].includes(String(value.lastBootstrapResult))
-    && value.integration === 'bounded_runtime_v1'
+    && (value.integration === 'bounded_runtime_v1' || value.integration === 'dependency_resource_manager_v1')
     && Array.isArray(value.blockingReasons)
     && value.blockingReasons.every((entry) => typeof entry === 'string')) {
+    const legacyResourceLayout = value.integration === 'bounded_runtime_v1';
+    const validMigrationPhases = [
+      'legacy_detected', 'migration_pending', 'waiting_for_idle', 'preparing_shared_runtime',
+      'validating', 'activating', 'reclaiming_legacy_bytes', 'migrated', 'migration_blocked',
+    ];
+    const migrationPhase = legacyResourceLayout
+      ? 'legacy_detected'
+      : validMigrationPhases.includes(String(value.migrationPhase))
+        ? value.migrationPhase as WorktreeDependencyPolicyState['migrationPhase']
+        : 'migration_pending';
     return {
       policyVersion: WORKTREE_DEPENDENCY_POLICY_VERSION,
       disposition: value.disposition,
@@ -3060,10 +3070,27 @@ function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPo
       ...(typeof value.ecosystem === 'string' ? { ecosystem: value.ecosystem } : {}),
       ...(typeof value.packageManager === 'string' ? { packageManager: value.packageManager } : {}),
       ...(typeof value.packageManagerVersion === 'string' ? { packageManagerVersion: value.packageManagerVersion } : {}),
+      ...(typeof value.runtimeVersion === 'string' ? { runtimeVersion: value.runtimeVersion } : {}),
       ...(typeof value.sharedStoreIdentity === 'string' ? { sharedStoreIdentity: value.sharedStoreIdentity } : {}),
       ...(typeof value.localRuntimeIdentity === 'string' ? { localRuntimeIdentity: value.localRuntimeIdentity } : {}),
-      blockingReasons: value.blockingReasons as string[],
-      integration: 'bounded_runtime_v1',
+      ...(typeof value.resourcePoolId === 'string' ? { resourcePoolId: value.resourcePoolId } : {}),
+      ...(typeof value.resourcePoolPath === 'string' ? { resourcePoolPath: value.resourcePoolPath } : {}),
+      ...(value.runtimeView === 'global_virtual_store' || value.runtimeView === 'centralized_env' || value.runtimeView === 'local'
+        ? { runtimeView: value.runtimeView }
+        : {}),
+      ...(value.linkMode === 'symlink' || value.linkMode === 'hardlink' || value.linkMode === 'reflink' || value.linkMode === 'copy' || value.linkMode === 'local'
+        ? { linkMode: value.linkMode }
+        : {}),
+      ...(value.crossFilesystem === 'unknown' ? { crossFilesystem: value.crossFilesystem } : {}),
+      ...(typeof value.compatibilityIdentity === 'string' ? { compatibilityIdentity: value.compatibilityIdentity } : {}),
+      ...(migrationPhase === undefined ? {} : { migrationPhase }),
+      ...(typeof value.resourceFallbackReason === 'string' ? { resourceFallbackReason: value.resourceFallbackReason } : {}),
+      ...(value.emergencyOverride === true ? { emergencyOverride: true as const } : {}),
+      blockingReasons: [
+        ...(value.blockingReasons as string[]),
+        ...(legacyResourceLayout ? ['Legacy #34 dependency layout detected; mandatory #63 migration is pending at the next safe idle boundary.'] : []),
+      ],
+      integration: 'dependency_resource_manager_v1',
     };
   }
   return {
@@ -3072,8 +3099,9 @@ function normalizeWorktreeDependencyPolicy(value: unknown): WorktreeDependencyPo
     status: 'grandfathered',
     installMode: 'frozen',
     lastBootstrapResult: 'skipped',
-    blockingReasons: ['Legacy worktree has no dependency-policy state; preserving its current runtime layout.'],
-    integration: 'bounded_runtime_v1',
+    migrationPhase: 'legacy_detected',
+    blockingReasons: ['Legacy worktree has no dependency-resource state; preserve it only until the next safe idle migration boundary.'],
+    integration: 'dependency_resource_manager_v1',
   };
 }
 

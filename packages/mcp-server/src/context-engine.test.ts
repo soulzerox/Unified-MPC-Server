@@ -168,6 +168,42 @@ describe('context engine', () => {
     await expect(engine.searchAll({ query: 'login', workspaceId: 'workspace-1' }, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });
 
+
+  it('bounds oversized text results before context candidates are retained', async () => {
+    const paths = Array.from({ length: 1_000 }, (_, index) => `src/file-${index}.ts`);
+    const source = {
+      ...services(),
+      search: {
+        searchText: async () => ok({
+          matches: paths.map((path, line) => ({ path, line: line + 1, text: 'needle' })),
+          truncated: false,
+        }),
+        searchFiles: async () => ok({ paths: [], truncated: false }),
+      },
+      git: { status: async () => ok({ entries: [] }) },
+    } as McpApplicationServices;
+
+    const result = await new ContextEngine(source, actor).collect({ query: 'needle', workspaceId: 'workspace-1', pageSize: 1 });
+
+    expect(result).toMatchObject({ ok: true, value: { matchedFiles: 100, totalMatches: 100, hasMore: true } });
+  });
+
+  it('bounds oversized filename results before context candidates are retained', async () => {
+    const paths = Array.from({ length: 1_000 }, (_, index) => `src/file-${index}.ts`);
+    const source = {
+      ...services(),
+      search: {
+        searchText: async () => ok({ matches: [], truncated: false }),
+        searchFiles: async () => ok({ paths, truncated: false }),
+      },
+      git: { status: async () => ok({ entries: [] }) },
+    } as McpApplicationServices;
+
+    const result = await new ContextEngine(source, actor).collect({ query: 'needle', workspaceId: 'workspace-1', pageSize: 1 });
+
+    expect(result).toMatchObject({ ok: true, value: { matchedFiles: 100, totalMatches: 0, hasMore: true } });
+  });
+
   it('stops cross-workspace search at one global result budget', async () => {
     const searched: string[] = [];
     const source = {

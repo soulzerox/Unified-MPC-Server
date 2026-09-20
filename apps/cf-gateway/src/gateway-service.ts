@@ -9,8 +9,22 @@ export type BridgeState =
   | 'SESSION_CONNECTED'
   | 'ERROR';
 
+export type GatewaySessionState = 'not_leased' | 'leased';
+export type ConnectorRegistrationState = 'unverified' | 'stale';
+export type ConnectorRegistrationReason = 'host_projection_unavailable' | 'backend_restart';
+export type ConnectorRecoveryAction = 'none' | 'reconnect_chatgpt_session';
+
+export interface ConnectorRegistrationStatus {
+  readonly state: ConnectorRegistrationState;
+  readonly action: ConnectorRecoveryAction;
+  readonly reason?: ConnectorRegistrationReason;
+}
+
 export interface GatewayStatus {
   readonly state: BridgeState;
+  readonly sessionState: GatewaySessionState;
+  readonly connectorRegistration: ConnectorRegistrationStatus;
+  readonly endToEndState: 'unverified' | 'healthy';
   readonly tunnelUrl?: string;
   readonly mcpUrl?: string;
   readonly localPort: number;
@@ -85,6 +99,8 @@ export class GatewayService {
   private desiredSessionConnected = false;
   private consecutiveHealthFailures = 0;
   private reconnectAttempt = 0;
+  private connectorRegistration: ConnectorRegistrationStatus = { state: 'unverified', action: 'none' };
+  private connectorRecoveryRequired = false;
 
   public constructor(options: GatewayServiceOptions = {}) {
     this.localPort = options.localPort ?? 18765;
@@ -122,6 +138,9 @@ export class GatewayService {
   public status(): GatewayStatus {
     return {
       state: this.state,
+      sessionState: this.leaseToken === undefined ? 'not_leased' : 'leased',
+      connectorRegistration: { ...this.connectorRegistration },
+      endToEndState: 'unverified',
       ...(this.tunnelUrl ? { tunnelUrl: this.tunnelUrl } : {}),
       ...(this.tunnelUrl ? { mcpUrl: new URL(this.mcpPath, this.tunnelUrl).toString() } : {}),
       localPort: this.localPort,
@@ -150,6 +169,7 @@ export class GatewayService {
     const wasSessionConnected = this.state === 'SESSION_CONNECTED' || this.desiredSessionConnected;
     const wasRunning = this.state === 'BRIDGE_HEALTHY' || this.state === 'SESSION_CONNECTED';
     await this.stop();
+    this.connectorRecoveryRequired = wasSessionConnected;
     this.configurationValue = next;
     this.tunnelProvider = this.tunnelProviderFactory(next);
     if (!wasRunning) return ok(undefined);
@@ -254,10 +274,12 @@ export class GatewayService {
     this.reconnectAttempt = 0;
     this.latencyMs = undefined;
     this.lastError = undefined;
+    this.connectorRecoveryRequired = false;
+    this.connectorRegistration = { state: 'unverified', action: 'none' };
     return ok(undefined);
   }
 
-  public async connectSession(): Promise<Result<{ readonly leaseToken: string; readonly tunnelUrl: string; readonly mcpUrl: string }>> {
+  public async connectSession(): Promise<Result<{ readonly leaseToken: string; readonly tunnelUrl: string; readonly mcpUrl: string; readonly connectorRegistration: ConnectorRegistrationStatus }>> {
     if (!this.canConnectSession()) {
       return err(
         appError(
@@ -268,6 +290,9 @@ export class GatewayService {
     }
 
     this.desiredSessionConnected = true;
+    this.connectorRegistration = this.connectorRecoveryRequired
+      ? { state: 'stale', reason: 'backend_restart', action: 'reconnect_chatgpt_session' }
+      : { state: 'unverified', reason: 'host_projection_unavailable', action: 'reconnect_chatgpt_session' };
     this.leaseToken = `lease_${randomUUID().replaceAll('-', '')}`;
     this.state = 'SESSION_CONNECTED';
     this.clearSessionLeaseTimer();
@@ -281,6 +306,7 @@ export class GatewayService {
       leaseToken: this.leaseToken,
       tunnelUrl: this.tunnelUrl!,
       mcpUrl: new URL(this.mcpPath, this.tunnelUrl!).toString(),
+      connectorRegistration: { ...this.connectorRegistration },
     });
   }
 
@@ -288,6 +314,8 @@ export class GatewayService {
     this.desiredSessionConnected = false;
     this.clearSessionLeaseTimer();
     this.leaseToken = undefined;
+    this.connectorRecoveryRequired = false;
+    this.connectorRegistration = { state: 'unverified', action: 'none' };
     if (this.state === 'SESSION_CONNECTED') this.state = this.tunnelUrl === undefined ? 'STOPPED' : 'BRIDGE_HEALTHY';
     this.scheduleHealthMonitor();
     return ok(undefined);
@@ -327,6 +355,10 @@ export class GatewayService {
     this.clearHealthMonitorTimer();
     this.clearSessionLeaseTimer();
     this.leaseToken = undefined;
+    this.connectorRecoveryRequired = this.desiredSessionConnected;
+    this.connectorRegistration = this.desiredSessionConnected
+      ? { state: 'stale', reason: 'backend_restart', action: 'reconnect_chatgpt_session' }
+      : { state: 'unverified', action: 'none' };
     this.lastError = message;
     this.state = 'ERROR';
     const tunnel = this.tunnel;

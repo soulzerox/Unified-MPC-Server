@@ -73,6 +73,9 @@ import { skillTools } from './tools/skill-tools.js';
 import { workspaceTools } from './tools/workspace-tools.js';
 import type { McpApplicationServices, McpToolContext, McpToolDefinition } from './tools/tool-types.js';
 
+const THAI_RAG_EVENT_TYPES = ['decision', 'requirement', 'constraint', 'preference', 'milestone', 'handoff', 'root_cause_fix', 'explicit_remember'] as const;
+const THAI_RAG_EVENT_TYPE_SET = new Set<string>(THAI_RAG_EVENT_TYPES);
+
 export type { McpApplicationServices } from './tools/tool-types.js';
 export type { ActiveProjectScope, WorkspaceScope } from './destructive-scope.js';
 export type AuthorizationMode = InvocationAuthorizationMode;
@@ -845,7 +848,7 @@ export class ToolRegistry {
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'workspace_memory_record', {
       name,
-      category: entityType,
+      entityType,
       observations,
     }, signal);
   }
@@ -858,7 +861,8 @@ export class ToolRegistry {
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'recall', {
-      query: category === undefined ? query : `[${category}] ${query}`,
+      query,
+      ...(category === undefined ? {} : { category }),
       ...(limit === undefined ? {} : { limit }),
     }, signal);
   }
@@ -870,7 +874,8 @@ export class ToolRegistry {
     signal: AbortSignal,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'remember', {
-      content: category === undefined ? content : `[${category}] ${content}`,
+      content,
+      ...(category === undefined ? {} : { category }),
     }, signal);
   }
 
@@ -886,46 +891,48 @@ export class ToolRegistry {
     }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    const scopedCategory = `workspace:${workspaceId}`;
     let providerTool = tool;
-    let providerArgs: Readonly<Record<string, unknown>> = args;
+    let providerArgs: Readonly<Record<string, unknown>> = { ...args, workspace_id: workspaceId };
 
-    if (tool === 'remember') {
-      providerArgs = { ...args, category: scopedCategory };
-    } else if (tool === 'recall') {
-      providerArgs = { ...args, category: scopedCategory };
-    } else if (tool === 'forget') {
-      providerArgs = { ...args, category: scopedCategory };
-    } else if (tool === 'workspace_memory_record') {
+    if (tool === 'workspace_memory_record') {
       const name = typeof args.name === 'string' ? args.name : 'workspace-note';
       const observations = Array.isArray(args.observations)
         ? args.observations.filter((value): value is string => typeof value === 'string')
         : [];
-      const category = typeof args.category === 'string' && args.category.trim().length > 0 ? args.category.trim() : 'working-memory';
-      providerTool = 'remember';
+      const entityType = typeof args.entityType === 'string' && args.entityType.trim().length > 0
+        ? args.entityType.trim()
+        : typeof args.category === 'string' && args.category.trim().length > 0
+          ? args.category.trim()
+          : 'work-log';
+      const eventType = entityType === 'work-log' ? 'explicit_remember' : entityType;
+      if (!THAI_RAG_EVENT_TYPE_SET.has(eventType)) {
+        return err(appError('INVALID_INPUT', `Unsupported workspace memory event type: ${entityType}`, false, {
+          reason: 'unsupported-event-type',
+          entityType,
+          supportedEventTypes: THAI_RAG_EVENT_TYPES.join(','),
+        }));
+      }
+      providerTool = 'record_event';
       providerArgs = {
-        category: scopedCategory,
-        content: `[${category}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
+        workspace_id: workspaceId,
+        event_type: eventType,
+        content: `[${eventType}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
       };
-    } else if (tool === 'pre_edit_context') {
-      providerArgs = { ...args, workspace: workspaceId };
-    } else if (tool === 'code_blast_radius') {
-      providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_index') {
-      providerArgs = { ...args, workspace_path: scope.rootPath, workspace: workspaceId };
+      providerArgs = { ...providerArgs, workspace_path: scope.rootPath };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
       const pathFilter = requestedFilter.length === 0
         ? workspaceId
         : requestedFilter.startsWith(`${workspaceId}/`) ? requestedFilter : `${workspaceId}/${requestedFilter}`;
-      providerArgs = { ...args, path_filter: pathFilter };
+      providerArgs = { ...providerArgs, path_filter: pathFilter };
     } else if (tool === 'code_context') {
       const requestedPath = typeof args.file_path === 'string' ? args.file_path.trim().replaceAll('\\', '/').replace(/^\.\//, '') : '';
       if (requestedPath.length === 0 || requestedPath === '..' || requestedPath.startsWith('../')) {
         return err(appError('INVALID_INPUT', 'Native Thai-RAG code_context requires a workspace-relative file path'));
       }
       providerArgs = {
-        ...args,
+        ...providerArgs,
         file_path: requestedPath.startsWith(`${workspaceId}/`) ? requestedPath : `${workspaceId}/${requestedPath}`,
       };
     }

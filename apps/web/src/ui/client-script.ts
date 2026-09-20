@@ -95,7 +95,7 @@ export function getClientScriptJs(): string {
           if (tel) {
             tel.innerHTML =
               '<div style="line-height: 1.8;">' +
-              '<div>Status: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
+              '<div>Control Plane Reachability: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
               '<div>Gateway State: ' + (data.gateway?.state || 'STOPPED') + '</div>' +
               '<div>Local Loopback Port: ' + (data.gateway?.localPort || 18765) + '</div>' +
               '</div>';

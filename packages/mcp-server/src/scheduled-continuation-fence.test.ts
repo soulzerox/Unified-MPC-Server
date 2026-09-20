@@ -282,24 +282,25 @@ describe('scheduled continuation mutation fence', () => {
     expect(end).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps ordinary read execution tied to the parent request lifetime', async (): Promise<void> => {
+  it('keeps ordinary unfenced mutation execution tied to the parent request lifetime', async (): Promise<void> => {
     let executionSignal: AbortSignal | undefined;
     let started = false;
-    const readFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+    const writeFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
       executionSignal = signal;
       started = true;
       return new Promise<ReturnType<typeof ok>>((resolve) => {
         signal?.addEventListener('abort', () => {
-          resolve(ok({ path: 'src/file.ts', content: '', startLine: 1, endLine: 1 }));
+          resolve(ok({ path: 'src/file.ts', bytesWritten: 0 }));
         }, { once: true });
       });
     });
-    const registry = new ToolRegistry({ file: { readFile } } as unknown as McpApplicationServices, actor);
+    const registry = new ToolRegistry({ file: { writeFile } } as unknown as McpApplicationServices, actor);
     const parent = new AbortController();
 
-    const pending = registry.invoke('read_file', {
+    const pending = registry.invoke('write_file', {
       workspaceId: 'workspace-1',
       path: 'src/file.ts',
+      content: 'request scoped',
     }, undefined, parent.signal);
 
     for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();

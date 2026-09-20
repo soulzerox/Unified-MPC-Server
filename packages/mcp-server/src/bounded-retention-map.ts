@@ -17,6 +17,11 @@ export interface BoundedRetentionEviction<K, V> {
   readonly reason: BoundedRetentionEvictionReason;
 }
 
+export type BoundedRetentionLookup<K, V> =
+  | { readonly state: 'missing' }
+  | { readonly state: 'value'; readonly value: V }
+  | { readonly state: 'evicted'; readonly eviction: BoundedRetentionEviction<K, V> };
+
 /** Small LRU+TTL store for transient runtime state that must not grow forever. */
 export class BoundedRetentionMap<K, V> {
   private readonly values = new Map<K, RetainedValue<V>>();
@@ -29,16 +34,24 @@ export class BoundedRetentionMap<K, V> {
   }
 
   public get(key: K): V | undefined {
+    const lookup = this.getWithEviction(key);
+    return lookup.state === 'value' ? lookup.value : undefined;
+  }
+
+  public getWithEviction(key: K): BoundedRetentionLookup<K, V> {
     const retained = this.values.get(key);
-    if (retained === undefined) return undefined;
+    if (retained === undefined) return { state: 'missing' };
     const now = this.now();
     if (now - retained.touchedAt >= this.options.ttlMs) {
       this.values.delete(key);
-      return undefined;
+      return {
+        state: 'evicted',
+        eviction: { key, value: retained.value, reason: 'ttl' },
+      };
     }
     this.values.delete(key);
     this.values.set(key, { value: retained.value, touchedAt: now });
-    return retained.value;
+    return { state: 'value', value: retained.value };
   }
 
   public take(key: K): V | undefined {

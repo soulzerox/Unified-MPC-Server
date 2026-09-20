@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { appError, err, ok } from '@unified-mpc/domain';
 import { LocalCapabilityService, ShellCapabilityBackend } from '@unified-mpc/capabilities';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
+import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalPolicy, type ToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import type { ActivitySinkEvent } from './activity-tracker.js';
 import { MANDATORY_HARNESS_TOOL_NAMES, ToolRegistry, type McpApplicationServices, type ToolRegistryOptions, type WorkspaceScope } from './tool-registry.js';
@@ -1221,6 +1222,159 @@ describe('MCP tool registry', () => {
     expect((await registry.invoke('shell', { operation: 'run', executable: 'npm.cmd', arguments: ['run', 'cleanup'], userConfirmed: true })).isError).not.toBe(true);
     expect((await registry.invoke('mcp_call', { server: 'child', tool: 'delete_file', arguments: { path: 'x' }, userConfirmed: true })).isError).not.toBe(true);
     expect(calls).toEqual(['shell', 'web_fetch', 'shell', 'mcp_call']);
+  });
+
+  it('checks resource pressure only after child MCP approval and never reaches the child backend when exhausted', async () => {
+    const controller = new ResourceAdmissionController({ globalCost: 3, workspaceCost: 3, maxOperations: 1 });
+    const held = controller.tryAcquire({
+      operationId: 'held-child-call',
+      workspaceId: 'workspace-held',
+      resourceClass: 'child_mcp_call',
+      cost: 3,
+    });
+    if (!held.admitted) throw new Error('expected held child-MCP admission');
+    const childCall = vi.fn(async () => ok({ ok: true }));
+    const hostApproval = vi.fn(async () => true);
+    const registry = new ToolRegistry({
+      extensions: { callMcpTool: childCall } as unknown as McpApplicationServices['extensions'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      hostMutationApprovalProvider: hostApproval,
+      resourceAdmissionController: controller,
+      mcpCallAdmissionCost: 3,
+    });
+
+    const response = await registry.invoke('mcp_call', {
+      server: 'child',
+      tool: 'mutate',
+      arguments: { workspaceId: 'workspace-a' },
+      userConfirmed: true,
+    });
+
+    expect(hostApproval).toHaveBeenCalledTimes(1);
+    expect(childCall).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'RESOURCE_PRESSURE', recoverable: true } },
+    });
+    expect(controller.release(held.lease)).toBe(true);
+  });
+
+  it('charges a running child MCP call to the host active workspace and releases capacity on settlement', async () => {
+    const controller = new ResourceAdmissionController({ globalCost: 3, workspaceCost: 3, maxOperations: 1 });
+    let settleChild: (() => void) | undefined;
+    let childStarted = false;
+    const registry = new ToolRegistry({
+      extensions: {
+        async callMcpTool(): Promise<ReturnType<typeof ok>> {
+          childStarted = true;
+          return await new Promise((resolve) => {
+            settleChild = (): void => resolve(ok({ ok: true }));
+          });
+        },
+      } as unknown as McpApplicationServices['extensions'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-a', rootPath: 'E:\\project-a' }),
+      resourceAdmissionController: controller,
+      mcpCallAdmissionCost: 3,
+    });
+
+    const pending = registry.invoke('mcp_call', {
+      server: 'child',
+      tool: 'slow',
+      arguments: { workspaceId: 'spoofed-workspace' },
+    });
+    for (let attempt = 0; attempt < 20 && !childStarted; attempt += 1) await Promise.resolve();
+
+    expect(childStarted).toBe(true);
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 3,
+      activeOperations: 1,
+      activeCostByClass: { child_mcp_call: 3 },
+      activeCostByWorkspace: { 'workspace-a': 3 },
+    });
+
+    settleChild?.();
+    await expect(pending).resolves.not.toMatchObject({ isError: true });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('keeps the child MCP admission lease while a timed-out backend is still settling', async () => {
+    vi.useFakeTimers();
+    const controller = new ResourceAdmissionController({ globalCost: 3, workspaceCost: 3, maxOperations: 1 });
+    let settleChild: (() => void) | undefined;
+    let childStarted = false;
+    const registry = new ToolRegistry({
+      extensions: {
+        async callMcpTool(): Promise<ReturnType<typeof ok>> {
+          childStarted = true;
+          return await new Promise((resolve) => {
+            settleChild = (): void => resolve(ok({ ok: true }));
+          });
+        },
+      } as unknown as McpApplicationServices['extensions'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      resourceAdmissionController: controller,
+      mcpCallAdmissionCost: 3,
+      maxToolDurationMs: 10,
+    });
+
+    const pending = registry.invoke('mcp_call', {
+      server: 'child',
+      tool: 'slow',
+      arguments: { workspaceId: 'workspace-a' },
+    });
+    for (let attempt = 0; attempt < 20 && !childStarted; attempt += 1) await Promise.resolve();
+    expect(childStarted).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT', recoverable: true } },
+    });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 3, activeOperations: 1 });
+
+    settleChild?.();
+    for (let attempt = 0; attempt < 20 && controller.snapshot().activeOperations > 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('charges tool_batch only at the dispatched child mcp_call boundary', async () => {
+    const controller = new ResourceAdmissionController({ globalCost: 3, workspaceCost: 3, maxOperations: 1 });
+    const childCall = vi.fn(async () => ok({ ok: true }));
+    const registry = new ToolRegistry({
+      extensions: { callMcpTool: childCall } as unknown as McpApplicationServices['extensions'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      resourceAdmissionController: controller,
+      mcpCallAdmissionCost: 3,
+    });
+
+    const response = await registry.invoke('tool_batch', {
+      parallel: true,
+      maxConcurrency: 1,
+      calls: [{
+        id: 'child-1',
+        tool: 'mcp_call',
+        arguments: {
+          server: 'child',
+          tool: 'read',
+          arguments: { workspaceId: 'workspace-a' },
+        },
+        dependsOn: [],
+      }],
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(childCall).toHaveBeenCalledTimes(1);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0, rejected: 0 });
   });
 
   it('marks Full Bypass calls in activity and bypasses special confirmation and application command scope gates', async () => {

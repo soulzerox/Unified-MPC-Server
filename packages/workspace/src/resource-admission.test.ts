@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
   ResourceAdmissionController,
+  sharedProcessResourceAdmissionController,
+  tryAdmitChildMcpCall,
   tryAdmitDependencyBootstrap,
 } from './resource-admission.js';
 
@@ -62,4 +65,28 @@ describe('resource admission contract', () => {
     expect(controller.release(first.lease)).toBe(false);
     expect(tryAdmitDependencyBootstrap(controller, { operationId: 'bootstrap-b', workspaceId: 'workspace-a', cost: 4 })).toMatchObject({ admitted: true });
   });
+  it('accounts child MCP calls in the existing weighted controller', () => {
+    const controller = new ResourceAdmissionController({ globalCost: 6, workspaceCost: 3, maxOperations: 2 });
+    const decision = tryAdmitChildMcpCall(controller, {
+      operationId: 'mcp-call-a',
+      workspaceId: 'workspace-a',
+      cost: DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
+    });
+
+    expect(decision).toMatchObject({
+      admitted: true,
+      lease: { resourceClass: 'child_mcp_call', workspaceId: 'workspace-a', cost: 3 },
+    });
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 3,
+      activeOperations: 1,
+      activeCostByClass: { dependency_bootstrap: 0, child_mcp_call: 3 },
+      activeCostByWorkspace: { 'workspace-a': 3 },
+    });
+  });
+
+  it('returns one process-owned default controller across runtime owners', () => {
+    expect(sharedProcessResourceAdmissionController()).toBe(sharedProcessResourceAdmissionController());
+  });
+
 });

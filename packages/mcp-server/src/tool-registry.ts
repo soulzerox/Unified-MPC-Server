@@ -708,6 +708,11 @@ export class ToolRegistry {
     if (sessionStart?.resolvedResourceId === undefined) {
       return err(appError('CONFLICT', 'Mandatory session-start skill ask-matt is unavailable in the live runtime policy', true));
     }
+    const unavailableNativeCapability = policy.value.policies.find((entry) =>
+      entry.resourceType === 'capability' && entry.mandatory && !entry.available);
+    if (unavailableNativeCapability !== undefined) {
+      return err(appError('CONFLICT', `Required native capability is unavailable: ${unavailableNativeCapability.resourceId}`, true));
+    }
     if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
     const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
     if (!sessionStartSkill.ok) return sessionStartSkill;

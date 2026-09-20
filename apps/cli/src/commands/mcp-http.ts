@@ -1,5 +1,5 @@
 import { appError, err, type Result } from '@unified-mpc/domain';
-import { startMcpHttp, type McpHttpServerHandle, type McpHttpServerOptions } from '@unified-mpc/mcp-server';
+import { DEFAULT_LEGACY_SESSION_TTL_MS, startMcpHttp, type McpHttpServerHandle, type McpHttpServerOptions } from '@unified-mpc/mcp-server';
 import type { Workspace } from '@unified-mpc/workspace';
 
 export interface ConfiguredWorkspaceResolver {
@@ -41,6 +41,16 @@ export interface McpHttpProviderStartupOptions {
 const defaultStarter: McpHttpServerStarter = {
   start: startMcpHttp,
 };
+
+export function configuredLegacySessionTtlMs(environment: NodeJS.ProcessEnv = process.env): number {
+  const configured = environment.UNIFIED_MPC_LEGACY_SESSION_TTL_MS?.trim();
+  if (configured === undefined || configured.length === 0) return DEFAULT_LEGACY_SESSION_TTL_MS;
+  const value = Number(configured);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('UNIFIED_MPC_LEGACY_SESSION_TTL_MS must be a positive integer number of milliseconds');
+  }
+  return value;
+}
 
 export async function startMcpHttpBeforeProvider(
   options: McpHttpProviderStartupOptions,

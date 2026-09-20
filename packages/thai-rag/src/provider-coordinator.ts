@@ -2,6 +2,7 @@ import { unlink } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import path from 'node:path';
 import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
+import type { PosixProcessIdentityProbe } from '@unified-mpc/process';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
   isThaiRagOwnerLockConflict,
@@ -21,6 +22,7 @@ export interface ThaiRagProviderCoordinatorOptions {
   readonly pid?: number;
   readonly now?: () => Date;
   readonly isProcessAlive?: (pid: number) => boolean;
+  readonly processIdentityProbe?: PosixProcessIdentityProbe;
   readonly followerConnectTimeoutMs?: number;
 }
 
@@ -59,6 +61,7 @@ export class ThaiRagProviderCoordinator {
       ...(options.pid === undefined ? {} : { pid: options.pid }),
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.isProcessAlive === undefined ? {} : { isProcessAlive: options.isProcessAlive }),
+      ...(options.processIdentityProbe === undefined ? {} : { processIdentityProbe: options.processIdentityProbe }),
     });
   }
 
@@ -298,7 +301,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       return;
     }
     const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    // This delay is part of awaited startup/recovery work and must keep the parent alive.
     signal?.addEventListener('abort', () => {
       clearTimeout(timer);
       resolve();

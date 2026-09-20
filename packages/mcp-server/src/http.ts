@@ -29,7 +29,13 @@ import { APP_NAME, APP_VERSION } from '@unified-mpc/shared';
 
 export const MAX_MCP_HTTP_BODY_BYTES = 1_048_576;
 export const UNIFIED_MPC_MCP_IDENTITY_PATH = '/_unified-mpc/identity';
-const DEFAULT_LEGACY_SESSION_TTL_MS = 30 * 60_000;
+export const DEFAULT_LEGACY_SESSION_TTL_MS = 60 * 60_000;
+export const LEGACY_SESSION_EVICTION_REASONS = ['idle_ttl', 'lru_capacity', 'client_delete', 'transport_close', 'backend_shutdown', 'protocol_error'] as const;
+export type LegacySessionEvictionReason = typeof LEGACY_SESSION_EVICTION_REASONS[number];
+export interface LegacySessionEvictionEvent {
+  readonly sessionId: string;
+  readonly reason: LegacySessionEvictionReason;
+}
 const DEFAULT_MAX_LEGACY_SESSIONS = 64;
 
 export interface McpHttpServerOptions extends McpServerOptions {
@@ -43,6 +49,7 @@ export interface McpHttpServerOptions extends McpServerOptions {
   readonly legacySessionTtlMs?: number;
   readonly maxLegacySessions?: number;
   readonly legacySessionNow?: () => number;
+  readonly legacySessionEvictionObserver?: (event: LegacySessionEvictionEvent) => void;
 }
 
 export interface McpHttpServerAddress {
@@ -234,6 +241,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   });
   const closingSessions = new WeakSet<LegacySession>();
   const pendingSessionCloses = new Set<Promise<void>>();
+  const explicitCloseReasons = new Map<string, LegacySessionEvictionReason>();
   let closed = false;
 
   const disposeLegacySession = async (session: LegacySession): Promise<void> => {
@@ -251,17 +259,35 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     return pending;
   };
 
+  const trackSessionEviction = (
+    sessionId: string,
+    session: LegacySession,
+    reason: LegacySessionEvictionReason,
+  ): Promise<void> => {
+    if (closingSessions.has(session)) return Promise.resolve();
+    try {
+      options.legacySessionEvictionObserver?.({ sessionId, reason });
+    } catch (error: unknown) {
+      writeDiagnostic(error instanceof Error ? error : new Error(String(error)));
+    }
+    return trackSessionClose(session);
+  };
+
   const pruneLegacySessions = async (): Promise<void> => {
     const expired = sessions.pruneExpired();
-    await Promise.allSettled(expired.map(([, session]) => trackSessionClose(session)));
+    await Promise.allSettled(expired.map(([sessionId, session]) => trackSessionEviction(sessionId, session, 'idle_ttl')));
   };
 
   const sweepTimer = setInterval(() => { void pruneLegacySessions(); }, Math.min(sessionTtlMs, 60_000));
   sweepTimer.unref();
 
-  const closeLegacySession = async (sessionId: string, session: LegacySession): Promise<void> => {
+  const closeLegacySession = async (
+    sessionId: string,
+    session: LegacySession,
+    reason: LegacySessionEvictionReason,
+  ): Promise<void> => {
     if (sessions.peek(sessionId) === session) sessions.delete(sessionId);
-    await trackSessionClose(session);
+    await trackSessionEviction(sessionId, session, reason);
   };
 
   const createLegacySession = async (request: Request): Promise<Response> => {
@@ -286,14 +312,18 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       onsessioninitialized(sessionId): void {
         registeredSessionId = sessionId;
         registeredSession = { server, transport, scopeSessionId: requestScope.sessionId };
-        const evicted = sessions.set(sessionId, registeredSession);
-        for (const [, session] of evicted) void trackSessionClose(session);
+        const evicted = sessions.setWithEvictions(sessionId, registeredSession);
+        for (const entry of evicted) {
+          void trackSessionEviction(entry.key, entry.value, entry.reason === 'ttl' ? 'idle_ttl' : 'lru_capacity');
+        }
       },
       onsessionclosed(sessionId): void {
         const session = sessions.peek(sessionId);
         if (session?.transport !== transport) return;
         sessions.delete(sessionId);
-        void trackSessionClose(session);
+        const reason = explicitCloseReasons.get(sessionId) ?? 'transport_close';
+        explicitCloseReasons.delete(sessionId);
+        void trackSessionEviction(sessionId, session, reason);
       },
     });
 
@@ -307,8 +337,11 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       if (registeredSessionId !== undefined && registeredSession !== undefined && sessions.peek(registeredSessionId) === registeredSession) {
         sessions.delete(registeredSessionId);
       }
-      if (registeredSession !== undefined) await trackSessionClose(registeredSession);
-      else await server.close().catch(() => undefined);
+      if (registeredSessionId !== undefined && registeredSession !== undefined) {
+        await trackSessionEviction(registeredSessionId, registeredSession, 'protocol_error');
+      } else {
+        await server.close().catch(() => undefined);
+      }
       throw error;
     }
   };
@@ -334,12 +367,28 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
         return createLegacySession(request);
       }
 
-      const session = sessions.get(sessionId);
-      if (session === undefined) return sessionNotFoundResponse();
+      const lookup = sessions.getWithEviction(sessionId);
+      if (lookup.state === 'evicted') {
+        await trackSessionEviction(lookup.eviction.key, lookup.eviction.value, 'idle_ttl');
+        return sessionNotFoundResponse();
+      }
+      if (lookup.state === 'missing') return sessionNotFoundResponse();
+      const session = lookup.value;
 
-      const result = await session.transport.handleRequest(request, requestOptions);
-      if (request.method === 'DELETE') await closeLegacySession(sessionId, session);
-      return result;
+      if (request.method === 'DELETE') explicitCloseReasons.set(sessionId, 'client_delete');
+      try {
+        const result = await session.transport.handleRequest(request, requestOptions);
+        if (request.method === 'DELETE') await closeLegacySession(sessionId, session, 'client_delete');
+        return result;
+      } catch (error: unknown) {
+        if (sessions.peek(sessionId) === session) {
+          sessions.delete(sessionId);
+          await trackSessionEviction(sessionId, session, 'protocol_error');
+        }
+        throw error;
+      } finally {
+        explicitCloseReasons.delete(sessionId);
+      }
     },
     async close(): Promise<void> {
       if (closed) return;
@@ -347,7 +396,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       clearInterval(sweepTimer);
       await modernHandler.close();
       const activeSessions = sessions.drain();
-      await Promise.allSettled(activeSessions.map(([, session]) => trackSessionClose(session)));
+      await Promise.allSettled(activeSessions.map(([sessionId, session]) => trackSessionEviction(sessionId, session, 'backend_shutdown')));
       await Promise.allSettled([...pendingSessionCloses]);
     },
   };

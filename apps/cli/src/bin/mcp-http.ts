@@ -5,7 +5,7 @@ import { createCrossClientHostMutationApprovalProvider, hostApprovalBrokerDirect
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
-import { createWebMcpHttpServerOptions, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
+import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
 
 function envPort(): number {
@@ -60,6 +60,7 @@ async function main(): Promise<void> {
       activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
       toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
       toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
+      legacySessionTtlMs: configuredLegacySessionTtlMs(),
       allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
       allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),
     }, brokeredHostMutationApprovalProvider)),

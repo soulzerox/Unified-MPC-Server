@@ -79,12 +79,14 @@ describe('ThaiRagProviderRuntime', () => {
 
   it('enforces a single provider owner across runtimes sharing the same data root', async () => {
     const dataRoot = await root();
+    const processIdentityProbe = async (): Promise<string> => 'process:current';
     const first = new ThaiRagProviderRuntime({
       dataRoot,
       ownerId: 'http-runtime',
       providerVersion: '4.61.0',
       embeddingIndexGeneration: 1,
       driver: driver(),
+      processIdentityProbe,
     });
     const second = new ThaiRagProviderRuntime({
       dataRoot,
@@ -92,6 +94,7 @@ describe('ThaiRagProviderRuntime', () => {
       providerVersion: '4.61.0',
       embeddingIndexGeneration: 1,
       driver: driver(),
+      processIdentityProbe,
     });
 
     expect((await first.start()).ok).toBe(true);
@@ -120,10 +123,11 @@ describe('ThaiRagProviderRuntime', () => {
       embeddingIndexGeneration: 1,
       driver: driver(),
       isProcessAlive: (pid): boolean => pid !== 424242,
+      processIdentityProbe: async (): Promise<string> => 'process:replacement',
     });
     expect((await runtime.start()).ok).toBe(true);
-    const lock = JSON.parse(await readFile(path.join(providerRoot, 'provider.lock'), 'utf8')) as { ownerId: string };
-    expect(lock.ownerId).toBe('replacement');
+    const lock = JSON.parse(await readFile(path.join(providerRoot, 'provider.lock'), 'utf8')) as { ownerId: string; processIdentity?: string };
+    expect(lock).toMatchObject({ ownerId: 'replacement', processIdentity: 'process:replacement' });
     expect((await runtime.stop()).ok).toBe(true);
 
     const denied = new ThaiRagProviderRuntime({
@@ -133,9 +137,105 @@ describe('ThaiRagProviderRuntime', () => {
       embeddingIndexGeneration: 1,
       driver: driver({ start: async () => err(appError('INTERNAL_ERROR', 'must not start')) }),
       isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:live',
     });
     await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({ ownerId: 'live-owner', pid: process.pid, startedAt: '2026-01-01T00:00:00.000Z' }));
-    expect((await denied.start()).ok).toBe(false);
+    const unverified = await denied.start();
+    expect(unverified.ok).toBe(false);
+    if (!unverified.ok) expect(unverified.error.details?.reason).toBe('owner-lock-unverified');
+  });
+
+  it('reclaims a lock when a live PID has been reused by a different process identity', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(providerRoot, { recursive: true }));
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'old-owner',
+      pid: 777,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      processIdentity: 'process:old-start',
+    }));
+
+    const runtime = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'replacement',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      pid: 888,
+      driver: driver(),
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (pid): Promise<string> => pid === 777 ? 'process:reused-pid' : 'process:replacement',
+    });
+
+    expect((await runtime.start()).ok).toBe(true);
+    const lock = JSON.parse(await readFile(path.join(providerRoot, 'provider.lock'), 'utf8')) as {
+      ownerId: string;
+      pid: number;
+      processIdentity?: string;
+    };
+    expect(lock).toMatchObject({ ownerId: 'replacement', pid: 888, processIdentity: 'process:replacement' });
+    expect((await runtime.stop()).ok).toBe(true);
+  });
+
+  it('keeps a verified live owner lock when PID and process identity both match', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(providerRoot, { recursive: true }));
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'live-owner',
+      pid: 777,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      processIdentity: 'process:same-start',
+    }));
+
+    const runtime = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'contender',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ start: async () => err(appError('INTERNAL_ERROR', 'must not start')) }),
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:same-start',
+    });
+
+    const started = await runtime.start();
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.details?.reason).toBe('owner-lock');
+  });
+
+  it('fails closed instead of crashing when process identity is unavailable on a non-POSIX platform', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const first = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'windows-owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+      platform: 'win32',
+      isProcessAlive: (): boolean => true,
+    });
+
+    expect((await first.start()).ok).toBe(true);
+    const lock = JSON.parse(await readFile(path.join(providerRoot, 'provider.lock'), 'utf8')) as {
+      processIdentity?: string;
+    };
+    expect(lock.processIdentity).toBeUndefined();
+
+    const contender = new ThaiRagProviderRuntime({
+      dataRoot,
+      ownerId: 'windows-contender',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ start: async () => err(appError('INTERNAL_ERROR', 'must not start')) }),
+      platform: 'win32',
+      isProcessAlive: (): boolean => true,
+    });
+    const denied = await contender.start();
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.error.details?.reason).toBe('owner-lock-unverified');
+
+    expect((await first.stop()).ok).toBe(true);
   });
 
   it('passes result budgets to every provider producer', async () => {

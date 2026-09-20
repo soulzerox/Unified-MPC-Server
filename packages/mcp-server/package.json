@@ -23,7 +23,8 @@
     "@unified-mpc/search": "workspace:*",
     "@unified-mpc/shared": "workspace:*",
     "@modelcontextprotocol/server": "2.0.0",
-    "zod": "4.2.0"
+    "zod": "4.2.0",
+    "@unified-mpc/workspace": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0"

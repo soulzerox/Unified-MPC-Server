@@ -9,7 +9,7 @@
   "type": "module",
   "scripts": {
     "lint": "eslint .",
-    "typecheck": "tsc --build",
+    "typecheck": "node scripts/check-workspace-dependencies.mjs && tsc --build",
     "test": "corepack pnpm -r --if-present test",
     "build": "corepack pnpm -r --if-present build",
     "version:check": "node scripts/check-version-consistency.mjs",
@@ -18,7 +18,8 @@
     "cli": "node apps/cli/dist/index.js",
     "docs:tools": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs",
     "docs:tools:check": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs --check",
-    "prepare": "husky"
+    "prepare": "husky",
+    "runtime:smoke": "node scripts/smoke-mcp-http-runtime.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.33.0",

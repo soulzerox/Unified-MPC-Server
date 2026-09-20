@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type AppError, type Result, type ResultBudget } from '@unified-mpc/domain';
+import { createPosixProcessIdentityProbe, type PosixProcessIdentityProbe } from '@unified-mpc/process';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
   createProviderHealth,
@@ -33,6 +34,8 @@ export interface ThaiRagProviderRuntimeOptions {
   readonly pid?: number;
   readonly now?: () => Date;
   readonly isProcessAlive?: (pid: number) => boolean;
+  readonly processIdentityProbe?: PosixProcessIdentityProbe;
+  readonly platform?: NodeJS.Platform;
 }
 
 export const THAI_RAG_OWNER_LOCK_CONFLICT_REASON = 'owner-lock';
@@ -46,21 +49,25 @@ interface ProviderLockRecord {
   readonly ownerId: string;
   readonly pid: number;
   readonly startedAt: string;
+  readonly processIdentity?: string;
 }
 
 export class ThaiRagProviderRuntime {
   private readonly pid: number;
   private readonly now: () => Date;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly processIdentityProbe: PosixProcessIdentityProbe;
   private healthState: ThaiRagProviderHealth;
   private providerRoot: string | undefined;
   private ownsLock = false;
+  private ownedProcessIdentity: string | undefined;
   private callQueue: Promise<unknown> = Promise.resolve();
 
   public constructor(private readonly options: ThaiRagProviderRuntimeOptions) {
     this.pid = options.pid ?? process.pid;
     this.now = options.now ?? ((): Date => new Date());
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+    this.processIdentityProbe = options.processIdentityProbe ?? defaultProcessIdentityProbe(options.platform ?? process.platform);
     this.healthState = createProviderHealth(options.providerVersion, options.embeddingIndexGeneration);
   }
 
@@ -143,18 +150,21 @@ export class ThaiRagProviderRuntime {
     const lockPath = this.lockPath();
     const create = async (): Promise<Result<void>> => {
       try {
+        const processIdentity = await this.readProcessIdentity(this.pid);
         const handle = await open(lockPath, 'wx', 0o600);
         try {
           const record: ProviderLockRecord = {
             ownerId: this.options.ownerId,
             pid: this.pid,
             startedAt: this.now().toISOString(),
+            ...(processIdentity === null ? {} : { processIdentity }),
           };
           await handle.writeFile(JSON.stringify(record));
         } finally {
           await handle.close();
         }
         this.ownsLock = true;
+        this.ownedProcessIdentity = processIdentity ?? undefined;
         return ok(undefined);
       } catch (error: unknown) {
         if (isNodeError(error) && error.code === 'EEXIST') {
@@ -174,7 +184,16 @@ export class ThaiRagProviderRuntime {
         reason: THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON,
       }));
     }
-    if (this.isProcessAlive(existing.pid)) return first;
+    if (this.isProcessAlive(existing.pid)) {
+      const observedIdentity = await this.readProcessIdentity(existing.pid);
+      if (existing.processIdentity === undefined || observedIdentity === null) {
+        return err(appError('CONFLICT', 'Thai-RAG provider owner lock exists but process identity cannot be verified', true, {
+          reason: THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON,
+        }));
+      }
+      if (observedIdentity === existing.processIdentity) return first;
+      // A live PID with a different start identity is a reused PID, not the lock owner.
+    }
     try {
       await unlink(lockPath);
     } catch (error: unknown) {
@@ -186,10 +205,13 @@ export class ThaiRagProviderRuntime {
   private async releaseOwnerLock(): Promise<void> {
     if (!this.ownsLock) return;
     const existing = await this.readLock();
-    if (existing?.ownerId === this.options.ownerId && existing.pid === this.pid) {
+    if (existing?.ownerId === this.options.ownerId
+      && existing.pid === this.pid
+      && existing.processIdentity === this.ownedProcessIdentity) {
       await unlink(this.lockPath()).catch(() => undefined);
     }
     this.ownsLock = false;
+    this.ownedProcessIdentity = undefined;
   }
 
   private async readLock(): Promise<ProviderLockRecord | null> {
@@ -200,8 +222,22 @@ export class ThaiRagProviderRuntime {
         || typeof parsed.pid !== 'number'
         || !Number.isInteger(parsed.pid)
         || parsed.pid <= 0
-        || typeof parsed.startedAt !== 'string') return null;
-      return { ownerId: parsed.ownerId, pid: parsed.pid, startedAt: parsed.startedAt };
+        || typeof parsed.startedAt !== 'string'
+        || (parsed.processIdentity !== undefined && (typeof parsed.processIdentity !== 'string' || parsed.processIdentity.length === 0))) return null;
+      return {
+        ownerId: parsed.ownerId,
+        pid: parsed.pid,
+        startedAt: parsed.startedAt,
+        ...(parsed.processIdentity === undefined ? {} : { processIdentity: parsed.processIdentity }),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async readProcessIdentity(pid: number): Promise<string | null> {
+    try {
+      return await this.processIdentityProbe(pid);
     } catch {
       return null;
     }
@@ -251,6 +287,13 @@ function degradationReasons(components: ThaiRagProviderComponents): string[] {
   if (!components.lexicalRetrievalAvailable) reasons.push('lexical-retrieval-unavailable');
   if (!components.semanticRetrievalAvailable) reasons.push('semantic-retrieval-unavailable');
   return reasons;
+}
+
+function defaultProcessIdentityProbe(platform: NodeJS.Platform): PosixProcessIdentityProbe {
+  if (platform === 'darwin' || platform === 'linux') return createPosixProcessIdentityProbe(platform);
+  // No trustworthy process-start probe exists for other supported runtimes yet.
+  // Returning an unverifiable identity keeps live owner locks fail-closed instead of crashing at construction time.
+  return async (): Promise<null> => null;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {

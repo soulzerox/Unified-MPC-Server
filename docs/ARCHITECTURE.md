@@ -146,3 +146,15 @@ Native workspace memory and Thai-RAG are parent-owned capabilities, not mandator
 HTTP and stdio transports share the same harness ledger across request-scoped `ToolRegistry` recreation, so bootstrap/pre-edit state follows the MCP transport session rather than one transient request object. MCP `instructions` explicitly tell coding clients to call `workspace_bootstrap` before the first code mutation and `prepare_code_change` before each development-artifact mutation; the registry still enforces both rules even if a client ignores those instructions.
 
 Mutation approval remains a host boundary rather than an MCP-client assertion. `startMcpStdio` is the common composition root for Unified-MPC CLI, standalone local STDIO, and IDE integrations that launch the stdio entrypoint, and it installs the shared trusted human exact-action provider unless the embedding host supplies its own provider. The default provider uses only out-of-band human surfaces (OS dialog or controlling TTY), never MCP stdin; a real denial is terminal and absence of every trusted surface fails closed. Trusted STDIO sessions also enroll a local cross-client approval worker. The packaged Web/MCP-HTTP composition strips any direct upstream trusted-host provider and explicitly injects only the local broker provider, so a ChatGPT Web approval-required request can be routed to an online trusted IDE/CLI worker without moving the trusted adapter into the Web trust boundary. The broker uses atomic claim, worker heartbeat, approval-scope affinity, and fail-closed timeout semantics; a trusted session closes its worker and invalidates its session-scoped approval grants. Generic providerless HTTP composition still has no host approval path and remains denied.
+
+
+---
+
+## Transport Session Lifetime vs Durable Goal Ownership
+
+The ChatGPT/Web Streamable HTTP transport and the durable goal engine deliberately have different lifetimes:
+
+- Legacy Web MCP sessions are bounded transient state. The default inactivity TTL is one hour and can be overridden with `UNIFIED_MPC_LEGACY_SESSION_TTL_MS`. Each valid request refreshes the idle deadline while LRU capacity remains bounded.
+- Session eviction is observable with the reason `idle_ttl`, `lru_capacity`, `client_delete`, `transport_close`, `backend_shutdown`, or `protocol_error`. Eviction invalidates only session-scoped Ponytail/harness activation state.
+- Goals, checkpoints, worktrees, and lease generations remain durable in SQLite. A reconnect therefore creates a fresh transport and resumes by durable workspace/goal identifiers rather than reusing stale transport memory.
+- Goal leases are fenced independently. Before lease expiry, takeover is permitted only when same-generation liveness is trustworthy and proves zero live ownership. Unknown/unavailable liveness, live fenced calls, live/unknown blocking tasks, or a live scheduled owner preserve the existing lease. Successful recovery atomically increments `lease_generation`, making the old token stale.

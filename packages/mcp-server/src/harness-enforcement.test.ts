@@ -62,12 +62,7 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
       async bootstrapMandatoryMcpServers() {
         bootstrapEvents.push('mandatory_mcp');
-        return ok({
-          ready: false,
-          servers: [
-            { name: 'memory', required: true, connected: false, pinned: false, tools: [], requiredTools: ['search_nodes', 'create_entities', 'add_observations'], error: 'native provider handled by parent capability' },
-          ],
-        });
+        return ok({ ready: true, servers: [] });
       },
       async describeMcpServer(input: { server: string }) {
         if (input.server !== 'godkiller') return err(appError('NOT_FOUND', `missing ${input.server}`));
@@ -244,11 +239,38 @@ describe('workspace engineering harness enforcement', () => {
     const { services } = createHarnessServices();
     services.extensions = {
       ...services.extensions,
-      async bootstrapMandatoryMcpServers() {
+      async runtimePolicySnapshot() {
         return ok({
-          ready: false,
-          servers: [],
+          ready: true,
+          policies: [
+            {
+              priority: 'P1',
+              id: 'session-start:ask-matt',
+              resourceId: 'ask-matt',
+              resolvedResourceId: 'agents-skills/ask-matt',
+              resourceType: 'skill',
+              mandatory: true,
+              enforcement: 'EVERY_SESSION',
+              directive: 'Load ask-matt.',
+              source: 'configured',
+              available: true,
+            },
+            {
+              priority: 'P2',
+              id: 'optional:sequentialthinking',
+              resourceId: 'sequentialthinking',
+              resourceType: 'server',
+              mandatory: false,
+              enforcement: 'ON_DEMAND',
+              directive: 'Optional child.',
+              source: 'configured',
+              available: false,
+            },
+          ],
         });
+      },
+      async bootstrapMandatoryMcpServers() {
+        return ok({ ready: true, servers: [] });
       },
     } as typeof services.extensions;
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });

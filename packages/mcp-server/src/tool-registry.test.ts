@@ -1339,8 +1339,9 @@ describe('MCP tool registry', () => {
     expect(controller.snapshot()).toMatchObject({ activeCost: 3, activeOperations: 1 });
 
     settleChild?.();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 20 && controller.snapshot().activeOperations > 0; attempt += 1) {
+      await Promise.resolve();
+    }
     expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
   });
 

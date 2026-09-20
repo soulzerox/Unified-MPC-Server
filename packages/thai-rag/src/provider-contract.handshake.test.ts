@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  THAI_RAG_CANCEL_CAPABILITY,
+  THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+  THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
   THAI_RAG_CONTRACT_FINGERPRINT,
   THAI_RAG_CONTRACT_VERSION,
   THAI_RAG_PRODUCTION_BRIDGE,
@@ -49,6 +52,47 @@ describe('Thai-RAG provider handshake', () => {
     };
 
     expect(validateThaiRagHandshake(providerMinor)).toEqual({ ok: true, value: providerMinor });
+  });
+
+
+  it('accepts the additive cancellable index-job contract during rolling upgrades', () => {
+    const cancellable = {
+      ...baseHandshake,
+      contractFingerprint: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+      capabilities: [...baseHandshake.capabilities, THAI_RAG_CANCEL_CAPABILITY],
+      generation: {
+        ...baseHandshake.generation,
+        contract: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+      },
+    };
+
+    expect(validateThaiRagHandshake(cancellable)).toEqual({ ok: true, value: cancellable });
+  });
+
+  it('rejects a cancellable fingerprint that omits the cancel capability', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      contractFingerprint: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+      generation: {
+        ...baseHandshake.generation,
+        contract: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('missing-capability');
+  });
+
+  it('rejects an index-job version that does not match its attested fingerprint', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('index-job-contract-mismatch');
   });
 
   it('rejects a current-contract handshake when preprocessing version is missing by default', () => {

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ActivityTracker } from './activity-tracker.js';
 import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
-import { DEFAULT_LEGACY_SESSION_TTL_MS, UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
+import { DEFAULT_LEGACY_SESSION_TTL_MS, LEGACY_SESSION_EVICTION_REASONS, UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
 
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
 
@@ -270,8 +270,16 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
-  it('defaults legacy Web session retention to one hour', () => {
+  it('defaults legacy Web session retention to one hour and exposes stable eviction reasons', () => {
     expect(DEFAULT_LEGACY_SESSION_TTL_MS).toBe(60 * 60_000);
+    expect(LEGACY_SESSION_EVICTION_REASONS).toEqual([
+      'idle_ttl',
+      'lru_capacity',
+      'client_delete',
+      'transport_close',
+      'backend_shutdown',
+      'protocol_error',
+    ]);
   });
 
   it('refreshes legacy session idle retention on valid activity', async () => {

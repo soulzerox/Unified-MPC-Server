@@ -406,6 +406,7 @@ export class ToolRegistry {
       }
       const mutationScopeMismatch = mutationDecision.kind !== 'read'
         && !COMMAND_EXECUTION_TOOLS.has(tool.name)
+        && !ACTIVE_PROJECT_SELECTION_TOOLS.has(tool.name)
         && (mutationWorkspaceId !== undefined || requiresActiveWorkspaceScope(tool.name, mutationDecision))
         && (activeWorkspaceScope === null || mutationWorkspaceId === undefined || mutationWorkspaceId !== activeWorkspaceScope.workspaceId);
       const nativePathScopeMismatch = nativePathScopeRequired
@@ -1488,6 +1489,7 @@ function normalizeActiveWorkspaceScopesProvider(options: ActiveWorkspaceScopeOpt
 
 const NATIVE_ACTIVE_SCOPE_TOOLS = new Set(['office', 'audio', 'screen_record']);
 const COMMAND_EXECUTION_TOOLS = new Set(['shell', 'wsl_exec', 'process_start']);
+const ACTIVE_PROJECT_SELECTION_TOOLS = new Set(['workspace_activate', 'workspace_deactivate', 'workspace_set_primary']);
 export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
   'write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file',
   'restore_deleted_file', 'restore_checkpoint', 'git', 'shell', 'wsl_exec',

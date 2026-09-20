@@ -591,13 +591,16 @@ export class ContextEngine {
 
   private async safeSearchText(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, signal?: AbortSignal): Promise<Awaited<ReturnType<SearchService['searchText']>>> {
     try {
-      return await this.services.search!.searchText(this.actor, workspaceId, {
+      const result = await this.services.search!.searchText(this.actor, workspaceId, {
         query: request.query,
         maxResults,
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(request.path === undefined ? {} : { path: request.path }),
         ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       }, signal);
+      if (!result.ok) return result;
+      const matches = result.value.matches.slice(0, maxResults);
+      return ok({ matches, truncated: result.value.truncated || result.value.matches.length > matches.length });
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context text search failed', recoverable: true });
     }
@@ -605,13 +608,16 @@ export class ContextEngine {
 
   private async safeSearchFiles(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, glob?: string, signal?: AbortSignal): Promise<Awaited<ReturnType<SearchService['searchFiles']>>> {
     try {
-      return await this.services.search!.searchFiles(this.actor, workspaceId, {
+      const result = await this.services.search!.searchFiles(this.actor, workspaceId, {
         maxResults,
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(glob === undefined ? {} : { glob }),
         ...(request.path === undefined ? {} : { path: request.path }),
         ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       }, signal);
+      if (!result.ok) return result;
+      const paths = result.value.paths.slice(0, maxResults);
+      return ok({ paths, truncated: result.value.truncated || result.value.paths.length > paths.length });
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context filename search failed', recoverable: true });
     }
@@ -752,110 +758,3 @@ function boundContextRequest(request: WorkspaceContextRequest, budget: ResultBud
   if (budget === undefined) return request;
   return {
     ...request,
-    pageSize: Math.max(1, Math.min(request.pageSize ?? DEFAULT_PAGE_SIZE[request.mode ?? 'optimized'], budget.maxItems)),
-    responseTargetBytes: Math.max(1, Math.min(request.responseTargetBytes ?? DEFAULT_RESPONSE_TARGET_BYTES, budget.maxTextBytes)),
-    resultBudget: budget,
-  };
-}
-
-function mergeCollections(collections: readonly WorkspaceCollection[]): WorkspaceCollection {
-  const byKey = new Map<string, Candidate>();
-  let scannedFiles = 0;
-  let totalMatches = 0;
-  let searchTruncated = false;
-  for (const collection of collections) {
-    scannedFiles += collection.scannedFiles;
-    totalMatches += collection.totalMatches;
-    searchTruncated ||= collection.searchTruncated;
-    for (const candidate of collection.candidates) {
-      const key = `${candidate.workspaceId}\0${normalizePath(candidate.path)}`;
-      const existing = byKey.get(key);
-      if (existing === undefined) byKey.set(key, candidate);
-      else byKey.set(key, {
-        ...existing,
-        matches: [...existing.matches, ...candidate.matches],
-        score: existing.score + candidate.score,
-        reason: `${existing.reason}; ${candidate.reason}`,
-      });
-    }
-  }
-  const candidates = [...byKey.values()];
-  candidates.sort((left, right) => right.score - left.score || `${left.workspaceId}:${normalizePath(left.path)}`.localeCompare(`${right.workspaceId}:${normalizePath(right.path)}`));
-  return { candidates, scannedFiles, totalMatches, searchTruncated };
-}
-
-function validateRequest(request: WorkspaceContextRequest): Result<void> {
-  if (typeof request.query !== 'string' || request.query.trim().length === 0) return err({ code: 'INVALID_INPUT', message: 'Context query is required', recoverable: false });
-  if (request.pageSize !== undefined && (!Number.isInteger(request.pageSize) || request.pageSize < 1 || request.pageSize > 500)) {
-    return err({ code: 'INVALID_INPUT', message: 'Context pageSize is invalid', recoverable: false });
-  }
-  if (request.responseTargetBytes !== undefined && (!Number.isInteger(request.responseTargetBytes) || request.responseTargetBytes < 1024 || request.responseTargetBytes > MAX_RESPONSE_TARGET_BYTES)) {
-    return err({ code: 'INVALID_INPUT', message: 'Context responseTargetBytes is invalid', recoverable: false });
-  }
-  return ok(undefined);
-}
-
-function normalizePageSize(value: number): number {
-  return Math.max(1, Math.min(500, Math.floor(value)));
-}
-
-function normalizeResponseTarget(value: number | undefined): number {
-  return Math.max(1024, Math.min(MAX_RESPONSE_TARGET_BYTES, Math.floor(value ?? DEFAULT_RESPONSE_TARGET_BYTES)));
-}
-
-function normalizePath(value: string): string {
-  return value.replace(/\\/g, '/').toLowerCase();
-}
-
-function matchesIndexedPath(path: string, prefix: string): boolean {
-  return prefix.length === 0 || path === prefix || path.startsWith(`${prefix}/`);
-}
-
-function dedupePaths(paths: readonly { readonly workspaceId: string; readonly path: string }[]): readonly { readonly workspaceId: string; readonly path: string }[] {
-  const seen = new Set<string>();
-  const result: Array<{ readonly workspaceId: string; readonly path: string }> = [];
-  for (const entry of paths) {
-    const key = `${entry.workspaceId}\0${normalizePath(entry.path)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(entry);
-  }
-  return result;
-}
-
-function isTestPath(value: string): boolean {
-  return /(^|[\\/])(test|tests)([\\/]|$)|\.(test|spec)\.[^.]+$/i.test(value);
-}
-
-function isSourcePath(value: string): boolean {
-  return /\.(c|m)?(t|j)sx?$|\.py$|\.go$|\.rs$|\.java$|\.cs$/i.test(value);
-}
-
-function extractSymbols(content: string): readonly string[] {
-  const symbols = new Set<string>();
-  const pattern = /\b(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|var|enum)\s+([A-Za-z_$][\w$]*)/g;
-  for (const match of content.matchAll(pattern)) {
-    const symbol = match[1];
-    if (symbol !== undefined) symbols.add(symbol);
-  }
-  return [...symbols];
-}
-
-function createSnippets(content: string, matches: readonly ContextMatch[], mode: ContextMode): readonly ContextSnippet[] {
-  const lines = content.split(/\r?\n/);
-  const radius = mode === 'exhaustive' ? 4 : mode === 'full' ? 2 : 1;
-  const ranges = matches.length === 0
-    ? [{ start: 1, end: Math.min(lines.length, mode === 'exhaustive' ? 40 : 12) }]
-    : matches.map((match) => ({ start: Math.max(1, match.line - radius), end: Math.min(lines.length, match.line + radius) }));
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const range of ranges.sort((left, right) => left.start - right.start)) {
-    const previous = merged[merged.length - 1];
-    if (previous !== undefined && range.start <= previous.end + 1) previous.end = Math.max(previous.end, range.end);
-    else merged.push({ ...range });
-  }
-  return merged.map((range) => ({
-    startLine: range.start,
-    endLine: range.end,
-    text: lines.slice(range.start - 1, range.end).join('\n'),
-  }));
-}

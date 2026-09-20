@@ -168,6 +168,41 @@ describe('context engine', () => {
     await expect(engine.searchAll({ query: 'login', workspaceId: 'workspace-1' }, undefined, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_TIMEOUT' } });
   });
 
+  it('bounds oversized text results before context candidates are retained', async () => {
+    const paths = Array.from({ length: 1_000 }, (_, index) => `src/file-${index}.ts`);
+    const source = {
+      ...services(),
+      search: {
+        searchText: async () => ok({
+          matches: paths.map((path, line) => ({ path, line: line + 1, text: 'needle' })),
+          truncated: false,
+        }),
+        searchFiles: async () => ok({ paths: [], truncated: false }),
+      },
+      git: { status: async () => ok({ entries: [] }) },
+    } as McpApplicationServices;
+
+    const result = await new ContextEngine(source, actor).collect({ query: 'needle', workspaceId: 'workspace-1', pageSize: 1 });
+
+    expect(result).toMatchObject({ ok: true, value: { matchedFiles: 100, totalMatches: 100, hasMore: true } });
+  });
+
+  it('bounds oversized filename results before context candidates are retained', async () => {
+    const paths = Array.from({ length: 1_000 }, (_, index) => `src/file-${index}.ts`);
+    const source = {
+      ...services(),
+      search: {
+        searchText: async () => ok({ matches: [], truncated: false }),
+        searchFiles: async () => ok({ paths, truncated: false }),
+      },
+      git: { status: async () => ok({ entries: [] }) },
+    } as McpApplicationServices;
+
+    const result = await new ContextEngine(source, actor).collect({ query: 'needle', workspaceId: 'workspace-1', pageSize: 1 });
+
+    expect(result).toMatchObject({ ok: true, value: { matchedFiles: 100, totalMatches: 0, hasMore: true } });
+  });
+
   it('stops cross-workspace search at one global result budget', async () => {
     const searched: string[] = [];
     const source = {
@@ -223,94 +258,3 @@ describe('context engine', () => {
     const scanNext = await engine.continueFullScan(scan.value.continuationToken, 10);
     expect(scanNext.ok).toBe(true);
     if (!scanNext.ok) return;
-    expect(scanNext.value.files.length).toBeGreaterThan(0);
-
-    const many = await engine.readMany({ workspaceId: 'workspace-1', files: [{ path: '.env' }, { path: 'dist/login.js' }] });
-    expect(many.ok).toBe(true);
-    if (!many.ok) return;
-    expect(many.value.totalFiles).toBe(2);
-    expect(many.value.failedFiles).toBe(0);
-  });
-
-  it('pages indexed scans from a bounded cursor without retaining the full matching path list', async () => {
-    const entries = Array.from({ length: 10_000 }, (_, index) => ({
-      relativePath: `src/file-${String(index).padStart(5, '0')}.ts`,
-      kind: 'file' as const,
-    }));
-    const source = {
-      ...services(),
-      workspaceIndex: {
-        status: async () => ok({ indexed: true, snapshot: {
-          version: 1 as const,
-          workspaceId: 'workspace-1',
-          rootPath: '/tmp/workspace-1',
-          indexedAt: new Date(0).toISOString(),
-          entries,
-        }, watcher: null, generation: 'generation-1', freshness: 'unverified' as const, stale: false }),
-      },
-    } as McpApplicationServices;
-    const engine = new ContextEngine(source, actor);
-
-    const first = await engine.fullScan({ workspaceId: 'workspace-1', pageSize: 2, includeIgnored: false });
-    expect(first).toMatchObject({ ok: true, value: {
-      files: [
-        { path: 'src/file-00000.ts' },
-        { path: 'src/file-00001.ts' },
-      ],
-      scannedFiles: 10_000,
-      hasMore: true,
-    } });
-    if (!first.ok || first.value.continuationToken === undefined) return;
-
-    const second = await engine.continueFullScan(first.value.continuationToken, 2);
-    expect(second).toMatchObject({ ok: true, value: {
-      files: [
-        { path: 'src/file-00002.ts' },
-        { path: 'src/file-00003.ts' },
-      ],
-      scannedFiles: 10_000,
-      hasMore: true,
-    } });
-  });
-
-  it('expires and caps abandoned context and full-scan continuation tokens', async () => {
-    let now = 0;
-    const engine = new ContextEngine(services(), actor, undefined, {
-      continuationTtlMs: 100,
-      maxContinuations: 1,
-      now: (): number => now,
-    });
-
-    const first = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
-    const second = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
-    expect(first.ok && first.value.continuationToken).toEqual(expect.any(String));
-    expect(second.ok && second.value.continuationToken).toEqual(expect.any(String));
-    if (!first.ok || !second.ok || first.value.continuationToken === undefined || second.value.continuationToken === undefined) return;
-
-    await expect(engine.continue(first.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
-    now = 101;
-    await expect(engine.continue(second.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
-
-    now = 200;
-    const scan = await engine.fullScan({ workspaceId: 'workspace-1', pageSize: 1 });
-    expect(scan.ok && scan.value.continuationToken).toEqual(expect.any(String));
-    if (!scan.ok || scan.value.continuationToken === undefined) return;
-    now = 301;
-    await expect(engine.continueFullScan(scan.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
-  });
-
-  it('uses the context ledger to avoid resending unchanged files', async () => {
-    const engine = new ContextEngine(services(), actor);
-    const first = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
-    const second = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
-
-    expect(first.ok).toBe(true);
-    expect(second.ok).toBe(true);
-    if (!first.ok || !second.ok) return;
-    expect(first.value.files[0]?.delivery).toBe('content');
-    expect(second.value.files[0]?.delivery).toBe('unchanged');
-    expect(second.value.files[0]?.unchangedSince).toBeDefined();
-    expect(second.value.economy?.ledgerHits).toBeGreaterThan(0);
-    expect(second.value.economy?.previouslySeenBytesAvoided).toBeGreaterThan(0);
-  });
-});

@@ -90,8 +90,8 @@ describe('mandatory independent host approval', () => {
     expect(remembered.isError).not.toBe(true);
     expect(approvals).toEqual([]);
     expect(nativeCalls).toEqual([
-      { tool: 'recall', arguments: { query: '[decision] architecture decision', workspace_id: 'workspace-a', limit: 5 } },
-      { tool: 'remember', arguments: { content: '[decision] Prefer native curated RAG operations.', workspace_id: 'workspace-a' } },
+      { tool: 'recall', arguments: { query: 'architecture decision', category: 'decision', workspace_id: 'workspace-a', limit: 5 } },
+      { tool: 'remember', arguments: { content: 'Prefer native curated RAG operations.', category: 'decision', workspace_id: 'workspace-a' } },
     ]);
   });
 

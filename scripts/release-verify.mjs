@@ -57,6 +57,7 @@ const commands = [
   [process.execPath, ['scripts/generate-tool-catalog.mjs', '--check']],
   ['corepack', ['pnpm', 'test']],
   ['corepack', ['pnpm', 'build']],
+  [process.execPath, ['scripts/smoke-mcp-http-runtime.mjs']],
   [process.execPath, ['scripts/test-config-mutation-lock.mjs']],
   ['npx', ['vitest', 'run', 'tests/']],
   ['git', ['diff', '--check']],

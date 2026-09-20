@@ -1,6 +1,7 @@
 export * from './machine-root.js';
 export * from './filesystem-root.js';
 export * from './dependency-cache-policy.js';
+export * from './dependency-resource-manager.js';
 export * from './dependency-cache-lifecycle.js';
 export * from './delegated-workspace-contract.js';
 export * from './resource-admission.js';

@@ -559,11 +559,11 @@ describe('MCP tool registry', () => {
     let observedBudget: unknown;
     const registry = new ToolRegistry({
       search: {
-        async searchText(_actor, _workspaceId, request) {
+        async searchText(_actor, _workspaceId, request): Promise<ReturnType<typeof ok>> {
           observedBudget = request.resultBudget;
           return ok({ matches: [{ path: 'large.ts', line: 1, text: 'x'.repeat(2_000) }], truncated: false });
         },
-        async searchFiles() { return ok({ paths: [], truncated: false }); },
+        async searchFiles(): Promise<ReturnType<typeof ok>> { return ok({ paths: [], truncated: false }); },
       },
     }, actor, { maxToolResultBytes: 256 });
 

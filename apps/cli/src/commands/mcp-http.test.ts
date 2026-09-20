@@ -1,7 +1,7 @@
 import { appError, ok } from '@unified-mpc/domain';
 import type { McpServerOptions } from '@unified-mpc/mcp-server';
 import { describe, expect, it } from 'vitest';
-import { createWebMcpHttpServerOptions, runMcpHttpCommand, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
+import { createWebMcpHttpServerOptions, runMcpHttpCommand, startMcpHttpBeforeProvider, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
 
 const workspace = {
   id: 'workspace-http-1',
@@ -12,6 +12,41 @@ const workspace = {
 };
 
 describe('mcp http command', () => {
+  it('binds HTTP before waiting for degradable provider startup', async () => {
+    const events: string[] = [];
+    let resolveProvider: (() => void) | undefined;
+    const providerReady = new Promise<void>((resolve) => { resolveProvider = resolve; });
+    const handle = { address: { host: '127.0.0.1' as const, port: 4000 }, endpoint: new URL('http://127.0.0.1:4000/mcp'), close: async (): Promise<void> => {} };
+
+    const startup = await startMcpHttpBeforeProvider({
+      start: async (): Promise<McpHttpServerHandle> => {
+        events.push('http-started');
+        return handle;
+      },
+      initializeProvider: async (): Promise<void> => {
+        events.push('provider-started');
+        await providerReady;
+      },
+    });
+
+    expect(events).toEqual(['http-started', 'provider-started']);
+    expect(startup.state()).toEqual({ phase: 'starting' });
+    resolveProvider?.();
+    await startup.providerReady;
+    expect(startup.state()).toEqual({ phase: 'ready' });
+  });
+
+  it('keeps provider startup failures observable as degraded state', async () => {
+    const handle = { address: { host: '127.0.0.1' as const, port: 4000 }, endpoint: new URL('http://127.0.0.1:4000/mcp'), close: async (): Promise<void> => {} };
+    const startup = await startMcpHttpBeforeProvider({
+      start: async (): Promise<McpHttpServerHandle> => handle,
+      initializeProvider: async (): Promise<void> => { throw new Error('owner socket is unavailable'); },
+    });
+
+    await expect(startup.providerReady).rejects.toThrow('owner socket is unavailable');
+    expect(startup.state()).toEqual({ phase: 'degraded', error: 'owner socket is unavailable' });
+  });
+
   it('keeps the ChatGPT Web HTTP composition fail-closed even when a trusted host provider is supplied upstream', () => {
     const hostMutationApprovalProvider = async (): Promise<boolean> => true;
     const webOptions = createWebMcpHttpServerOptions({

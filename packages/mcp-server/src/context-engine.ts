@@ -591,13 +591,16 @@ export class ContextEngine {
 
   private async safeSearchText(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, signal?: AbortSignal): Promise<Awaited<ReturnType<SearchService['searchText']>>> {
     try {
-      return await this.services.search!.searchText(this.actor, workspaceId, {
+      const result = await this.services.search!.searchText(this.actor, workspaceId, {
         query: request.query,
         maxResults,
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(request.path === undefined ? {} : { path: request.path }),
         ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       }, signal);
+      if (!result.ok) return result;
+      const matches = result.value.matches.slice(0, maxResults);
+      return ok({ matches, truncated: result.value.truncated || result.value.matches.length > matches.length });
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context text search failed', recoverable: true });
     }
@@ -605,13 +608,16 @@ export class ContextEngine {
 
   private async safeSearchFiles(workspaceId: string, request: WorkspaceContextRequest, maxResults: number, glob?: string, signal?: AbortSignal): Promise<Awaited<ReturnType<SearchService['searchFiles']>>> {
     try {
-      return await this.services.search!.searchFiles(this.actor, workspaceId, {
+      const result = await this.services.search!.searchFiles(this.actor, workspaceId, {
         maxResults,
         discovery: request.includeIgnored === true ? 'explicit' : 'automatic',
         ...(glob === undefined ? {} : { glob }),
         ...(request.path === undefined ? {} : { path: request.path }),
         ...(request.resultBudget === undefined ? {} : { resultBudget: request.resultBudget }),
       }, signal);
+      if (!result.ok) return result;
+      const paths = result.value.paths.slice(0, maxResults);
+      return ok({ paths, truncated: result.value.truncated || result.value.paths.length > paths.length });
     } catch {
       return err({ code: 'INTERNAL_ERROR', message: 'Context filename search failed', recoverable: true });
     }

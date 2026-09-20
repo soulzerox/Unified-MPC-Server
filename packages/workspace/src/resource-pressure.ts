@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { freemem, totalmem } from 'node:os';
 
 export type ResourcePressureState = 'normal' | 'elevated' | 'critical';
@@ -34,8 +35,10 @@ const DEFAULT_SAMPLE_TTL_MS = 1_000;
 /**
  * Lightweight cached process/OS memory pressure signal.
  *
- * Production reads use Node's OS memory counters plus process RSS. The sample
- * is cached so hot admission paths do not repeatedly query the OS.
+ * Linux prefers /proc/meminfo MemAvailable so reclaimable page cache is not
+ * mistaken for exhausted memory. Other platforms, or unreadable /proc, fall
+ * back to Node's portable OS counters. The sample is cached so hot admission
+ * paths do not repeatedly query the OS.
  */
 export class ProcessMemoryPressureProbe implements ResourcePressureProbe {
   private readonly elevatedAvailableRatio: number;
@@ -59,10 +62,7 @@ export class ProcessMemoryPressureProbe implements ResourcePressureProbe {
       throw new Error('sampleTtlMs must be a non-negative finite number');
     }
 
-    this.memoryReader = options.memoryReader ?? ((): { totalMemoryBytes: number; availableMemoryBytes: number } => ({
-      totalMemoryBytes: totalmem(),
-      availableMemoryBytes: freemem(),
-    }));
+    this.memoryReader = options.memoryReader ?? defaultMemoryReader;
     this.processRssReader = options.processRssReader ?? ((): number => process.memoryUsage().rss);
     this.now = options.now ?? Date.now;
   }
@@ -105,6 +105,42 @@ export class ProcessMemoryPressureProbe implements ResourcePressureProbe {
     this.cached = sample;
     return sample;
   }
+}
+
+function defaultMemoryReader(): { readonly totalMemoryBytes: number; readonly availableMemoryBytes: number } {
+  if (process.platform === 'linux') {
+    const linuxMemory = tryReadLinuxAvailableMemory();
+    if (linuxMemory !== undefined) return linuxMemory;
+  }
+  return {
+    totalMemoryBytes: totalmem(),
+    availableMemoryBytes: freemem(),
+  };
+}
+
+function tryReadLinuxAvailableMemory(): { readonly totalMemoryBytes: number; readonly availableMemoryBytes: number } | undefined {
+  try {
+    return parseLinuxMeminfo(readFileSync('/proc/meminfo', 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function parseLinuxMeminfo(value: string): { readonly totalMemoryBytes: number; readonly availableMemoryBytes: number } | undefined {
+  const totalMatch = /^MemTotal:\s+(\d+)\s+kB$/mu.exec(value);
+  const availableMatch = /^MemAvailable:\s+(\d+)\s+kB$/mu.exec(value);
+  if (totalMatch === null || availableMatch === null) return undefined;
+
+  const totalKiB = Number.parseInt(totalMatch[1] ?? '', 10);
+  const availableKiB = Number.parseInt(availableMatch[1] ?? '', 10);
+  if (!Number.isFinite(totalKiB) || totalKiB <= 0 || !Number.isFinite(availableKiB) || availableKiB < 0) {
+    return undefined;
+  }
+
+  return {
+    totalMemoryBytes: totalKiB * 1024,
+    availableMemoryBytes: availableKiB * 1024,
+  };
 }
 
 function validateRatio(value: number, label: string): void {

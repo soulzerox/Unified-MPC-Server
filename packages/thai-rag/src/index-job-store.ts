@@ -3,12 +3,15 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCanonicalWorkspaceId, resolveThaiRagProviderRoot } from './canonical-workspace.js';
 
-export type ThaiRagIndexJobStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'legacy-unavailable';
+export type ThaiRagIndexJobStatus = 'running' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'interrupted' | 'legacy-unavailable';
+
+const ACTIVE_JOB_STATUSES = new Set<ThaiRagIndexJobStatus>(['running', 'cancelling']);
 
 export interface ThaiRagIndexJob {
   readonly jobId: string;
   readonly workspaceId: string;
   readonly ownerId?: string;
+  readonly providerJobId?: string;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
   readonly startedAt: string;
@@ -58,7 +61,7 @@ export class ThaiRagIndexJobStore {
     const finishedAt = this.now().toISOString();
     let changed = false;
     for (const [id, job] of this.jobs) {
-      if (job.status !== 'running' || job.ownerId !== ownerId) continue;
+      if (!ACTIVE_JOB_STATUSES.has(job.status) || job.ownerId !== ownerId) continue;
       this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: 'Provider restarted before the indexing job completed' });
       changed = true;
     }
@@ -88,6 +91,34 @@ export class ThaiRagIndexJobStore {
     return this.finish(jobId, 'completed', { result }, ownerId);
   }
 
+  public async bindProviderJob(jobId: string, providerJobId: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
+    if (providerJobId.trim().length === 0) throw new Error('Thai-RAG provider job ID is required');
+    await this.initialize();
+    const current = this.jobs.get(jobId);
+    if (current === undefined || current.ownerId !== ownerId) return null;
+    if (!ACTIVE_JOB_STATUSES.has(current.status)) return current;
+    const next: ThaiRagIndexJob = { ...current, providerJobId };
+    this.jobs.set(jobId, next);
+    await this.persist();
+    return next;
+  }
+
+  public async requestCancellation(jobId: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
+    await this.initialize();
+    const current = this.jobs.get(jobId);
+    if (current === undefined || current.ownerId !== ownerId) return null;
+    if (!ACTIVE_JOB_STATUSES.has(current.status)) return current;
+    if (current.status === 'cancelling') return current;
+    const next: ThaiRagIndexJob = { ...current, status: 'cancelling' };
+    this.jobs.set(jobId, next);
+    await this.persist();
+    return next;
+  }
+
+  public async cancel(jobId: string, result: unknown, ownerId: string): Promise<ThaiRagIndexJob | null> {
+    return this.finish(jobId, 'cancelled', { result }, ownerId);
+  }
+
   public async fail(jobId: string, error: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
     return this.finish(jobId, 'failed', { error }, ownerId);
   }
@@ -97,7 +128,7 @@ export class ThaiRagIndexJobStore {
     const finishedAt = this.now().toISOString();
     let changed = false;
     for (const [id, job] of this.jobs) {
-      if (job.status !== 'running' || job.ownerId !== ownerId) continue;
+      if (!ACTIVE_JOB_STATUSES.has(job.status) || job.ownerId !== ownerId) continue;
       this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: reason });
       changed = true;
     }
@@ -119,18 +150,19 @@ export class ThaiRagIndexJobStore {
 
   public async active(ownerId: string): Promise<readonly ThaiRagIndexJob[]> {
     await this.initialize();
-    return [...this.jobs.values()].filter((job) => job.status === 'running' && job.ownerId === ownerId);
+    return [...this.jobs.values()].filter((job) => ACTIVE_JOB_STATUSES.has(job.status) && job.ownerId === ownerId);
   }
 
   private async finish(
     jobId: string,
-    status: 'completed' | 'failed',
+    status: 'completed' | 'failed' | 'cancelled',
     detail: { readonly result?: unknown; readonly error?: string },
     ownerId: string,
   ): Promise<ThaiRagIndexJob | null> {
     await this.initialize();
     const current = this.jobs.get(jobId);
     if (current === undefined || current.ownerId !== ownerId) return null;
+    if (!ACTIVE_JOB_STATUSES.has(current.status)) return current;
     const next: ThaiRagIndexJob = {
       ...current,
       status,
@@ -160,7 +192,8 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
     ? value.workspaceId
     : 'legacy-unavailable';
   const ownerId = typeof value.ownerId === 'string' && value.ownerId.trim().length > 0 ? value.ownerId : undefined;
-  const validStatus = value.status === 'running' || value.status === 'completed' || value.status === 'failed' || value.status === 'interrupted' || value.status === 'legacy-unavailable';
+  const validStatus = value.status === 'running' || value.status === 'cancelling' || value.status === 'cancelled'
+    || value.status === 'completed' || value.status === 'failed' || value.status === 'interrupted' || value.status === 'legacy-unavailable';
   const legacy = ownerId === undefined || !parseCanonicalWorkspaceId(workspaceId).ok || !validStatus;
   const status: ThaiRagIndexJobStatus = legacy ? 'legacy-unavailable' : value.status as ThaiRagIndexJobStatus;
   return {
@@ -169,6 +202,7 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       jobId: value.jobId,
       workspaceId,
       ...(ownerId === undefined ? {} : { ownerId }),
+      ...(typeof value.providerJobId === 'string' && value.providerJobId.trim().length > 0 ? { providerJobId: value.providerJobId } : {}),
       status,
       force: typeof value.force === 'boolean' ? value.force : false,
       startedAt: typeof value.startedAt === 'string' ? value.startedAt : now().toISOString(),

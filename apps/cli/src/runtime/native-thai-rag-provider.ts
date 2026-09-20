@@ -11,6 +11,7 @@ import {
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
+  THAI_RAG_CANCEL_CAPABILITY,
   THAI_RAG_EMBEDDING_COMPATIBILITY,
   THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
@@ -40,12 +41,15 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly clientFactory?: McpClientFactory;
   readonly callTimeoutMs?: number;
   readonly healthRefreshMs?: number;
+  /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
+  readonly indexJobPollMs?: number;
 }
 
 export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly sessions: McpSessionManager;
   private readonly jobs: ThaiRagIndexJobStore;
   private readonly healthRefreshMs: number;
+  private readonly indexJobPollMs: number;
   private ownerId: string | undefined;
   private launchConfig: McpServerLaunchConfig | undefined;
   private lastHealth: ThaiRagProviderDriverHealth | undefined;
@@ -65,6 +69,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private idleWaiters: Array<() => void> = [];
   private lifecycleQueue: Promise<unknown> = Promise.resolve();
   private stopPromise: Promise<Result<void>> | undefined;
+  private cancellableIndexJobs = false;
+  private readonly indexJobMonitors = new Map<string, Promise<void>>();
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
     this.sessions = new McpSessionManager({
@@ -75,6 +81,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     });
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
+    this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
   }
 
   public start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
@@ -138,6 +145,17 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return compatible;
     }
+    const versionSupportsCancellation = handshake.value.indexJobContractVersion === '1.1'
+      && handshake.value.capabilities.includes(THAI_RAG_CANCEL_CAPABILITY);
+    if (versionSupportsCancellation && !toolNames.has(THAI_RAG_CANCEL_CAPABILITY)) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError(
+        'CONFLICT',
+        'Native Thai-RAG worker attests cancellable index jobs but does not expose cancel_index',
+        true,
+        { reason: 'missing-capability', missing: THAI_RAG_CANCEL_CAPABILITY },
+      ));
+    }
     const healthProbe = await this.callWorker('health', {}, signal);
     if (!healthProbe.ok) {
       await this.sessions.close().catch(() => undefined);
@@ -159,6 +177,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return healthy;
     }
+    this.cancellableIndexJobs = versionSupportsCancellation
+      && healthHandshake.value.indexJobContractVersion === '1.1'
+      && healthHandshake.value.capabilities.includes(THAI_RAG_CANCEL_CAPABILITY);
     this.sessions.pin(SERVER_NAME);
     this.started = true;
     for (const workspaceId of this.workspaceRoots.keys()) this.pendingReindexIds.add(workspaceId);
@@ -213,6 +234,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`))
         : ok(job);
     }
+    if (tool === 'cancel_index') return this.cancelIndex(args, budget);
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);
     const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
     if (!normalizedArgs.ok) return normalizedArgs;
@@ -230,6 +252,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.started = false;
     this.shuttingDown = true;
     const generation = ++this.lifecycleGeneration;
+    if (this.cancellableIndexJobs) await this.cancelActiveProviderIndexJobs();
     await this.jobs.interruptRunning(this.ownerId ?? '');
     await this.waitForOperations();
     await this.workerQueue.catch(() => undefined);
@@ -257,9 +280,17 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       background: false,
     };
     if (!background) return this.callWorker('code_index', childArgs, signal, budget);
+    if (!this.cancellableIndexJobs) return this.legacyBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
+    return this.cancellableBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
+  }
 
-      const job = await this.jobs.create(workspace.value.workspaceId, force, this.ownerId ?? '');
-
+  private async legacyBackgroundCodeIndex(
+    workspaceId: string,
+    childArgs: Readonly<Record<string, unknown>>,
+    force: boolean,
+    budget?: ResultBudget,
+  ): Promise<Result<unknown>> {
+    const job = await this.jobs.create(workspaceId, force, this.ownerId ?? '');
     const operation = this.enqueueWorker(async () => {
       const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
       const result = normalizeWorkerCallResult('code_index', raw);
@@ -270,7 +301,133 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     void operation.catch(async (error: unknown) => {
       await this.jobs.fail(job.jobId, errorMessage(error), this.ownerId ?? '').catch(() => undefined);
     });
-    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspace.value.workspaceId });
+    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspaceId });
+  }
+
+  private async cancellableBackgroundCodeIndex(
+    workspaceId: string,
+    childArgs: Readonly<Record<string, unknown>>,
+    force: boolean,
+    budget?: ResultBudget,
+  ): Promise<Result<unknown>> {
+    const ownerId = this.ownerId ?? '';
+    const job = await this.jobs.create(workspaceId, force, ownerId);
+    const started = await this.callWorker('code_index', { ...childArgs, background: true }, undefined, budget);
+    if (!started.ok) {
+      await this.jobs.fail(job.jobId, started.error.message, ownerId);
+      return started;
+    }
+    const providerJobId = nestedString(started.value, 'job_id');
+    if (providerJobId === undefined) {
+      const message = 'Native Thai-RAG background index response omitted provider job_id';
+      await this.jobs.fail(job.jobId, message, ownerId);
+      return err(appError('CONFLICT', message, true, { reason: 'missing-provider-job-id' }));
+    }
+    await this.jobs.bindProviderJob(job.jobId, providerJobId, ownerId);
+    this.startIndexJobMonitor(job.jobId, providerJobId, workspaceId, ownerId);
+    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspaceId });
+  }
+
+  private async cancelIndex(args: Readonly<Record<string, unknown>>, budget?: ResultBudget): Promise<Result<unknown>> {
+    const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
+    const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
+    const workspace = parseCanonicalWorkspaceId(workspaceValue);
+    if (jobId.length === 0 || !workspace.ok) {
+      return err(appError('INVALID_INPUT', 'Thai-RAG cancel_index requires job_id and workspace_id'));
+    }
+    const ownerId = this.ownerId ?? '';
+    const job = await this.jobs.get(jobId, ownerId, workspace.value);
+    if (job === null) return err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`));
+    if (job.status !== 'running' && job.status !== 'cancelling') return ok(job);
+    if (!this.cancellableIndexJobs || job.providerJobId === undefined) {
+      return err(appError(
+        'CONFLICT',
+        'Native Thai-RAG index job cannot be cancelled because the active provider uses the legacy job contract',
+        true,
+        { reason: 'cancellation-unavailable', jobId },
+      ));
+    }
+
+    const cancelled = await this.callWorker('cancel_index', {
+      job_id: job.providerJobId,
+      workspace_id: workspace.value,
+    }, undefined, budget);
+    if (!cancelled.ok) return cancelled;
+
+    const remoteStatus = nestedString(cancelled.value, 'status');
+    if (remoteStatus === 'cancelled') {
+      const terminal = await this.jobs.cancel(jobId, nestedValue(cancelled.value, 'result') ?? cancelled.value, ownerId);
+      return terminal === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(terminal);
+    }
+    if (remoteStatus === 'done') {
+      const terminal = await this.jobs.complete(jobId, nestedValue(cancelled.value, 'result') ?? cancelled.value, ownerId);
+      return terminal === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(terminal);
+    }
+    if (remoteStatus === 'error') {
+      const message = nestedString(cancelled.value, 'error') ?? 'Native Thai-RAG provider reported an index error while cancellation was requested';
+      const terminal = await this.jobs.fail(jobId, message, ownerId);
+      return terminal === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(terminal);
+    }
+    const next = await this.jobs.requestCancellation(jobId, ownerId);
+    return next === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(next);
+  }
+
+  private startIndexJobMonitor(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): void {
+    const monitor = this.monitorIndexJob(jobId, providerJobId, workspaceId, ownerId)
+      .catch(async (error: unknown) => {
+        if (!this.shuttingDown) await this.jobs.fail(jobId, errorMessage(error), ownerId).catch(() => undefined);
+      })
+      .finally(() => {
+        if (this.indexJobMonitors.get(jobId) === monitor) this.indexJobMonitors.delete(jobId);
+      });
+    this.indexJobMonitors.set(jobId, monitor);
+  }
+
+  private async monitorIndexJob(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): Promise<void> {
+    while (!this.shuttingDown) {
+      await delay(this.indexJobPollMs);
+      if (this.shuttingDown) return;
+      const local = await this.jobs.get(jobId, ownerId, workspaceId);
+      if (local === null || (local.status !== 'running' && local.status !== 'cancelling')) return;
+
+      const status = await this.callWorker('index_status', {
+        job_id: providerJobId,
+        workspace_id: workspaceId,
+      });
+      if (this.shuttingDown) return;
+      if (!status.ok) {
+        await this.jobs.fail(jobId, status.error.message, ownerId);
+        return;
+      }
+      const remoteStatus = nestedString(status.value, 'status');
+      if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
+      if (remoteStatus === 'done') {
+        await this.jobs.complete(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
+        return;
+      }
+      if (remoteStatus === 'cancelled') {
+        await this.jobs.cancel(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
+        return;
+      }
+      if (remoteStatus === 'error') {
+        await this.jobs.fail(jobId, nestedString(status.value, 'error') ?? 'Native Thai-RAG provider background index failed', ownerId);
+        return;
+      }
+      await this.jobs.fail(jobId, `Native Thai-RAG provider returned unknown index status: ${remoteStatus ?? 'missing'}`, ownerId);
+      return;
+    }
+  }
+
+  private async cancelActiveProviderIndexJobs(): Promise<void> {
+    const ownerId = this.ownerId ?? '';
+    const active = await this.jobs.active(ownerId);
+    for (const job of active) {
+      if (job.providerJobId === undefined) continue;
+      await this.callWorker('cancel_index', {
+        job_id: job.providerJobId,
+        workspace_id: job.workspaceId,
+      }).catch(() => undefined);
+    }
   }
 
   private resolveIndexWorkspace(workspaceValue: string): Result<{ readonly workspaceId: string; readonly rootPath: string }> {

@@ -2,6 +2,7 @@ export * from './machine-root.js';
 export * from './filesystem-root.js';
 export * from './dependency-cache-policy.js';
 export * from './dependency-cache-lifecycle.js';
+export * from './delegated-workspace-contract.js';
 export * from './path-containment.js';
 export * from './secret-policy.js';
 export * from './workspace-path-guard.js';

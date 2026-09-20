@@ -112,7 +112,8 @@ describe('upgrade runtime multi-session persistence', () => {
             status: 'ready',
             packageManager: 'npm',
             lastBootstrapResult: 'installed',
-            integration: 'bounded_runtime_v1',
+            integration: 'dependency_resource_manager_v1',
+            migrationPhase: 'migrated',
           },
         },
       });

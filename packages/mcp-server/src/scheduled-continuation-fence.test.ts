@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { GoalRequestCancellationService } from '@unified-mpc/application';
 import { appError, err, ok } from '@unified-mpc/domain';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
@@ -197,6 +198,61 @@ describe('scheduled continuation mutation fence', () => {
     expect(begin).toHaveBeenCalledWith(actor, 'workspace-1', expect.any(String), goalLease);
     expect(hostApproval).toHaveBeenCalledTimes(1);
     expect(callMcpTool).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('detaches an admitted durable goal mutation from parent request abort but still honors explicit goal cancellation', async (): Promise<void> => {
+    const cancellation = new GoalRequestCancellationService({ waitMs: 100 });
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let started = false;
+    const writeFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+      executionSignal = signal;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        signal?.addEventListener('abort', () => {
+          resolve(ok({ path: 'src/file.ts', bytesWritten: 0 }));
+        }, { once: true });
+      });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      goalRequestCancellation: cancellation,
+      file: { writeFile },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor);
+    const parent = new AbortController();
+
+    const pending = registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+      content: 'durable work',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    }, undefined, parent.signal);
+
+    for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();
+    expect(started).toBe(true);
+
+    parent.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+
+    await expect(cancellation.cancelForGoal('goal-1')).resolves.toMatchObject({
+      requested: 1,
+      stopped: 1,
+      remaining: 0,
+      timedOut: false,
+    });
+    expect(executionSignal?.aborted).toBe(true);
+
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
     expect(end).toHaveBeenCalledTimes(1);
   });
 

@@ -64,6 +64,7 @@ describe('worktree dependency/cache policy', () => {
         phase: 'install',
         args: [
           'pnpm@10.15.0',
+          '--config.enable-global-virtual-store=true',
           'install',
           '--frozen-lockfile',
           '--prefer-offline',
@@ -73,6 +74,11 @@ describe('worktree dependency/cache policy', () => {
       }),
     ]);
     expect(left.versionCheck?.expectedVersion).toBe('10.15.0');
+    expect(left.resource).toMatchObject({
+      runtimeView: 'global_virtual_store',
+      linkMode: 'symlink',
+      resourcePoolPath: path.join(shared, 'pnpm', 'store', 'links'),
+    });
   });
 
   it('keeps explicit dependency updates mutable and scoped to one worktree', async () => {
@@ -174,8 +180,18 @@ describe('worktree dependency/cache policy', () => {
     }
 
     const [left, right] = await Promise.all([
-      resolveDependencyStrategy({ rootPath: leftRoot, sharedCacheRoot: shared, worktree: { isNew: true } }),
-      resolveDependencyStrategy({ rootPath: rightRoot, sharedCacheRoot: shared, worktree: { isNew: true } }),
+      resolveDependencyStrategy({
+        rootPath: leftRoot,
+        sharedCacheRoot: shared,
+        worktree: { isNew: true },
+        runtimeVersions: { uv: '0.11.25' },
+      }),
+      resolveDependencyStrategy({
+        rootPath: rightRoot,
+        sharedCacheRoot: shared,
+        worktree: { isNew: true },
+        runtimeVersions: { uv: '0.11.25' },
+      }),
     ]);
 
     expect(left.ecosystem).toBe('python-uv');
@@ -183,6 +199,12 @@ describe('worktree dependency/cache policy', () => {
     expect(left.worktreeLocalPaths).toContain(path.join(leftRoot, '.venv'));
     expect(right.worktreeLocalPaths).toContain(path.join(rightRoot, '.venv'));
     expect(left.commands[0]?.args).toContain('--frozen');
+    expect(left.commands[0]?.environment).toMatchObject({
+      UV_PREVIEW_FEATURES: 'centralized-project-envs',
+      UV_CACHE_DIR: path.join(shared, 'python', 'uv'),
+    });
+    expect(left.resource.runtimeView).toBe('centralized_env');
+    expect(left.resource.compatibilityIdentity).toBe(right.resource.compatibilityIdentity);
   });
 
   it('creates a worktree-local venv before pip installs into it', async () => {

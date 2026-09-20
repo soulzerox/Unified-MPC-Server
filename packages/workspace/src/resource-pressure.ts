@@ -59,11 +59,11 @@ export class ProcessMemoryPressureProbe implements ResourcePressureProbe {
       throw new Error('sampleTtlMs must be a non-negative finite number');
     }
 
-    this.memoryReader = options.memoryReader ?? (() => ({
+    this.memoryReader = options.memoryReader ?? ((): { totalMemoryBytes: number; availableMemoryBytes: number } => ({
       totalMemoryBytes: totalmem(),
       availableMemoryBytes: freemem(),
     }));
-    this.processRssReader = options.processRssReader ?? (() => process.memoryUsage().rss);
+    this.processRssReader = options.processRssReader ?? ((): number => process.memoryUsage().rss);
     this.now = options.now ?? Date.now;
   }
 

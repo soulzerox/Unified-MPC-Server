@@ -358,6 +358,89 @@ describe('MCP tool registry', () => {
     expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_id: workspaceId, workspace_path: rootPath } }]);
   });
 
+  it('holds native foreground RAG indexing admission until provider settlement', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 1,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    let settleIndex: (() => void) | undefined;
+    let indexStarted = false;
+    const registry = new ToolRegistry({
+      thaiRag: {
+        async call(): Promise<ReturnType<typeof ok>> {
+          indexStarted = true;
+          return await new Promise((resolve) => {
+            settleIndex = (): void => resolve(ok({ indexed: true }));
+          });
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      hostMutationApprovalProvider: approveMutation,
+      resourceAdmissionController: controller,
+      ragIndexAdmissionCost: 8,
+    });
+
+    const pending = registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
+    for (let attempt = 0; attempt < 20 && !indexStarted; attempt += 1) await Promise.resolve();
+
+    expect(indexStarted).toBe(true);
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 8,
+      activeOperations: 1,
+      activeCostByClass: { rag_indexing: 8 },
+      activeCostByWorkspace: { [workspaceId]: 8 },
+      activeCostBySession: { 'session-a': 8 },
+    });
+
+    settleIndex?.();
+    await expect(pending).resolves.not.toMatchObject({ isError: true });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('rejects native foreground RAG indexing under class pressure before provider execution', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 2,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+    const held = controller.tryAcquire({
+      operationId: 'held-rag-index',
+      workspaceId: 'workspace-held',
+      sessionId: 'system',
+      resourceClass: 'rag_indexing',
+      cost: 8,
+    });
+    if (!held.admitted) throw new Error('expected held RAG indexing admission');
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const providerCall = vi.fn(async () => ok({ indexed: true }));
+    const registry = new ToolRegistry({
+      thaiRag: { call: providerCall },
+    } as unknown as McpApplicationServices, actor, {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      hostMutationApprovalProvider: approveMutation,
+      resourceAdmissionController: controller,
+      ragIndexAdmissionCost: 8,
+    });
+
+    const response = await registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
+
+    expect(providerCall).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'RESOURCE_PRESSURE', details: { reason: 'resource_class_cost_exhausted' } } },
+    });
+    expect(controller.release(held.lease)).toBe(true);
+  });
+
   it('lets an already-started call settle after disable while blocking future calls', async () => {
     let snapshot = { version: 1 as const, generation: 0, overrides: {} as Record<string, 'enabled' | 'disabled'> };
     let releaseRead!: () => void;

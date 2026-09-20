@@ -78,6 +78,8 @@ export interface McpServerOptions {
   readonly mcpCallAdmissionCost?: number;
   /** Weighted admission cost held while one LSP server process is alive. */
   readonly lspProcessAdmissionCost?: number;
+  /** Weighted admission cost held while one foreground native RAG indexing call is active. */
+  readonly ragIndexAdmissionCost?: number;
   /** Compatibility result guard; it must not apply elapsed-time behavior. */
   readonly runBudgetGuard?: RunBudgetGuard;
   /**
@@ -117,6 +119,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     resourceAdmissionController: options.resourceAdmissionController ?? sharedProcessResourceAdmissionController(),
     ...(options.mcpCallAdmissionCost === undefined ? {} : { mcpCallAdmissionCost: options.mcpCallAdmissionCost }),
     ...(options.lspProcessAdmissionCost === undefined ? {} : { lspProcessAdmissionCost: options.lspProcessAdmissionCost }),
+    ...(options.ragIndexAdmissionCost === undefined ? {} : { ragIndexAdmissionCost: options.ragIndexAdmissionCost }),
   });
   const runBudgetGuard = options.runBudgetGuard ?? new RunBudgetGuard();
   let configuredPonytailMode = DEFAULT_PONYTAIL_MODE;

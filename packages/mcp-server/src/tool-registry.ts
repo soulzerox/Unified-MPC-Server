@@ -18,7 +18,9 @@ import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } f
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
+  DEFAULT_RAG_INDEX_ADMISSION_COST,
   tryAdmitChildMcpCall,
+  tryAdmitRagIndex,
   type ResourceAdmissionController,
   type ResourceAdmissionLease,
 } from '@unified-mpc/workspace';
@@ -135,6 +137,8 @@ export interface ToolRegistryOptions {
   readonly mcpCallAdmissionCost?: number;
   /** Weighted cost charged while one LSP server process is alive. */
   readonly lspProcessAdmissionCost?: number;
+  /** Weighted cost charged while one foreground native RAG indexing call is running. */
+  readonly ragIndexAdmissionCost?: number;
 }
 
 export interface HostMutationApprovalScope {
@@ -229,6 +233,7 @@ export class ToolRegistry {
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
   private readonly mcpCallAdmissionCost: number;
   private readonly lspProcessAdmissionCost: number;
+  private readonly ragIndexAdmissionCost: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
     this.services = services;
@@ -261,6 +266,10 @@ export class ToolRegistry {
     this.lspProcessAdmissionCost = normalizePositiveInteger(
       options.lspProcessAdmissionCost,
       DEFAULT_LSP_PROCESS_ADMISSION_COST,
+    );
+    this.ragIndexAdmissionCost = normalizePositiveInteger(
+      options.ragIndexAdmissionCost,
+      DEFAULT_RAG_INDEX_ADMISSION_COST,
     );
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
@@ -652,6 +661,44 @@ export class ToolRegistry {
           const message = admission.code === 'RESOURCE_PRESSURE'
             ? `Child MCP call rejected by resource admission (${admission.reason}); retry after current expensive work settles`
             : `Child MCP call rejected by resource admission (${admission.reason})`;
+          const response = mapError(appError(admission.code, message, admission.retryable, {
+            reason: admission.reason,
+            requestedCost: admission.requestedCost,
+            activeCost: admission.snapshot.activeCost,
+            activeOperations: admission.snapshot.activeOperations,
+          }));
+          await this.activity.end(callId, admission.code, Date.now() - started, message);
+          return response;
+        }
+        resourceAdmissionLease = admission.lease;
+      }
+      if (
+        tool.name === 'rag_code_index'
+        && this.resourceAdmissionController !== undefined
+        && isRecord(approvalExecutionInput)
+        && approvalExecutionInput.background !== true
+      ) {
+        const admissionWorkspaceId = readTrimmedString(approvalExecutionInput.workspaceId);
+        if (admissionWorkspaceId === undefined) {
+          await fencedMutationEnd?.();
+          fencedMutationEnd = undefined;
+          const message = 'Native RAG indexing requires a canonical workspaceId for resource admission';
+          const response = mapError(appError('INVALID_INPUT', message));
+          await this.activity.end(callId, 'INVALID_INPUT', Date.now() - started, message);
+          return response;
+        }
+        const admission = tryAdmitRagIndex(this.resourceAdmissionController, {
+          operationId: callId,
+          workspaceId: admissionWorkspaceId,
+          sessionId: this.sessionId ?? (this.actor.sessionId?.trim() || this.actor.clientId),
+          cost: this.ragIndexAdmissionCost,
+        });
+        if (!admission.admitted) {
+          await fencedMutationEnd?.();
+          fencedMutationEnd = undefined;
+          const message = admission.code === 'RESOURCE_PRESSURE'
+            ? `Native RAG indexing rejected by resource admission (${admission.reason}); retry after current expensive work settles`
+            : `Native RAG indexing rejected by resource admission (${admission.reason})`;
           const response = mapError(appError(admission.code, message, admission.retryable, {
             reason: admission.reason,
             requestedCost: admission.requestedCost,

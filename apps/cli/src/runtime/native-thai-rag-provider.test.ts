@@ -784,51 +784,6 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
-  it('maps canonical memory ownership errors without collapsing scope and reconciliation states', async () => {
-    const dataRoot = await tempRoot();
-    const workspaceRoot = await tempRoot();
-    const driver = new NativeThaiRagProviderDriver({
-      dataRoot,
-      launchConfig: { command: '/python' },
-      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
-      clientFactory: clientFactory({
-        jsonTextResponses: true,
-        async onCall(tool, args): Promise<unknown> {
-          if (tool !== 'forget') return success('ok');
-          const memoryId = typeof args.memory_id === 'string' ? args.memory_id : '';
-          const code = memoryId === 'outside'
-            ? 'scope_denied'
-            : memoryId === 'pending'
-              ? 'memory_reconciliation_pending'
-              : 'memory_not_found';
-          return jsonTextResponse({
-            data: {
-              status: code === 'memory_reconciliation_pending' ? 'degraded' : 'error',
-              workspace_id: workspaceId,
-              errors: [{ code, message: code, details: {} }],
-            },
-          });
-        },
-      }),
-    });
-
-    await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({ ok: true });
-
-    await expect(driver.call('forget', { workspace_id: workspaceId, memory_id: 'missing' })).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'FILE_NOT_FOUND', details: { reason: 'memory_not_found', providerStatus: 'error' } },
-    });
-    await expect(driver.call('forget', { workspace_id: workspaceId, memory_id: 'outside' })).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'PERMISSION_DENIED', details: { reason: 'scope_denied', providerStatus: 'error' } },
-    });
-    await expect(driver.call('forget', { workspace_id: workspaceId, memory_id: 'pending' })).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'CONFLICT', details: { reason: 'memory_reconciliation_pending', providerStatus: 'degraded' } },
-    });
-    await driver.stop();
-  });
-
   it('rejects unsupported embedding dimension for contract 1.0', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

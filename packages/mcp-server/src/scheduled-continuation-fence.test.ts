@@ -282,6 +282,38 @@ describe('scheduled continuation mutation fence', () => {
     expect(end).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps ordinary read execution tied to the parent request lifetime', async (): Promise<void> => {
+    let executionSignal: AbortSignal | undefined;
+    let started = false;
+    const readFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+      executionSignal = signal;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        signal?.addEventListener('abort', () => {
+          resolve(ok({ path: 'src/file.ts', content: '', startLine: 1, endLine: 1 }));
+        }, { once: true });
+      });
+    });
+    const registry = new ToolRegistry({ file: { readFile } } as unknown as McpApplicationServices, actor);
+    const parent = new AbortController();
+
+    const pending = registry.invoke('read_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+    }, undefined, parent.signal);
+
+    for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();
+    expect(started).toBe(true);
+
+    parent.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(true);
+  });
+
   it('rejects a stale opaque child MCP lease before child dispatch', async (): Promise<void> => {
     const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
     const begin = vi.fn().mockResolvedValue(err(appError('CONFLICT', 'stale goal lease', true)));

@@ -232,3 +232,14 @@ pnpm test
 ```
 
 ทุกคำสั่งจะต้องเสร็จสิ้นโดยมีผลลัพธ์ผ่าน 100% (Exit code 0, Zero errors, Zero warnings)
+
+
+---
+
+## อายุ Session ของ ChatGPT Web และการทำงานต่อ
+
+Session ของ MCP ผ่าน Web เป็นสถานะชั่วคราวและหมดอายุเมื่อไม่มีการใช้งาน **1 ชั่วโมง** โดยค่าเริ่มต้น สามารถกำหนดเองได้ด้วย `UNIFIED_MPC_LEGACY_SESSION_TTL_MS` (หน่วยมิลลิวินาที) การเรียกใช้งานที่ถูกต้องจะรีเฟรชเวลา idle ใหม่
+
+การหมดอายุหรือปิด transport จะล้างเฉพาะสถานะที่ผูกกับ session เท่านั้น **ไม่ลบ** Goal, Checkpoint หรือ worktree ที่เก็บแบบ durable เมื่อเชื่อมต่อใหม่ให้ใช้ workspace/goal identifier เดิมเพื่อ resume งานบน transport ใหม่ ไม่ควรพึ่ง transcript หรือ session เก่าเป็นแหล่งความจริง
+
+Goal lease เป็นคนละชั้นกับ transport TTL หาก lease ยังไม่หมด ระบบจะยึดคืนได้ทันทีเฉพาะเมื่อ liveness evidence ที่เชื่อถือได้ยืนยันว่าไม่มี fenced call, blocking task หรือ scheduled worker ที่ยังเป็นเจ้าของงานอยู่ หากตรวจสอบไม่ได้หรือผลกำกวม ระบบจะ fail closed และคง lease เดิมไว้

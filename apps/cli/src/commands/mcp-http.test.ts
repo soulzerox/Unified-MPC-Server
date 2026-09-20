@@ -1,7 +1,7 @@
 import { appError, ok } from '@unified-mpc/domain';
 import type { McpServerOptions } from '@unified-mpc/mcp-server';
 import { describe, expect, it } from 'vitest';
-import { createWebMcpHttpServerOptions, runMcpHttpCommand, startMcpHttpBeforeProvider, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
+import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, runMcpHttpCommand, startMcpHttpBeforeProvider, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
 
 const workspace = {
   id: 'workspace-http-1',
@@ -12,6 +12,18 @@ const workspace = {
 };
 
 describe('mcp http command', () => {
+  it('defaults Web legacy session retention to one hour and accepts an environment override', () => {
+    expect(configuredLegacySessionTtlMs({})).toBe(3_600_000);
+    expect(configuredLegacySessionTtlMs({ UNIFIED_MPC_LEGACY_SESSION_TTL_MS: '7200000' })).toBe(7_200_000);
+  });
+
+  it('rejects invalid Web legacy session retention overrides', () => {
+    for (const value of ['0', '-1', '1.5', 'not-a-number']) {
+      expect(() => configuredLegacySessionTtlMs({ UNIFIED_MPC_LEGACY_SESSION_TTL_MS: value }))
+        .toThrow('UNIFIED_MPC_LEGACY_SESSION_TTL_MS');
+    }
+  });
+
   it('binds HTTP before waiting for degradable provider startup', async () => {
     const events: string[] = [];
     let resolveProvider: (() => void) | undefined;

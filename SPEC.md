@@ -181,6 +181,13 @@ The Local Web Control Plane enforces an explicit state machine for ChatGPT Web c
   - Request Body Size Guard: Enforces a strict 1MB maximum payload on all POST requests, returning `413 Payload Too Large` if exceeded.
   - Serves the native Obsidian Telemetry dashboard on `GET /` and exposes REST APIs for status, inventory, policy/gateway management, and pruning. Extension installation is intentionally not exposed through WebUI.
 
+#### Web transport lifetime, durable work, and lease recovery
+
+Legacy ChatGPT/Web MCP transport sessions are transient runtime containers. Their production inactivity TTL defaults to **3,600,000 ms (1 hour)** and is configurable with `UNIFIED_MPC_LEGACY_SESSION_TTL_MS`. Valid session activity refreshes the TTL. Eviction by idle TTL, LRU capacity, client DELETE, transport close, backend shutdown, or protocol error clears transport-scoped harness ledgers only; it MUST NOT delete durable Goal/Checkpoint/worktree state.
+
+Goal ownership is a separate 10-minute fenced lease. An unexpired lease may be reacquired immediately only from trustworthy liveness evidence for the same lease generation/activity sequence proving no live fenced call, no live or unknown blocking task, and no live scheduled owner. Recovery uses an atomic compare-and-swap generation rotation so the old token is fenced immediately. Missing, stale, or ambiguous liveness fails closed. Recurring scheduled continuation keeps the #21 same-runKey `worker_busy_noop` re-check behavior.
+
+
 ### 6. Unified CLI Commands & Headless Integration (`apps/cli`)
 
 The native CLI binary (`unified-mpc`) provides complete command-line control for human developers and headless AI agents (Claude Code, OpenCode CLI, Agy CLI):

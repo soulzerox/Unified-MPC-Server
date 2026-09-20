@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ActivityTracker } from './activity-tracker.js';
 import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
-import { UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
+import { DEFAULT_LEGACY_SESSION_TTL_MS, LEGACY_SESSION_EVICTION_REASONS, UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
 
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
 
@@ -270,8 +270,67 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
+  it('defaults legacy Web session retention to one hour and exposes stable eviction reasons', () => {
+    expect(DEFAULT_LEGACY_SESSION_TTL_MS).toBe(60 * 60_000);
+    expect(LEGACY_SESSION_EVICTION_REASONS).toEqual([
+      'idle_ttl',
+      'lru_capacity',
+      'client_delete',
+      'transport_close',
+      'backend_shutdown',
+      'protocol_error',
+    ]);
+  });
+
+  it('refreshes legacy session idle retention on valid activity', async () => {
+    let now = 0;
+    const evictionReasons: string[] = [];
+    const retentionHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+      },
+      actor: { clientId: 'retention-refresh-test', clientName: 'retention-refresh-test' },
+      legacySessionTtlMs: 100,
+      legacySessionNow: () => now,
+      legacySessionEvictionObserver: (event) => { evictionReasons.push(event.reason); },
+    });
+    const client = new Client({ name: 'retention-refresh-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(retentionHandle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const sessionId = transport.sessionId;
+      expect(sessionId).toEqual(expect.any(String));
+
+      now = 80;
+      expect((await client.callTool({ name: 'workspace_list', arguments: {} })).isError).not.toBe(true);
+      now = 150;
+      expect((await client.callTool({ name: 'workspace_list', arguments: {} })).isError).not.toBe(true);
+
+      now = 251;
+      const expired = await fetch(retentionHandle.endpoint, {
+        method: 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          'mcp-session-id': sessionId!,
+          ...(transport.protocolVersion === undefined ? {} : { 'mcp-protocol-version': transport.protocolVersion }),
+        },
+      });
+      expect(expired.status).toBe(404);
+      expect(evictionReasons).toContain('idle_ttl');
+    } finally {
+      await client.close().catch(() => undefined);
+      await retentionHandle.close();
+    }
+  });
+
   it('evicts oldest legacy sessions and expires idle sessions', async () => {
     let now = 0;
+    const evictionReasons: string[] = [];
     const retentionHandle = await startMcpHttp({
       port: 0,
       services: {
@@ -284,6 +343,7 @@ describe('MCP localhost HTTP transport', () => {
       maxLegacySessions: 1,
       legacySessionTtlMs: 100,
       legacySessionNow: () => now,
+      legacySessionEvictionObserver: (event) => { evictionReasons.push(event.reason); },
     });
     const firstClient = new Client({ name: 'retention-first-client', version: '0.1.0' });
     const firstTransport = new StreamableHTTPClientTransport(retentionHandle.endpoint);
@@ -308,6 +368,7 @@ describe('MCP localhost HTTP transport', () => {
         },
       });
       expect(evicted.status).toBe(404);
+      expect(evictionReasons).toContain('lru_capacity');
 
       now = 101;
       const expired = await fetch(retentionHandle.endpoint, {

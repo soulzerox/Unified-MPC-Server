@@ -114,6 +114,8 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 - **Goal Continuation**: Allows AI agents to execute complex, multi-turn goals autonomously across session boundaries with goal leases and fencing tokens.
 - **Checkpoint State Machine**: Records point-in-time workspace snapshots and transaction journals, enabling safe rollbacks if an agent goes off course.
 - **Task Supervisor**: Differentiates between `blocking_job` (tasks that affect execution liveness) and `supporting_service` (background daemons), preventing zombie processes.
+- **Transport vs Durable Continuity**: Legacy ChatGPT/Web MCP transport sessions use an inactivity TTL of **1 hour by default** (`UNIFIED_MPC_LEGACY_SESSION_TTL_MS`). Valid session activity refreshes that TTL. Transport eviction clears only session-scoped harness state; durable goals, checkpoints, worktrees, and lease generations remain in SQLite and can be resumed from a fresh transport.
+- **Early Orphan Lease Recovery**: A fresh `run_goal` may rotate an unexpired goal lease immediately only when trustworthy liveness proves zero live fenced calls, zero live/unknown blocking tasks, and no live scheduled owner. Ambiguous or unavailable liveness fails closed; the prior token is fenced by the atomic lease-generation update.
 
 ### 7. Hard-Gated Cloudflare Gateway for ChatGPT Web
 - **Outbound-Only Tunnel Companion**: Decoupled `apps/cf-gateway` companion establishes an outbound encrypted HTTPS tunnel via Cloudflare, eliminating the need to expose inbound ports on your host.

@@ -555,6 +555,30 @@ describe('MCP tool registry', () => {
     await expect(registry.invoke('process_logs', { workspaceId: 'workspace-1', processId: 'process-1', tailLines: 10001 })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
   });
 
+  it('propagates the registry output budget into producers before result materialization', async () => {
+    let observedBudget: unknown;
+    const registry = new ToolRegistry({
+      search: {
+        async searchText(_actor, _workspaceId, request): Promise<ReturnType<typeof ok>> {
+          observedBudget = request.resultBudget;
+          return ok({ matches: [{ path: 'large.ts', line: 1, text: 'x'.repeat(2_000) }], truncated: false });
+        },
+        async searchFiles(): Promise<ReturnType<typeof ok>> { return ok({ paths: [], truncated: false }); },
+      },
+    }, actor, { maxToolResultBytes: 256 });
+
+    const response = await registry.invoke('search_text', { workspaceId: 'workspace-1', query: 'large' });
+
+    expect(observedBudget).toMatchObject({
+      maxTextBytes: 256,
+      maxStructuredBytes: 256,
+      maxBinaryBytes: 256,
+      maxBase64Bytes: 256,
+    });
+    expect(JSON.parse(response.content[0]?.type === 'text' ? response.content[0].text : '{}'))
+      .toMatchObject({ truncated: true, maxBytes: 256 });
+  });
+
   it('marks read-only and destructive annotations accurately and excludes forbidden tools', () => {
     const registry = new ToolRegistry({}, actor);
     const byName = new Map(registry.list().map((tool) => [tool.name, tool]));

@@ -5,6 +5,7 @@ import { classifyContextPath } from '@unified-mpc/search';
 import type { McpApplicationServices } from './tools/tool-types.js';
 import { ContextEconomyRuntime, type ContextEconomyStats, type ContextDeliveryKind } from './context-economy.js';
 import { BoundedRetentionMap } from './bounded-retention-map.js';
+import { estimateJsonBytesBounded } from './bounded-json-size.js';
 
 export type ContextIntent = 'auto' | 'debug' | 'implement' | 'review' | 'trace' | 'explore';
 export type ContextMode = 'optimized' | 'full' | 'exhaustive';
@@ -411,7 +412,10 @@ export class ContextEngine {
           ? { workspaceId, path: file.path, result: result.value }
           : { workspaceId, path: file.path, error: { code: result.error.code, message: result.error.message } };
         files.push(entry);
-        if (result.ok) consumedBytes += Buffer.byteLength(JSON.stringify(result.value), 'utf8');
+        if (result.ok && budget !== undefined) {
+          const remainingBytesForAccounting = Math.max(0, budget.maxStructuredBytes - consumedBytes);
+          consumedBytes += estimateJsonBytesBounded(result.value, remainingBytesForAccounting);
+        }
         if (budget !== undefined && consumedBytes >= budget.maxStructuredBytes) break;
       } catch {
         files.push({ workspaceId, path: file.path, error: { code: 'INTERNAL_ERROR', message: 'File read failed' } });

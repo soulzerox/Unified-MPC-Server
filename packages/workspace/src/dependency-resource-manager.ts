@@ -100,7 +100,6 @@ export function resolveDependencyResourcePlan(input: DependencyResourceManagerIn
   }
 
   const compatibilityIdentity = stableIdentity([
-    path.resolve(input.rootPath),
     input.ecosystem,
     input.packageManager,
     input.packageManagerVersion ?? '',

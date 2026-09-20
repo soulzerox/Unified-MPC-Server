@@ -5,7 +5,9 @@ import { THAI_RAG_PROVIDER_ID, type CanonicalWorkspaceId } from './canonical-wor
 export const THAI_RAG_PROVIDER_SCHEMA_VERSION = 1;
 export const THAI_RAG_CONTRACT_VERSION = '1.0';
 export const THAI_RAG_INDEX_JOB_CONTRACT_VERSION = '1.0';
+export const THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION = '1.1';
 export const THAI_RAG_CONTRACT_FINGERPRINT = 'c271073944e379a4932a3377a351dc7d45f421f4866e404eda277ec0f0bfa1bc';
+export const THAI_RAG_CANCEL_CONTRACT_FINGERPRINT = 'e9861eb3df0176f7843860448b37899b04edb50a12d51c10c09cd5186a742afe';
 export const THAI_RAG_PRODUCTION_BRIDGE = 'thai-rag-provider-1.0-production-bridge';
 export const THAI_RAG_LEGACY_ADAPTERS = {
   [THAI_RAG_PRODUCTION_BRIDGE]: { sourceContractVersion: '0.9', targetContractVersion: THAI_RAG_CONTRACT_VERSION },
@@ -44,6 +46,21 @@ export const THAI_RAG_CONFORMANCE_FIXTURE = {
   },
 } as const;
 export const THAI_RAG_REQUIRED_CAPABILITIES = [...THAI_RAG_CONFORMANCE_OPERATIONS];
+export const THAI_RAG_CANCEL_CAPABILITY = 'cancel_index';
+
+const SUPPORTED_INDEX_JOB_CONTRACTS = new Map<string, {
+  readonly indexJobContractVersion: string;
+  readonly requiredCapabilities: readonly string[];
+}>([
+  [THAI_RAG_CONTRACT_FINGERPRINT, {
+    indexJobContractVersion: THAI_RAG_INDEX_JOB_CONTRACT_VERSION,
+    requiredCapabilities: THAI_RAG_REQUIRED_CAPABILITIES,
+  }],
+  [THAI_RAG_CANCEL_CONTRACT_FINGERPRINT, {
+    indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+    requiredCapabilities: [...THAI_RAG_REQUIRED_CAPABILITIES, THAI_RAG_CANCEL_CAPABILITY],
+  }],
+]);
 
 export interface ThaiRagProviderHandshake {
   readonly providerId: typeof THAI_RAG_PROVIDER_ID;
@@ -193,11 +210,22 @@ export function validateThaiRagHandshake(
     return fail('contract-version-mismatch', `unsupported contract version ${handshake.contractVersion}`, { expected: THAI_RAG_CONTRACT_VERSION, actual: handshake.contractVersion, legacyAdapter: handshake.legacyAdapter });
   }
   if (handshake.providerId !== THAI_RAG_PROVIDER_ID) return fail('provider-id-mismatch', `unexpected provider ${handshake.providerId}`, { expected: THAI_RAG_PROVIDER_ID, actual: handshake.providerId });
-  if (handshake.contractFingerprint !== THAI_RAG_CONTRACT_FINGERPRINT) return fail('fingerprint-mismatch', 'contract fingerprint does not match supported conformance fixture', { expected: THAI_RAG_CONTRACT_FINGERPRINT, actual: handshake.contractFingerprint });
-  if (handshake.indexJobContractVersion !== THAI_RAG_INDEX_JOB_CONTRACT_VERSION) return fail('index-job-contract-mismatch', 'index job contract version is unsupported', { expected: THAI_RAG_INDEX_JOB_CONTRACT_VERSION, actual: handshake.indexJobContractVersion });
+  const supportedJobContract = SUPPORTED_INDEX_JOB_CONTRACTS.get(handshake.contractFingerprint);
+  if (supportedJobContract === undefined) {
+    return fail('fingerprint-mismatch', 'contract fingerprint does not match a supported conformance fixture', {
+      expected: [...SUPPORTED_INDEX_JOB_CONTRACTS.keys()],
+      actual: handshake.contractFingerprint,
+    });
+  }
+  if (handshake.indexJobContractVersion !== supportedJobContract.indexJobContractVersion) {
+    return fail('index-job-contract-mismatch', 'index job contract version does not match the attested fingerprint', {
+      expected: supportedJobContract.indexJobContractVersion,
+      actual: handshake.indexJobContractVersion,
+    });
+  }
   if (!isCompatibleRange(handshake.compatibilityRange)) return fail('compatibility-range-invalid', 'compatibility range does not include supported contract version', { expected: THAI_RAG_CONTRACT_VERSION, actual: handshake.compatibilityRange });
   if (handshake.workspaceScopeModel !== 'explicit_workspace_id') return fail('workspace-scope-model-mismatch', 'canonical workspace_id scope is required');
-  const missing = THAI_RAG_REQUIRED_CAPABILITIES.filter((capability) => !handshake.capabilities.includes(capability));
+  const missing = supportedJobContract.requiredCapabilities.filter((capability) => !handshake.capabilities.includes(capability));
   if (missing.length > 0) return fail('missing-capability', `required capabilities missing: ${missing.join(', ')}`);
   if (handshake.health === 'unavailable') return fail('health-unavailable', 'provider health is unavailable');
   if (handshake.health === 'degraded') {
@@ -220,8 +248,8 @@ export function validateThaiRagHandshake(
   if (options.embeddingIndexGeneration !== undefined && handshake.embeddingIndexGeneration !== options.embeddingIndexGeneration) {
     return fail('generation-drift', `provider generation ${handshake.embeddingIndexGeneration} does not match expected ${options.embeddingIndexGeneration}`, { expected: options.embeddingIndexGeneration, actual: handshake.embeddingIndexGeneration });
   }
-  if (handshake.generation.contract !== THAI_RAG_CONTRACT_FINGERPRINT || handshake.generation.embedding !== handshake.embedding.profile || (handshake.generation.index !== 'unknown' && handshake.generation.index !== String(handshake.embeddingIndexGeneration))) {
-    return fail('generation-drift', 'active generation metadata does not match handshake embedding or contract identity', { expected: { contract: THAI_RAG_CONTRACT_FINGERPRINT, embedding: handshake.embedding.profile, index: String(handshake.embeddingIndexGeneration) }, actual: handshake.generation });
+  if (handshake.generation.contract !== handshake.contractFingerprint || handshake.generation.embedding !== handshake.embedding.profile || (handshake.generation.index !== 'unknown' && handshake.generation.index !== String(handshake.embeddingIndexGeneration))) {
+    return fail('generation-drift', 'active generation metadata does not match handshake embedding or contract identity', { expected: { contract: handshake.contractFingerprint, embedding: handshake.embedding.profile, index: String(handshake.embeddingIndexGeneration) }, actual: handshake.generation });
   }
   if (!Number.isSafeInteger(handshake.embedding.dimension) || handshake.embedding.dimension <= 0) return fail('embedding-metadata-invalid', 'embedding dimension is invalid');
   if (handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion.trim().length === 0) return fail('embedding-metadata-invalid', 'embedding preprocessing version is invalid');

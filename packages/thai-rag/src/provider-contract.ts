@@ -79,6 +79,8 @@ export interface ThaiRagHandshakeValidationOptions {
   readonly workspaceId?: string;
   readonly embeddingIndexGeneration?: number;
   readonly allowLegacyAdapter?: boolean;
+  /** Native-consumer-only transition for PR25 providers that omit this field. */
+  readonly allowMissingPreprocessingVersion?: boolean;
   readonly expectedEmbeddingProfile?: string;
   readonly expectedEmbeddingModel?: string;
   readonly expectedPreprocessingVersion?: string;
@@ -224,14 +226,16 @@ export function validateThaiRagHandshake(
   if (!Number.isSafeInteger(handshake.embedding.dimension) || handshake.embedding.dimension <= 0) return fail('embedding-metadata-invalid', 'embedding dimension is invalid');
   if (handshake.embedding.preprocessingVersion !== undefined && handshake.embedding.preprocessingVersion.trim().length === 0) return fail('embedding-metadata-invalid', 'embedding preprocessing version is invalid');
   const attestedLegacy = legacy && adapter !== undefined && options.allowLegacyAdapter === true;
+  const missingPreprocessingVersionAllowed = options.allowMissingPreprocessingVersion === true
+    && handshake.embedding.preprocessingVersion === undefined;
   const expectedEmbedding = THAI_RAG_EMBEDDING_COMPATIBILITY[handshake.contractVersion as keyof typeof THAI_RAG_EMBEDDING_COMPATIBILITY];
   if (expectedEmbedding !== undefined && handshake.embedding.dimension !== expectedEmbedding.dimension) return fail('embedding-metadata-invalid', 'embedding dimension is unsupported', { expected: expectedEmbedding.dimension, actual: handshake.embedding.dimension });
   if (options.expectedEmbeddingProfile !== undefined && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported', { expected: options.expectedEmbeddingProfile, actual: handshake.embedding.profile });
   if (options.expectedEmbeddingModel !== undefined && !attestedLegacy && !isExpectedEmbeddingModel(handshake.embedding.model, options.expectedEmbeddingModel)) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
-  if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion && !attestedLegacy) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
+  if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion && !attestedLegacy && !missingPreprocessingVersionAllowed) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
   if (!isEmbeddingModelMetadataValid(handshake.embedding.profile, handshake.embedding.model, attestedLegacy)) return fail('embedding-metadata-invalid', 'embedding model does not match embedding profile');
   const normalized = normalizeSupportedEmbeddingMetadata(handshake);
-  if (expectedEmbedding !== undefined && (normalized.embedding.profile !== expectedEmbedding.profile || normalized.embedding.model.split('@sha256:')[0] !== expectedEmbedding.model || ('preprocessingVersion' in expectedEmbedding && normalized.embedding.preprocessingVersion !== expectedEmbedding.preprocessingVersion))) return fail('embedding-metadata-invalid', 'embedding metadata drifts from supported contract profile', { expected: expectedEmbedding, actual: handshake.embedding });
+  if (expectedEmbedding !== undefined && (normalized.embedding.profile !== expectedEmbedding.profile || normalized.embedding.model.split('@sha256:')[0] !== expectedEmbedding.model || ('preprocessingVersion' in expectedEmbedding && normalized.embedding.preprocessingVersion !== expectedEmbedding.preprocessingVersion && !missingPreprocessingVersionAllowed))) return fail('embedding-metadata-invalid', 'embedding metadata drifts from supported contract profile', { expected: expectedEmbedding, actual: handshake.embedding });
   return ok(normalized);
 }
 

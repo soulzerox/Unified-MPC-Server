@@ -130,6 +130,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const compatible = validateThaiRagHandshake(handshake.value, {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
+      allowMissingPreprocessingVersion: true,
       ...embeddingCompatibility(handshake.value.contractVersion),
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
@@ -150,6 +151,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const healthy = validateThaiRagHandshake(healthHandshake.value, {
       embeddingIndexGeneration: options.embeddingIndexGeneration,
       allowLegacyAdapter: healthHandshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
+      allowMissingPreprocessingVersion: true,
       ...embeddingCompatibility(healthHandshake.value.contractVersion),
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });
@@ -440,6 +442,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const compatible = validateThaiRagHandshake(handshake.value, {
       embeddingIndexGeneration: this.expectedEmbeddingIndexGeneration,
       allowLegacyAdapter: handshake.value.legacyAdapter === THAI_RAG_PRODUCTION_BRIDGE,
+      allowMissingPreprocessingVersion: true,
       ...embeddingCompatibility(handshake.value.contractVersion),
       allowedDegradedCapabilities: THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
     });

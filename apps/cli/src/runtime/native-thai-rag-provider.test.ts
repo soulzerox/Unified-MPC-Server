@@ -712,6 +712,27 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('starts and reports health for a PR25-shaped handshake without preprocessing version', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: pr25Handshake() }),
+    });
+
+    await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({
+      ok: true,
+      value: { contractVersion: '1.0', indexJobContractVersion: '1.0' },
+    });
+    await expect(driver.health()).resolves.toMatchObject({
+      ok: true,
+      value: { contractVersion: '1.0', indexJobContractVersion: '1.0', embedding: { profile: 'nomic-embed-text-v2-moe' } },
+    });
+    await driver.stop();
+  });
+
   it('rejects unsupported embedding dimension for contract 1.0', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -1047,6 +1068,13 @@ function defaultHandshake(): Record<string, unknown> {
       storage: 'sqlite',
     },
   };
+}
+
+function pr25Handshake(): Record<string, unknown> {
+  const handshake = defaultHandshake();
+  const embedding = { ...(handshake.embedding as Record<string, unknown>) };
+  delete embedding.preprocessing_version;
+  return { ...handshake, embedding };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

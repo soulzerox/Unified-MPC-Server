@@ -51,6 +51,35 @@ describe('Thai-RAG provider handshake', () => {
     expect(validateThaiRagHandshake(providerMinor)).toEqual({ ok: true, value: providerMinor });
   });
 
+  it('rejects a current-contract handshake when preprocessing version is missing by default', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
+  });
+
+  it('accepts missing preprocessing version only with the transition option', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined },
+    }, { allowMissingPreprocessingVersion: true });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects a wrong non-empty preprocessing version even with the transition option', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' },
+    }, { allowMissingPreprocessingVersion: true });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
+  });
+
   it.each([
     ['incompatible major contract', { contractVersion: '2.0', compatibilityRange: { min: '2.0', max: '2.x' } }],
     ['provider range excludes Unified contract', { contractVersion: '1.1', compatibilityRange: { min: '1.1', max: '1.x' } }],

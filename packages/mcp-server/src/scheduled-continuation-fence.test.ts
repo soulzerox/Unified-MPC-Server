@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GoalRequestCancellationService } from '@unified-mpc/application';
 import { appError, err, ok } from '@unified-mpc/domain';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
@@ -202,7 +201,34 @@ describe('scheduled continuation mutation fence', () => {
   });
 
   it('detaches an admitted durable goal mutation from parent request abort but still honors explicit goal cancellation', async (): Promise<void> => {
-    const cancellation = new GoalRequestCancellationService({ waitMs: 100 });
+    let registeredController: AbortController | undefined;
+    let registeredRequestId: string | undefined;
+    let resolveDone: (() => void) | undefined;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    const cancellation = {
+      register(_goalId: string, requestId: string, controller: AbortController) {
+        registeredController = controller;
+        registeredRequestId = requestId;
+        return {
+          accepted: true,
+          done,
+          release(): void { resolveDone?.(); },
+        };
+      },
+      async cancelForGoal(goalId: string) {
+        const requested = registeredController === undefined ? 0 : 1;
+        registeredController?.abort();
+        if (requested > 0) await done;
+        return {
+          goalId,
+          requested,
+          stopped: requested,
+          remaining: 0,
+          timedOut: false,
+          requestIds: registeredRequestId === undefined ? [] : [registeredRequestId],
+        };
+      },
+    };
     const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
     const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
     const heartbeat = vi.fn().mockResolvedValue(undefined);

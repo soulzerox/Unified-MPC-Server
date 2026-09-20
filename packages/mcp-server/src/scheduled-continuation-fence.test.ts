@@ -282,6 +282,43 @@ describe('scheduled continuation mutation fence', () => {
     expect(end).toHaveBeenCalledTimes(1);
   });
 
+  it('detaches an admitted durable goal mutation when only the response budget expires', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let settleWrite: (() => void) | undefined;
+    const writeFile = vi.fn(async (_actor, _workspaceId, _request, signal?: AbortSignal) => {
+      executionSignal = signal;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        settleWrite = (): void => { resolve(ok({ path: 'src/file.ts', bytesWritten: 1 })); };
+      });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      file: { writeFile },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, { maxToolDurationMs: 10 });
+
+    const response = await registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+      content: 'durable work',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+
+    settleWrite?.();
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps ordinary unfenced mutation execution tied to the parent request lifetime', async (): Promise<void> => {
     let executionSignal: AbortSignal | undefined;
     let started = false;

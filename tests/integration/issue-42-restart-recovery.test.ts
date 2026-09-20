@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { GatewayService, type GatewayStatus } from '../../apps/cf-gateway/src/index.js';
+import { GatewayService, type GatewayStatus, type TunnelHandle } from '../../apps/cf-gateway/src/gateway-service.js';
 import type { McpHttpServerHandle } from '@unified-mpc/mcp-server';
 import { ControlPlaneServer } from '../../apps/web/src/index.js';
 import { startMcpHttpBeforeProvider, type McpHttpProviderStartup } from '../../apps/cli/src/commands/mcp-http.js';
@@ -38,11 +38,11 @@ describe('Issue #42 restart recovery', () => {
       reconnectBaseDelayMs: 5,
       reconnectMaxDelayMs: 20,
       reconnectJitterRatio: 0,
-      tunnelProviderFactory: () => async () => {
+      tunnelProviderFactory: (): (() => Promise<TunnelHandle>) => async (): Promise<TunnelHandle> => {
         tunnelStarts += 1;
-        return { url: 'https://mcp.issue-42.test', stop: async () => {} };
+        return { url: 'https://mcp.issue-42.test', stop: async (): Promise<void> => {} };
       },
-      healthProbe: async (_url, timeoutMs) => {
+      healthProbe: async (_url, timeoutMs): Promise<number> => {
         try {
           const response = await fetch(`http://127.0.0.1:${backendPort}/_unified-mpc/identity`, {
             signal: AbortSignal.timeout(timeoutMs),

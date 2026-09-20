@@ -256,30 +256,31 @@ describe('MCP tool registry', () => {
       hostMutationApprovalProvider: approveMutation,
     });
 
-    await expect(registry.invoke('rag_remember', {
+    const remember = await registry.invoke('rag_remember', {
       workspaceId,
       content: 'remember me',
       category: 'decision',
       userConfirmed: true,
-    })).resolves.toMatchObject({ isError: undefined });
-    await expect(registry.invoke('rag_recall', {
+    });
+    const recall = await registry.invoke('rag_recall', {
       workspaceId,
       query: 'remember',
       category: 'decision',
       limit: 3,
-    })).resolves.toMatchObject({ isError: undefined });
-    await expect(registry.invoke('rag_forget', {
+    });
+    const forget = await registry.invoke('rag_forget', {
       workspaceId,
       memoryId: 'mem-1',
       userConfirmed: true,
-    })).resolves.toMatchObject({ isError: undefined });
-    await expect(registry.invoke('workspace_memory_record', {
+    });
+    const record = await registry.invoke('workspace_memory_record', {
       workspaceId,
       name: 'architecture',
       observations: ['use exact scope'],
       category: 'decision',
       userConfirmed: true,
-    })).resolves.toMatchObject({ isError: undefined });
+    });
+    for (const result of [remember, recall, forget, record]) expect(result.isError).not.toBe(true);
 
     expect(calls).toEqual([
       { tool: 'remember', args: { workspace_id: workspaceId, content: 'remember me', category: 'decision' } },

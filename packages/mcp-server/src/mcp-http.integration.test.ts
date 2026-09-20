@@ -288,6 +288,7 @@ describe('MCP localhost HTTP transport', () => {
       actor: { clientId: 'retention-refresh-test', clientName: 'retention-refresh-test' },
       legacySessionTtlMs: 100,
       legacySessionNow: () => now,
+      legacySessionEvictionObserver: (event) => { evictionReasons.push(event.reason); },
     });
     const client = new Client({ name: 'retention-refresh-client', version: '0.1.0' });
     const transport = new StreamableHTTPClientTransport(retentionHandle.endpoint);
@@ -321,6 +322,7 @@ describe('MCP localhost HTTP transport', () => {
 
   it('evicts oldest legacy sessions and expires idle sessions', async () => {
     let now = 0;
+    const evictionReasons: string[] = [];
     const retentionHandle = await startMcpHttp({
       port: 0,
       services: {

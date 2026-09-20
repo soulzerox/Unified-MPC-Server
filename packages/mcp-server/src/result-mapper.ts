@@ -1,4 +1,5 @@
 import type { AppError, Result, ResultBudget } from '@unified-mpc/domain';
+import { estimateJsonBytesBounded } from './bounded-json-size.js';
 
 export interface McpTextContent {
   readonly type: 'text';
@@ -55,9 +56,9 @@ export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}):
   }
   const structuredContent = toStructuredContent(result.value);
   const hasStructuredPayload = typeof result.value === 'object' && result.value !== null;
-  const structuredBytes = structuredContent === undefined ? 0 : estimateJsonBytes(structuredContent, budget.maxStructuredBytes);
+  const structuredBytes = structuredContent === undefined ? 0 : estimateJsonBytesBounded(structuredContent, budget.maxStructuredBytes);
   if (structuredBytes > budget.maxStructuredBytes) return truncatedResponse(options, structuredBytes, budget.maxStructuredBytes, 'structured');
-  const textBytes = estimateJsonBytes(result.value, budget.maxTextBytes);
+  const textBytes = estimateJsonBytesBounded(result.value, budget.maxTextBytes);
   if (textBytes > budget.maxTextBytes) {
     if (image === undefined) return truncatedResponse(options, textBytes, budget.maxTextBytes, 'text');
     return { content: [image] };
@@ -132,36 +133,6 @@ function truncatedResponse(options: MapResultOptions, originalBytes: number, max
     limitType,
     hint: 'Retry with a narrower query, pagination, or a smaller response target.',
   }) }] };
-}
-
-function estimateJsonBytes(value: unknown, limit: number, seen = new WeakSet<object>()): number {
-  if (value === null || typeof value !== 'object') {
-    if (typeof value === 'string') return Math.min(limit + 1, jsonStringBytes(value));
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? 4 : Buffer.byteLength(serialized, 'utf8');
-  }
-  if (seen.has(value)) return limit + 1;
-  seen.add(value);
-  let bytes = 2;
-  const entries = Array.isArray(value) ? value.map((entry) => [undefined, entry] as const) : Object.entries(value);
-  for (const [key, entry] of entries) {
-    if (key !== undefined) bytes += Buffer.byteLength(JSON.stringify(key), 'utf8') + 1;
-    bytes += estimateJsonBytes(entry, Math.max(0, limit - bytes), seen) + (key === undefined ? 1 : 1);
-    if (bytes > limit) return limit + 1;
-  }
-  seen.delete(value);
-  return bytes;
-}
-
-function jsonStringBytes(value: string): number {
-  let bytes = 2;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 34 || code === 92) bytes += 2;
-    else if (code <= 0x1f) bytes += code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6;
-    else bytes += Buffer.byteLength(value[index] ?? '', 'utf8');
-  }
-  return bytes;
 }
 
 function toText(value: unknown): string {

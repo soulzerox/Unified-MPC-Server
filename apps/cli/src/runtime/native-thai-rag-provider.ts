@@ -585,9 +585,8 @@ async function rollbackWorkspaceAliases(changed: readonly { readonly alias: stri
 }
 
 function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake> {
-  const outer = isRecord(value) && isRecord(value.structuredContent) && isRecord(value.structuredContent.data)
-    ? value.structuredContent.data
-    : isRecord(value) && isRecord(value.data) ? value.data : value;
+  const payload = normalizeWorkerPayload(value);
+  const outer = isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
   const data = isRecord(outer) && isRecord(outer.data) && typeof outer.data.provider_id === 'string' ? outer.data : outer;
   if (!isRecord(data)
     || typeof data.provider_id !== 'string'
@@ -701,8 +700,9 @@ function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Resul
 }
 
 function structuredProviderError(value: unknown): { readonly code: string; readonly message: string; readonly status: string } | undefined {
-  if (!isRecord(value) || !isRecord(value.structuredContent) || !isRecord(value.structuredContent.data)) return undefined;
-  const data = value.structuredContent.data;
+  const payload = normalizeWorkerPayload(value);
+  if (!isRecord(payload)) return undefined;
+  const data = isRecord(payload.data) ? payload.data : payload;
   if (!Array.isArray(data.errors) || data.errors.length === 0 || !isRecord(data.errors[0])) return undefined;
   const error = data.errors[0];
   if (typeof error.code !== 'string' || typeof error.message !== 'string') return undefined;
@@ -711,6 +711,20 @@ function structuredProviderError(value: unknown): { readonly code: string; reado
     message: error.message,
     status: typeof data.status === 'string' ? data.status : 'unavailable',
   };
+}
+
+function normalizeWorkerPayload(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  if (isRecord(value.structuredContent)) return value.structuredContent;
+  if (!Array.isArray(value.content)) return value;
+  const first = value.content[0];
+  if (!isRecord(first) || typeof first.text !== 'string') return value;
+  try {
+    const parsed: unknown = JSON.parse(first.text);
+    return isRecord(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
 }
 
 function mapProviderErrorCode(code: string): 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NOT_FOUND' | 'CONFLICT' {

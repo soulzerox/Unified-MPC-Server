@@ -733,6 +733,57 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('starts and reports health from a stdio JSON-text handshake envelope', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ jsonTextResponses: true }),
+    });
+
+    await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({
+      ok: true,
+      value: { contractVersion: '1.0', indexJobContractVersion: '1.0' },
+    });
+    await expect(driver.health()).resolves.toMatchObject({
+      ok: true,
+      value: { contractVersion: '1.0', indexJobContractVersion: '1.0', embedding: { profile: 'nomic-embed-text-v2-moe' } },
+    });
+    await driver.stop();
+  });
+
+  it('maps structured provider errors from a stdio JSON-text envelope', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        jsonTextResponses: true,
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'recall') return jsonTextResponse({
+            status: 'error',
+            data: {
+              workspace_id: workspaceId,
+              errors: [{ code: 'workspace_scope_required', message: 'canonical workspace_id is required', details: {} }],
+            },
+          });
+          return success('ok');
+        },
+      }),
+    });
+
+    await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({ ok: true });
+    await expect(driver.call('recall', { workspace_id: workspaceId, query: 'scope' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT', details: { reason: 'workspace_scope_required' } },
+    });
+    await driver.stop();
+  });
+
   it('rejects unsupported embedding dimension for contract 1.0', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -991,6 +1042,7 @@ function clientFactory(options: {
   readonly scopeDrift?: string;
   readonly schemaDrift?: string;
   readonly oldProviderSchema?: boolean;
+  readonly jsonTextResponses?: boolean;
 } = {}): McpClientFactory {
   return {
     async connect(config): Promise<McpClientSession> {
@@ -1011,14 +1063,20 @@ function clientFactory(options: {
         },
         async listResources(): Promise<[]> { return []; },
         async callTool(tool, args): Promise<unknown> {
-          if (tool === 'version') return success('version', options.handshake ?? defaultHandshake());
-          if (tool === 'health') return success('health', options.handshake ?? defaultHandshake());
+          if (tool === 'version' || tool === 'health') {
+            const data = options.handshake ?? defaultHandshake();
+            return options.jsonTextResponses ? jsonTextResponse({ status: 'ok', data }) : success(tool, data);
+          }
           return options.onCall === undefined ? success('ok') : options.onCall(tool, args);
         },
         async close(): Promise<void> { options.onClose?.(); },
       };
     },
   };
+}
+
+function jsonTextResponse(payload: Record<string, unknown>): unknown {
+  return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
 }
 
 function structuredFailure(code: string): unknown {

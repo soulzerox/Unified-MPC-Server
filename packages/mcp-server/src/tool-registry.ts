@@ -632,6 +632,7 @@ export class ToolRegistry {
         const admission = tryAdmitChildMcpCall(this.resourceAdmissionController, {
           operationId: callId,
           workspaceId: admissionWorkspaceId,
+          sessionId: this.sessionId ?? (this.actor.sessionId?.trim() || this.actor.clientId),
           cost: this.mcpCallAdmissionCost,
         });
         if (!admission.admitted) {

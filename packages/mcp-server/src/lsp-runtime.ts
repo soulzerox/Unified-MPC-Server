@@ -69,31 +69,25 @@ class LspConnection {
 
   public request(method: string, params: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     const id = randomUUID();
+    if (signal?.aborted) return Promise.reject(new Error(`LSP ${method} cancelled`));
     return new Promise((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
       let settled = false;
-      const cleanup = (): void => {
-        if (timer !== undefined) clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-      };
       const rejectPending = (error: Error): void => {
         if (settled) return;
         settled = true;
         this.responseWaiters.delete(id);
-        cleanup();
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         reject(error);
       };
       const onAbort = (): void => rejectPending(new Error(`LSP ${method} cancelled`));
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-      timer = setTimeout(() => rejectPending(new Error(`LSP ${method} timed out after ${timeoutMs}ms`)), timeoutMs);
+      const timer = setTimeout(() => rejectPending(new Error(`LSP ${method} timed out after ${timeoutMs}ms`)), timeoutMs);
       this.responseWaiters.set(id, {
         resolve: (value) => {
           if (settled) return;
           settled = true;
-          cleanup();
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
           resolve(value);
         },
         reject: (error) => rejectPending(error),
@@ -427,13 +421,12 @@ function quietPeriod(quietMs: number, maxMs: number, signal?: AbortSignal): Prom
       reject(new Error('LSP diagnostics wait cancelled'));
       return;
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = (): void => {
-      if (timer !== undefined) clearTimeout(timer);
+      clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
       reject(new Error('LSP diagnostics wait cancelled'));
     };
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
       resolve();
     }, Math.min(quietMs, maxMs));

@@ -3,13 +3,30 @@ export type ResourceAdmissionClass = 'dependency_bootstrap' | 'child_mcp_call';
 export interface ResourceAdmissionLimits {
   readonly globalCost: number;
   readonly workspaceCost: number;
+  /** Optional for backwards-compatible callers; defaults to the global ceiling. */
+  readonly sessionCost?: number;
   readonly maxOperations: number;
+  /** Optional per-class ceilings; unspecified classes default to the global ceiling. */
+  readonly resourceClassCost?: Readonly<Partial<Record<ResourceAdmissionClass, number>>>;
+}
+
+interface NormalizedResourceAdmissionLimits {
+  readonly globalCost: number;
+  readonly workspaceCost: number;
+  readonly sessionCost: number;
+  readonly maxOperations: number;
+  readonly resourceClassCost: Readonly<Record<ResourceAdmissionClass, number>>;
 }
 
 export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
   globalCost: 16,
   workspaceCost: 8,
+  sessionCost: 8,
   maxOperations: 8,
+  resourceClassCost: Object.freeze({
+    dependency_bootstrap: 8,
+    child_mcp_call: 12,
+  }),
 }) satisfies ResourceAdmissionLimits;
 
 export const DEFAULT_CHILD_MCP_CALL_ADMISSION_COST = 3;
@@ -17,6 +34,11 @@ export const DEFAULT_CHILD_MCP_CALL_ADMISSION_COST = 3;
 export interface ResourceAdmissionRequest {
   readonly operationId: string;
   readonly workspaceId: string;
+  /**
+   * Stable caller/session owner. Background lifecycle work may omit this and
+   * is accounted to the explicit non-client "system" owner.
+   */
+  readonly sessionId?: string;
   readonly resourceClass: ResourceAdmissionClass;
   readonly cost: number;
 }
@@ -24,6 +46,7 @@ export interface ResourceAdmissionRequest {
 export interface ResourceAdmissionLease {
   readonly operationId: string;
   readonly workspaceId: string;
+  readonly sessionId: string;
   readonly resourceClass: ResourceAdmissionClass;
   readonly cost: number;
 }
@@ -33,6 +56,7 @@ export interface ResourceAdmissionSnapshot {
   readonly activeOperations: number;
   readonly activeCostByClass: Readonly<Record<ResourceAdmissionClass, number>>;
   readonly activeCostByWorkspace: Readonly<Record<string, number>>;
+  readonly activeCostBySession: Readonly<Record<string, number>>;
   readonly rejected: number;
 }
 
@@ -41,6 +65,8 @@ export type ResourceAdmissionRejectionReason =
   | 'duplicate_operation'
   | 'global_cost_exhausted'
   | 'workspace_cost_exhausted'
+  | 'session_cost_exhausted'
+  | 'resource_class_cost_exhausted'
   | 'operation_limit_exhausted';
 
 export type ResourceAdmissionDecision =
@@ -74,15 +100,28 @@ export type ResourceAdmissionDecision =
  * Share one instance across transports to make the limits process-wide.
  */
 export class ResourceAdmissionController {
-  private readonly limits: ResourceAdmissionLimits;
+  private readonly limits: NormalizedResourceAdmissionLimits;
   private readonly active = new Map<string, ResourceAdmissionLease>();
   private rejected = 0;
 
   public constructor(limits: ResourceAdmissionLimits) {
     validateLimit(limits.globalCost, 'globalCost');
     validateLimit(limits.workspaceCost, 'workspaceCost');
+    validateLimit(limits.sessionCost ?? limits.globalCost, 'sessionCost');
     validateLimit(limits.maxOperations, 'maxOperations');
-    this.limits = { ...limits };
+    for (const resourceClass of RESOURCE_ADMISSION_CLASSES) {
+      validateLimit(limits.resourceClassCost?.[resourceClass] ?? limits.globalCost, `resourceClassCost.${resourceClass}`);
+    }
+    this.limits = {
+      globalCost: limits.globalCost,
+      workspaceCost: limits.workspaceCost,
+      sessionCost: limits.sessionCost ?? limits.globalCost,
+      maxOperations: limits.maxOperations,
+      resourceClassCost: {
+        dependency_bootstrap: limits.resourceClassCost?.dependency_bootstrap ?? limits.globalCost,
+        child_mcp_call: limits.resourceClassCost?.child_mcp_call ?? limits.globalCost,
+      },
+    };
   }
 
   public tryAcquire(request: ResourceAdmissionRequest): ResourceAdmissionDecision {
@@ -91,15 +130,22 @@ export class ResourceAdmissionController {
     if (invalid !== undefined) return this.rejectInvalid(invalid, requestedCost);
     if (this.active.has(request.operationId)) return this.rejectInvalid('duplicate_operation', requestedCost);
 
+    const sessionId = normalizeSessionId(request.sessionId);
     const snapshot = this.snapshot();
     const workspaceCost = snapshot.activeCostByWorkspace[request.workspaceId] ?? 0;
+    const sessionCost = snapshot.activeCostBySession[sessionId] ?? 0;
+    const classCost = snapshot.activeCostByClass[request.resourceClass];
     const reason = snapshot.activeCost + request.cost > this.limits.globalCost
       ? 'global_cost_exhausted'
       : workspaceCost + request.cost > this.limits.workspaceCost
         ? 'workspace_cost_exhausted'
-        : snapshot.activeOperations >= this.limits.maxOperations
-          ? 'operation_limit_exhausted'
-          : undefined;
+        : sessionCost + request.cost > this.limits.sessionCost
+          ? 'session_cost_exhausted'
+          : classCost + request.cost > this.limits.resourceClassCost[request.resourceClass]
+            ? 'resource_class_cost_exhausted'
+            : snapshot.activeOperations >= this.limits.maxOperations
+              ? 'operation_limit_exhausted'
+              : undefined;
     if (reason !== undefined) {
       this.rejected += 1;
       return {
@@ -115,6 +161,7 @@ export class ResourceAdmissionController {
     const lease: ResourceAdmissionLease = {
       operationId: request.operationId,
       workspaceId: request.workspaceId,
+      sessionId,
       resourceClass: request.resourceClass,
       cost: request.cost,
     };
@@ -135,17 +182,20 @@ export class ResourceAdmissionController {
       child_mcp_call: 0,
     };
     const activeCostByWorkspace: Record<string, number> = {};
+    const activeCostBySession: Record<string, number> = {};
     let activeCost = 0;
     for (const lease of this.active.values()) {
       activeCost += lease.cost;
       activeCostByClass[lease.resourceClass] += lease.cost;
       activeCostByWorkspace[lease.workspaceId] = (activeCostByWorkspace[lease.workspaceId] ?? 0) + lease.cost;
+      activeCostBySession[lease.sessionId] = (activeCostBySession[lease.sessionId] ?? 0) + lease.cost;
     }
     return {
       activeCost,
       activeOperations: this.active.size,
       activeCostByClass,
       activeCostByWorkspace,
+      activeCostBySession,
       rejected: this.rejected,
     };
   }
@@ -194,8 +244,15 @@ function validateLimit(value: number, label: string): void {
   if (!Number.isInteger(value) || value < 1) throw new Error(`${label} must be a positive integer`);
 }
 
+const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'child_mcp_call'] as const;
+
 function validateRequest(request: ResourceAdmissionRequest): 'invalid_request' | undefined {
-  if (!isBoundedId(request.operationId) || !isBoundedId(request.workspaceId) || !isResourceClass(request.resourceClass) || !Number.isInteger(request.cost) || request.cost < 1) {
+  if (!isBoundedId(request.operationId)
+    || !isBoundedId(request.workspaceId)
+    || (request.sessionId !== undefined && !isBoundedId(request.sessionId))
+    || !isResourceClass(request.resourceClass)
+    || !Number.isInteger(request.cost)
+    || request.cost < 1) {
     return 'invalid_request';
   }
   return undefined;
@@ -209,9 +266,14 @@ function isResourceClass(value: unknown): value is ResourceAdmissionClass {
   return value === 'dependency_bootstrap' || value === 'child_mcp_call';
 }
 
+function normalizeSessionId(value: string | undefined): string {
+  return value === undefined ? 'system' : value.trim();
+}
+
 function sameLease(left: ResourceAdmissionLease, right: ResourceAdmissionLease): boolean {
   return left.operationId === right.operationId
     && left.workspaceId === right.workspaceId
+    && left.sessionId === right.sessionId
     && left.resourceClass === right.resourceClass
     && left.cost === right.cost;
 }

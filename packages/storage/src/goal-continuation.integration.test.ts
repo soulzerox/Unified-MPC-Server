@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { GoalContinuationService } from '@unified-mpc/application';
 import { ScheduledContinuationService } from '@unified-mpc/application';
 import type { FileActor, GoalRequestCancellationPort, GoalTaskCancellationPort } from '@unified-mpc/application';
-import type { ScheduledContinuationWorkerLiveness } from '@unified-mpc/domain';
+import type { GoalTrackedTask, ScheduledContinuationWorkerLiveness } from '@unified-mpc/domain';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { SqliteDatabase } from './database.js';
 import { SqliteGoalRepository } from './goal-repository.js';
@@ -529,6 +529,214 @@ describe('durable goal continuation persistence', () => {
       });
     } finally {
       runtime.database.close();
+    }
+  });
+
+  it('does not reclaim an unexpired foreground lease while a blocking task is still running', async () => {
+    const { filename, workspace } = await fixture();
+    const now = new Date('2026-08-26T00:00:00.000Z');
+    const runtime = await open(filename, workspace, () => now);
+    try {
+      const created = await runtime.service.runGoal(actor('foreground-a'), { ...createRequest, leaseSeconds: 600 });
+      if (!created.ok || created.value.leaseToken === undefined) throw new Error('goal create failed');
+      const checkpointed = await runtime.service.checkpointGoal(actor('foreground-a'), {
+        goalId: created.value.goalId,
+        leaseToken: created.value.leaseToken,
+        expectedRevision: created.value.revision,
+        currentPhase: 'blocking-verification',
+        summary: 'A blocking verification task is still running.',
+        stepUpdates: [],
+        nextAction: 'Wait for the blocking task to finish.',
+        blockers: [],
+        evidence: [],
+        trackedTasks: [
+          { taskId: 'verification-job', provider: 'shell', role: 'blocking_job', cancelWithGoal: true },
+        ],
+      });
+      if (!checkpointed.ok) throw new Error('goal checkpoint failed');
+
+      const recoveryService = new GoalContinuationService(runtime.workspaces, runtime.repository, {
+        now: (): Date => now,
+        scheduledContinuations: runtime.repository,
+        workerLiveness: {
+          observe: async (goalId, trackedTasks): Promise<ScheduledContinuationWorkerLiveness> => {
+            const goal = await runtime.repository.getById(goalId);
+            if (goal === null) throw new Error('goal missing during liveness probe');
+            return {
+              trustworthy: true,
+              observedAt: now.toISOString(),
+              leaseGeneration: goal.leaseGeneration,
+              leaseActivitySeq: goal.leaseActivitySeq,
+              liveFencedCallCount: 0,
+              blockingTaskStates: trackedTasks.map((task) => ({
+                taskId: task.taskId,
+                provider: task.provider,
+                state: 'running' as const,
+              })),
+            };
+          },
+        },
+      });
+
+      const held = await recoveryService.runGoal(actor('foreground-b'), {
+        workspaceId: workspace.id,
+        goalKey: createRequest.goalKey,
+        leaseSeconds: 600,
+      });
+      expect(held).toMatchObject({
+        ok: true,
+        value: {
+          acquired: false,
+          goalId: created.value.goalId,
+          leaseGeneration: checkpointed.value.leaseGeneration,
+          retryAfterSeconds: 600,
+        },
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
+  it.each(['unavailable', 'ambiguous'] as const)(
+    'fails closed when foreground lease liveness is %s',
+    async (livenessMode) => {
+      const { filename, workspace } = await fixture();
+      const now = new Date('2026-08-26T00:00:00.000Z');
+      const runtime = await open(filename, workspace, () => now);
+      try {
+        const created = await runtime.service.runGoal(actor('foreground-a'), { ...createRequest, leaseSeconds: 600 });
+        if (!created.ok) throw new Error('goal create failed');
+
+        const recoveryService = new GoalContinuationService(runtime.workspaces, runtime.repository, {
+          now: (): Date => now,
+          scheduledContinuations: runtime.repository,
+          workerLiveness: {
+            observe: async (goalId): Promise<ScheduledContinuationWorkerLiveness> => {
+              if (livenessMode === 'unavailable') throw new Error('liveness provider unavailable');
+              const goal = await runtime.repository.getById(goalId);
+              if (goal === null) throw new Error('goal missing during liveness probe');
+              return {
+                trustworthy: false,
+                observedAt: now.toISOString(),
+                leaseGeneration: goal.leaseGeneration,
+                leaseActivitySeq: goal.leaseActivitySeq,
+                liveFencedCallCount: 0,
+                blockingTaskStates: [],
+              };
+            },
+          },
+        });
+
+        const held = await recoveryService.runGoal(actor('foreground-b'), {
+          workspaceId: workspace.id,
+          goalKey: createRequest.goalKey,
+          leaseSeconds: 600,
+        });
+        expect(held).toMatchObject({
+          ok: true,
+          value: {
+            acquired: false,
+            goalId: created.value.goalId,
+            leaseGeneration: created.value.leaseGeneration,
+            retryAfterSeconds: 600,
+          },
+        });
+      } finally {
+        runtime.database.close();
+      }
+    },
+  );
+
+  it('allows exactly one concurrent early-orphan takeover winner before lease expiry', async () => {
+    const { filename, workspace } = await fixture();
+    const startedAt = new Date('2026-08-26T00:00:00.000Z');
+    let now = startedAt;
+    const first = await open(filename, workspace, () => now);
+    const second = await open(filename, workspace, () => now);
+    try {
+      const created = await first.service.runGoal(actor('foreground-a'), { ...createRequest, leaseSeconds: 600 });
+      if (!created.ok || created.value.leaseToken === undefined) throw new Error('goal create failed');
+      now = new Date(startedAt.getTime() + 1_000);
+
+      let observedCount = 0;
+      let releaseProbes!: () => void;
+      const bothProbed = new Promise<void>((resolve) => {
+        releaseProbes = resolve;
+      });
+      const createWorkerLiveness = (repository: SqliteGoalRepository) => ({
+        observe: async (
+          goalId: string,
+          trackedTasks: readonly GoalTrackedTask[],
+        ): Promise<ScheduledContinuationWorkerLiveness> => {
+          const goal = await repository.getById(goalId);
+          if (goal === null) throw new Error('goal missing during liveness probe');
+          observedCount += 1;
+          if (observedCount === 2) releaseProbes();
+          await bothProbed;
+          return {
+            trustworthy: true,
+            observedAt: now.toISOString(),
+            leaseGeneration: goal.leaseGeneration,
+            leaseActivitySeq: goal.leaseActivitySeq,
+            liveFencedCallCount: 0,
+            blockingTaskStates: trackedTasks
+              .filter((task) => task.role === 'blocking_job')
+              .map((task) => ({ taskId: task.taskId, provider: task.provider, state: 'absent' as const })),
+          };
+        },
+      });
+
+      const firstRecovery = new GoalContinuationService(first.workspaces, first.repository, {
+        now: (): Date => now,
+        workerLiveness: createWorkerLiveness(first.repository),
+      });
+      const secondRecovery = new GoalContinuationService(second.workspaces, second.repository, {
+        now: (): Date => now,
+        workerLiveness: createWorkerLiveness(second.repository),
+      });
+
+      const [left, right] = await Promise.all([
+        firstRecovery.runGoal(actor('foreground-b'), {
+          workspaceId: workspace.id,
+          goalKey: createRequest.goalKey,
+          leaseSeconds: 600,
+        }),
+        secondRecovery.runGoal(actor('foreground-c'), {
+          workspaceId: workspace.id,
+          goalKey: createRequest.goalKey,
+          leaseSeconds: 600,
+        }),
+      ]);
+
+      const winners = [left, right].filter((entry) => entry.ok && entry.value.acquired);
+      const losers = [left, right].filter((entry) => entry.ok && !entry.value.acquired);
+      expect(winners).toHaveLength(1);
+      expect(losers).toHaveLength(1);
+      expect(winners[0]).toMatchObject({
+        ok: true,
+        value: {
+          goalId: created.value.goalId,
+          leaseGeneration: created.value.leaseGeneration + 1,
+          leaseRecovery: 'stale_worker_recovered',
+        },
+      });
+
+      const staleWorker = await first.service.checkpointGoal(actor('foreground-a'), {
+        goalId: created.value.goalId,
+        leaseToken: created.value.leaseToken,
+        expectedRevision: created.value.revision,
+        currentPhase: 'stale-racing-worker',
+        summary: 'The pre-takeover worker must be fenced after the CAS winner rotates generation.',
+        stepUpdates: [],
+        nextAction: 'Must fail.',
+        blockers: [],
+        evidence: [],
+        activeTaskIds: [],
+      });
+      expect(staleWorker).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    } finally {
+      first.database.close();
+      second.database.close();
     }
   });
 

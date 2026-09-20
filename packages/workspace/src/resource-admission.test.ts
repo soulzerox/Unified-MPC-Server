@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
+  DEFAULT_RAG_INDEX_ADMISSION_COST,
   ResourceAdmissionController,
   sharedProcessResourceAdmissionController,
   tryAdmitChildMcpCall,
   tryAdmitDependencyBootstrap,
   tryAdmitLspProcess,
+  tryAdmitRagIndex,
 } from './resource-admission.js';
 import type { ResourcePressureProbe } from './resource-pressure.js';
 
@@ -129,6 +131,44 @@ describe('resource admission contract', () => {
     if (!first.admitted || !second.admitted) throw new Error('expected both independent LSP processes to be admitted');
     expect(controller.release(first.lease)).toBe(true);
     expect(controller.release(second.lease)).toBe(true);
+  });
+
+  it('serializes expensive RAG indexing through the shared weighted controller', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+
+    const first = tryAdmitRagIndex(controller, {
+      operationId: 'rag-index-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_RAG_INDEX_ADMISSION_COST,
+    });
+    const second = tryAdmitRagIndex(controller, {
+      operationId: 'rag-index-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_RAG_INDEX_ADMISSION_COST,
+    });
+
+    expect(first).toMatchObject({ admitted: true, lease: { resourceClass: 'rag_indexing', cost: 8 } });
+    expect(second).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'resource_class_cost_exhausted',
+    });
+    if (!first.admitted) throw new Error('expected first RAG index admission');
+    expect(controller.release(first.lease)).toBe(true);
+    expect(tryAdmitRagIndex(controller, {
+      operationId: 'rag-index-c',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_RAG_INDEX_ADMISSION_COST,
+    })).toMatchObject({ admitted: true });
   });
 
   it('returns one process-owned default controller across runtime owners', () => {

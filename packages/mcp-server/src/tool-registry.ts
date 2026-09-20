@@ -16,6 +16,12 @@ import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unifi
 import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
+  DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
+  ResourceAdmissionController,
+  tryAdmitChildMcpCall,
+  type ResourceAdmissionLease,
+} from '@unified-mpc/workspace';
+import {
   DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY,
   DEFAULT_PONYTAIL_MODE,
   DEFAULT_TOOL_AVAILABILITY_SNAPSHOT,
@@ -122,6 +128,10 @@ export interface ToolRegistryOptions {
   readonly maxToolResultBytes?: number;
   /** Tighter ceiling for opaque child MCP results, which clients commonly retain in conversation history. */
   readonly maxMcpCallResultBytes?: number;
+  /** Shared process-level admission controller. Production server factories provide one by default. */
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  /** Weighted cost charged for each admitted child MCP call. */
+  readonly mcpCallAdmissionCost?: number;
 }
 
 export interface HostMutationApprovalScope {
@@ -213,6 +223,8 @@ export class ToolRegistry {
   private readonly maxToolDurationMs: number | null;
   private readonly maxToolResultBytes: number;
   private readonly maxMcpCallResultBytes: number;
+  private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
+  private readonly mcpCallAdmissionCost: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
     this.services = services;
@@ -236,6 +248,11 @@ export class ToolRegistry {
     this.maxMcpCallResultBytes = Math.min(
       normalizeToolResultBudget(options.maxMcpCallResultBytes, DEFAULT_MAX_MCP_CALL_RESULT_BYTES),
       this.maxToolResultBytes,
+    );
+    this.resourceAdmissionController = options.resourceAdmissionController;
+    this.mcpCallAdmissionCost = normalizePositiveInteger(
+      options.mcpCallAdmissionCost,
+      DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
     );
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
@@ -371,6 +388,12 @@ export class ToolRegistry {
     const started = Date.now();
     let fencedMutationEnd: (() => Promise<void>) | undefined;
     let durableGoalExecutionAdmitted = false;
+    let resourceAdmissionLease: ResourceAdmissionLease | undefined;
+    const releaseResourceAdmission = (): void => {
+      if (resourceAdmissionLease === undefined || this.resourceAdmissionController === undefined) return;
+      this.resourceAdmissionController.release(resourceAdmissionLease);
+      resourceAdmissionLease = undefined;
+    };
     try {
       const tool = this.allTools.find((candidate) => candidate.name === name);
       if (tool === undefined || !this.isEffectivelyExposed(name)) {
@@ -601,6 +624,33 @@ export class ToolRegistry {
         );
         durableGoalExecutionAdmitted = true;
       }
+      if (tool.name === 'mcp_call' && this.resourceAdmissionController !== undefined) {
+        const admissionWorkspaceId = await this.resolveMcpCallAdmissionWorkspaceId(
+          approvalExecutionInput,
+          mutationFenceWorkspaceId ?? activityWorkspaceId,
+        );
+        const admission = tryAdmitChildMcpCall(this.resourceAdmissionController, {
+          operationId: callId,
+          workspaceId: admissionWorkspaceId,
+          cost: this.mcpCallAdmissionCost,
+        });
+        if (!admission.admitted) {
+          await fencedMutationEnd?.();
+          fencedMutationEnd = undefined;
+          const message = admission.code === 'RESOURCE_PRESSURE'
+            ? `Child MCP call rejected by resource admission (${admission.reason}); retry after current expensive work settles`
+            : `Child MCP call rejected by resource admission (${admission.reason})`;
+          const response = mapError(appError(admission.code, message, admission.retryable, {
+            reason: admission.reason,
+            requestedCost: admission.requestedCost,
+            activeCost: admission.snapshot.activeCost,
+            activeOperations: admission.snapshot.activeOperations,
+          }));
+          await this.activity.end(callId, admission.code, Date.now() - started, message);
+          return response;
+        }
+        resourceAdmissionLease = admission.lease;
+      }
       const resolvedActivityInput = this.withRememberedActivityTarget(
         name,
         withActivityWorkspaceId(approvalExecutionInput, activityWorkspaceId),
@@ -623,6 +673,16 @@ export class ToolRegistry {
         callId,
         durableGoalExecutionAdmitted,
       );
+      if (execution.deferredSettlement !== undefined && resourceAdmissionLease !== undefined && this.resourceAdmissionController !== undefined) {
+        const deferredLease = resourceAdmissionLease;
+        const deferredController = this.resourceAdmissionController;
+        resourceAdmissionLease = undefined;
+        void execution.deferredSettlement.then(() => {
+          deferredController.release(deferredLease);
+        });
+      } else {
+        releaseResourceAdmission();
+      }
       const response = execution.response;
       const rawResultTargetSummary = summarizeStructuredResultTarget(response.structuredContent);
       const resultTargetSummary = rawResultTargetSummary === undefined
@@ -656,6 +716,7 @@ export class ToolRegistry {
       }
       return response;
     } catch (error: unknown) {
+      releaseResourceAdmission();
       await fencedMutationEnd?.().catch(() => undefined);
       fencedMutationEnd = undefined;
       const response = mapError(sanitizeException(error, this.diagnostic));
@@ -1220,6 +1281,30 @@ export class ToolRegistry {
     } catch { return null; }
   }
 
+  private async resolveMcpCallAdmissionWorkspaceId(input: unknown, fallback?: string): Promise<string> {
+    if (fallback !== undefined) return fallback;
+    const nestedWorkspaceId = readMcpCallArgumentWorkspaceId(input);
+
+    if (this.activeWorkspaceScopesProvider !== undefined) {
+      try {
+        const scopes = await this.activeWorkspaceScopesProvider();
+        if (nestedWorkspaceId !== undefined && scopes.some((scope) => scope.workspaceId === nestedWorkspaceId)) {
+          return nestedWorkspaceId;
+        }
+        const primary = scopes[0]?.workspaceId;
+        if (primary !== undefined) return primary;
+      } catch {
+        // Fall through to the single active-project provider / child context.
+      }
+    }
+
+    if (this.enforceActiveWorkspaceScope) {
+      const active = await this.resolveActiveWorkspaceScope();
+      if (active !== null) return active.workspaceId;
+    }
+    return nestedWorkspaceId ?? 'system';
+  }
+
   private async executeWithinResponseBudget(
     tool: McpToolDefinition,
     input: unknown,
@@ -1337,6 +1422,10 @@ function normalizeToolResultBudget(value: number | undefined, fallback: number):
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
 function normalizeActivityWorkspaceResolver(services: McpApplicationServices, actor: FileActor): (cwd: string) => Promise<string | undefined> {
   return async (cwd: string): Promise<string | undefined> => {
     const infoPort = services.workspaceInfo;
@@ -1387,6 +1476,10 @@ function normalizedActivityPath(value: string): string {
   return api === path.win32 ? normalized.toLowerCase() : normalized;
 }
 
+function readMcpCallArgumentWorkspaceId(input: unknown): string | undefined {
+  if (!isRecord(input) || !isRecord(input.arguments)) return undefined;
+  return readTrimmedString(input.arguments.workspaceId);
+}
 function readTrimmedString(value: unknown): string | undefined { return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function rememberBounded(map: Map<string, string>, key: string, value: string, max: number): void {

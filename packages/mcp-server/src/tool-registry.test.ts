@@ -240,6 +240,60 @@ describe('MCP tool registry', () => {
     });
   });
 
+  it('passes canonical workspace ownership separately from semantic memory categories', async () => {
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const registry = new ToolRegistry({
+      thaiRag: {
+        async call(tool: string, args: Readonly<Record<string, unknown>>): Promise<ReturnType<typeof ok>> {
+          calls.push({ tool, args });
+          return ok({ accepted: true });
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    await expect(registry.invoke('rag_remember', {
+      workspaceId,
+      content: 'remember me',
+      category: 'decision',
+      userConfirmed: true,
+    })).resolves.toMatchObject({ isError: undefined });
+    await expect(registry.invoke('rag_recall', {
+      workspaceId,
+      query: 'remember',
+      category: 'decision',
+      limit: 3,
+    })).resolves.toMatchObject({ isError: undefined });
+    await expect(registry.invoke('rag_forget', {
+      workspaceId,
+      memoryId: 'mem-1',
+      userConfirmed: true,
+    })).resolves.toMatchObject({ isError: undefined });
+    await expect(registry.invoke('workspace_memory_record', {
+      workspaceId,
+      name: 'architecture',
+      observations: ['use exact scope'],
+      category: 'decision',
+      userConfirmed: true,
+    })).resolves.toMatchObject({ isError: undefined });
+
+    expect(calls).toEqual([
+      { tool: 'remember', args: { workspace_id: workspaceId, content: 'remember me', category: 'decision' } },
+      { tool: 'recall', args: { workspace_id: workspaceId, query: 'remember', category: 'decision', limit: 3 } },
+      { tool: 'forget', args: { workspace_id: workspaceId, memory_id: 'mem-1' } },
+      { tool: 'record_event', args: {
+        workspace_id: workspaceId,
+        event_type: 'decision',
+        content: '[decision] architecture\n- use exact scope',
+      } },
+    ]);
+    expect(calls.some((call) => Object.values(call.args).includes(`workspace:${workspaceId}`))).toBe(false);
+  });
+
   it('passes the active workspace root to native code indexing', async () => {
     const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
     const workspaceId = '11111111-1111-4111-8111-111111111111';
@@ -259,7 +313,7 @@ describe('MCP tool registry', () => {
     const result = await registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
 
     expect(result.isError).not.toBe(true);
-    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath, workspace: workspaceId } }]);
+    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_id: workspaceId, workspace_path: rootPath } }]);
   });
 
   it('lets an already-started call settle after disable while blocking future calls', async () => {

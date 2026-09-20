@@ -6,6 +6,14 @@ export interface ResourceAdmissionLimits {
   readonly maxOperations: number;
 }
 
+export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
+  globalCost: 16,
+  workspaceCost: 8,
+  maxOperations: 8,
+}) satisfies ResourceAdmissionLimits;
+
+export const DEFAULT_CHILD_MCP_CALL_ADMISSION_COST = 3;
+
 export interface ResourceAdmissionRequest {
   readonly operationId: string;
   readonly workspaceId: string;
@@ -160,6 +168,26 @@ export function tryAdmitDependencyBootstrap(
   request: Omit<ResourceAdmissionRequest, 'resourceClass'>,
 ): ResourceAdmissionDecision {
   return controller.tryAcquire({ ...request, resourceClass: 'dependency_bootstrap' });
+}
+
+export function tryAdmitChildMcpCall(
+  controller: ResourceAdmissionController,
+  request: Omit<ResourceAdmissionRequest, 'resourceClass'>,
+): ResourceAdmissionDecision {
+  return controller.tryAcquire({ ...request, resourceClass: 'child_mcp_call' });
+}
+
+let processResourceAdmissionController: ResourceAdmissionController | undefined;
+
+/**
+ * Process-owned default controller used by production runtime owners.
+ *
+ * Callers that need different tested limits can inject their own controller;
+ * the default getter intentionally returns the same instance across transports.
+ */
+export function sharedProcessResourceAdmissionController(): ResourceAdmissionController {
+  processResourceAdmissionController ??= new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
+  return processResourceAdmissionController;
 }
 
 function validateLimit(value: number, label: string): void {

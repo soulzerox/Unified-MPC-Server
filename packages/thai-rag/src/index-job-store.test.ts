@@ -74,6 +74,58 @@ describe('ThaiRagIndexJobStore', () => {
     await expect(store.complete(job.jobId, { indexed: 1 }, 'owner-a')).resolves.toMatchObject({ status: 'completed' });
   });
 
+  it('persists provider job identity and cooperative cancellation lifecycle', async () => {
+    const dataRoot = await root();
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const job = await store.create(workspaceId, false, 'owner-a');
+
+    await expect(store.bindProviderJob(job.jobId, 'idx_provider_1', 'owner-a')).resolves.toMatchObject({
+      status: 'running',
+      providerJobId: 'idx_provider_1',
+    });
+    await expect(store.requestCancellation(job.jobId, 'owner-a')).resolves.toMatchObject({
+      status: 'cancelling',
+      providerJobId: 'idx_provider_1',
+    });
+    await expect(store.active('owner-a')).resolves.toEqual([
+      expect.objectContaining({ jobId: job.jobId, status: 'cancelling' }),
+    ]);
+    await expect(store.cancel(job.jobId, { status: 'cancelled' }, 'owner-a')).resolves.toMatchObject({
+      status: 'cancelled',
+      providerJobId: 'idx_provider_1',
+      result: { status: 'cancelled' },
+    });
+    await expect(store.active('owner-a')).resolves.toEqual([]);
+
+    const replacement = new ThaiRagIndexJobStore(dataRoot);
+    await expect(replacement.get(job.jobId, 'owner-a', workspaceId)).resolves.toMatchObject({
+      status: 'cancelled',
+      providerJobId: 'idx_provider_1',
+    });
+  });
+
+  it('does not let late completion overwrite a terminal cancellation or interruption', async () => {
+    const dataRoot = await root();
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+
+    const cancelled = await store.create(workspaceId, false, 'owner-a');
+    await store.requestCancellation(cancelled.jobId, 'owner-a');
+    await store.cancel(cancelled.jobId, { cancelled: true }, 'owner-a');
+    await expect(store.complete(cancelled.jobId, { indexed: 99 }, 'owner-a')).resolves.toMatchObject({
+      status: 'cancelled',
+      result: { cancelled: true },
+    });
+
+    const interrupted = await store.create(workspaceId, false, 'owner-a');
+    await store.interruptRunning('owner-a', 'shutdown');
+    await expect(store.complete(interrupted.jobId, { indexed: 99 }, 'owner-a')).resolves.toMatchObject({
+      status: 'interrupted',
+      error: 'shutdown',
+    });
+  });
+
   it('preserves legacy records without owner IDs as unavailable instead of dropping them', async () => {
     const dataRoot = await root();
     const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');

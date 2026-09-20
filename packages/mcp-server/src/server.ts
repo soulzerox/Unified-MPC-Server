@@ -14,6 +14,7 @@ import type { SetOfMarksObservationStore } from './set-of-marks-service.js';
 import { BUNDLED_PONYTAIL_SKILL_ID, PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
 import { actorForRequestScope, type McpRequestScope } from './request-scope.js';
+import { sharedProcessResourceAdmissionController, type ResourceAdmissionController } from '@unified-mpc/workspace';
 
 export const MCP_OUTCOME_DRIVEN_INSTRUCTIONS = [
   'Continue using unified-mpc tools until the requested outcome is complete.',
@@ -71,6 +72,10 @@ export interface McpServerOptions {
   readonly maxToolResultBytes?: number;
   /** Tighter UTF-8 result ceiling for proxied child MCP calls. */
   readonly maxMcpCallResultBytes?: number;
+  /** Process-owned admission controller shared across MCP server/transport instances. */
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  /** Weighted admission cost for one proxied child MCP call. */
+  readonly mcpCallAdmissionCost?: number;
   /** Compatibility result guard; it must not apply elapsed-time behavior. */
   readonly runBudgetGuard?: RunBudgetGuard;
   /**
@@ -107,6 +112,8 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.setOfMarksStore === undefined ? {} : { setOfMarksStore: options.setOfMarksStore }),
     ...(options.maxToolResultBytes === undefined ? {} : { maxToolResultBytes: options.maxToolResultBytes }),
     ...(options.maxMcpCallResultBytes === undefined ? {} : { maxMcpCallResultBytes: options.maxMcpCallResultBytes }),
+    resourceAdmissionController: options.resourceAdmissionController ?? sharedProcessResourceAdmissionController(),
+    ...(options.mcpCallAdmissionCost === undefined ? {} : { mcpCallAdmissionCost: options.mcpCallAdmissionCost }),
   });
   const runBudgetGuard = options.runBudgetGuard ?? new RunBudgetGuard();
   let configuredPonytailMode = DEFAULT_PONYTAIL_MODE;

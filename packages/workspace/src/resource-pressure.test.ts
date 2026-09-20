@@ -9,9 +9,12 @@ describe('process memory pressure probe', () => {
       elevatedAvailableRatio: 0.2,
       criticalAvailableRatio: 0.1,
       sampleTtlMs: 0,
-      memoryReader: () => ({ totalMemoryBytes: 1_000, availableMemoryBytes }),
-      processRssReader: () => 123,
-      now: () => now++,
+      memoryReader: (): { totalMemoryBytes: number; availableMemoryBytes: number } => ({
+        totalMemoryBytes: 1_000,
+        availableMemoryBytes,
+      }),
+      processRssReader: (): number => 123,
+      now: (): number => now++,
     });
 
     expect(probe.sample()).toMatchObject({ state: 'normal', availableRatio: 0.5, processRssBytes: 123 });
@@ -26,12 +29,12 @@ describe('process memory pressure probe', () => {
     let now = 1_000;
     const probe = new ProcessMemoryPressureProbe({
       sampleTtlMs: 500,
-      memoryReader: () => {
+      memoryReader: (): { totalMemoryBytes: number; availableMemoryBytes: number } => {
         reads += 1;
         return { totalMemoryBytes: 1_000, availableMemoryBytes: 500 };
       },
-      processRssReader: () => 123,
-      now: () => now,
+      processRssReader: (): number => 123,
+      now: (): number => now,
     });
 
     const first = probe.sample();

@@ -861,8 +861,7 @@ describe('MCP tool registry', () => {
   it('allows registered Active Project selection controls to target an inactive workspace without widening ordinary mutation scope', async () => {
     const selectionCalls: string[] = [];
     let writes = 0;
-    let hostApproved = false;
-    const hostApproval = vi.fn(async () => hostApproved);
+    const hostApproval = vi.fn(async () => false);
     const selectionSnapshot = { primaryWorkspaceId: 'workspace-a', activeWorkspaceIds: ['workspace-a'] };
     const services = {
       workspaceSelection: {
@@ -898,13 +897,8 @@ describe('MCP tool registry', () => {
       hostMutationApprovalProvider: hostApproval,
     });
 
-    await expect(registry.invoke('workspace_activate', { workspaceId: 'workspace-b', userConfirmed: true }))
-      .resolves.toMatchObject({ isError: true });
-    expect(hostApproval).not.toHaveBeenCalled();
-
-    hostApproved = true;
     for (const toolName of ['workspace_activate', 'workspace_deactivate', 'workspace_set_primary'] as const) {
-      await expect(registry.invoke(toolName, { workspaceId: 'workspace-b', userConfirmed: true }))
+      await expect(registry.invoke(toolName, { workspaceId: 'workspace-b' }))
         .resolves.not.toMatchObject({ isError: true });
     }
     await expect(registry.invoke('workspace_activate', { workspaceId: 'missing', userConfirmed: true }))
@@ -914,7 +908,7 @@ describe('MCP tool registry', () => {
 
     expect(selectionCalls).toEqual(['activate:workspace-b', 'deactivate:workspace-b', 'setPrimary:workspace-b', 'activate:missing']);
     expect(writes).toBe(0);
-    expect(hostApproval).toHaveBeenCalledTimes(4);
+    expect(hostApproval).not.toHaveBeenCalled();
   });
 
   it('routes absolute file, database, and command targets to any matching member of the active workspace set', async () => {

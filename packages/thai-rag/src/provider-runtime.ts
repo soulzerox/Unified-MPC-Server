@@ -1,6 +1,6 @@
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
+import { appError, err, ok, type AppError, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
   createProviderHealth,
@@ -33,6 +33,13 @@ export interface ThaiRagProviderRuntimeOptions {
   readonly pid?: number;
   readonly now?: () => Date;
   readonly isProcessAlive?: (pid: number) => boolean;
+}
+
+export const THAI_RAG_OWNER_LOCK_CONFLICT_REASON = 'owner-lock';
+export const THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON = 'owner-lock-unverified';
+
+export function isThaiRagOwnerLockConflict(error: AppError): boolean {
+  return error.code === 'CONFLICT' && error.details?.reason === THAI_RAG_OWNER_LOCK_CONFLICT_REASON;
 }
 
 interface ProviderLockRecord {
@@ -151,7 +158,9 @@ export class ThaiRagProviderRuntime {
         return ok(undefined);
       } catch (error: unknown) {
         if (isNodeError(error) && error.code === 'EEXIST') {
-          return err(appError('CONFLICT', 'Thai-RAG provider already has an active owner', true));
+          return err(appError('CONFLICT', 'Thai-RAG provider already has an active owner', true, {
+            reason: THAI_RAG_OWNER_LOCK_CONFLICT_REASON,
+          }));
         }
         return err(appError('INTERNAL_ERROR', 'Unable to acquire Thai-RAG provider owner lock', true));
       }
@@ -160,7 +169,12 @@ export class ThaiRagProviderRuntime {
     const first = await create();
     if (first.ok) return first;
     const existing = await this.readLock();
-    if (existing === null || this.isProcessAlive(existing.pid)) return first;
+    if (existing === null) {
+      return err(appError('CONFLICT', 'Thai-RAG provider owner lock exists but cannot be validated', true, {
+        reason: THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON,
+      }));
+    }
+    if (this.isProcessAlive(existing.pid)) return first;
     try {
       await unlink(lockPath);
     } catch (error: unknown) {

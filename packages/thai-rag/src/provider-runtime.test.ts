@@ -97,7 +97,10 @@ describe('ThaiRagProviderRuntime', () => {
     expect((await first.start()).ok).toBe(true);
     const duplicate = await second.start();
     expect(duplicate.ok).toBe(false);
-    if (!duplicate.ok) expect(duplicate.error.code).toBe('CONFLICT');
+    if (!duplicate.ok) {
+      expect(duplicate.error.code).toBe('CONFLICT');
+      expect(duplicate.error.details?.reason).toBe('owner-lock');
+    }
 
     expect((await first.stop()).ok).toBe(true);
     expect((await second.start()).ok).toBe(true);

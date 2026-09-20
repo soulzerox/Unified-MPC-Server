@@ -1,8 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok, type ResultBudget } from '@unified-mpc/domain';
+import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
   ThaiRagProviderCoordinator,
   type ThaiRagProviderDriver,
@@ -209,6 +209,51 @@ describe('ThaiRagProviderCoordinator', () => {
     expect(started.ok && started.value.role).toBe('owner');
     expect(starts).toBe(1);
     await replacement.close();
+  });
+
+  it('preserves a generic provider CONFLICT instead of treating it as owner contention', async () => {
+    const dataRoot = await root();
+    const startupError = appError('CONFLICT', 'Native Thai-RAG worker contract is incompatible', true, {
+      reason: 'incompatible-contract',
+    });
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      driver: driver({ start: async () => err(startupError) }),
+    });
+
+    const started = await coordinator.start();
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error).toBe(startupError);
+  });
+
+  it('does not enter follower mode for an unverified lock beside an unowned socket', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    await writeFile(path.join(providerRoot, 'provider.lock'), '{not-json');
+    await writeFile(path.join(providerRoot, 'provider.sock'), 'stale socket placeholder');
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'replacement',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      driver: driver({ start: async () => { throw new Error('must not start with an unverified owner lock'); } }),
+    });
+
+    const started = await coordinator.start();
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) {
+      expect(started.error.code).toBe('CONFLICT');
+      expect(started.error.details?.reason).toBe('owner-lock-unverified');
+      expect(started.error.message).not.toContain('owner is locked but not reachable');
+    }
   });
 });
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
+  isThaiRagOwnerLockConflict,
   ThaiRagProviderRuntime,
   type ThaiRagProviderDriver,
 } from './provider-runtime.js';
@@ -77,7 +78,7 @@ export class ThaiRagProviderCoordinator {
       return ok({ role: 'owner', health: started.value });
     }
 
-    if (started.error.code !== 'CONFLICT') return started;
+    if (!isThaiRagOwnerLockConflict(started.error)) return started;
     const remoteHealth = await this.waitForFollowerHealth(signal);
     if (!remoteHealth.ok) return remoteHealth;
     this.role = 'follower';

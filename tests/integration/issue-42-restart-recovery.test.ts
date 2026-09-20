@@ -1,9 +1,9 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { GatewayService, type GatewayStatus } from '@unified-mpc/cf-gateway';
+import { GatewayService, type GatewayStatus } from '../../apps/cf-gateway/src/index.js';
 import type { McpHttpServerHandle } from '@unified-mpc/mcp-server';
-import { ControlPlaneServer } from '@unified-mpc/web';
+import { ControlPlaneServer } from '../../apps/web/src/index.js';
 import { startMcpHttpBeforeProvider, type McpHttpProviderStartup } from '../../apps/cli/src/commands/mcp-http.js';
 
 interface IdentityRuntime {

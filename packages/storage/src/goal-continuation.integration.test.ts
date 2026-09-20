@@ -426,13 +426,17 @@ describe('durable goal continuation persistence', () => {
     }
   });
 
-  it('immediately recovers an orphaned foreground lease when trustworthy liveness proves no worker exists', async () => {
+  it.each([1, 120])(
+    'immediately recovers an orphaned foreground lease with %i seconds elapsed when trustworthy liveness proves no worker exists',
+    async (elapsedSeconds) => {
     const { filename, workspace } = await fixture();
-    const now = new Date('2026-08-26T00:00:00.000Z');
+    const startedAt = new Date('2026-08-26T00:00:00.000Z');
+    let now = startedAt;
     const runtime = await open(filename, workspace, () => now);
     try {
       const created = await runtime.service.runGoal(actor('foreground-a'), { ...createRequest, leaseSeconds: 600 });
       if (!created.ok || created.value.leaseToken === undefined) throw new Error('goal create failed');
+      now = new Date(startedAt.getTime() + elapsedSeconds * 1_000);
 
       const recoveryService = new GoalContinuationService(runtime.workspaces, runtime.repository, {
         now: (): Date => now,

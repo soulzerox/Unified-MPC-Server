@@ -1301,6 +1301,74 @@ describe('MCP tool registry', () => {
     expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
   });
 
+  it('shares one session budget across child MCP calls in different active workspaces', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 6,
+      workspaceCost: 3,
+      sessionCost: 3,
+      maxOperations: 2,
+      resourceClassCost: { dependency_bootstrap: 6, child_mcp_call: 6 },
+    });
+    let settleFirst: (() => void) | undefined;
+    let firstStarted = false;
+    const firstRegistry = new ToolRegistry({
+      extensions: {
+        async callMcpTool(): Promise<ReturnType<typeof ok>> {
+          firstStarted = true;
+          return await new Promise((resolve) => {
+            settleFirst = (): void => resolve(ok({ ok: true }));
+          });
+        },
+      } as unknown as McpApplicationServices['extensions'],
+    }, actor, {
+      sessionId: 'session-a',
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-a', rootPath: 'E:\\project-a' }),
+      resourceAdmissionController: controller,
+      mcpCallAdmissionCost: 3,
+    });
+    const secondChildCall = vi.fn(async () => ok({ ok: true }));
+    const secondRegistry = new ToolRegistry({
+      extensions: { callMcpTool: secondChildCall } as unknown as McpApplicationServices['extensions'],
+    }, actor, {
+      sessionId: 'session-a',
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-b', rootPath: 'E:\\project-b' }),
+      resourceAdmissionController: controller,
+      mcpCallAdmissionCost: 3,
+    });
+
+    const firstPending = firstRegistry.invoke('mcp_call', {
+      server: 'child',
+      tool: 'slow',
+      arguments: {},
+    });
+    for (let attempt = 0; attempt < 20 && !firstStarted; attempt += 1) await Promise.resolve();
+    expect(firstStarted).toBe(true);
+
+    const second = await secondRegistry.invoke('mcp_call', {
+      server: 'child',
+      tool: 'read',
+      arguments: {},
+    });
+
+    expect(secondChildCall).not.toHaveBeenCalled();
+    expect(second).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'RESOURCE_PRESSURE', details: { reason: 'session_cost_exhausted' } } },
+    });
+    expect(controller.snapshot()).toMatchObject({
+      activeCostBySession: { 'session-a': 3 },
+      activeCostByWorkspace: { 'workspace-a': 3 },
+    });
+
+    settleFirst?.();
+    await expect(firstPending).resolves.not.toMatchObject({ isError: true });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
   it('keeps the child MCP admission lease while a timed-out backend is still settling', async () => {
     vi.useFakeTimers();
     const controller = new ResourceAdmissionController({ globalCost: 3, workspaceCost: 3, maxOperations: 1 });

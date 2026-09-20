@@ -858,6 +858,59 @@ describe('MCP tool registry', () => {
     expect(projectStarts).toBe(0);
   });
 
+  it('allows registered Active Project selection controls to target an inactive workspace without widening ordinary mutation scope', async () => {
+    const selectionCalls: string[] = [];
+    let writes = 0;
+    const hostApproval = vi.fn(async () => false);
+    const selectionSnapshot = { primaryWorkspaceId: 'workspace-a', activeWorkspaceIds: ['workspace-a'] };
+    const services = {
+      workspaceSelection: {
+        async list() { return ok(selectionSnapshot); },
+        async activate(workspaceId: string) {
+          selectionCalls.push(`activate:${workspaceId}`);
+          return workspaceId === 'workspace-b'
+            ? ok({ primaryWorkspaceId: 'workspace-a', activeWorkspaceIds: ['workspace-a', 'workspace-b'] })
+            : err(appError('WORKSPACE_NOT_FOUND', 'Workspace is not a registered project', true));
+        },
+        async deactivate(workspaceId: string) {
+          selectionCalls.push(`deactivate:${workspaceId}`);
+          return workspaceId === 'workspace-b'
+            ? ok(selectionSnapshot)
+            : err(appError('WORKSPACE_NOT_FOUND', 'Workspace is not a registered project', true));
+        },
+        async setPrimary(workspaceId: string) {
+          selectionCalls.push(`setPrimary:${workspaceId}`);
+          return workspaceId === 'workspace-b'
+            ? ok({ primaryWorkspaceId: 'workspace-b', activeWorkspaceIds: ['workspace-b', 'workspace-a'] })
+            : err(appError('WORKSPACE_NOT_FOUND', 'Workspace is not a registered project', true));
+        },
+      },
+      file: {
+        async writeFile() { writes += 1; return ok({ path: 'note.txt', bytesWritten: 1 }); },
+      },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => [
+        { workspaceId: 'workspace-a', rootPath: '/projects/a' },
+      ],
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      hostMutationApprovalProvider: hostApproval,
+    });
+
+    for (const toolName of ['workspace_activate', 'workspace_deactivate', 'workspace_set_primary'] as const) {
+      await expect(registry.invoke(toolName, { workspaceId: 'workspace-b' }))
+        .resolves.not.toMatchObject({ isError: true });
+    }
+    await expect(registry.invoke('workspace_activate', { workspaceId: 'missing', userConfirmed: true }))
+      .resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'WORKSPACE_NOT_FOUND' } } });
+    await expect(registry.invoke('write_file', { workspaceId: 'workspace-b', path: 'note.txt', content: 'x', userConfirmed: true }))
+      .resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED' } } });
+
+    expect(selectionCalls).toEqual(['activate:workspace-b', 'deactivate:workspace-b', 'setPrimary:workspace-b', 'activate:missing']);
+    expect(writes).toBe(0);
+    expect(hostApproval).not.toHaveBeenCalled();
+  });
+
   it('routes absolute file, database, and command targets to any matching member of the active workspace set', async () => {
     const rawRootA = await mkdtemp(path.join(tmpdir(), 'unified-mpc-active-a-'));
     const rawRootB = await mkdtemp(path.join(tmpdir(), 'unified-mpc-active-b-'));

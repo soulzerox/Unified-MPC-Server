@@ -9,7 +9,6 @@ import {
   type InvocationAuthorizationMode,
   type InvocationAuthorizationSource,
   type Result,
-  type ResultBudget,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
 import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
@@ -74,12 +73,11 @@ import { skillTools } from './tools/skill-tools.js';
 import { workspaceTools } from './tools/workspace-tools.js';
 import type { McpApplicationServices, McpToolContext, McpToolDefinition } from './tools/tool-types.js';
 
-const THAI_RAG_EVENT_TYPES = ['decision', 'requirement', 'constraint', 'preference', 'milestone', 'handoff', 'root_cause_fix', 'explicit_remember'] as const;
-const THAI_RAG_EVENT_TYPE_SET = new Set<string>(THAI_RAG_EVENT_TYPES);
-
 export type { McpApplicationServices } from './tools/tool-types.js';
 export type { ActiveProjectScope, WorkspaceScope } from './destructive-scope.js';
 export type AuthorizationMode = InvocationAuthorizationMode;
+
+export const MANDATORY_HARNESS_TOOL_NAMES = ['workspace_bootstrap', 'prepare_code_change'] as const;
 
 export interface ToolRegistryOptions {
   readonly diagnostic?: DiagnosticLogger;
@@ -246,11 +244,11 @@ export class ToolRegistry {
       bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
       prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
-      workingMemorySearch: (workspaceId, query, signal, budget) => this.workingMemorySearch(workspaceId, query, signal, budget),
-      workingMemoryRecord: (workspaceId, name, entityType, observations, signal, budget) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal, budget),
-      ragRecall: (workspaceId, query, category, limit, signal, budget) => this.ragRecall(workspaceId, query, category, limit, signal, budget),
-      ragRemember: (workspaceId, content, category, signal, budget) => this.ragRemember(workspaceId, content, category, signal, budget),
-        nativeRagCall: (workspaceId, tool, args, signal, budget) => this.nativeRagCall(workspaceId, tool, args, signal, budget),
+      workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
+      workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
+      ragRecall: (workspaceId, query, category, limit, signal) => this.ragRecall(workspaceId, query, category, limit, signal),
+      ragRemember: (workspaceId, content, category, signal) => this.ragRemember(workspaceId, content, category, signal),
+      nativeRagCall: (workspaceId, tool, args, signal) => this.nativeRagCall(workspaceId, tool, args, signal),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
     const filePageEngine = new FilePageEngine(services, actor);
@@ -344,7 +342,7 @@ export class ToolRegistry {
     // Harness preconditions are inseparable from a mutation-capable coding surface.
     // User/tool projection overrides must never hide the gates while leaving code
     // mutation tools callable, otherwise the host can deadlock before an edit.
-    if (name === 'workspace_bootstrap' || name === 'prepare_code_change') return true;
+    if (MANDATORY_HARNESS_TOOL_NAMES.some((toolName) => toolName === name)) return true;
     return resolveEffectiveToolAvailability({
       name,
       snapshot: this.currentToolAvailabilitySnapshot(),
@@ -707,10 +705,6 @@ export class ToolRegistry {
     if (sessionStart?.resolvedResourceId === undefined) {
       return err(appError('CONFLICT', 'Mandatory session-start skill ask-matt is unavailable in the live runtime policy', true));
     }
-    const unavailable = policy.value.policies.filter((entry) => entry.mandatory && entry.resourceType === 'capability' && !entry.available);
-    if (unavailable.length > 0) {
-      return err(appError('CONFLICT', `Required native capability or policy is unavailable: ${unavailable.map((entry) => entry.resourceId).join(', ')}`, true));
-    }
     if (signal.aborted) return err(appError('PROCESS_TIMEOUT', 'Task bootstrap was cancelled', true));
     const sessionStartSkill = await extensions.readSkill({ skillId: sessionStart.resolvedResourceId });
     if (!sessionStartSkill.ok) return sessionStartSkill;
@@ -744,16 +738,19 @@ export class ToolRegistry {
     const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
     const extensions = this.services.extensions;
-    if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'Runtime extension services are unavailable', true));
-    const mandatoryMcpResult = await extensions.bootstrapMandatoryMcpServers(signal);
-    if (!mandatoryMcpResult.ok) return mandatoryMcpResult;
-    const externalMandatoryMcp = mandatoryMcpResult.value.servers.filter((server) => !isNativeProviderServer(server.name));
-    const mandatoryMcp: import('@unified-mpc/extensions').MandatoryMcpBootstrapResult = {
-      ...mandatoryMcpResult.value,
-      ready: externalMandatoryMcp.every((server) => server.connected && server.pinned),
-    };
-    if (!mandatoryMcp.ready) {
-      return err(appError('CONFLICT', `Required external MCP server is unavailable: ${externalMandatoryMcp.map((server) => server.name).join(', ')}`, true));
+    if (extensions?.bootstrapMandatoryMcpServers === undefined) return err(appError('INTERNAL_ERROR', 'Mandatory MCP bootstrap service is unavailable', true));
+    const mandatoryMcp = await extensions.bootstrapMandatoryMcpServers(signal);
+    if (!mandatoryMcp.ok) return mandatoryMcp;
+    if (!mandatoryMcp.value.ready) {
+      const failed = mandatoryMcp.value.servers.filter((server) => !server.connected || !server.pinned).map((server) => server.name).join(', ');
+      return err(appError('CONFLICT', `Mandatory child MCP bootstrap is not ready: ${failed || 'unknown server'}`, true));
+    }
+    for (const server of mandatoryMcp.value.servers) {
+      const required = server.requiredTools ?? [];
+      const missing = required.filter((tool) => !server.tools.includes(tool));
+      if (missing.length > 0) {
+        return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));
+      }
     }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
@@ -764,7 +761,7 @@ export class ToolRegistry {
     }
     const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
     if (!agentsMdHash.ok) return agentsMdHash;
-    const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp);
+    const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp.value);
     let preferredGoal = null;
     try {
       preferredGoal = await this.services.preferredGoal?.get(workspaceId) ?? null;
@@ -777,7 +774,7 @@ export class ToolRegistry {
       agentsMdHash: agentsMdHash.value,
       harnessFingerprint: state.harnessFingerprint,
       sessionStartSkill: taskContext.value.sessionStartSkill,
-      mandatoryMcp,
+      mandatoryMcp: mandatoryMcp.value,
       thaiRag: thaiRagHealth.value,
       preferredGoal,
     });
@@ -835,8 +832,8 @@ export class ToolRegistry {
     return ok({ ready: true, filePath, checks });
   }
 
-  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal, budget?: ResultBudget): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
-    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal, budget);
+  private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+    return this.ragRecall(workspaceId, query, 'working-memory', 10, signal);
   }
 
   private async workingMemoryRecord(
@@ -845,13 +842,12 @@ export class ToolRegistry {
     entityType: string,
     observations: readonly string[],
     signal: AbortSignal,
-    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'workspace_memory_record', {
       name,
-      entityType,
+      category: entityType,
       observations,
-    }, signal, budget);
+    }, signal);
   }
 
   private async ragRecall(
@@ -860,12 +856,11 @@ export class ToolRegistry {
     category: string | undefined,
     limit: number | undefined,
     signal: AbortSignal,
-    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'recall', {
       query: category === undefined ? query : `[${category}] ${query}`,
       ...(limit === undefined ? {} : { limit }),
-    }, signal, budget);
+    }, signal);
   }
 
   private async ragRemember(
@@ -873,11 +868,10 @@ export class ToolRegistry {
     content: string,
     category: string | undefined,
     signal: AbortSignal,
-    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     return this.nativeRagCall(workspaceId, 'remember', {
       content: category === undefined ? content : `[${category}] ${content}`,
-    }, signal, budget);
+    }, signal);
   }
 
   private async nativeRagCall(
@@ -885,7 +879,6 @@ export class ToolRegistry {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal: AbortSignal,
-    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const scope = await this.resolveActiveWorkspaceScope(workspaceId);
     if (scope === null || scope.workspaceId !== workspaceId) {
@@ -893,55 +886,51 @@ export class ToolRegistry {
     }
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+    const scopedCategory = `workspace:${workspaceId}`;
     let providerTool = tool;
-    let providerArgs: Readonly<Record<string, unknown>> = { ...args, workspace_id: workspaceId };
+    let providerArgs: Readonly<Record<string, unknown>> = args;
 
-    if (tool === 'workspace_memory_record') {
+    if (tool === 'remember') {
+      providerArgs = { ...args, category: scopedCategory };
+    } else if (tool === 'recall') {
+      providerArgs = { ...args, category: scopedCategory };
+    } else if (tool === 'forget') {
+      providerArgs = { ...args, category: scopedCategory };
+    } else if (tool === 'workspace_memory_record') {
       const name = typeof args.name === 'string' ? args.name : 'workspace-note';
       const observations = Array.isArray(args.observations)
         ? args.observations.filter((value): value is string => typeof value === 'string')
         : [];
-      const entityType = typeof args.entityType === 'string' && args.entityType.trim().length > 0
-        ? args.entityType.trim()
-        : typeof args.category === 'string' && args.category.trim().length > 0
-          ? args.category.trim()
-          : 'work-log';
-      const eventType = entityType === 'work-log' ? 'explicit_remember' : entityType;
-      if (!THAI_RAG_EVENT_TYPE_SET.has(eventType)) {
-        return err(appError('INVALID_INPUT', `Unsupported workspace memory event type: ${entityType}`, false, { reason: 'unsupported-event-type', entityType, supportedEventTypes: THAI_RAG_EVENT_TYPES.join(',') }));
-      }
-      providerTool = 'record_event';
+      const category = typeof args.category === 'string' && args.category.trim().length > 0 ? args.category.trim() : 'working-memory';
+      providerTool = 'remember';
       providerArgs = {
-        workspace_id: workspaceId,
-        event_type: eventType,
-        content: `[${eventType}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
+        category: scopedCategory,
+        content: `[${category}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
       };
     } else if (tool === 'pre_edit_context') {
-      providerArgs = { ...providerArgs };
+      providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_blast_radius') {
-      providerArgs = { ...providerArgs };
+      providerArgs = { ...args, workspace: workspaceId };
     } else if (tool === 'code_index') {
-      providerArgs = { ...providerArgs, workspace_path: scope.rootPath };
-    } else if (tool === 'index_status') {
-      providerArgs = { ...providerArgs };
+      providerArgs = { ...args, workspace_path: scope.rootPath, workspace: workspaceId };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
       const pathFilter = requestedFilter.length === 0
         ? workspaceId
         : requestedFilter.startsWith(`${workspaceId}/`) ? requestedFilter : `${workspaceId}/${requestedFilter}`;
-      providerArgs = { ...providerArgs, path_filter: pathFilter };
+      providerArgs = { ...args, path_filter: pathFilter };
     } else if (tool === 'code_context') {
       const requestedPath = typeof args.file_path === 'string' ? args.file_path.trim().replaceAll('\\', '/').replace(/^\.\//, '') : '';
       if (requestedPath.length === 0 || requestedPath === '..' || requestedPath.startsWith('../')) {
         return err(appError('INVALID_INPUT', 'Native Thai-RAG code_context requires a workspace-relative file path'));
       }
       providerArgs = {
-        ...providerArgs,
+        ...args,
         file_path: requestedPath.startsWith(`${workspaceId}/`) ? requestedPath : `${workspaceId}/${requestedPath}`,
       };
     }
 
-    const result = await thaiRag.call(providerTool, providerArgs, signal, budget);
+    const result = await thaiRag.call(providerTool, providerArgs, signal);
     if (!result.ok) return result;
     if (tool === 'index_status' && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {
       return err(appError('PERMISSION_DENIED', `Native Thai-RAG index job belongs to another workspace: ${result.value.workspaceId}`));
@@ -955,7 +944,7 @@ export class ToolRegistry {
     input: unknown,
     signal?: AbortSignal,
   ): Promise<ReturnType<typeof err> | undefined> {
-    if (workspaceId === undefined || this.services.thaiRag === undefined) return undefined;
+    if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return undefined;
     const paths = codeMutationPaths(toolName, input);
     if (paths.length === 0) return undefined;
     const context = this.harnessContext(workspaceId);
@@ -1264,16 +1253,8 @@ export class ToolRegistry {
         }
         try {
           const maxBytes = tool.name === 'mcp_call' ? this.maxMcpCallResultBytes : this.maxToolResultBytes;
-          const budget: ResultBudget = {
-        maxItems: Number.MAX_SAFE_INTEGER,
-        maxTextBytes: maxBytes,
-            maxStructuredBytes: maxBytes,
-            maxBinaryBytes: maxBytes,
-            maxBase64Bytes: maxBytes,
-          };
-          operation = tool.execute(input, controller.signal, authorization, budget).then((result) => mapResult(result, {
+          operation = tool.execute(input, controller.signal, authorization).then((result) => mapResult(result, {
             maxBytes,
-            budget,
             toolName: tool.name,
             onTruncated: ({ originalBytes }) => this.diagnostic?.({
               name: 'ToolResultBudgetExceeded',
@@ -1422,11 +1403,6 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
     .filter((scope) => isAbsoluteActivityPath(scope.rootPath) && activityPathContains(scope.rootPath, candidate))
     .sort((left, right) => normalizedActivityPath(right.rootPath).length - normalizedActivityPath(left.rootPath).length);
   return matches[0] ?? null;
-}
-
-function isNativeProviderServer(name: string): boolean {
-  const key = name.trim().toLowerCase();
-  return key === 'memory' || key === 'thai-rag-mcp';
 }
 
 function nativeThaiRagReadyForHarness(health: {

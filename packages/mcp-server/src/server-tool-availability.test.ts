@@ -50,8 +50,12 @@ describe('MCP server live tool availability', () => {
 
   it('keeps connector discovery contract identical to canonical registered harness definitions', async () => {
     const registry = new ToolRegistry({}, actor);
-    const canonical = registry.describeSchema('prepare_code_change');
-    expect(canonical).toBeDefined();
+    const canonical = new Map([
+      ['workspace_bootstrap', registry.describeSchema('workspace_bootstrap')],
+      ['prepare_code_change', registry.describeSchema('prepare_code_change')],
+    ] as const);
+    expect(canonical.get('workspace_bootstrap')).toBeDefined();
+    expect(canonical.get('prepare_code_change')).toBeDefined();
 
     const server = createMcpServer({ services: {} as McpApplicationServices, actor });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -61,34 +65,37 @@ describe('MCP server live tool availability', () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
       const listed = await client.listTools();
-      const tool = listed.tools.find((candidate) => candidate.name === 'prepare_code_change');
-      expect(tool).toBeDefined();
-      const described = await client.callTool({ name: 'tool_describe', arguments: { name: 'prepare_code_change' } });
-      expect(described.isError).not.toBe(true);
-      const describedValue = described.structuredContent as {
-        inputSchema: unknown;
-        outputSchema: unknown;
-        annotations: unknown;
-        execution: unknown;
-      };
+      for (const name of canonical.keys()) {
+        const tool = listed.tools.find((candidate) => candidate.name === name);
+        expect(tool, name).toBeDefined();
+        const described = await client.callTool({ name: 'tool_describe', arguments: { name } });
+        expect(described.isError, name).not.toBe(true);
+        const describedValue = described.structuredContent as {
+          inputSchema: unknown;
+          outputSchema: unknown;
+          annotations: unknown;
+          execution: unknown;
+        };
 
-      expect(tool?.inputSchema).toEqual(describedValue.inputSchema);
-      expect(tool?.outputSchema).toEqual(describedValue.outputSchema);
-      expect(tool?.annotations).toEqual(describedValue.annotations);
-      expect(describedValue.inputSchema).toMatchObject({
-        type: 'object',
-        additionalProperties: false,
-        required: ['workspaceId', 'filePath'],
-      });
+        expect(tool?.inputSchema, name).toEqual(describedValue.inputSchema);
+        expect(tool?.outputSchema, name).toEqual(describedValue.outputSchema);
+        expect(tool?.annotations, name).toEqual(describedValue.annotations);
+        expect(describedValue.inputSchema, name).toMatchObject({
+          type: 'object',
+          additionalProperties: false,
+          required: name === 'workspace_bootstrap' ? ['workspaceId'] : ['workspaceId', 'filePath'],
+        });
+        expect(canonical.get(name)?.inputSchema, name).toBeInstanceOf(Object);
+        expect(canonical.get(name)?.annotations, name).toEqual(describedValue.annotations);
+        expect(canonical.get(name)?.execution, name).toEqual(describedValue.execution);
+      }
+
       const invalid = await client.callTool({
         name: 'prepare_code_change',
         arguments: { workspaceId: 'workspace-1', filePath: 'src/file.ts', unexpected: true },
       });
       expect(invalid.isError).toBe(true);
       expect(invalid.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text' })]));
-      expect(canonical?.inputSchema).toBeInstanceOf(Object);
-      expect(canonical?.annotations).toEqual(describedValue.annotations);
-      expect(canonical?.execution).toEqual(describedValue.execution);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);

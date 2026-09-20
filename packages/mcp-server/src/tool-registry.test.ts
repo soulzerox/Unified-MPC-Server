@@ -7,9 +7,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { appError, err, ok } from '@unified-mpc/domain';
 import { LocalCapabilityService, ShellCapabilityBackend } from '@unified-mpc/capabilities';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
-import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalPolicy } from '@unified-mpc/shared';
+import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalPolicy, type ToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import type { ActivitySinkEvent } from './activity-tracker.js';
-import { ToolRegistry, type McpApplicationServices, type ToolRegistryOptions, type WorkspaceScope } from './tool-registry.js';
+import { MANDATORY_HARNESS_TOOL_NAMES, ToolRegistry, type McpApplicationServices, type ToolRegistryOptions, type WorkspaceScope } from './tool-registry.js';
 import { GoalRequestCancellationService } from '@unified-mpc/application';
 import { CODEX_TOOL_NAMES } from './tools/codex-tools.js';
 import { isAdvertisedDeliveryState } from './tool-delivery-contract.js';
@@ -23,55 +23,6 @@ afterEach(() => {
 });
 
 describe('MCP tool registry', () => {
-  it('hands result budgets through native RAG and working-memory wrappers', async () => {
-    const budgets: unknown[] = [];
-    const registry = new ToolRegistry({
-      thaiRag: {
-        async health() { return ok({}); },
-        async call(_tool: string, _args: Readonly<Record<string, unknown>>, _signal: AbortSignal, budget: unknown) {
-          budgets.push(budget);
-          return ok({ recorded: true });
-        },
-      },
-    } as never, actor, {
-      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' }),
-      maxToolResultBytes: 512,
-    });
-
-    await registry.invoke('rag_remember', { workspaceId: 'workspace-1', content: 'note' });
-    await registry.invoke('working_memory_search', { workspaceId: 'workspace-1', query: 'needle' });
-
-    expect(budgets).toHaveLength(2);
-    expect(budgets[0]).toMatchObject({ maxItems: Number.MAX_SAFE_INTEGER, maxStructuredBytes: 512 });
-    expect(budgets[1]).toMatchObject({ maxItems: Number.MAX_SAFE_INTEGER, maxStructuredBytes: 512 });
-  });
-
-  it.each([10, 50, 100])('passes %dMB byte limits before producer materialization', async (megabytes) => {
-    const limit = megabytes * 1024 * 1024;
-    let producerMaterializedOversizedResult = false;
-    let request: unknown;
-    const registry = new ToolRegistry({
-      search: {
-        async searchText(_actor, _workspaceId, options): Promise<ReturnType<typeof ok>> {
-          request = options;
-          if (options.resultBudget === undefined) producerMaterializedOversizedResult = true;
-          return ok({ matches: [] });
-        },
-      },
-    }, actor, { maxToolResultBytes: limit });
-
-    await registry.invoke('search_text', { workspaceId: 'workspace-1', query: 'needle' });
-
-    expect(request).toMatchObject({ resultBudget: {
-      maxItems: Number.MAX_SAFE_INTEGER,
-      maxTextBytes: limit,
-      maxStructuredBytes: limit,
-      maxBinaryBytes: limit,
-      maxBase64Bytes: limit,
-    } });
-    expect(producerMaterializedOversizedResult).toBe(false);
-  });
-
   it.each([
     ['/tmp/Project', '/tmp/Project/src'],
     ['E:\\Project', 'E:\\Project\\src'],
@@ -205,6 +156,27 @@ describe('MCP tool registry', () => {
     expect(enabled.list()).toHaveLength(hidden.list().length + CODEX_TOOL_NAMES.length + 1);
   });
 
+  it('keeps every mutation-capable surface paired with the mandatory harness tools', (): void => {
+    const registry = new ToolRegistry({}, actor, {
+      toolAvailabilitySnapshotProvider: (): ToolAvailabilitySnapshot => ({
+        version: 1,
+        generation: 1,
+        overrides: {
+          workspace_bootstrap: 'disabled',
+          prepare_code_change: 'disabled',
+          write_file: 'enabled',
+        },
+      }),
+    });
+    const exposed = registry.listExposedDefinitions();
+    const mutationSurface = exposed.filter((tool) => tool.permission !== 'READ' || !tool.annotations.readOnlyHint);
+
+    expect(mutationSurface.map((tool) => tool.name)).toContain('write_file');
+    for (const requiredToolName of MANDATORY_HARNESS_TOOL_NAMES) {
+      expect(exposed.map((tool) => tool.name), requiredToolName).toContain(requiredToolName);
+    }
+  });
+
   it('applies live per-tool availability overrides to list and invoke without rebuilding the registry', async () => {
     let snapshot = { version: 1 as const, generation: 0, overrides: {} as Record<string, 'enabled' | 'disabled'> };
     let reads = 0;
@@ -287,7 +259,7 @@ describe('MCP tool registry', () => {
     const result = await registry.invoke('rag_code_index', { workspaceId, background: false, userConfirmed: true });
 
     expect(result.isError).not.toBe(true);
-    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath, workspace_id: workspaceId } }]);
+    expect(calls).toEqual([{ tool: 'code_index', args: { background: false, force: false, workspace_path: rootPath, workspace: workspaceId } }]);
   });
 
   it('lets an already-started call settle after disable while blocking future calls', async () => {

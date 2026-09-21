@@ -5,6 +5,7 @@ import {
   type ExecutionScopedRuntimeEvent,
   type GoalRuntimeEvent,
   type GoalRuntimeEventDecision,
+  type GoalScopedRuntimeEvent,
 } from './goal-runtime-event.js';
 import type {
   GoalBlockerKind,
@@ -62,9 +63,8 @@ type ProjectionApplication =
 
 function applyGoalScopedEvent(
   current: GoalRuntimeProjection,
-  event: GoalRuntimeEvent,
+  event: GoalScopedRuntimeEvent,
 ): ProjectionApplication {
-  if (!isGoalScopedRuntimeEvent(event)) return { projection: current };
 
   switch (event.type) {
     case 'goal_selected':
@@ -99,6 +99,10 @@ function applyGoalScopedEvent(
           ...current,
           lifecycleState: 'cleaned',
         }, event.occurredAt),
+      };
+    case 'workspace_observed':
+      return {
+        projection: applyWorkspaceObservation(current, event.workspaceState, event.occurredAt, event.detail),
       };
   }
 }
@@ -301,6 +305,62 @@ function applyExecutionScopedEvent(
   }
 }
 
+function applyWorkspaceObservation(
+  current: GoalRuntimeProjection,
+  workspaceState: GoalRuntimeProjection['workspaceState'],
+  observedAt: string,
+  detail: string | undefined,
+): GoalRuntimeProjection {
+  const next: GoalRuntimeProjection = { ...current, workspaceState };
+
+  if (workspaceState === 'unknown') {
+    return isWorkspaceDerivedBlocker(current)
+      ? clearBlocker(next)
+      : next;
+  }
+
+  if (workspaceState === 'clean') {
+    return isWorkspaceDerivedBlocker(current)
+      ? clearBlocker(next)
+      : next;
+  }
+
+  if (current.blocker !== undefined && !isWorkspaceDerivedBlocker(current)) {
+    return next;
+  }
+
+  const kind = workspaceBlockerKind(workspaceState);
+  if (kind === undefined) return next;
+  return {
+    ...next,
+    blocker: {
+      kind,
+      observedAt,
+      ...(detail === undefined ? {} : { detail }),
+    },
+  };
+}
+
+function isWorkspaceDerivedBlocker(current: GoalRuntimeProjection): boolean {
+  if (current.blocker?.kind === 'dirty_workspace') {
+    return current.workspaceState === 'dirty';
+  }
+  return current.blocker?.kind === 'recovery_required'
+    && (current.workspaceState === 'missing'
+      || current.workspaceState === 'unavailable'
+      || current.workspaceState === 'conflict');
+}
+
+function workspaceBlockerKind(
+  workspaceState: GoalRuntimeProjection['workspaceState'],
+): GoalBlockerKind | undefined {
+  if (workspaceState === 'dirty') return 'dirty_workspace';
+  if (workspaceState === 'missing'
+    || workspaceState === 'unavailable'
+    || workspaceState === 'conflict') return 'recovery_required';
+  return undefined;
+}
+
 function validateProjectionTransitions(
   current: GoalRuntimeProjection,
   next: GoalRuntimeProjection,
@@ -379,7 +439,12 @@ function clearBlocker(
   if (onlyKind !== undefined && projection.blocker.kind !== onlyKind) return projection;
   const next = { ...projection };
   delete next.blocker;
-  return next;
+  const workspaceKind = workspaceBlockerKind(next.workspaceState);
+  if (workspaceKind === undefined) return next;
+  return {
+    ...next,
+    blocker: { kind: workspaceKind },
+  };
 }
 
 function withLastActivity(projection: GoalRuntimeProjection, occurredAt: string): GoalRuntimeProjection {

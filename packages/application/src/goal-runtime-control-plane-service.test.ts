@@ -9,6 +9,7 @@ import {
   type GoalRuntimeSnapshotRepository,
 } from '@unified-mpc/domain';
 import { GoalRuntimeControlPlaneError, GoalRuntimeControlPlaneService } from './goal-runtime-control-plane-service.js';
+import type { GoalWorkspaceTruthObservation } from './goal-workspace-truth-reader.js';
 
 const workspaceId = 'workspace-1';
 
@@ -44,6 +45,8 @@ function fixture(options: {
   snapshot?: GoalRuntimeSnapshotRecord;
   events?: readonly GoalRuntimeEventRecord[];
   replayWindowMissed?: boolean;
+  workspaceTruth?: { read(workspaceId: string): Promise<GoalWorkspaceTruthObservation> };
+  now?: () => Date;
 } = {}): {
   readonly service: GoalRuntimeControlPlaneService;
   readonly stored: GoalRuntimeSnapshotRecord[];
@@ -104,7 +107,10 @@ function fixture(options: {
     list: async (request): Promise<readonly GoalRecord[]> => [...goals.values()]
       .filter((entry) => request.workspaceId === undefined || entry.workspaceId === request.workspaceId)
       .slice(0, request.limit),
-  }, snapshots, events);
+  }, snapshots, events, {
+    ...(options.workspaceTruth === undefined ? {} : { workspaceTruth: options.workspaceTruth }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
 
   return { service, stored, records };
 }
@@ -125,6 +131,47 @@ describe('GoalRuntimeControlPlaneService', () => {
       executionGeneration: 1,
     });
     expect(snapshot.projection.lastHeartbeatAt).toBeUndefined();
+  });
+
+  it('projects conservative workspace truth without changing integration state', async () => {
+    const runtime = fixture({
+      workspaceTruth: {
+        read: async () => ({ state: 'dirty', detail: 'Git workspace has uncommitted changes' }),
+      },
+      now: (): Date => new Date('2026-09-22T00:00:30.000Z'),
+    });
+
+    const snapshot = await runtime.service.ensureGoalSnapshot('goal-1');
+
+    expect(snapshot.projection).toMatchObject({
+      workspaceState: 'dirty',
+      integrationState: 'unknown',
+      blocker: {
+        kind: 'dirty_workspace',
+        detail: 'Git workspace has uncommitted changes',
+        observedAt: '2026-09-22T00:00:30.000Z',
+      },
+    });
+    expect(runtime.records.map((entry) => entry.event.type)).toEqual(['workspace_observed']);
+  });
+
+  it('does not append duplicate workspace observations when the authoritative state is unchanged', async () => {
+    let reads = 0;
+    const runtime = fixture({
+      workspaceTruth: {
+        read: async () => {
+          reads += 1;
+          return { state: 'clean', detail: 'Git workspace is clean' };
+        },
+      },
+      now: (): Date => new Date('2026-09-22T00:00:30.000Z'),
+    });
+
+    await runtime.service.ensureGoalSnapshot('goal-1');
+    await runtime.service.ensureGoalSnapshot('goal-1');
+
+    expect(reads).toBe(2);
+    expect(runtime.records.filter((entry) => entry.event.type === 'workspace_observed')).toHaveLength(1);
   });
 
   it('projects real phase activity from queued to running and persists the event cursor', async () => {

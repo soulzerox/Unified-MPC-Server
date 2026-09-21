@@ -14,6 +14,7 @@ export const GOAL_SCOPED_RUNTIME_EVENT_TYPES = [
   'goal_abandoned',
   'goal_archived',
   'goal_cleaned',
+  'workspace_observed',
 ] as const;
 export type GoalScopedRuntimeEventType = typeof GOAL_SCOPED_RUNTIME_EVENT_TYPES[number];
 
@@ -58,9 +59,14 @@ interface GoalRuntimeEventBase {
   readonly detail?: string;
 }
 
-export interface GoalScopedRuntimeEvent extends GoalRuntimeEventBase {
-  readonly type: GoalScopedRuntimeEventType;
-}
+export type GoalScopedRuntimeEvent =
+  | (GoalRuntimeEventBase & {
+      readonly type: Exclude<GoalScopedRuntimeEventType, 'workspace_observed'>;
+    })
+  | (GoalRuntimeEventBase & {
+      readonly type: 'workspace_observed';
+      readonly workspaceState: GoalWorkspaceState;
+    });
 
 export interface ExecutionScopedRuntimeEvent extends GoalRuntimeEventBase {
   readonly type: ExecutionScopedRuntimeEventType;

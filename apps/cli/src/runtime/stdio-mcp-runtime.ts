@@ -14,6 +14,7 @@ import {
   GoalMutationFenceService,
   GoalRuntimeControlPlaneService,
   GoalRuntimeReconciliationService,
+  GoalWorkspaceTruthReader,
   ManagedResourceRecoveryService,
   ScheduledContinuationService,
   ProcessService,
@@ -262,10 +263,12 @@ export function createStdioMcpRuntime(
   const requestCancellation = new GoalRequestCancellationService();
   const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
   const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
+  const goalWorkspaceTruth = new GoalWorkspaceTruthReader(workspaceRepository, gitService);
   const goalRuntimeControlPlane = new GoalRuntimeControlPlaneService(
     goalRepository,
     goalRuntimeSnapshots,
     goalRuntimeEvents,
+    { workspaceTruth: goalWorkspaceTruth },
   );
   const goalMutationFence = new GoalMutationFenceService(goalRepository, {
     taskStateReader: new RuntimeGoalManagedTaskStateReader({

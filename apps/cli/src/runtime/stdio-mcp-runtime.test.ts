@@ -202,6 +202,19 @@ describe('stdio MCP runtime', () => {
     await workspaceRepository.insert(primary);
     await workspaceRepository.insert(secondary);
     const goalRepository = new SqliteGoalRepository(database);
+    const primaryAcquired = await goalRepository.acquire({
+      goalId: 'goal-primary-runtime',
+      workspaceId: primary.id,
+      goalKey: 'primary-runtime',
+      ownerClientId: 'primary-client',
+      ownerSessionId: 'primary-session',
+      objective: 'Keep primary runtime truth independent from background projects.',
+      plan: { steps: [] },
+      leaseTokenHash: 'b'.repeat(64),
+      leaseSeconds: 600,
+      now: '2026-09-22T00:01:00.000Z',
+    });
+    expect(primaryAcquired.acquired).toBe(true);
     const acquired = await goalRepository.acquire({
       goalId: 'goal-background-runtime',
       workspaceId: secondary.id,
@@ -222,13 +235,24 @@ describe('stdio MCP runtime', () => {
       await runtime.recoveryReady;
       const verificationDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
       try {
-        const snapshot = await new SqliteGoalRuntimeSnapshotRepository(verificationDatabase)
-          .getGoalRuntimeSnapshot('goal-background-runtime');
-        expect(snapshot?.projection).toMatchObject({
+        const snapshots = new SqliteGoalRuntimeSnapshotRepository(verificationDatabase);
+        const primarySnapshot = await snapshots.getGoalRuntimeSnapshot('goal-primary-runtime');
+        const backgroundSnapshot = await snapshots.getGoalRuntimeSnapshot('goal-background-runtime');
+        expect(primarySnapshot?.projection).toMatchObject({
+          workspaceId: primary.id,
+          lifecycleState: 'open',
+          runtimeState: 'queued',
+          desiredRuntimeState: 'running',
+          workspaceState: 'unknown',
+          integrationState: 'unknown',
+        });
+        expect(backgroundSnapshot?.projection).toMatchObject({
           workspaceId: secondary.id,
           lifecycleState: 'open',
           runtimeState: 'queued',
           desiredRuntimeState: 'running',
+          workspaceState: 'unknown',
+          integrationState: 'unknown',
         });
       } finally {
         verificationDatabase.close();

@@ -134,6 +134,27 @@ describe('GoalRuntimeControlPlaneService', () => {
     expect(snapshot.projection.lastHeartbeatAt).toBeUndefined();
   });
 
+  it('projects durable Goal blockers without inventing integration truth', async () => {
+    const runtime = fixture({
+      goals: [goal({
+        revision: 2,
+        blockers: ['Dependency unavailable'],
+        updatedAt: '2026-09-22T00:00:20.000Z',
+      })],
+      now: (): Date => new Date('2026-09-22T00:00:30.000Z'),
+    });
+
+    const snapshot = await runtime.service.ensureGoalSnapshot('goal-1');
+    expect(snapshot.projection).toMatchObject({
+      integrationState: 'unknown',
+      blocker: {
+        kind: 'goal_blocked',
+        detail: 'Durable Goal blockers at revision 2: Dependency unavailable',
+        observedAt: '2026-09-22T00:00:30.000Z',
+      },
+    });
+    expect(runtime.records.map((entry) => entry.event.type)).toEqual(['goal_blocker_observed']);
+  });
   it('projects conservative workspace truth without changing integration state', async () => {
     const runtime = fixture({
       workspaceTruth: {

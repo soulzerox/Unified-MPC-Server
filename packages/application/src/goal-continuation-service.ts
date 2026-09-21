@@ -17,6 +17,7 @@ import {
   type GoalPonytailMode,
   type GoalRecord,
   type GoalRepository,
+  type GoalRuntimeEvent,
   type GoalStatus,
   type GoalStepStatus,
   type GoalStepUpdate,
@@ -38,6 +39,7 @@ import {
   type GoalTaskCancellationResult,
 } from './goal-task-cancellation-service.js';
 import type { GoalRequestCancellationPort, GoalRequestCancellationResult } from './goal-request-cancellation-service.js';
+import type { GoalRuntimeEventPublisher } from './goal-runtime-control-plane-service.js';
 
 export const DEFAULT_GOAL_LEASE_SECONDS = 600;
 export const MIN_GOAL_LEASE_SECONDS = 30;
@@ -246,6 +248,7 @@ export interface GoalContinuationServiceOptions {
   readonly requestCancellation?: Pick<GoalRequestCancellationPort, 'cancelForGoal'>;
   readonly goalExecutions?: Pick<GoalExecutionRepository, 'getExecutionById'>;
   readonly executionCancellation?: Pick<GoalExecutionCancellationRepository, 'cancelExecution'>;
+  readonly runtimeEvents?: GoalRuntimeEventPublisher;
 }
 
 export class GoalContinuationService {
@@ -256,6 +259,7 @@ export class GoalContinuationService {
   private readonly requestCancellation: Pick<GoalRequestCancellationPort, 'cancelForGoal'> | undefined;
   private readonly goalExecutions: Pick<GoalExecutionRepository, 'getExecutionById'> | undefined;
   private readonly executionCancellation: Pick<GoalExecutionCancellationRepository, 'cancelExecution'> | undefined;
+  private readonly runtimeEvents: GoalRuntimeEventPublisher | undefined;
 
   public constructor(
     private readonly workspaces: WorkspaceRepository,
@@ -269,6 +273,7 @@ export class GoalContinuationService {
     this.requestCancellation = options.requestCancellation;
     this.goalExecutions = options.goalExecutions;
     this.executionCancellation = options.executionCancellation;
+    this.runtimeEvents = options.runtimeEvents;
   }
 
   public async runGoal(actor: FileActor, request: RunGoalRequest): Promise<Result<RunGoalResult>> {
@@ -336,6 +341,37 @@ export class GoalContinuationService {
         ...(recoveryEvidence === undefined ? {} : { recoveryEvidence }),
         now: this.now().toISOString(),
       });
+      if (acquired.acquired) {
+        const runtimeEvents: GoalRuntimeEvent[] = [];
+        if (existing === null) {
+          runtimeEvents.push({
+            eventId: goalRuntimeEventId(acquired.goal.id, 'goal_created', 'created'),
+            type: 'goal_created',
+            workspaceId: acquired.goal.workspaceId,
+            goalId: acquired.goal.id,
+            occurredAt: acquired.goal.updatedAt,
+          });
+        }
+        if (acquired.goal.executionId !== undefined && acquired.goal.executionGeneration !== undefined) {
+          runtimeEvents.push({
+            eventId: goalRuntimeEventId(
+              acquired.goal.id,
+              'execution_submitted',
+              `${acquired.goal.executionId}:${acquired.goal.executionGeneration}`,
+            ),
+            type: 'execution_submitted',
+            workspaceId: acquired.goal.workspaceId,
+            goalId: acquired.goal.id,
+            executionId: acquired.goal.executionId,
+            executionGeneration: acquired.goal.executionGeneration,
+            occurredAt: acquired.goal.updatedAt,
+            detail: acquired.leaseRecovery === 'stale_worker_recovered'
+              ? 'durable execution generation acquired after stale-worker recovery'
+              : 'durable execution generation acquired',
+          });
+        }
+        await this.publishRuntimeEventsBestEffort(runtimeEvents);
+      }
       const base = toRunSnapshot(acquired.goal);
       return ok({
         ...base,
@@ -392,8 +428,10 @@ export class GoalContinuationService {
       const ponytailMode = requestedPonytailMode === undefined
         ? current.ponytailMode ?? null
         : requestedPonytailMode === 'inherit' ? null : requestedPonytailMode;
+      const checkpointId = randomUUID();
+      const checkpointAt = this.now().toISOString();
       const goal = await this.goals.checkpoint({
-        checkpointId: randomUUID(),
+        checkpointId,
         goalId,
         ownerClientId,
         ownerSessionId: stableOwnerSessionId(actor),
@@ -410,8 +448,47 @@ export class GoalContinuationService {
         trackedTasks,
         ponytailMode,
         releaseLease: request.releaseLease === true,
-        now: this.now().toISOString(),
+        now: checkpointAt,
       });
+      if (goal.executionId !== undefined && goal.executionGeneration !== undefined) {
+        const execution = {
+          workspaceId: goal.workspaceId,
+          goalId: goal.id,
+          executionId: goal.executionId,
+          executionGeneration: goal.executionGeneration,
+          occurredAt: goal.updatedAt,
+        } as const;
+        const runtimeEvents: GoalRuntimeEvent[] = [
+          {
+            ...execution,
+            eventId: goalRuntimeEventId(goal.id, 'execution_heartbeat', `${checkpointId}:heartbeat`),
+            type: 'execution_heartbeat',
+          },
+          {
+            ...execution,
+            eventId: goalRuntimeEventId(goal.id, 'phase_started', `${checkpointId}:${goal.currentPhase}`),
+            type: 'phase_started',
+            phase: goal.currentPhase,
+            detail: request.summary,
+          },
+          {
+            ...execution,
+            eventId: goalRuntimeEventId(goal.id, 'checkpoint_created', checkpointId),
+            type: 'checkpoint_created',
+            checkpointId,
+            detail: request.summary,
+          },
+        ];
+        if (request.releaseLease === true) {
+          runtimeEvents.push({
+            ...execution,
+            eventId: goalRuntimeEventId(goal.id, 'execution_completed', `${checkpointId}:released`),
+            type: 'execution_completed',
+            detail: 'execution lease released at durable checkpoint',
+          });
+        }
+        await this.publishRuntimeEventsBestEffort(runtimeEvents);
+      }
       return ok(toSnapshot(goal));
     } catch (error: unknown) {
       return this.mapError(error);
@@ -427,6 +504,7 @@ export class GoalContinuationService {
       if (await this.workspaces.get(current.workspaceId) === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) return err(appError('INVALID_INPUT', 'expectedRevision is invalid'));
       const now = this.now().toISOString();
+      await this.ensureRuntimeSnapshotBestEffort(goalId);
       const finishRequest = {
         checkpointId: randomUUID(),
         goalId,
@@ -471,6 +549,47 @@ export class GoalContinuationService {
         }
       }
       const goal = await this.goals.finish(finishRequest);
+      const runtimeEvents: GoalRuntimeEvent[] = [];
+      if (current.executionId !== undefined && current.executionGeneration !== undefined) {
+        const execution = {
+          workspaceId: current.workspaceId,
+          goalId: current.id,
+          executionId: current.executionId,
+          executionGeneration: current.executionGeneration,
+          occurredAt: now,
+        } as const;
+        if (request.status === 'completed') {
+          runtimeEvents.push({
+            ...execution,
+            eventId: goalRuntimeEventId(current.id, 'execution_started', `${finishRequest.checkpointId}:finish`),
+            type: 'execution_started',
+            detail: 'execution reached explicit Goal finish',
+          });
+          runtimeEvents.push({
+            ...execution,
+            eventId: goalRuntimeEventId(current.id, 'execution_completed', finishRequest.checkpointId),
+            type: 'execution_completed',
+            detail: request.summary,
+          });
+        } else {
+          runtimeEvents.push({
+            ...execution,
+            eventId: goalRuntimeEventId(current.id, 'execution_failed', finishRequest.checkpointId),
+            type: 'execution_failed',
+            detail: request.summary,
+          });
+        }
+      }
+      runtimeEvents.push({
+        eventId: goalRuntimeEventId(current.id, 'goal_completed', finishRequest.checkpointId),
+        type: 'goal_completed',
+        workspaceId: current.workspaceId,
+        goalId: current.id,
+        occurredAt: now,
+        detail: `terminal Goal status: ${request.status}`,
+      });
+      await this.publishRuntimeEventsBestEffort(runtimeEvents);
+      await this.ensureRuntimeSnapshotBestEffort(goalId);
       return ok({ ...toSnapshot(goal), completionState: 'completed', scheduledTaskCancellation });
     } catch (error: unknown) {
       return this.mapError(error);
@@ -516,8 +635,10 @@ export class GoalContinuationService {
         return err(appError('INVALID_INPUT', 'Goal execution was not found'));
       }
       const now = this.now().toISOString();
+      await this.ensureRuntimeSnapshotBestEffort(execution.goalId);
+      const cancellationCheckpointId = randomUUID();
       const cancelled = await this.executionCancellation.cancelExecution({
-        checkpointId: randomUUID(),
+        checkpointId: cancellationCheckpointId,
         goalId: execution.goalId,
         executionId,
         expectedExecutionGeneration: request.executionGeneration,
@@ -526,12 +647,44 @@ export class GoalContinuationService {
         evidence: normalizeEvidence(request.evidence),
         now,
       });
-      return ok(await this.buildCancellationResult(
+      const result = await this.buildCancellationResult(
         ownerClientId,
         execution.goalId,
         now,
         cancelled,
-      ));
+      );
+      await this.publishRuntimeEventsBestEffort([
+        {
+          eventId: goalRuntimeEventId(execution.goalId, 'execution_cancel_requested', `${cancellationCheckpointId}:requested`),
+          type: 'execution_cancel_requested',
+          workspaceId: execution.workspaceId,
+          goalId: execution.goalId,
+          executionId,
+          executionGeneration: request.executionGeneration,
+          occurredAt: now,
+          detail: request.summary,
+        },
+        {
+          eventId: goalRuntimeEventId(execution.goalId, 'execution_cancelled', cancellationCheckpointId),
+          type: 'execution_cancelled',
+          workspaceId: execution.workspaceId,
+          goalId: execution.goalId,
+          executionId,
+          executionGeneration: request.executionGeneration,
+          occurredAt: now,
+          detail: request.summary,
+        },
+        {
+          eventId: goalRuntimeEventId(execution.goalId, 'goal_abandoned', cancellationCheckpointId),
+          type: 'goal_abandoned',
+          workspaceId: execution.workspaceId,
+          goalId: execution.goalId,
+          occurredAt: now,
+          detail: 'explicit exact-generation cancellation',
+        },
+      ]);
+      await this.ensureRuntimeSnapshotBestEffort(execution.goalId);
+      return ok(result);
     } catch (error: unknown) {
       return this.mapError(error);
     }
@@ -546,8 +699,10 @@ export class GoalContinuationService {
       const ownerClientId = current.ownerClientId;
       if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) return err(appError('INVALID_INPUT', 'expectedRevision is invalid'));
       const now = this.now().toISOString();
+      await this.ensureRuntimeSnapshotBestEffort(goalId);
+      const cancellationCheckpointId = randomUUID();
       const cancelled = await this.goals.cancel({
-        checkpointId: randomUUID(),
+        checkpointId: cancellationCheckpointId,
         goalId,
         ownerClientId,
         expectedRevision: request.expectedRevision,
@@ -555,7 +710,43 @@ export class GoalContinuationService {
         evidence: normalizeEvidence(request.evidence),
         now,
       });
-      return ok(await this.buildCancellationResult(ownerClientId, goalId, now, cancelled));
+      const result = await this.buildCancellationResult(ownerClientId, goalId, now, cancelled);
+      const runtimeEvents: GoalRuntimeEvent[] = [];
+      if (current.executionId !== undefined && current.executionGeneration !== undefined) {
+        runtimeEvents.push(
+          {
+            eventId: goalRuntimeEventId(goalId, 'execution_cancel_requested', `${cancellationCheckpointId}:requested`),
+            type: 'execution_cancel_requested',
+            workspaceId: current.workspaceId,
+            goalId,
+            executionId: current.executionId,
+            executionGeneration: current.executionGeneration,
+            occurredAt: now,
+            detail: request.summary,
+          },
+          {
+            eventId: goalRuntimeEventId(goalId, 'execution_cancelled', cancellationCheckpointId),
+            type: 'execution_cancelled',
+            workspaceId: current.workspaceId,
+            goalId,
+            executionId: current.executionId,
+            executionGeneration: current.executionGeneration,
+            occurredAt: now,
+            detail: request.summary,
+          },
+        );
+      }
+      runtimeEvents.push({
+        eventId: goalRuntimeEventId(goalId, 'goal_abandoned', cancellationCheckpointId),
+        type: 'goal_abandoned',
+        workspaceId: current.workspaceId,
+        goalId,
+        occurredAt: now,
+        detail: 'explicit Goal cancellation',
+      });
+      await this.publishRuntimeEventsBestEffort(runtimeEvents);
+      await this.ensureRuntimeSnapshotBestEffort(goalId);
+      return ok(result);
     } catch (error: unknown) {
       return this.mapError(error);
     }
@@ -777,6 +968,28 @@ export class GoalContinuationService {
       return trackedTasks.map((task) => task.cancelWithGoal
         ? failedGoalTaskCancellation(task.taskId, message, task.provider)
         : skippedGoalTaskCancellation(task));
+    }
+  }
+
+  private async ensureRuntimeSnapshotBestEffort(goalId: string): Promise<void> {
+    if (this.runtimeEvents === undefined) return;
+    try {
+      await this.runtimeEvents.ensureGoalSnapshot(goalId);
+    } catch {
+      // Runtime projection is recoverable from durable Goal state/events and
+      // must never turn an otherwise valid durable Goal mutation into failure.
+    }
+  }
+
+  private async publishRuntimeEventsBestEffort(events: readonly GoalRuntimeEvent[]): Promise<void> {
+    if (this.runtimeEvents === undefined) return;
+    for (const event of events) {
+      try {
+        await this.runtimeEvents.publishGoalRuntimeEvent(event);
+      } catch {
+        // Keep event/projection delivery non-critical. Startup bootstrap and
+        // later durable events reconcile the authoritative snapshot.
+      }
     }
   }
 
@@ -1067,6 +1280,13 @@ function redactSensitiveText(value: string): string {
     .replace(/(\bauthorization\s*:\s*bearer\s+)[^\s]+/gi, '$1[REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
     .replace(/\b(token|secret|password|api[_-]?key|private[_-]?key|credential)\s*[:=]\s*[^\s]+/gi, '$1=[REDACTED]');
+}
+
+function goalRuntimeEventId(goalId: string, type: GoalRuntimeEvent['type'], discriminator: string): string {
+  const digest = createHash('sha256')
+    .update([goalId, type, discriminator].join('\0'))
+    .digest('hex');
+  return `goal-runtime-${digest}`;
 }
 
 function createLeaseToken(): string { return randomBytes(32).toString('base64url'); }

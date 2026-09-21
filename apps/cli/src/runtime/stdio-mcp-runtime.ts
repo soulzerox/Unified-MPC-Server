@@ -12,6 +12,7 @@ import {
   GoalRequestCancellationService,
   GoalTaskCancellationService,
   GoalMutationFenceService,
+  GoalRuntimeControlPlaneService,
   GoalRuntimeReconciliationService,
   ManagedResourceRecoveryService,
   ScheduledContinuationService,
@@ -267,6 +268,13 @@ export function createStdioMcpRuntime(
       agentSwarm: agentSwarmService,
     }),
   });
+  const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
+  const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
+  const goalRuntimeControlPlane = new GoalRuntimeControlPlaneService(
+    goalRepository,
+    goalRuntimeSnapshots,
+    goalRuntimeEvents,
+  );
   const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {
     scheduledContinuations: goalRepository,
     workerLiveness: goalMutationFence,
@@ -274,6 +282,7 @@ export function createStdioMcpRuntime(
     requestCancellation,
     goalExecutions: goalRepository,
     executionCancellation: goalRepository,
+    runtimeEvents: goalRuntimeControlPlane,
   });
   const scheduledContinuationService = new ScheduledContinuationService(goalRepository, {
     workerLiveness: goalMutationFence,
@@ -281,14 +290,17 @@ export function createStdioMcpRuntime(
   });
   const goalRuntimeReconciliation = new GoalRuntimeReconciliationService(
     goalRepository,
-    new SqliteGoalRuntimeSnapshotRepository(database),
-    new SqliteGoalRuntimeEventRepository(database),
+    goalRuntimeSnapshots,
+    goalRuntimeEvents,
     goalRepository,
     goalMutationFence,
   );
   const goalRuntimeRecoveryReady = (async (): Promise<void> => {
-    for (const activeWorkspace of await activeWorkspaces()) {
-      await goalRuntimeReconciliation.reconcileWorkspace(activeWorkspace.id);
+    // Runtime reconciliation is registration-scoped, never Web selection/default scoped.
+    // A project may keep durable work running while it is outside the current UI context.
+    for (const registeredWorkspace of await rawWorkspaceRepository.list()) {
+      await goalRuntimeControlPlane.bootstrapWorkspace(registeredWorkspace.id);
+      await goalRuntimeReconciliation.reconcileWorkspace(registeredWorkspace.id);
     }
   })();
   const managedResourceRecoveryReady = managedResourceRecovery.start().then(() => undefined);

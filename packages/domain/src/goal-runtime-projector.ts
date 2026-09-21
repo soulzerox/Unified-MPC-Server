@@ -313,7 +313,11 @@ function applyWorkspaceObservation(
 ): GoalRuntimeProjection {
   const next: GoalRuntimeProjection = { ...current, workspaceState };
 
-  if (workspaceState === 'unknown') return next;
+  if (workspaceState === 'unknown') {
+    return isWorkspaceDerivedBlocker(current)
+      ? clearBlocker(next)
+      : next;
+  }
 
   if (workspaceState === 'clean') {
     return isWorkspaceDerivedBlocker(current)
@@ -325,9 +329,8 @@ function applyWorkspaceObservation(
     return next;
   }
 
-  const kind: GoalBlockerKind = workspaceState === 'dirty'
-    ? 'dirty_workspace'
-    : 'recovery_required';
+  const kind = workspaceBlockerKind(workspaceState);
+  if (kind === undefined) return next;
   return {
     ...next,
     blocker: {
@@ -339,11 +342,23 @@ function applyWorkspaceObservation(
 }
 
 function isWorkspaceDerivedBlocker(current: GoalRuntimeProjection): boolean {
-  if (current.blocker?.kind === 'dirty_workspace') return true;
+  if (current.blocker?.kind === 'dirty_workspace') {
+    return current.workspaceState === 'dirty';
+  }
   return current.blocker?.kind === 'recovery_required'
     && (current.workspaceState === 'missing'
       || current.workspaceState === 'unavailable'
       || current.workspaceState === 'conflict');
+}
+
+function workspaceBlockerKind(
+  workspaceState: GoalRuntimeProjection['workspaceState'],
+): GoalBlockerKind | undefined {
+  if (workspaceState === 'dirty') return 'dirty_workspace';
+  if (workspaceState === 'missing'
+    || workspaceState === 'unavailable'
+    || workspaceState === 'conflict') return 'recovery_required';
+  return undefined;
 }
 
 function validateProjectionTransitions(
@@ -424,7 +439,12 @@ function clearBlocker(
   if (onlyKind !== undefined && projection.blocker.kind !== onlyKind) return projection;
   const next = { ...projection };
   delete next.blocker;
-  return next;
+  const workspaceKind = workspaceBlockerKind(next.workspaceState);
+  if (workspaceKind === undefined) return next;
+  return {
+    ...next,
+    blocker: { kind: workspaceKind },
+  };
 }
 
 function withLastActivity(projection: GoalRuntimeProjection, occurredAt: string): GoalRuntimeProjection {

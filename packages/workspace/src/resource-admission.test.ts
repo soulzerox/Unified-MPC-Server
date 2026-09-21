@@ -4,6 +4,7 @@ import {
   DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
   DEFAULT_RAG_INDEX_ADMISSION_COST,
+  DEFAULT_GOAL_PROCESS_ADMISSION_COST,
   ResourceAdmissionController,
   sharedProcessResourceAdmissionController,
   tryAdmitChildMcpCall,
@@ -11,6 +12,7 @@ import {
   tryAdmitDependencyBootstrap,
   tryAdmitLspProcess,
   tryAdmitRagIndex,
+  tryAdmitGoalProcess,
 } from './resource-admission.js';
 import type { ResourcePressureProbe } from './resource-pressure.js';
 
@@ -213,6 +215,48 @@ describe('resource admission contract', () => {
       sessionId: 'session-b',
       cost: DEFAULT_RAG_INDEX_ADMISSION_COST,
     })).toMatchObject({ admitted: true });
+  });
+
+
+  it('accounts detached Goal-owned processes in the shared weighted controller', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { goal_process: 16 },
+    });
+
+    const first = tryAdmitGoalProcess(controller, {
+      operationId: 'goal-process-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_GOAL_PROCESS_ADMISSION_COST,
+    });
+    const sameWorkspace = tryAdmitGoalProcess(controller, {
+      operationId: 'goal-process-a-2',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-b',
+      cost: 1,
+    });
+    const otherWorkspace = tryAdmitGoalProcess(controller, {
+      operationId: 'goal-process-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_GOAL_PROCESS_ADMISSION_COST,
+    });
+
+    expect(first).toMatchObject({ admitted: true, lease: { resourceClass: 'goal_process', cost: 8 } });
+    expect(sameWorkspace).toMatchObject({ admitted: false, code: 'RESOURCE_PRESSURE', reason: 'workspace_cost_exhausted' });
+    expect(otherWorkspace).toMatchObject({ admitted: true, lease: { resourceClass: 'goal_process', cost: 8 } });
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 16,
+      activeOperations: 2,
+      activeCostByClass: { goal_process: 16 },
+    });
+    if (!first.admitted || !otherWorkspace.admitted) throw new Error('expected independent Goal processes');
+    expect(controller.release(first.lease)).toBe(true);
+    expect(controller.release(otherWorkspace.lease)).toBe(true);
   });
 
   it('returns one process-owned default controller across runtime owners', () => {

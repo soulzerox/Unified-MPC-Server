@@ -20,9 +20,11 @@ import {
   DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
   DEFAULT_RAG_INDEX_ADMISSION_COST,
+  DEFAULT_GOAL_PROCESS_ADMISSION_COST,
   tryAdmitChildMcpCall,
   tryAdmitContextScan,
   tryAdmitRagIndex,
+  tryAdmitGoalProcess,
   type ResourceAdmissionController,
   type ResourceAdmissionLease,
 } from '@unified-mpc/workspace';
@@ -60,6 +62,7 @@ import {
 import { inspectMutationOperation, permissionLevelForMutationDecision, requiresMutationConfirmation, type MutationPolicyDecision } from './mutation-policy.js';
 import { mapError, mapResult, type McpToolResponse } from './result-mapper.js';
 import { sharedProcessRagIndexAdmissionTracker, type RagIndexAdmissionTracker } from './rag-index-admission.js';
+import { sharedProcessGoalProcessAdmissionTracker, type GoalProcessAdmissionTracker } from './goal-process-admission.js';
 import { agentSwarmTools } from './tools/agent-swarm-tools.js';
 import { batchTools } from './tools/batch-tools.js';
 import { contextTools } from './tools/context-tools.js';
@@ -144,6 +147,8 @@ export interface ToolRegistryOptions {
   readonly lspProcessAdmissionCost?: number;
   /** Weighted cost charged while one foreground native RAG indexing call is running. */
   readonly ragIndexAdmissionCost?: number;
+  /** Weighted cost held for the real lifetime of one Goal-owned managed process. */
+  readonly goalProcessAdmissionCost?: number;
 }
 
 export interface HostMutationApprovalScope {
@@ -170,6 +175,7 @@ export interface HostMutationApprovalRequest {
 }
 
 const HEAVY_CONTEXT_ADMISSION_TOOLS = new Set(['workspace_context', 'workspace_full_scan', 'search_all', 'read_many_files']);
+const GOAL_PROCESS_ADMISSION_TOOLS = new Set(['process_start', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build']);
 
 const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024;
@@ -241,10 +247,12 @@ export class ToolRegistry {
   private readonly maxMcpCallResultBytes: number;
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
   private readonly ragIndexAdmissionTracker: RagIndexAdmissionTracker | undefined;
+  private readonly goalProcessAdmissionTracker: GoalProcessAdmissionTracker | undefined;
   private readonly contextScanAdmissionCost: number;
   private readonly mcpCallAdmissionCost: number;
   private readonly lspProcessAdmissionCost: number;
   private readonly ragIndexAdmissionCost: number;
+  private readonly goalProcessAdmissionCost: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
     this.services = services;
@@ -273,6 +281,9 @@ export class ToolRegistry {
     this.ragIndexAdmissionTracker = this.resourceAdmissionController === undefined
       ? undefined
       : sharedProcessRagIndexAdmissionTracker(this.resourceAdmissionController);
+    this.goalProcessAdmissionTracker = this.resourceAdmissionController === undefined
+      ? undefined
+      : sharedProcessGoalProcessAdmissionTracker(this.resourceAdmissionController);
     this.contextScanAdmissionCost = normalizePositiveInteger(
       options.contextScanAdmissionCost,
       DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
@@ -288,6 +299,10 @@ export class ToolRegistry {
     this.ragIndexAdmissionCost = normalizePositiveInteger(
       options.ragIndexAdmissionCost,
       DEFAULT_RAG_INDEX_ADMISSION_COST,
+    );
+    this.goalProcessAdmissionCost = normalizePositiveInteger(
+      options.goalProcessAdmissionCost,
+      DEFAULT_GOAL_PROCESS_ADMISSION_COST,
     );
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
@@ -428,6 +443,7 @@ export class ToolRegistry {
     let durableGoalExecutionAdmitted = false;
     let resourceAdmissionLease: ResourceAdmissionLease | undefined;
     let backgroundRagAdmissionWorkspaceId: string | undefined;
+    let goalProcessAdmissionWorkspaceId: string | undefined;
     const releaseResourceAdmission = (): void => {
       if (resourceAdmissionLease === undefined || this.resourceAdmissionController === undefined) return;
       this.resourceAdmissionController.release(resourceAdmissionLease);
@@ -663,6 +679,36 @@ export class ToolRegistry {
         );
         durableGoalExecutionAdmitted = true;
       }
+      if (
+        durableGoalExecutionAdmitted
+        && GOAL_PROCESS_ADMISSION_TOOLS.has(tool.name)
+        && this.resourceAdmissionController !== undefined
+        && mutationFenceWorkspaceId !== undefined
+      ) {
+        const admission = tryAdmitGoalProcess(this.resourceAdmissionController, {
+          operationId: callId,
+          workspaceId: mutationFenceWorkspaceId,
+          sessionId: this.sessionId ?? (this.actor.sessionId?.trim() || this.actor.clientId),
+          cost: this.goalProcessAdmissionCost,
+        });
+        if (!admission.admitted) {
+          await fencedMutationEnd?.();
+          fencedMutationEnd = undefined;
+          const message = admission.code === 'RESOURCE_PRESSURE'
+            ? `Goal-owned process rejected by resource admission (${admission.reason}); retry after current expensive work settles`
+            : `Goal-owned process rejected by resource admission (${admission.reason})`;
+          const response = mapError(appError(admission.code, message, admission.retryable, {
+            reason: admission.reason,
+            requestedCost: admission.requestedCost,
+            activeCost: admission.snapshot.activeCost,
+            activeOperations: admission.snapshot.activeOperations,
+          }));
+          await this.activity.end(callId, admission.code, Date.now() - started, message);
+          return response;
+        }
+        resourceAdmissionLease = admission.lease;
+        goalProcessAdmissionWorkspaceId = mutationFenceWorkspaceId;
+      }
       if (HEAVY_CONTEXT_ADMISSION_TOOLS.has(tool.name) && this.resourceAdmissionController !== undefined) {
         const admissionWorkspaceId = await this.resolveContextAdmissionWorkspaceId(
           approvalExecutionInput,
@@ -780,6 +826,32 @@ export class ToolRegistry {
         durableGoalExecutionAdmitted,
       );
       if (
+        goalProcessAdmissionWorkspaceId !== undefined
+        && resourceAdmissionLease !== undefined
+        && this.resourceAdmissionController !== undefined
+      ) {
+        const processLease = resourceAdmissionLease;
+        const processController = this.resourceAdmissionController;
+        const processWorkspaceId = goalProcessAdmissionWorkspaceId;
+        if (execution.settledResult !== undefined) {
+          if (this.transferGoalProcessAdmissionLease(processWorkspaceId, execution.settledResult, processLease)) {
+            resourceAdmissionLease = undefined;
+          } else {
+            releaseResourceAdmission();
+          }
+        } else if (execution.deferredSettlement !== undefined) {
+          resourceAdmissionLease = undefined;
+          void execution.deferredSettlement.then((settledResult) => {
+            if (
+              settledResult !== undefined
+              && this.transferGoalProcessAdmissionLease(processWorkspaceId, settledResult, processLease)
+            ) return;
+            processController.release(processLease);
+          });
+        } else {
+          releaseResourceAdmission();
+        }
+      } else if (
         backgroundRagAdmissionWorkspaceId !== undefined
         && resourceAdmissionLease !== undefined
         && this.resourceAdmissionController !== undefined
@@ -1156,6 +1228,25 @@ export class ToolRegistry {
       if (jobId !== undefined) this.ragIndexAdmissionTracker?.reconcile(workspaceId, jobId, result.value);
     }
     return result;
+  }
+
+  private transferGoalProcessAdmissionLease(
+    workspaceId: string,
+    result: Result<unknown>,
+    lease: ResourceAdmissionLease,
+  ): boolean {
+    if (!result.ok || !isRecord(result.value)) return false;
+    const processId = readTrimmedString(result.value.processId);
+    const tracker = this.goalProcessAdmissionTracker;
+    const processService = this.services.process;
+    if (processId === undefined || tracker === undefined || processService?.statusForGoalLiveness === undefined) return false;
+    return tracker.bind({
+      workspaceId,
+      processId,
+      lease,
+      initialStatus: result.value,
+      readStatus: () => processService.statusForGoalLiveness(workspaceId, processId),
+    });
   }
 
   private transferRagIndexAdmissionLease(

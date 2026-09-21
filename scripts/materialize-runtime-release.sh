@@ -36,7 +36,7 @@ write_state() {
   local key="$1"
   local value="$2"
   [[ -n "$record_dir" && -d "$record_dir" ]] || return 1
-  local tmp="$record_dir/.$key.tmp.$"
+  local tmp="$record_dir/.$key.tmp.$$"
   printf '%s\n' "$value" >"$tmp"
   mv -f -- "$tmp" "$record_dir/$key"
 }
@@ -114,7 +114,7 @@ mkdir -p "$runtime_dir/releases"
 runtime_dir="$(readlink -f -- "$runtime_dir")"
 releases_dir="$(readlink -f -- "$runtime_dir/releases")"
 release_root="$releases_dir/$deployment_id"
-stage_root="$releases_dir/.$deployment_id.materializing.$"
+stage_root="$releases_dir/.$deployment_id.materializing.$$"
 
 mkdir -p "$materialization_state_root"
 materialization_state_root="$(readlink -f -- "$materialization_state_root")"

@@ -43,8 +43,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
 
-      - name: Build MCP dependency closure
-        run: pnpm --filter @unified-mpc/mcp-server^... build
+      - name: Build CLI dependency closure
+        run: pnpm --filter @unified-mpc/cli^... build
 
       - name: Exact execution cancellation regression
         run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/goal-continuation.integration.test.ts

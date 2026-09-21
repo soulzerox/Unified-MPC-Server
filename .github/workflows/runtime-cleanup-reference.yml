@@ -66,4 +66,12 @@ jobs:
             packages/mcp-server/src/tools/tool-types.ts
 
       - name: Diff hygiene
-        run: git diff --check ${{ github.event.pull_request.base.sha || format('HEAD~1') }}...HEAD
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -n "$BASE_SHA" && "$BASE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            git diff --check "$BASE_SHA"...HEAD
+          else
+            git diff --check HEAD^
+          fi

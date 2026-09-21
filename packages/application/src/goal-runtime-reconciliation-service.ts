@@ -150,7 +150,9 @@ export class GoalRuntimeReconciliationService {
       goalId: projection.goalId,
       executionId: projection.activeExecutionId,
       executionGeneration: projection.executionGeneration,
-      occurredAt: now,
+      // Event identity and content stay stable across crash retries. The actual
+      // reconciliation attempt time remains available as the durable recordedAt.
+      occurredAt: stableReconciliationOccurredAt(snapshot),
       blockerKind: 'worker_lost',
       detail: `restart reconciliation: ${assessment.reason}`,
     };
@@ -222,6 +224,16 @@ function legacyTrackedTasks(taskIds: readonly string[]): readonly GoalTrackedTas
     role: 'blocking_job',
     cancelWithGoal: true,
   }));
+}
+
+function stableReconciliationOccurredAt(snapshot: GoalRuntimeSnapshotRecord): string {
+  const candidates = [
+    snapshot.updatedAt,
+    snapshot.projection.lastActivityAt,
+    snapshot.projection.lastHeartbeatAt,
+  ].filter((value): value is string => value !== undefined);
+  return candidates.reduce((latest, candidate) =>
+    Date.parse(candidate) > Date.parse(latest) ? candidate : latest);
 }
 
 function workerLostEventId(goal: GoalRecord, snapshot: GoalRuntimeSnapshotRecord): string {

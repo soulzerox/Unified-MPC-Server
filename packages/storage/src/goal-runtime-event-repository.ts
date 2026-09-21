@@ -2,6 +2,7 @@ import {
   isExecutionScopedRuntimeEventType,
   isGoalBlockerKind,
   isGoalScopedRuntimeEvent,
+  isGoalWorkspaceState,
   isGoalScopedRuntimeEventType,
   type AppendGoalRuntimeEventRequest,
   type AppendGoalRuntimeEventResult,
@@ -47,6 +48,7 @@ interface GoalRuntimeEventRow {
   readonly task_id: string | null;
   readonly checkpoint_id: string | null;
   readonly blocker_kind: string | null;
+  readonly workspace_state: string | null;
   readonly recorded_at: string;
 }
 
@@ -91,8 +93,8 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       INSERT OR IGNORE INTO goal_runtime_events (
         event_id, workspace_id, goal_id, event_type,
         execution_id, execution_generation,
-        occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, recorded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, workspace_state, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       event.eventId,
       event.workspaceId,
@@ -106,6 +108,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       execution?.taskId ?? null,
       execution?.checkpointId ?? null,
       execution?.blockerKind ?? null,
+      event.type === 'workspace_observed' ? event.workspaceState : null,
       request.recordedAt,
     );
 
@@ -267,8 +270,8 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         INSERT INTO goal_runtime_events (
           event_id, workspace_id, goal_id, event_type,
           execution_id, execution_generation,
-          occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, workspace_state, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         event.eventId,
         event.workspaceId,
@@ -282,6 +285,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         event.taskId ?? null,
         event.checkpointId ?? null,
         event.blockerKind ?? null,
+        null,
         request.recordedAt,
       );
       if (Number(inserted.changes) !== 1) {
@@ -441,8 +445,21 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         || row.phase !== null || row.task_id !== null || row.checkpoint_id !== null || row.blocker_kind !== null) {
         throw new GoalRuntimeEventStoreError('corrupt', 'Goal-scoped runtime event contains execution-only fields');
       }
-      event = { ...common, type: row.event_type };
+      if (row.event_type === 'workspace_observed') {
+        if (!isGoalWorkspaceState(row.workspace_state)) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Workspace observation event is missing a valid workspace state');
+        }
+        event = { ...common, type: 'workspace_observed', workspaceState: row.workspace_state };
+      } else {
+        if (row.workspace_state !== null) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Non-workspace Goal event contains workspace state');
+        }
+        event = { ...common, type: row.event_type };
+      }
     } else if (isExecutionScopedRuntimeEventType(row.event_type)) {
+      if (row.workspace_state !== null) {
+        throw new GoalRuntimeEventStoreError('corrupt', 'Execution-scoped runtime event contains workspace state');
+      }
       if (row.execution_id === null || row.execution_generation === null) {
         throw new GoalRuntimeEventStoreError('corrupt', 'Execution-scoped runtime event is missing execution identity');
       }
@@ -480,7 +497,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
     if (!requiredStrings.every((key) => typeof value[key] === 'string')) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event required fields are invalid');
     }
-    const nullableStrings = ['execution_id', 'detail', 'phase', 'task_id', 'checkpoint_id', 'blocker_kind'];
+    const nullableStrings = ['execution_id', 'detail', 'phase', 'task_id', 'checkpoint_id', 'blocker_kind', 'workspace_state'];
     if (!nullableStrings.every((key) => value[key] === null || typeof value[key] === 'string')) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event optional fields are invalid');
     }
@@ -506,7 +523,12 @@ function validateEvent(event: GoalRuntimeEvent): void {
   validateIso(event.occurredAt, 'occurredAt');
   optionalBounded(event.detail, 'detail', MAX_DETAIL_CHARS);
 
-  if (isGoalScopedRuntimeEvent(event)) return;
+  if (isGoalScopedRuntimeEvent(event)) {
+    if (event.type === 'workspace_observed' && !isGoalWorkspaceState(event.workspaceState)) {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'workspaceState is invalid');
+    }
+    return;
+  }
 
   requireIdentifier(event.executionId, 'executionId');
   positiveInteger(event.executionGeneration, 'executionGeneration');
@@ -527,7 +549,13 @@ function sameEvent(left: GoalRuntimeEvent, right: GoalRuntimeEvent): boolean {
     || left.detail !== right.detail) return false;
 
   if (isGoalScopedRuntimeEvent(left) || isGoalScopedRuntimeEvent(right)) {
-    return isGoalScopedRuntimeEvent(left) && isGoalScopedRuntimeEvent(right);
+    if (!isGoalScopedRuntimeEvent(left) || !isGoalScopedRuntimeEvent(right)) return false;
+    if (left.type === 'workspace_observed' || right.type === 'workspace_observed') {
+      return left.type === 'workspace_observed'
+        && right.type === 'workspace_observed'
+        && left.workspaceState === right.workspaceState;
+    }
+    return true;
   }
 
   return left.executionId === right.executionId

@@ -90,15 +90,17 @@ export function getClientScriptJs(): string {
           if (!res.ok) throw new Error('Status request failed');
           const data = await res.json();
           const identity = data.mcpIdentity;
-          const buildVersion = document.getElementById('build-version');
-          if (buildVersion && identity) {
-            buildVersion.textContent = 'v' + (identity.buildVersion || identity.version || 'unknown');
+          const buildCommit = document.getElementById('build-commit');
+          if (buildCommit && identity) {
+            const visibleCommit = identity.buildShortCommit
+              || (identity.buildCommit ? identity.buildCommit.slice(0, 12) : 'unknown');
+            buildCommit.textContent = visibleCommit;
             const details = [
               identity.buildCommit ? 'commit ' + identity.buildCommit : '',
               identity.buildTime ? 'built ' + identity.buildTime : '',
               identity.buildDirty === true ? 'dirty build' : identity.buildDirty === false ? 'clean build' : '',
             ].filter(Boolean);
-            buildVersion.title = details.join(' · ') || 'MCP runtime build identity';
+            buildCommit.title = details.join(' · ') || 'MCP runtime build identity';
           }
           const led = document.getElementById('status-led');
           if (led) led.className = 'led';

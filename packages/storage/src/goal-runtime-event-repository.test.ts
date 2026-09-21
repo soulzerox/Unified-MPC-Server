@@ -168,6 +168,28 @@ describe('SqliteGoalRuntimeEventRepository', () => {
     }
   });
 
+  it('round-trips structured workspace observations without execution identity', async () => {
+    const runtime = await fixture();
+    try {
+      const event: GoalRuntimeEvent = {
+        eventId: 'workspace-observed-1',
+        type: 'workspace_observed',
+        workspaceId: 'workspace-1',
+        goalId: 'goal-1',
+        workspaceState: 'dirty',
+        occurredAt: now,
+        detail: 'registered workspace has uncommitted changes',
+      };
+      const appended = await runtime.events.appendGoalRuntimeEvent({ event, recordedAt: now });
+      expect(appended.record.event).toEqual(event);
+
+      const replay = await runtime.events.listGoalRuntimeEvents({ goalId: 'goal-1', limit: 10 });
+      expect(replay[0]?.event).toEqual(event);
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('bounds replay reads even when callers request an excessive limit', async () => {
     const runtime = await fixture();
     try {

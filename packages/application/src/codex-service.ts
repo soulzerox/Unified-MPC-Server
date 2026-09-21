@@ -3,7 +3,7 @@ import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationOb
 import { CodexAdapter, type CodexSandboxMode, type CodexStatus } from '@unified-mpc/codex';
 import type { CodexRunAuditInput } from '@unified-mpc/audit';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionEngine, type PermissionProfile } from '@unified-mpc/permissions';
-import type { LogQuery, ManagedProcess, ProcessLogResult } from '@unified-mpc/process';
+import type { LogQuery, ManagedProcess, ManagedProcessRecoveryIdentity, ProcessLogResult } from '@unified-mpc/process';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 import type { FileActor } from './file-service.js';
 
@@ -13,6 +13,7 @@ export interface CodexAdapterPort {
   status(): Promise<Result<CodexStatus>>;
   start(cwd: string, instruction: string, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void, sandboxMode?: CodexSandboxMode): Promise<Result<ManagedProcess>>;
   statusProcess(processId: string): Result<ManagedProcess>;
+  recoveryIdentity?(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>>;
   logs(processId: string, query: LogQuery): Result<ProcessLogResult>;
   stop(processId: string, autoRetry?: boolean): Promise<Result<void>>;
 }
@@ -132,6 +133,22 @@ export class CodexService {
     if (owner === undefined) return err(appError('PROCESS_NOT_FOUND', 'Codex task was not found'));
     if (owner.workspaceId !== workspaceId) return err(appError('PERMISSION_DENIED', 'Codex task belongs to another workspace'));
     return this.adapter.statusProcess(owner.processId);
+  }
+
+  /**
+   * Trusted internal restart identity lookup for delegated resource
+   * reconciliation. This is never projected through normal Codex task output.
+   */
+  public recoveryIdentityForGoal(workspaceId: string, codexTaskId: string): Promise<Result<ManagedProcessRecoveryIdentity>> {
+    const owner = this.owners.get(codexTaskId);
+    if (owner === undefined) return Promise.resolve(err(appError('PROCESS_NOT_FOUND', 'Codex task was not found')));
+    if (owner.workspaceId !== workspaceId) {
+      return Promise.resolve(err(appError('PERMISSION_DENIED', 'Codex task belongs to another workspace')));
+    }
+    if (this.adapter.recoveryIdentity === undefined) {
+      return Promise.resolve(err(appError('INTERNAL_ERROR', 'Codex recovery identity provider is unavailable', true)));
+    }
+    return this.adapter.recoveryIdentity(owner.processId);
   }
 
   /** Trusted cancellation path used by durable goals; it deliberately ignores the transient MCP session. */

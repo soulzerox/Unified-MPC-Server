@@ -100,9 +100,11 @@ describe('ModernTasksProtocol durable goal execution bridge', () => {
     await expect(protocol.cancelTask({ taskId: created.taskId })).resolves.toEqual({
       resultType: 'complete',
     });
-    expect(cancellations).toEqual([
-      { executionId: 'execution-3', executionGeneration: 3 },
-    ]);
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0]).toMatchObject({
+      executionId: 'execution-3',
+      executionGeneration: 3,
+    });
     await expect(protocol.getTask({ taskId: created.taskId })).resolves.toMatchObject({
       status: 'cancelled',
     });

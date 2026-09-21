@@ -984,7 +984,7 @@ function normalizeTrackedTasks(
       if (!isRecord(entry) || typeof entry.taskId !== 'string') throw new Error('tracked task is invalid');
       const taskId = requiredBounded(entry.taskId, 'task id', MAX_TASK_ID);
       const provider = entry.provider;
-      if (provider !== 'process' && provider !== 'codex' && provider !== 'shell') throw new Error('tracked task provider is invalid');
+      if (provider !== 'process' && provider !== 'codex' && provider !== 'shell' && provider !== 'agent_swarm') throw new Error('tracked task provider is invalid');
       if (entry.role !== 'blocking_job' && entry.role !== 'supporting_service') throw new Error('tracked task role is invalid');
       if (typeof entry.cancelWithGoal !== 'boolean') throw new Error('tracked task cancellation policy is invalid');
       const key = `${provider}\0${taskId}`;

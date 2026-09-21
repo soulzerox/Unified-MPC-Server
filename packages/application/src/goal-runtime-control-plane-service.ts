@@ -159,6 +159,39 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     }
   }
 
+  private async reconcileDurableBlockerTruthUnlocked(
+    initial: GoalRuntimeSnapshotRecord,
+  ): Promise<GoalRuntimeSnapshotRecord> {
+    const goal = await this.goals.getById(initial.projection.goalId);
+    if (goal === null) {
+      throw new GoalRuntimeControlPlaneError('goal_not_found', `Goal '${initial.projection.goalId}' was not found`);
+    }
+    if (goal.status !== 'active') return initial;
+
+    const detail = durableGoalBlockerDetail(goal);
+    const currentBlocker = initial.projection.blocker;
+    if (detail === undefined) {
+      if (currentBlocker?.kind !== 'goal_blocked') return initial;
+    } else {
+      if (currentBlocker !== undefined && currentBlocker.kind !== 'goal_blocked') return initial;
+      if (currentBlocker?.kind === 'goal_blocked' && currentBlocker.detail === detail) return initial;
+    }
+
+    const occurredAt = this.now().toISOString();
+    return this.appendAndReplayUnlocked(initial, {
+      eventId: durableGoalBlockerRuntimeEventId(
+        goal.id,
+        goal.revision,
+        detail === undefined ? 'clear' : 'blocked',
+        initial.lastEventSequence,
+      ),
+      type: 'goal_blocker_observed',
+      workspaceId: goal.workspaceId,
+      goalId: goal.id,
+      occurredAt,
+      ...(detail === undefined ? {} : { blockerKind: 'goal_blocked', detail }),
+    });
+  }
   private async ensureGoalSnapshotUnlocked(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
     const existing = await this.snapshots.getGoalRuntimeSnapshot(goalId);
     if (existing !== null) return existing;

@@ -91,6 +91,18 @@ describe('Goal runtime event generation fence', () => {
     )).toEqual({ disposition: 'reject', reason: 'terminal_generation' });
   });
 
+  it('rejects late same-generation activity after a completed execution cleared active identity', () => {
+    expect(classifyGoalRuntimeEvent(
+      projection({ runtimeState: 'idle', desiredRuntimeState: 'idle', activeExecutionId: undefined }),
+      event('task_progress'),
+    )).toEqual({ disposition: 'reject', reason: 'terminal_generation' });
+
+    expect(classifyGoalRuntimeEvent(
+      projection({ runtimeState: 'idle', desiredRuntimeState: 'idle', activeExecutionId: undefined }),
+      event('integration_started'),
+    )).toEqual({ disposition: 'apply' });
+  });
+
   it('does not let a closed Goal restart from an ordinary execution event', () => {
     expect(classifyGoalRuntimeEvent(
       projection({ lifecycleState: 'archived', runtimeState: 'idle', desiredRuntimeState: 'idle' }),

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Redactor } from '@unified-mpc/audit';
 import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
 import type { ManagedProcess, ProcessLogResult } from '@unified-mpc/process';
+import { DEFAULT_DELEGATED_AGENT_ADMISSION_COST, tryAdmitDelegatedAgent, type ResourceAdmissionController, type ResourceAdmissionLease } from '@unified-mpc/workspace';
 import {
   SqliteAgentSwarmRepository,
   type StoredAgentSwarm,
@@ -33,24 +34,35 @@ export interface AgentSwarmCodexPort {
   stop(actor: FileActor, workspaceId: string, codexTaskId: string, userConfirmed?: boolean, authorization?: InvocationAuthorization): Promise<Result<void>>;
 }
 
+export interface AgentSwarmServiceOptions {
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  readonly delegatedAgentAdmissionCost?: number;
+}
+
 interface LiveSwarm {
   readonly actor: FileActor;
   readonly workspaceId: string;
   readonly prompts: ReadonlyMap<string, string>;
   readonly authorization: InvocationAuthorization;
   readonly abortController: AbortController;
+  readonly resourceLeases: Map<string, ResourceAdmissionLease>;
   monitor?: Promise<void>;
 }
 
 export class AgentSwarmService {
   private readonly live = new Map<string, LiveSwarm>();
+  private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
+  private readonly delegatedAgentAdmissionCost: number;
 
   public constructor(
     private readonly repository: SqliteAgentSwarmRepository,
     private readonly codex: AgentSwarmCodexPort,
     private readonly now: () => Date = () => new Date(),
     private readonly idFactory: () => string = randomUUID,
+    options: AgentSwarmServiceOptions = {},
   ) {
+    this.resourceAdmissionController = options.resourceAdmissionController;
+    this.delegatedAgentAdmissionCost = normalizePositiveInteger(options.delegatedAgentAdmissionCost, DEFAULT_DELEGATED_AGENT_ADMISSION_COST);
     // Never reattach by PID/task id after restart. Persisted active tasks are
     // explicitly downgraded to termination_unverified until a future verified
     // runtime-handle protocol exists.
@@ -96,6 +108,7 @@ export class AgentSwarmService {
       prompts: new Map(request.tasks.map((task) => [task.id, task.prompt])),
       authorization: authorization as InvocationAuthorization,
       abortController: new AbortController(),
+      resourceLeases: new Map<string, ResourceAdmissionLease>(),
     };
     this.live.set(stored.id, live);
     await this.tick(stored.id, live, signal);

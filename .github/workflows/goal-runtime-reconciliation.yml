@@ -42,13 +42,13 @@ jobs:
         run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Storage reconciliation regression
-        run: pnpm --filter @unified-mpc/storage test -- goal-runtime-snapshot-repository.test.ts
+        run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/goal-runtime-snapshot-repository.test.ts
 
       - name: Application restart reconciliation
-        run: pnpm --filter @unified-mpc/application test -- goal-runtime-reconciliation-service.test.ts
+        run: pnpm --filter @unified-mpc/application exec vitest run src/goal-runtime-reconciliation-service.test.ts
 
       - name: STDIO runtime regression
-        run: pnpm --filter @unified-mpc/cli test -- stdio-mcp-runtime.test.ts
+        run: pnpm --filter @unified-mpc/cli exec vitest run src/runtime/stdio-mcp-runtime.test.ts
 
       - name: Targeted typecheck
         run: |

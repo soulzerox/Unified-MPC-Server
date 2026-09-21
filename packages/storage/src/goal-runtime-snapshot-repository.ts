@@ -85,7 +85,7 @@ export class SqliteGoalRuntimeSnapshotRepository implements GoalRuntimeSnapshotR
     const projection = normalizeProjection(request.projection, 'invalid_projection');
     const lastEventSequence = nonNegativeInteger(request.lastEventSequence, 'lastEventSequence', 'invalid_projection');
     validateIso(request.updatedAt, 'updatedAt', 'invalid_projection');
-    this.validateStoredScope(projection);
+    this.validateStoredScope(projection, lastEventSequence);
 
     return this.transaction(() => {
       const existingRow = this.database.connection.prepare(
@@ -155,7 +155,7 @@ export class SqliteGoalRuntimeSnapshotRepository implements GoalRuntimeSnapshotR
     });
   }
 
-  private validateStoredScope(projection: GoalRuntimeProjection): void {
+  private validateStoredScope(projection: GoalRuntimeProjection, lastEventSequence: number): void {
     const goal = this.database.connection.prepare(
       'SELECT workspace_id FROM goals WHERE id = ?',
     ).get(projection.goalId) as { workspace_id?: string } | undefined;
@@ -167,6 +167,19 @@ export class SqliteGoalRuntimeSnapshotRepository implements GoalRuntimeSnapshotR
         'invalid_projection',
         'Goal runtime snapshot workspace does not match its Goal',
       );
+    }
+
+    if (lastEventSequence > 0) {
+      const event = this.database.connection.prepare(`
+        SELECT sequence FROM goal_runtime_events
+        WHERE sequence = ? AND workspace_id = ? AND goal_id = ?
+      `).get(lastEventSequence, projection.workspaceId, projection.goalId);
+      if (!isRecord(event) || typeof event.sequence !== 'number') {
+        throw new GoalRuntimeSnapshotStoreError(
+          'invalid_projection',
+          'Goal runtime snapshot cursor does not identify a durable event for this Goal',
+        );
+      }
     }
 
     if (projection.executionGeneration === undefined) return;
@@ -286,7 +299,7 @@ function rowValues(
   projection: GoalRuntimeProjection,
   lastEventSequence: number,
   updatedAt: string,
-): readonly unknown[] {
+): Array<string | number | null> {
   return [
     projection.workspaceId,
     projection.contractVersion,

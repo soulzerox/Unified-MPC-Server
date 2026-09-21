@@ -150,7 +150,7 @@ export class ManagedResourceRecoveryService {
     if (this.closed || this.timer !== undefined) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.reconcileOnce().finally(() => this.schedulePoll());
+      void this.reconcileOnce().catch(() => undefined).finally(() => this.schedulePoll());
     }, this.pollIntervalMs);
     this.timer.unref?.();
   }

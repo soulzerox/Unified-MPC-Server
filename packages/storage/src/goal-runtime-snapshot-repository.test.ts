@@ -13,7 +13,13 @@ import { SqliteWorkspaceRepository } from './workspace-repository.js';
 
 const now = '2026-09-21T14:00:00.000Z';
 
-async function fixture() {
+async function fixture(): Promise<{
+  database: SqliteDatabase;
+  events: SqliteGoalRuntimeEventRepository;
+  snapshots: SqliteGoalRuntimeSnapshotRepository;
+  executionId: string;
+  initial: GoalRuntimeProjection;
+}> {
   const database = new SqliteDatabase(':memory:');
   const workspaces = new SqliteWorkspaceRepository(database);
   await workspaces.insert({

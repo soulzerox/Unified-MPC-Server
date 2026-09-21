@@ -37,7 +37,7 @@ if [[ "$url" == *":3000/api/status" ]]; then
   [[ ! -f "$active/web.fail" ]] || exit 22
   printf '{"status":"healthy","mcpIdentity":'
   cat "$provenance"
-  printf '}\\n'
+  printf '}\n'
 else
   [[ ! -f "$active/mcp.fail" ]] || exit 22
   cat "$provenance"

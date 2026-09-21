@@ -19,7 +19,8 @@
     "docs:tools": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs",
     "docs:tools:check": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs --check",
     "prepare": "husky",
-    "runtime:smoke": "node scripts/smoke-mcp-http-runtime.mjs"
+    "runtime:smoke": "node scripts/smoke-mcp-http-runtime.mjs",
+    "release:materialize": "bash scripts/materialize-runtime-release.sh"
   },
   "devDependencies": {
     "@eslint/js": "9.33.0",

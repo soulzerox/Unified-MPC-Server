@@ -44,8 +44,8 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
     // Preserve cross-project parallelism: two 8-cost LSP processes can run
     // concurrently when global capacity permits; workspace/session caps stay 8.
     lsp_process: 16,
-    // Until provider-owned job leases/cancellation land in Thai-RAG #8, keep
-    // local embedding/indexing conservative: one 8-cost index at a time.
+    // Native Thai-RAG indexing has a cancellable lifecycle, but embedding/indexing
+    // remains memory-heavy, so keep one 8-cost index at a time by default.
     rag_indexing: 8,
   }),
 }) satisfies ResourceAdmissionLimits;

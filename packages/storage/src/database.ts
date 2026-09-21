@@ -20,6 +20,7 @@ import { RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/rec
 import { GOAL_PONYTAIL_MODE_MIGRATION_SQL } from './migrations/goal-ponytail-mode-migration.js';
 import { GOAL_EXECUTION_MIGRATION_SQL } from './migrations/goal-execution-migration.js';
 import { GOAL_RUNTIME_EVENT_MIGRATION_SQL } from './migrations/goal-runtime-event-migration.js';
+import { GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL } from './migrations/goal-runtime-snapshot-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -78,6 +79,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '017_goal_ponytail_mode', sql: GOAL_PONYTAIL_MODE_MIGRATION_SQL });
     this.applyMigration({ id: '018_goal_executions', sql: GOAL_EXECUTION_MIGRATION_SQL });
     this.applyMigration({ id: '019_goal_runtime_events', sql: GOAL_RUNTIME_EVENT_MIGRATION_SQL });
+    this.applyMigration({ id: '020_goal_runtime_snapshots', sql: GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

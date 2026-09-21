@@ -23,7 +23,9 @@ import {
   normalizeHostPath,
   parseRuntimeVersion,
   prepareDependencyBootstrap,
+  runtimeDeploymentCleanupBlocker,
   type DependencyBootstrapPlan,
+  type RuntimeDeploymentCleanupBlocker,
   type DependencyInstallCommand,
   type ResourceAdmissionController,
 } from '@unified-mpc/workspace';
@@ -1607,15 +1609,27 @@ export class UpgradeRuntimeService {
     if (entry.owner !== this.actor.clientId || (entry.ownerSessionId !== undefined && entry.ownerSessionId !== actorSessionId(this.actor))) {
       return err(appError('PERMISSION_DENIED', 'Worktree is owned by another client session'));
     }
+    const cleanupBlocker = await this.runtimeDeploymentCleanupBlocker(workspaceId, worktreePath);
     const plan = {
       tool: 'git_worktree_remove', workspaceId, worktreePath,
       owner: entry.owner,
       mutationPolicy: 'explicit-confirmation-and-dry-run',
       dependencyPolicy: entry.dependencyPolicy,
+      cleanupBlocker,
     };
     if (input.dryRun !== false && input.dry_run !== false) return ok({ ...plan, dryRun: true });
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Removing a Git worktree requires explicit user confirmation'));
     if (this.services.git === undefined) return ok({ ...plan, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
+    if (cleanupBlocker.blocked) {
+      const details = cleanupBlocker.reason === 'active_runtime_reference'
+        ? cleanupBlocker.references.map((reference) => `${reference.kind}:${reference.path}`).join(', ')
+        : cleanupBlocker.uncertainties.join('; ');
+      return err(appError(
+        'CONFLICT',
+        `Worktree cleanup blocked by ${cleanupBlocker.reason ?? 'runtime deployment state'}${details.length === 0 ? '' : `: ${details}`}`,
+        true,
+      ));
+    }
     const result = await this.services.git.run(this.actor, {
       workspaceId,
       args: ['worktree', 'remove', worktreePath],
@@ -1627,6 +1641,52 @@ export class UpgradeRuntimeService {
       if (index !== -1) worktrees.splice(index, 1);
     });
     return ok({ ...plan, dryRun: false, sideEffectsStarted: true, status: 'completed', result: result.value });
+  }
+
+  private async runtimeDeploymentCleanupBlocker(
+    workspaceId: string,
+    worktreePath: string,
+  ): Promise<RuntimeDeploymentCleanupBlocker> {
+    if (this.diagnostics.platform !== 'linux') {
+      return { blocked: false, reason: null, references: [], uncertainties: [] };
+    }
+    if (this.services.workspaceInfo === undefined) {
+      return {
+        blocked: true,
+        reason: 'runtime_reference_unknown',
+        references: [],
+        uncertainties: ['workspace root is unavailable for runtime-reference reconciliation'],
+      };
+    }
+
+    const info = await this.services.workspaceInfo.info(this.actor, workspaceId);
+    if (!info.ok || typeof info.value !== 'object' || info.value === null || Array.isArray(info.value)) {
+      return {
+        blocked: true,
+        reason: 'runtime_reference_unknown',
+        references: [],
+        uncertainties: ['workspace root could not be resolved for runtime-reference reconciliation'],
+      };
+    }
+    const workspace = info.value as Record<string, unknown>;
+    const rootValue = typeof workspace.realRootPath === 'string'
+      ? workspace.realRootPath
+      : typeof workspace.rootPath === 'string'
+        ? workspace.rootPath
+        : undefined;
+    if (rootValue === undefined || !path.isAbsolute(rootValue)) {
+      return {
+        blocked: true,
+        reason: 'runtime_reference_unknown',
+        references: [],
+        uncertainties: ['workspace root is not an absolute host path'],
+      };
+    }
+
+    const cleanupPath = path.isAbsolute(worktreePath)
+      ? path.resolve(worktreePath)
+      : path.resolve(rootValue, worktreePath);
+    return runtimeDeploymentCleanupBlocker(cleanupPath, this.services.runtimeDeploymentReferenceOptions);
   }
 
   private async repositoryMap(workspaceId: string | undefined): Promise<Result<unknown>> {

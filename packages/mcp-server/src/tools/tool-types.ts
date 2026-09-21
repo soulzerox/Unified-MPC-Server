@@ -1,7 +1,11 @@
 import { err, ok, type InvocationAuthorization, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
-import type { ResourceAdmissionController, ResourceAdmissionLease } from '@unified-mpc/workspace';
+import type {
+  ResourceAdmissionController,
+  ResourceAdmissionLease,
+  RuntimeDeploymentReferenceOptions,
+} from '@unified-mpc/workspace';
 import type {
   AgentSwarmService,
   ApplyPatchRequest,
@@ -110,6 +114,8 @@ export interface McpApplicationServices {
   /** Host platform selected by the composition root; tests may inject a deterministic profile. */
   readonly platform?: NodeJS.Platform;
   readonly runtimeStatePath?: string;
+  /** Deterministic deployment-reference roots for cleanup fencing; production defaults to the #104 XDG/env paths. */
+  readonly runtimeDeploymentReferenceOptions?: RuntimeDeploymentReferenceOptions;
   readonly runtimeTiming?: () => McpRuntimeTiming;
   /** Lightweight process/runtime cardinalities for diagnostics only; must stay bounded and side-effect free. */
   readonly runtimeDiagnostics?: () => { readonly toolAvailabilitySubscriptions: number };

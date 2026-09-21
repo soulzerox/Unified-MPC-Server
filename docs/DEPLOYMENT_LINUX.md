@@ -51,6 +51,7 @@ cp scripts/unified-mpc-mcp-http.service ~/.config/systemd/user/
 cp scripts/unified-mpc-web.service ~/.config/systemd/user/
 cp scripts/unified-mpc.service ~/.config/systemd/user/
 cp scripts/validate-runtime-root.sh ~/.config/unified-mpc/validate-runtime-root.sh
+cp scripts/launch-runtime.sh ~/.config/unified-mpc/launch-runtime.sh
 cp scripts/promote-runtime.sh ~/.config/unified-mpc/promote-runtime.sh
 cp scripts/unified-mpc.service.env.example ~/.config/unified-mpc/service.env
 ```
@@ -75,16 +76,25 @@ PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 - Goal/delegated/inspection/temporary workspaces;
 - a symlink that resolves to one of those locations.
 
-The supplied units run `~/.config/unified-mpc/validate-runtime-root.sh` with `/usr/bin/bash` before Node starts. The validator lives outside `UNIFIED_MPC_ROOT`, so a missing or cleaned runtime tree can still fail with an actionable `RUNTIME_ROOT_INVALID`, `RUNTIME_ROOT_DISPOSABLE`, or `RUNTIME_ARTIFACT_MISSING` diagnostic instead of entering only a curl/restart failure loop.
+The supplied units launch through the stable `~/.config/unified-mpc/launch-runtime.sh` reconciler, which lives outside `UNIFIED_MPC_ROOT`. Before Node starts it validates a **common MCP + Web runtime** with `validate-runtime-root.sh`.
 
-The preflight validates the **final systemd environment**. Local drop-ins can override values after the checked-in unit, so inspect the effective configuration whenever a runtime root changes:
+The configured `UNIFIED_MPC_ROOT` remains authoritative when it is valid. If a late systemd drop-in or legacy environment file supplies a missing, disposable, or incomplete root, the launcher conservatively tries the deployment-owned pointers in this order:
+
+1. `runtime/current`;
+2. `runtime/last-known-good`.
+
+Fallback pointers are accepted only when they resolve under the deployment-owned `runtime/releases/*` directory and pass both MCP and Web runtime validation. The child process receives the reconciled path through its own exported `UNIFIED_MPC_ROOT`, so a stale override cannot redirect execution back into a disposable Goal/build worktree.
+
+A recovery emits an auditable `RUNTIME_ROOT_RECOVERED` diagnostic naming the selected pointer and resolved runtime. If no safe fallback exists, the launcher emits the underlying `RUNTIME_ROOT_*` diagnostics plus `RUNTIME_RECOVERY_UNAVAILABLE` and exits with status 78. The units set `RestartPreventExitStatus=78`, preventing an unrecoverable configuration from looping forever while preserving normal `Restart=on-failure` behavior for transient runtime failures.
+
+The launcher does **not** rewrite `service.env`, legacy drop-ins, or deployment pointers. Recovery is therefore idempotent and conservative; remove the stale configuration after inspecting the effective unit:
 
 ```bash
 systemctl --user cat unified-mpc-mcp-http.service
 systemctl --user cat unified-mpc-web.service
 ```
 
-Remove stale drop-ins or environment files that redirect `UNIFIED_MPC_ROOT` to a completed/cleanup-managed worktree. In particular, a legacy `~/.config/unified-mpc/runtime-root.env` must not be used to make a disposable build/Goal worktree the durable production root.
+In particular, a legacy `~/.config/unified-mpc/runtime-root.env` must not be used to make a disposable build/Goal worktree the durable production root.
 
 ### Atomic active-runtime promotion and rollback
 
@@ -119,7 +129,11 @@ UNIFIED_MPC_RUNTIME_DIR="$runtime_dir" \
 release="$runtime_dir/releases/$deployment_id"
 ```
 
-The source/build worktree may be removed after materialization: runtime package dependencies are localized under `$release/apps/cli/node_modules`, while build provenance remains at `$release/apps/cli/dist/build-provenance.json`.
+The source/build worktree may be removed **only after materialization returns successfully**: runtime package dependencies are localized under `$release/apps/cli/node_modules`, while build provenance remains at `$release/apps/cli/dist/build-provenance.json`.
+
+While a linked Goal/build worktree is being materialized, the materializer holds a native Git worktree lock and publishes an active source reference under `~/.local/state/unified-mpc/materializations/<deployment-id>/`. The #80 cleanup fence consumes that `materialization_source` reference, so dry-run/destructive cleanup explains the blocker before removal; the Git lock is the final TOCTOU defense if cleanup and materialization begin concurrently. Normal completion terminalizes the record as `published`; normal failure records `failed` and unlocks the source.
+
+An abrupt process/host crash may intentionally leave a `materializing` record and a locked linked worktree. That state is fail-closed: do not force-remove it. Inspect the materialization record, staging/release state, and `git worktree list --porcelain`; only after confirming no materializer can still be using the source should an operator explicitly reconcile/unlock the stale worktree.
 
 After installing the user units and running `systemctl --user daemon-reload`, activate that immutable release:
 

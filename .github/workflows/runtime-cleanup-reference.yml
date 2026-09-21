@@ -1,0 +1,84 @@
+name: Runtime cleanup reference gate
+
+on:
+  pull_request:
+    paths:
+      - "packages/workspace/src/runtime-deployment-reference.ts"
+      - "packages/workspace/src/runtime-deployment-reference.test.ts"
+      - "packages/workspace/src/index.ts"
+      - "packages/mcp-server/src/upgrade-runtime.ts"
+      - "packages/mcp-server/src/upgrade-runtime-concurrency.test.ts"
+      - "packages/mcp-server/src/tools/tool-types.ts"
+      - "scripts/materialize-runtime-release.sh"
+      - "scripts/materialization-source-fence.test.sh"
+      - ".github/workflows/runtime-cleanup-reference.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/workspace/src/runtime-deployment-reference.ts"
+      - "packages/workspace/src/runtime-deployment-reference.test.ts"
+      - "packages/workspace/src/index.ts"
+      - "packages/mcp-server/src/upgrade-runtime.ts"
+      - "packages/mcp-server/src/upgrade-runtime-concurrency.test.ts"
+      - "packages/mcp-server/src/tools/tool-types.ts"
+      - "scripts/materialize-runtime-release.sh"
+      - "scripts/materialization-source-fence.test.sh"
+      - ".github/workflows/runtime-cleanup-reference.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+
+      - name: Install workspace dependencies once
+        run: corepack pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build MCP transitive dependency closure
+        run: corepack pnpm --filter '@unified-mpc/mcp-server^...' build
+
+      - name: Materialization source Git fence
+        run: bash scripts/materialization-source-fence.test.sh
+
+      - name: Runtime deployment reference unit tests
+        run: corepack pnpm --filter @unified-mpc/workspace exec vitest run src/runtime-deployment-reference.test.ts
+
+      - name: Worktree cleanup restart integration
+        run: corepack pnpm --filter @unified-mpc/mcp-server exec vitest run src/upgrade-runtime-concurrency.test.ts --fileParallelism=false
+
+      - name: Targeted typecheck
+        run: corepack pnpm --filter @unified-mpc/workspace --filter @unified-mpc/mcp-server typecheck
+
+      - name: Targeted lint
+        run: |
+          corepack pnpm exec eslint \
+            packages/workspace/src/runtime-deployment-reference.ts \
+            packages/workspace/src/runtime-deployment-reference.test.ts \
+            packages/mcp-server/src/upgrade-runtime.ts \
+            packages/mcp-server/src/upgrade-runtime-concurrency.test.ts \
+            packages/mcp-server/src/tools/tool-types.ts
+
+      - name: Diff hygiene
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -n "$BASE_SHA" && "$BASE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            git diff --check "$BASE_SHA" HEAD
+          else
+            git diff --check HEAD^
+          fi

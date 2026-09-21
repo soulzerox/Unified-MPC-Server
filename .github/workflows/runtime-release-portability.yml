@@ -10,6 +10,7 @@ on:
       - "packages/**"
       - "scripts/materialize-runtime-release.sh"
       - "scripts/materialize-runtime-release.test.sh"
+      - "scripts/materialization-source-fence.test.sh"
       - "scripts/smoke-materialized-runtime.mjs"
       - "scripts/validate-runtime-root.sh"
       - "docs/DEPLOYMENT_LINUX.md"
@@ -25,6 +26,7 @@ on:
       - "packages/**"
       - "scripts/materialize-runtime-release.sh"
       - "scripts/materialize-runtime-release.test.sh"
+      - "scripts/materialization-source-fence.test.sh"
       - "scripts/smoke-materialized-runtime.mjs"
       - "scripts/validate-runtime-root.sh"
       - "docs/DEPLOYMENT_LINUX.md"
@@ -62,7 +64,11 @@ jobs:
         run: |
           bash -n scripts/materialize-runtime-release.sh
           bash -n scripts/materialize-runtime-release.test.sh
+          bash -n scripts/materialization-source-fence.test.sh
           node --check scripts/smoke-materialized-runtime.mjs
+
+      - name: Prove source cleanup is fenced during materialization
+        run: bash scripts/materialization-source-fence.test.sh
 
       - name: Prove portable release survives source removal and restart
         run: bash scripts/materialize-runtime-release.test.sh

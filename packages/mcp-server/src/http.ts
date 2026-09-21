@@ -38,8 +38,18 @@ export interface LegacySessionEvictionEvent {
 }
 const DEFAULT_MAX_LEGACY_SESSIONS = 64;
 
+export interface UnifiedBuildProvenance {
+  readonly version: string;
+  readonly buildVersion: string;
+  readonly buildCommit: string;
+  readonly buildShortCommit: string;
+  readonly buildTime: string;
+  readonly buildDirty: boolean;
+}
+
 export interface McpHttpServerOptions extends McpServerOptions {
   readonly port: number;
+  readonly buildProvenance?: UnifiedBuildProvenance;
   readonly maxBodyBytes?: number;
   readonly originPolicy?: OriginPolicy;
   readonly allowedHostnames?: readonly string[];
@@ -409,6 +419,7 @@ async function handleRequest(
   originPolicy: OriginPolicy,
   maxBodyBytes: number,
   allowedHostnames: readonly string[],
+  buildProvenance?: UnifiedBuildProvenance,
 ): Promise<void> {
   const requestedPath = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
   if (requestedPath !== '/mcp' && requestedPath !== UNIFIED_MPC_MCP_IDENTITY_PATH) {
@@ -435,15 +446,24 @@ async function handleRequest(
       sendStatus(response, 405, 'Method not allowed');
       return;
     }
-    await writeFetchResponse(response, Response.json({
+    const identity = {
       product: APP_NAME,
       service: 'desktop-mcp',
       protocol: 1,
       version: APP_VERSION,
-    }, {
+      ...(buildProvenance === undefined ? {} : {
+        buildVersion: buildProvenance.buildVersion,
+        buildCommit: buildProvenance.buildCommit,
+        buildShortCommit: buildProvenance.buildShortCommit,
+        buildTime: buildProvenance.buildTime,
+        buildDirty: buildProvenance.buildDirty,
+      }),
+    };
+    await writeFetchResponse(response, Response.json(identity, {
       headers: {
         'cache-control': 'no-store',
         'x-unified-mpc-service': 'desktop-mcp',
+        ...(buildProvenance === undefined ? {} : { 'x-unified-mpc-build': buildProvenance.buildShortCommit }),
       },
     }));
     return;
@@ -485,7 +505,7 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
     const allowedHostnames = [...new Set([...localhostAllowedHostnames(), ...(configuredHostnames() ?? [])])];
     const allowedOrigins = [...new Set([...localhostAllowedOrigins(), ...(configuredOrigins() ?? [])])];
     const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(allowedOrigins);
-    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames).catch((error: unknown) => {
+    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames, options.buildProvenance).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();

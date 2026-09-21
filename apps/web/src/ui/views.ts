@@ -37,7 +37,7 @@ export function renderDashboardViewsHtml(): string {
       <section>
         <div class="card">
           <div class="card-header">
-            <h2>Subsystem Status & Downstream Servers</h2>
+            <h2>Control Plane & Gateway Status</h2>
             <button class="btn btn-secondary btn-sm" id="refresh-status-btn">Refresh</button>
           </div>
           <div id="servers-telemetry" class="mono" style="font-size: 12px; color: var(--text-secondary);">
@@ -157,13 +157,13 @@ export function renderDashboardViewsHtml(): string {
     </div>
   </div>
 
-  <!-- VIEW: PROJECTS / ACTIVE WORKSPACE SET -->
+  <!-- VIEW: PROJECTS / PROJECT CONTEXT -->
   <div class="view-panel" id="view-projects">
     <div class="card">
       <div class="filter-bar">
         <div>
-          <h2 style="margin-bottom: 4px;">Projects & Active Workspace Set</h2>
-          <p style="font-size: 12px; color: var(--text-secondary);">Only registered project roots can be activated. The Primary Project is the default implicit project; active projects remain independently guarded by workspace containment.</p>
+          <h2 style="margin-bottom: 4px;">Projects & Web Context</h2>
+          <p style="font-size: 12px; color: var(--text-secondary);">Scope and Default control the implicit Web context only. They do not mean Running, and changing them does not start, pause, or cancel project execution. Registered project roots remain independently guarded by workspace containment.</p>
         </div>
         <button class="btn btn-secondary btn-sm" id="projects-refresh-btn" type="button">Refresh</button>
       </div>
@@ -173,8 +173,8 @@ export function renderDashboardViewsHtml(): string {
             <tr>
               <th>Project</th>
               <th>Path</th>
-              <th>Active</th>
-              <th>Primary</th>
+              <th>Scope</th>
+              <th>Default</th>
               <th>Goals</th>
               <th>Actions</th>
             </tr>

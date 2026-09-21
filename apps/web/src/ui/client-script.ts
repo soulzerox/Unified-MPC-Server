@@ -106,7 +106,7 @@ export function getClientScriptJs(): string {
           if (tel) {
             tel.innerHTML =
               '<div style="line-height: 1.8;">' +
-              '<div>Status: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
+              '<div>Control Plane Reachability: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
               '<div>Gateway State: ' + (data.gateway?.state || 'STOPPED') + '</div>' +
               '<div>Local Loopback Port: ' + (data.gateway?.localPort || 18765) + '</div>' +
               '</div>';
@@ -392,8 +392,8 @@ export function getClientScriptJs(): string {
           const row = document.createElement('tr');
           addCell(row, workspace.displayName || workspace.id);
           addCell(row, workspace.realRootPath || workspace.rootPath || '', 'mono');
-          addCell(row, active ? 'Active' : 'Inactive');
-          addCell(row, primary ? 'Primary' : '—');
+          addCell(row, active ? 'In Scope' : 'Out of Scope');
+          addCell(row, primary ? 'Default' : '—');
 
           const goalsCell = document.createElement('td');
           if (openGoalCount <= 0) {
@@ -413,7 +413,7 @@ export function getClientScriptJs(): string {
               const selected = document.createElement('span');
               selected.className = 'badge badge-optional';
               selected.style.marginLeft = '6px';
-              selected.textContent = 'Selected';
+              selected.textContent = 'Preferred';
               goalsCell.appendChild(selected);
             }
           }
@@ -423,9 +423,9 @@ export function getClientScriptJs(): string {
           const activeButton = document.createElement('button');
           activeButton.type = 'button';
           activeButton.className = active ? 'btn btn-secondary btn-sm' : 'btn btn-sm';
-          activeButton.textContent = active ? 'Deactivate' : 'Activate';
+          activeButton.textContent = active ? 'Remove from Scope' : 'Add to Scope';
           activeButton.disabled = primary;
-          activeButton.title = primary ? 'Choose another Primary Project before deactivating this project' : '';
+          activeButton.title = primary ? 'Choose another Default Project before removing this project from the Web context' : 'Selection scope does not start, pause, or cancel project execution';
           activeButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, active ? 'deactivate' : 'activate'));
           action.appendChild(activeButton);
           if (!primary) {
@@ -433,7 +433,7 @@ export function getClientScriptJs(): string {
             primaryButton.type = 'button';
             primaryButton.className = 'btn btn-secondary btn-sm';
             primaryButton.style.marginLeft = '8px';
-            primaryButton.textContent = 'Make Primary';
+            primaryButton.textContent = 'Set Default';
             primaryButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, 'primary'));
             action.appendChild(primaryButton);
           }
@@ -441,8 +441,8 @@ export function getClientScriptJs(): string {
           removeButton.type = 'button';
           removeButton.className = 'btn btn-secondary btn-sm';
           removeButton.style.marginLeft = '8px';
-          removeButton.textContent = 'Remove';
-          removeButton.title = 'Remove this project from Unified-MPC without deleting its source directory';
+          removeButton.textContent = 'Unregister';
+          removeButton.title = 'Unregister this project from Unified-MPC without deleting its source directory or implying runtime cancellation';
           removeButton.addEventListener('click', () => removeWorkspace(workspace.id, workspace.displayName || workspace.id));
           action.appendChild(removeButton);
           row.appendChild(action);
@@ -505,7 +505,7 @@ export function getClientScriptJs(): string {
           const preferred = document.createElement('span');
           preferred.className = 'badge badge-healthy';
           preferred.style.marginLeft = '6px';
-          preferred.textContent = 'Selected to continue';
+          preferred.textContent = 'Preferred goal';
           title.appendChild(preferred);
         }
         header.appendChild(title);
@@ -550,8 +550,8 @@ export function getClientScriptJs(): string {
         continueButton.type = 'button';
         continueButton.className = 'btn btn-sm goal-continue-btn';
         continueButton.disabled = preferredGoalId === goal.goalId;
-        continueButton.textContent = preferredGoalId === goal.goalId ? 'Selected' : 'Continue';
-        continueButton.title = 'Select this goal for workspace continuation without taking its execution lease';
+        continueButton.textContent = preferredGoalId === goal.goalId ? 'Preferred' : 'Select Goal';
+        continueButton.title = 'Select this goal as the preferred continuation target. This does not start execution or take its execution lease';
         continueButton.addEventListener('click', () => continueWorkspaceGoal(workspaceId, goal.goalId));
         actions.appendChild(continueButton);
 
@@ -638,7 +638,7 @@ export function getClientScriptJs(): string {
           const current = workspaceGoals.get(workspaceId);
           if (current) workspaceGoals.set(workspaceId, { ...current, preferredGoalId: data.preferredGoalId || goalId });
           renderWorkspaces();
-          showToast('Goal selected for continuation');
+          showToast('Preferred goal updated; execution was not started');
           logEvent('SUCCESS', 'Preferred goal selected for ' + workspaceId + ': ' + (data.goal.goalKey || goalId));
         } catch (err) {
           showToast('Goal selection failed: ' + err.message, true);
@@ -655,7 +655,7 @@ export function getClientScriptJs(): string {
           if (!res.ok || !data.selection) throw new Error(errorMessage(data, 'Workspace selection failed'));
           workspaceSelection = data.selection;
           renderWorkspaces();
-          showToast(operation === 'primary' ? 'Primary Project updated' : 'Active Projects updated');
+          showToast(operation === 'primary' ? 'Default Project updated' : 'Project scope updated');
           logEvent('SUCCESS', 'Workspace selection updated for ' + workspaceId + ' (' + operation + ')');
         } catch (err) {
           showToast('Project update failed: ' + err.message, true);
@@ -664,7 +664,7 @@ export function getClientScriptJs(): string {
       }
 
       async function removeWorkspace(workspaceId, displayName) {
-        const confirmed = window.confirm('Remove "' + displayName + '" from Unified-MPC? The source directory will not be deleted.');
+        const confirmed = window.confirm('Unregister "' + displayName + '" from Unified-MPC? The source directory will not be deleted, and this action is not a runtime cancel command.');
         if (!confirmed) return;
         try {
           const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId);
@@ -672,7 +672,7 @@ export function getClientScriptJs(): string {
           const data = await res.json();
           if (!res.ok) throw new Error(errorMessage(data, 'Project removal failed'));
           await loadWorkspaces();
-          showToast('Project removed from Unified-MPC');
+          showToast('Project unregistered from Unified-MPC');
           logEvent('SUCCESS', 'Workspace registration removed for ' + workspaceId + '; source files were not deleted');
         } catch (err) {
           showToast('Project removal failed: ' + err.message, true);

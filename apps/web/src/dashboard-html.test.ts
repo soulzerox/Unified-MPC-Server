@@ -34,7 +34,7 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('/api/chatgpt-web/connect');
   });
 
-  it('renders project goals collapsed by default and lazy-loads them with Continue/Open actions', () => {
+  it('renders project goals collapsed by default and lazy-loads them with explicit selection/Open actions', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('project-goals-toggle');
     expect(html).toContain('loadWorkspaceGoals');
@@ -42,7 +42,33 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("'/continue'");
     expect(html).toContain('goal-continue-btn');
     expect(html).toContain('goal-open-btn');
+    expect(html).toContain('Select Goal');
     expect(html).toContain('No open goals');
+  });
+
+  it('separates Web project context from runtime execution semantics', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('Projects & Web Context');
+    expect(html).toContain('Scope and Default control the implicit Web context only');
+    expect(html).toContain('In Scope');
+    expect(html).toContain('Out of Scope');
+    expect(html).toContain('Add to Scope');
+    expect(html).toContain('Remove from Scope');
+    expect(html).toContain('Set Default');
+    expect(html).toContain('Unregister');
+    expect(html).not.toContain('Make Primary');
+    expect(html).not.toContain("active ? 'Active' : 'Inactive'");
+  });
+
+  it('does not present generic control-plane reachability or static topology as subsystem health', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('Control Plane & Gateway Status');
+    expect(html).toContain('Control Plane Reachability');
+    expect(html).toContain('Control Plane Architecture');
+    expect(html).toContain('MCP Clients');
+    expect(html).toContain('Web / CLI / IDEs');
+    expect(html).not.toContain('Subsystem Status & Downstream Servers');
+    expect(html).not.toContain('Obsidian Control Plane Topology');
   });
 
   it('renders a user-editable P1-Pn policy editor with reorder and save controls', () => {

@@ -3,8 +3,7 @@ export function renderCanvasTopologySvg(): string {
   <div class="canvas-card" id="topology-canvas-container">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
       <div style="display: flex; align-items: center; gap: 8px;">
-        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--status-healthy); box-shadow: 0 0 6px var(--status-healthy);"></span>
-        <span style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary);">Obsidian Control Plane Topology</span>
+        <span style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary);">Control Plane Architecture</span>
       </div>
       <div class="mono" style="font-size: 11px; color: var(--text-muted);">
         Loopback Boundary: <span style="color: var(--text-primary);">127.0.0.1:18765</span> &bull; Full Bypass Guard
@@ -60,15 +59,15 @@ export function renderCanvasTopologySvg(): string {
       <g transform="translate(20, 35)">
         <rect width="110" height="50" rx="5" fill="#111318" stroke="#1F2430" stroke-width="1" />
         <circle cx="15" cy="25" r="4" fill="#3B82F6" />
-        <text x="26" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#E8EAED">IDE Clients</text>
-        <text x="26" y="36" font-family="sans-serif" font-size="9" fill="#9AA0AE">Cursor / Claude</text>
+        <text x="26" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#E8EAED">MCP Clients</text>
+        <text x="26" y="36" font-family="sans-serif" font-size="9" fill="#9AA0AE">Web / CLI / IDEs</text>
       </g>
 
       <g transform="translate(20, 125)">
         <rect width="110" height="50" rx="5" fill="#111318" stroke="#1F2430" stroke-width="1" />
         <circle cx="15" cy="25" r="4" fill="#3B82F6" />
-        <text x="26" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#E8EAED">VS Code / Wind</text>
-        <text x="26" y="36" font-family="sans-serif" font-size="9" fill="#9AA0AE">Native Loopback</text>
+        <text x="26" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#E8EAED">Host Adapters</text>
+        <text x="26" y="36" font-family="sans-serif" font-size="9" fill="#9AA0AE">Cline / OpenCode +</text>
       </g>
 
       <!-- CENTER NODE: Unified-MPC-Server Control Plane Core -->

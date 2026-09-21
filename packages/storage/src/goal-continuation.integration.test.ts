@@ -150,7 +150,7 @@ describe('durable goal continuation persistence', () => {
         executionGeneration: 2,
       },
     });
-    if (!resumed.ok) throw new Error('goal resume failed');
+    if (!resumed.ok || resumed.value.executionId === undefined) throw new Error('goal resume failed');
     expect(resumed.value.executionId).not.toBe(executionId);
     expect(resumed.value.leaseToken).not.toBe(leaseToken);
     await expect(second.service.getGoal(actor('session-c'), { goalId })).resolves.toMatchObject({
@@ -160,18 +160,37 @@ describe('durable goal continuation persistence', () => {
         executionGeneration: 2,
       },
     });
-    const executionRows = second.database.connection.prepare(`
-      SELECT id, goal_id, lease_generation, owner_client_id, owner_session_id
-      FROM goal_executions
-      WHERE goal_id = ?
-      ORDER BY lease_generation ASC
-    `).all(goalId);
-    expect(executionRows).toEqual([
-      expect.objectContaining({ id: executionId, goal_id: goalId, lease_generation: 1 }),
-      expect.objectContaining({ id: resumed.value.executionId, goal_id: goalId, lease_generation: 2 }),
+    const executions = await second.repository.listGoalExecutions({ goalId, limit: 20 });
+    expect(executions).toEqual([
+      expect.objectContaining({
+        id: resumed.value.executionId,
+        goalId,
+        workspaceId: workspace.id,
+        executionGeneration: 2,
+        leaseGeneration: 2,
+        receiptState: 'active',
+      }),
+      expect.objectContaining({
+        id: executionId,
+        goalId,
+        workspaceId: workspace.id,
+        executionGeneration: 1,
+        leaseGeneration: 1,
+        receiptState: 'superseded',
+      }),
     ]);
-    expect(JSON.stringify(executionRows)).not.toContain(String(leaseToken));
-    expect(JSON.stringify(executionRows)).not.toContain(String(resumed.value.leaseToken));
+    await expect(second.repository.getExecutionById(resumed.value.executionId)).resolves.toMatchObject({
+      id: resumed.value.executionId,
+      goalId,
+      executionGeneration: 2,
+      receiptState: 'active',
+    });
+    await expect(second.repository.getExecutionById('missing-execution')).resolves.toBeNull();
+    await expect(second.repository.listGoalExecutions({ goalId, limit: 1 })).resolves.toEqual([
+      expect.objectContaining({ id: resumed.value.executionId, executionGeneration: 2 }),
+    ]);
+    expect(JSON.stringify(executions)).not.toContain(String(leaseToken));
+    expect(JSON.stringify(executions)).not.toContain(String(resumed.value.leaseToken));
     second.database.close();
   });
 

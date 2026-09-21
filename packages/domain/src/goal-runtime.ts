@@ -76,6 +76,40 @@ export const GOAL_BLOCKER_KINDS = [
 ] as const;
 export type GoalBlockerKind = typeof GOAL_BLOCKER_KINDS[number];
 
+export const GOAL_EXECUTION_RECEIPT_STATES = [
+  'active',
+  'released',
+  'superseded',
+  'terminal',
+] as const;
+export type GoalExecutionReceiptState = typeof GOAL_EXECUTION_RECEIPT_STATES[number];
+
+export interface GoalExecutionRecord {
+  readonly id: string;
+  readonly goalId: string;
+  readonly workspaceId: string;
+  /** Concrete execution attempt/generation exposed to runtime consumers. */
+  readonly executionGeneration: number;
+  /** Lease fence generation backing this execution attempt. */
+  readonly leaseGeneration: number;
+  readonly ownerClientId: string;
+  readonly ownerSessionId: string;
+  readonly receiptState: GoalExecutionReceiptState;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ListGoalExecutionsRequest {
+  readonly goalId: string;
+  readonly limit: number;
+}
+
+/** Parent-owned execution history store. It reuses #64 receipts rather than creating a second execution database. */
+export interface GoalExecutionRepository {
+  getExecutionById(executionId: string): Promise<GoalExecutionRecord | null>;
+  listGoalExecutions(request: ListGoalExecutionsRequest): Promise<readonly GoalExecutionRecord[]>;
+}
+
 export type GoalRuntimeProgressStepState =
   | 'pending'
   | 'running'
@@ -150,4 +184,8 @@ export function isGoalWorkspaceState(value: unknown): value is GoalWorkspaceStat
 
 export function isGoalBlockerKind(value: unknown): value is GoalBlockerKind {
   return typeof value === 'string' && (GOAL_BLOCKER_KINDS as readonly string[]).includes(value);
+}
+
+export function isGoalExecutionReceiptState(value: unknown): value is GoalExecutionReceiptState {
+  return typeof value === 'string' && (GOAL_EXECUTION_RECEIPT_STATES as readonly string[]).includes(value);
 }

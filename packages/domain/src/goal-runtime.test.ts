@@ -3,6 +3,7 @@ import {
   GOAL_RUNTIME_CONTRACT_VERSION,
   isGoalBlockerKind,
   isGoalDesiredRuntimeState,
+  isGoalExecutionReceiptState,
   isGoalIntegrationState,
   isGoalLifecycleState,
   isGoalRuntimeState,
@@ -88,5 +89,8 @@ describe('goal runtime contracts', () => {
 
     expect(isGoalBlockerKind('worker_lost')).toBe(true);
     expect(isGoalBlockerKind('made_up')).toBe(false);
+
+    expect(isGoalExecutionReceiptState('superseded')).toBe(true);
+    expect(isGoalExecutionReceiptState('running')).toBe(false);
   });
 });

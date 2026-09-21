@@ -12,6 +12,7 @@ import {
   GoalRequestCancellationService,
   GoalTaskCancellationService,
   GoalMutationFenceService,
+  GoalRuntimeReconciliationService,
   ScheduledContinuationService,
   ProcessService,
   ProjectService,
@@ -48,6 +49,8 @@ import {
   SqliteCheckpointRepository,
   SqliteDatabase,
   SqliteGoalRepository,
+  SqliteGoalRuntimeEventRepository,
+  SqliteGoalRuntimeSnapshotRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
@@ -214,7 +217,7 @@ export function createStdioMcpRuntime(
     recoverableDelete: (): boolean => destructivePolicyProvider().recoverableDelete,
     recoveryTrashRoot: path.join(dataPath, 'recovery-trash'),
   });
-  const recoveryReady = fileService.reconcileRecoveryItemsForWorkspace(workspace).then((result) => {
+  const fileRecoveryReady = fileService.reconcileRecoveryItemsForWorkspace(workspace).then((result) => {
     if (!result.ok) throw new Error(result.error.message);
     const unsafe = result.value.entries.filter((entry) => entry.state !== 'moved');
     if (unsafe.length > 0) throw new Error(`Recovery reconciliation found unsafe entries: ${unsafe.length}`);
@@ -258,6 +261,19 @@ export function createStdioMcpRuntime(
     workerLiveness: goalMutationFence,
     workspaceIsActive: async (workspaceId: string): Promise<boolean> => (await workspaceRepository.get(workspaceId)) !== null,
   });
+  const goalRuntimeReconciliation = new GoalRuntimeReconciliationService(
+    goalRepository,
+    new SqliteGoalRuntimeSnapshotRepository(database),
+    new SqliteGoalRuntimeEventRepository(database),
+    goalRepository,
+    goalMutationFence,
+  );
+  const goalRuntimeRecoveryReady = (async (): Promise<void> => {
+    for (const activeWorkspace of await activeWorkspaces()) {
+      await goalRuntimeReconciliation.reconcileWorkspace(activeWorkspace.id);
+    }
+  })();
+  const recoveryReady = Promise.all([fileRecoveryReady, goalRuntimeRecoveryReady]).then(() => undefined);
   const actor: FileActor = { clientId: 'cli-mcp-stdio', clientName: 'Unified-MPC-Server CLI' };
   const sharedActivityLease = createSharedActivityLease(process.env.TUNNEL_CLIENT_PROFILE_DIR);
   const activityReady = sharedActivityLease.then(async (lease) => lease?.initialize());

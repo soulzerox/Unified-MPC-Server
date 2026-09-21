@@ -91,6 +91,47 @@ export interface AppendGoalRuntimeEventResult {
   readonly record: GoalRuntimeEventRecord;
 }
 
+export interface GoalRuntimeScheduledContinuationFence {
+  readonly continuationId: string;
+  readonly version: number;
+}
+
+export interface AppendGoalRuntimeReconciliationEventRequest {
+  readonly event: ExecutionScopedRuntimeEvent;
+  readonly recordedAt: string;
+  /** Snapshot cursor that was current before liveness was probed. */
+  readonly expectedSnapshotSequence: number;
+  /** Lease fence that was current before liveness was probed. */
+  readonly expectedLeaseGeneration: number;
+  readonly expectedLeaseActivitySeq: number;
+  /** Exact live watchdog observed before the probe, or null when none existed. */
+  readonly expectedLiveScheduledContinuation: GoalRuntimeScheduledContinuationFence | null;
+}
+
+export type GoalRuntimeReconciliationConflictReason =
+  | 'goal_not_active'
+  | 'lease_changed'
+  | 'snapshot_changed'
+  | 'event_stream_advanced'
+  | 'execution_changed'
+  | 'scheduled_continuation_changed';
+
+export type AppendGoalRuntimeReconciliationEventResult =
+  | {
+      readonly disposition: 'appended' | 'duplicate';
+      readonly record: GoalRuntimeEventRecord;
+    }
+  | {
+      readonly disposition: 'concurrent_change';
+      readonly reason: GoalRuntimeReconciliationConflictReason;
+    };
+
+export interface GoalRuntimeReconciliationEventRepository {
+  appendGoalRuntimeReconciliationEvent(
+    request: AppendGoalRuntimeReconciliationEventRequest,
+  ): Promise<AppendGoalRuntimeReconciliationEventResult>;
+}
+
 export interface ReplayWorkspaceGoalRuntimeEventsRequest {
   readonly workspaceId: string;
   /** Exclusive durable cursor. Omit for the oldest currently retained event. */

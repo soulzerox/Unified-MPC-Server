@@ -39,6 +39,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PR workflows otherwise test GitHub's synthetic merge commit. Use
+          # the immutable PR head SHA so provenance and verification receipts
+          # are exact-head evidence.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-node@v4
         with:

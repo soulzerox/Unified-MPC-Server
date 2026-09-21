@@ -60,25 +60,27 @@ bash "$validator" web "$candidate" >/dev/null
 read_provenance() {
   local root="$1"
   "$node_bin" --input-type=commonjs -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    const p = JSON.parse(fs.readFileSync(path, "utf8"));
-    if (!p || typeof p !== "object") throw new Error("invalid provenance object");
-    if (typeof p.buildCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(p.buildCommit)) {
-      throw new Error("invalid buildCommit");
+    try {
+      const fs = require("fs");
+      const path = process.argv[1];
+      const p = JSON.parse(fs.readFileSync(path, "utf8"));
+      if (!p || typeof p !== "object") process.exit(2);
+      if (typeof p.version !== "string" || p.version.length === 0) process.exit(2);
+      if (typeof p.buildCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(p.buildCommit)) process.exit(2);
+      if (typeof p.buildShortCommit !== "string" || p.buildShortCommit.toLowerCase() !== p.buildCommit.slice(0, 12).toLowerCase()) process.exit(2);
+      if (typeof p.buildDirty !== "boolean") process.exit(2);
+      const expectedVersion = p.version + "+" + p.buildShortCommit + (p.buildDirty ? ".dirty" : "");
+      if (p.buildVersion !== expectedVersion) process.exit(2);
+      if (typeof p.buildTime !== "string" || Number.isNaN(Date.parse(p.buildTime))) process.exit(2);
+      process.stdout.write(p.buildCommit + "\n" + String(p.buildDirty) + "\n");
+    } catch {
+      process.exit(2);
     }
-    if (typeof p.buildShortCommit !== "string" || p.buildShortCommit.toLowerCase() !== p.buildCommit.slice(0, 12).toLowerCase()) {
-      throw new Error("invalid buildShortCommit");
-    }
-    if (typeof p.buildVersion !== "string" || !p.buildVersion.includes(p.buildShortCommit)) {
-      throw new Error("invalid buildVersion");
-    }
-    if (typeof p.buildDirty !== "boolean") throw new Error("invalid buildDirty");
-    process.stdout.write(p.buildCommit + "\n" + String(p.buildDirty) + "\n");
   ' "$root/apps/cli/dist/build-provenance.json"
 }
 
-mapfile -t candidate_provenance < <(read_provenance "$candidate") || fail 67 "RUNTIME_PROMOTION_INCOMPLETE: invalid candidate provenance"
+candidate_provenance_output="$(read_provenance "$candidate" 2>/dev/null)" || fail 67 "RUNTIME_PROMOTION_INCOMPLETE: invalid candidate provenance"
+mapfile -t candidate_provenance <<<"$candidate_provenance_output"
 candidate_commit="${candidate_provenance[0]:-}"
 candidate_dirty="${candidate_provenance[1]:-}"
 if [[ -z "$candidate_commit" || "$candidate_dirty" != "false" ]]; then
@@ -134,8 +136,10 @@ validate_rollback_target() {
 
 runtime_commit() {
   local root="$1"
+  local output
   local -a provenance
-  mapfile -t provenance < <(read_provenance "$root") || return 1
+  output="$(read_provenance "$root" 2>/dev/null)" || return 1
+  mapfile -t provenance <<<"$output"
   printf '%s\n' "${provenance[0]:-}"
 }
 

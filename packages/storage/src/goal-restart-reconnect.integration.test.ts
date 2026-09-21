@@ -110,7 +110,7 @@ describe('durable Goal restart + reconnect integration', () => {
       scheduledContinuations: first.goals,
       goalExecutions: first.goals,
       executionCancellation: first.goals,
-      now: () => startedAt,
+      now: (): Date => startedAt,
     });
     const created = await firstService.runGoal(actor('session-a'), {
       workspaceId: workspace.id,
@@ -186,7 +186,7 @@ describe('durable Goal restart + reconnect integration', () => {
       second.events,
       second.goals,
       workerLiveness,
-      { now: () => restartAt },
+      { now: (): Date => restartAt },
     );
     await expect(reconciliation.reconcileWorkspace(workspace.id)).resolves.toEqual([
       expect.objectContaining({
@@ -205,7 +205,7 @@ describe('durable Goal restart + reconnect integration', () => {
     });
 
     const reconnectService = new GoalContinuationService(second.workspaces, second.goals, {
-      now: () => restartAt,
+      now: (): Date => restartAt,
       scheduledContinuations: second.goals,
       workerLiveness,
       goalExecutions: second.goals,

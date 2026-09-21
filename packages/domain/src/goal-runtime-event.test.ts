@@ -68,12 +68,12 @@ describe('Goal runtime event generation fence', () => {
       event('execution_submitted', { executionId: 'execution-5', executionGeneration: 5 }),
     )).toEqual({ disposition: 'reject', reason: 'generation_gap' });
 
-    const empty = projection({
+    const empty = { ...projection({
       runtimeState: 'idle',
       desiredRuntimeState: 'idle',
-      activeExecutionId: undefined,
-      executionGeneration: undefined,
-    });
+    }) };
+    delete empty.activeExecutionId;
+    delete empty.executionGeneration;
     expect(classifyGoalRuntimeEvent(
       empty,
       event('execution_started', { executionId: 'execution-1', executionGeneration: 1 }),
@@ -140,6 +140,15 @@ describe('Goal runtime state transition validator', () => {
       dimension: 'runtime',
       from: 'cancelled',
       to: 'running',
+      executionGenerationChanged: true,
+    })).toEqual({ valid: true });
+  });
+
+  it('allows a newly fenced generation to replace an active runtime attempt', () => {
+    expect(validateGoalStateTransition({
+      dimension: 'runtime',
+      from: 'running',
+      to: 'queued',
       executionGenerationChanged: true,
     })).toEqual({ valid: true });
   });

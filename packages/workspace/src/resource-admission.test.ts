@@ -5,6 +5,7 @@ import {
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
   DEFAULT_RAG_INDEX_ADMISSION_COST,
   DEFAULT_GOAL_PROCESS_ADMISSION_COST,
+  DEFAULT_DELEGATED_AGENT_ADMISSION_COST,
   ResourceAdmissionController,
   sharedProcessResourceAdmissionController,
   tryAdmitChildMcpCall,
@@ -13,6 +14,7 @@ import {
   tryAdmitLspProcess,
   tryAdmitRagIndex,
   tryAdmitGoalProcess,
+  tryAdmitDelegatedAgent,
 } from './resource-admission.js';
 import type { ResourcePressureProbe } from './resource-pressure.js';
 
@@ -255,6 +257,47 @@ describe('resource admission contract', () => {
       activeCostByClass: { goal_process: 16 },
     });
     if (!first.admitted || !otherWorkspace.admitted) throw new Error('expected independent Goal processes');
+    expect(controller.release(first.lease)).toBe(true);
+    expect(controller.release(otherWorkspace.lease)).toBe(true);
+  });
+
+  it('bounds delegated agent workers per workspace while preserving cross-workspace progress', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { delegated_agent: 16 },
+    });
+
+    const first = tryAdmitDelegatedAgent(controller, {
+      operationId: 'delegated-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_DELEGATED_AGENT_ADMISSION_COST,
+    });
+    const sameWorkspace = tryAdmitDelegatedAgent(controller, {
+      operationId: 'delegated-a-2',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-b',
+      cost: 1,
+    });
+    const otherWorkspace = tryAdmitDelegatedAgent(controller, {
+      operationId: 'delegated-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_DELEGATED_AGENT_ADMISSION_COST,
+    });
+
+    expect(first).toMatchObject({ admitted: true, lease: { resourceClass: 'delegated_agent', cost: 8 } });
+    expect(sameWorkspace).toMatchObject({ admitted: false, code: 'RESOURCE_PRESSURE', reason: 'workspace_cost_exhausted' });
+    expect(otherWorkspace).toMatchObject({ admitted: true, lease: { resourceClass: 'delegated_agent', cost: 8 } });
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 16,
+      activeOperations: 2,
+      activeCostByClass: { delegated_agent: 16 },
+    });
+    if (!first.admitted || !otherWorkspace.admitted) throw new Error('expected independent delegated workers');
     expect(controller.release(first.lease)).toBe(true);
     expect(controller.release(otherWorkspace.lease)).toBe(true);
   });

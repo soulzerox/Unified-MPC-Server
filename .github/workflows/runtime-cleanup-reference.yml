@@ -9,6 +9,8 @@ on:
       - "packages/mcp-server/src/upgrade-runtime.ts"
       - "packages/mcp-server/src/upgrade-runtime-concurrency.test.ts"
       - "packages/mcp-server/src/tools/tool-types.ts"
+      - "scripts/materialize-runtime-release.sh"
+      - "scripts/materialization-source-fence.test.sh"
       - ".github/workflows/runtime-cleanup-reference.yml"
   push:
     branches:
@@ -20,6 +22,8 @@ on:
       - "packages/mcp-server/src/upgrade-runtime.ts"
       - "packages/mcp-server/src/upgrade-runtime-concurrency.test.ts"
       - "packages/mcp-server/src/tools/tool-types.ts"
+      - "scripts/materialize-runtime-release.sh"
+      - "scripts/materialization-source-fence.test.sh"
       - ".github/workflows/runtime-cleanup-reference.yml"
 
 permissions:
@@ -46,6 +50,9 @@ jobs:
 
       - name: Build MCP transitive dependency closure
         run: corepack pnpm --filter '@unified-mpc/mcp-server^...' build
+
+      - name: Materialization source Git fence
+        run: bash scripts/materialization-source-fence.test.sh
 
       - name: Runtime deployment reference unit tests
         run: corepack pnpm --filter @unified-mpc/workspace exec vitest run src/runtime-deployment-reference.test.ts

@@ -98,6 +98,20 @@ mkdir -p "$stage_root/apps"
 bash "$validator" mcp-http "$stage_root" >/dev/null
 bash "$validator" web "$stage_root" >/dev/null
 
+# pnpm's legacy deploy can leave one metadata-only self-reference for the
+# deployed package itself. It is not a runtime dependency, but if retained it
+# would keep the release coupled to the source worktree. Remove only that
+# exact self-link when it resolves back to this source package; any other
+# escaping symlink remains a hard portability failure below.
+pnpm_self_link="$stage_root/apps/cli/node_modules/.pnpm/node_modules/@unified-mpc/cli"
+if [[ -L "$pnpm_self_link" ]]; then
+  pnpm_self_target="$(readlink -f -- "$pnpm_self_link" 2>/dev/null || true)"
+  expected_self_target="$(readlink -f -- "$source_root/apps/cli" 2>/dev/null || true)"
+  if [[ -n "$pnpm_self_target" && "$pnpm_self_target" == "$expected_self_target" ]]; then
+    rm -f -- "$pnpm_self_link"
+  fi
+fi
+
 deployed_provenance="$stage_root/apps/cli/dist/build-provenance.json"
 deployed_commit="$("$node_bin" --input-type=commonjs -e '
   const fs = require("fs");

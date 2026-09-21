@@ -854,6 +854,29 @@ export class UpgradeRuntimeService {
     const cacheMisses = verification.misses + Math.max(0, contextEconomy.filesDelivered - contextEconomy.ledgerHits);
     const cacheHitRate = cacheHits + cacheMisses === 0 ? 0 : cacheHits / (cacheHits + cacheMisses);
     const runtimeTelemetry = this.activityTracker?.telemetrySnapshot();
+    const memory = process.memoryUsage();
+    const processMemory = {
+      rssBytes: memory.rss,
+      heapTotalBytes: memory.heapTotal,
+      heapUsedBytes: memory.heapUsed,
+      externalBytes: memory.external,
+      arrayBuffersBytes: memory.arrayBuffers,
+    };
+    const runtimeDiagnostics = this.services.runtimeDiagnostics?.();
+    const runtimeRetention = {
+      tasks: this.tasks.size,
+      checkpoints: this.checkpoints.length,
+      hooks: this.hooks.size,
+      plugins: this.plugins.size,
+      sessionEntries: this.session.size,
+      worktrees: this.worktrees.length,
+      activityInflight: runtimeTelemetry?.active ?? 0,
+      activityCompletedEntries: runtimeTelemetry?.retainedCompletedEntries ?? 0,
+      activityCompletedEntryLimit: runtimeTelemetry?.maxRetainedCompletedEntries ?? 0,
+      incrementalVerificationEntries: verification.entries,
+      contextLedgerEntries: contextEconomy.ledgerEntries,
+      toolAvailabilitySubscriptions: runtimeDiagnostics?.toolAvailabilitySubscriptions ?? 0,
+    };
     if (runtimeTelemetry !== undefined) {
       return ok({
         tool: 'telemetry_dashboard', status: 'ready', available: true, ready: true, executed: true,
@@ -872,6 +895,8 @@ export class UpgradeRuntimeService {
         batchPartialFailures: runtimeTelemetry.batchPartialFailures,
         taskLifecycleCalls: runtimeTelemetry.taskLifecycleCalls,
         recentErrorClasses: runtimeTelemetry.recentErrorClasses,
+        processMemory,
+        runtimeRetention,
         cache: { hits: cacheHits, misses: cacheMisses, hitRate: cacheHitRate, entries: verification.entries + contextEconomy.ledgerEntries, bytesSaved: verification.bytesSaved + contextEconomy.previouslySeenBytesAvoided },
         cacheHitRate,
         contextBytes: contextEconomy.contextSentBytes,
@@ -885,6 +910,7 @@ export class UpgradeRuntimeService {
       return ok({
         tool: 'telemetry_dashboard', status: 'ready', available: true, ready: true, executed: true,
         source: 'runtime-counters', mcpCalls: 0, completedCalls: 0, errors: 0, averageLatencyMs: 0, p95LatencyMs: 0,
+        processMemory, runtimeRetention,
         cacheHitRate: hitRate(this.cache), contextBytes: contextEconomy.contextSentBytes,
         filesScanned: contextEconomy.filesDiscovered, filesDelivered: contextEconomy.filesDelivered,
         contextEconomy,
@@ -916,6 +942,7 @@ export class UpgradeRuntimeService {
       mcpCalls: Math.max(started, completed.length), completedCalls: completed.length, errors,
       averageLatencyMs: completed.length === 0 ? 0 : Number((totalDuration / completed.length).toFixed(2)),
       p95LatencyMs: p95Index < 0 ? 0 : durations[p95Index],
+      processMemory, runtimeRetention,
       cacheHitRate: hitRate(this.cache), contextBytes: contextEconomy.contextSentBytes,
       filesScanned: contextEconomy.filesDiscovered, filesDelivered: contextEconomy.filesDelivered,
       contextEconomy,

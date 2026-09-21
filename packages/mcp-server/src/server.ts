@@ -192,13 +192,26 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     syncRegisteredToolAvailability();
   });
   if (unsubscribeToolAvailability !== undefined) {
-    const closeServer = server.close.bind(server);
     let availabilitySubscriptionClosed = false;
+    const closeAvailabilitySubscription = (): void => {
+      if (availabilitySubscriptionClosed) return;
+      availabilitySubscriptionClosed = true;
+      unsubscribeToolAvailability();
+    };
+
+    // Modern HTTP serving closes the low-level protocol server after each
+    // request exchange without necessarily calling the high-level McpServer
+    // wrapper close(). Chain that lifecycle so per-request subscriptions do
+    // not retain the registered tool graph after the exchange completes.
+    const previousProtocolOnClose = server.server.onclose;
+    server.server.onclose = (): void => {
+      closeAvailabilitySubscription();
+      previousProtocolOnClose?.();
+    };
+
+    const closeServer = server.close.bind(server);
     server.close = async (): Promise<void> => {
-      if (!availabilitySubscriptionClosed) {
-        availabilitySubscriptionClosed = true;
-        unsubscribeToolAvailability();
-      }
+      closeAvailabilitySubscription();
       await closeServer();
     };
   }

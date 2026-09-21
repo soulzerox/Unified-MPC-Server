@@ -26,6 +26,41 @@ describe('upgrade runtime', () => {
     expect(UPGRADE_TOOL_CATALOG.some((entry) => entry.name === 'context_economy_stats')).toBe(true);
   });
 
+  it('reports process memory and bounded runtime retention diagnostics', async () => {
+    const runtime = new UpgradeRuntimeService({
+      runtimeDiagnostics: (): { readonly toolAvailabilitySubscriptions: number } => ({ toolAvailabilitySubscriptions: 3 }),
+    }, actor);
+    const result = await runtime.execute('telemetry_dashboard', {});
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        processMemory: {
+          rssBytes: expect.any(Number),
+          heapTotalBytes: expect.any(Number),
+          heapUsedBytes: expect.any(Number),
+          externalBytes: expect.any(Number),
+          arrayBuffersBytes: expect.any(Number),
+        },
+        runtimeRetention: {
+          tasks: 0,
+          checkpoints: 0,
+          hooks: 0,
+          plugins: 0,
+          sessionEntries: 0,
+          worktrees: 0,
+          activityInflight: 0,
+          activityCompletedEntries: 0,
+          activityCompletedEntryLimit: 0,
+          incrementalVerificationEntries: 0,
+          contextLedgerEntries: 0,
+          toolAvailabilitySubscriptions: 3,
+        },
+      },
+    });
+    if (result.ok) expect(result.value.processMemory.rssBytes).toBeGreaterThan(0);
+  });
+
   // The registry smoke invokes the complete phase catalog through every normal
   // boundary. Keep enough headroom for slower Windows/CI runners while still
   // failing a genuinely stuck registry invocation.

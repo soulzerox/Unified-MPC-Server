@@ -96,6 +96,8 @@ export interface McpApplicationServices {
   readonly platform?: NodeJS.Platform;
   readonly runtimeStatePath?: string;
   readonly runtimeTiming?: () => McpRuntimeTiming;
+  /** Lightweight process/runtime cardinalities for diagnostics only; must stay bounded and side-effect free. */
+  readonly runtimeDiagnostics?: () => { readonly toolAvailabilitySubscriptions: number };
   /** Test-only deterministic override for Windows Sandbox discovery; production runtimes leave this undefined. */
   readonly sandboxRuntimeOptions?: { readonly platform?: NodeJS.Platform; readonly sandboxExecutable?: string };
   /** Test-only deterministic override for native event-log queries; production runtimes leave this undefined. */

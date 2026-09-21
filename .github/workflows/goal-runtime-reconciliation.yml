@@ -55,6 +55,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Build CLI dependency closure
+        run: pnpm --filter @unified-mpc/cli build
+
       - name: Domain runtime projection regression
         run: >-
           pnpm --filter @unified-mpc/domain exec vitest run
@@ -77,9 +80,6 @@ jobs:
 
       - name: STDIO runtime regression
         run: pnpm --filter @unified-mpc/cli exec vitest run src/runtime/stdio-mcp-runtime.test.ts
-
-      - name: Build CLI dependency closure
-        run: pnpm --filter @unified-mpc/cli build
 
       - name: Targeted typecheck
         run: |

@@ -2,10 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { GoalRuntimeEvent } from '@unified-mpc/domain';
 import { SqliteDatabase } from './database.js';
 import { SqliteGoalRepository } from './goal-repository.js';
-import {
-  GoalRuntimeEventStoreError,
-  SqliteGoalRuntimeEventRepository,
-} from './goal-runtime-event-repository.js';
+import { SqliteGoalRuntimeEventRepository } from './goal-runtime-event-repository.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
 
 const now = '2026-09-21T12:30:00.000Z';
@@ -77,8 +74,27 @@ describe('SqliteGoalRuntimeEventRepository', () => {
       await expect(runtime.events.appendGoalRuntimeEvent({
         event: { ...event, detail: 'different content' },
         recordedAt: now,
-      })).rejects.toMatchObject<Partial<GoalRuntimeEventStoreError>>({
+      })).rejects.toMatchObject({
         reason: 'event_id_conflict',
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
+  it('rejects events whose execution generation does not match the durable receipt', async () => {
+    const runtime = await fixture();
+    try {
+      const mismatched = {
+        ...executionEvent('event-wrong-generation', runtime.executionId, 'execution_started'),
+        executionGeneration: 2,
+      };
+      await expect(runtime.events.appendGoalRuntimeEvent({
+        event: mismatched,
+        recordedAt: now,
+      })).rejects.toMatchObject({
+        reason: 'invalid_event',
+        message: expect.stringContaining('generation'),
       });
     } finally {
       runtime.database.close();

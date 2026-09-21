@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GOAL_RUNTIME_CONTRACT_VERSION,
   projectGoalRuntimeEvent,
+  type ExecutionScopedRuntimeEvent,
   type GoalRuntimeEvent,
   type GoalRuntimeProjection,
 } from './index.js';
@@ -20,9 +21,9 @@ const base = (overrides: Partial<GoalRuntimeProjection> = {}): GoalRuntimeProjec
 });
 
 const executionEvent = (
-  type: Extract<GoalRuntimeEvent, { executionId: string }>['type'],
-  overrides: Partial<Extract<GoalRuntimeEvent, { executionId: string }>> = {},
-): Extract<GoalRuntimeEvent, { executionId: string }> => ({
+  type: ExecutionScopedRuntimeEvent['type'],
+  overrides: Partial<ExecutionScopedRuntimeEvent> = {},
+): ExecutionScopedRuntimeEvent => ({
   eventId: `event-${type}`,
   type,
   workspaceId: 'workspace-1',

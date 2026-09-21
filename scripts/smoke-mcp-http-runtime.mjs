@@ -17,6 +17,13 @@ const gitHead = gitHeadResult.stdout.trim();
 if (provenance.buildCommit !== gitHead) {
   throw new Error(`Built provenance is stale: artifact=${provenance.buildCommit} checkout=${gitHead}`);
 }
+const gitStatusResult = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' });
+if (gitStatusResult.error !== undefined || gitStatusResult.status !== 0) {
+  throw new Error(`Unable to inspect checkout cleanliness for runtime smoke: ${gitStatusResult.stderr || gitStatusResult.error?.message || 'unknown error'}`);
+}
+if (gitStatusResult.stdout.trim().length === 0 && provenance.buildDirty !== false) {
+  throw new Error('Clean checkout produced provenance marked dirty');
+}
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-smoke-'));
 const workspace = path.join(temporaryRoot, 'workspace');
 const dataRoot = path.join(temporaryRoot, 'data');

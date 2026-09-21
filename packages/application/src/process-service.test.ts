@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ok, type CommandSpec, type Result } from '@unified-mpc/domain';
 import { permissionProfiles } from '@unified-mpc/permissions';
-import type { ManagedProcess, ManagedProcessStart, ProcessLogResult } from '@unified-mpc/process';
+import type { ManagedProcess, ManagedProcessRecoveryIdentity, ManagedProcessStart, ProcessLogResult } from '@unified-mpc/process';
 import type { Workspace, WorkspaceRepository } from '@unified-mpc/workspace';
 import { ProcessService, type ProcessServiceDependencies, type ProjectCommandSource } from './process-service.js';
 
@@ -361,6 +361,42 @@ describe('ProcessService', () => {
     await expect(service.status(owner, workspace.id, started.value.processId)).resolves.toMatchObject({ ok: true });
     expect(service.statusForGoalLiveness(workspace.id, started.value.processId)).toMatchObject({ ok: true, value: { state: 'running' } });
     expect(service.statusForGoalLiveness('another-workspace', started.value.processId)).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+  });
+
+  it('exposes restart recovery identity only through the trusted same-workspace path', async () => {
+    const workspace = await createWorkspace();
+    const handle = processHandle('process-recovery');
+    const identity: ManagedProcessRecoveryIdentity = {
+      processId: handle.processId,
+      platform: 'linux',
+      pid: 4242,
+      processStartedAt: '2026-09-21T00:00:00.000Z',
+    };
+    const manager: NonNullable<ProcessServiceDependencies['processManager']> = {
+      async start(_spec, _signal, onCreated): Promise<Result<ManagedProcess>> {
+        onCreated?.(handle);
+        return ok(handle);
+      },
+      list(): readonly ManagedProcess[] { return [handle]; },
+      status(): Result<ManagedProcess> { return ok(handle); },
+      async recoveryIdentity(): Promise<Result<ManagedProcessRecoveryIdentity>> { return ok(identity); },
+      logs(): Result<ProcessLogResult> { return ok({ entries: [], truncated: false, nextSequence: 0 }); },
+      async stop(): Promise<Result<void>> { return ok(undefined); },
+    };
+    const service = new ProcessService(repository(workspace), { processManager: manager });
+    const started = await service.start(
+      { clientId: 'client-1', clientName: 'test' },
+      workspace.id,
+      { executable: 'pnpm', args: ['test'], userConfirmed: true },
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await expect(service.recoveryIdentityForGoal(workspace.id, started.value.processId))
+      .resolves.toEqual(ok(identity));
+    await expect(service.recoveryIdentityForGoal('another-workspace', started.value.processId))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(started.value).not.toHaveProperty('pid');
   });
 
   it('cancels a tracked process from another client in the same workspace while isolating other workspaces', async () => {

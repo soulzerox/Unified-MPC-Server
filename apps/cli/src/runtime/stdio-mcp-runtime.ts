@@ -242,6 +242,7 @@ export function createStdioMcpRuntime(
     { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
     { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
     { provider: 'shell', cancelForGoal: capabilityRuntime.shell.cancelForGoal.bind(capabilityRuntime.shell) },
+    { provider: 'agent_swarm', cancelForGoal: agentSwarmService.cancelForGoal.bind(agentSwarmService) },
   ]);
   const requestCancellation = new GoalRequestCancellationService();
   const goalMutationFence = new GoalMutationFenceService(goalRepository, {
@@ -249,6 +250,7 @@ export function createStdioMcpRuntime(
       process: processService,
       codex: codexService,
       shell: capabilityRuntime.shell,
+      agentSwarm: agentSwarmService,
     }),
   });
   const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {

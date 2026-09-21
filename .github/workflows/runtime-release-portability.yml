@@ -1,0 +1,68 @@
+name: Runtime release portability gate
+
+on:
+  pull_request:
+    paths:
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "apps/**"
+      - "packages/**"
+      - "scripts/materialize-runtime-release.sh"
+      - "scripts/materialize-runtime-release.test.sh"
+      - "scripts/smoke-materialized-runtime.mjs"
+      - "scripts/validate-runtime-root.sh"
+      - "docs/DEPLOYMENT_LINUX.md"
+      - ".github/workflows/runtime-release-portability.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "apps/**"
+      - "packages/**"
+      - "scripts/materialize-runtime-release.sh"
+      - "scripts/materialize-runtime-release.test.sh"
+      - "scripts/smoke-materialized-runtime.mjs"
+      - "scripts/validate-runtime-root.sh"
+      - "docs/DEPLOYMENT_LINUX.md"
+      - ".github/workflows/runtime-release-portability.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # PR workflows otherwise test GitHub's synthetic merge commit. Use
+          # the immutable PR head SHA so provenance and verification receipts
+          # are exact-head evidence.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+
+      - name: Install workspace dependencies once
+        run: corepack pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build production CLI dependency graph
+        run: corepack pnpm --filter @unified-mpc/cli build
+
+      - name: Validate release scripts
+        run: |
+          bash -n scripts/materialize-runtime-release.sh
+          bash -n scripts/materialize-runtime-release.test.sh
+          node --check scripts/smoke-materialized-runtime.mjs
+
+      - name: Prove portable release survives source removal and restart
+        run: bash scripts/materialize-runtime-release.test.sh

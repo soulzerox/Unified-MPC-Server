@@ -28,7 +28,7 @@ From the repository root:
 
 ```bash
 corepack enable
-pnpm install
+pnpm install --frozen-lockfile --prefer-offline
 pnpm build
 pnpm cli doctor
 ```
@@ -107,13 +107,23 @@ A deployment pipeline may build in an isolated Goal/build worktree, but it must 
 
 The release directory must already contain the runtime entrypoints, package/runtime dependencies required by those entrypoints, and `apps/cli/dist/build-provenance.json`. Do **not** pass a Goal/build worktree directly to the promoter and do not make a release symlink resolve back into a worktree.
 
-After installing the user units and running `systemctl --user daemon-reload`, promote a pre-materialized release with:
+Materialize the already-built clean worktree into a self-contained release first. The materializer uses the existing pnpm store with `--prefer-offline` and pnpm 10's portable workspace deploy mode; it writes through a staging directory, rejects any release symlink that resolves back outside the release, and publishes only after runtime-root validation succeeds:
 
 ```bash
 runtime_dir="$HOME/.local/share/unified-mpc/runtime"
-release="$runtime_dir/releases/20260922-<build-sha>"
-deployment_id="20260922-<build-sha>"
+deployment_id="20260922-$(git rev-parse --short=12 HEAD)"
 
+UNIFIED_MPC_RUNTIME_DIR="$runtime_dir" \
+  pnpm release:materialize -- "$deployment_id"
+
+release="$runtime_dir/releases/$deployment_id"
+```
+
+The source/build worktree may be removed after materialization: runtime package dependencies are localized under `$release/apps/cli/node_modules`, while build provenance remains at `$release/apps/cli/dist/build-provenance.json`.
+
+After installing the user units and running `systemctl --user daemon-reload`, activate that immutable release:
+
+```bash
 bash ~/.config/unified-mpc/promote-runtime.sh "$release" "$deployment_id"
 ```
 

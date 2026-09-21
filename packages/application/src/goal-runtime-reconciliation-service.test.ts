@@ -66,13 +66,19 @@ function fixture(options: {
   liveFencedCallCount?: number;
   trustworthy?: boolean;
   commitDisposition?: 'appended' | 'concurrent_change';
+  failFirstStore?: boolean;
 } = {}) {
   let current = snapshot(options.runtimeState);
   const stored: GoalRuntimeSnapshotRecord[] = [];
+  let storeAttempts = 0;
   const snapshots: GoalRuntimeSnapshotRepository = {
     getGoalRuntimeSnapshot: async () => current,
     listWorkspaceGoalRuntimeSnapshots: async () => [current],
     storeGoalRuntimeSnapshot: async (request) => {
+      storeAttempts += 1;
+      if (options.failFirstStore === true && storeAttempts === 1) {
+        throw new Error('simulated snapshot write failure');
+      }
       current = {
         projection: request.projection,
         lastEventSequence: request.lastEventSequence,
@@ -83,6 +89,7 @@ function fixture(options: {
     },
   };
 
+  let committedEvent: AppendGoalRuntimeReconciliationEventRequest['event'] | undefined;
   const append = vi.fn(async (request: AppendGoalRuntimeReconciliationEventRequest) => {
     if (options.commitDisposition === 'concurrent_change') {
       return {
@@ -90,6 +97,17 @@ function fixture(options: {
         reason: 'lease_changed' as const,
       };
     }
+    if (committedEvent !== undefined) {
+      return {
+        disposition: 'duplicate' as const,
+        record: {
+          sequence: 3,
+          event: committedEvent,
+          recordedAt: now,
+        },
+      };
+    }
+    committedEvent = request.event;
     return {
       disposition: 'appended' as const,
       record: {
@@ -151,6 +169,7 @@ describe('GoalRuntimeReconciliationService', () => {
         executionId: 'execution-1',
         executionGeneration: 1,
         blockerKind: 'worker_lost',
+        occurredAt: '2026-09-21T14:58:00.000Z',
       },
     });
     expect(request.event.eventId).toMatch(/^restart-worker-lost-[a-f0-9]{64}$/);
@@ -200,5 +219,25 @@ describe('GoalRuntimeReconciliationService', () => {
       reason: 'waiting_approval',
     });
     expect(runtime.append).not.toHaveBeenCalled();
+  });
+
+  it('retries snapshot projection idempotently after a crash-window write failure', async () => {
+    const runtime = fixture({ failFirstStore: true });
+    await expect(runtime.service.reconcileGoal('goal-1')).resolves.toEqual({
+      goalId: 'goal-1',
+      disposition: 'projection_pending',
+      reason: 'snapshot_write_failed',
+      eventSequence: 3,
+    });
+    await expect(runtime.service.reconcileGoal('goal-1')).resolves.toMatchObject({
+      goalId: 'goal-1',
+      disposition: 'reconciled',
+      eventSequence: 3,
+    });
+
+    expect(runtime.append).toHaveBeenCalledTimes(2);
+    expect(runtime.append.mock.calls[1]![0].event).toEqual(runtime.append.mock.calls[0]![0].event);
+    expect(runtime.stored).toHaveLength(1);
+    expect(runtime.stored[0]!.projection.runtimeState).toBe('recovery_required');
   });
 });

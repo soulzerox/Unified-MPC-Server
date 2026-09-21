@@ -28,6 +28,7 @@ export function createMcpRuntimeDiagnosticsProvider(options: {
       throw new Error('Runtime telemetry returned an invalid diagnostics snapshot');
     }
 
+    const sharedRetention = await runtime.authoritativeSharedRetentionSnapshot();
     const retention = result.value.runtimeRetention;
     return {
       source: result.value.source,
@@ -40,9 +41,9 @@ export function createMcpRuntimeDiagnosticsProvider(options: {
         hooks: null,
         sessionEntries: null,
         contextLedgerEntries: null,
-        // Shared runtime state is persisted independently of the actor session.
-        plugins: options.services.runtimeStatePath === undefined ? null : retention.plugins,
-        worktrees: options.services.runtimeStatePath === undefined ? null : retention.worktrees,
+        // Shared runtime state is authoritative only when the store was read successfully.
+        plugins: sharedRetention?.plugins ?? null,
+        worktrees: sharedRetention?.worktrees ?? null,
         // These owners are explicitly process-scoped and injected by composition.
         activityInflight: options.activityTracker === undefined ? null : retention.activityInflight,
         activityCompletedEntries: options.activityTracker === undefined ? null : retention.activityCompletedEntries,

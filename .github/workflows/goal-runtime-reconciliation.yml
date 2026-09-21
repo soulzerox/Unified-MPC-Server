@@ -1,0 +1,71 @@
+name: Goal runtime reconciliation gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/goal-runtime-reconciliation.yml"
+      - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
+      - "apps/cli/src/runtime/stdio-mcp-runtime.test.ts"
+      - "packages/application/src/goal-runtime-reconciliation-service.ts"
+      - "packages/application/src/goal-runtime-reconciliation-service.test.ts"
+      - "packages/application/src/index.ts"
+      - "packages/domain/src/goal-runtime-event.ts"
+      - "packages/storage/src/goal-runtime-event-repository.ts"
+      - "packages/storage/src/goal-runtime-snapshot-repository.test.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goal-runtime-reconciliation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Storage reconciliation regression
+        run: pnpm --filter @unified-mpc/storage test -- goal-runtime-snapshot-repository.test.ts
+
+      - name: Application restart reconciliation
+        run: pnpm --filter @unified-mpc/application test -- goal-runtime-reconciliation-service.test.ts
+
+      - name: STDIO runtime regression
+        run: pnpm --filter @unified-mpc/cli test -- stdio-mcp-runtime.test.ts
+
+      - name: Targeted typecheck
+        run: |
+          pnpm --filter @unified-mpc/storage typecheck
+          pnpm --filter @unified-mpc/application typecheck
+          pnpm --filter @unified-mpc/cli typecheck
+
+      - name: Targeted ESLint
+        run: >-
+          pnpm exec eslint
+          packages/storage/src/goal-runtime-event-repository.ts
+          packages/storage/src/goal-runtime-snapshot-repository.test.ts
+          packages/application/src/goal-runtime-reconciliation-service.ts
+          packages/application/src/goal-runtime-reconciliation-service.test.ts
+          packages/application/src/index.ts
+          packages/domain/src/goal-runtime-event.ts
+          apps/cli/src/runtime/stdio-mcp-runtime.ts
+
+      - name: CLI dependency-closure build
+        run: pnpm --filter @unified-mpc/cli build

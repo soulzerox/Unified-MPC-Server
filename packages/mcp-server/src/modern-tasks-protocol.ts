@@ -270,8 +270,18 @@ export class ModernTasksProtocol {
 
     const createdAt = isoString(execution.createdAt) ?? new Date(0).toISOString();
     const lastUpdatedAt = isoString(execution.updatedAt) ?? createdAt;
+    const publicExecution = {
+      id: descriptor.backingId,
+      goalId: descriptor.goalId,
+      workspaceId: boundedString(execution.workspaceId, 128),
+      executionGeneration: descriptor.executionGeneration,
+      leaseGeneration: positiveInteger(execution.leaseGeneration),
+      receiptState,
+      createdAt,
+      updatedAt: lastUpdatedAt,
+    };
     return {
-      value: { execution, goal },
+      value: { execution: publicExecution, goal },
       status,
       ...(statusMessage === undefined ? {} : { statusMessage }),
       createdAt,

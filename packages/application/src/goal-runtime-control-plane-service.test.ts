@@ -155,6 +155,39 @@ describe('GoalRuntimeControlPlaneService', () => {
     });
     expect(runtime.records.map((entry) => entry.event.type)).toEqual(['goal_blocker_observed']);
   });
+  it('re-surfaces durable Goal blockers after runtime activity clears the effective blocker', async () => {
+    const times = [
+      new Date('2026-09-22T00:00:30.000Z'),
+      new Date('2026-09-22T00:01:01.000Z'),
+    ];
+    const runtime = fixture({
+      goals: [goal({ revision: 2, blockers: ['Dependency unavailable'] })],
+      now: (): Date => times.shift() ?? new Date('2026-09-22T00:01:01.000Z'),
+    });
+    await runtime.service.ensureGoalSnapshot('goal-1');
+
+    const snapshot = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'phase-with-durable-blocker',
+      type: 'phase_started',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+      phase: 'verify',
+    });
+
+    expect(snapshot.projection).toMatchObject({
+      runtimeState: 'running',
+      integrationState: 'unknown',
+      blocker: { kind: 'goal_blocked' },
+    });
+    expect(runtime.records.map((entry) => entry.event.type)).toEqual([
+      'goal_blocker_observed',
+      'phase_started',
+      'goal_blocker_observed',
+    ]);
+  });
   it('projects conservative workspace truth without changing integration state', async () => {
     const runtime = fixture({
       workspaceTruth: {

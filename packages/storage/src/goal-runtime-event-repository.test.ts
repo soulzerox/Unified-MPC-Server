@@ -194,6 +194,38 @@ describe('SqliteGoalRuntimeEventRepository', () => {
     }
   });
 
+  it('round-trips durable Goal blocker observations without execution identity', async () => {
+    const runtime = await fixture();
+    try {
+      const blocked: GoalRuntimeEvent = {
+        eventId: 'goal-blocker-observed-1',
+        type: 'goal_blocker_observed',
+        workspaceId: 'workspace-1',
+        goalId: 'goal-1',
+        blockerKind: 'goal_blocked',
+        occurredAt: now,
+        detail: 'Durable Goal blockers at revision 2: dependency unavailable',
+      };
+      const clear: GoalRuntimeEvent = {
+        eventId: 'goal-blocker-observed-2',
+        type: 'goal_blocker_observed',
+        workspaceId: 'workspace-1',
+        goalId: 'goal-1',
+        occurredAt: '2026-09-21T12:30:01.000Z',
+      };
+
+      const first = await runtime.events.appendGoalRuntimeEvent({ event: blocked, recordedAt: now });
+      const second = await runtime.events.appendGoalRuntimeEvent({ event: clear, recordedAt: '2026-09-21T12:30:01.000Z' });
+      expect(first.record.event).toEqual(blocked);
+      expect(second.record.event).toEqual(clear);
+
+      const replay = await runtime.events.listGoalRuntimeEvents({ goalId: 'goal-1', limit: 10 });
+      expect(replay.slice(0, 2).map((entry) => entry.event)).toEqual([clear, blocked]);
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('bounds replay reads even when callers request an excessive limit', async () => {
     const runtime = await fixture();
     try {

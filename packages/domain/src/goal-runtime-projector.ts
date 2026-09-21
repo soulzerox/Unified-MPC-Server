@@ -104,6 +104,13 @@ function applyGoalScopedEvent(
       return {
         projection: applyWorkspaceObservation(current, event.workspaceState, event.occurredAt, event.detail),
       };
+    case 'goal_blocker_observed':
+      return {
+        projection: withLastActivity(
+          applyGoalBlockerObservation(current, event.blockerKind, event.occurredAt, event.detail),
+          event.occurredAt,
+        ),
+      };
   }
 }
 
@@ -305,6 +312,29 @@ function applyExecutionScopedEvent(
   }
 }
 
+function applyGoalBlockerObservation(
+  current: GoalRuntimeProjection,
+  blockerKind: 'goal_blocked' | undefined,
+  observedAt: string,
+  detail: string | undefined,
+): GoalRuntimeProjection {
+  if (blockerKind === undefined) {
+    return current.blocker?.kind === 'goal_blocked'
+      ? clearBlocker(current, 'goal_blocked')
+      : current;
+  }
+
+  if (current.blocker !== undefined && current.blocker.kind !== 'goal_blocked') return current;
+  return {
+    ...current,
+    blocker: {
+      kind: 'goal_blocked',
+      observedAt,
+      ...(detail === undefined ? {} : { detail }),
+    },
+  };
+}
+
 function applyWorkspaceObservation(
   current: GoalRuntimeProjection,
   workspaceState: GoalRuntimeProjection['workspaceState'],
@@ -325,7 +355,9 @@ function applyWorkspaceObservation(
       : next;
   }
 
-  if (current.blocker !== undefined && !isWorkspaceDerivedBlocker(current)) {
+  if (current.blocker !== undefined
+    && !isWorkspaceDerivedBlocker(current)
+    && current.blocker.kind !== 'goal_blocked') {
     return next;
   }
 

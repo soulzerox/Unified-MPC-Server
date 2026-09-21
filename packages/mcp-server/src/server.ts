@@ -74,6 +74,8 @@ export interface McpServerOptions {
   readonly maxMcpCallResultBytes?: number;
   /** Process-owned admission controller shared across MCP server/transport instances. */
   readonly resourceAdmissionController?: ResourceAdmissionController;
+  /** Weighted admission cost for one heavy context/workspace read. */
+  readonly contextScanAdmissionCost?: number;
   /** Weighted admission cost for one proxied child MCP call. */
   readonly mcpCallAdmissionCost?: number;
   /** Weighted admission cost held while one LSP server process is alive. */
@@ -117,6 +119,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.maxToolResultBytes === undefined ? {} : { maxToolResultBytes: options.maxToolResultBytes }),
     ...(options.maxMcpCallResultBytes === undefined ? {} : { maxMcpCallResultBytes: options.maxMcpCallResultBytes }),
     resourceAdmissionController: options.resourceAdmissionController ?? sharedProcessResourceAdmissionController(),
+    ...(options.contextScanAdmissionCost === undefined ? {} : { contextScanAdmissionCost: options.contextScanAdmissionCost }),
     ...(options.mcpCallAdmissionCost === undefined ? {} : { mcpCallAdmissionCost: options.mcpCallAdmissionCost }),
     ...(options.lspProcessAdmissionCost === undefined ? {} : { lspProcessAdmissionCost: options.lspProcessAdmissionCost }),
     ...(options.ragIndexAdmissionCost === undefined ? {} : { ragIndexAdmissionCost: options.ragIndexAdmissionCost }),

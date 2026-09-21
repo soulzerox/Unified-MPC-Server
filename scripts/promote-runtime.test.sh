@@ -28,10 +28,20 @@ EOF
 cat >"$TMP_ROOT/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+url="${!#}"
 active="$(readlink -f -- "$UNIFIED_MPC_RUNTIME_DIR/current" 2>/dev/null || true)"
 [[ -n "$active" && -d "$active" ]] || exit 7
 [[ ! -f "$active/health.fail" ]] || exit 22
-cat "$active/apps/cli/dist/build-provenance.json"
+provenance="$active/apps/cli/dist/build-provenance.json"
+if [[ "$url" == *":3000/api/status" ]]; then
+  [[ ! -f "$active/web.fail" ]] || exit 22
+  printf '{"status":"healthy","mcpIdentity":'
+  cat "$provenance"
+  printf '}\\n'
+else
+  [[ ! -f "$active/mcp.fail" ]] || exit 22
+  cat "$provenance"
+fi
 EOF
 
 chmod +x "$TMP_ROOT/bin/systemctl" "$TMP_ROOT/bin/curl"
@@ -112,7 +122,8 @@ assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_a"
 
 release_b="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-b"
 make_runtime "$release_b" "$commit_b"
-touch "$release_b/health.fail"
+# MCP identity succeeds but Web status fails: promotion must still roll back.
+touch "$release_b/web.fail"
 expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_b" "deploy-b"
 assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_a"
 assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_a"

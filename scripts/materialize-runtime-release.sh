@@ -25,6 +25,38 @@ git_bin="${UNIFIED_MPC_GIT:-git}"
 node_bin="${UNIFIED_MPC_NODE:-node}"
 corepack_bin="${UNIFIED_MPC_COREPACK:-corepack}"
 flock_bin="${UNIFIED_MPC_FLOCK:-flock}"
+materialization_state_root="${UNIFIED_MPC_MATERIALIZE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/unified-mpc/materializations}"
+
+source_worktree_locked=false
+record_dir=""
+stage_root=""
+materialization_published=false
+
+write_state() {
+  local key="$1"
+  local value="$2"
+  [[ -n "$record_dir" && -d "$record_dir" ]] || return 1
+  local tmp="$record_dir/.$key.tmp.$"
+  printf '%s\n' "$value" >"$tmp"
+  mv -f -- "$tmp" "$record_dir/$key"
+}
+
+cleanup_materialization() {
+  local status=$?
+  trap - EXIT
+  set +e
+  if [[ -n "$stage_root" ]]; then
+    rm -rf -- "$stage_root"
+  fi
+  if [[ -n "$record_dir" && -d "$record_dir" && "$materialization_published" != "true" ]]; then
+    write_state finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_state status "failed"
+  fi
+  if [[ "$source_worktree_locked" == "true" && -d "$source_root" ]]; then
+    "$git_bin" -C "$source_root" worktree unlock "$source_root" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
 
 if [[ ! -d "$source_arg" ]]; then
   fail 66 "RUNTIME_RELEASE_INCOMPLETE: source root does not exist: '$source_arg'"
@@ -39,6 +71,18 @@ git_root="$(readlink -f -- "$git_root" 2>/dev/null || true)"
 if [[ -z "$git_root" || "$git_root" != "$source_root" ]]; then
   fail 65 "RUNTIME_RELEASE_INCOMPLETE: source root must be the Git worktree root: '$source_root'"
 fi
+
+# Linked Goal/build worktrees are cleanup-managed resources. Hold Git's native
+# worktree lock before reading build inputs so a concurrent git worktree remove
+# cannot cross the reference-check TOCTOU window. Canonical checkouts use a
+# .git directory and are not janitor-removable worktrees, so they need no lock.
+if [[ -f "$source_root/.git" ]]; then
+  if ! "$git_bin" -C "$source_root" worktree lock --reason "unified-runtime-materialization:$deployment_id" "$source_root" >/dev/null 2>&1; then
+    fail 75 "RUNTIME_RELEASE_INCOMPLETE: source linked worktree is already locked or unavailable: '$source_root'"
+  fi
+  source_worktree_locked=true
+fi
+trap cleanup_materialization EXIT
 
 source_commit="$("$git_bin" -C "$source_root" rev-parse --verify HEAD 2>/dev/null || true)"
 if [[ ! "$source_commit" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
@@ -70,7 +114,10 @@ mkdir -p "$runtime_dir/releases"
 runtime_dir="$(readlink -f -- "$runtime_dir")"
 releases_dir="$(readlink -f -- "$runtime_dir/releases")"
 release_root="$releases_dir/$deployment_id"
-stage_root="$releases_dir/.$deployment_id.materializing.$$"
+stage_root="$releases_dir/.$deployment_id.materializing.$"
+
+mkdir -p "$materialization_state_root"
+materialization_state_root="$(readlink -f -- "$materialization_state_root")"
 
 if [[ -e "$release_root" || -L "$release_root" ]]; then
   fail 73 "RUNTIME_RELEASE_INCOMPLETE: release already exists: '$release_root'"
@@ -84,10 +131,16 @@ if ! "$flock_bin" -n 9; then
   fail 75 "RUNTIME_RELEASE_INCOMPLETE: another runtime materialization is active"
 fi
 
-cleanup_stage() {
-  rm -rf -- "$stage_root"
-}
-trap cleanup_stage EXIT
+record_dir="$materialization_state_root/$deployment_id"
+if ! mkdir "$record_dir" 2>/dev/null; then
+  fail 73 "RUNTIME_RELEASE_INCOMPLETE: materialization id already exists: '$deployment_id'"
+fi
+write_state source_path "$source_root"
+write_state source_commit "$source_commit"
+write_state release_path "$release_root"
+write_state started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+write_state status "materializing"
+
 mkdir -p "$stage_root/apps"
 
 (
@@ -145,5 +198,8 @@ cat >"$stage_root/runtime-release.json" <<EOF
 EOF
 
 mv -- "$stage_root" "$release_root"
-trap - EXIT
+stage_root=""
+write_state finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+write_state status "published"
+materialization_published=true
 printf 'RUNTIME_RELEASE_OK: deployment=%s commit=%s root=%s\n' "$deployment_id" "$source_commit" "$release_root"

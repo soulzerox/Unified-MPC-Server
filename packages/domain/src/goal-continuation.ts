@@ -98,6 +98,9 @@ export interface GoalRecord {
   readonly leaseTokenHash?: string;
   readonly leaseDurationSeconds?: number;
   readonly leaseGeneration: number;
+  /** Durable execution receipt identity for the current lease generation. */
+  readonly executionId?: string;
+  readonly executionGeneration?: number;
   readonly leaseActivitySeq: number;
   readonly leaseHeartbeatAt?: string;
   readonly leaseExpiresAt?: string;

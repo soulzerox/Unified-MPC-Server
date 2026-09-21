@@ -167,6 +167,8 @@ export interface PendingScheduledTaskCleanup {
 
 export interface GoalSnapshot {
   readonly goalId: string;
+  readonly executionId?: string;
+  readonly executionGeneration?: number;
   readonly goalKey: string;
   readonly workspaceId: string;
   readonly objective: string;
@@ -763,6 +765,8 @@ function toRunSnapshot(goal: GoalRecord): Omit<RunGoalResult, 'acquired' | 'leas
   const snapshot = toSnapshot(goal);
   return {
     goalId: snapshot.goalId,
+    ...(snapshot.executionId === undefined ? {} : { executionId: snapshot.executionId }),
+    ...(snapshot.executionGeneration === undefined ? {} : { executionGeneration: snapshot.executionGeneration }),
     goalKey: snapshot.goalKey,
     status: snapshot.status,
     revision: snapshot.revision,
@@ -785,6 +789,8 @@ function toRunSnapshot(goal: GoalRecord): Omit<RunGoalResult, 'acquired' | 'leas
 function toSnapshot(goal: GoalRecord): GoalSnapshot {
   return {
     goalId: goal.id,
+    ...(goal.executionId === undefined ? {} : { executionId: goal.executionId }),
+    ...(goal.executionGeneration === undefined ? {} : { executionGeneration: goal.executionGeneration }),
     goalKey: goal.goalKey,
     workspaceId: goal.workspaceId,
     objective: goal.objective,

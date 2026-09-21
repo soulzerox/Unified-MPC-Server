@@ -118,8 +118,8 @@ describe('GoalRuntimeControlPlaneService', () => {
       workspaceState: 'unknown',
       activeExecutionId: 'execution-1',
       executionGeneration: 1,
-      lastHeartbeatAt: '2026-09-22T00:00:00.000Z',
     });
+    expect(snapshot.projection.lastHeartbeatAt).toBeUndefined();
   });
 
   it('projects real phase activity from queued to running and persists the event cursor', async () => {
@@ -169,7 +169,7 @@ describe('GoalRuntimeControlPlaneService', () => {
       activeExecutionId: 'execution-2',
       executionGeneration: 2,
     });
-    expect(snapshot.projection.lastHeartbeatAt).toBe('2026-09-22T00:00:00.000Z');
+    expect(snapshot.projection.lastHeartbeatAt).toBeUndefined();
   });
 
   it('replays a durable crash-window event before publishing the next event', async () => {

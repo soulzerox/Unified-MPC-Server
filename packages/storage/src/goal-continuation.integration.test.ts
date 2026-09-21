@@ -196,6 +196,70 @@ describe('durable goal continuation persistence', () => {
     second.database.close();
   });
 
+  it('refuses a stale execution task handle and cancels only the exact active generation', async () => {
+    const { filename, workspace } = await fixture();
+    let now = new Date('2026-08-26T00:00:00.000Z');
+    const runtime = await open(filename, workspace, () => now);
+    try {
+      const first = await runtime.service.runGoal(actor('session-a'), createRequest);
+      if (!first.ok || first.value.executionId === undefined) throw new Error('first execution failed');
+
+      now = new Date('2026-08-26T00:01:01.000Z');
+      const second = await runtime.service.runGoal(actor('session-b'), {
+        workspaceId: workspace.id,
+        goalKey: createRequest.goalKey,
+        leaseSeconds: 60,
+      });
+      if (!second.ok || second.value.executionId === undefined) throw new Error('second execution failed');
+
+      const staleCancel = await runtime.service.cancelGoalExecution(actor('session-stale'), {
+        executionId: first.value.executionId,
+        executionGeneration: 1,
+        summary: 'stale task cancellation must be fenced',
+        evidence: [{ kind: 'note', value: 'test:stale-execution-handle' }],
+      });
+      expect(staleCancel).toMatchObject({
+        ok: false,
+        error: { code: 'CONFLICT' },
+      });
+      await expect(runtime.service.getGoal(actor('session-check'), { goalId: first.value.goalId })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          status: 'active',
+          executionId: second.value.executionId,
+          executionGeneration: 2,
+        },
+      });
+
+      const exactCancel = await runtime.service.cancelGoalExecution(actor('session-current'), {
+        executionId: second.value.executionId,
+        executionGeneration: 2,
+        summary: 'cancel exact current execution',
+        evidence: [{ kind: 'note', value: 'test:exact-execution-handle' }],
+      });
+      expect(exactCancel).toMatchObject({
+        ok: true,
+        value: {
+          status: 'cancelled',
+          executionId: second.value.executionId,
+          executionGeneration: 2,
+        },
+      });
+      await expect(runtime.repository.getExecutionById(second.value.executionId)).resolves.toMatchObject({
+        id: second.value.executionId,
+        executionGeneration: 2,
+        receiptState: 'terminal',
+      });
+      await expect(runtime.repository.getExecutionById(first.value.executionId)).resolves.toMatchObject({
+        id: first.value.executionId,
+        executionGeneration: 1,
+        receiptState: 'superseded',
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('counts only active workspace goals for the host Projects summary', async () => {
     const { filename, workspace } = await fixture();
     const now = new Date('2026-08-26T00:00:00.000Z');

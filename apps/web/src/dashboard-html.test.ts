@@ -10,6 +10,14 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('--canvas:           #090A0C;');
   });
 
+  it('renders semantic fallback and upgrades to the live MCP build identity', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('id="build-version"');
+    expect(html).toContain('v4.61.0');
+    expect(html).toContain('identity.buildVersion');
+    expect(html).toContain('setInterval(loadStatus, 5000)');
+  });
+
   it('contains client-side JavaScript for live reactivity', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('<script>');

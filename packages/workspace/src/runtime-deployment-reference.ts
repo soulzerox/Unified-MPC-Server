@@ -1,8 +1,10 @@
-import { lstat, readdir, readFile, readlink, stat } from 'node:fs/promises';
+import type { Dirent, Stats } from 'node:fs';
+import { lstat, readdir, readFile, readlink, realpath, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 export type RuntimeDeploymentReferenceKind =
+  | 'configured_runtime_root'
   | 'current'
   | 'last_known_good'
   | 'deployment_candidate'
@@ -64,6 +66,7 @@ export async function inspectRuntimeDeploymentReferences(
   const references: RuntimeDeploymentReference[] = [];
   const uncertainties: string[] = [];
 
+  await inspectConfiguredRuntimeRoot(env.UNIFIED_MPC_ROOT, references, uncertainties);
   await inspectPointer(path.join(runtimeDir, 'current'), 'current', references, uncertainties);
   await inspectPointer(path.join(runtimeDir, 'last-known-good'), 'last_known_good', references, uncertainties);
   await inspectDeploymentRecords(deploymentStateDir, references, uncertainties);
@@ -106,13 +109,37 @@ export async function runtimeDeploymentCleanupBlocker(
     : { blocked: true, reason: 'active_runtime_reference', references: matches, uncertainties: [] };
 }
 
+async function inspectConfiguredRuntimeRoot(
+  configuredRoot: string | undefined,
+  references: RuntimeDeploymentReference[],
+  uncertainties: string[],
+): Promise<void> {
+  const value = configuredRoot?.trim();
+  if (value === undefined || value.length === 0) return;
+  if (!path.isAbsolute(value)) {
+    uncertainties.push('configured UNIFIED_MPC_ROOT is not absolute');
+    return;
+  }
+
+  let resolved = path.normalize(value);
+  try {
+    resolved = await realpath(value);
+  } catch (error: unknown) {
+    if (!hasCode(error, 'ENOENT')) {
+      uncertainties.push('configured UNIFIED_MPC_ROOT could not be resolved');
+      return;
+    }
+  }
+  references.push({ kind: 'configured_runtime_root', path: resolved });
+}
+
 async function inspectPointer(
   pointerPath: string,
   kind: 'current' | 'last_known_good',
   references: RuntimeDeploymentReference[],
   uncertainties: string[],
 ): Promise<void> {
-  let details;
+  let details: Stats;
   try {
     details = await lstat(pointerPath);
   } catch (error: unknown) {
@@ -146,7 +173,7 @@ async function inspectDeploymentRecords(
   references: RuntimeDeploymentReference[],
   uncertainties: string[],
 ): Promise<void> {
-  let entries;
+  let entries: Dirent[];
   try {
     entries = await readdir(deploymentStateDir, { withFileTypes: true });
   } catch (error: unknown) {

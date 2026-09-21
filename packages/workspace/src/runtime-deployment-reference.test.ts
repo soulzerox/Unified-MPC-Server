@@ -74,6 +74,22 @@ describe('runtime deployment cleanup references', () => {
     ]));
   });
 
+  it('blocks a legacy effective runtime root that points directly into a disposable worktree', async () => {
+    const { options, root } = await fixture();
+    const worktree = path.join(root, 'project', '.unified-mpc', 'worktrees', 'legacy-runtime');
+    await mkdir(worktree, { recursive: true });
+
+    const configured = {
+      ...options,
+      env: { UNIFIED_MPC_ROOT: worktree },
+    };
+    await expect(runtimeDeploymentCleanupBlocker(worktree, configured)).resolves.toMatchObject({
+      blocked: true,
+      reason: 'active_runtime_reference',
+      references: [{ kind: 'configured_runtime_root', path: worktree }],
+    });
+  });
+
   it('blocks non-terminal deployment candidate, previous-active and rollback targets', async () => {
     const { runtimeDir, stateDir, options } = await fixture();
     const candidate = path.join(runtimeDir, 'releases', 'candidate');

@@ -239,6 +239,81 @@ describe('GoalRuntimeControlPlaneService', () => {
     expect(runtime.records).toHaveLength(0);
   });
 
+  it('does not confuse unrelated workspace retention with a brand-new Goal replay gap', async () => {
+    const runtime = fixture({
+      events: [{
+        sequence: 100,
+        event: {
+          eventId: 'other-goal-event',
+          type: 'goal_created',
+          workspaceId,
+          goalId: 'other-goal',
+          occurredAt: '2026-09-22T00:00:00.000Z',
+        },
+        recordedAt: '2026-09-22T00:00:00.000Z',
+      }],
+    });
+
+    const snapshot = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'new-goal-phase',
+      type: 'phase_started',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+      phase: 'work',
+    });
+
+    expect(snapshot.lastEventSequence).toBe(101);
+    expect(snapshot.projection).toMatchObject({ runtimeState: 'running', phase: 'work' });
+  });
+
+  it('repairs a stale running snapshot from durable terminal state after a crash window', async () => {
+    const runningSnapshot: GoalRuntimeSnapshotRecord = {
+      projection: {
+        contractVersion: GOAL_RUNTIME_CONTRACT_VERSION,
+        goalId: 'goal-1',
+        workspaceId,
+        lifecycleState: 'open',
+        runtimeState: 'running',
+        desiredRuntimeState: 'running',
+        integrationState: 'unknown',
+        workspaceState: 'unknown',
+        activeExecutionId: 'execution-1',
+        executionGeneration: 1,
+        lastActivityAt: '2026-09-22T00:00:30.000Z',
+      },
+      lastEventSequence: 0,
+      updatedAt: '2026-09-22T00:00:30.000Z',
+    };
+    const runtime = fixture({
+      goals: [goal({
+        status: 'cancelled',
+        revision: 2,
+        terminalAt: '2026-09-22T00:02:00.000Z',
+        updatedAt: '2026-09-22T00:02:00.000Z',
+        leaseHeartbeatAt: undefined,
+        leaseExpiresAt: undefined,
+      })],
+      snapshot: runningSnapshot,
+    });
+
+    const snapshot = await runtime.service.ensureGoalSnapshot('goal-1');
+
+    expect(snapshot.projection).toMatchObject({
+      lifecycleState: 'abandoned',
+      runtimeState: 'cancelled',
+      desiredRuntimeState: 'cancelled',
+      executionGeneration: 1,
+    });
+    expect(snapshot.projection.activeExecutionId).toBeUndefined();
+    expect(runtime.records.map((entry) => entry.event.type)).toEqual([
+      'execution_cancelled',
+      'goal_abandoned',
+    ]);
+  });
+
   it('bootstraps terminal durable truth without retaining a fake active execution', async () => {
     const runtime = fixture({
       goals: [goal({

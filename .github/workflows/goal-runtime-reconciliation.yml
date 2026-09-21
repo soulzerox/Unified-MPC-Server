@@ -50,6 +50,9 @@ jobs:
       - name: STDIO runtime regression
         run: pnpm --filter @unified-mpc/cli exec vitest run src/runtime/stdio-mcp-runtime.test.ts
 
+      - name: Build CLI dependency closure
+        run: pnpm --filter @unified-mpc/cli build
+
       - name: Targeted typecheck
         run: |
           pnpm --filter @unified-mpc/storage typecheck
@@ -67,5 +70,3 @@ jobs:
           packages/domain/src/goal-runtime-event.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts
 
-      - name: CLI dependency-closure build
-        run: pnpm --filter @unified-mpc/cli build

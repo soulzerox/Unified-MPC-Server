@@ -1,7 +1,6 @@
 import { OBSIDIAN_THEME_CSS } from './ui/tokens.js';
 import { renderDashboardViewsHtml } from './ui/views.js';
 import { getClientScriptJs } from './ui/client-script.js';
-import { APP_VERSION } from '@unified-mpc/shared';
 
 export function renderDashboardHtml(): string {
   return `<!DOCTYPE html>
@@ -19,7 +18,7 @@ ${OBSIDIAN_THEME_CSS}
     <div class="brand">
       <div class="led" id="status-led"></div>
       <span>Unified-MPC-Server</span>
-      <span id="build-version" class="mono" style="color: var(--text-muted); font-size: 12px;" title="Semantic version until MCP runtime build identity is available">v${APP_VERSION}</span>
+      <span id="build-commit" class="mono" style="color: var(--text-muted); font-size: 12px;" title="Waiting for MCP runtime build identity">unknown</span>
       <span class="brand-chip">Obsidian Telemetry</span>
     </div>
     <nav>

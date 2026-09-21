@@ -10,11 +10,12 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('--canvas:           #090A0C;');
   });
 
-  it('renders semantic fallback and upgrades to the live MCP build identity', () => {
+  it('renders only the live artifact commit identity in the header', () => {
     const html = renderDashboardHtml();
-    expect(html).toContain('id="build-version"');
-    expect(html).toContain('v4.61.0');
-    expect(html).toContain('identity.buildVersion');
+    expect(html).toContain('id="build-commit"');
+    expect(html).toContain('identity.buildShortCommit');
+    expect(html).not.toContain('v4.61.0');
+    expect(html).not.toContain('identity.buildVersion || identity.version');
     expect(html).toContain('setInterval(loadStatus, 5000)');
   });
 

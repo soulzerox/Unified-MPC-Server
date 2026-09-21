@@ -9,6 +9,7 @@ export interface RuntimeGoalManagedTaskStateReaderOptions {
   readonly process?: GoalTaskStatusProvider;
   readonly codex?: GoalTaskStatusProvider;
   readonly shell?: GoalTaskStatusProvider;
+  readonly agentSwarm?: GoalTaskStatusProvider;
 }
 
 /** Combines every host-owned task registry without treating an unavailable source as absence. */
@@ -17,13 +18,14 @@ export class RuntimeGoalManagedTaskStateReader implements GoalManagedTaskStateRe
   private readonly byProvider: ReadonlyMap<Exclude<GoalTaskProvider, 'legacy_auto'>, GoalTaskStatusProvider>;
 
   public constructor(options: RuntimeGoalManagedTaskStateReaderOptions) {
-    this.providers = [options.process, options.codex, options.shell]
+    this.providers = [options.process, options.codex, options.shell, options.agentSwarm]
       .filter((provider): provider is GoalTaskStatusProvider => provider !== undefined);
     this.byProvider = new Map(
       ([
         ['process', options.process],
         ['codex', options.codex],
         ['shell', options.shell],
+        ['agent_swarm', options.agentSwarm],
       ] as const).filter((entry): entry is [Exclude<GoalTaskProvider, 'legacy_auto'>, GoalTaskStatusProvider] => entry[1] !== undefined),
     );
   }
@@ -60,6 +62,7 @@ function mapTaskStatus(result: Result<unknown>): ManagedGoalTaskState {
   switch (result.value.state) {
     case 'starting':
     case 'running':
+    case 'queued':
       return 'running';
     case 'exited':
     case 'failed':

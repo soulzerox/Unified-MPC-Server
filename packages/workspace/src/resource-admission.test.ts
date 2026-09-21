@@ -107,6 +107,62 @@ describe('resource admission contract', () => {
     if (otherWorkspace.admitted) expect(controller.release(otherWorkspace.lease)).toBe(true);
   });
 
+  it('restores pre-existing durable debt even above current ceilings and blocks new work', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 4,
+      workspaceCost: 4,
+      sessionCost: 4,
+      maxOperations: 2,
+      resourceClassCost: { goal_process: 4 },
+    });
+    const recovered = {
+      operationId: 'recovered-goal-process',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      resourceClass: 'goal_process' as const,
+      cost: 8,
+    };
+
+    expect(controller.restore(recovered)).toBe(true);
+    expect(controller.restore(recovered)).toBe(true);
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 8,
+      activeOperations: 1,
+      activeCostByClass: { goal_process: 8 },
+      activeCostByWorkspace: { 'workspace-a': 8 },
+      activeCostBySession: { 'session-a': 8 },
+    });
+    expect(tryAdmitDependencyBootstrap(controller, {
+      operationId: 'new-work',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: 1,
+    })).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'global_cost_exhausted',
+    });
+    expect(controller.release(recovered)).toBe(true);
+  });
+
+  it('fails closed when restored debt reuses an operation id with different ownership', () => {
+    const controller = new ResourceAdmissionController({ globalCost: 8, workspaceCost: 8, maxOperations: 4 });
+    const recovered = {
+      operationId: 'recovered-process',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      resourceClass: 'goal_process' as const,
+      cost: 4,
+    };
+    expect(controller.restore(recovered)).toBe(true);
+    expect(controller.restore({ ...recovered, workspaceId: 'workspace-b' })).toBe(false);
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 4,
+      activeOperations: 1,
+      activeCostByWorkspace: { 'workspace-a': 4 },
+    });
+  });
+
   it('releases capacity deterministically and rejects duplicate operation ids', () => {
     const controller = new ResourceAdmissionController({ globalCost: 4, workspaceCost: 4, maxOperations: 2 });
     const first = tryAdmitDependencyBootstrap(controller, { operationId: 'bootstrap-a', workspaceId: 'workspace-a', cost: 4 });

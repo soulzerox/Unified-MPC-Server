@@ -45,10 +45,14 @@ make_runtime() {
   mkdir -p "$root/apps/cli/dist/bin"
   printf 'export {};\n' >"$root/apps/cli/dist/bin/mcp-http.js"
   printf 'export {};\n' >"$root/apps/cli/dist/index.js"
+  local suffix=""
+  if [[ "$dirty" == "true" ]]; then
+    suffix=".dirty"
+  fi
   cat >"$root/apps/cli/dist/build-provenance.json" <<EOF
 {
   "version": "4.61.0",
-  "buildVersion": "4.61.0+${commit:0:12}${dirty/true/.dirty}",
+  "buildVersion": "4.61.0+${commit:0:12}$suffix",
   "buildCommit": "$commit",
   "buildShortCommit": "${commit:0:12}",
   "buildTime": "2026-09-22T00:00:00.000Z",

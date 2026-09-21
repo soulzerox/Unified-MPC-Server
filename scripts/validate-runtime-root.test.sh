@@ -82,6 +82,11 @@ make_runtime "$symlink_target"
 ln -s "$symlink_target" "$TMP_ROOT/current"
 expect_fail 65 RUNTIME_ROOT_DISPOSABLE mcp-http "$TMP_ROOT/current"
 
+linked_worktree="$TMP_ROOT/external-linked-worktree"
+make_runtime "$linked_worktree"
+printf 'gitdir: %s\n' "$TMP_ROOT/repo/.git/worktrees/external-linked-worktree" >"$linked_worktree/.git"
+expect_fail 65 RUNTIME_ROOT_DISPOSABLE web "$linked_worktree"
+
 expect_fail 64 RUNTIME_ROOT_INVALID unknown-service "$canonical"
 
 printf 'runtime-root preflight: %s checks passed\n' "$pass_count"

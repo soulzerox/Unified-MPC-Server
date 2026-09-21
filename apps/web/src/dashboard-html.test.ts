@@ -28,6 +28,7 @@ describe('Dashboard HTML Reactive SPA', () => {
   it('wires telemetry and policy API endpoints in script', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('/api/status');
+    expect(html).toContain('/api/runtime-diagnostics');
     expect(html).toContain('/api/workspaces');
     expect(html).toContain('/api/policies');
     expect(html).toContain('/api/policies/sync');
@@ -136,6 +137,22 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('canvas-svg');
     expect(html).toContain('Obsidian Control Plane Topology');
     expect(html).toContain('UNIFIED CONTROL');
+  });
+
+  it('renders authoritative MCP process memory and retention diagnostics without project-health inference', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('Logs / Diagnostics');
+    expect(html).toContain('id="stat-runtime-rss"');
+    expect(html).toContain('id="runtime-diagnostics-panel"');
+    expect(html).toContain('id="runtime-rss"');
+    expect(html).toContain('id="runtime-heap-used"');
+    expect(html).toContain('id="runtime-retention-body"');
+    expect(html).toContain('Local MCP process');
+    expect(html).toContain('/api/runtime-diagnostics');
+    expect(html).toContain('activityCompletedEntryLimit');
+    expect(html).toContain('no process-authoritative owner is exposed');
+    expect(html).toContain("typeof value === 'number'");
+    expect(html).not.toContain('Project memory pressure');
   });
 
   it('wires real-time telemetry log terminal and /api/logs', () => {

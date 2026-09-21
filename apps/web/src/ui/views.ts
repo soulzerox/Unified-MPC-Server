@@ -26,6 +26,10 @@ export function renderDashboardViewsHtml(): string {
         <span class="stat-label">Loopback Port</span>
         <span class="stat-value" id="stat-loopback-port">18765</span>
       </div>
+      <div class="stat-chip">
+        <span class="stat-label">MCP RSS</span>
+        <span class="stat-value" id="stat-runtime-rss">—</span>
+      </div>
     </div>
 
     <!-- Interactive Canvas Topology Component -->
@@ -363,8 +367,54 @@ export function renderDashboardViewsHtml(): string {
     </div>
   </div>
 
-  <!-- VIEW: LOGS VIEW -->
+  <!-- VIEW: LOGS / DIAGNOSTICS -->
   <div class="view-panel" id="view-logs">
+    <div class="card" id="runtime-diagnostics-panel">
+      <div class="card-header">
+        <div>
+          <h2>Runtime Diagnostics</h2>
+          <div style="margin-top: 4px; color: var(--text-muted); font-size: 12px;">Local MCP process · authoritative control-plane telemetry</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="badge badge-state mono" id="runtime-diagnostics-source">waiting</span>
+          <button class="btn btn-secondary btn-sm" id="runtime-diagnostics-refresh-btn">Refresh</button>
+        </div>
+      </div>
+      <div class="stats-row" style="margin-bottom: 16px;">
+        <div class="stat-chip">
+          <span class="stat-label">RSS</span>
+          <span class="stat-value" id="runtime-rss">—</span>
+        </div>
+        <div class="stat-chip">
+          <span class="stat-label">Heap Used</span>
+          <span class="stat-value" id="runtime-heap-used">—</span>
+        </div>
+        <div class="stat-chip">
+          <span class="stat-label">Heap Total</span>
+          <span class="stat-value" id="runtime-heap-total">—</span>
+        </div>
+        <div class="stat-chip">
+          <span class="stat-label">External / Array Buffers</span>
+          <span class="stat-value" id="runtime-external">—</span>
+        </div>
+      </div>
+      <div style="margin-bottom: 8px; color: var(--text-muted); font-size: 12px;">— means no process-authoritative owner is exposed for that counter.</div>
+      <div class="table-responsive">
+        <table aria-label="Runtime retention diagnostics">
+          <thead>
+            <tr>
+              <th>Retained State</th>
+              <th>Current</th>
+              <th>Limit</th>
+            </tr>
+          </thead>
+          <tbody id="runtime-retention-body">
+            <tr><td colspan="3" style="color: var(--text-muted); text-align: center;">Loading MCP runtime diagnostics...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card" style="padding: 0; overflow: hidden;">
       <div class="terminal-box">
         <div class="terminal-toolbar">

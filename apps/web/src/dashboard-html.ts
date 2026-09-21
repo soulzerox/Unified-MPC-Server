@@ -28,7 +28,7 @@ ${OBSIDIAN_THEME_CSS}
       <a id="nav-skills">Skills</a>
       <a id="nav-policies">Policies</a>
       <a id="nav-chatgpt">ChatGPT Web</a>
-      <a id="nav-logs">Logs</a>
+      <a id="nav-logs">Logs / Diagnostics</a>
     </nav>
   </header>
 

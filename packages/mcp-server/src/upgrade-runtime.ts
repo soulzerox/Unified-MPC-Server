@@ -255,6 +255,14 @@ export class UpgradeRuntimeService {
     this.diagnostics = createPlatformDiagnosticsProvider(platform);
   }
 
+  public async authoritativeSharedRetentionSnapshot(): Promise<{ readonly plugins: number; readonly worktrees: number } | null> {
+    if (!await this.refreshSharedState()) return null;
+    return {
+      plugins: this.plugins.size,
+      worktrees: this.worktrees.length,
+    };
+  }
+
   public async execute(name: string, input: Record<string, unknown>, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
     await this.loadState();
     switch (name) {

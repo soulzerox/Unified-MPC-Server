@@ -588,7 +588,7 @@ describe('MCP tool registry', () => {
       resourceClassCost: { rag_indexing: 8 },
     });
     const workspaceId = '11111111-1111-4111-8111-111111111111';
-    const providerCall = vi.fn(async (tool: string, args: Readonly<Record<string, unknown>>) => {
+    const providerCall = vi.fn(async (tool: string) => {
       if (tool === 'code_index') return ok({ status: 'running', job_id: 'idx-cancel', workspace_id: workspaceId });
       if (tool === 'cancel_index') return ok({ status: 'cancelled', jobId: 'idx-cancel', workspaceId });
       if (tool === 'index_status') return ok({ status: 'running', jobId: 'idx-cancel', workspaceId });

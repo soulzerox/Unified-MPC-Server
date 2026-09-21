@@ -124,7 +124,10 @@ export type GoalRuntimeEventRejectionReason =
   | 'future_generation'
   | 'generation_gap'
   | 'execution_identity_mismatch'
-  | 'terminal_generation';
+  | 'terminal_generation'
+  | 'missing_event_data'
+  | 'invalid_transition'
+  | 'projection_invariant';
 
 export type GoalRuntimeEventDecision =
   | { readonly disposition: 'apply' }

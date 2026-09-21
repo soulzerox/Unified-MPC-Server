@@ -1124,7 +1124,8 @@ export class ToolRegistry {
     result: Result<unknown>,
     lease: ResourceAdmissionLease,
   ): boolean {
-    const jobId = readBackgroundRagJobId(result);
+    if (!result.ok) return false;
+    const jobId = readBackgroundRagJobId(result.value);
     const tracker = this.ragIndexAdmissionTracker;
     const thaiRag = this.services.thaiRag;
     if (jobId === undefined || tracker === undefined || thaiRag === undefined) return false;
@@ -1607,9 +1608,9 @@ function readMcpCallArgumentWorkspaceId(input: unknown): string | undefined {
   return readTrimmedString(input.arguments.workspaceId);
 }
 function readTrimmedString(value: unknown): string | undefined { return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined; }
-function readBackgroundRagJobId(result: Result<unknown>): string | undefined {
-  if (!result.ok || !isRecord(result.value)) return undefined;
-  return readTrimmedString(result.value.job_id) ?? readTrimmedString(result.value.jobId);
+function readBackgroundRagJobId(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  return readTrimmedString(value.job_id) ?? readTrimmedString(value.jobId);
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function rememberBounded(map: Map<string, string>, key: string, value: string, max: number): void {

@@ -11,7 +11,7 @@ import {
   type Result,
 } from '@unified-mpc/domain';
 import { CommandPolicy, DefaultPermissionEngine, permissionProfiles, type PermissionEngine, type PermissionProfile } from '@unified-mpc/permissions';
-import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult } from '@unified-mpc/process';
+import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessRecoveryIdentity, type ManagedProcessStart, type ProcessLogResult } from '@unified-mpc/process';
 import { JsCommandDetector, ProjectDetector, type ProjectCommandKind } from '@unified-mpc/project';
 import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from '@unified-mpc/shared';
 import { isAbsoluteHostPath, isHostPathWithin, resolveHostPath, WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
@@ -30,6 +30,7 @@ export interface ProcessManagerPort {
   start(spec: ManagedProcessStart, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void): Promise<Result<ManagedProcess>>;
   list?(): readonly ManagedProcess[];
   status(processId: string): Result<ManagedProcess>;
+  recoveryIdentity?(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>>;
   logs(processId: string, query: LogQuery): Result<ProcessLogResult>;
   stop(processId: string, autoRetry?: boolean): Promise<Result<void>>;
 }
@@ -131,6 +132,23 @@ export class ProcessService {
     if (owner === undefined) return err(appError('PROCESS_NOT_FOUND', 'Process was not found'));
     if (owner.workspaceId !== workspaceId) return err(appError('PERMISSION_DENIED', 'Process belongs to another workspace'));
     return this.processManager.status(processId);
+  }
+
+  /**
+   * Trusted internal restart identity lookup for durable Goal/resource
+   * reconciliation. Raw host process identity is never returned by normal MCP
+   * process status/list calls.
+   */
+  public recoveryIdentityForGoal(workspaceId: string, processId: string): Promise<Result<ManagedProcessRecoveryIdentity>> {
+    const owner = this.owners.get(processId);
+    if (owner === undefined) return Promise.resolve(err(appError('PROCESS_NOT_FOUND', 'Process was not found')));
+    if (owner.workspaceId !== workspaceId) {
+      return Promise.resolve(err(appError('PERMISSION_DENIED', 'Process belongs to another workspace')));
+    }
+    if (this.processManager.recoveryIdentity === undefined) {
+      return Promise.resolve(err(appError('INTERNAL_ERROR', 'Managed process recovery identity provider is unavailable', true)));
+    }
+    return this.processManager.recoveryIdentity(processId);
   }
 
   /** Trusted cancellation path used by durable goals; it deliberately ignores the transient MCP session. */

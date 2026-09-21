@@ -16,6 +16,15 @@ on:
       - "packages/domain/src/goal-runtime.ts"
       - "packages/process/src/process-recovery.ts"
       - "packages/process/src/process-recovery.test.ts"
+      - "packages/process/src/process-manager.ts"
+      - "packages/process/src/process-manager.test.ts"
+      - "packages/process/src/process-types.ts"
+      - "packages/codex/src/codex-adapter.ts"
+      - "packages/codex/src/codex-adapter.test.ts"
+      - "packages/application/src/process-service.ts"
+      - "packages/application/src/process-service.test.ts"
+      - "packages/application/src/codex-service.ts"
+      - "packages/application/src/codex-service.test.ts"
       - "packages/mcp-server/src/goal-managed-task-state-reader.ts"
       - "packages/mcp-server/src/goal-managed-task-state-reader.test.ts"
       - "packages/mcp-server/src/goal-process-admission.ts"
@@ -76,7 +85,15 @@ jobs:
           src/goal-scheduled-execution-ownership.integration.test.ts
 
       - name: Managed process restart identity contract
-        run: pnpm --filter @unified-mpc/process exec vitest run --fileParallelism=false src/process-recovery.test.ts
+        run: >-
+          pnpm --filter @unified-mpc/process exec vitest run --fileParallelism=false
+          src/process-recovery.test.ts
+          src/process-manager.test.ts
+
+      - name: Recovery identity service plumbing
+        run: |
+          pnpm --filter @unified-mpc/codex exec vitest run --fileParallelism=false src/codex-adapter.test.ts
+          pnpm --filter @unified-mpc/application exec vitest run --fileParallelism=false src/process-service.test.ts src/codex-service.test.ts
 
       - name: Goal resource admission contract
         run: pnpm --filter @unified-mpc/workspace exec vitest run --fileParallelism=false src/resource-admission.test.ts
@@ -100,6 +117,7 @@ jobs:
         run: |
           pnpm --filter @unified-mpc/domain typecheck
           pnpm --filter @unified-mpc/process typecheck
+          pnpm --filter @unified-mpc/codex typecheck
           pnpm --filter @unified-mpc/workspace typecheck
           pnpm --filter @unified-mpc/storage typecheck
           pnpm --filter @unified-mpc/application typecheck
@@ -112,6 +130,15 @@ jobs:
           packages/domain/src/goal-continuation.ts
           packages/process/src/process-recovery.ts
           packages/process/src/process-recovery.test.ts
+          packages/process/src/process-manager.ts
+          packages/process/src/process-manager.test.ts
+          packages/process/src/process-types.ts
+          packages/codex/src/codex-adapter.ts
+          packages/codex/src/codex-adapter.test.ts
+          packages/application/src/process-service.ts
+          packages/application/src/process-service.test.ts
+          packages/application/src/codex-service.ts
+          packages/application/src/codex-service.test.ts
           packages/storage/src/goal-repository.ts
           packages/storage/src/goal-continuation.integration.test.ts
           packages/storage/src/goal-restart-reconnect.integration.test.ts

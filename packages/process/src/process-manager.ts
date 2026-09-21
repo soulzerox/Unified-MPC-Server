@@ -5,14 +5,20 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { PathExecutableResolver, type ExecutableResolver } from './executable-resolver.js';
 import { LogRingBuffer } from './ring-buffer.js';
 import { createProcessTreeTerminator, type ProcessTreeTerminator } from './process-tree.js';
+import { createPosixProcessIdentityProbe, type PosixProcessIdentityProbe } from './posix-process-identity.js';
 import { createSpawnInvocationFactory, type SpawnInvocationFactory } from './spawn-invocation.js';
-import type { LogQuery, ManagedProcess, ManagedProcessStart, ManagedProcessState, ProcessLogResult } from './process-types.js';
+import type { LogQuery, ManagedProcess, ManagedProcessRecoveryIdentity, ManagedProcessStart, ManagedProcessState, ProcessLogResult } from './process-types.js';
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const START_CANCELLATION_RETRY_MS = 250;
 
 export const DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES = 24;
+
+export interface ProcessManagerRecoveryOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly processStartedAt?: PosixProcessIdentityProbe;
+}
 
 interface ManagedRecord {
   readonly processId: string;
@@ -35,12 +41,22 @@ interface ManagedRecord {
 export class ProcessManager {
   private readonly records = new Map<string, ManagedRecord>();
 
+  private readonly recoveryPlatform: NodeJS.Platform;
+  private readonly processStartedAt: PosixProcessIdentityProbe | undefined;
+
   public constructor(
     private readonly terminator: ProcessTreeTerminator = createProcessTreeTerminator(),
     private readonly executableResolver: ExecutableResolver = new PathExecutableResolver(),
     private readonly maxActiveProcesses: number = DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES,
     private readonly invocationFactory: SpawnInvocationFactory = createSpawnInvocationFactory(),
-  ) {}
+    recoveryOptions: ProcessManagerRecoveryOptions = {},
+  ) {
+    this.recoveryPlatform = recoveryOptions.platform ?? process.platform;
+    this.processStartedAt = recoveryOptions.processStartedAt
+      ?? (isPosixRecoveryPlatform(this.recoveryPlatform)
+        ? createPosixProcessIdentityProbe(this.recoveryPlatform)
+        : undefined);
+  }
 
   public async start(
     spec: ManagedProcessStart,
@@ -137,6 +153,50 @@ export class ProcessManager {
   public status(processId: string): Result<ManagedProcess> {
     const record = this.records.get(processId);
     return record === undefined ? err(appError('PROCESS_NOT_FOUND', 'Process was not found')) : ok(this.snapshot(record));
+  }
+
+  public async recoveryIdentity(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>> {
+    const record = this.records.get(processId);
+    if (record === undefined) return err(appError('PROCESS_NOT_FOUND', 'Process was not found'));
+    if (isVerifiedTerminal(record.state) || !isChildLive(record.child)) {
+      return err(appError('CONFLICT', 'Managed process is no longer live enough to capture a restart identity', true, {
+        reason: 'process_not_live',
+        processId,
+      }));
+    }
+    if (!isPosixRecoveryPlatform(this.recoveryPlatform) || this.processStartedAt === undefined) {
+      return err(appError('CONFLICT', 'Managed process restart identity is unavailable on this platform', true, {
+        reason: 'platform_unsupported',
+        platform: this.recoveryPlatform,
+      }));
+    }
+    const pid = record.child.pid;
+    if (!Number.isSafeInteger(pid) || (pid ?? 0) <= 0) {
+      return err(appError('CONFLICT', 'Managed process host identity is not available yet', true, {
+        reason: 'pid_unavailable',
+        processId,
+      }));
+    }
+    try {
+      const processStartedAt = await this.processStartedAt(pid as number);
+      if (processStartedAt === null) {
+        return err(appError('CONFLICT', 'Managed process host identity can no longer be verified', true, {
+          reason: 'identity_unavailable',
+          processId,
+        }));
+      }
+      return ok({
+        processId,
+        platform: this.recoveryPlatform,
+        pid: pid as number,
+        processStartedAt,
+      });
+    } catch {
+      return err(appError('CONFLICT', 'Managed process host identity probe failed', true, {
+        reason: 'probe_failed',
+        processId,
+      }));
+    }
   }
 
   public list(): readonly ManagedProcess[] {
@@ -308,6 +368,12 @@ function delay(milliseconds: number): Promise<void> {
 
 function isChildLive(child: ChildProcess): boolean {
   return child.exitCode === null && child.signalCode === null;
+}
+
+
+
+function isPosixRecoveryPlatform(platform: NodeJS.Platform): platform is 'linux' | 'darwin' {
+  return platform === 'linux' || platform === 'darwin';
 }
 
 

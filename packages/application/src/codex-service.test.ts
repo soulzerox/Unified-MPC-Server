@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ok, type Result } from '@unified-mpc/domain';
 import { permissionProfiles } from '@unified-mpc/permissions';
-import type { ManagedProcess, ProcessLogResult } from '@unified-mpc/process';
+import type { ManagedProcess, ManagedProcessRecoveryIdentity, ProcessLogResult } from '@unified-mpc/process';
 import type { Workspace, WorkspaceRepository } from '@unified-mpc/workspace';
 import type { CodexStatus } from '@unified-mpc/codex';
 import { CodexService, type CodexAdapterPort } from './codex-service.js';
@@ -167,6 +167,34 @@ describe('CodexService', () => {
     await expect(service.taskStatus(otherClient, 'another-workspace', started.value.codexTaskId)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
     expect(service.statusForGoalLiveness(workspace.id, started.value.codexTaskId)).toMatchObject({ ok: true, value: { state: 'running' } });
     expect(service.statusForGoalLiveness('another-workspace', started.value.codexTaskId)).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+  });
+
+  it('exposes delegated restart identity only through the trusted same-workspace path', async () => {
+    const workspace = await createWorkspace();
+    const adapter = fakeAdapter();
+    const identity: ManagedProcessRecoveryIdentity = {
+      processId: 'process-1',
+      platform: 'linux',
+      pid: 4242,
+      processStartedAt: '2026-09-21T00:00:00.000Z',
+    };
+    adapter.recoveryIdentity = async (): Promise<Result<ManagedProcessRecoveryIdentity>> => ok(identity);
+    const service = new CodexService(repository(workspace), { adapter, taskIdFactory: (): string => 'codex-recovery' });
+    const started = await service.run(
+      { clientId: 'client-1', clientName: 'test' },
+      workspace.id,
+      'review',
+      undefined,
+      true,
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    expect(started.value).not.toHaveProperty('pid');
+    await expect(service.recoveryIdentityForGoal(workspace.id, started.value.codexTaskId))
+      .resolves.toEqual(ok(identity));
+    await expect(service.recoveryIdentityForGoal('another-workspace', started.value.codexTaskId))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
   });
 
   it('cancels a tracked Codex task from another client in the same workspace while isolating other workspaces', async () => {

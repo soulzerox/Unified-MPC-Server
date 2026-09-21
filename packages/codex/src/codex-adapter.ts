@@ -1,5 +1,5 @@
 import { err, ok, type Result } from '@unified-mpc/domain';
-import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult } from '@unified-mpc/process';
+import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessRecoveryIdentity, type ManagedProcessStart, type ProcessLogResult } from '@unified-mpc/process';
 import { CodexDiscovery } from './codex-discovery.js';
 import { CodexInvocationBuilder, type CodexDiscoveryResult, type CodexInvocation, type CodexSandboxMode, type CodexStatus } from './codex-capabilities.js';
 
@@ -10,6 +10,7 @@ export interface CodexDiscoveryPort {
 export interface CodexProcessManagerPort {
   start(spec: ManagedProcessStart, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void): Promise<Result<ManagedProcess>>;
   status(processId: string): Result<ManagedProcess>;
+  recoveryIdentity?(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>>;
   logs(processId: string, query: LogQuery): Result<ProcessLogResult>;
   stop(processId: string, autoRetry?: boolean): Promise<Result<void>>;
 }
@@ -56,6 +57,17 @@ export class CodexAdapter {
 
   public statusProcess(processId: string): Result<ManagedProcess> {
     return this.processManager.status(processId);
+  }
+
+  public recoveryIdentity(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>> {
+    if (this.processManager.recoveryIdentity === undefined) {
+      return Promise.resolve(err({
+        code: 'INTERNAL_ERROR',
+        message: 'Codex process recovery identity provider is unavailable',
+        recoverable: true,
+      }));
+    }
+    return this.processManager.recoveryIdentity(processId);
   }
 
   public logs(processId: string, query: LogQuery): Result<ProcessLogResult> {

@@ -6,6 +6,7 @@ on:
       - ".github/workflows/goal-execution-tasks.yml"
       - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
       - "packages/application/src/goal-continuation-service.ts"
+      - "packages/application/src/goal-runtime-reconciliation-service.ts"
       - "packages/domain/src/goal-continuation.ts"
       - "packages/domain/src/goal-runtime.ts"
       - "packages/mcp-server/src/modern-tasks-protocol.ts"
@@ -14,6 +15,9 @@ on:
       - "packages/mcp-server/src/tools/tool-types.ts"
       - "packages/storage/src/goal-continuation.integration.test.ts"
       - "packages/storage/src/goal-repository.ts"
+      - "packages/storage/src/goal-restart-reconnect.integration.test.ts"
+      - "packages/storage/src/goal-runtime-event-repository.ts"
+      - "packages/storage/src/goal-runtime-snapshot-repository.ts"
   workflow_dispatch:
 
 permissions:
@@ -46,8 +50,11 @@ jobs:
       - name: Build CLI dependency closure
         run: pnpm --filter @unified-mpc/cli^... build
 
-      - name: Exact execution cancellation regression
-        run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/goal-continuation.integration.test.ts
+      - name: Durable execution restart/reconnect regression
+        run: >-
+          pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false
+          src/goal-continuation.integration.test.ts
+          src/goal-restart-reconnect.integration.test.ts
 
       - name: Goal-backed MCP Tasks regression
         run: pnpm --filter @unified-mpc/mcp-server exec vitest run --fileParallelism=false src/modern-tasks-goal.test.ts src/modern-tasks.integration.test.ts
@@ -66,7 +73,9 @@ jobs:
           packages/domain/src/goal-continuation.ts
           packages/storage/src/goal-repository.ts
           packages/storage/src/goal-continuation.integration.test.ts
+          packages/storage/src/goal-restart-reconnect.integration.test.ts
           packages/application/src/goal-continuation-service.ts
+          packages/application/src/goal-runtime-reconciliation-service.ts
           packages/mcp-server/src/modern-tasks-protocol.ts
           packages/mcp-server/src/modern-tasks-goal.test.ts
           packages/mcp-server/src/tools/tool-types.ts

@@ -33,6 +33,7 @@ export const GOAL_RUNTIME_STATES = [
 export type GoalRuntimeState = typeof GOAL_RUNTIME_STATES[number];
 
 export const GOAL_DESIRED_RUNTIME_STATES = [
+  'idle',
   'running',
   'paused',
   'cancelled',

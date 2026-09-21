@@ -148,6 +148,9 @@ export function classifyGoalRuntimeEvent(
   if (event.workspaceId !== current.workspaceId) return { disposition: 'reject', reason: 'workspace_mismatch' };
   if (isGoalScopedRuntimeEvent(event)) return { disposition: 'apply' };
 
+  if (current.lifecycleState === 'archived' || current.lifecycleState === 'cleaned') {
+    return { disposition: 'reject', reason: 'goal_not_open' };
+  }
   if (current.lifecycleState !== 'open' && event.type !== 'integration_started'
     && event.type !== 'integration_completed' && event.type !== 'integration_conflict') {
     return { disposition: 'reject', reason: 'goal_not_open' };

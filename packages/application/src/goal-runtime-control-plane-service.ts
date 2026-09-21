@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   GOAL_RUNTIME_CONTRACT_VERSION,
   projectGoalRuntimeEvent,
@@ -210,6 +211,43 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
   private async catchUpSnapshotUnlocked(
     initial: GoalRuntimeSnapshotRecord,
   ): Promise<GoalRuntimeSnapshotRecord> {
+    // Sequence zero means this Goal has no compacted event cursor yet. Workspace
+    // sequence numbers are global, so an unrelated workspace retention gap must
+    // not make a brand-new Goal look stale. Replay its own retained events first.
+    if (initial.lastEventSequence === 0) {
+      const own = await this.events.listGoalRuntimeEvents({
+        goalId: initial.projection.goalId,
+        limit: EVENT_REPLAY_PAGE_SIZE,
+      });
+      if (own.length === 0) return initial;
+      if (own.length === EVENT_REPLAY_PAGE_SIZE) {
+        throw new GoalRuntimeControlPlaneError(
+          'replay_window_missed',
+          'Goal runtime event history exceeds the zero-cursor replay window',
+        );
+      }
+      let projection = initial.projection;
+      let lastEventSequence = 0;
+      let updatedAt = initial.updatedAt;
+      for (const record of [...own].reverse()) {
+        const projected = projectGoalRuntimeEvent(projection, record.event);
+        if (projected.decision.disposition === 'reject') {
+          throw new GoalRuntimeControlPlaneError(
+            'projection_rejected',
+            `Durable Goal runtime event ${record.sequence} was rejected: ${projected.decision.reason}`,
+          );
+        }
+        projection = projected.projection;
+        lastEventSequence = record.sequence;
+        updatedAt = record.recordedAt;
+      }
+      return this.snapshots.storeGoalRuntimeSnapshot({
+        projection,
+        lastEventSequence,
+        updatedAt,
+      });
+    }
+
     let snapshot = initial;
     let scanCursor = initial.lastEventSequence;
 
@@ -337,11 +375,8 @@ function projectionFromDurableGoal(goal: GoalRecord): GoalRuntimeProjection {
 }
 
 function durableRuntimeEventId(goalId: string, type: GoalRuntimeEvent['type'], discriminator: string): string {
-  const input = [goalId, type, discriminator].join('\0');
-  let hash = 2166136261;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `goal-runtime-reconcile-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  const digest = createHash('sha256')
+    .update([goalId, type, discriminator].join('\0'))
+    .digest('hex');
+  return `goal-runtime-reconcile-${digest}`;
 }

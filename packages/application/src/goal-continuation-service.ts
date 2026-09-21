@@ -589,6 +589,7 @@ export class GoalContinuationService {
         detail: `terminal Goal status: ${request.status}`,
       });
       await this.publishRuntimeEventsBestEffort(runtimeEvents);
+      await this.ensureRuntimeSnapshotBestEffort(goalId);
       return ok({ ...toSnapshot(goal), completionState: 'completed', scheduledTaskCancellation });
     } catch (error: unknown) {
       return this.mapError(error);
@@ -682,6 +683,7 @@ export class GoalContinuationService {
           detail: 'explicit exact-generation cancellation',
         },
       ]);
+      await this.ensureRuntimeSnapshotBestEffort(execution.goalId);
       return ok(result);
     } catch (error: unknown) {
       return this.mapError(error);
@@ -743,6 +745,7 @@ export class GoalContinuationService {
         detail: 'explicit Goal cancellation',
       });
       await this.publishRuntimeEventsBestEffort(runtimeEvents);
+      await this.ensureRuntimeSnapshotBestEffort(goalId);
       return ok(result);
     } catch (error: unknown) {
       return this.mapError(error);

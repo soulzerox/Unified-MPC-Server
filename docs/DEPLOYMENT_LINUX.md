@@ -9,6 +9,7 @@ Unified-MPC-Server runs natively on modern Ubuntu/Debian Linux. The recommended 
 - Corepack + pnpm `>=10`.
 - `systemd` user services.
 - `curl` for the MCP HTTP readiness probe.
+- `flock` (util-linux) for non-overlapping runtime promotion.
 - `cloudflared` on the Web service `PATH` when the ChatGPT bridge is enabled. `~/.local/bin` is included by the supplied unit.
 - A working Linux Secret Service when Cloudflare credentials/tunnel tokens are persisted.
 
@@ -32,7 +33,7 @@ pnpm build
 pnpm cli doctor
 ```
 
-The systemd units execute the built files under `apps/cli/dist`, so rebuild before restarting the services after a source update.
+The build still produces the runtime files under `apps/cli/dist`. For production, do not make a source checkout/worktree update become live merely by restarting systemd: build and verify first, materialize a complete runnable release under the deployment-owned runtime directory, then activate it with the promotion flow below.
 
 ## 3. Install the user services
 
@@ -68,7 +69,7 @@ PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 ### Runtime-root safety
 
-`UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. It must point to either the durable canonical checkout or a stable promoted release directory whose lifecycle is independent of issue/goal cleanup. Never point it at:
+`UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. The recommended production value is the stable `runtime/current` pointer. The validator also permits a durable canonical checkout for controlled recovery/development use, but its lifecycle must remain independent of issue/goal cleanup. Never point it at:
 
 - `.unified-mpc/worktrees/*` or another linked Git worktree;
 - Goal/delegated/inspection/temporary workspaces;

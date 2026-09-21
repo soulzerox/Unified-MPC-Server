@@ -108,10 +108,13 @@ function blockingStates(evidence: GoalWorkerLivenessEvidence): readonly {
   readonly state: 'running' | 'terminal' | 'absent' | 'unknown';
 }[] {
   if (evidence.blockingTaskStates !== undefined) return evidence.blockingTaskStates;
-  return evidence.activeTaskStates?.map((entry) => ({
-    ...entry,
-    provider: 'legacy_auto' as const,
-  })) ?? [];
+  if ('activeTaskStates' in evidence && evidence.activeTaskStates !== undefined) {
+    return evidence.activeTaskStates.map((entry) => ({
+      ...entry,
+      provider: 'legacy_auto' as const,
+    }));
+  }
+  return [];
 }
 
 function legacyTrackedTasks(activeTaskIds: readonly string[]): readonly GoalTrackedTask[] {

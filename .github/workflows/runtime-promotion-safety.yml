@@ -1,0 +1,51 @@
+name: Runtime promotion safety gate
+
+on:
+  pull_request:
+    paths:
+      - "scripts/promote-runtime.sh"
+      - "scripts/promote-runtime.test.sh"
+      - "scripts/validate-runtime-root.sh"
+      - "scripts/validate-runtime-root.test.sh"
+      - "scripts/unified-mpc.service.env.example"
+      - "docs/DEPLOYMENT_LINUX.md"
+      - ".github/workflows/runtime-promotion-safety.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/promote-runtime.sh"
+      - "scripts/promote-runtime.test.sh"
+      - "scripts/validate-runtime-root.sh"
+      - "scripts/validate-runtime-root.test.sh"
+      - "scripts/unified-mpc.service.env.example"
+      - "docs/DEPLOYMENT_LINUX.md"
+      - ".github/workflows/runtime-promotion-safety.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate shell syntax
+        run: |
+          bash -n scripts/validate-runtime-root.sh
+          bash -n scripts/validate-runtime-root.test.sh
+          bash -n scripts/promote-runtime.sh
+          bash -n scripts/promote-runtime.test.sh
+
+      - name: Runtime root regression
+        run: bash scripts/validate-runtime-root.test.sh
+
+      - name: Atomic promotion and rollback regression
+        run: bash scripts/promote-runtime.test.sh
+
+      - name: Verify durable runtime pointer documentation
+        run: |
+          grep -Fq '/.local/share/unified-mpc/runtime/current' scripts/unified-mpc.service.env.example
+          grep -Fq 'last-known-good' docs/DEPLOYMENT_LINUX.md

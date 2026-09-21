@@ -9,6 +9,7 @@ Unified-MPC-Server runs natively on modern Ubuntu/Debian Linux. The recommended 
 - Corepack + pnpm `>=10`.
 - `systemd` user services.
 - `curl` for the MCP HTTP readiness probe.
+- `flock` (util-linux) for non-overlapping runtime promotion.
 - `cloudflared` on the Web service `PATH` when the ChatGPT bridge is enabled. `~/.local/bin` is included by the supplied unit.
 - A working Linux Secret Service when Cloudflare credentials/tunnel tokens are persisted.
 
@@ -32,7 +33,7 @@ pnpm build
 pnpm cli doctor
 ```
 
-The systemd units execute the built files under `apps/cli/dist`, so rebuild before restarting the services after a source update.
+The build still produces the runtime files under `apps/cli/dist`. For production, do not make a source checkout/worktree update become live merely by restarting systemd: build and verify first, materialize a complete runnable release under the deployment-owned runtime directory, then activate it with the promotion flow below.
 
 ## 3. Install the user services
 
@@ -50,13 +51,14 @@ cp scripts/unified-mpc-mcp-http.service ~/.config/systemd/user/
 cp scripts/unified-mpc-web.service ~/.config/systemd/user/
 cp scripts/unified-mpc.service ~/.config/systemd/user/
 cp scripts/validate-runtime-root.sh ~/.config/unified-mpc/validate-runtime-root.sh
+cp scripts/promote-runtime.sh ~/.config/unified-mpc/promote-runtime.sh
 cp scripts/unified-mpc.service.env.example ~/.config/unified-mpc/service.env
 ```
 
 Edit `~/.config/unified-mpc/service.env` and set **absolute paths**:
 
 ```ini
-UNIFIED_MPC_ROOT=/absolute/path/to/Unified-MPC-Server
+UNIFIED_MPC_ROOT=/home/you/.local/share/unified-mpc/runtime/current
 UNIFIED_MPC_WORKSPACE=/absolute/path/to/your/project
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
@@ -67,7 +69,7 @@ PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 ### Runtime-root safety
 
-`UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. It must point to either the durable canonical checkout or a stable promoted release directory whose lifecycle is independent of issue/goal cleanup. Never point it at:
+`UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. The recommended production value is the stable `runtime/current` pointer. The validator also permits a durable canonical checkout for controlled recovery/development use, but its lifecycle must remain independent of issue/goal cleanup. Never point it at:
 
 - `.unified-mpc/worktrees/*` or another linked Git worktree;
 - Goal/delegated/inspection/temporary workspaces;
@@ -83,6 +85,54 @@ systemctl --user cat unified-mpc-web.service
 ```
 
 Remove stale drop-ins or environment files that redirect `UNIFIED_MPC_ROOT` to a completed/cleanup-managed worktree. In particular, a legacy `~/.config/unified-mpc/runtime-root.env` must not be used to make a disposable build/Goal worktree the durable production root.
+
+### Atomic active-runtime promotion and rollback
+
+For production, point `UNIFIED_MPC_ROOT` at one stable pointer only:
+
+```text
+~/.local/share/unified-mpc/runtime/current
+```
+
+A deployment pipeline may build in an isolated Goal/build worktree, but it must first materialize a **complete runnable release** under the deployment-owned release directory:
+
+```text
+~/.local/share/unified-mpc/runtime/
+├── releases/
+│   ├── <deployment-a>/
+│   └── <deployment-b>/
+├── current -> releases/<active-deployment>
+└── last-known-good -> releases/<last-healthy-deployment>
+```
+
+The release directory must already contain the runtime entrypoints, package/runtime dependencies required by those entrypoints, and `apps/cli/dist/build-provenance.json`. Do **not** pass a Goal/build worktree directly to the promoter and do not make a release symlink resolve back into a worktree.
+
+After installing the user units and running `systemctl --user daemon-reload`, promote a pre-materialized release with:
+
+```bash
+runtime_dir="$HOME/.local/share/unified-mpc/runtime"
+release="$runtime_dir/releases/20260922-<build-sha>"
+deployment_id="20260922-<build-sha>"
+
+bash ~/.config/unified-mpc/promote-runtime.sh "$release" "$deployment_id"
+```
+
+The promoter:
+
+1. accepts only releases physically resolved under `runtime/releases/`;
+2. runs the same MCP/Web runtime-root preflight used by systemd;
+3. rejects malformed or dirty build provenance;
+4. acquires a non-blocking promotion lock;
+5. persists the candidate, previous active root, rollback target and build commit before activation;
+6. atomically replaces the `current` symlink;
+7. restarts `unified-mpc.service` and checks both MCP `/_unified-mpc/identity` and Web `/api/status`;
+8. requires the MCP identity and Web-projected MCP `buildCommit` to equal the promoted artifact;
+9. advances `last-known-good` only after both local services are healthy;
+10. atomically restores the previous known-good release and re-verifies it when activation fails.
+
+Deployment evidence is stored under `~/.local/state/unified-mpc/deployments/<deployment-id>/` with bounded status/health/rollback fields. Deployment IDs are immutable; reusing an existing ID fails closed.
+
+This promotion step intentionally activates an **already materialized runnable release**. Copy/package/materialization from a source worktree is a separate deployment step and must preserve artifact provenance; source cleanup must not change anything inside the promoted release.
 
 Validate the checked-in unit syntax before installation or after edits:
 

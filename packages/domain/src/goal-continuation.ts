@@ -206,6 +206,22 @@ export interface CancelGoalRecordRequest {
   readonly now: string;
 }
 
+/**
+ * Exact execution cancellation fence used by durable task handles. Unlike
+ * cancel_goal's revision CAS, this contract refuses to affect a different
+ * execution generation after reconnect/takeover.
+ */
+export interface CancelGoalExecutionRecordRequest {
+  readonly checkpointId: string;
+  readonly goalId: string;
+  readonly executionId: string;
+  readonly expectedExecutionGeneration: number;
+  readonly ownerClientId: string;
+  readonly summary: string;
+  readonly evidence: readonly GoalEvidence[];
+  readonly now: string;
+}
+
 export interface CancelGoalRecordResult {
   readonly goal: GoalRecord;
   readonly trackedTaskIds: readonly string[];
@@ -244,6 +260,10 @@ export interface ScheduledTaskCancellationInstruction {
   readonly receiptRequired?: true;
   readonly requiredEffect?: 'non_runnable';
   readonly reason: 'live_task_confirmed' | 'no_live_task' | 'already_fired' | 'already_cancelled' | 'native_task_unverified';
+}
+
+export interface GoalExecutionCancellationRepository {
+  cancelExecution(request: CancelGoalExecutionRecordRequest): Promise<CancelGoalRecordResult>;
 }
 
 export interface GoalRepository {

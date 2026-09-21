@@ -118,4 +118,22 @@ describe('GoalTaskCancellationService', () => {
     expect(calls).toEqual(['shell:same-id']);
     expect(result).toMatchObject([{ taskId: 'same-id', provider: 'shell', status: 'cancelled' }]);
   });
+
+  it('routes an explicit agent swarm binding to the durable swarm cancellation backend', async () => {
+    const calls: string[] = [];
+    const service = new GoalTaskCancellationService([
+      provider('process', async (taskId) => { calls.push(`process:${taskId}`); return ok({ matched: false, state: 'not_found' }); }),
+      provider('agent_swarm', async (taskId) => { calls.push(`agent_swarm:${taskId}`); return ok({ matched: true, state: 'cancelled' }); }),
+    ]);
+
+    const result = await service.cancelForGoal('client-1', 'workspace-1', [{
+      taskId: 'swarm-1',
+      provider: 'agent_swarm',
+      role: 'blocking_job',
+      cancelWithGoal: true,
+    }]);
+
+    expect(calls).toEqual(['agent_swarm:swarm-1']);
+    expect(result).toMatchObject([{ taskId: 'swarm-1', provider: 'agent_swarm', status: 'cancelled' }]);
+  });
 });

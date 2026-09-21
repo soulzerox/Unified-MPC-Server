@@ -5,7 +5,7 @@ import {
   type Result,
 } from '@unified-mpc/domain';
 
-export type GoalTaskCancellationProviderName = 'process' | 'codex' | 'shell';
+export type GoalTaskCancellationProviderName = 'process' | 'codex' | 'shell' | 'agent_swarm';
 
 export interface GoalTaskCancellationProvider {
   readonly provider: GoalTaskCancellationProviderName;

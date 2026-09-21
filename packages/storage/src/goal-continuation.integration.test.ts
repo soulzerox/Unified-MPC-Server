@@ -1108,6 +1108,7 @@ describe('durable goal continuation persistence', () => {
     if (!created.ok || created.value.leaseToken === undefined) throw new Error('goal create failed');
     const trackedTasks = [
       { taskId: 'verification-job', provider: 'shell' as const, role: 'blocking_job' as const, cancelWithGoal: true },
+      { taskId: 'delegated-research', provider: 'agent_swarm' as const, role: 'blocking_job' as const, cancelWithGoal: true },
       { taskId: 'xampp-mariadb', provider: 'process' as const, role: 'supporting_service' as const, cancelWithGoal: false },
     ];
     const checkpointed = await first.service.checkpointGoal(actor('session-a'), {
@@ -1124,7 +1125,7 @@ describe('durable goal continuation persistence', () => {
     });
     expect(checkpointed).toMatchObject({
       ok: true,
-      value: { activeTaskIds: ['verification-job'], trackedTasks },
+      value: { activeTaskIds: ['verification-job', 'delegated-research'], trackedTasks },
     });
     first.database.close();
 
@@ -1132,10 +1133,10 @@ describe('durable goal continuation persistence', () => {
     try {
       await expect(second.service.getGoal(actor('session-b'), { goalId: created.value.goalId })).resolves.toMatchObject({
         ok: true,
-        value: { activeTaskIds: ['verification-job'], trackedTasks },
+        value: { activeTaskIds: ['verification-job', 'delegated-research'], trackedTasks },
       });
       const raw = second.database.connection.prepare('SELECT tracked_tasks_json, active_task_ids_json FROM goals WHERE id = ?').get(created.value.goalId);
-      expect(raw).toMatchObject({ tracked_tasks_json: JSON.stringify(trackedTasks), active_task_ids_json: JSON.stringify(['verification-job']) });
+      expect(raw).toMatchObject({ tracked_tasks_json: JSON.stringify(trackedTasks), active_task_ids_json: JSON.stringify(['verification-job', 'delegated-research']) });
     } finally {
       second.database.close();
     }

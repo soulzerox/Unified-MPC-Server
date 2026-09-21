@@ -54,4 +54,19 @@ describe('RuntimeGoalManagedTaskStateReader', () => {
     expect(codex.statusForGoalLiveness).not.toHaveBeenCalled();
     expect(shell.statusForGoalLiveness).toHaveBeenCalledWith('workspace-1', 'same-id');
   });
+
+  it('treats a queued agent swarm as live and routes the explicit durable binding only to the swarm registry', async (): Promise<void> => {
+    const process = { statusForGoalLiveness: vi.fn(async (): Promise<Result<unknown>> => ok({ state: 'running' })) };
+    const agentSwarm = { statusForGoalLiveness: vi.fn(async (): Promise<Result<unknown>> => ok({ state: 'queued' })) };
+    const reader = new RuntimeGoalManagedTaskStateReader({ process, agentSwarm });
+
+    await expect(reader.read('workspace-1', {
+      taskId: 'swarm-1',
+      provider: 'agent_swarm',
+      role: 'blocking_job',
+      cancelWithGoal: true,
+    })).resolves.toBe('running');
+    expect(process.statusForGoalLiveness).not.toHaveBeenCalled();
+    expect(agentSwarm.statusForGoalLiveness).toHaveBeenCalledWith('workspace-1', 'swarm-1');
+  });
 });

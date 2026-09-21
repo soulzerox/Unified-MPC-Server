@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Redactor } from '@unified-mpc/audit';
-import { appError, err, isApplicationAuthorized, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
+import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
 import type { ManagedProcess, ProcessLogResult } from '@unified-mpc/process';
 import {
   SqliteAgentSwarmRepository,
@@ -112,6 +112,43 @@ export class AgentSwarmService {
   public async status(actor: FileActor, workspaceId: string, swarmId: string): Promise<Result<AgentSwarmSnapshot>> {
     const swarm = this.repository.getOwned(swarmId, actor.clientId, actorSessionId(actor), workspaceId);
     return swarm === undefined ? err(appError('PROCESS_NOT_FOUND', 'Agent swarm was not found')) : ok(toSnapshot(swarm));
+  }
+
+  /** Trusted read-only host probe used only by durable-goal liveness reconciliation. */
+  public statusForGoalLiveness(workspaceId: string, swarmId: string): Result<AgentSwarmSnapshot> {
+    const swarm = this.repository.getForGoalLiveness(swarmId, workspaceId);
+    return swarm === undefined ? err(appError('PROCESS_NOT_FOUND', 'Agent swarm was not found')) : ok(toSnapshot(swarm));
+  }
+
+  /** Trusted cancellation path for a Goal-tracked swarm; transient session identity is intentionally ignored. */
+  public async cancelForGoal(
+    ownerClientId: string,
+    workspaceId: string,
+    swarmId: string,
+  ): Promise<Result<GoalTaskCancellationObservation>> {
+    const swarm = this.repository.getOwnedForGoal(swarmId, ownerClientId, workspaceId);
+    if (swarm === undefined) return ok({ matched: false, state: 'not_found' });
+    if (swarm.state === 'termination_unverified') {
+      return ok({ matched: true, state: 'termination_unverified', detail: 'Agent swarm runtime termination is unverified' });
+    }
+    if (isTerminalSwarm(swarm.state)) {
+      return ok({ matched: true, state: 'already_terminal', detail: swarm.state });
+    }
+
+    const live = this.live.get(swarmId);
+    if (live === undefined) {
+      return ok({ matched: true, state: 'termination_unverified', detail: 'Agent swarm has no live runtime owner' });
+    }
+    const cancelled = await this.cancel(live.actor, workspaceId, swarmId, live.authorization);
+    if (!cancelled.ok) return cancelled;
+    if (cancelled.value.state === 'cancelled') return ok({ matched: true, state: 'cancelled', detail: 'cancelled' });
+    if (cancelled.value.state === 'termination_unverified') {
+      return ok({ matched: true, state: 'termination_unverified', detail: 'Agent swarm runtime termination is unverified' });
+    }
+    if (isTerminalSwarm(cancelled.value.state)) {
+      return ok({ matched: true, state: 'already_terminal', detail: cancelled.value.state });
+    }
+    return ok({ matched: true, state: 'termination_unverified', detail: cancelled.value.state });
   }
 
   public async cancel(

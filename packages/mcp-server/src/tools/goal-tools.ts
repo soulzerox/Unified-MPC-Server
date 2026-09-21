@@ -30,7 +30,7 @@ const stepUpdate = z.object({
 }).strict();
 const trackedTask = z.object({
   taskId: z.string().min(1).max(256),
-  provider: z.enum(['process', 'codex', 'shell']),
+  provider: z.enum(['process', 'codex', 'shell', 'agent_swarm']),
   role: z.enum(['blocking_job', 'supporting_service']),
   cancelWithGoal: z.boolean(),
 }).strict();

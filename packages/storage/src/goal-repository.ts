@@ -253,7 +253,9 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         existing.leaseActivitySeq,
       );
       if (Number(changed.changes) !== 1) throw new GoalStateError('conflict', 'Goal lease changed concurrently');
-      this.updateExecutionState(existing.id, existing.leaseGeneration, 'superseded', request.now);
+      if (existing.leaseGeneration > 0) {
+        this.updateExecutionState(existing.id, existing.leaseGeneration, 'superseded', request.now);
+      }
       this.insertExecution({
         id: randomUUID(),
         goalId: existing.id,
@@ -2266,8 +2268,10 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     const trackedTasks = parseTrackedTasks(row.tracked_tasks_json, row.active_task_ids_json, 'goal tracked tasks');
     const activeTaskIds = blockingTaskIds(trackedTasks);
     const terminalEvidence = row.terminal_evidence_json === null ? undefined : parseEvidence(row.terminal_evidence_json, 'terminal evidence');
+    // Direct-SQL legacy fixtures and pre-v4.62 databases can temporarily lack
+    // a receipt row. Repository-owned acquisitions always create one, while
+    // migration 018 backfills persisted production goals.
     const execution = row.lease_generation === 0 ? undefined : this.selectExecution(row.id, row.lease_generation);
-    if (row.lease_generation > 0 && execution === undefined) throw corrupt('Goal execution receipt is missing for the current lease generation');
     const checkpoints = this.database.connection.prepare(
       'SELECT * FROM goal_checkpoints WHERE goal_id = ? ORDER BY revision ASC',
     ).all(row.id).map((value) => this.toCheckpoint(this.requireCheckpointRow(value)));

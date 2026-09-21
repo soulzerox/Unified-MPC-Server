@@ -258,10 +258,7 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
         limit: EVENT_REPLAY_PAGE_SIZE,
       });
       if (page.replayWindowMissed) {
-        throw new GoalRuntimeControlPlaneError(
-          'replay_window_missed',
-          `Goal runtime replay window was missed after sequence ${scanCursor}`,
-        );
+        return this.recoverAfterReplayWindowMissUnlocked(snapshot);
       }
       if (page.events.length === 0) return snapshot;
 
@@ -291,6 +288,47 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       scanCursor = page.events.at(-1)!.sequence;
       if (page.latestSequence === undefined || scanCursor >= page.latestSequence) return snapshot;
     }
+  }
+
+  private async recoverAfterReplayWindowMissUnlocked(
+    initial: GoalRuntimeSnapshotRecord,
+  ): Promise<GoalRuntimeSnapshotRecord> {
+    const retained = await this.events.listGoalRuntimeEvents({
+      goalId: initial.projection.goalId,
+      limit: EVENT_REPLAY_PAGE_SIZE,
+    });
+    const newer = retained.filter((record) => record.sequence > initial.lastEventSequence);
+
+    // Workspace retention is shared across Goals while snapshot cursors are
+    // Goal-local. If only unrelated events were pruned, this Goal has not
+    // missed any projection input and its existing snapshot remains valid.
+    if (newer.length === 0) return initial;
+
+    const goal = await this.goals.getById(initial.projection.goalId);
+    if (goal === null) {
+      throw new GoalRuntimeControlPlaneError(
+        'goal_not_found',
+        `Goal '${initial.projection.goalId}' was not found`,
+      );
+    }
+
+    // A genuine gap means incremental replay is no longer safe. Rebuild from
+    // durable Goal truth, then fold the bounded retained tail. Rejected tail
+    // events may depend on pruned predecessors, so compact past them rather
+    // than turning unrelated workspace retention into a startup failure.
+    let projection = projectionFromDurableGoal(goal);
+    for (const record of [...retained].reverse()) {
+      const projected = projectGoalRuntimeEvent(projection, record.event);
+      if (projected.decision.disposition === 'reject') continue;
+      projection = projected.projection;
+    }
+
+    const latest = retained[0]!;
+    return this.snapshots.storeGoalRuntimeSnapshot({
+      projection,
+      lastEventSequence: latest.sequence,
+      updatedAt: latest.recordedAt,
+    });
   }
 
   private async withGoalLock<T>(goalId: string, operation: () => Promise<T>): Promise<T> {

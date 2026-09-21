@@ -51,6 +51,7 @@ function fixture(options: {
   readonly service: GoalRuntimeControlPlaneService;
   readonly stored: GoalRuntimeSnapshotRecord[];
   readonly records: GoalRuntimeEventRecord[];
+  readonly setGoal: (entry: GoalRecord) => void;
 } {
   const goals = new Map((options.goals ?? [goal()]).map((entry) => [entry.id, entry]));
   let snapshot = options.snapshot ?? null;
@@ -112,7 +113,7 @@ function fixture(options: {
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 
-  return { service, stored, records };
+  return { service, stored, records, setGoal: (entry): void => { goals.set(entry.id, entry); } };
 }
 
 describe('GoalRuntimeControlPlaneService', () => {

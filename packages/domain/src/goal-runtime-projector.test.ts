@@ -177,6 +177,64 @@ describe('projectGoalRuntimeEvent', () => {
     expect(missing.projection.blocker).toEqual(workerBlocked.blocker);
   });
 
+  it('keeps workspace blockers coherent across runtime blocker changes', () => {
+    const dirty = projectGoalRuntimeEvent(base({
+      runtimeState: 'queued',
+      desiredRuntimeState: 'running',
+      activeExecutionId: 'execution-1',
+      executionGeneration: 1,
+      workspaceState: 'unknown',
+    }), {
+      eventId: 'workspace-dirty-running',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'dirty',
+      occurredAt: '2026-09-21T13:00:02.000Z',
+    });
+    expect(dirty.projection.blocker?.kind).toBe('dirty_workspace');
+
+    const started = projectGoalRuntimeEvent(dirty.projection, executionEvent('execution_started'));
+    expect(started.projection).toMatchObject({
+      runtimeState: 'running',
+      workspaceState: 'dirty',
+      blocker: { kind: 'dirty_workspace' },
+    });
+
+    const approval = projectGoalRuntimeEvent(started.projection, executionEvent('approval_required'));
+    expect(approval.projection.blocker?.kind).toBe('waiting_approval');
+
+    const approved = projectGoalRuntimeEvent(approval.projection, executionEvent('approval_resolved'));
+    expect(approved.projection).toMatchObject({
+      runtimeState: 'running',
+      workspaceState: 'dirty',
+      blocker: { kind: 'dirty_workspace' },
+    });
+  });
+
+  it('drops resolved workspace recovery blockers when only unknown truth remains', () => {
+    const missing = projectGoalRuntimeEvent(base({ workspaceState: 'unknown' }), {
+      eventId: 'workspace-missing-before-unknown',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'missing',
+      occurredAt: '2026-09-21T13:00:02.000Z',
+    });
+    expect(missing.projection.blocker?.kind).toBe('recovery_required');
+
+    const unknown = projectGoalRuntimeEvent(missing.projection, {
+      eventId: 'workspace-unknown-after-missing',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'unknown',
+      occurredAt: '2026-09-21T13:00:03.000Z',
+    });
+    expect(unknown.projection.workspaceState).toBe('unknown');
+    expect(unknown.projection.blocker).toBeUndefined();
+  });
+
   it('clears only workspace-derived recovery blockers after the workspace becomes clean', () => {
     const missing = projectGoalRuntimeEvent(base({ workspaceState: 'unknown' }), {
       eventId: 'workspace-missing',

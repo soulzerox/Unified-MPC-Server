@@ -285,6 +285,90 @@ describe('upgrade runtime multi-session persistence', () => {
     }
   });
 
+  it('blocks managed worktree removal while release materialization references the source', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-materialization-reference-fence-'));
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
+    const runtimeDir = path.join(directory, 'runtime');
+    const deploymentStateDir = path.join(directory, 'deployments');
+    const materializationStateDir = path.join(directory, 'materializations');
+    const worktreePath = path.join(directory, '.worktrees', 'materializing');
+    const recordDir = path.join(materializationStateDir, 'deploy-materializing');
+    const calls: unknown[] = [];
+    await mkdir(worktreePath, { recursive: true });
+    await mkdir(runtimeDir, { recursive: true });
+    await mkdir(deploymentStateDir, { recursive: true });
+    await mkdir(recordDir, { recursive: true });
+    await writeFile(path.join(recordDir, 'source_path'), `${worktreePath}\n`, 'utf8');
+    await writeFile(path.join(recordDir, 'status'), 'materializing\n', 'utf8');
+
+    const services = {
+      runtimeStatePath,
+      runtimeDeploymentReferenceOptions: {
+        runtimeDir,
+        deploymentStateDir,
+        materializationStateDir,
+        homeDir: directory,
+        env: {},
+      },
+      workspaceInfo: {
+        async info(): Promise<ReturnType<typeof ok>> {
+          return ok({ rootPath: directory, realRootPath: directory });
+        },
+      },
+      git: {
+        async run(_actor: FileActor, request: unknown): Promise<ReturnType<typeof ok>> {
+          calls.push(request);
+          return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
+        },
+      },
+    };
+
+    try {
+      const owner = new UpgradeRuntimeService(services, actorA);
+      await expect(owner.execute('git_worktree_spawn', {
+        workspaceId: 'ws-materializing',
+        worktreePath: '.worktrees/materializing',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dependencyEmergencyOverride: true,
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
+      expect(calls).toHaveLength(1);
+
+      await expect(owner.execute('git_worktree_remove', {
+        workspaceId: 'ws-materializing',
+        worktreePath: '.worktrees/materializing',
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('materialization_source'),
+        },
+      });
+      expect(calls).toHaveLength(1);
+
+      await writeFile(path.join(recordDir, 'status'), 'published\n', 'utf8');
+      await expect(owner.execute('git_worktree_remove', {
+        workspaceId: 'ws-materializing',
+        worktreePath: '.worktrees/materializing',
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          status: 'completed',
+          cleanupBlocker: { blocked: false, reason: null },
+        },
+      });
+      expect(calls).toHaveLength(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('grandfathers legacy worktree ledger rows after restart', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-legacy-worktree-'));
     const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');

@@ -129,7 +129,11 @@ UNIFIED_MPC_RUNTIME_DIR="$runtime_dir" \
 release="$runtime_dir/releases/$deployment_id"
 ```
 
-The source/build worktree may be removed after materialization: runtime package dependencies are localized under `$release/apps/cli/node_modules`, while build provenance remains at `$release/apps/cli/dist/build-provenance.json`.
+The source/build worktree may be removed **only after materialization returns successfully**: runtime package dependencies are localized under `$release/apps/cli/node_modules`, while build provenance remains at `$release/apps/cli/dist/build-provenance.json`.
+
+While a linked Goal/build worktree is being materialized, the materializer holds a native Git worktree lock and publishes an active source reference under `~/.local/state/unified-mpc/materializations/<deployment-id>/`. The #80 cleanup fence consumes that `materialization_source` reference, so dry-run/destructive cleanup explains the blocker before removal; the Git lock is the final TOCTOU defense if cleanup and materialization begin concurrently. Normal completion terminalizes the record as `published`; normal failure records `failed` and unlocks the source.
+
+An abrupt process/host crash may intentionally leave a `materializing` record and a locked linked worktree. That state is fail-closed: do not force-remove it. Inspect the materialization record, staging/release state, and `git worktree list --porcelain`; only after confirming no materializer can still be using the source should an operator explicitly reconcile/unlock the stale worktree.
 
 After installing the user units and running `systemctl --user daemon-reload`, activate that immutable release:
 

@@ -14,19 +14,29 @@ async function fixture(): Promise<{
   readonly root: string;
   readonly runtimeDir: string;
   readonly stateDir: string;
+  readonly materializationDir: string;
   readonly options: RuntimeDeploymentReferenceOptions;
 }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-runtime-ref-'));
   temporaryRoots.push(root);
   const runtimeDir = path.join(root, 'runtime');
   const stateDir = path.join(root, 'deployments');
+  const materializationDir = path.join(root, 'materializations');
   await mkdir(path.join(runtimeDir, 'releases'), { recursive: true });
   await mkdir(stateDir, { recursive: true });
+  await mkdir(materializationDir, { recursive: true });
   return {
     root,
     runtimeDir,
     stateDir,
-    options: { runtimeDir, deploymentStateDir: stateDir, homeDir: root, env: {} },
+    materializationDir,
+    options: {
+      runtimeDir,
+      deploymentStateDir: stateDir,
+      materializationStateDir: materializationDir,
+      homeDir: root,
+      env: {},
+    },
   };
 }
 
@@ -150,6 +160,60 @@ describe('runtime deployment cleanup references', () => {
       ]),
     });
     expect(afterRestart).toEqual(first);
+  });
+
+  it('blocks a source worktree while runtime release materialization is active', async () => {
+    const { materializationDir, options, root } = await fixture();
+    const source = path.join(root, 'project', '.unified-mpc', 'worktrees', 'release-build');
+    await writeRecord(materializationDir, 'deploy-materializing', {
+      status: 'materializing',
+      source_path: source,
+    });
+
+    await expect(runtimeDeploymentCleanupBlocker(source, options)).resolves.toMatchObject({
+      blocked: true,
+      reason: 'active_runtime_reference',
+      references: [{
+        kind: 'materialization_source',
+        path: source,
+        deploymentId: 'deploy-materializing',
+        status: 'materializing',
+      }],
+    });
+  });
+
+  it('does not pin source worktrees after materialization reaches a terminal state', async () => {
+    const { materializationDir, options, root } = await fixture();
+    const source = path.join(root, 'project', '.unified-mpc', 'worktrees', 'published-build');
+    await writeRecord(materializationDir, 'deploy-published', {
+      status: 'published',
+      source_path: source,
+    });
+    await writeRecord(materializationDir, 'deploy-failed', {
+      status: 'failed',
+      source_path: source,
+    });
+
+    await expect(runtimeDeploymentCleanupBlocker(source, options)).resolves.toEqual({
+      blocked: false,
+      reason: null,
+      references: [],
+      uncertainties: [],
+    });
+  });
+
+  it('fails closed when a crash-partial active materialization has no source path', async () => {
+    const { materializationDir, options, root } = await fixture();
+    await writeRecord(materializationDir, 'deploy-crash', { status: 'materializing' });
+
+    await expect(runtimeDeploymentCleanupBlocker(path.join(root, 'some-worktree'), options)).resolves.toMatchObject({
+      blocked: true,
+      reason: 'runtime_reference_unknown',
+      uncertainties: expect.arrayContaining([
+        expect.stringContaining('deploy-crash'),
+        expect.stringContaining('source_path'),
+      ]),
+    });
   });
 
   it('allows an unrelated absolute path when deployment references are healthy and disjoint', async () => {

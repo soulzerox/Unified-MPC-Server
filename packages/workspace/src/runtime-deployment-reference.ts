@@ -9,7 +9,8 @@ export type RuntimeDeploymentReferenceKind =
   | 'last_known_good'
   | 'deployment_candidate'
   | 'deployment_previous_active'
-  | 'deployment_rollback_target';
+  | 'deployment_rollback_target'
+  | 'materialization_source';
 
 export interface RuntimeDeploymentReference {
   readonly kind: RuntimeDeploymentReferenceKind;
@@ -21,6 +22,7 @@ export interface RuntimeDeploymentReference {
 export interface RuntimeDeploymentReferenceSnapshot {
   readonly runtimeDir: string;
   readonly deploymentStateDir: string;
+  readonly materializationStateDir: string;
   readonly references: readonly RuntimeDeploymentReference[];
   readonly uncertainties: readonly string[];
 }
@@ -35,12 +37,15 @@ export interface RuntimeDeploymentCleanupBlocker {
 export interface RuntimeDeploymentReferenceOptions {
   readonly runtimeDir?: string;
   readonly deploymentStateDir?: string;
+  readonly materializationStateDir?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly homeDir?: string;
 }
 
 const ACTIVE_DEPLOYMENT_STATUSES = new Set(['pending', 'activated', 'rollback_pending', 'rollback_failed']);
 const TERMINAL_DEPLOYMENT_STATUSES = new Set(['healthy', 'rolled_back', 'failed', 'failed_no_rollback']);
+const ACTIVE_MATERIALIZATION_STATUSES = new Set(['materializing']);
+const TERMINAL_MATERIALIZATION_STATUSES = new Set(['published', 'failed', 'interrupted']);
 const ACTIVE_REFERENCE_FIELDS = [
   ['candidate_path', 'deployment_candidate'],
   ['previous_active', 'deployment_previous_active'],
@@ -63,6 +68,11 @@ export async function inspectRuntimeDeploymentReferences(
       ?? env.UNIFIED_MPC_DEPLOY_STATE_DIR
       ?? path.join(env.XDG_STATE_HOME ?? path.join(homeDir, '.local', 'state'), 'unified-mpc', 'deployments'),
   );
+  const materializationStateDir = path.resolve(
+    options.materializationStateDir
+      ?? env.UNIFIED_MPC_MATERIALIZE_STATE_DIR
+      ?? path.join(env.XDG_STATE_HOME ?? path.join(homeDir, '.local', 'state'), 'unified-mpc', 'materializations'),
+  );
   const references: RuntimeDeploymentReference[] = [];
   const uncertainties: string[] = [];
 
@@ -70,10 +80,12 @@ export async function inspectRuntimeDeploymentReferences(
   await inspectPointer(path.join(runtimeDir, 'current'), 'current', references, uncertainties);
   await inspectPointer(path.join(runtimeDir, 'last-known-good'), 'last_known_good', references, uncertainties);
   await inspectDeploymentRecords(deploymentStateDir, references, uncertainties);
+  await inspectMaterializationRecords(materializationStateDir, references, uncertainties);
 
   return {
     runtimeDir,
     deploymentStateDir,
+    materializationStateDir,
     references: dedupeReferences(references),
     uncertainties: [...new Set(uncertainties)].sort(),
   };
@@ -218,6 +230,52 @@ async function inspectDeploymentRecords(
         status: status.value,
       });
     }
+  }
+}
+
+async function inspectMaterializationRecords(
+  materializationStateDir: string,
+  references: RuntimeDeploymentReference[],
+  uncertainties: string[],
+): Promise<void> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(materializationStateDir, { withFileTypes: true });
+  } catch (error: unknown) {
+    if (hasCode(error, 'ENOENT')) return;
+    uncertainties.push('materialization state directory could not be enumerated');
+    return;
+  }
+
+  for (const entry of entries.filter((candidate) => candidate.isDirectory()).sort((left, right) => left.name.localeCompare(right.name))) {
+    const recordDir = path.join(materializationStateDir, entry.name);
+    const status = await readStateField(recordDir, 'status');
+    if (status.kind !== 'value' || status.value.length === 0) {
+      uncertainties.push(`materialization ${entry.name} has no trustworthy status`);
+      continue;
+    }
+
+    if (TERMINAL_MATERIALIZATION_STATUSES.has(status.value)) continue;
+    if (!ACTIVE_MATERIALIZATION_STATUSES.has(status.value)) {
+      uncertainties.push(`materialization ${entry.name} has unknown status ${status.value}`);
+      continue;
+    }
+
+    const source = await readStateField(recordDir, 'source_path');
+    if (source.kind !== 'value' || source.value.length === 0) {
+      uncertainties.push(`materialization ${entry.name} status ${status.value} is missing source_path`);
+      continue;
+    }
+    if (!path.isAbsolute(source.value)) {
+      uncertainties.push(`materialization ${entry.name} source_path is not absolute`);
+      continue;
+    }
+    references.push({
+      kind: 'materialization_source',
+      path: path.normalize(source.value),
+      deploymentId: entry.name,
+      status: status.value,
+    });
   }
 }
 

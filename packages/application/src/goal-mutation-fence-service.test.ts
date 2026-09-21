@@ -175,6 +175,52 @@ describe('GoalMutationFenceService', () => {
     expect(publishGoalRuntimeEvent).toHaveBeenCalledTimes(2);
   });
 
+  it('refreshes workspace truth after admitted fenced work ends without probing on heartbeat', async (): Promise<void> => {
+    const refreshGoalWorkspaceTruth = vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> =>
+      runtimeSnapshot({ workspaceState: 'dirty' }));
+    const runtimeEvents: GoalRuntimeEventPublisher = {
+      ensureGoalSnapshot: vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> => runtimeSnapshot()),
+      publishGoalRuntimeEvent: vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> =>
+        runtimeSnapshot({ runtimeState: 'running' })),
+      refreshGoalWorkspaceTruth,
+    };
+    const times = [
+      new Date('2026-08-27T10:00:00.000Z'),
+      new Date('2026-08-27T10:00:10.000Z'),
+      new Date('2026-08-27T10:00:20.000Z'),
+    ];
+    const service = new GoalMutationFenceService(repository(), {
+      now: (): Date => times.shift() ?? new Date('2026-08-27T10:00:20.000Z'),
+      runtimeEvents,
+    });
+
+    await service.begin(actor, 'workspace-1', 'call-workspace', {
+      goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 3,
+    });
+    await service.heartbeat('call-workspace', 3);
+    expect(refreshGoalWorkspaceTruth).not.toHaveBeenCalled();
+
+    await expect(service.end('call-workspace')).resolves.toBeUndefined();
+    expect(refreshGoalWorkspaceTruth).toHaveBeenCalledTimes(1);
+    expect(refreshGoalWorkspaceTruth).toHaveBeenCalledWith('goal-1');
+  });
+
+  it('keeps fence completion successful when workspace observation fails', async (): Promise<void> => {
+    const runtimeEvents: GoalRuntimeEventPublisher = {
+      ensureGoalSnapshot: vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> => runtimeSnapshot()),
+      publishGoalRuntimeEvent: vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> => runtimeSnapshot()),
+      refreshGoalWorkspaceTruth: vi.fn(async (): Promise<never> => {
+        throw new Error('workspace probe unavailable');
+      }),
+    };
+    const service = new GoalMutationFenceService(repository(), { runtimeEvents });
+
+    await service.begin(actor, 'workspace-1', 'call-workspace-side-path', {
+      goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 3,
+    });
+    await expect(service.end('call-workspace-side-path')).resolves.toBeUndefined();
+  });
+
   it('keeps durable fence admission successful when runtime projection delivery is unavailable', async (): Promise<void> => {
     const service = new GoalMutationFenceService(repository(), {
       runtimeEvents: {

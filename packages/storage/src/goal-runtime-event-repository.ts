@@ -148,15 +148,14 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       const duplicateRow = this.database.connection.prepare(
         'SELECT * FROM goal_runtime_events WHERE event_id = ?',
       ).get(request.event.eventId);
-      if (duplicateRow !== undefined) {
-        const record = this.toRecord(this.requireRow(duplicateRow));
-        if (!sameEvent(record.event, request.event)) {
-          throw new GoalRuntimeEventStoreError(
-            'event_id_conflict',
-            `Goal runtime event ID '${request.event.eventId}' already identifies different content`,
-          );
-        }
-        return { disposition: 'duplicate' as const, record };
+      const duplicateRecord = duplicateRow === undefined
+        ? undefined
+        : this.toRecord(this.requireRow(duplicateRow));
+      if (duplicateRecord !== undefined && !sameEvent(duplicateRecord.event, request.event)) {
+        throw new GoalRuntimeEventStoreError(
+          'event_id_conflict',
+          `Goal runtime event ID '${request.event.eventId}' already identifies different content`,
+        );
       }
 
       this.validateStoredScope(request.event);
@@ -198,13 +197,25 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         return { disposition: 'concurrent_change' as const, reason: 'snapshot_changed' as const };
       }
 
-      const newerEvent = this.database.connection.prepare(`
-        SELECT sequence
-        FROM goal_runtime_events
-        WHERE goal_id = ? AND sequence > ?
-        ORDER BY sequence ASC
-        LIMIT 1
-      `).get(request.event.goalId, request.expectedSnapshotSequence);
+      const newerEvent = duplicateRecord === undefined
+        ? this.database.connection.prepare(`
+            SELECT sequence
+            FROM goal_runtime_events
+            WHERE goal_id = ? AND sequence > ?
+            ORDER BY sequence ASC
+            LIMIT 1
+          `).get(request.event.goalId, request.expectedSnapshotSequence)
+        : this.database.connection.prepare(`
+            SELECT sequence
+            FROM goal_runtime_events
+            WHERE goal_id = ? AND sequence > ? AND event_id <> ?
+            ORDER BY sequence ASC
+            LIMIT 1
+          `).get(
+            request.event.goalId,
+            request.expectedSnapshotSequence,
+            duplicateRecord.event.eventId,
+          );
       if (newerEvent !== undefined) {
         return { disposition: 'concurrent_change' as const, reason: 'event_stream_advanced' as const };
       }
@@ -246,6 +257,9 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
           && continuation.version === expectedContinuation.version;
       if (!continuationMatches) {
         return { disposition: 'concurrent_change' as const, reason: 'scheduled_continuation_changed' as const };
+      }
+      if (duplicateRecord !== undefined) {
+        return { disposition: 'duplicate' as const, record: duplicateRecord };
       }
 
       const event = request.event;

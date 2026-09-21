@@ -265,11 +265,13 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
     if (!nullableStrings.every((key) => value[key] === null || typeof value[key] === 'string')) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event optional fields are invalid');
     }
-    if (!Number.isInteger(value.sequence) || (value.sequence as number) <= 0) {
+    if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= 0) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event sequence is invalid');
     }
     if (value.execution_generation !== null
-      && (!Number.isInteger(value.execution_generation) || (value.execution_generation as number) <= 0)) {
+      && (typeof value.execution_generation !== 'number'
+        || !Number.isInteger(value.execution_generation)
+        || value.execution_generation <= 0)) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event execution generation is invalid');
     }
     validateIso(value.occurred_at as string, 'occurred_at', 'corrupt');

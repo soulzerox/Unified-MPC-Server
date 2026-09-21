@@ -3,6 +3,7 @@ export {
   type ControlPlaneServerOptions,
   type GoalControlPort,
   type McpIdentityProbe,
+  type McpRuntimeDiagnosticsProbe,
   type WebMcpRuntimeIdentity,
   type WebGoalSummary,
   type WebWorkspaceSummary,

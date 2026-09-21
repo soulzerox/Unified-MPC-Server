@@ -9,6 +9,7 @@ export * from './progress-heartbeat.js';
 export * from './result-mapper.js';
 export * from './server.js';
 export * from './shared-activity-snapshot.js';
+export * from './runtime-diagnostics.js';
 export * from './stdio.js';
 export * from './trusted-host-approval.js';
 export * from './cross-client-host-approval.js';

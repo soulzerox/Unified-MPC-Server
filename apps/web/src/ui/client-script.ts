@@ -29,6 +29,51 @@ export function getClientScriptJs(): string {
         return fallback;
       }
 
+      function formatBytes(value) {
+        const bytes = Number(value);
+        if (!Number.isFinite(bytes) || bytes < 0) return '—';
+        if (bytes < 1024) return Math.round(bytes) + ' B';
+        const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+        let amount = bytes;
+        let unit = -1;
+        do {
+          amount /= 1024;
+          unit += 1;
+        } while (amount >= 1024 && unit < units.length - 1);
+        return (amount >= 100 ? amount.toFixed(0) : amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)) + ' ' + units[unit];
+      }
+
+      function setText(id, value) {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+      }
+
+      function renderRuntimeRetention(retention) {
+        const body = document.getElementById('runtime-retention-body');
+        if (!body) return;
+        body.replaceChildren();
+        const rows = [
+          ['Tasks', 'tasks'],
+          ['Checkpoints', 'checkpoints'],
+          ['Hooks', 'hooks'],
+          ['Plugins', 'plugins'],
+          ['Session entries', 'sessionEntries'],
+          ['Worktrees', 'worktrees'],
+          ['Activity in-flight', 'activityInflight'],
+          ['Activity completed', 'activityCompletedEntries', 'activityCompletedEntryLimit'],
+          ['Incremental verification', 'incrementalVerificationEntries'],
+          ['Context ledger', 'contextLedgerEntries'],
+          ['Tool availability subscriptions', 'toolAvailabilitySubscriptions'],
+        ];
+        for (const [label, key, limitKey] of rows) {
+          const row = document.createElement('tr');
+          addCell(row, label);
+          addCell(row, Number.isFinite(Number(retention?.[key])) ? String(retention[key]) : '—', 'mono');
+          addCell(row, limitKey && Number.isFinite(Number(retention?.[limitKey])) && Number(retention[limitKey]) > 0 ? String(retention[limitKey]) : '—', 'mono');
+          body.appendChild(row);
+        }
+      }
+
       async function mutationJson(url, init) {
         const res = await fetch(url, init);
         if (res.status === 401) {
@@ -121,6 +166,34 @@ export function getClientScriptJs(): string {
           const tel = document.getElementById('servers-telemetry');
           if (tel) tel.textContent = 'Unable to reach backend: ' + err.message;
           logEvent('ERROR', 'Failed to reach status endpoint: ' + err.message);
+        }
+      }
+
+      async function loadRuntimeDiagnostics() {
+        try {
+          const res = await fetch('/api/runtime-diagnostics');
+          const data = await res.json();
+          if (!res.ok || data?.available !== true || !data.diagnostics) {
+            throw new Error(errorMessage(data, 'MCP runtime diagnostics unavailable'));
+          }
+          const diagnostics = data.diagnostics;
+          const memory = diagnostics.processMemory || {};
+          setText('stat-runtime-rss', formatBytes(memory.rssBytes));
+          setText('runtime-rss', formatBytes(memory.rssBytes));
+          setText('runtime-heap-used', formatBytes(memory.heapUsedBytes));
+          setText('runtime-heap-total', formatBytes(memory.heapTotalBytes));
+          setText('runtime-external', formatBytes(memory.externalBytes) + ' / ' + formatBytes(memory.arrayBuffersBytes));
+          setText('runtime-diagnostics-source', diagnostics.source || 'runtime-counters');
+          renderRuntimeRetention(diagnostics.runtimeRetention || {});
+        } catch {
+          setText('stat-runtime-rss', 'unavailable');
+          setText('runtime-rss', 'unavailable');
+          setText('runtime-heap-used', 'unavailable');
+          setText('runtime-heap-total', 'unavailable');
+          setText('runtime-external', 'unavailable');
+          setText('runtime-diagnostics-source', 'unavailable');
+          const body = document.getElementById('runtime-retention-body');
+          if (body) body.replaceChildren(emptyRow(3, 'MCP runtime diagnostics unavailable'));
         }
       }
 
@@ -1194,6 +1267,7 @@ export function getClientScriptJs(): string {
         loadGatewayStatus();
         loadPolicies();
         fetchServerLogs();
+        loadRuntimeDiagnostics();
       });
       document.getElementById('refresh-servers-btn')?.addEventListener('click', loadInventory);
       document.getElementById('servers-view-refresh-btn')?.addEventListener('click', loadInventory);
@@ -1201,6 +1275,7 @@ export function getClientScriptJs(): string {
       document.getElementById('skills-view-refresh-btn')?.addEventListener('click', loadInventory);
       document.getElementById('chatgpt-view-refresh-btn')?.addEventListener('click', loadGatewayStatus);
       document.getElementById('projects-refresh-btn')?.addEventListener('click', loadWorkspaces);
+      document.getElementById('runtime-diagnostics-refresh-btn')?.addEventListener('click', loadRuntimeDiagnostics);
 
       // Search Inputs
       document.getElementById('server-search-input')?.addEventListener('input', (e) => {
@@ -1231,9 +1306,11 @@ export function getClientScriptJs(): string {
       loadGatewayStatus();
       loadSettings();
       fetchServerLogs();
+      loadRuntimeDiagnostics();
 
       setInterval(loadStatus, 5000);
       setInterval(loadGatewayStatus, 5000);
+      setInterval(loadRuntimeDiagnostics, 5000);
       setInterval(fetchServerLogs, 6000);
     })();
   `;

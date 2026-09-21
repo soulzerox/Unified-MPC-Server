@@ -26,9 +26,11 @@ import { HarnessActivationLedger } from './harness-runtime.js';
 import { createOriginPolicy, type OriginPolicy } from './origin-policy.js';
 import { BoundedRetentionMap } from './bounded-retention-map.js';
 import { APP_NAME, APP_VERSION } from '@unified-mpc/shared';
+import type { McpRuntimeDiagnosticsProvider } from './runtime-diagnostics.js';
 
 export const MAX_MCP_HTTP_BODY_BYTES = 1_048_576;
 export const UNIFIED_MPC_MCP_IDENTITY_PATH = '/_unified-mpc/identity';
+export const UNIFIED_MPC_RUNTIME_DIAGNOSTICS_PATH = '/_unified-mpc/runtime-diagnostics';
 export const DEFAULT_LEGACY_SESSION_TTL_MS = 60 * 60_000;
 export const LEGACY_SESSION_EVICTION_REASONS = ['idle_ttl', 'lru_capacity', 'client_delete', 'transport_close', 'backend_shutdown', 'protocol_error'] as const;
 export type LegacySessionEvictionReason = typeof LEGACY_SESSION_EVICTION_REASONS[number];
@@ -50,6 +52,7 @@ export interface UnifiedBuildProvenance {
 export interface McpHttpServerOptions extends McpServerOptions {
   readonly port: number;
   readonly buildProvenance?: UnifiedBuildProvenance;
+  readonly runtimeDiagnosticsProvider?: McpRuntimeDiagnosticsProvider;
   readonly maxBodyBytes?: number;
   readonly originPolicy?: OriginPolicy;
   readonly allowedHostnames?: readonly string[];
@@ -420,9 +423,10 @@ async function handleRequest(
   maxBodyBytes: number,
   allowedHostnames: readonly string[],
   buildProvenance?: UnifiedBuildProvenance,
+  runtimeDiagnosticsProvider?: McpRuntimeDiagnosticsProvider,
 ): Promise<void> {
   const requestedPath = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
-  if (requestedPath !== '/mcp' && requestedPath !== UNIFIED_MPC_MCP_IDENTITY_PATH) {
+  if (requestedPath !== '/mcp' && requestedPath !== UNIFIED_MPC_MCP_IDENTITY_PATH && requestedPath !== UNIFIED_MPC_RUNTIME_DIAGNOSTICS_PATH) {
     sendStatus(response, 404, 'Not found');
     return;
   }
@@ -434,6 +438,30 @@ async function handleRequest(
   }
 
   const fetchRequest = toFetchRequest(request, read.body);
+  if (requestedPath === UNIFIED_MPC_RUNTIME_DIAGNOSTICS_PATH) {
+    if (fetchRequest.method !== 'GET') {
+      sendStatus(response, 405, 'Method not allowed');
+      return;
+    }
+    const loopbackRejected = hostHeaderValidationResponse(fetchRequest, [...localhostAllowedHostnames()])
+      ?? createOriginPolicy(localhostAllowedOrigins()).validate(fetchRequest);
+    if (loopbackRejected !== undefined) {
+      await writeFetchResponse(response, loopbackRejected);
+      return;
+    }
+    if (runtimeDiagnosticsProvider === undefined) {
+      sendStatus(response, 503, 'Runtime diagnostics unavailable');
+      return;
+    }
+    try {
+      const diagnostics = await runtimeDiagnosticsProvider();
+      await writeFetchResponse(response, Response.json(diagnostics, { headers: { 'cache-control': 'no-store' } }));
+    } catch {
+      sendStatus(response, 503, 'Runtime diagnostics unavailable');
+    }
+    return;
+  }
+
   const rejected = hostHeaderValidationResponse(fetchRequest, [...allowedHostnames])
     ?? originPolicy.validate(fetchRequest);
   if (rejected !== undefined) {
@@ -505,7 +533,7 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
     const allowedHostnames = [...new Set([...localhostAllowedHostnames(), ...(configuredHostnames() ?? [])])];
     const allowedOrigins = [...new Set([...localhostAllowedOrigins(), ...(configuredOrigins() ?? [])])];
     const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(allowedOrigins);
-    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames, options.buildProvenance).catch((error: unknown) => {
+    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames, options.buildProvenance, options.runtimeDiagnosticsProvider).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();

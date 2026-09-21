@@ -8,6 +8,7 @@ import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudf
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
+import { isMcpRuntimeDiagnosticsSnapshot, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import {
   DEFAULT_EXTENSIONS_SETTINGS,
   EXTENSIONS_SETTINGS_KEY,
@@ -85,6 +86,7 @@ export interface WebMcpRuntimeIdentity {
 }
 
 export type McpIdentityProbe = (localPort: number) => Promise<WebMcpRuntimeIdentity | null>;
+export type McpRuntimeDiagnosticsProbe = (localPort: number) => Promise<McpRuntimeDiagnosticsSnapshot | null>;
 
 export interface ControlPlaneServerOptions {
   readonly port?: number;
@@ -104,6 +106,7 @@ export interface ControlPlaneServerOptions {
   readonly workspaceControl?: WorkspaceControlPort;
   readonly goalControl?: GoalControlPort;
   readonly mcpIdentityProbe?: McpIdentityProbe;
+  readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
   readonly closeSettings?: () => void;
 }
 
@@ -155,6 +158,7 @@ export class ControlPlaneServer {
   private readonly workspaceControl: WorkspaceControlPort | undefined;
   private readonly goalControl: GoalControlPort | undefined;
   private readonly mcpIdentityProbe: McpIdentityProbe;
+  private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly closeSettings: (() => void) | undefined;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
@@ -183,6 +187,7 @@ export class ControlPlaneServer {
     this.workspaceControl = options.workspaceControl;
     this.goalControl = options.goalControl;
     this.mcpIdentityProbe = options.mcpIdentityProbe ?? probeMcpRuntimeIdentity;
+    this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.closeSettings = options.closeSettings;
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
@@ -292,6 +297,29 @@ export class ControlPlaneServer {
         status: 'healthy',
         gateway,
         mcpIdentity,
+      }));
+      return;
+    }
+
+    if (pathname === '/api/runtime-diagnostics' && req.method === 'GET') {
+      const gateway = this.gateway.status();
+      const diagnostics = await this.mcpRuntimeDiagnosticsProbe(gateway.localPort);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      if (diagnostics === null) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'control-plane-process',
+          error: 'MCP runtime diagnostics unavailable',
+        }));
+        return;
+      }
+      res.statusCode = 200;
+      res.end(JSON.stringify({
+        available: true,
+        scope: 'control-plane-process',
+        diagnostics,
       }));
       return;
     }
@@ -1185,6 +1213,21 @@ async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Pr
   });
 }
 
+
+async function probeMcpRuntimeDiagnostics(localPort: number): Promise<McpRuntimeDiagnosticsSnapshot | null> {
+  if (!Number.isInteger(localPort) || localPort <= 0 || localPort > 65_535) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${localPort}/_unified-mpc/runtime-diagnostics`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!response.ok) return null;
+    const value: unknown = await response.json();
+    return isMcpRuntimeDiagnosticsSnapshot(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 async function probeMcpRuntimeIdentity(localPort: number): Promise<WebMcpRuntimeIdentity | null> {
   if (!Number.isInteger(localPort) || localPort <= 0 || localPort > 65_535) return null;

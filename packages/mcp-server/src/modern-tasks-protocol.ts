@@ -21,7 +21,7 @@ const TASK_DESCRIPTOR_VERSION = 1;
 const MAX_TASK_ID_BYTES = 4096;
 
 type ModernTaskStatus = 'working' | 'input_required' | 'completed' | 'failed' | 'cancelled';
-type TaskProvider = 'shell' | 'process';
+type TaskProvider = 'shell' | 'process' | 'goal';
 
 interface ModernTaskDescriptor {
   readonly v: 1;
@@ -30,6 +30,8 @@ interface ModernTaskDescriptor {
   readonly backingId: string;
   readonly toolName: string;
   readonly workspaceId?: string;
+  readonly goalId?: string;
+  readonly executionGeneration?: number;
 }
 
 interface ModernTaskBase {
@@ -122,7 +124,24 @@ export class ModernTasksProtocol {
   public async cancelTask(params: { readonly taskId: string }): Promise<ModernTaskCompleteResult> {
     const descriptor = decodeTaskId(params.taskId);
     const current = await this.observe(descriptor);
-    if (current.status === 'completed' || current.status === 'cancelled') return { resultType: 'complete' };
+    if (current.status === 'completed' || current.status === 'cancelled' || current.status === 'failed') {
+      return { resultType: 'complete' };
+    }
+
+    if (descriptor.provider === 'goal') {
+      const goals = this.services.goals;
+      if (goals === undefined || descriptor.executionGeneration === undefined) {
+        throw internalError('Durable goal execution service is unavailable');
+      }
+      const cancelled = await goals.cancelGoalExecution(this.actor, {
+        executionId: descriptor.backingId,
+        executionGeneration: descriptor.executionGeneration,
+        summary: 'Cancelled through the exact MCP Tasks execution handle',
+        evidence: [{ kind: 'note', value: 'unified-mpc:mcp-tasks:exact-execution-cancel' }],
+      });
+      if (!cancelled.ok) throw providerError(cancelled.error);
+      return { resultType: 'complete' };
+    }
 
     if (descriptor.provider === 'shell') {
       const capabilities = this.services.capabilities;
@@ -154,6 +173,24 @@ export class ModernTasksProtocol {
     const request = asRecord(input);
     const workspaceId = boundedString(request?.workspaceId, 128);
 
+    const goalExecutionId = boundedString(structured.executionId, 128);
+    const goalId = boundedString(structured.goalId, 128);
+    const executionGeneration = positiveInteger(structured.executionGeneration);
+    if (
+      toolName === 'run_goal'
+      && goalExecutionId !== undefined
+      && goalId !== undefined
+      && executionGeneration !== undefined
+    ) {
+      return goalTaskDescriptor(
+        goalExecutionId,
+        goalId,
+        executionGeneration,
+        toolName,
+        workspaceId,
+      );
+    }
+
     const shellTaskId = boundedString(structured.task_id, 256);
     const shellRequest = toolName === 'shell' && (request?.operation === undefined || request.operation === 'run');
     if (shellTaskId !== undefined && (shellRequest || toolName === 'task_create')) {
@@ -174,8 +211,84 @@ export class ModernTasksProtocol {
   }
 
   private async observe(descriptor: ModernTaskDescriptor): Promise<ProviderObservation> {
+    if (descriptor.provider === 'goal') return this.observeGoal(descriptor);
     if (descriptor.provider === 'shell') return this.observeShell(descriptor);
     return this.observeProcess(descriptor);
+  }
+
+  private async observeGoal(descriptor: ModernTaskDescriptor): Promise<ProviderObservation> {
+    const goals = this.services.goals;
+    if (
+      goals === undefined
+      || descriptor.goalId === undefined
+      || descriptor.executionGeneration === undefined
+    ) {
+      throw internalError('Durable goal execution service is unavailable');
+    }
+    const executionResult = await goals.getGoalExecution(this.actor, {
+      executionId: descriptor.backingId,
+    });
+    if (!executionResult.ok) throw providerError(executionResult.error);
+    const execution = asRecord(executionResult.value);
+    if (
+      execution === undefined
+      || execution.id !== descriptor.backingId
+      || execution.goalId !== descriptor.goalId
+      || execution.executionGeneration !== descriptor.executionGeneration
+    ) {
+      throw invalidParams('Task not found or inaccessible');
+    }
+
+    const goalResult = await goals.getGoal(this.actor, { goalId: descriptor.goalId });
+    if (!goalResult.ok) throw providerError(goalResult.error);
+    const goal = asRecord(goalResult.value);
+    if (goal === undefined) throw internalError('Durable goal returned an invalid status payload');
+
+    const receiptState = boundedString(execution.receiptState, 32);
+    const goalStatus = boundedString(goal.status, 32);
+    let status: ModernTaskStatus;
+    let statusMessage: string | undefined;
+    if (receiptState === 'active') {
+      status = 'working';
+    } else if (receiptState === 'terminal') {
+      status = goalStatus === 'completed'
+        ? 'completed'
+        : goalStatus === 'cancelled'
+          ? 'cancelled'
+          : 'failed';
+      if (status === 'failed') statusMessage = `Goal execution ended with status ${goalStatus ?? 'unknown'}`;
+    } else if (receiptState === 'superseded') {
+      status = 'cancelled';
+      statusMessage = 'Execution was superseded by a newer generation';
+    } else if (receiptState === 'released') {
+      status = 'working';
+      statusMessage = 'Execution lease is released while the durable goal awaits continuation';
+    } else {
+      status = 'failed';
+      statusMessage = 'Durable execution receipt state is invalid';
+    }
+
+    const createdAt = isoString(execution.createdAt) ?? new Date(0).toISOString();
+    const lastUpdatedAt = isoString(execution.updatedAt) ?? createdAt;
+    const publicExecution = {
+      id: descriptor.backingId,
+      goalId: descriptor.goalId,
+      workspaceId: boundedString(execution.workspaceId, 128),
+      executionGeneration: descriptor.executionGeneration,
+      leaseGeneration: positiveInteger(execution.leaseGeneration),
+      receiptState,
+      createdAt,
+      updatedAt: lastUpdatedAt,
+    };
+    return {
+      value: { execution: publicExecution, goal },
+      status,
+      ...(statusMessage === undefined ? {} : { statusMessage }),
+      createdAt,
+      lastUpdatedAt,
+      ttlMs: null,
+      resultIsError: status === 'failed',
+    };
   }
 
   private async observeShell(descriptor: ModernTaskDescriptor): Promise<ProviderObservation> {
@@ -270,6 +383,25 @@ function taskDescriptor(provider: TaskProvider, backingId: string, toolName: str
   };
 }
 
+function goalTaskDescriptor(
+  executionId: string,
+  goalId: string,
+  executionGeneration: number,
+  toolName: string,
+  workspaceId?: string,
+): ModernTaskDescriptor {
+  return {
+    v: TASK_DESCRIPTOR_VERSION,
+    nonce: randomUUID(),
+    provider: 'goal',
+    backingId: executionId,
+    toolName,
+    goalId,
+    executionGeneration,
+    ...(workspaceId === undefined ? {} : { workspaceId }),
+  };
+}
+
 function encodeTaskId(descriptor: ModernTaskDescriptor): string {
   return `${TASK_ID_PREFIX}${Buffer.from(JSON.stringify(descriptor), 'utf8').toString('base64url')}`;
 }
@@ -286,7 +418,19 @@ function decodeTaskId(taskId: string): ModernTaskDescriptor {
     const backingId = boundedString(record?.backingId, 256);
     const toolName = boundedString(record?.toolName, 128);
     const workspaceId = boundedString(record?.workspaceId, 128);
-    if (record?.v !== TASK_DESCRIPTOR_VERSION || (provider !== 'shell' && provider !== 'process') || nonce === undefined || backingId === undefined || toolName === undefined) {
+    const goalId = boundedString(record?.goalId, 128);
+    const executionGeneration = positiveInteger(record?.executionGeneration);
+    const providerValid = provider === 'shell' || provider === 'process' || provider === 'goal';
+    const goalDescriptorValid = provider !== 'goal'
+      || (goalId !== undefined && executionGeneration !== undefined && toolName === 'run_goal');
+    if (
+      record?.v !== TASK_DESCRIPTOR_VERSION
+      || !providerValid
+      || !goalDescriptorValid
+      || nonce === undefined
+      || backingId === undefined
+      || toolName === undefined
+    ) {
       throw new Error('invalid descriptor');
     }
     return {
@@ -296,6 +440,8 @@ function decodeTaskId(taskId: string): ModernTaskDescriptor {
       backingId,
       toolName,
       ...(workspaceId === undefined ? {} : { workspaceId }),
+      ...(goalId === undefined ? {} : { goalId }),
+      ...(executionGeneration === undefined ? {} : { executionGeneration }),
     };
   } catch {
     throw invalidParams('Task not found or inaccessible');
@@ -353,8 +499,13 @@ function taskTtlMs(createdAt: string, deadlineAt: string | undefined): number | 
 }
 
 function providerError(error: AppError): ProtocolError {
-  if (error.code === 'PROCESS_NOT_FOUND' || error.code === 'PERMISSION_DENIED') {
-    return invalidParams('Task not found or inaccessible');
+  if (
+    error.code === 'PROCESS_NOT_FOUND'
+    || error.code === 'PERMISSION_DENIED'
+    || error.code === 'INVALID_INPUT'
+    || error.code === 'CONFLICT'
+  ) {
+    return invalidParams(error.code === 'CONFLICT' ? error.message : 'Task not found or inaccessible');
   }
   return internalError(error.message);
 }
@@ -371,6 +522,10 @@ function boundedString(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 && trimmed.length <= maxLength ? trimmed : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function isoString(value: unknown): string | undefined {

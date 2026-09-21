@@ -256,6 +256,8 @@ export function createStdioMcpRuntime(
     workerLiveness: goalMutationFence,
     taskCancellation,
     requestCancellation,
+    goalExecutions: goalRepository,
+    executionCancellation: goalRepository,
   });
   const scheduledContinuationService = new ScheduledContinuationService(goalRepository, {
     workerLiveness: goalMutationFence,

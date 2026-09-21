@@ -5,7 +5,11 @@ import {
   err,
   ok,
   type GoalCheckpointRecord,
+  type CancelGoalRecordResult,
   type GoalEvidence,
+  type GoalExecutionRecord,
+  type GoalExecutionRepository,
+  type GoalExecutionCancellationRepository,
   type GoalLeaseRecoveryEvidence,
   type GoalReconciliationReason,
   type GoalPlan,
@@ -110,6 +114,17 @@ export interface FinishGoalRequest {
 export interface CancelGoalRequest {
   readonly goalId: string;
   readonly expectedRevision: number;
+  readonly summary: string;
+  readonly evidence: readonly GoalEvidence[];
+}
+
+export interface GetGoalExecutionRequest {
+  readonly executionId: string;
+}
+
+export interface CancelGoalExecutionRequest {
+  readonly executionId: string;
+  readonly executionGeneration: number;
   readonly summary: string;
   readonly evidence: readonly GoalEvidence[];
 }
@@ -229,6 +244,8 @@ export interface GoalContinuationServiceOptions {
   readonly workerLiveness?: ScheduledContinuationWorkerLivenessPort;
   readonly taskCancellation?: Pick<GoalTaskCancellationPort, 'cancelForGoal'>;
   readonly requestCancellation?: Pick<GoalRequestCancellationPort, 'cancelForGoal'>;
+  readonly goalExecutions?: Pick<GoalExecutionRepository, 'getExecutionById'>;
+  readonly executionCancellation?: Pick<GoalExecutionCancellationRepository, 'cancelExecution'>;
 }
 
 export class GoalContinuationService {
@@ -237,6 +254,8 @@ export class GoalContinuationService {
   private readonly workerLiveness: ScheduledContinuationWorkerLivenessPort | undefined;
   private readonly taskCancellation: Pick<GoalTaskCancellationPort, 'cancelForGoal'> | undefined;
   private readonly requestCancellation: Pick<GoalRequestCancellationPort, 'cancelForGoal'> | undefined;
+  private readonly goalExecutions: Pick<GoalExecutionRepository, 'getExecutionById'> | undefined;
+  private readonly executionCancellation: Pick<GoalExecutionCancellationRepository, 'cancelExecution'> | undefined;
 
   public constructor(
     private readonly workspaces: WorkspaceRepository,
@@ -248,6 +267,8 @@ export class GoalContinuationService {
     this.workerLiveness = options.workerLiveness;
     this.taskCancellation = options.taskCancellation;
     this.requestCancellation = options.requestCancellation;
+    this.goalExecutions = options.goalExecutions;
+    this.executionCancellation = options.executionCancellation;
   }
 
   public async runGoal(actor: FileActor, request: RunGoalRequest): Promise<Result<RunGoalResult>> {
@@ -456,6 +477,66 @@ export class GoalContinuationService {
     }
   }
 
+  public async getGoalExecution(actor: FileActor, request: GetGoalExecutionRequest): Promise<Result<GoalExecutionRecord>> {
+    try {
+      const ownerClientId = stableOwnerClientId(actor);
+      const executionId = requiredBounded(request.executionId, 'executionId', 128);
+      if (this.goalExecutions === undefined) {
+        return err(appError('INTERNAL_ERROR', 'Durable goal execution repository is unavailable'));
+      }
+      const execution = await this.goalExecutions.getExecutionById(executionId);
+      if (execution === null || execution.ownerClientId !== ownerClientId) {
+        return err(appError('INVALID_INPUT', 'Goal execution was not found'));
+      }
+      return ok(execution);
+    } catch (error: unknown) {
+      return this.mapError(error);
+    }
+  }
+
+  public async cancelGoalExecution(
+    actor: FileActor,
+    request: CancelGoalExecutionRequest,
+  ): Promise<Result<CancelGoalResult>> {
+    try {
+      const ownerClientId = stableOwnerClientId(actor);
+      const executionId = requiredBounded(request.executionId, 'executionId', 128);
+      if (!Number.isInteger(request.executionGeneration) || request.executionGeneration < 1) {
+        return err(appError('INVALID_INPUT', 'executionGeneration is invalid'));
+      }
+      if (this.goalExecutions === undefined || this.executionCancellation === undefined) {
+        return err(appError('INTERNAL_ERROR', 'Exact durable goal execution cancellation is unavailable'));
+      }
+      const execution = await this.goalExecutions.getExecutionById(executionId);
+      if (
+        execution === null
+        || execution.ownerClientId !== ownerClientId
+        || execution.executionGeneration !== request.executionGeneration
+      ) {
+        return err(appError('INVALID_INPUT', 'Goal execution was not found'));
+      }
+      const now = this.now().toISOString();
+      const cancelled = await this.executionCancellation.cancelExecution({
+        checkpointId: randomUUID(),
+        goalId: execution.goalId,
+        executionId,
+        expectedExecutionGeneration: request.executionGeneration,
+        ownerClientId,
+        summary: safeText(request.summary, MAX_SUMMARY, 'summary'),
+        evidence: normalizeEvidence(request.evidence),
+        now,
+      });
+      return ok(await this.buildCancellationResult(
+        ownerClientId,
+        execution.goalId,
+        now,
+        cancelled,
+      ));
+    } catch (error: unknown) {
+      return this.mapError(error);
+    }
+  }
+
   public async cancelGoal(actor: FileActor, request: CancelGoalRequest): Promise<Result<CancelGoalResult>> {
     try {
       stableOwnerClientId(actor);
@@ -474,32 +555,7 @@ export class GoalContinuationService {
         evidence: normalizeEvidence(request.evidence),
         now,
       });
-      const [requestCancellation, taskCancellations] = await Promise.all([
-        this.cancelInFlightRequests(goalId),
-        this.cancelTrackedTasks(ownerClientId, cancelled.goal.workspaceId, cancelled.trackedTasks ?? legacyTrackedTasks(cancelled.trackedTaskIds)),
-      ]);
-      let scheduledTaskCancellation: ScheduledTaskCancellationInstruction = {
-        action: 'none',
-        reason: 'no_live_task',
-      };
-      if (this.scheduledContinuations !== undefined) {
-        try {
-          const marked = await this.scheduledContinuations.markGoalFinishedForScheduledContinuation(goalId, now);
-          scheduledTaskCancellation = cancellationInstruction(marked.continuation);
-        } catch {
-          scheduledTaskCancellation = { action: 'none', reason: 'native_task_unverified' };
-        }
-      }
-      return ok({
-        ...toSnapshot(cancelled.goal),
-        trackedTaskIds: cancelled.trackedTaskIds,
-        trackedTasks: cancelled.trackedTasks ?? legacyTrackedTasks(cancelled.trackedTaskIds),
-        taskCancellations,
-        allTasksStopped: taskCancellations.every((entry) => isGoalTaskStopped(entry.status)),
-        requestCancellation,
-        allRequestsStopped: requestCancellation.remaining === 0,
-        scheduledTaskCancellation,
-      });
+      return ok(await this.buildCancellationResult(ownerClientId, goalId, now, cancelled));
     } catch (error: unknown) {
       return this.mapError(error);
     }
@@ -654,6 +710,44 @@ export class GoalContinuationService {
     }
     if (error instanceof Error) return err(appError('INVALID_INPUT', 'Durable goal input is invalid'));
     return err(appError('INTERNAL_ERROR', 'Durable goal operation failed'));
+  }
+
+  private async buildCancellationResult(
+    ownerClientId: string,
+    goalId: string,
+    now: string,
+    cancelled: CancelGoalRecordResult,
+  ): Promise<CancelGoalResult> {
+    const [requestCancellation, taskCancellations] = await Promise.all([
+      this.cancelInFlightRequests(goalId),
+      this.cancelTrackedTasks(
+        ownerClientId,
+        cancelled.goal.workspaceId,
+        cancelled.trackedTasks ?? legacyTrackedTasks(cancelled.trackedTaskIds),
+      ),
+    ]);
+    let scheduledTaskCancellation: ScheduledTaskCancellationInstruction = {
+      action: 'none',
+      reason: 'no_live_task',
+    };
+    if (this.scheduledContinuations !== undefined) {
+      try {
+        const marked = await this.scheduledContinuations.markGoalFinishedForScheduledContinuation(goalId, now);
+        scheduledTaskCancellation = cancellationInstruction(marked.continuation);
+      } catch {
+        scheduledTaskCancellation = { action: 'none', reason: 'native_task_unverified' };
+      }
+    }
+    return {
+      ...toSnapshot(cancelled.goal),
+      trackedTaskIds: cancelled.trackedTaskIds,
+      trackedTasks: cancelled.trackedTasks ?? legacyTrackedTasks(cancelled.trackedTaskIds),
+      taskCancellations,
+      allTasksStopped: taskCancellations.every((entry) => isGoalTaskStopped(entry.status)),
+      requestCancellation,
+      allRequestsStopped: requestCancellation.remaining === 0,
+      scheduledTaskCancellation,
+    };
   }
 
   private async cancelTrackedTasks(

@@ -150,6 +150,8 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('Local MCP process');
     expect(html).toContain('/api/runtime-diagnostics');
     expect(html).toContain('activityCompletedEntryLimit');
+    expect(html).toContain('no process-authoritative owner is exposed');
+    expect(html).toContain("typeof value === 'number'");
     expect(html).not.toContain('Project memory pressure');
   });
 

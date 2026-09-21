@@ -27,6 +27,29 @@ export function createMcpRuntimeDiagnosticsProvider(options: {
     if (!isMcpRuntimeDiagnosticsSnapshot(result.value)) {
       throw new Error('Runtime telemetry returned an invalid diagnostics snapshot');
     }
-    return result.value;
+
+    const retention = result.value.runtimeRetention;
+    return {
+      source: result.value.source,
+      processMemory: result.value.processMemory,
+      runtimeRetention: {
+        // UpgradeRuntime session state is owned by request/session-scoped actors.
+        // A diagnostics-only runtime must not report its fresh local state as zero.
+        tasks: null,
+        checkpoints: null,
+        hooks: null,
+        sessionEntries: null,
+        contextLedgerEntries: null,
+        // Shared runtime state is persisted independently of the actor session.
+        plugins: options.services.runtimeStatePath === undefined ? null : retention.plugins,
+        worktrees: options.services.runtimeStatePath === undefined ? null : retention.worktrees,
+        // These owners are explicitly process-scoped and injected by composition.
+        activityInflight: options.activityTracker === undefined ? null : retention.activityInflight,
+        activityCompletedEntries: options.activityTracker === undefined ? null : retention.activityCompletedEntries,
+        activityCompletedEntryLimit: options.activityTracker === undefined ? null : retention.activityCompletedEntryLimit,
+        incrementalVerificationEntries: options.incrementalVerifier === undefined ? null : retention.incrementalVerificationEntries,
+        toolAvailabilitySubscriptions: options.services.runtimeDiagnostics === undefined ? null : retention.toolAvailabilitySubscriptions,
+      },
+    };
   };
 }

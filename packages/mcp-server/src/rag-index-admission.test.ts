@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ok } from '@unified-mpc/domain';
-import { ResourceAdmissionController } from '@unified-mpc/workspace';
+import { ResourceAdmissionController, type ResourceAdmissionLease } from '@unified-mpc/workspace';
 import { RagIndexAdmissionTracker } from './rag-index-admission.js';
 
 function controller(): ResourceAdmissionController {
@@ -13,7 +13,7 @@ function controller(): ResourceAdmissionController {
   });
 }
 
-function lease(admission: ResourceAdmissionController) {
+function lease(admission: ResourceAdmissionController): ResourceAdmissionLease {
   const acquired = admission.tryAcquire({
     operationId: 'rag-background',
     workspaceId: 'workspace-1',

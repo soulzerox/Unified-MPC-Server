@@ -134,6 +134,71 @@ describe('projectGoalRuntimeEvent', () => {
     });
   });
 
+  it('projects authoritative workspace observations without overwriting unrelated blockers', () => {
+    const dirty = projectGoalRuntimeEvent(base({ workspaceState: 'unknown' }), {
+      eventId: 'workspace-dirty',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'dirty',
+      occurredAt: '2026-09-21T13:00:02.000Z',
+      detail: 'registered workspace has uncommitted changes',
+    });
+    expect(dirty.projection).toMatchObject({
+      workspaceState: 'dirty',
+      blocker: { kind: 'dirty_workspace' },
+    });
+
+    const clean = projectGoalRuntimeEvent(dirty.projection, {
+      eventId: 'workspace-clean',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'clean',
+      occurredAt: '2026-09-21T13:00:03.000Z',
+    });
+    expect(clean.projection.workspaceState).toBe('clean');
+    expect(clean.projection.blocker).toBeUndefined();
+
+    const workerBlocked = base({
+      workspaceState: 'clean',
+      blocker: { kind: 'worker_lost', observedAt: '2026-09-21T13:00:04.000Z' },
+    });
+    const missing = projectGoalRuntimeEvent(workerBlocked, {
+      eventId: 'workspace-missing',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'missing',
+      occurredAt: '2026-09-21T13:00:05.000Z',
+      detail: 'registered workspace root is missing',
+    });
+    expect(missing.projection.workspaceState).toBe('missing');
+    expect(missing.projection.blocker).toEqual(workerBlocked.blocker);
+  });
+
+  it('clears only workspace-derived recovery blockers after the workspace becomes clean', () => {
+    const missing = projectGoalRuntimeEvent(base({ workspaceState: 'unknown' }), {
+      eventId: 'workspace-missing',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'missing',
+      occurredAt: '2026-09-21T13:00:02.000Z',
+    });
+    expect(missing.projection.blocker?.kind).toBe('recovery_required');
+
+    const clean = projectGoalRuntimeEvent(missing.projection, {
+      eventId: 'workspace-restored',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'clean',
+      occurredAt: '2026-09-21T13:00:03.000Z',
+    });
+    expect(clean.projection.blocker).toBeUndefined();
+  });
+
   it('completes one execution without fabricating Goal lifecycle or integration completion', () => {
     const running = base({
       runtimeState: 'running',

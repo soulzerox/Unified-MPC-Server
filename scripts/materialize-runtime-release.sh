@@ -124,7 +124,11 @@ if [[ "$deployed_commit" != "$source_commit" ]]; then
 fi
 
 while IFS= read -r -d '' link; do
+  raw_target="$(readlink -- "$link" 2>/dev/null || true)"
   resolved="$(readlink -f -- "$link" 2>/dev/null || true)"
+  if [[ "$raw_target" == /* ]]; then
+    fail 68 "RUNTIME_RELEASE_NOT_PORTABLE: absolute symlink would not survive atomic release rename: '$link' -> '$raw_target'"
+  fi
   if [[ -z "$resolved" || ( "$resolved" != "$stage_root" && "$resolved" != "$stage_root/"* ) ]]; then
     fail 68 "RUNTIME_RELEASE_NOT_PORTABLE: symlink escapes release root: '$link' -> '$resolved'"
   fi

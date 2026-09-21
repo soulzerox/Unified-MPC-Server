@@ -187,10 +187,13 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
 }
 
 function projectionFromDurableGoal(goal: GoalRecord): GoalRuntimeProjection {
-  const hasExactExecution = goal.status === 'active'
+  const exactExecutionId = goal.status === 'active'
     && goal.executionId !== undefined
     && goal.executionGeneration !== undefined
-    && goal.executionGeneration === goal.leaseGeneration;
+    && goal.executionGeneration === goal.leaseGeneration
+      ? goal.executionId
+      : undefined;
+  const hasExactExecution = exactExecutionId !== undefined;
 
   const base = {
     contractVersion: GOAL_RUNTIME_CONTRACT_VERSION,
@@ -209,10 +212,7 @@ function projectionFromDurableGoal(goal: GoalRecord): GoalRuntimeProjection {
         lifecycleState: 'open',
         runtimeState: hasExactExecution ? 'queued' : 'idle',
         desiredRuntimeState: hasExactExecution ? 'running' : 'idle',
-        ...(hasExactExecution ? { activeExecutionId: goal.executionId } : {}),
-        ...(hasExactExecution && goal.leaseHeartbeatAt !== undefined
-          ? { lastHeartbeatAt: goal.leaseHeartbeatAt }
-          : {}),
+        ...(exactExecutionId === undefined ? {} : { activeExecutionId: exactExecutionId }),
       };
     case 'completed':
       return {

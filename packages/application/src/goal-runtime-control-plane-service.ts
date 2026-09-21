@@ -54,8 +54,9 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
 
   public async ensureGoalSnapshot(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
     return this.withGoalLock(goalId, async () => {
-      const snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
-      return this.catchUpSnapshotUnlocked(snapshot);
+      let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
+      snapshot = await this.catchUpSnapshotUnlocked(snapshot);
+      return this.reconcileDurableTerminalStateUnlocked(snapshot);
     });
   }
 
@@ -64,25 +65,7 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       let snapshot = await this.ensureGoalSnapshotUnlocked(event.goalId);
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
 
-      const preview = projectGoalRuntimeEvent(snapshot.projection, event);
-      if (preview.decision.disposition === 'reject') {
-        throw new GoalRuntimeControlPlaneError(
-          'projection_rejected',
-          `Goal runtime event '${event.type}' was rejected: ${preview.decision.reason}`,
-        );
-      }
-
-      const appended = await this.events.appendGoalRuntimeEvent({
-        event,
-        recordedAt: new Date().toISOString(),
-      });
-
-      if (appended.record.sequence <= snapshot.lastEventSequence) return snapshot;
-
-      // Replay from the snapshot cursor instead of blindly storing the preview.
-      // This preserves event order if another authoritative producer appended
-      // a same-Goal event between our preflight and durable append.
-      return this.catchUpSnapshotUnlocked(snapshot);
+      return this.appendAndReplayUnlocked(snapshot, event);
     });
   }
 
@@ -119,6 +102,109 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       lastEventSequence,
       updatedAt: goal.updatedAt,
     });
+  }
+
+  private async reconcileDurableTerminalStateUnlocked(
+    initial: GoalRuntimeSnapshotRecord,
+  ): Promise<GoalRuntimeSnapshotRecord> {
+    const goal = await this.goals.getById(initial.projection.goalId);
+    if (goal === null) {
+      throw new GoalRuntimeControlPlaneError('goal_not_found', `Goal '${initial.projection.goalId}' was not found`);
+    }
+    if (goal.status === 'active') return initial;
+
+    let snapshot = initial;
+    const occurredAt = goal.terminalAt ?? goal.updatedAt;
+    const executionId = snapshot.projection.activeExecutionId;
+    const executionGeneration = snapshot.projection.executionGeneration;
+    const discriminator = `durable-terminal:${goal.revision}`;
+
+    if (executionId !== undefined && executionGeneration !== undefined) {
+      if (goal.status === 'cancelled') {
+        snapshot = await this.appendAndReplayUnlocked(snapshot, {
+          eventId: durableRuntimeEventId(goal.id, 'execution_cancelled', discriminator),
+          type: 'execution_cancelled',
+          workspaceId: goal.workspaceId,
+          goalId: goal.id,
+          executionId,
+          executionGeneration,
+          occurredAt,
+          detail: 'restart reconciliation from durable cancelled Goal',
+        });
+      } else if (goal.status === 'completed') {
+        if (snapshot.projection.runtimeState === 'queued' || snapshot.projection.runtimeState === 'starting') {
+          snapshot = await this.appendAndReplayUnlocked(snapshot, {
+            eventId: durableRuntimeEventId(goal.id, 'execution_started', `${discriminator}:finish`),
+            type: 'execution_started',
+            workspaceId: goal.workspaceId,
+            goalId: goal.id,
+            executionId,
+            executionGeneration,
+            occurredAt,
+            detail: 'restart reconciliation for durably completed Goal',
+          });
+        }
+        snapshot = await this.appendAndReplayUnlocked(snapshot, {
+          eventId: durableRuntimeEventId(goal.id, 'execution_completed', discriminator),
+          type: 'execution_completed',
+          workspaceId: goal.workspaceId,
+          goalId: goal.id,
+          executionId,
+          executionGeneration,
+          occurredAt,
+          detail: 'restart reconciliation from durable completed Goal',
+        });
+      } else {
+        snapshot = await this.appendAndReplayUnlocked(snapshot, {
+          eventId: durableRuntimeEventId(goal.id, 'execution_failed', discriminator),
+          type: 'execution_failed',
+          workspaceId: goal.workspaceId,
+          goalId: goal.id,
+          executionId,
+          executionGeneration,
+          occurredAt,
+          detail: `restart reconciliation from durable ${goal.status} Goal`,
+        });
+      }
+    }
+
+    const lifecycleType = goal.status === 'cancelled' ? 'goal_abandoned' : 'goal_completed';
+    const lifecycleTarget = lifecycleType === 'goal_abandoned' ? 'abandoned' : 'completed';
+    if (snapshot.projection.lifecycleState !== lifecycleTarget) {
+      snapshot = await this.appendAndReplayUnlocked(snapshot, {
+        eventId: durableRuntimeEventId(goal.id, lifecycleType, discriminator),
+        type: lifecycleType,
+        workspaceId: goal.workspaceId,
+        goalId: goal.id,
+        occurredAt,
+        detail: `restart reconciliation from durable ${goal.status} Goal`,
+      });
+    }
+    return snapshot;
+  }
+
+  private async appendAndReplayUnlocked(
+    snapshot: GoalRuntimeSnapshotRecord,
+    event: GoalRuntimeEvent,
+  ): Promise<GoalRuntimeSnapshotRecord> {
+    const preview = projectGoalRuntimeEvent(snapshot.projection, event);
+    if (preview.decision.disposition === 'reject') {
+      throw new GoalRuntimeControlPlaneError(
+        'projection_rejected',
+        `Goal runtime event '${event.type}' was rejected: ${preview.decision.reason}`,
+      );
+    }
+
+    const appended = await this.events.appendGoalRuntimeEvent({
+      event,
+      recordedAt: new Date().toISOString(),
+    });
+    if (appended.record.sequence <= snapshot.lastEventSequence) return snapshot;
+
+    // Replay from the snapshot cursor instead of blindly storing the preview.
+    // This preserves event order if another authoritative producer appended
+    // a same-Goal event between our preflight and durable append.
+    return this.catchUpSnapshotUnlocked(snapshot);
   }
 
   private async catchUpSnapshotUnlocked(
@@ -248,4 +334,14 @@ function projectionFromDurableGoal(goal: GoalRecord): GoalRuntimeProjection {
         desiredRuntimeState: 'cancelled',
       };
   }
+}
+
+function durableRuntimeEventId(goalId: string, type: GoalRuntimeEvent['type'], discriminator: string): string {
+  const input = [goalId, type, discriminator].join('\0');
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `goal-runtime-reconcile-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }

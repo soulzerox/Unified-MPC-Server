@@ -266,6 +266,10 @@ export function validateGoalStateTransition(transition: GoalStateTransition): Go
       : { valid: false, reason: 'invalid_transition' };
   }
 
+  if (transition.executionGenerationChanged === true && isExecutionActiveRuntimeState(transition.to)) {
+    return { valid: true };
+  }
+
   if (isTerminalRuntimeState(transition.from)
     && isExecutionActiveRuntimeState(transition.to)
     && transition.executionGenerationChanged !== true) {

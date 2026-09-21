@@ -345,6 +345,43 @@ describe('SqliteGoalRuntimeSnapshotRepository', () => {
     }
   });
 
+  it('rejects a duplicate worker_lost retry when the event stream advances after the first commit', async () => {
+    const runtime = await fixture();
+    try {
+      const running = await storeRunningSnapshot(runtime);
+      const workerLost = executionEvent(runtime.executionId, 'worker_lost', 3, {
+        blockerKind: 'worker_lost',
+        detail: 'restart reconciliation: no_live_worker',
+      });
+      const request = {
+        event: workerLost,
+        recordedAt: workerLost.occurredAt,
+        expectedSnapshotSequence: running.sequence,
+        expectedLeaseGeneration: 1,
+        expectedLeaseActivitySeq: 0,
+        expectedLiveScheduledContinuation: null,
+      } as const;
+
+      await expect(runtime.events.appendGoalRuntimeReconciliationEvent(request)).resolves.toMatchObject({
+        disposition: 'appended',
+        record: { event: workerLost },
+      });
+
+      const heartbeat = executionEvent(runtime.executionId, 'execution_heartbeat', 4);
+      await runtime.events.appendGoalRuntimeEvent({
+        event: heartbeat,
+        recordedAt: heartbeat.occurredAt,
+      });
+
+      await expect(runtime.events.appendGoalRuntimeReconciliationEvent(request)).resolves.toEqual({
+        disposition: 'concurrent_change',
+        reason: 'event_stream_advanced',
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('does not append worker_lost when the event stream advances after the liveness probe', async () => {
     const runtime = await fixture();
     try {

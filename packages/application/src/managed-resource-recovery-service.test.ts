@@ -102,6 +102,55 @@ describe('ManagedResourceRecoveryService', () => {
     }
   });
 
+
+  it('removes stale debt when the persisted child is already verified gone at startup', async () => {
+    const { database, repository, controller } = await fixture();
+    try {
+      store(repository, 'goal-already-gone', 'workspace-a', 'goal_process', 4);
+      const service = new ManagedResourceRecoveryService(repository, controller, {
+        platform: 'linux',
+        probe: probe(() => ({ state: 'verified_gone', pid: 4017 })),
+        now: () => new Date('2026-09-21T00:00:02.000Z'),
+      });
+
+      expect(await service.reconcileOnce()).toMatchObject({ restored: 0, released: 1 });
+      expect(repository.listUnreleased()).toEqual([]);
+      expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('restores a verified delegated child and blocks competing expensive work', async () => {
+    const { database, repository, controller } = await fixture();
+    try {
+      store(repository, 'delegated-survivor', 'workspace-a', 'delegated_agent', 4);
+      const service = new ManagedResourceRecoveryService(repository, controller, {
+        platform: 'linux',
+        probe: probe(() => ({
+          state: 'verified_live',
+          pid: 4018,
+          startedAt: '2026-09-21T00:00:00.000Z',
+        })),
+      });
+
+      expect(await service.reconcileOnce()).toMatchObject({ restored: 1, released: 0 });
+      expect(controller.snapshot()).toMatchObject({
+        activeCost: 4,
+        activeOperations: 1,
+        activeCostByClass: { delegated_agent: 4 },
+      });
+      expect(tryAdmitDependencyBootstrap(controller, {
+        operationId: 'competing-work',
+        workspaceId: 'workspace-b',
+        sessionId: 'session-b',
+        cost: 1,
+      })).toMatchObject({ admitted: false, reason: 'global_cost_exhausted' });
+    } finally {
+      database.close();
+    }
+  });
+
   it('fails closed for ambiguous liveness and is idempotent across repeated reconciliation', async () => {
     const { database, repository, controller } = await fixture();
     try {

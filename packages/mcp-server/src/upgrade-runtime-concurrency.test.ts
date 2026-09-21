@@ -1,4 +1,4 @@
-﻿import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+﻿import { access, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -140,6 +140,17 @@ describe('upgrade runtime multi-session persistence', () => {
     const calls: unknown[] = [];
     const services = {
       runtimeStatePath,
+      runtimeDeploymentReferenceOptions: {
+        runtimeDir: path.join(directory, 'runtime'),
+        deploymentStateDir: path.join(directory, 'deployments'),
+        homeDir: directory,
+        env: {},
+      },
+      workspaceInfo: {
+        async info(): Promise<ReturnType<typeof ok>> {
+          return ok({ rootPath: directory, realRootPath: directory });
+        },
+      },
       git: {
         async run(_actor: FileActor, request: unknown): Promise<ReturnType<typeof ok>> {
           calls.push(request);
@@ -173,6 +184,105 @@ describe('upgrade runtime multi-session persistence', () => {
       workspaceId: 'ws-1', worktreePath: '.worktrees/session-b', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
     expect(calls).toHaveLength(4);
+  });
+
+  it('blocks runtime-referenced worktree cleanup across runtime restart until the reference is removed', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-reference-fence-'));
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
+    const runtimeDir = path.join(directory, 'runtime');
+    const deploymentStateDir = path.join(directory, 'deployments');
+    const worktreePath = path.join(directory, '.worktrees', 'runtime-bound');
+    const calls: unknown[] = [];
+    await mkdir(worktreePath, { recursive: true });
+    await mkdir(runtimeDir, { recursive: true });
+    await symlink(worktreePath, path.join(runtimeDir, 'current'));
+
+    const services = {
+      runtimeStatePath,
+      runtimeDeploymentReferenceOptions: {
+        runtimeDir,
+        deploymentStateDir,
+        homeDir: directory,
+        env: {},
+      },
+      workspaceInfo: {
+        async info(): Promise<ReturnType<typeof ok>> {
+          return ok({ rootPath: directory, realRootPath: directory });
+        },
+      },
+      git: {
+        async run(_actor: FileActor, request: unknown): Promise<ReturnType<typeof ok>> {
+          calls.push(request);
+          return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
+        },
+      },
+    };
+
+    try {
+      const owner = new UpgradeRuntimeService(services, actorA);
+      await expect(owner.execute('git_worktree_spawn', {
+        workspaceId: 'ws-runtime',
+        worktreePath: '.worktrees/runtime-bound',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dependencyEmergencyOverride: true,
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
+      expect(calls).toHaveLength(1);
+
+      await expect(owner.execute('git_worktree_remove', {
+        workspaceId: 'ws-runtime',
+        worktreePath: '.worktrees/runtime-bound',
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          dryRun: true,
+          cleanupBlocker: {
+            blocked: true,
+            reason: 'active_runtime_reference',
+            references: [expect.objectContaining({ kind: 'current', path: worktreePath })],
+          },
+        },
+      });
+
+      await expect(owner.execute('git_worktree_remove', {
+        workspaceId: 'ws-runtime',
+        worktreePath: '.worktrees/runtime-bound',
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'CONFLICT', message: expect.stringContaining('active_runtime_reference') },
+      });
+      expect(calls).toHaveLength(1);
+
+      const restarted = new UpgradeRuntimeService(services, actorA);
+      await expect(restarted.execute('git_worktree_remove', {
+        workspaceId: 'ws-runtime',
+        worktreePath: '.worktrees/runtime-bound',
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      expect(calls).toHaveLength(1);
+
+      await unlink(path.join(runtimeDir, 'current'));
+      await expect(restarted.execute('git_worktree_remove', {
+        workspaceId: 'ws-runtime',
+        worktreePath: '.worktrees/runtime-bound',
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          status: 'completed',
+          cleanupBlocker: { blocked: false, reason: null },
+        },
+      });
+      expect(calls).toHaveLength(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('grandfathers legacy worktree ledger rows after restart', async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ok, type Result } from '@unified-mpc/domain';
-import type { ManagedProcess, ManagedProcessStart, ProcessLogResult } from '@unified-mpc/process';
+import type { ManagedProcess, ManagedProcessRecoveryIdentity, ManagedProcessStart, ProcessLogResult } from '@unified-mpc/process';
 import { CodexAdapter, type CodexDiscoveryPort, type CodexProcessManagerPort } from './codex-adapter.js';
 import type { CodexDiscoveryResult } from './codex-capabilities.js';
 
@@ -23,6 +23,30 @@ describe('CodexAdapter', () => {
       args: ['exec', '--sandbox', 'workspace-write', 'review "quoted" input'],
       cwd: 'C:\\workspace',
     }]);
+  });
+
+  it('proxies the internal restart recovery identity without changing the Codex process handle', async () => {
+    const identity: ManagedProcessRecoveryIdentity = {
+      processId: 'process-1',
+      platform: 'linux',
+      pid: 4242,
+      processStartedAt: '2026-09-21T00:00:00.000Z',
+    };
+    const manager: CodexProcessManagerPort = {
+      async start(): Promise<Result<ManagedProcess>> { return ok(processHandle()); },
+      status(): Result<ManagedProcess> { return ok(processHandle()); },
+      async recoveryIdentity(): Promise<Result<ManagedProcessRecoveryIdentity>> { return ok(identity); },
+      logs(): Result<ProcessLogResult> { return ok({ entries: [], truncated: false, nextSequence: 0 }); },
+      async stop(): Promise<Result<void>> { return ok(undefined); },
+    };
+    const discovery: CodexDiscoveryPort = { async discover(): Promise<Result<CodexDiscoveryResult>> { return ok(discovered()); } };
+    const adapter = new CodexAdapter(discovery, manager);
+
+    const started = await adapter.start('C:\\workspace', 'review');
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    expect(started.value).not.toHaveProperty('pid');
+    await expect(adapter.recoveryIdentity(started.value.processId)).resolves.toEqual(ok(identity));
   });
 
   it('does not start a process after cancellation wins during Codex discovery', async () => {

@@ -260,6 +260,62 @@ describe('durable goal continuation persistence', () => {
     }
   });
 
+  it('keeps the current released execution generation cancellable until a takeover supersedes it', async () => {
+    const { filename, workspace } = await fixture();
+    const now = new Date('2026-08-26T00:00:00.000Z');
+    const runtime = await open(filename, workspace, () => now);
+    try {
+      const created = await runtime.service.runGoal(actor('session-a'), createRequest);
+      if (
+        !created.ok
+        || created.value.executionId === undefined
+        || created.value.leaseToken === undefined
+      ) {
+        throw new Error('goal create failed');
+      }
+
+      const released = await runtime.service.checkpointGoal(actor('session-a'), {
+        goalId: created.value.goalId,
+        leaseToken: created.value.leaseToken,
+        expectedRevision: created.value.revision,
+        currentPhase: 'waiting',
+        summary: 'release the lease for durable continuation',
+        stepUpdates: [],
+        nextAction: 'resume later',
+        blockers: [],
+        evidence: [{ kind: 'note', value: 'test:released-execution' }],
+        releaseLease: true,
+      });
+      expect(released).toMatchObject({
+        ok: true,
+        value: {
+          executionId: created.value.executionId,
+          executionGeneration: 1,
+        },
+      });
+      await expect(runtime.repository.getExecutionById(created.value.executionId)).resolves.toMatchObject({
+        receiptState: 'released',
+      });
+
+      const cancelled = await runtime.service.cancelGoalExecution(actor('session-b'), {
+        executionId: created.value.executionId,
+        executionGeneration: 1,
+        summary: 'cancel released current execution',
+        evidence: [{ kind: 'note', value: 'test:cancel-released-current-execution' }],
+      });
+      expect(cancelled).toMatchObject({
+        ok: true,
+        value: {
+          status: 'cancelled',
+          executionId: created.value.executionId,
+          executionGeneration: 1,
+        },
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('counts only active workspace goals for the host Projects summary', async () => {
     const { filename, workspace } = await fixture();
     const now = new Date('2026-08-26T00:00:00.000Z');

@@ -71,7 +71,7 @@ jobs:
         run: |
           if [[ -n "$BASE_SHA" && "$BASE_SHA" != "0000000000000000000000000000000000000000" ]]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
-            git diff --check "$BASE_SHA"...HEAD
+            git diff --check "$BASE_SHA" HEAD
           else
             git diff --check HEAD^
           fi

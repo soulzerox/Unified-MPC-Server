@@ -5,11 +5,14 @@ import {
   isGoalScopedRuntimeEventType,
   type AppendGoalRuntimeEventRequest,
   type AppendGoalRuntimeEventResult,
+  type AppendGoalRuntimeReconciliationEventRequest,
+  type AppendGoalRuntimeReconciliationEventResult,
   type ExecutionScopedRuntimeEvent,
   type GoalRuntimeEvent,
   type GoalRuntimeEventRecord,
   type GoalRuntimeEventReplayPage,
   type GoalRuntimeEventRepository,
+  type GoalRuntimeReconciliationEventRepository,
   type ListGoalRuntimeEventsRequest,
   type ReplayWorkspaceGoalRuntimeEventsRequest,
 } from '@unified-mpc/domain';
@@ -57,7 +60,7 @@ export class GoalRuntimeEventStoreError extends Error {
   }
 }
 
-export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventRepository {
+export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventRepository, GoalRuntimeReconciliationEventRepository {
   private readonly maxEventsPerWorkspace: number;
   private readonly retentionSlack: number;
 
@@ -121,6 +124,159 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       );
     }
     return { appended: false, record };
+  }
+
+  public async appendGoalRuntimeReconciliationEvent(
+    request: AppendGoalRuntimeReconciliationEventRequest,
+  ): Promise<AppendGoalRuntimeReconciliationEventResult> {
+    validateEvent(request.event);
+    validateIso(request.recordedAt, 'recordedAt');
+    nonNegativeInteger(request.expectedSnapshotSequence, 'expectedSnapshotSequence');
+    positiveInteger(request.expectedLeaseGeneration, 'expectedLeaseGeneration');
+    nonNegativeInteger(request.expectedLeaseActivitySeq, 'expectedLeaseActivitySeq');
+    if (request.event.type !== 'worker_lost') {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'Only worker_lost may use the reconciliation commit fence');
+    }
+    if (request.event.executionGeneration !== request.expectedLeaseGeneration) {
+      throw new GoalRuntimeEventStoreError(
+        'invalid_event',
+        'Reconciliation event generation must match the probed lease generation',
+      );
+    }
+
+    return this.transaction(() => {
+      const duplicateRow = this.database.connection.prepare(
+        'SELECT * FROM goal_runtime_events WHERE event_id = ?',
+      ).get(request.event.eventId);
+      if (duplicateRow !== undefined) {
+        const record = this.toRecord(this.requireRow(duplicateRow));
+        if (!sameEvent(record.event, request.event)) {
+          throw new GoalRuntimeEventStoreError(
+            'event_id_conflict',
+            `Goal runtime event ID '${request.event.eventId}' already identifies different content`,
+          );
+        }
+        return { disposition: 'duplicate' as const, record };
+      }
+
+      this.validateStoredScope(request.event);
+
+      const goal = this.database.connection.prepare(`
+        SELECT workspace_id, status, lease_generation, lease_activity_seq
+        FROM goals
+        WHERE id = ?
+      `).get(request.event.goalId) as {
+        workspace_id?: string;
+        status?: string;
+        lease_generation?: number;
+        lease_activity_seq?: number;
+      } | undefined;
+      if (goal === undefined || goal.status !== 'active') {
+        return { disposition: 'concurrent_change' as const, reason: 'goal_not_active' as const };
+      }
+      if (goal.workspace_id !== request.event.workspaceId) {
+        throw new GoalRuntimeEventStoreError('invalid_event', 'Goal runtime event workspace does not match its Goal');
+      }
+      if (goal.lease_generation !== request.expectedLeaseGeneration
+        || goal.lease_activity_seq !== request.expectedLeaseActivitySeq) {
+        return { disposition: 'concurrent_change' as const, reason: 'lease_changed' as const };
+      }
+
+      const snapshot = this.database.connection.prepare(`
+        SELECT last_event_sequence, active_execution_id, execution_generation
+        FROM goal_runtime_snapshots
+        WHERE goal_id = ?
+      `).get(request.event.goalId) as {
+        last_event_sequence?: number;
+        active_execution_id?: string | null;
+        execution_generation?: number | null;
+      } | undefined;
+      if (snapshot === undefined
+        || snapshot.last_event_sequence !== request.expectedSnapshotSequence
+        || snapshot.active_execution_id !== request.event.executionId
+        || snapshot.execution_generation !== request.event.executionGeneration) {
+        return { disposition: 'concurrent_change' as const, reason: 'snapshot_changed' as const };
+      }
+
+      const newerEvent = this.database.connection.prepare(`
+        SELECT sequence
+        FROM goal_runtime_events
+        WHERE goal_id = ? AND sequence > ?
+        ORDER BY sequence ASC
+        LIMIT 1
+      `).get(request.event.goalId, request.expectedSnapshotSequence);
+      if (newerEvent !== undefined) {
+        return { disposition: 'concurrent_change' as const, reason: 'event_stream_advanced' as const };
+      }
+
+      const execution = this.database.connection.prepare(`
+        SELECT id, state
+        FROM goal_executions
+        WHERE goal_id = ? AND workspace_id = ? AND lease_generation = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(
+        request.event.goalId,
+        request.event.workspaceId,
+        request.expectedLeaseGeneration,
+      ) as { id?: string; state?: string } | undefined;
+      if (execution === undefined
+        || execution.id !== request.event.executionId
+        || execution.state !== 'active') {
+        return { disposition: 'concurrent_change' as const, reason: 'execution_changed' as const };
+      }
+
+      const continuation = this.database.connection.prepare(`
+        SELECT id, version
+        FROM goal_scheduled_continuations
+        WHERE goal_id = ?
+          AND status IN (
+            'prepared','scheduled','create_uncertain',
+            'reschedule_required','reschedule_failed','reschedule_uncertain',
+            'cancel_required','cancel_failed','cancel_uncertain'
+          )
+        ORDER BY generation DESC
+        LIMIT 1
+      `).get(request.event.goalId) as { id?: string; version?: number } | undefined;
+      const expectedContinuation = request.expectedLiveScheduledContinuation;
+      const continuationMatches = expectedContinuation === null
+        ? continuation === undefined
+        : continuation !== undefined
+          && continuation.id === expectedContinuation.continuationId
+          && continuation.version === expectedContinuation.version;
+      if (!continuationMatches) {
+        return { disposition: 'concurrent_change' as const, reason: 'scheduled_continuation_changed' as const };
+      }
+
+      const event = request.event;
+      const inserted = this.database.connection.prepare(`
+        INSERT INTO goal_runtime_events (
+          event_id, workspace_id, goal_id, event_type,
+          execution_id, execution_generation,
+          occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        event.eventId,
+        event.workspaceId,
+        event.goalId,
+        event.type,
+        event.executionId,
+        event.executionGeneration,
+        event.occurredAt,
+        event.detail ?? null,
+        event.phase ?? null,
+        event.taskId ?? null,
+        event.checkpointId ?? null,
+        event.blockerKind ?? null,
+        request.recordedAt,
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new GoalRuntimeEventStoreError('corrupt', 'Reconciliation event insert did not create exactly one row');
+      }
+      const record = this.toRecord(this.requireEventById(event.eventId));
+      this.enforceWorkspaceRetention(event.workspaceId);
+      return { disposition: 'appended' as const, record };
+    });
   }
 
   public async replayWorkspaceGoalRuntimeEvents(
@@ -242,6 +398,18 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
           LIMIT 1 OFFSET ?
         )
     `).run(workspaceId, workspaceId, this.maxEventsPerWorkspace - 1);
+  }
+
+  private transaction<T>(operation: () => T): T {
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const value = operation();
+      this.database.connection.exec('COMMIT;');
+      return value;
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
   }
 
   private toRecord(row: GoalRuntimeEventRow): GoalRuntimeEventRecord {

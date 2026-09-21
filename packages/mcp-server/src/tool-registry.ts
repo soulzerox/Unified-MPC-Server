@@ -17,9 +17,11 @@ import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capa
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
+  DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
   DEFAULT_RAG_INDEX_ADMISSION_COST,
   tryAdmitChildMcpCall,
+  tryAdmitContextScan,
   tryAdmitRagIndex,
   type ResourceAdmissionController,
   type ResourceAdmissionLease,
@@ -134,6 +136,8 @@ export interface ToolRegistryOptions {
   readonly maxMcpCallResultBytes?: number;
   /** Shared process-level admission controller. Production server factories provide one by default. */
   readonly resourceAdmissionController?: ResourceAdmissionController;
+  /** Weighted cost charged for each admitted heavy context/workspace read. */
+  readonly contextScanAdmissionCost?: number;
   /** Weighted cost charged for each admitted child MCP call. */
   readonly mcpCallAdmissionCost?: number;
   /** Weighted cost charged while one LSP server process is alive. */
@@ -164,6 +168,8 @@ export interface HostMutationApprovalRequest {
   /** Present only for non-destructive automation actions eligible for one informed trusted-session grant. */
   readonly approvalScope?: HostMutationApprovalScope;
 }
+
+const HEAVY_CONTEXT_ADMISSION_TOOLS = new Set(['workspace_context', 'workspace_full_scan', 'search_all', 'read_many_files']);
 
 const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024;
@@ -235,6 +241,7 @@ export class ToolRegistry {
   private readonly maxMcpCallResultBytes: number;
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
   private readonly ragIndexAdmissionTracker: RagIndexAdmissionTracker | undefined;
+  private readonly contextScanAdmissionCost: number;
   private readonly mcpCallAdmissionCost: number;
   private readonly lspProcessAdmissionCost: number;
   private readonly ragIndexAdmissionCost: number;
@@ -266,6 +273,10 @@ export class ToolRegistry {
     this.ragIndexAdmissionTracker = this.resourceAdmissionController === undefined
       ? undefined
       : sharedProcessRagIndexAdmissionTracker(this.resourceAdmissionController);
+    this.contextScanAdmissionCost = normalizePositiveInteger(
+      options.contextScanAdmissionCost,
+      DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
+    );
     this.mcpCallAdmissionCost = normalizePositiveInteger(
       options.mcpCallAdmissionCost,
       DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
@@ -651,6 +662,34 @@ export class ToolRegistry {
           admitted.value.leaseGeneration,
         );
         durableGoalExecutionAdmitted = true;
+      }
+      if (HEAVY_CONTEXT_ADMISSION_TOOLS.has(tool.name) && this.resourceAdmissionController !== undefined) {
+        const admissionWorkspaceId = await this.resolveContextAdmissionWorkspaceId(
+          approvalExecutionInput,
+          activityWorkspaceId,
+        );
+        const admission = tryAdmitContextScan(this.resourceAdmissionController, {
+          operationId: callId,
+          workspaceId: admissionWorkspaceId,
+          sessionId: this.sessionId ?? (this.actor.sessionId?.trim() || this.actor.clientId),
+          cost: this.contextScanAdmissionCost,
+        });
+        if (!admission.admitted) {
+          await fencedMutationEnd?.();
+          fencedMutationEnd = undefined;
+          const message = admission.code === 'RESOURCE_PRESSURE'
+            ? `Context/workspace read rejected by resource admission (${admission.reason}); retry after current expensive work settles`
+            : `Context/workspace read rejected by resource admission (${admission.reason})`;
+          const response = mapError(appError(admission.code, message, admission.retryable, {
+            reason: admission.reason,
+            requestedCost: admission.requestedCost,
+            activeCost: admission.snapshot.activeCost,
+            activeOperations: admission.snapshot.activeOperations,
+          }));
+          await this.activity.end(callId, admission.code, Date.now() - started, message);
+          return response;
+        }
+        resourceAdmissionLease = admission.lease;
       }
       if (tool.name === 'mcp_call' && this.resourceAdmissionController !== undefined) {
         const admissionWorkspaceId = await this.resolveMcpCallAdmissionWorkspaceId(
@@ -1396,6 +1435,25 @@ export class ToolRegistry {
       }
       return await this.activeWorkspaceScopeProvider();
     } catch { return null; }
+  }
+
+  private async resolveContextAdmissionWorkspaceId(input: unknown, fallback?: string): Promise<string> {
+    const explicitWorkspaceId = readExplicitWorkspaceId(input);
+    if (explicitWorkspaceId !== undefined) return explicitWorkspaceId;
+    if (fallback !== undefined) return fallback;
+    if (this.activeWorkspaceScopesProvider !== undefined) {
+      try {
+        const primary = (await this.activeWorkspaceScopesProvider())[0]?.workspaceId;
+        if (primary !== undefined) return primary;
+      } catch {
+        // Fall through to the single active-project provider / system bucket.
+      }
+    }
+    if (this.enforceActiveWorkspaceScope) {
+      const active = await this.resolveActiveWorkspaceScope();
+      if (active !== null) return active.workspaceId;
+    }
+    return 'system';
   }
 
   private async resolveMcpCallAdmissionWorkspaceId(input: unknown, fallback?: string): Promise<string> {

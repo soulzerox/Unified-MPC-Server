@@ -1,7 +1,7 @@
 import { ProcessMemoryPressureProbe } from './resource-pressure.js';
 import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
 
-export type ResourceAdmissionClass = 'dependency_bootstrap' | 'child_mcp_call' | 'lsp_process' | 'rag_indexing';
+export type ResourceAdmissionClass = 'dependency_bootstrap' | 'context_scan' | 'child_mcp_call' | 'lsp_process' | 'rag_indexing';
 
 export interface ResourceAdmissionLimits {
   readonly globalCost: number;
@@ -39,16 +39,18 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
   maxOperations: 8,
   resourceClassCost: Object.freeze({
     dependency_bootstrap: 8,
+    context_scan: 8,
     child_mcp_call: 12,
     // Preserve cross-project parallelism: two 8-cost LSP processes can run
     // concurrently when global capacity permits; workspace/session caps stay 8.
     lsp_process: 16,
-    // Until provider-owned job leases/cancellation land in Thai-RAG #8, keep
-    // local embedding/indexing conservative: one 8-cost index at a time.
+    // Native Thai-RAG indexing has a cancellable lifecycle, but embedding/indexing
+    // remains memory-heavy, so keep one 8-cost index at a time by default.
     rag_indexing: 8,
   }),
 }) satisfies ResourceAdmissionLimits;
 
+export const DEFAULT_CONTEXT_SCAN_ADMISSION_COST = 4;
 export const DEFAULT_CHILD_MCP_CALL_ADMISSION_COST = 3;
 export const DEFAULT_LSP_PROCESS_ADMISSION_COST = 8;
 export const DEFAULT_RAG_INDEX_ADMISSION_COST = 8;
@@ -149,6 +151,7 @@ export class ResourceAdmissionController {
       maxOperations: limits.maxOperations,
       resourceClassCost: {
         dependency_bootstrap: limits.resourceClassCost?.dependency_bootstrap ?? limits.globalCost,
+        context_scan: limits.resourceClassCost?.context_scan ?? limits.globalCost,
         child_mcp_call: limits.resourceClassCost?.child_mcp_call ?? limits.globalCost,
         lsp_process: limits.resourceClassCost?.lsp_process ?? limits.globalCost,
         rag_indexing: limits.resourceClassCost?.rag_indexing ?? limits.globalCost,
@@ -228,6 +231,7 @@ export class ResourceAdmissionController {
   private buildSnapshot(pressure: ResourcePressureSample | undefined): ResourceAdmissionSnapshot {
     const activeCostByClass: Record<ResourceAdmissionClass, number> = {
       dependency_bootstrap: 0,
+      context_scan: 0,
       child_mcp_call: 0,
       lsp_process: 0,
       rag_indexing: 0,
@@ -292,6 +296,13 @@ export function tryAdmitDependencyBootstrap(
   return controller.tryAcquire({ ...request, resourceClass: 'dependency_bootstrap' });
 }
 
+export function tryAdmitContextScan(
+  controller: ResourceAdmissionController,
+  request: Omit<ResourceAdmissionRequest, 'resourceClass'>,
+): ResourceAdmissionDecision {
+  return controller.tryAcquire({ ...request, resourceClass: 'context_scan' });
+}
+
 export function tryAdmitChildMcpCall(
   controller: ResourceAdmissionController,
   request: Omit<ResourceAdmissionRequest, 'resourceClass'>,
@@ -351,7 +362,7 @@ function effectiveGlobalCost(
   return Math.max(1, Math.floor(configuredGlobalCost * ratio));
 }
 
-const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'child_mcp_call', 'lsp_process', 'rag_indexing'] as const;
+const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'context_scan', 'child_mcp_call', 'lsp_process', 'rag_indexing'] as const;
 
 function validateRequest(request: ResourceAdmissionRequest): 'invalid_request' | undefined {
   if (!isBoundedId(request.operationId)
@@ -370,7 +381,7 @@ function isBoundedId(value: unknown): value is string {
 }
 
 function isResourceClass(value: unknown): value is ResourceAdmissionClass {
-  return value === 'dependency_bootstrap' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing';
+  return value === 'dependency_bootstrap' || value === 'context_scan' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing';
 }
 
 function normalizeSessionId(value: string | undefined): string {

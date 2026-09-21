@@ -57,6 +57,7 @@ import {
 } from './ponytail-runtime.js';
 import { inspectMutationOperation, permissionLevelForMutationDecision, requiresMutationConfirmation, type MutationPolicyDecision } from './mutation-policy.js';
 import { mapError, mapResult, type McpToolResponse } from './result-mapper.js';
+import { sharedProcessRagIndexAdmissionTracker, type RagIndexAdmissionTracker } from './rag-index-admission.js';
 import { agentSwarmTools } from './tools/agent-swarm-tools.js';
 import { batchTools } from './tools/batch-tools.js';
 import { contextTools } from './tools/context-tools.js';
@@ -182,11 +183,13 @@ const TRUSTED_INTERNAL_MEMORY_RAG_TOOLS = new Set([
   'rag_code_blast_radius',
   'rag_code_index',
   'rag_index_status',
+  'rag_cancel_index',
 ]);
 
 interface BudgetedToolExecution {
   readonly response: McpToolResponse;
-  readonly deferredSettlement?: Promise<void>;
+  readonly settledResult?: Result<unknown>;
+  readonly deferredSettlement?: Promise<Result<unknown> | undefined>;
 }
 
 type ProjectCommandKind = 'dev' | 'test' | 'lint' | 'typecheck' | 'build';
@@ -231,6 +234,7 @@ export class ToolRegistry {
   private readonly maxToolResultBytes: number;
   private readonly maxMcpCallResultBytes: number;
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
+  private readonly ragIndexAdmissionTracker: RagIndexAdmissionTracker | undefined;
   private readonly mcpCallAdmissionCost: number;
   private readonly lspProcessAdmissionCost: number;
   private readonly ragIndexAdmissionCost: number;
@@ -259,6 +263,9 @@ export class ToolRegistry {
       this.maxToolResultBytes,
     );
     this.resourceAdmissionController = options.resourceAdmissionController;
+    this.ragIndexAdmissionTracker = this.resourceAdmissionController === undefined
+      ? undefined
+      : sharedProcessRagIndexAdmissionTracker(this.resourceAdmissionController);
     this.mcpCallAdmissionCost = normalizePositiveInteger(
       options.mcpCallAdmissionCost,
       DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
@@ -289,7 +296,7 @@ export class ToolRegistry {
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
       ragRecall: (workspaceId, query, category, limit, signal) => this.ragRecall(workspaceId, query, category, limit, signal),
       ragRemember: (workspaceId, content, category, signal) => this.ragRemember(workspaceId, content, category, signal),
-      nativeRagCall: (workspaceId, tool, args, signal) => this.nativeRagCall(workspaceId, tool, args, signal),
+      nativeRagCall: (workspaceId, tool, args, signal, budget) => this.nativeRagCall(workspaceId, tool, args, signal, budget),
     };
     const contextEngine = new ContextEngine(services, actor, contextEconomy);
     const filePageEngine = new FilePageEngine(services, actor);
@@ -409,6 +416,7 @@ export class ToolRegistry {
     let fencedMutationEnd: (() => Promise<void>) | undefined;
     let durableGoalExecutionAdmitted = false;
     let resourceAdmissionLease: ResourceAdmissionLease | undefined;
+    let backgroundRagAdmissionWorkspaceId: string | undefined;
     const releaseResourceAdmission = (): void => {
       if (resourceAdmissionLease === undefined || this.resourceAdmissionController === undefined) return;
       this.resourceAdmissionController.release(resourceAdmissionLease);
@@ -676,7 +684,6 @@ export class ToolRegistry {
         tool.name === 'rag_code_index'
         && this.resourceAdmissionController !== undefined
         && isRecord(approvalExecutionInput)
-        && approvalExecutionInput.background !== true
       ) {
         const admissionWorkspaceId = readTrimmedString(approvalExecutionInput.workspaceId);
         if (admissionWorkspaceId === undefined) {
@@ -687,6 +694,7 @@ export class ToolRegistry {
           await this.activity.end(callId, 'INVALID_INPUT', Date.now() - started, message);
           return response;
         }
+        if (approvalExecutionInput.background === true) backgroundRagAdmissionWorkspaceId = admissionWorkspaceId;
         const admission = tryAdmitRagIndex(this.resourceAdmissionController, {
           operationId: callId,
           workspaceId: admissionWorkspaceId,
@@ -732,7 +740,33 @@ export class ToolRegistry {
         callId,
         durableGoalExecutionAdmitted,
       );
-      if (execution.deferredSettlement !== undefined && resourceAdmissionLease !== undefined && this.resourceAdmissionController !== undefined) {
+      if (
+        backgroundRagAdmissionWorkspaceId !== undefined
+        && resourceAdmissionLease !== undefined
+        && this.resourceAdmissionController !== undefined
+      ) {
+        const backgroundLease = resourceAdmissionLease;
+        const backgroundController = this.resourceAdmissionController;
+        const backgroundWorkspaceId = backgroundRagAdmissionWorkspaceId;
+        if (execution.settledResult !== undefined) {
+          if (this.transferRagIndexAdmissionLease(backgroundWorkspaceId, execution.settledResult, backgroundLease)) {
+            resourceAdmissionLease = undefined;
+          } else {
+            releaseResourceAdmission();
+          }
+        } else if (execution.deferredSettlement !== undefined) {
+          resourceAdmissionLease = undefined;
+          void execution.deferredSettlement.then((settledResult) => {
+            if (
+              settledResult !== undefined
+              && this.transferRagIndexAdmissionLease(backgroundWorkspaceId, settledResult, backgroundLease)
+            ) return;
+            backgroundController.release(backgroundLease);
+          });
+        } else {
+          releaseResourceAdmission();
+        }
+      } else if (execution.deferredSettlement !== undefined && resourceAdmissionLease !== undefined && this.resourceAdmissionController !== undefined) {
         const deferredLease = resourceAdmissionLease;
         const deferredController = this.resourceAdmissionController;
         resourceAdmissionLease = undefined;
@@ -1014,6 +1048,7 @@ export class ToolRegistry {
     tool: string,
     args: Readonly<Record<string, unknown>>,
     signal: AbortSignal,
+    budget?: ResultBudget,
   ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const scope = await this.resolveActiveWorkspaceScope(workspaceId);
     if (scope === null || scope.workspaceId !== workspaceId) {
@@ -1067,17 +1102,40 @@ export class ToolRegistry {
       };
     }
 
-    const result = await thaiRag.call(providerTool, providerArgs, signal);
+    const result = await thaiRag.call(providerTool, providerArgs, signal, budget);
     if (!result.ok) {
       if (tool === 'forget' && result.error.details?.reason === 'memory_not_found') {
         return err(appError('FILE_NOT_FOUND', result.error.message, result.error.recoverable, result.error.details));
       }
       return result;
     }
-    if (tool === 'index_status' && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {
+    if ((tool === 'index_status' || tool === 'cancel_index') && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {
       return err(appError('PERMISSION_DENIED', `Native Thai-RAG index job belongs to another workspace: ${result.value.workspaceId}`));
     }
+    if (tool === 'index_status' || tool === 'cancel_index') {
+      const jobId = readTrimmedString(args.job_id);
+      if (jobId !== undefined) this.ragIndexAdmissionTracker?.reconcile(workspaceId, jobId, result.value);
+    }
     return result;
+  }
+
+  private transferRagIndexAdmissionLease(
+    workspaceId: string,
+    result: Result<unknown>,
+    lease: ResourceAdmissionLease,
+  ): boolean {
+    if (!result.ok) return false;
+    const jobId = readBackgroundRagJobId(result.value);
+    const tracker = this.ragIndexAdmissionTracker;
+    const thaiRag = this.services.thaiRag;
+    if (jobId === undefined || tracker === undefined || thaiRag === undefined) return false;
+    return tracker.bind({
+      workspaceId,
+      jobId,
+      lease,
+      initialStatus: result.value,
+      readStatus: () => thaiRag.call('index_status', { workspace_id: workspaceId, job_id: jobId }),
+    });
   }
 
   private async validateHarnessMutation(
@@ -1381,7 +1439,8 @@ export class ToolRegistry {
     let settled = false;
     let deadlineExceeded = false;
     let onParentAbort: (() => void) | undefined;
-    let operation: Promise<McpToolResponse> | undefined;
+    let operation: Promise<{ readonly response: McpToolResponse; readonly result: Result<unknown> }> | undefined;
+    let settledResult: Result<unknown> | undefined;
     let registrationReleased = false;
     const releaseRegistration = (): void => {
       if (registrationReleased) return;
@@ -1439,13 +1498,16 @@ export class ToolRegistry {
             maxBinaryBytes: maxBytes,
             maxBase64Bytes: maxBytes,
           };
-          operation = tool.execute(input, controller.signal, authorization, resultBudget).then((result) => mapResult(result, {
-            maxBytes,
-            budget: resultBudget,
-            toolName: tool.name,
-            onTruncated: ({ originalBytes }) => this.diagnostic?.({
-              name: 'ToolResultBudgetExceeded',
-              message: `MCP tool ${tool.name} produced ${originalBytes} bytes, exceeding the ${maxBytes}-byte output budget; the client received a bounded truncation envelope`,
+          operation = tool.execute(input, controller.signal, authorization, resultBudget).then((result) => ({
+            result,
+            response: mapResult(result, {
+              maxBytes,
+              budget: resultBudget,
+              toolName: tool.name,
+              onTruncated: ({ originalBytes }) => this.diagnostic?.({
+                name: 'ToolResultBudgetExceeded',
+                message: `MCP tool ${tool.name} produced ${originalBytes} bytes, exceeding the ${maxBytes}-byte output budget; the client received a bounded truncation envelope`,
+              }),
             }),
           }));
         } catch (error: unknown) {
@@ -1454,11 +1516,17 @@ export class ToolRegistry {
           return;
         }
         void operation.then(releaseRegistration, releaseRegistration);
-        void operation.then(finish, reject);
+        void operation.then((settledOperation) => {
+          settledResult = settledOperation.result;
+          finish(settledOperation.response);
+        }, reject);
       });
       return {
         response,
-        ...(deadlineExceeded && operation !== undefined ? { deferredSettlement: operation.then(() => undefined, () => undefined) } : {}),
+        ...(settledResult === undefined ? {} : { settledResult }),
+        ...(deadlineExceeded && operation !== undefined
+          ? { deferredSettlement: operation.then((settledOperation) => settledOperation.result, () => undefined) }
+          : {}),
       };
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -1540,6 +1608,10 @@ function readMcpCallArgumentWorkspaceId(input: unknown): string | undefined {
   return readTrimmedString(input.arguments.workspaceId);
 }
 function readTrimmedString(value: unknown): string | undefined { return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined; }
+function readBackgroundRagJobId(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  return readTrimmedString(value.job_id) ?? readTrimmedString(value.jobId);
+}
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function rememberBounded(map: Map<string, string>, key: string, value: string, max: number): void {
   if (map.has(key)) map.delete(key);

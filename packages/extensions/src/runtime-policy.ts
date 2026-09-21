@@ -12,12 +12,13 @@ const NATIVE_CAPABILITIES = new Set([
   'rag_code_blast_radius',
   'rag_code_index',
   'rag_index_status',
+  'rag_cancel_index',
 ]);
 
 export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
   { id: 'session-start:ask-matt', resourceId: 'ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'At the start of every user task, load and follow ask-matt before planning or acting.' },
   { id: 'memory:workspace-selective', resourceId: 'native-memory', resourceType: 'capability', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use native workspace-scoped memory selectively for durable decisions, constraints, preferences, and explicit recall; do not persist every turn.', requiredCapabilities: ['rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_forget'] },
-  { id: 'code:pre-edit-context', resourceId: 'native-thai-rag', resourceType: 'capability', mandatory: true, enforcement: 'SAFETY_PRE_CHECK', directive: 'Use the parent-owned native Thai-RAG capability for repository retrieval and mandatory pre-edit context before development-artifact mutation.', requiredCapabilities: ['rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status'] },
+  { id: 'code:pre-edit-context', resourceId: 'native-thai-rag', resourceType: 'capability', mandatory: true, enforcement: 'SAFETY_PRE_CHECK', directive: 'Use the parent-owned native Thai-RAG capability for repository retrieval and mandatory pre-edit context before development-artifact mutation.', requiredCapabilities: ['rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status', 'rag_cancel_index'] },
   { id: 'code-safety:godkiller', resourceId: 'godkiller', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'For high-risk changes such as broad refactors, migrations, security-sensitive work, or unclear blast radius, request the curated Godkiller safety path by setting runGodkillerSafetyCheck=true on prepare_code_change.', requiredTools: ['gk_task'] },
   { id: 'optional:sequentialthinking', resourceId: 'sequentialthinking', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use revisable step-by-step reasoning when a complex task benefits from explicit decomposition.', readOnlyTools: ['sequentialthinking'] },
   { id: 'optional:context7', resourceId: 'context7', resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use current version-specific library, framework, SDK, or API documentation before relying on external interfaces.', readOnlyTools: ['resolve-library-id', 'query-docs'] },

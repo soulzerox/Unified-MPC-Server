@@ -1121,7 +1121,7 @@ export class UpgradeRuntimeService {
       excluded: server.excluded,
       ...(server.exclusionReason === undefined ? {} : { exclusionReason: server.exclusionReason }),
     }));
-    const nativeCapabilities = ['rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status'];
+    const nativeCapabilities = ['rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status', 'rag_cancel_index'];
     return ok({
       tool: name,
       status: 'ready',

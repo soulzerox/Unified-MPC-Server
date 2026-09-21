@@ -16,6 +16,7 @@ const inputs: Readonly<Record<string, unknown>> = {
   rag_code_blast_radius: { workspaceId: 'workspace-1', symbolName: 'run' },
   rag_code_index: { workspaceId: 'workspace-1' },
   rag_index_status: { workspaceId: 'workspace-1', jobId: 'job-1' },
+  rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },
 };
 
 describe('native RAG tool budgets', () => {

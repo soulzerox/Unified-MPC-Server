@@ -109,6 +109,38 @@ describe('AgentSwarmService', () => {
     }
   });
 
+  it('lets durable Goal ownership observe and cancel a live swarm without transient session authority', async () => {
+    const fake = runningCodex();
+    const { database, service } = await fixture(fake.codex);
+    try {
+      const started = await service.start(actor, startRequest(), undefined, authorization);
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+
+      expect(service.statusForGoalLiveness('workspace-a', started.value.swarmId)).toMatchObject({
+        ok: true,
+        value: { state: 'running' },
+      });
+
+      const cancelled = await service.cancelForGoal(actor.clientId, 'workspace-a', started.value.swarmId);
+      expect(cancelled).toMatchObject({
+        ok: true,
+        value: { matched: true, state: 'cancelled' },
+      });
+      expect(fake.stop).toHaveBeenCalledTimes(1);
+      expect(service.statusForGoalLiveness('workspace-a', started.value.swarmId)).toMatchObject({
+        ok: true,
+        value: { state: 'cancelled' },
+      });
+      await expect(service.cancelForGoal('different-client', 'workspace-a', started.value.swarmId)).resolves.toMatchObject({
+        ok: true,
+        value: { matched: false, state: 'not_found' },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('redacts terminal Codex output before persistence and result reads', async () => {
     const codex: AgentSwarmCodexPort = {
       run: async () => ok({ codexTaskId: 'codex-secret', processId: 'process-secret' }),

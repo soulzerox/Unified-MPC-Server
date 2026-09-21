@@ -261,8 +261,8 @@ export class ModernTasksProtocol {
       status = 'cancelled';
       statusMessage = 'Execution was superseded by a newer generation';
     } else if (receiptState === 'released') {
-      status = 'failed';
-      statusMessage = 'Execution lease was released; a future generation may continue the durable goal';
+      status = 'working';
+      statusMessage = 'Execution lease is released while the durable goal awaits continuation';
     } else {
       status = 'failed';
       statusMessage = 'Durable execution receipt state is invalid';

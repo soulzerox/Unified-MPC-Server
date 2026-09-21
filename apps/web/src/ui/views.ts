@@ -398,6 +398,7 @@ export function renderDashboardViewsHtml(): string {
           <span class="stat-value" id="runtime-external">—</span>
         </div>
       </div>
+      <div style="margin-bottom: 8px; color: var(--text-muted); font-size: 12px;">— means no process-authoritative owner is exposed for that counter.</div>
       <div class="table-responsive">
         <table aria-label="Runtime retention diagnostics">
           <thead>

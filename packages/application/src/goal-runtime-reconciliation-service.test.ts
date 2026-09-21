@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import {
   GOAL_RUNTIME_CONTRACT_VERSION,
   type AppendGoalRuntimeReconciliationEventRequest,
+  type AppendGoalRuntimeReconciliationEventResult,
   type GoalRecord,
   type GoalRuntimeReconciliationEventRepository,
   type GoalRuntimeSnapshotRecord,
@@ -12,6 +13,16 @@ import {
 import { GoalRuntimeReconciliationService } from './goal-runtime-reconciliation-service.js';
 
 const now = '2026-09-21T15:00:00.000Z';
+
+type ReconciliationAppend = (
+  request: AppendGoalRuntimeReconciliationEventRequest,
+) => Promise<AppendGoalRuntimeReconciliationEventResult>;
+
+interface FixtureRuntime {
+  readonly service: GoalRuntimeReconciliationService;
+  readonly append: Mock<ReconciliationAppend>;
+  readonly stored: GoalRuntimeSnapshotRecord[];
+}
 
 function goal(overrides: Partial<GoalRecord> = {}): GoalRecord {
   return {
@@ -67,7 +78,7 @@ function fixture(options: {
   trustworthy?: boolean;
   commitDisposition?: 'appended' | 'concurrent_change';
   failFirstStore?: boolean;
-} = {}) {
+} = {}): FixtureRuntime {
   let current = snapshot(options.runtimeState);
   const stored: GoalRuntimeSnapshotRecord[] = [];
   let storeAttempts = 0;
@@ -90,7 +101,7 @@ function fixture(options: {
   };
 
   let committedEvent: AppendGoalRuntimeReconciliationEventRequest['event'] | undefined;
-  const append = vi.fn(async (request: AppendGoalRuntimeReconciliationEventRequest) => {
+  const append = vi.fn<ReconciliationAppend>(async (request: AppendGoalRuntimeReconciliationEventRequest) => {
     if (options.commitDisposition === 'concurrent_change') {
       return {
         disposition: 'concurrent_change' as const,
@@ -135,12 +146,12 @@ function fixture(options: {
   };
 
   const service = new GoalRuntimeReconciliationService(
-    { getById: async () => goal() },
+    { getById: async (): Promise<GoalRecord> => goal() },
     snapshots,
     events,
     scheduledContinuations,
     workerLiveness,
-    { now: () => new Date(now) },
+    { now: (): Date => new Date(now) },
   );
   return { service, append, stored };
 }

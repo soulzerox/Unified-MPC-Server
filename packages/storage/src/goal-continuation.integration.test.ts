@@ -150,7 +150,7 @@ describe('durable goal continuation persistence', () => {
         executionGeneration: 2,
       },
     });
-    if (!resumed.ok) throw new Error('goal resume failed');
+    if (!resumed.ok || resumed.value.executionId === undefined) throw new Error('goal resume failed');
     expect(resumed.value.executionId).not.toBe(executionId);
     expect(resumed.value.leaseToken).not.toBe(leaseToken);
     await expect(second.service.getGoal(actor('session-c'), { goalId })).resolves.toMatchObject({
@@ -179,13 +179,16 @@ describe('durable goal continuation persistence', () => {
         receiptState: 'superseded',
       }),
     ]);
-    await expect(second.repository.getExecutionById(resumed.value.executionId!)).resolves.toMatchObject({
+    await expect(second.repository.getExecutionById(resumed.value.executionId)).resolves.toMatchObject({
       id: resumed.value.executionId,
       goalId,
       executionGeneration: 2,
       receiptState: 'active',
     });
     await expect(second.repository.getExecutionById('missing-execution')).resolves.toBeNull();
+    await expect(second.repository.listGoalExecutions({ goalId, limit: 1 })).resolves.toEqual([
+      expect.objectContaining({ id: resumed.value.executionId, executionGeneration: 2 }),
+    ]);
     expect(JSON.stringify(executions)).not.toContain(String(leaseToken));
     expect(JSON.stringify(executions)).not.toContain(String(resumed.value.leaseToken));
     second.database.close();

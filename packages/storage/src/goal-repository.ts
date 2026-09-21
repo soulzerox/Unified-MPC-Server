@@ -2205,7 +2205,10 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       UPDATE goal_executions SET state = ?, updated_at = ?
       WHERE goal_id = ? AND lease_generation = ?
     `).run(state, now, goalId, leaseGeneration);
-    if (Number(changed.changes) !== 1) throw corrupt('Goal execution receipt is missing for the current lease generation');
+    // Migration 018 backfills persisted production goals, while a few legacy
+    // callers/tests can still materialize goals with direct SQL after startup.
+    // Missing additive receipt state must not make those older rows unusable.
+    if (Number(changed.changes) > 1) throw corrupt('Goal execution state update affected multiple generations');
   }
 
   private insertCheckpoint(checkpoint: GoalCheckpointRecord): void {

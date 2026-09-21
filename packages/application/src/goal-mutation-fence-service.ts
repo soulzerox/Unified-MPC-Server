@@ -44,12 +44,18 @@ interface GoalRuntimeCallBinding {
   readonly executionGeneration: number;
 }
 
+interface GoalWorkspaceCallBinding {
+  readonly goalId: string;
+  readonly workspaceId: string;
+}
+
 export class GoalMutationFenceService implements ScheduledContinuationWorkerLivenessPort {
   private readonly now: () => Date;
   private readonly callLeaseSeconds: number;
   private readonly taskStateReader: GoalManagedTaskStateReader | undefined;
   private readonly runtimeEvents: GoalRuntimeEventPublisher | undefined;
   private readonly runtimeCalls = new Map<string, GoalRuntimeCallBinding>();
+  private readonly workspaceCalls = new Map<string, GoalWorkspaceCallBinding>();
 
   public constructor(
     private readonly repository: ScheduledContinuationRepository,
@@ -95,6 +101,7 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
         startedAt,
         expiresAt,
       });
+      this.workspaceCalls.set(callId, { goalId: admitted.goalId, workspaceId });
       await this.recordRuntimeStartBestEffort(callId, workspaceId, admitted.goalId, admitted.leaseGeneration, startedAt);
       return ok(admitted);
     } catch (error: unknown) {
@@ -111,10 +118,13 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
   }
 
   public async end(callId: string): Promise<void> {
+    const workspaceBinding = this.workspaceCalls.get(callId);
     try {
       await this.repository.endGoalFencedMutation(callId, this.now().toISOString());
+      await this.refreshWorkspaceTruthBestEffort(workspaceBinding?.goalId);
     } finally {
       this.runtimeCalls.delete(callId);
+      this.workspaceCalls.delete(callId);
     }
   }
 
@@ -206,6 +216,16 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     } catch {
       // Durable fence heartbeat remains authoritative for admission/liveness.
       // Event delivery is repaired by later runtime activity/reconciliation.
+    }
+  }
+
+  private async refreshWorkspaceTruthBestEffort(goalId: string | undefined): Promise<void> {
+    if (goalId === undefined || this.runtimeEvents?.refreshGoalWorkspaceTruth === undefined) return;
+    try {
+      await this.runtimeEvents.refreshGoalWorkspaceTruth(goalId);
+    } catch {
+      // Filesystem/Git observation is a non-critical side path. Ending the
+      // durable mutation fence must not fail because workspace truth refresh did.
     }
   }
 

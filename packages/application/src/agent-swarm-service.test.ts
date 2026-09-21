@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { appError, err, ok, type InvocationAuthorization } from '@unified-mpc/domain';
 import type { ManagedProcess } from '@unified-mpc/process';
-import { SqliteAgentSwarmRepository, SqliteDatabase } from '@unified-mpc/storage';
+import { SqliteAgentSwarmRepository, SqliteDatabase, SqliteManagedResourceBindingRepository } from '@unified-mpc/storage';
 import { AgentSwarmService, type AgentSwarmCodexPort, type AgentSwarmServiceOptions } from './agent-swarm-service.js';
 import type { AgentSwarmStartRequest } from './agent-swarm-types.js';
 import type { FileActor } from './file-service.js';
@@ -276,4 +276,111 @@ describe('AgentSwarmService', () => {
       database.close();
     }
   });
+  it('persists delegated child resource ownership and durably releases it after verified stop', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-agent-swarm-binding-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const repository = new SqliteAgentSwarmRepository(database);
+    const bindings = new SqliteManagedResourceBindingRepository(database);
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 16,
+      sessionCost: 16,
+      maxOperations: 4,
+    });
+    const codex: AgentSwarmCodexPort = {
+      run: async () => ok({ codexTaskId: 'codex-durable', processId: 'process-durable' }),
+      taskStatus: async () => ok(managed('codex-durable')),
+      taskLogs: async () => ok({ entries: [], truncated: false, nextSequence: 0 }),
+      stop: async () => ok(undefined),
+      recoveryIdentityForGoal: async () => ok({
+        processId: 'process-durable',
+        platform: 'linux',
+        pid: 5050,
+        processStartedAt: '2026-08-31T00:00:00.000Z',
+      }),
+    };
+    const service = new AgentSwarmService(
+      repository,
+      codex,
+      () => new Date('2026-08-31T00:00:00.000Z'),
+      () => '11111111-1111-4111-8111-111111111111',
+      { resourceAdmissionController: controller, managedResourceBindings: bindings },
+    );
+
+    try {
+      const started = await service.start(actor, startRequest(), undefined, authorization);
+      expect(started).toMatchObject({ ok: true, value: { state: 'running' } });
+      expect(bindings.listUnreleased()).toEqual([
+        expect.objectContaining({
+          operationId: 'agent-swarm:11111111-1111-4111-8111-111111111111:inspect',
+          workspaceId: 'workspace-a',
+          sessionId: 'session-a',
+          resourceClass: 'delegated_agent',
+          logicalHandle: 'codex-durable',
+          pid: 5050,
+          state: 'active',
+        }),
+      ]);
+
+      if (!started.ok) return;
+      expect(await service.cancel(actor, 'workspace-a', started.value.swarmId, authorization))
+        .toMatchObject({ ok: true, value: { state: 'cancelled' } });
+      expect(bindings.listUnreleased()).toEqual([]);
+      expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('retains durable delegated debt when child termination cannot be verified', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-agent-swarm-unverified-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const repository = new SqliteAgentSwarmRepository(database);
+    const bindings = new SqliteManagedResourceBindingRepository(database);
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 16,
+      sessionCost: 16,
+      maxOperations: 4,
+    });
+    const codex: AgentSwarmCodexPort = {
+      run: async () => ok({ codexTaskId: 'codex-unverified', processId: 'process-unverified' }),
+      taskStatus: async () => ok(managed('codex-unverified')),
+      taskLogs: async () => ok({ entries: [], truncated: false, nextSequence: 0 }),
+      stop: async () => err(appError('PROCESS_TIMEOUT', 'stop could not be verified', true)),
+      recoveryIdentityForGoal: async () => ok({
+        processId: 'process-unverified',
+        platform: 'linux',
+        pid: 6060,
+        processStartedAt: '2026-08-31T00:00:00.000Z',
+      }),
+    };
+    const service = new AgentSwarmService(
+      repository,
+      codex,
+      () => new Date('2026-08-31T00:00:00.000Z'),
+      () => '11111111-1111-4111-8111-111111111111',
+      { resourceAdmissionController: controller, managedResourceBindings: bindings },
+    );
+
+    try {
+      const started = await service.start(actor, startRequest(), undefined, authorization);
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+      expect(await service.cancel(actor, 'workspace-a', started.value.swarmId, authorization))
+        .toMatchObject({ ok: true, value: { state: 'termination_unverified' } });
+      expect(bindings.listUnreleased()).toEqual([
+        expect.objectContaining({
+          resourceClass: 'delegated_agent',
+          state: 'termination_unverified',
+        }),
+      ]);
+      expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
 });

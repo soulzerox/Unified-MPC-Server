@@ -4,5 +4,6 @@ export * from './ring-buffer.js';
 export * from './process-tree.js';
 export * from './posix-process-tree.js';
 export * from './posix-process-identity.js';
+export * from './process-recovery.js';
 export * from './executable-resolver.js';
 export * from './spawn-invocation.js';

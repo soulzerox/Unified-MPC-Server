@@ -1,0 +1,73 @@
+name: Goal execution tasks gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/goal-execution-tasks.yml"
+      - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
+      - "packages/application/src/goal-continuation-service.ts"
+      - "packages/domain/src/goal-continuation.ts"
+      - "packages/domain/src/goal-runtime.ts"
+      - "packages/mcp-server/src/modern-tasks-protocol.ts"
+      - "packages/mcp-server/src/modern-tasks-goal.test.ts"
+      - "packages/mcp-server/src/modern-tasks.integration.test.ts"
+      - "packages/mcp-server/src/tools/tool-types.ts"
+      - "packages/storage/src/goal-continuation.integration.test.ts"
+      - "packages/storage/src/goal-repository.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goal-execution-tasks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build MCP dependency closure
+        run: pnpm --filter @unified-mpc/mcp-server^... build
+
+      - name: Exact execution cancellation regression
+        run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/goal-continuation.integration.test.ts
+
+      - name: Goal-backed MCP Tasks regression
+        run: pnpm --filter @unified-mpc/mcp-server exec vitest run --fileParallelism=false src/modern-tasks-goal.test.ts src/modern-tasks.integration.test.ts
+
+      - name: Targeted typecheck
+        run: |
+          pnpm --filter @unified-mpc/domain typecheck
+          pnpm --filter @unified-mpc/storage typecheck
+          pnpm --filter @unified-mpc/application typecheck
+          pnpm --filter @unified-mpc/mcp-server typecheck
+          pnpm --filter @unified-mpc/cli typecheck
+
+      - name: Targeted ESLint
+        run: >-
+          pnpm exec eslint
+          packages/domain/src/goal-continuation.ts
+          packages/storage/src/goal-repository.ts
+          packages/storage/src/goal-continuation.integration.test.ts
+          packages/application/src/goal-continuation-service.ts
+          packages/mcp-server/src/modern-tasks-protocol.ts
+          packages/mcp-server/src/modern-tasks-goal.test.ts
+          packages/mcp-server/src/tools/tool-types.ts
+          apps/cli/src/runtime/stdio-mcp-runtime.ts

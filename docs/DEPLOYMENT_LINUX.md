@@ -49,6 +49,7 @@ mkdir -p ~/.config/systemd/user ~/.config/unified-mpc
 cp scripts/unified-mpc-mcp-http.service ~/.config/systemd/user/
 cp scripts/unified-mpc-web.service ~/.config/systemd/user/
 cp scripts/unified-mpc.service ~/.config/systemd/user/
+cp scripts/validate-runtime-root.sh ~/.config/unified-mpc/validate-runtime-root.sh
 cp scripts/unified-mpc.service.env.example ~/.config/unified-mpc/service.env
 ```
 
@@ -63,6 +64,25 @@ PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 `EnvironmentFile` values are literal: do not use `~` or `$HOME`. If Node comes from nvm/asdf/mise, prepend its exact `bin` directory to `PATH`. Keep `~/.local/bin` (expanded to the real home path in `service.env`) when `cloudflared` is installed there.
 
 `UNIFIED_MPC_WORKSPACE` must be a real project directory, not `/`, `/mnt`, or another filesystem mount root.
+
+### Runtime-root safety
+
+`UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. It must point to either the durable canonical checkout or a stable promoted release directory whose lifecycle is independent of issue/goal cleanup. Never point it at:
+
+- `.unified-mpc/worktrees/*` or another linked Git worktree;
+- Goal/delegated/inspection/temporary workspaces;
+- a symlink that resolves to one of those locations.
+
+The supplied units run `~/.config/unified-mpc/validate-runtime-root.sh` with `/usr/bin/bash` before Node starts. The validator lives outside `UNIFIED_MPC_ROOT`, so a missing or cleaned runtime tree can still fail with an actionable `RUNTIME_ROOT_INVALID`, `RUNTIME_ROOT_DISPOSABLE`, or `RUNTIME_ARTIFACT_MISSING` diagnostic instead of entering only a curl/restart failure loop.
+
+The preflight validates the **final systemd environment**. Local drop-ins can override values after the checked-in unit, so inspect the effective configuration whenever a runtime root changes:
+
+```bash
+systemctl --user cat unified-mpc-mcp-http.service
+systemctl --user cat unified-mpc-web.service
+```
+
+Remove stale drop-ins or environment files that redirect `UNIFIED_MPC_ROOT` to a completed/cleanup-managed worktree. In particular, a legacy `~/.config/unified-mpc/runtime-root.env` must not be used to make a disposable build/Goal worktree the durable production root.
 
 Validate the checked-in unit syntax before installation or after edits:
 

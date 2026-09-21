@@ -5,6 +5,7 @@ import {
   type ExecutionScopedRuntimeEvent,
   type GoalRuntimeEvent,
   type GoalRuntimeEventDecision,
+  type GoalScopedRuntimeEvent,
 } from './goal-runtime-event.js';
 import type {
   GoalBlockerKind,
@@ -62,9 +63,8 @@ type ProjectionApplication =
 
 function applyGoalScopedEvent(
   current: GoalRuntimeProjection,
-  event: GoalRuntimeEvent,
+  event: GoalScopedRuntimeEvent,
 ): ProjectionApplication {
-  if (!isGoalScopedRuntimeEvent(event)) return { projection: current };
 
   switch (event.type) {
     case 'goal_selected':
@@ -99,6 +99,10 @@ function applyGoalScopedEvent(
           ...current,
           lifecycleState: 'cleaned',
         }, event.occurredAt),
+      };
+    case 'workspace_observed':
+      return {
+        projection: applyWorkspaceObservation(current, event.workspaceState, event.occurredAt, event.detail),
       };
   }
 }
@@ -299,6 +303,47 @@ function applyExecutionScopedEvent(
         }, event.occurredAt),
       };
   }
+}
+
+function applyWorkspaceObservation(
+  current: GoalRuntimeProjection,
+  workspaceState: GoalRuntimeProjection['workspaceState'],
+  observedAt: string,
+  detail: string | undefined,
+): GoalRuntimeProjection {
+  const next: GoalRuntimeProjection = { ...current, workspaceState };
+
+  if (workspaceState === 'unknown') return next;
+
+  if (workspaceState === 'clean') {
+    return isWorkspaceDerivedBlocker(current)
+      ? clearBlocker(next)
+      : next;
+  }
+
+  if (current.blocker !== undefined && !isWorkspaceDerivedBlocker(current)) {
+    return next;
+  }
+
+  const kind: GoalBlockerKind = workspaceState === 'dirty'
+    ? 'dirty_workspace'
+    : 'recovery_required';
+  return {
+    ...next,
+    blocker: {
+      kind,
+      observedAt,
+      ...(detail === undefined ? {} : { detail }),
+    },
+  };
+}
+
+function isWorkspaceDerivedBlocker(current: GoalRuntimeProjection): boolean {
+  if (current.blocker?.kind === 'dirty_workspace') return true;
+  return current.blocker?.kind === 'recovery_required'
+    && (current.workspaceState === 'missing'
+      || current.workspaceState === 'unavailable'
+      || current.workspaceState === 'conflict');
 }
 
 function validateProjectionTransitions(

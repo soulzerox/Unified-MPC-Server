@@ -68,12 +68,12 @@ describe('Goal runtime event generation fence', () => {
       event('execution_submitted', { executionId: 'execution-5', executionGeneration: 5 }),
     )).toEqual({ disposition: 'reject', reason: 'generation_gap' });
 
-    const empty = projection({
+    const empty = { ...projection({
       runtimeState: 'idle',
       desiredRuntimeState: 'idle',
-      activeExecutionId: undefined,
-      executionGeneration: undefined,
-    });
+    }) };
+    delete empty.activeExecutionId;
+    delete empty.executionGeneration;
     expect(classifyGoalRuntimeEvent(
       empty,
       event('execution_started', { executionId: 'execution-1', executionGeneration: 1 }),
@@ -89,6 +89,28 @@ describe('Goal runtime event generation fence', () => {
       projection({ runtimeState: 'failed' }),
       event('phase_started', { phase: 'test' }),
     )).toEqual({ disposition: 'reject', reason: 'terminal_generation' });
+  });
+
+  it('rejects late same-generation activity after a completed execution cleared active identity', () => {
+    const completed = { ...projection({ runtimeState: 'idle', desiredRuntimeState: 'idle' }) };
+    delete completed.activeExecutionId;
+
+    expect(classifyGoalRuntimeEvent(
+      completed,
+      event('task_progress'),
+    )).toEqual({ disposition: 'reject', reason: 'terminal_generation' });
+
+    expect(classifyGoalRuntimeEvent(
+      completed,
+      event('integration_started'),
+    )).toEqual({ disposition: 'apply' });
+  });
+
+  it('rejects even integration activity after Goal archival', () => {
+    expect(classifyGoalRuntimeEvent(
+      projection({ lifecycleState: 'archived', runtimeState: 'idle', desiredRuntimeState: 'idle' }),
+      event('integration_started'),
+    )).toEqual({ disposition: 'reject', reason: 'goal_not_open' });
   });
 
   it('does not let a closed Goal restart from an ordinary execution event', () => {
@@ -128,6 +150,15 @@ describe('Goal runtime state transition validator', () => {
       dimension: 'runtime',
       from: 'cancelled',
       to: 'running',
+      executionGenerationChanged: true,
+    })).toEqual({ valid: true });
+  });
+
+  it('allows a newly fenced generation to replace an active runtime attempt', () => {
+    expect(validateGoalStateTransition({
+      dimension: 'runtime',
+      from: 'running',
+      to: 'queued',
       executionGenerationChanged: true,
     })).toEqual({ valid: true });
   });

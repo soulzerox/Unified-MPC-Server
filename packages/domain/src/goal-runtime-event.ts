@@ -124,7 +124,10 @@ export type GoalRuntimeEventRejectionReason =
   | 'future_generation'
   | 'generation_gap'
   | 'execution_identity_mismatch'
-  | 'terminal_generation';
+  | 'terminal_generation'
+  | 'missing_event_data'
+  | 'invalid_transition'
+  | 'projection_invariant';
 
 export type GoalRuntimeEventDecision =
   | { readonly disposition: 'apply' }
@@ -145,6 +148,9 @@ export function classifyGoalRuntimeEvent(
   if (event.workspaceId !== current.workspaceId) return { disposition: 'reject', reason: 'workspace_mismatch' };
   if (isGoalScopedRuntimeEvent(event)) return { disposition: 'apply' };
 
+  if (current.lifecycleState === 'archived' || current.lifecycleState === 'cleaned') {
+    return { disposition: 'reject', reason: 'goal_not_open' };
+  }
   if (current.lifecycleState !== 'open' && event.type !== 'integration_started'
     && event.type !== 'integration_completed' && event.type !== 'integration_conflict') {
     return { disposition: 'reject', reason: 'goal_not_open' };
@@ -169,6 +175,14 @@ export function classifyGoalRuntimeEvent(
 
   if (current.activeExecutionId !== undefined && current.activeExecutionId !== event.executionId) {
     return { disposition: 'reject', reason: 'execution_identity_mismatch' };
+  }
+
+  if (current.activeExecutionId === undefined
+    && current.executionGeneration === event.executionGeneration
+    && event.type !== 'integration_started'
+    && event.type !== 'integration_completed'
+    && event.type !== 'integration_conflict') {
+    return { disposition: 'reject', reason: 'terminal_generation' };
   }
 
   if (isTerminalRuntimeState(current.runtimeState) && isExecutionActivityEvent(event.type)) {
@@ -253,6 +267,10 @@ export function validateGoalStateTransition(transition: GoalStateTransition): Go
     return allowed[transition.from].includes(transition.to)
       ? { valid: true }
       : { valid: false, reason: 'invalid_transition' };
+  }
+
+  if (transition.executionGenerationChanged === true && isExecutionActiveRuntimeState(transition.to)) {
+    return { valid: true };
   }
 
   if (isTerminalRuntimeState(transition.from)

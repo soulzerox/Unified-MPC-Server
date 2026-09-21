@@ -207,6 +207,58 @@ describe('ProcessManager', () => {
     }
   });
 
+  it('captures a restart recovery identity internally without exposing the host pid in ManagedProcess', async () => {
+    let observedPid: number | undefined;
+    const hostStartedAt = '2026-09-21T00:00:00.000Z';
+    const manager = new ProcessManager(undefined, undefined, undefined, undefined, {
+      platform: 'linux',
+      processStartedAt: async (pid): Promise<string> => {
+        observedPid = pid;
+        return hostStartedAt;
+      },
+    });
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      cwd: process.cwd(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    expect(started.value).not.toHaveProperty('pid');
+    const identity = await manager.recoveryIdentity(started.value.processId);
+    expect(identity).toEqual({
+      ok: true,
+      value: {
+        processId: started.value.processId,
+        platform: 'linux',
+        pid: observedPid,
+        processStartedAt: hostStartedAt,
+      },
+    });
+    expect(observedPid).toEqual(expect.any(Number));
+
+    await expect(manager.stop(started.value.processId)).resolves.toMatchObject({ ok: true });
+  });
+
+  it('fails closed when restart identity is requested on an unsupported host platform', async () => {
+    const manager = new ProcessManager(undefined, undefined, undefined, undefined, { platform: 'win32' });
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      cwd: process.cwd(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await expect(manager.recoveryIdentity(started.value.processId)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', recoverable: true, details: { reason: 'platform_unsupported' } },
+    });
+
+    await expect(manager.stop(started.value.processId)).resolves.toMatchObject({ ok: true });
+  });
+
   it('caps simultaneous managed processes to prevent runaway child-process growth', async () => {
     const manager = new ProcessManager(undefined, undefined, 1);
     const first = await manager.start({

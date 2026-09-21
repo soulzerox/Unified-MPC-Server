@@ -100,7 +100,7 @@ describe('MCP tool registry', () => {
       'system_info', 'notification', 'file_dialog', 'clipboard', 'web_fetch',
       'audio', 'screen_record', 'office', 'scheduler',
       'wsl_exec', 'wsl_fs',
-      'skills_list', 'skills_read', 'skills_install', 'ponytail_session', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call', 'rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status',
+      'skills_list', 'skills_read', 'skills_install', 'ponytail_session', 'task_bootstrap', 'policy_snapshot', 'mcp_list', 'mcp_describe', 'mcp_install', 'mcp_call', 'rag_recall', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_pre_edit_context', 'rag_code_search', 'rag_code_context', 'rag_code_blast_radius', 'rag_code_index', 'rag_index_status', 'rag_cancel_index',
       'workspace_context', 'workspace_context_continue', 'workspace_full_scan', 'workspace_full_scan_continue',
       'workspace_snapshot', 'search_all', 'read_many_files',
       'read_file_page', 'read_file_page_continue',
@@ -441,7 +441,7 @@ describe('MCP tool registry', () => {
     expect(controller.release(held.lease)).toBe(true);
   });
 
-  it('does not attach a request-scoped lease to background native RAG indexing', async () => {
+  it('rejects background native RAG indexing under class pressure before provider execution', async () => {
     const controller = new ResourceAdmissionController({
       globalCost: 16,
       workspaceCost: 8,
@@ -471,14 +471,151 @@ describe('MCP tool registry', () => {
 
     const response = await registry.invoke('rag_code_index', { workspaceId, background: true, userConfirmed: true });
 
-    expect(response.isError).not.toBe(true);
-    expect(providerCall).toHaveBeenCalledTimes(1);
-    expect(controller.snapshot()).toMatchObject({
-      activeCost: 8,
-      activeOperations: 1,
-      activeCostByClass: { rag_indexing: 8 },
+    expect(providerCall).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'RESOURCE_PRESSURE', details: { reason: 'resource_class_cost_exhausted' } } },
     });
     expect(controller.release(held.lease)).toBe(true);
+  });
+
+  it('transfers background native RAG admission across ToolRegistry request instances until terminal status', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 1,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    let status = 'running';
+    const providerCall = vi.fn(async (tool: string) => {
+      if (tool === 'code_index') return ok({ status: 'running', job_id: 'idx-background', workspace_id: workspaceId });
+      if (tool === 'index_status') return ok({ status, jobId: 'idx-background', workspaceId });
+      throw new Error(`unexpected provider tool: ${tool}`);
+    });
+    const services = { thaiRag: { call: providerCall } } as unknown as McpApplicationServices;
+    const options: ToolRegistryOptions = {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      hostMutationApprovalProvider: approveMutation,
+      resourceAdmissionController: controller,
+      ragIndexAdmissionCost: 8,
+    };
+    const startRegistry = new ToolRegistry(services, actor, options);
+
+    const started = await startRegistry.invoke('rag_code_index', { workspaceId, background: true, userConfirmed: true });
+
+    expect(started.isError).not.toBe(true);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+    const blocked = await new ToolRegistry(services, actor, options).invoke('rag_code_index', {
+      workspaceId,
+      background: true,
+      userConfirmed: true,
+    });
+    expect(blocked).toMatchObject({ isError: true, structuredContent: { error: { code: 'RESOURCE_PRESSURE' } } });
+
+    status = 'completed';
+    const terminal = await new ToolRegistry(services, actor, options).invoke('rag_index_status', {
+      workspaceId,
+      jobId: 'idx-background',
+    });
+
+    expect(terminal.isError).not.toBe(true);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('keeps background RAG admission after a start-response timeout and transfers it when start later settles', async () => {
+    vi.useFakeTimers();
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 1,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    let settleIndex: (() => void) | undefined;
+    let indexStarted = false;
+    const providerCall = vi.fn(async (tool: string) => {
+      if (tool === 'code_index') {
+        indexStarted = true;
+        return await new Promise<ReturnType<typeof ok>>((resolve) => {
+          settleIndex = (): void => resolve(ok({ status: 'running', job_id: 'idx-timeout', workspace_id: workspaceId }));
+        });
+      }
+      if (tool === 'index_status') return ok({ status: 'completed', jobId: 'idx-timeout', workspaceId });
+      throw new Error(`unexpected provider tool: ${tool}`);
+    });
+    const registry = new ToolRegistry({
+      thaiRag: { call: providerCall },
+    } as unknown as McpApplicationServices, actor, {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      hostMutationApprovalProvider: approveMutation,
+      resourceAdmissionController: controller,
+      ragIndexAdmissionCost: 8,
+      maxToolDurationMs: 10,
+    });
+
+    const pending = registry.invoke('rag_code_index', { workspaceId, background: true, userConfirmed: true });
+    for (let attempt = 0; attempt < 20 && !indexStarted; attempt += 1) await Promise.resolve();
+    expect(indexStarted).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT', recoverable: true } },
+    });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+
+    settleIndex?.();
+    for (let attempt = 0; attempt < 20; attempt += 1) await Promise.resolve();
+    expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+
+    const terminal = await registry.invoke('rag_index_status', { workspaceId, jobId: 'idx-timeout' });
+    expect(terminal.isError).not.toBe(true);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+    vi.useRealTimers();
+  });
+
+  it('releases transferred RAG admission when explicit cancellation becomes terminal', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 1,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const providerCall = vi.fn(async (tool: string, args: Readonly<Record<string, unknown>>) => {
+      if (tool === 'code_index') return ok({ status: 'running', job_id: 'idx-cancel', workspace_id: workspaceId });
+      if (tool === 'cancel_index') return ok({ status: 'cancelled', jobId: 'idx-cancel', workspaceId });
+      if (tool === 'index_status') return ok({ status: 'running', jobId: 'idx-cancel', workspaceId });
+      throw new Error(`unexpected provider tool: ${tool}`);
+    });
+    const registry = new ToolRegistry({
+      thaiRag: { call: providerCall },
+    } as unknown as McpApplicationServices, actor, {
+      sessionId: 'session-a',
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId, rootPath: '/tmp/project-directory' }),
+      hostMutationApprovalProvider: approveMutation,
+      resourceAdmissionController: controller,
+      ragIndexAdmissionCost: 8,
+    });
+    await registry.invoke('rag_code_index', { workspaceId, background: true, userConfirmed: true });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+
+    const cancelled = await registry.invoke('rag_cancel_index', { workspaceId, jobId: 'idx-cancel', userConfirmed: true });
+
+    expect(cancelled.isError).not.toBe(true);
+    expect(providerCall).toHaveBeenCalledWith(
+      'cancel_index',
+      { job_id: 'idx-cancel', workspace_id: workspaceId },
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
   });
 
   it('keeps foreground native RAG admission while a timed-out provider call is still settling', async () => {

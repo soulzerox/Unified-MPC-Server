@@ -74,13 +74,16 @@ describe('MCP runtime diagnostics provider', () => {
     }
   });
 
-  it('reports shared retention unavailable when the persisted store cannot be read', async () => {
+  it('reports shared retention unavailable when the persisted shared state cannot be read', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'runtime-diagnostics-unreadable-'));
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
     try {
-      const blockedParent = path.join(directory, 'not-a-directory');
-      await writeFile(blockedParent, 'blocked');
+      const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+      await store.updateShared(() => ({ plugins: [], worktrees: [] }));
+      await writeFile(store.sharedStatePath(), '{ invalid-json');
+
       const provider = createMcpRuntimeDiagnosticsProvider({
-        services: { runtimeStatePath: path.join(blockedParent, 'upgrade-runtime.json') },
+        services: { runtimeStatePath },
         actor: { clientId: 'diagnostics-provider-test', clientName: 'diagnostics-provider-test' },
       });
 

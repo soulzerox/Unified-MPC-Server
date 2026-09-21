@@ -229,6 +229,23 @@ export class ResourceAdmissionController {
     return { admitted: true, lease, snapshot: this.buildSnapshot(pressure) };
   }
 
+  /**
+   * Restore already-running durable resource debt after a backend restart.
+   *
+   * This is not a new admission decision: the external work already exists, so
+   * restored debt may exceed current pressure/limit ceilings and intentionally
+   * blocks competing work until the recovered lease is released. Replaying the
+   * exact same lease is idempotent; an operation-id collision with different
+   * ownership/cost fails closed.
+   */
+  public restore(lease: ResourceAdmissionLease): boolean {
+    if (validateRequest(lease) !== undefined) return false;
+    const current = this.active.get(lease.operationId);
+    if (current !== undefined) return sameLease(current, lease);
+    this.active.set(lease.operationId, lease);
+    return true;
+  }
+
   public release(lease: ResourceAdmissionLease): boolean {
     const current = this.active.get(lease.operationId);
     if (current === undefined || !sameLease(current, lease)) return false;

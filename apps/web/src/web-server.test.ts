@@ -162,6 +162,40 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(data.status).toBe('healthy');
   });
 
+  it('projects the live MCP artifact identity through /api/status for WebUI build inspection', async () => {
+    const probedPorts: number[] = [];
+    const identity = {
+      product: 'Unified-MPC-Server',
+      service: 'desktop-mcp',
+      protocol: 1,
+      version: '4.61.0',
+      buildVersion: '4.61.0+0123456789ab',
+      buildCommit: '0123456789abcdef0123456789abcdef01234567',
+      buildShortCommit: '0123456789ab',
+      buildTime: '2026-09-21T09:00:00.000Z',
+      buildDirty: false,
+    };
+    const statusServer = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      mcpIdentityProbe: async (localPort): Promise<typeof identity> => {
+        probedPorts.push(localPort);
+        return identity;
+      },
+    });
+    await statusServer.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${statusServer.port}/api/status`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toMatchObject({ status: 'healthy', mcpIdentity: identity });
+      expect(probedPorts).toEqual([0]);
+    } finally {
+      await statusServer.close();
+    }
+  });
+
   it('lists registered projects and updates the shared Active Project selection through guarded workspace APIs', async () => {
     let selection = { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] as string[] };
     const workspaceControl = {

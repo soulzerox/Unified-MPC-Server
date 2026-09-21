@@ -89,6 +89,17 @@ export function getClientScriptJs(): string {
           const res = await fetch('/api/status');
           if (!res.ok) throw new Error('Status request failed');
           const data = await res.json();
+          const identity = data.mcpIdentity;
+          const buildVersion = document.getElementById('build-version');
+          if (buildVersion && identity) {
+            buildVersion.textContent = 'v' + (identity.buildVersion || identity.version || 'unknown');
+            const details = [
+              identity.buildCommit ? 'commit ' + identity.buildCommit : '',
+              identity.buildTime ? 'built ' + identity.buildTime : '',
+              identity.buildDirty === true ? 'dirty build' : identity.buildDirty === false ? 'clean build' : '',
+            ].filter(Boolean);
+            buildVersion.title = details.join(' · ') || 'MCP runtime build identity';
+          }
           const led = document.getElementById('status-led');
           if (led) led.className = 'led';
           const tel = document.getElementById('servers-telemetry');
@@ -1219,6 +1230,7 @@ export function getClientScriptJs(): string {
       loadSettings();
       fetchServerLogs();
 
+      setInterval(loadStatus, 5000);
       setInterval(loadGatewayStatus, 5000);
       setInterval(fetchServerLogs, 6000);
     })();

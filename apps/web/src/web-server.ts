@@ -72,6 +72,20 @@ export interface GoalControlPort {
   continue(workspaceId: string, goalId: string): Promise<WebGoalSummary>;
 }
 
+export interface WebMcpRuntimeIdentity {
+  readonly product: string;
+  readonly service: string;
+  readonly protocol: number;
+  readonly version: string;
+  readonly buildVersion?: string;
+  readonly buildCommit?: string;
+  readonly buildShortCommit?: string;
+  readonly buildTime?: string;
+  readonly buildDirty?: boolean;
+}
+
+export type McpIdentityProbe = (localPort: number) => Promise<WebMcpRuntimeIdentity | null>;
+
 export interface ControlPlaneServerOptions {
   readonly port?: number;
   readonly gatewayLocalPort?: number;
@@ -89,6 +103,7 @@ export interface ControlPlaneServerOptions {
   readonly cloudflareReconciler?: CloudflareTunnelReconciler;
   readonly workspaceControl?: WorkspaceControlPort;
   readonly goalControl?: GoalControlPort;
+  readonly mcpIdentityProbe?: McpIdentityProbe;
   readonly closeSettings?: () => void;
 }
 
@@ -139,6 +154,7 @@ export class ControlPlaneServer {
   private readonly cloudflareReconciler: CloudflareTunnelReconciler;
   private readonly workspaceControl: WorkspaceControlPort | undefined;
   private readonly goalControl: GoalControlPort | undefined;
+  private readonly mcpIdentityProbe: McpIdentityProbe;
   private readonly closeSettings: (() => void) | undefined;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
@@ -166,6 +182,7 @@ export class ControlPlaneServer {
     this.cloudflareReconciler = options.cloudflareReconciler ?? new CloudflareTunnelReconciler();
     this.workspaceControl = options.workspaceControl;
     this.goalControl = options.goalControl;
+    this.mcpIdentityProbe = options.mcpIdentityProbe ?? probeMcpRuntimeIdentity;
     this.closeSettings = options.closeSettings;
 
     this.recordLog('INFO', 'ControlPlaneServer initialized with loopback policy guard');
@@ -268,10 +285,13 @@ export class ControlPlaneServer {
 
     // 3. API Routes
     if (pathname === '/api/status' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const gateway = this.gateway.status();
+      const mcpIdentity = await this.mcpIdentityProbe(gateway.localPort);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         status: 'healthy',
-        gateway: this.gateway.status(),
+        gateway,
+        mcpIdentity,
       }));
       return;
     }
@@ -1163,4 +1183,33 @@ async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Pr
       reject(err);
     });
   });
+}
+
+
+async function probeMcpRuntimeIdentity(localPort: number): Promise<WebMcpRuntimeIdentity | null> {
+  if (!Number.isInteger(localPort) || localPort <= 0 || localPort > 65_535) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${localPort}/_unified-mpc/identity`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!response.ok) return null;
+    const value: unknown = await response.json();
+    return isWebMcpRuntimeIdentity(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isWebMcpRuntimeIdentity(value: unknown): value is WebMcpRuntimeIdentity {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.product !== 'string'
+    || typeof candidate.service !== 'string'
+    || typeof candidate.protocol !== 'number'
+    || typeof candidate.version !== 'string') return false;
+  for (const key of ['buildVersion', 'buildCommit', 'buildShortCommit', 'buildTime'] as const) {
+    if (candidate[key] !== undefined && typeof candidate[key] !== 'string') return false;
+  }
+  return candidate.buildDirty === undefined || typeof candidate.buildDirty === 'boolean';
 }

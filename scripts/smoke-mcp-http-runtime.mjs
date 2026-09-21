@@ -1,11 +1,29 @@
 /* global process, setTimeout, clearTimeout, URL, fetch, AbortSignal */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 const root = process.cwd();
 const entrypoint = path.join(root, 'apps', 'cli', 'dist', 'bin', 'mcp-http.js');
+const provenancePath = path.join(root, 'apps', 'cli', 'dist', 'build-provenance.json');
+const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'));
+const gitHeadResult = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root, encoding: 'utf8' });
+if (gitHeadResult.error !== undefined || gitHeadResult.status !== 0) {
+  throw new Error(`Unable to resolve Git HEAD for runtime smoke: ${gitHeadResult.stderr || gitHeadResult.error?.message || 'unknown error'}`);
+}
+const gitHead = gitHeadResult.stdout.trim();
+if (provenance.buildCommit !== gitHead) {
+  throw new Error(`Built provenance is stale: artifact=${provenance.buildCommit} checkout=${gitHead}`);
+}
+const gitStatusResult = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' });
+if (gitStatusResult.error !== undefined || gitStatusResult.status !== 0) {
+  throw new Error(`Unable to inspect checkout cleanliness for runtime smoke: ${gitStatusResult.stderr || gitStatusResult.error?.message || 'unknown error'}`);
+}
+if (gitStatusResult.stdout.trim().length === 0 && provenance.buildDirty !== false) {
+  throw new Error('Clean checkout produced provenance marked dirty');
+}
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-smoke-'));
 const workspace = path.join(temporaryRoot, 'workspace');
 const dataRoot = path.join(temporaryRoot, 'data');
@@ -52,6 +70,14 @@ try {
   const identity = await response.json();
   if (identity?.service !== 'desktop-mcp' || identity?.protocol !== 1 || typeof identity?.version !== 'string') {
     throw new Error(`Unexpected identity payload: ${JSON.stringify(identity)}`);
+  }
+  for (const key of ['version', 'buildVersion', 'buildCommit', 'buildShortCommit', 'buildTime', 'buildDirty']) {
+    if (identity[key] !== provenance[key]) {
+      throw new Error(`Runtime build identity mismatch for ${key}: identity=${JSON.stringify(identity[key])} artifact=${JSON.stringify(provenance[key])}`);
+    }
+  }
+  if (response.headers.get('x-unified-mpc-build') !== provenance.buildShortCommit) {
+    throw new Error(`Runtime build header mismatch: ${response.headers.get('x-unified-mpc-build')}`);
   }
   settled = true;
   process.stdout.write(`MCP HTTP runtime smoke passed at ${identityUrl.href}; HTTP identity became healthy independently of Thai-RAG readiness.\n`);

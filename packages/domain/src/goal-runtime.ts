@@ -162,6 +162,36 @@ export interface GoalRuntimeProjection {
   readonly blocker?: GoalRuntimeBlocker;
 }
 
+export interface GoalRuntimeSnapshotRecord {
+  readonly projection: GoalRuntimeProjection;
+  /** Last durable Goal runtime event sequence incorporated into this projection. */
+  readonly lastEventSequence: number;
+  readonly updatedAt: string;
+}
+
+export interface StoreGoalRuntimeSnapshotRequest {
+  readonly projection: GoalRuntimeProjection;
+  readonly lastEventSequence: number;
+  readonly updatedAt: string;
+}
+
+export interface ListWorkspaceGoalRuntimeSnapshotsRequest {
+  readonly workspaceId: string;
+  readonly limit: number;
+}
+
+/**
+ * Durable compaction point for the authoritative projector. Implementations
+ * must never let an older event cursor replace a newer snapshot.
+ */
+export interface GoalRuntimeSnapshotRepository {
+  getGoalRuntimeSnapshot(goalId: string): Promise<GoalRuntimeSnapshotRecord | null>;
+  listWorkspaceGoalRuntimeSnapshots(
+    request: ListWorkspaceGoalRuntimeSnapshotsRequest,
+  ): Promise<readonly GoalRuntimeSnapshotRecord[]>;
+  storeGoalRuntimeSnapshot(request: StoreGoalRuntimeSnapshotRequest): Promise<GoalRuntimeSnapshotRecord>;
+}
+
 export function isGoalLifecycleState(value: unknown): value is GoalLifecycleState {
   return typeof value === 'string' && (GOAL_LIFECYCLE_STATES as readonly string[]).includes(value);
 }

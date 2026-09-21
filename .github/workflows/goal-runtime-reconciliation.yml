@@ -7,6 +7,10 @@ on:
       - "apps/cli/package.json"
       - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
       - "apps/cli/src/runtime/stdio-mcp-runtime.test.ts"
+      - "packages/application/src/goal-continuation-service.ts"
+      - "packages/application/src/goal-continuation-runtime-events.integration.test.ts"
+      - "packages/application/src/goal-runtime-control-plane-service.ts"
+      - "packages/application/src/goal-runtime-control-plane-service.test.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.test.ts"
       - "packages/application/src/index.ts"
@@ -45,8 +49,12 @@ jobs:
       - name: Storage reconciliation regression
         run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/goal-runtime-snapshot-repository.test.ts
 
-      - name: Application restart reconciliation
-        run: pnpm --filter @unified-mpc/application exec vitest run src/goal-runtime-reconciliation-service.test.ts
+      - name: Application runtime producer and restart reconciliation
+        run: >-
+          pnpm --filter @unified-mpc/application exec vitest run
+          src/goal-runtime-control-plane-service.test.ts
+          src/goal-continuation-runtime-events.integration.test.ts
+          src/goal-runtime-reconciliation-service.test.ts
 
       - name: STDIO runtime regression
         run: pnpm --filter @unified-mpc/cli exec vitest run src/runtime/stdio-mcp-runtime.test.ts
@@ -65,6 +73,10 @@ jobs:
           pnpm exec eslint
           packages/storage/src/goal-runtime-event-repository.ts
           packages/storage/src/goal-runtime-snapshot-repository.test.ts
+          packages/application/src/goal-continuation-service.ts
+          packages/application/src/goal-continuation-runtime-events.integration.test.ts
+          packages/application/src/goal-runtime-control-plane-service.ts
+          packages/application/src/goal-runtime-control-plane-service.test.ts
           packages/application/src/goal-runtime-reconciliation-service.ts
           packages/application/src/goal-runtime-reconciliation-service.test.ts
           packages/application/src/index.ts

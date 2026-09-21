@@ -179,7 +179,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       port: 0,
       gateway,
       capabilityToken,
-      mcpIdentityProbe: async (localPort) => {
+      mcpIdentityProbe: async (localPort): Promise<typeof identity> => {
         probedPorts.push(localPort);
         return identity;
       },

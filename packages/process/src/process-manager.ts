@@ -158,6 +158,12 @@ export class ProcessManager {
   public async recoveryIdentity(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>> {
     const record = this.records.get(processId);
     if (record === undefined) return err(appError('PROCESS_NOT_FOUND', 'Process was not found'));
+    if (isVerifiedTerminal(record.state) || !isChildLive(record.child)) {
+      return err(appError('CONFLICT', 'Managed process is no longer live enough to capture a restart identity', true, {
+        reason: 'process_not_live',
+        processId,
+      }));
+    }
     if (!isPosixRecoveryPlatform(this.recoveryPlatform) || this.processStartedAt === undefined) {
       return err(appError('CONFLICT', 'Managed process restart identity is unavailable on this platform', true, {
         reason: 'platform_unsupported',

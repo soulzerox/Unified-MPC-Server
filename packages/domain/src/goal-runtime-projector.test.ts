@@ -207,6 +207,9 @@ describe('projectGoalRuntimeEvent', () => {
       desiredRuntimeState: 'running',
       activeExecutionId: 'execution-1',
       executionGeneration: 1,
+      phase: 'old-phase',
+      progress: { phase: 'old-phase', detail: 'old generation' },
+      lastHeartbeatAt: '2026-09-21T12:59:59.000Z',
     });
     const takeover = projectGoalRuntimeEvent(running, executionEvent('execution_submitted', {
       executionId: 'execution-2',
@@ -220,6 +223,9 @@ describe('projectGoalRuntimeEvent', () => {
         runtimeState: 'queued',
       },
     });
+    expect(takeover.projection.phase).toBeUndefined();
+    expect(takeover.projection.progress).toBeUndefined();
+    expect(takeover.projection.lastHeartbeatAt).toBeUndefined();
   });
 
   it('never treats goal_selected as runtime activity', () => {

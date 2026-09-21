@@ -10,6 +10,7 @@ import {
   type GoalRuntimeSnapshotRecord,
   type GoalRuntimeSnapshotRepository,
 } from '@unified-mpc/domain';
+import type { GoalWorkspaceTruthObservation, GoalWorkspaceTruthReader } from './goal-workspace-truth-reader.js';
 
 const DEFAULT_BOOTSTRAP_LIMIT = 500;
 const EVENT_REPLAY_PAGE_SIZE = 500;
@@ -17,12 +18,18 @@ const EVENT_REPLAY_PAGE_SIZE = 500;
 export interface GoalRuntimeEventPublisher {
   ensureGoalSnapshot(goalId: string): Promise<GoalRuntimeSnapshotRecord>;
   publishGoalRuntimeEvent(event: GoalRuntimeEvent): Promise<GoalRuntimeSnapshotRecord>;
+  refreshGoalWorkspaceTruth?(goalId: string): Promise<GoalRuntimeSnapshotRecord>;
 }
 
 export interface GoalRuntimeBootstrapResult {
   readonly workspaceId: string;
   readonly goalsScanned: number;
   readonly snapshotsReady: number;
+}
+
+export interface GoalRuntimeControlPlaneOptions {
+  readonly workspaceTruth?: Pick<GoalWorkspaceTruthReader, 'read'>;
+  readonly now?: () => Date;
 }
 
 export class GoalRuntimeControlPlaneError extends Error {
@@ -46,18 +53,25 @@ export class GoalRuntimeControlPlaneError extends Error {
  */
 export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher {
   private readonly goalChains = new Map<string, Promise<void>>();
+  private readonly workspaceTruth: Pick<GoalWorkspaceTruthReader, 'read'> | undefined;
+  private readonly now: () => Date;
 
   public constructor(
     private readonly goals: Pick<GoalRepository, 'getById' | 'list'>,
     private readonly snapshots: GoalRuntimeSnapshotRepository,
     private readonly events: GoalRuntimeEventRepository,
-  ) {}
+    options: GoalRuntimeControlPlaneOptions = {},
+  ) {
+    this.workspaceTruth = options.workspaceTruth;
+    this.now = options.now ?? ((): Date => new Date());
+  }
 
   public async ensureGoalSnapshot(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
     return this.withGoalLock(goalId, async () => {
       let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
-      return this.reconcileDurableTerminalStateUnlocked(snapshot);
+      snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
+      return this.refreshWorkspaceTruthUnlocked(snapshot);
     });
   }
 
@@ -70,17 +84,74 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     });
   }
 
+  public async refreshGoalWorkspaceTruth(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
+    return this.withGoalLock(goalId, async () => {
+      let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
+      snapshot = await this.catchUpSnapshotUnlocked(snapshot);
+      snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
+      return this.refreshWorkspaceTruthUnlocked(snapshot);
+    });
+  }
+
   public async bootstrapWorkspace(
     workspaceId: string,
     limit = DEFAULT_BOOTSTRAP_LIMIT,
   ): Promise<GoalRuntimeBootstrapResult> {
     const goals = await this.goals.list({ workspaceId, limit });
+    const workspaceObservation = await this.readWorkspaceTruthBestEffort(workspaceId);
     let snapshotsReady = 0;
     for (const goal of goals) {
-      await this.ensureGoalSnapshot(goal.id);
+      await this.withGoalLock(goal.id, async () => {
+        let snapshot = await this.ensureGoalSnapshotUnlocked(goal.id);
+        snapshot = await this.catchUpSnapshotUnlocked(snapshot);
+        snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
+        await this.refreshWorkspaceTruthUnlocked(snapshot, workspaceObservation);
+      });
       snapshotsReady += 1;
     }
     return { workspaceId, goalsScanned: goals.length, snapshotsReady };
+  }
+
+  private async readWorkspaceTruthBestEffort(
+    workspaceId: string,
+  ): Promise<GoalWorkspaceTruthObservation | null> {
+    if (this.workspaceTruth === undefined) return null;
+    try {
+      return await this.workspaceTruth.read(workspaceId);
+    } catch {
+      return { state: 'unavailable', detail: 'workspace truth probe failed' };
+    }
+  }
+
+  private async refreshWorkspaceTruthUnlocked(
+    snapshot: GoalRuntimeSnapshotRecord,
+    suppliedObservation?: GoalWorkspaceTruthObservation | null,
+  ): Promise<GoalRuntimeSnapshotRecord> {
+    const observation = suppliedObservation === undefined
+      ? await this.readWorkspaceTruthBestEffort(snapshot.projection.workspaceId)
+      : suppliedObservation;
+    if (observation === null || observation.state === snapshot.projection.workspaceState) return snapshot;
+
+    const occurredAt = this.now().toISOString();
+    try {
+      return await this.appendAndReplayUnlocked(snapshot, {
+        eventId: workspaceRuntimeEventId(
+          snapshot.projection.goalId,
+          observation.state,
+          snapshot.lastEventSequence,
+        ),
+        type: 'workspace_observed',
+        workspaceId: snapshot.projection.workspaceId,
+        goalId: snapshot.projection.goalId,
+        workspaceState: observation.state,
+        occurredAt,
+        ...(observation.detail === undefined ? {} : { detail: observation.detail }),
+      });
+    } catch {
+      // Workspace truth is observational. Failure to project/persist it must not
+      // fail an already-admitted mutation or block runtime startup.
+      return snapshot;
+    }
   }
 
   private async ensureGoalSnapshotUnlocked(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
@@ -418,3 +489,15 @@ function durableRuntimeEventId(goalId: string, type: GoalRuntimeEvent['type'], d
     .digest('hex');
   return `goal-runtime-reconcile-${digest}`;
 }
+
+function workspaceRuntimeEventId(
+  goalId: string,
+  state: GoalWorkspaceTruthObservation['state'],
+  snapshotSequence: number,
+): string {
+  const digest = createHash('sha256')
+    .update([goalId, 'workspace_observed', state, String(snapshotSequence)].join('\0'))
+    .digest('hex');
+  return `goal-runtime-workspace-${digest}`;
+}
+

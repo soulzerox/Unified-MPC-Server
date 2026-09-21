@@ -26,6 +26,22 @@ describe('ToolAvailabilityService', () => {
     expect(settings.get(USER_SETTING_KEYS.toolAvailability)).toContain('"generation":3');
   });
 
+  it('reports live subscription cardinality and releases subscribers idempotently', () => {
+    const service = new ToolAvailabilityService(new MemorySettings());
+    expect(service.listenerCount()).toBe(0);
+
+    const unsubscribeFirst = service.subscribe(() => undefined);
+    const unsubscribeSecond = service.subscribe(() => undefined);
+    expect(service.listenerCount()).toBe(2);
+
+    unsubscribeFirst();
+    expect(service.listenerCount()).toBe(1);
+    unsubscribeFirst();
+    expect(service.listenerCount()).toBe(1);
+    unsubscribeSecond();
+    expect(service.listenerCount()).toBe(0);
+  });
+
   it('preserves unknown override keys and refreshes external cross-process writes only when state changes', () => {
     const settings = new MemorySettings();
     settings.set(USER_SETTING_KEYS.toolAvailability, JSON.stringify({

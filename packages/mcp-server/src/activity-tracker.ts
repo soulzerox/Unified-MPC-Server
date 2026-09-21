@@ -61,6 +61,8 @@ export interface ActivityTelemetrySnapshot {
   readonly batchPartialFailures: number;
   readonly taskLifecycleCalls: number;
   readonly recentErrorClasses: readonly { readonly code: string; readonly count: number }[];
+  readonly retainedCompletedEntries: number;
+  readonly maxRetainedCompletedEntries: number;
 }
 
 export interface ActivitySink {
@@ -158,6 +160,8 @@ export class ActivityTracker {
       batchPartialFailures: this.completedTelemetry.filter((entry) => entry.toolName === 'tool_batch' && entry.partialFailure).length,
       taskLifecycleCalls: this.completedTelemetry.filter((entry) => /^(task_|delegate_|agent_swarm_)/.test(entry.toolName)).length,
       recentErrorClasses: [...errorCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 16).map(([code, count]) => ({ code, count })),
+      retainedCompletedEntries: this.completedTelemetry.length,
+      maxRetainedCompletedEntries: this.maxTelemetryEntries,
     };
   }
 

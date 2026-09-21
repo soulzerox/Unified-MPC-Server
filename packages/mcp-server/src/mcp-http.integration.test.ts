@@ -91,6 +91,48 @@ describe('MCP localhost HTTP transport', () => {
     }
   });
 
+  it('releases modern per-request tool availability subscriptions after each exchange', async () => {
+    let activeSubscriptions = 0;
+    let peakSubscriptions = 0;
+    const listenerHandle = await startMcpHttp({
+      port: 0,
+      services: {} as McpApplicationServices,
+      actor: { clientId: 'listener-cleanup-test', clientName: 'listener-cleanup-test' },
+      toolAvailabilitySubscribe: () => {
+        activeSubscriptions += 1;
+        peakSubscriptions = Math.max(peakSubscriptions, activeSubscriptions);
+        let closed = false;
+        return (): void => {
+          if (closed) return;
+          closed = true;
+          activeSubscriptions -= 1;
+        };
+      },
+    });
+    const client = new Client(
+      { name: 'listener-cleanup-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(listenerHandle.endpoint);
+
+    try {
+      await client.connect(transport);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(activeSubscriptions).toBe(0);
+
+      for (let index = 0; index < 8; index += 1) {
+        const tools = await client.listTools();
+        expect(tools.tools).toHaveLength(expectedAdvertisedToolCount);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(activeSubscriptions).toBe(0);
+      }
+      expect(peakSubscriptions).toBeGreaterThan(0);
+    } finally {
+      await client.close().catch(() => undefined);
+      await listenerHandle.close();
+    }
+  });
+
   it('keeps HTTP/Web fail-closed when exact-action host approval is unavailable', async () => {
     const client = new Client(
       { name: 'http-web-fail-closed-client', version: '0.1.0' },

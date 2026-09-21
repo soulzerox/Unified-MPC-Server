@@ -27,6 +27,10 @@ export class ToolAvailabilityService {
     return this.current;
   }
 
+  public listenerCount(): number {
+    return this.listeners.size;
+  }
+
   public subscribe(listener: ToolAvailabilityListener): () => void {
     this.listeners.add(listener);
     return (): void => { this.listeners.delete(listener); };

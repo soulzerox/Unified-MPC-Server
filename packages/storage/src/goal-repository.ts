@@ -78,6 +78,18 @@ interface GoalRow {
   readonly terminal_at: string | null;
 }
 
+interface GoalExecutionRow {
+  readonly id: string;
+  readonly goal_id: string;
+  readonly workspace_id: string;
+  readonly lease_generation: number;
+  readonly owner_client_id: string;
+  readonly owner_session_id: string;
+  readonly state: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 interface CheckpointRow {
   readonly id: string;
   readonly goal_id: string;
@@ -179,6 +191,16 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
           request.now,
           request.now,
         );
+        this.insertExecution({
+          id: randomUUID(),
+          goalId: request.goalId,
+          workspaceId: request.workspaceId,
+          leaseGeneration: 1,
+          ownerClientId: request.ownerClientId,
+          ownerSessionId: request.ownerSessionId,
+          state: 'active',
+          now: request.now,
+        });
         return { goal: this.requireById(request.goalId), acquired: true };
       }
 
@@ -231,6 +253,19 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         existing.leaseActivitySeq,
       );
       if (Number(changed.changes) !== 1) throw new GoalStateError('conflict', 'Goal lease changed concurrently');
+      if (existing.leaseGeneration > 0) {
+        this.updateExecutionState(existing.id, existing.leaseGeneration, 'superseded', request.now);
+      }
+      this.insertExecution({
+        id: randomUUID(),
+        goalId: existing.id,
+        workspaceId: existing.workspaceId,
+        leaseGeneration: existing.leaseGeneration + 1,
+        ownerClientId: request.ownerClientId,
+        ownerSessionId: request.ownerSessionId,
+        state: 'active',
+        now: request.now,
+      });
       return {
         goal: this.requireById(existing.id),
         acquired: true,
@@ -406,6 +441,9 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         trackedTasks,
         createdAt: request.now,
       });
+      if (request.releaseLease) {
+        this.updateExecutionState(request.goalId, current.leaseGeneration, 'released', request.now);
+      }
       return this.requireById(request.goalId);
     });
   }
@@ -450,6 +488,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         trackedTasks: [],
         createdAt: request.now,
       });
+      this.updateExecutionState(request.goalId, current.leaseGeneration, 'terminal', request.now);
       return this.requireById(request.goalId);
     });
   }
@@ -523,6 +562,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         trackedTasks,
         createdAt: request.now,
       });
+      this.updateExecutionState(request.goalId, current.leaseGeneration, 'terminal', request.now);
       return { goal: this.requireById(request.goalId), trackedTaskIds, trackedTasks };
     });
   }
@@ -588,6 +628,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         trackedTasks: [],
         createdAt: request.now,
       });
+      this.updateExecutionState(request.goalId, current.leaseGeneration, 'terminal', request.now);
       return this.requireById(request.goalId);
     });
   }
@@ -2126,6 +2167,50 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     });
   }
 
+  private insertExecution(input: {
+    readonly id: string;
+    readonly goalId: string;
+    readonly workspaceId: string;
+    readonly leaseGeneration: number;
+    readonly ownerClientId: string;
+    readonly ownerSessionId: string;
+    readonly state: 'active' | 'released' | 'superseded' | 'terminal';
+    readonly now: string;
+  }): void {
+    this.database.connection.prepare(`
+      INSERT INTO goal_executions (
+        id, goal_id, workspace_id, lease_generation, owner_client_id, owner_session_id,
+        state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.goalId,
+      input.workspaceId,
+      input.leaseGeneration,
+      input.ownerClientId,
+      input.ownerSessionId,
+      input.state,
+      input.now,
+      input.now,
+    );
+  }
+
+  private updateExecutionState(
+    goalId: string,
+    leaseGeneration: number,
+    state: 'active' | 'released' | 'superseded' | 'terminal',
+    now: string,
+  ): void {
+    const changed = this.database.connection.prepare(`
+      UPDATE goal_executions SET state = ?, updated_at = ?
+      WHERE goal_id = ? AND lease_generation = ?
+    `).run(state, now, goalId, leaseGeneration);
+    // Migration 018 backfills persisted production goals, while a few legacy
+    // callers/tests can still materialize goals with direct SQL after startup.
+    // Missing additive receipt state must not make those older rows unusable.
+    if (Number(changed.changes) > 1) throw corrupt('Goal execution state update affected multiple generations');
+  }
+
   private insertCheckpoint(checkpoint: GoalCheckpointRecord): void {
     this.database.connection.prepare(`
       INSERT INTO goal_checkpoints (
@@ -2186,6 +2271,10 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
     const trackedTasks = parseTrackedTasks(row.tracked_tasks_json, row.active_task_ids_json, 'goal tracked tasks');
     const activeTaskIds = blockingTaskIds(trackedTasks);
     const terminalEvidence = row.terminal_evidence_json === null ? undefined : parseEvidence(row.terminal_evidence_json, 'terminal evidence');
+    // Direct-SQL legacy fixtures and pre-v4.62 databases can temporarily lack
+    // a receipt row. Repository-owned acquisitions always create one, while
+    // migration 018 backfills persisted production goals.
+    const execution = row.lease_generation === 0 ? undefined : this.selectExecution(row.id, row.lease_generation);
     const checkpoints = this.database.connection.prepare(
       'SELECT * FROM goal_checkpoints WHERE goal_id = ? ORDER BY revision ASC',
     ).all(row.id).map((value) => this.toCheckpoint(this.requireCheckpointRow(value)));
@@ -2220,6 +2309,7 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       ...(row.lease_token_hash === null ? {} : { leaseTokenHash: row.lease_token_hash }),
       ...(row.lease_duration_seconds === null ? {} : { leaseDurationSeconds: row.lease_duration_seconds }),
       leaseGeneration: row.lease_generation,
+      ...(execution === undefined ? {} : { executionId: execution.id, executionGeneration: execution.lease_generation }),
       leaseActivitySeq: row.lease_activity_seq,
       ...(row.lease_heartbeat_at === null ? {} : { leaseHeartbeatAt: row.lease_heartbeat_at }),
       ...(row.lease_expires_at === null ? {} : { leaseExpiresAt: row.lease_expires_at }),
@@ -2230,6 +2320,26 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       ...(row.terminal_at === null ? {} : { terminalAt: row.terminal_at }),
       checkpoints,
     };
+  }
+
+  private selectExecution(goalId: string, leaseGeneration: number): GoalExecutionRow | undefined {
+    const value = this.database.connection.prepare(`
+      SELECT * FROM goal_executions WHERE goal_id = ? AND lease_generation = ?
+    `).get(goalId, leaseGeneration);
+    return value === undefined ? undefined : this.requireExecutionRow(value);
+  }
+
+  private requireExecutionRow(value: unknown): GoalExecutionRow {
+    if (!isRecord(value)) throw corrupt('Goal execution row is invalid');
+    const strings = ['id','goal_id','workspace_id','owner_client_id','owner_session_id','state','created_at','updated_at'];
+    if (!strings.every((key) => typeof value[key] === 'string')) throw corrupt('Goal execution row fields are invalid');
+    if (typeof value.lease_generation !== 'number' || !Number.isInteger(value.lease_generation) || value.lease_generation <= 0) {
+      throw corrupt('Goal execution generation is invalid');
+    }
+    if (!['active','released','superseded','terminal'].includes(value.state as string)) throw corrupt('Goal execution state is invalid');
+    validateIso(value.created_at as string, 'goal execution created_at');
+    validateIso(value.updated_at as string, 'goal execution updated_at');
+    return value as unknown as GoalExecutionRow;
   }
 
   private toCheckpoint(row: CheckpointRow): GoalCheckpointRecord {

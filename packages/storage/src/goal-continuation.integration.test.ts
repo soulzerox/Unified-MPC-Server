@@ -107,22 +107,71 @@ describe('durable goal continuation persistence', () => {
     let now = new Date('2026-08-26T00:00:00.000Z');
     const first = await open(filename, workspace, () => now);
     const created = await first.service.runGoal(actor('session-a'), createRequest);
-    expect(created).toMatchObject({ ok: true, value: { acquired: true, goalKey: createRequest.goalKey, revision: 0 } });
+    expect(created).toMatchObject({
+      ok: true,
+      value: {
+        acquired: true,
+        goalKey: createRequest.goalKey,
+        revision: 0,
+        executionId: expect.any(String),
+        executionGeneration: 1,
+      },
+    });
     if (!created.ok) throw new Error('goal create failed');
     const goalId = created.value.goalId;
+    const executionId = created.value.executionId;
     const leaseToken = created.value.leaseToken;
     expect(leaseToken).toEqual(expect.any(String));
 
     const duplicate = await first.service.runGoal(actor('session-a'), createRequest);
-    expect(duplicate).toMatchObject({ ok: true, value: { acquired: false, goalId, retryAfterSeconds: expect.any(Number) } });
+    expect(duplicate).toMatchObject({
+      ok: true,
+      value: {
+        acquired: false,
+        goalId,
+        executionId,
+        executionGeneration: 1,
+        retryAfterSeconds: expect.any(Number),
+      },
+    });
     expect((await first.repository.list({ ownerClientId: actor('session-a').clientId, workspaceId: workspace.id, limit: 20 }))).toHaveLength(1);
     first.database.close();
 
     now = new Date('2026-08-26T00:01:01.000Z');
     const second = await open(filename, workspace, () => now);
     const resumed = await second.service.runGoal(actor('session-b'), { workspaceId: workspace.id, goalKey: createRequest.goalKey, leaseSeconds: 60 });
-    expect(resumed).toMatchObject({ ok: true, value: { acquired: true, goalId, revision: 0 } });
-    expect(resumed.ok && resumed.value.leaseToken).not.toBe(leaseToken);
+    expect(resumed).toMatchObject({
+      ok: true,
+      value: {
+        acquired: true,
+        goalId,
+        revision: 0,
+        executionId: expect.any(String),
+        executionGeneration: 2,
+      },
+    });
+    if (!resumed.ok) throw new Error('goal resume failed');
+    expect(resumed.value.executionId).not.toBe(executionId);
+    expect(resumed.value.leaseToken).not.toBe(leaseToken);
+    await expect(second.service.getGoal(actor('session-c'), { goalId })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        executionId: resumed.value.executionId,
+        executionGeneration: 2,
+      },
+    });
+    const executionRows = second.database.connection.prepare(`
+      SELECT id, goal_id, lease_generation, owner_client_id, owner_session_id
+      FROM goal_executions
+      WHERE goal_id = ?
+      ORDER BY lease_generation ASC
+    `).all(goalId);
+    expect(executionRows).toEqual([
+      expect.objectContaining({ id: executionId, goal_id: goalId, lease_generation: 1 }),
+      expect.objectContaining({ id: resumed.value.executionId, goal_id: goalId, lease_generation: 2 }),
+    ]);
+    expect(JSON.stringify(executionRows)).not.toContain(String(leaseToken));
+    expect(JSON.stringify(executionRows)).not.toContain(String(resumed.value.leaseToken));
     second.database.close();
   });
 

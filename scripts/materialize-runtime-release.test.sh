@@ -29,6 +29,15 @@ test -f "$release/runtime-release.json"
 test -f "$release/apps/cli/dist/bin/mcp-http.js"
 test -f "$release/apps/cli/dist/index.js"
 test -d "$release/apps/cli/node_modules"
+test ! -e "$release/apps/cli/node_modules/.pnpm/node_modules/@unified-mpc/cli"
+
+while IFS= read -r -d '' link; do
+  resolved="$(readlink -f -- "$link" 2>/dev/null || true)"
+  [[ -n "$resolved" && ( "$resolved" == "$release" || "$resolved" == "$release/"* ) ]] || {
+    printf 'release contains escaping symlink: %s -> %s\n' "$link" "$resolved" >&2
+    exit 1
+  }
+done < <(find "$release" -type l -print0)
 
 bash "$SCRIPT_DIR/validate-runtime-root.sh" mcp-http "$release" >/dev/null
 bash "$SCRIPT_DIR/validate-runtime-root.sh" web "$release" >/dev/null

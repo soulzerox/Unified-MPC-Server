@@ -62,7 +62,7 @@ type ProjectionApplication =
 
 function applyGoalScopedEvent(
   current: GoalRuntimeProjection,
-  event: Extract<GoalRuntimeEvent, { readonly type: string }>,
+  event: GoalRuntimeEvent,
 ): ProjectionApplication {
   if (!isGoalScopedRuntimeEvent(event)) return { projection: current };
 
@@ -109,8 +109,9 @@ function applyExecutionScopedEvent(
 ): ProjectionApplication {
   switch (event.type) {
     case 'execution_submitted': {
+      const reset = resetExecutionLocalObservations(current);
       const next = clearBlocker({
-        ...current,
+        ...reset,
         activeExecutionId: event.executionId,
         executionGeneration: event.executionGeneration,
         runtimeState: 'queued',
@@ -354,6 +355,14 @@ function runtimeRequiresActiveExecution(state: GoalRuntimeState): boolean {
     || state === 'blocked'
     || state === 'recovering'
     || state === 'recovery_required';
+}
+
+function resetExecutionLocalObservations(projection: GoalRuntimeProjection): GoalRuntimeProjection {
+  const next = { ...projection };
+  delete next.phase;
+  delete next.progress;
+  delete next.lastHeartbeatAt;
+  return next;
 }
 
 function clearActiveExecution(projection: GoalRuntimeProjection): GoalRuntimeProjection {

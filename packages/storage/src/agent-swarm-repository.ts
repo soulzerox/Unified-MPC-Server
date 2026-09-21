@@ -88,6 +88,20 @@ export class SqliteAgentSwarmRepository {
     return row === undefined ? undefined : this.fromRow(row);
   }
 
+  /** Trusted durable-goal lookup that deliberately ignores the transient MCP session. */
+  public getOwnedForGoal(id: string, ownerClientId: string, workspaceId: string): StoredAgentSwarm | undefined {
+    const row = this.database.connection.prepare('SELECT * FROM agent_swarms WHERE id = ? AND owner_client_id = ? AND workspace_id = ?')
+      .get(id, ownerClientId, workspaceId) as SwarmRow | undefined;
+    return row === undefined ? undefined : this.fromRow(row);
+  }
+
+  /** Trusted read-only liveness lookup keyed by the durable swarm handle and workspace. */
+  public getForGoalLiveness(id: string, workspaceId: string): StoredAgentSwarm | undefined {
+    const row = this.database.connection.prepare('SELECT * FROM agent_swarms WHERE id = ? AND workspace_id = ?')
+      .get(id, workspaceId) as SwarmRow | undefined;
+    return row === undefined ? undefined : this.fromRow(row);
+  }
+
   public findByIdempotency(ownerClientId: string, ownerSessionId: string, workspaceId: string, idempotencyKey: string): StoredAgentSwarm | undefined {
     const row = this.database.connection.prepare('SELECT * FROM agent_swarms WHERE owner_client_id = ? AND owner_session_id = ? AND workspace_id = ? AND idempotency_key = ?')
       .get(ownerClientId, ownerSessionId, workspaceId, idempotencyKey) as SwarmRow | undefined;

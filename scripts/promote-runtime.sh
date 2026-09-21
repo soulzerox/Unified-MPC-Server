@@ -127,11 +127,15 @@ resolve_link() {
 
 validate_rollback_target() {
   local target="$1"
+  local output
+  local -a provenance
   [[ -n "$target" && -d "$target" ]] || return 1
   [[ "$target" == "$releases_dir/"* ]] || return 1
   bash "$validator" mcp-http "$target" >/dev/null 2>&1 || return 1
   bash "$validator" web "$target" >/dev/null 2>&1 || return 1
-  read_provenance "$target" >/dev/null 2>&1 || return 1
+  output="$(read_provenance "$target" 2>/dev/null)" || return 1
+  mapfile -t provenance <<<"$output"
+  [[ "${provenance[1]:-}" == "false" ]]
 }
 
 runtime_commit() {
@@ -165,6 +169,12 @@ probe_runtime() {
 }
 
 previous_active=""
+if [[ -e "$lkg_link" && ! -L "$lkg_link" ]]; then
+  write_state status "failed"
+  write_state health_result "not_started"
+  write_state rollback_result "not_started"
+  fail 70 "RUNTIME_PROMOTION_INCOMPLETE: last-known-good pointer is not a symlink: '$lkg_link'"
+fi
 if [[ -e "$current_link" && ! -L "$current_link" ]]; then
   write_state status "failed"
   write_state health_result "not_started"

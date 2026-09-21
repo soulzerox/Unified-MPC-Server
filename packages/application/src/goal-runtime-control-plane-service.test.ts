@@ -43,6 +43,7 @@ function fixture(options: {
   goals?: readonly GoalRecord[];
   snapshot?: GoalRuntimeSnapshotRecord;
   events?: readonly GoalRuntimeEventRecord[];
+  replayWindowMissed?: boolean;
 } = {}): {
   readonly service: GoalRuntimeControlPlaneService;
   readonly stored: GoalRuntimeSnapshotRecord[];
@@ -89,7 +90,7 @@ function fixture(options: {
         events: scoped.filter((entry) => entry.sequence > after).slice(0, request.limit),
         ...(oldest === undefined ? {} : { oldestAvailableSequence: oldest }),
         ...(latest === undefined ? {} : { latestSequence: latest }),
-        replayWindowMissed: false,
+        replayWindowMissed: options.replayWindowMissed === true,
       };
     },
     listGoalRuntimeEvents: async (request) =>
@@ -271,6 +272,46 @@ describe('GoalRuntimeControlPlaneService', () => {
 
     expect(snapshot.lastEventSequence).toBe(101);
     expect(snapshot.projection).toMatchObject({ runtimeState: 'running', phase: 'work' });
+  });
+
+  it('keeps a Goal-local snapshot valid when only unrelated workspace history fell out of retention', async () => {
+    const initial: GoalRuntimeSnapshotRecord = {
+      projection: {
+        contractVersion: GOAL_RUNTIME_CONTRACT_VERSION,
+        goalId: 'goal-1',
+        workspaceId,
+        lifecycleState: 'open',
+        runtimeState: 'queued',
+        desiredRuntimeState: 'running',
+        integrationState: 'unknown',
+        workspaceState: 'unknown',
+        activeExecutionId: 'execution-1',
+        executionGeneration: 1,
+        lastActivityAt: '2026-09-22T00:00:00.000Z',
+      },
+      lastEventSequence: 10,
+      updatedAt: '2026-09-22T00:00:00.000Z',
+    };
+    const runtime = fixture({
+      snapshot: initial,
+      replayWindowMissed: true,
+      events: [{
+        sequence: 100,
+        event: {
+          eventId: 'other-goal-retained-event',
+          type: 'goal_created',
+          workspaceId,
+          goalId: 'other-goal',
+          occurredAt: '2026-09-22T00:05:00.000Z',
+        },
+        recordedAt: '2026-09-22T00:05:00.000Z',
+      }],
+    });
+
+    const snapshot = await runtime.service.ensureGoalSnapshot('goal-1');
+
+    expect(snapshot).toEqual(initial);
+    expect(runtime.stored).toHaveLength(0);
   });
 
   it('repairs a stale running snapshot from durable terminal state after a crash window', async () => {

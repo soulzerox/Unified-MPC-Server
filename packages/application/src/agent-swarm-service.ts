@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Redactor } from '@unified-mpc/audit';
 import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
 import type { ManagedProcess, ProcessLogResult } from '@unified-mpc/process';
+import { DEFAULT_DELEGATED_AGENT_ADMISSION_COST, tryAdmitDelegatedAgent, type ResourceAdmissionController, type ResourceAdmissionLease } from '@unified-mpc/workspace';
 import {
   SqliteAgentSwarmRepository,
   type StoredAgentSwarm,
@@ -33,24 +34,35 @@ export interface AgentSwarmCodexPort {
   stop(actor: FileActor, workspaceId: string, codexTaskId: string, userConfirmed?: boolean, authorization?: InvocationAuthorization): Promise<Result<void>>;
 }
 
+export interface AgentSwarmServiceOptions {
+  readonly resourceAdmissionController?: ResourceAdmissionController;
+  readonly delegatedAgentAdmissionCost?: number;
+}
+
 interface LiveSwarm {
   readonly actor: FileActor;
   readonly workspaceId: string;
   readonly prompts: ReadonlyMap<string, string>;
   readonly authorization: InvocationAuthorization;
   readonly abortController: AbortController;
+  readonly resourceLeases: Map<string, ResourceAdmissionLease>;
   monitor?: Promise<void>;
 }
 
 export class AgentSwarmService {
   private readonly live = new Map<string, LiveSwarm>();
+  private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
+  private readonly delegatedAgentAdmissionCost: number;
 
   public constructor(
     private readonly repository: SqliteAgentSwarmRepository,
     private readonly codex: AgentSwarmCodexPort,
     private readonly now: () => Date = () => new Date(),
     private readonly idFactory: () => string = randomUUID,
+    options: AgentSwarmServiceOptions = {},
   ) {
+    this.resourceAdmissionController = options.resourceAdmissionController;
+    this.delegatedAgentAdmissionCost = normalizePositiveInteger(options.delegatedAgentAdmissionCost, DEFAULT_DELEGATED_AGENT_ADMISSION_COST);
     // Never reattach by PID/task id after restart. Persisted active tasks are
     // explicitly downgraded to termination_unverified until a future verified
     // runtime-handle protocol exists.
@@ -96,11 +108,17 @@ export class AgentSwarmService {
       prompts: new Map(request.tasks.map((task) => [task.id, task.prompt])),
       authorization: authorization as InvocationAuthorization,
       abortController: new AbortController(),
+      resourceLeases: new Map<string, ResourceAdmissionLease>(),
     };
     this.live.set(stored.id, live);
     await this.tick(stored.id, live, signal);
-    const afterInitialTick = this.requireOwned(actor, request.workspaceId, stored.id);
-    if (!isTerminalSwarm(afterInitialTick.state) && !live.abortController.signal.aborted && signal?.aborted !== true) {
+    let afterInitialTick = this.requireOwned(actor, request.workspaceId, stored.id);
+    if (!isTerminalSwarm(afterInitialTick.state) && signal?.aborted === true) {
+      const cancelled = await this.cancel(actor, request.workspaceId, stored.id, authorization);
+      if (!cancelled.ok) return cancelled;
+      afterInitialTick = this.requireOwned(actor, request.workspaceId, stored.id);
+    }
+    if (!isTerminalSwarm(afterInitialTick.state) && !live.abortController.signal.aborted) {
       live.monitor = this.monitor(stored.id, live, signal);
       void live.monitor.finally(() => this.live.delete(stored.id));
     } else {
@@ -167,11 +185,13 @@ export class AgentSwarmService {
     live?.abortController.abort();
     for (const task of swarm.tasks) {
       if (task.state === 'queued' || task.state === 'blocked') {
+        this.releaseTaskAdmission(live, task.id);
         this.repository.updateTask(swarmId, task.id, { state: 'cancelled', finishedAt: this.now().toISOString() }, this.now().toISOString());
         continue;
       }
       if (task.state !== 'running' || task.codexTaskId === undefined) continue;
       const stopped = await this.codex.stop(actor, workspaceId, task.codexTaskId, false, authorization);
+      if (stopped.ok) this.releaseTaskAdmission(live, task.id);
       this.repository.updateTask(swarmId, task.id, stopped.ok
         ? { state: 'cancelled', finishedAt: this.now().toISOString() }
         : { state: 'termination_unverified', error: boundedError(stopped.error.message), finishedAt: this.now().toISOString() }, this.now().toISOString());
@@ -179,6 +199,7 @@ export class AgentSwarmService {
     const refreshed = this.requireOwned(actor, workspaceId, swarmId);
     const state = refreshed.tasks.some((task) => task.state === 'termination_unverified') ? 'termination_unverified' : 'cancelled';
     this.repository.updateSwarmState(swarmId, state, this.now().toISOString());
+    if (state === 'cancelled') this.releaseAllTaskAdmissions(live);
     return ok(toSnapshot(this.requireOwned(actor, workspaceId, swarmId)));
   }
 
@@ -212,7 +233,11 @@ export class AgentSwarmService {
   }
 
   private async monitor(swarmId: string, live: LiveSwarm, outerSignal?: AbortSignal): Promise<void> {
-    while (!live.abortController.signal.aborted && outerSignal?.aborted !== true) {
+    while (!live.abortController.signal.aborted) {
+      if (outerSignal?.aborted === true) {
+        await this.cancel(live.actor, live.workspaceId, swarmId, live.authorization);
+        return;
+      }
       const swarm = this.repository.getOwned(swarmId, live.actor.clientId, actorSessionId(live.actor), live.workspaceId);
       if (swarm === undefined || isTerminalSwarm(swarm.state)) return;
       await this.tick(swarmId, live, outerSignal);
@@ -245,6 +270,7 @@ export class AgentSwarmService {
         ...(completed ? { error: null } : { error: boundedError(status.value.error ?? `Codex process ended in ${status.value.state}`) }),
         finishedAt: this.now().toISOString(),
       }, this.now().toISOString());
+      this.releaseTaskAdmission(live, task.id);
     }
 
     const dependencySwarm = this.requireOwned(live.actor, live.workspaceId, swarmId);
@@ -266,11 +292,29 @@ export class AgentSwarmService {
         this.repository.updateTask(swarmId, task.id, { state: 'termination_unverified', error: 'ephemeral prompt unavailable after runtime restart', finishedAt: this.now().toISOString() }, this.now().toISOString());
         continue;
       }
+      if (this.resourceAdmissionController !== undefined && !live.resourceLeases.has(task.id)) {
+        const admission = tryAdmitDelegatedAgent(this.resourceAdmissionController, {
+          operationId: `agent-swarm:${swarmId}:${task.id}`,
+          workspaceId: launchSwarm.workspaceId,
+          sessionId: actorSessionId(live.actor),
+          cost: this.delegatedAgentAdmissionCost,
+        });
+        if (!admission.admitted) {
+          if (admission.code === 'RESOURCE_PRESSURE') continue;
+          this.repository.updateTask(swarmId, task.id, {
+            state: 'failed',
+            error: `delegated worker admission failed: ${admission.reason}`,
+            finishedAt: this.now().toISOString(),
+          }, this.now().toISOString());
+          continue;
+        }
+        live.resourceLeases.set(task.id, admission.lease);
+      }
       const started = await this.codex.run(live.actor, launchSwarm.workspaceId, prompt, signal, false, live.authorization, 'read-only');
       if (!started.ok) {
-        // Isolate admission failure to this child. Already-running siblings keep
-        // their verified handles and independent queued siblings may continue
-        // launching within the same bounded-concurrency tick.
+        this.releaseTaskAdmission(live, task.id);
+        // Isolate launch failure to this child. Already-running siblings keep
+        // their verified handles and independent queued siblings may continue.
         this.repository.updateTask(swarmId, task.id, { state: 'failed', error: boundedError(started.error.message), finishedAt: this.now().toISOString() }, this.now().toISOString());
         continue;
       }
@@ -288,6 +332,18 @@ export class AgentSwarmService {
     else if (swarm.tasks.every((task) => isTerminalTask(task.state))) state = swarm.tasks.every((task) => task.state === 'completed') ? 'completed' : 'failed';
     else if (swarm.tasks.every((task) => task.state === 'queued' || task.state === 'blocked')) state = 'queued';
     this.repository.updateSwarmState(swarmId, state, this.now().toISOString());
+  }
+
+  private releaseTaskAdmission(live: LiveSwarm | undefined, taskId: string): void {
+    if (live === undefined || this.resourceAdmissionController === undefined) return;
+    const lease = live.resourceLeases.get(taskId);
+    if (lease === undefined) return;
+    if (this.resourceAdmissionController.release(lease)) live.resourceLeases.delete(taskId);
+  }
+
+  private releaseAllTaskAdmissions(live: LiveSwarm | undefined): void {
+    if (live === undefined) return;
+    for (const taskId of [...live.resourceLeases.keys()]) this.releaseTaskAdmission(live, taskId);
   }
 
   private requireOwned(actor: FileActor, workspaceId: string, swarmId: string): StoredAgentSwarm {
@@ -387,4 +443,8 @@ function utf8Page(value: string, offset: number, maxBytes: number): { text: stri
   }
   if (end === offset) return { text: '' };
   return end >= value.length ? { text: value.slice(offset) } : { text: value.slice(offset, end), nextOffset: end };
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
 }

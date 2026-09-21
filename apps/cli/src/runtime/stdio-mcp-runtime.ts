@@ -54,7 +54,7 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { SecretPolicy, WorkspacePathGuard, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 
@@ -235,7 +235,13 @@ export function createStdioMcpRuntime(
     auditService,
     profileProvider,
   });
-  const agentSwarmService = new AgentSwarmService(new SqliteAgentSwarmRepository(database), codexService);
+  const agentSwarmService = new AgentSwarmService(
+    new SqliteAgentSwarmRepository(database),
+    codexService,
+    undefined,
+    undefined,
+    { resourceAdmissionController: sharedProcessResourceAdmissionController() },
+  );
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
   const taskCancellation = new GoalTaskCancellationService([

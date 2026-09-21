@@ -2941,7 +2941,7 @@ function validateTrackedTask(value: unknown, label = 'tracked task'): GoalTracke
     if (value.role !== 'blocking_job' || value.cancelWithGoal !== true) throw corrupt(`${label} legacy binding is invalid`);
     return { taskId: value.taskId.trim(), provider: 'legacy_auto', role: 'blocking_job', cancelWithGoal: true };
   }
-  if (value.provider !== 'process' && value.provider !== 'codex' && value.provider !== 'shell') throw corrupt(`${label} provider is invalid`);
+  if (value.provider !== 'process' && value.provider !== 'codex' && value.provider !== 'shell' && value.provider !== 'agent_swarm') throw corrupt(`${label} provider is invalid`);
   if (value.role !== 'blocking_job' && value.role !== 'supporting_service') throw corrupt(`${label} role is invalid`);
   if (typeof value.cancelWithGoal !== 'boolean') throw corrupt(`${label} cancellation policy is invalid`);
   return {

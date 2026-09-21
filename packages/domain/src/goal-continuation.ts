@@ -4,7 +4,7 @@ export type GoalStepStatus = 'pending' | 'in_progress' | 'completed' | 'blocked'
 export type GoalEvidenceKind = 'path' | 'hash' | 'task' | 'note';
 export type GoalPonytailMode = 'off' | 'lite' | 'full' | 'ultra';
 
-export type GoalTaskProvider = 'process' | 'codex' | 'shell' | 'legacy_auto';
+export type GoalTaskProvider = 'process' | 'codex' | 'shell' | 'agent_swarm' | 'legacy_auto';
 export type GoalTrackedTaskRole = 'blocking_job' | 'supporting_service';
 
 /**
@@ -15,7 +15,7 @@ export type GoalTrackedTaskRole = 'blocking_job' | 'supporting_service';
 export type GoalTrackedTask =
   | {
       readonly taskId: string;
-      readonly provider: 'process' | 'codex' | 'shell';
+      readonly provider: 'process' | 'codex' | 'shell' | 'agent_swarm';
       readonly role: GoalTrackedTaskRole;
       readonly cancelWithGoal: boolean;
     }

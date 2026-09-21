@@ -18,7 +18,7 @@ describe('goal runtime contracts', () => {
       workspaceId: 'workspace-1',
       lifecycleState: 'completed',
       runtimeState: 'idle',
-      desiredRuntimeState: 'running',
+      desiredRuntimeState: 'idle',
       integrationState: 'pending',
       workspaceState: 'dirty',
       phase: 'integration',
@@ -32,6 +32,7 @@ describe('goal runtime contracts', () => {
     expect(snapshot).toMatchObject({
       lifecycleState: 'completed',
       runtimeState: 'idle',
+      desiredRuntimeState: 'idle',
       integrationState: 'pending',
       workspaceState: 'dirty',
       blocker: { kind: 'dirty_workspace' },
@@ -75,6 +76,7 @@ describe('goal runtime contracts', () => {
     expect(isGoalRuntimeState('recovery_required')).toBe(true);
     expect(isGoalRuntimeState('completed')).toBe(false);
 
+    expect(isGoalDesiredRuntimeState('idle')).toBe(true);
     expect(isGoalDesiredRuntimeState('paused')).toBe(true);
     expect(isGoalDesiredRuntimeState('blocked')).toBe(false);
 

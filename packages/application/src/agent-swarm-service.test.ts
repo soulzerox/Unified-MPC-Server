@@ -5,9 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { appError, err, ok, type InvocationAuthorization } from '@unified-mpc/domain';
 import type { ManagedProcess } from '@unified-mpc/process';
 import { SqliteAgentSwarmRepository, SqliteDatabase } from '@unified-mpc/storage';
-import { AgentSwarmService, type AgentSwarmCodexPort } from './agent-swarm-service.js';
+import { AgentSwarmService, type AgentSwarmCodexPort, type AgentSwarmServiceOptions } from './agent-swarm-service.js';
 import type { AgentSwarmStartRequest } from './agent-swarm-types.js';
 import type { FileActor } from './file-service.js';
+import { ResourceAdmissionController } from '@unified-mpc/workspace';
 
 const temporaryRoots: string[] = [];
 const actor: FileActor = { clientId: 'client-a', clientName: 'ChatGPT', sessionId: 'session-a' };
@@ -31,12 +32,12 @@ function managed(codexTaskId: string, state: ManagedProcess['state'] = 'running'
   };
 }
 
-async function fixture(codex: AgentSwarmCodexPort): Promise<{ database: SqliteDatabase; repository: SqliteAgentSwarmRepository; service: AgentSwarmService }> {
+async function fixture(codex: AgentSwarmCodexPort, options: AgentSwarmServiceOptions = {}): Promise<{ database: SqliteDatabase; repository: SqliteAgentSwarmRepository; service: AgentSwarmService }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-agent-swarm-service-'));
   temporaryRoots.push(root);
   const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
   const repository = new SqliteAgentSwarmRepository(database);
-  const service = new AgentSwarmService(repository, codex, () => new Date('2026-08-31T00:00:00.000Z'), () => '11111111-1111-4111-8111-111111111111');
+  const service = new AgentSwarmService(repository, codex, () => new Date('2026-08-31T00:00:00.000Z'), () => '11111111-1111-4111-8111-111111111111', options);
   return { database, repository, service };
 }
 
@@ -176,6 +177,66 @@ describe('AgentSwarmService', () => {
 
       const cancelledAfterCompletion = await service.cancel(actor, 'workspace-a', started.value.swarmId, authorization);
       expect(cancelledAfterCompletion).toMatchObject({ ok: true, value: { state: 'completed' } });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('holds shared delegated-worker capacity for the real child lifetime and retries queued siblings after release', async () => {
+    let firstTerminal = false;
+    let sequence = 0;
+    const stop = vi.fn<AgentSwarmCodexPort['stop']>(async () => ok(undefined));
+    const run = vi.fn<AgentSwarmCodexPort['run']>(async () => {
+      sequence += 1;
+      return ok({ codexTaskId: `codex-${sequence}`, processId: `process-${sequence}` });
+    });
+    const codex: AgentSwarmCodexPort = {
+      run,
+      taskStatus: async (_actor, _workspaceId, codexTaskId) => {
+        if (codexTaskId === 'codex-1' && firstTerminal) return ok(managed(codexTaskId, 'exited'));
+        return ok(managed(codexTaskId));
+      },
+      taskLogs: async () => ok({ entries: [], truncated: false, nextSequence: 0 }),
+      stop,
+    };
+    const resourceAdmissionController = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { delegated_agent: 16 },
+    });
+    const { database, service } = await fixture(codex, { resourceAdmissionController });
+    try {
+      const started = await service.start(actor, startRequest([
+        { id: 'first', prompt: 'first task' },
+        { id: 'second', prompt: 'second task' },
+      ], 2), undefined, authorization);
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(started.value.tasks.map((task) => task.state)).toEqual(['running', 'queued']);
+      expect(resourceAdmissionController.snapshot()).toMatchObject({
+        activeCost: 8,
+        activeOperations: 1,
+        activeCostByClass: { delegated_agent: 8 },
+      });
+
+      firstTerminal = true;
+      await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+      expect(resourceAdmissionController.snapshot()).toMatchObject({
+        activeCost: 8,
+        activeOperations: 1,
+        activeCostByClass: { delegated_agent: 8 },
+      });
+
+      const cancelled = await service.cancel(actor, 'workspace-a', started.value.swarmId, authorization);
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'cancelled' } });
+      expect(resourceAdmissionController.snapshot()).toMatchObject({
+        activeCost: 0,
+        activeOperations: 0,
+        activeCostByClass: { delegated_agent: 0 },
+      });
     } finally {
       database.close();
     }

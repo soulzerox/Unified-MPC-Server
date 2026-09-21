@@ -5,11 +5,17 @@ on:
     paths:
       - ".github/workflows/goal-execution-tasks.yml"
       - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
+      - "packages/application/src/agent-swarm-service.ts"
+      - "packages/application/src/agent-swarm-service.test.ts"
       - "packages/application/src/goal-continuation-service.ts"
+      - "packages/application/src/goal-task-cancellation-service.ts"
+      - "packages/application/src/goal-task-cancellation-service.test.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.ts"
       - "packages/application/src/scheduled-continuation-service.ts"
       - "packages/domain/src/goal-continuation.ts"
       - "packages/domain/src/goal-runtime.ts"
+      - "packages/mcp-server/src/goal-managed-task-state-reader.ts"
+      - "packages/mcp-server/src/goal-managed-task-state-reader.test.ts"
       - "packages/mcp-server/src/goal-process-admission.ts"
       - "packages/mcp-server/src/goal-process-admission.integration.test.ts"
       - "packages/mcp-server/src/modern-tasks-protocol.ts"
@@ -17,7 +23,9 @@ on:
       - "packages/mcp-server/src/scheduled-continuation-fence.test.ts"
       - "packages/mcp-server/src/tool-registry.ts"
       - "packages/mcp-server/src/modern-tasks.integration.test.ts"
+      - "packages/mcp-server/src/tools/goal-tools.ts"
       - "packages/mcp-server/src/tools/tool-types.ts"
+      - "packages/storage/src/agent-swarm-repository.ts"
       - "packages/storage/src/goal-continuation.integration.test.ts"
       - "packages/storage/src/goal-repository.ts"
       - "packages/storage/src/goal-restart-reconnect.integration.test.ts"
@@ -68,6 +76,12 @@ jobs:
       - name: Goal resource admission contract
         run: pnpm --filter @unified-mpc/workspace exec vitest run --fileParallelism=false src/resource-admission.test.ts
 
+      - name: Goal-tracked delegated swarm ownership
+        run: >-
+          pnpm --filter @unified-mpc/application exec vitest run --fileParallelism=false
+          src/agent-swarm-service.test.ts
+          src/goal-task-cancellation-service.test.ts
+
       - name: Goal-backed MCP Tasks, parent-abort, and process-lifetime regression
         run: >-
           pnpm --filter @unified-mpc/mcp-server exec vitest run --fileParallelism=false
@@ -75,6 +89,7 @@ jobs:
           src/modern-tasks.integration.test.ts
           src/scheduled-continuation-fence.test.ts
           src/goal-process-admission.integration.test.ts
+          src/goal-managed-task-state-reader.test.ts
 
       - name: Targeted typecheck
         run: |
@@ -93,16 +108,24 @@ jobs:
           packages/storage/src/goal-continuation.integration.test.ts
           packages/storage/src/goal-restart-reconnect.integration.test.ts
           packages/storage/src/goal-scheduled-execution-ownership.integration.test.ts
+          packages/application/src/agent-swarm-service.ts
+          packages/application/src/agent-swarm-service.test.ts
           packages/application/src/goal-continuation-service.ts
+          packages/application/src/goal-task-cancellation-service.ts
+          packages/application/src/goal-task-cancellation-service.test.ts
           packages/application/src/scheduled-continuation-service.ts
           packages/application/src/goal-runtime-reconciliation-service.ts
           packages/workspace/src/resource-admission.ts
           packages/workspace/src/resource-admission.test.ts
+          packages/mcp-server/src/goal-managed-task-state-reader.ts
+          packages/mcp-server/src/goal-managed-task-state-reader.test.ts
           packages/mcp-server/src/goal-process-admission.ts
           packages/mcp-server/src/goal-process-admission.integration.test.ts
           packages/mcp-server/src/modern-tasks-protocol.ts
           packages/mcp-server/src/modern-tasks-goal.test.ts
           packages/mcp-server/src/scheduled-continuation-fence.test.ts
           packages/mcp-server/src/tool-registry.ts
+          packages/mcp-server/src/tools/goal-tools.ts
           packages/mcp-server/src/tools/tool-types.ts
+          packages/storage/src/agent-swarm-repository.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts

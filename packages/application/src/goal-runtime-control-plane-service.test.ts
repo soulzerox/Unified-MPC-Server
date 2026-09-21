@@ -43,7 +43,11 @@ function fixture(options: {
   goals?: readonly GoalRecord[];
   snapshot?: GoalRuntimeSnapshotRecord;
   events?: readonly GoalRuntimeEventRecord[];
-} = {}) {
+} = {}): {
+  readonly service: GoalRuntimeControlPlaneService;
+  readonly stored: GoalRuntimeSnapshotRecord[];
+  readonly records: GoalRuntimeEventRecord[];
+} {
   const goals = new Map((options.goals ?? [goal()]).map((entry) => [entry.id, entry]));
   let snapshot = options.snapshot ?? null;
   const stored: GoalRuntimeSnapshotRecord[] = [];
@@ -95,13 +99,13 @@ function fixture(options: {
   };
 
   const service = new GoalRuntimeControlPlaneService({
-    getById: async (goalId) => goals.get(goalId) ?? null,
-    list: async (request) => [...goals.values()]
+    getById: async (goalId): Promise<GoalRecord | null> => goals.get(goalId) ?? null,
+    list: async (request): Promise<readonly GoalRecord[]> => [...goals.values()]
       .filter((entry) => request.workspaceId === undefined || entry.workspaceId === request.workspaceId)
       .slice(0, request.limit),
   }, snapshots, events);
 
-  return { service, stored, records, latest: () => snapshot };
+  return { service, stored, records };
 }
 
 describe('GoalRuntimeControlPlaneService', () => {

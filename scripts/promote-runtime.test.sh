@@ -94,6 +94,7 @@ commit_a="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 commit_b="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 commit_c="cccccccccccccccccccccccccccccccccccccccc"
 commit_d="dddddddddddddddddddddddddddddddddddddddd"
+commit_e="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 release_a="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-a"
 make_runtime "$release_a" "$commit_a"
@@ -141,5 +142,17 @@ assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_c"
 
 expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_c" "deploy-c"
 assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_c"
+
+# First deployment failure with no last-known-good must leave no active runtime.
+export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/data-fresh/unified-mpc/runtime"
+export UNIFIED_MPC_DEPLOY_STATE_DIR="$TMP_ROOT/state-fresh/unified-mpc/deployments"
+mkdir -p "$UNIFIED_MPC_RUNTIME_DIR/releases"
+release_e="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-e"
+make_runtime "$release_e" "$commit_e"
+touch "$release_e/health.fail"
+expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_e" "deploy-e"
+[[ ! -e "$UNIFIED_MPC_RUNTIME_DIR/current" && ! -L "$UNIFIED_MPC_RUNTIME_DIR/current" ]]
+grep -Fxq failed_no_rollback "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/status"
+grep -Fxq unavailable "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/rollback_result"
 
 printf 'runtime promotion regression: passed\n'

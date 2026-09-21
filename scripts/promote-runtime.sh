@@ -29,6 +29,7 @@ node_bin="${UNIFIED_MPC_NODE:-node}"
 flock_bin="${UNIFIED_MPC_FLOCK:-flock}"
 service="${UNIFIED_MPC_SYSTEMD_SERVICE:-unified-mpc.service}"
 health_url="${UNIFIED_MPC_HEALTH_URL:-http://127.0.0.1:18765/_unified-mpc/identity}"
+web_health_url="${UNIFIED_MPC_WEB_HEALTH_URL:-http://127.0.0.1:3000/api/status}"
 health_timeout="${UNIFIED_MPC_HEALTH_TIMEOUT_SECONDS:-10}"
 
 mkdir -p "$runtime_dir/releases" "$state_root"
@@ -151,7 +152,7 @@ restart_runtime() {
   "$systemctl_bin" --user restart "$service"
 }
 
-probe_runtime() {
+probe_mcp_runtime() {
   local expected_commit="$1"
   local payload actual_commit
   payload="$("$curl_bin" --fail --silent --show-error --max-time "$health_timeout" "$health_url")" || return 1
@@ -170,6 +171,33 @@ probe_runtime() {
     });
   ' 2>/dev/null)" || return 1
   [[ "$actual_commit" == "$expected_commit" ]]
+}
+
+probe_web_runtime() {
+  local expected_commit="$1"
+  local payload actual_commit
+  payload="$("$curl_bin" --fail --silent --show-error --max-time "$health_timeout" "$web_health_url")" || return 1
+  actual_commit="$(printf '%s' "$payload" | "$node_bin" --input-type=commonjs -e '
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { input += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        const value = JSON.parse(input);
+        if (!value || value.status !== "healthy") process.exit(2);
+        if (!value.mcpIdentity || typeof value.mcpIdentity.buildCommit !== "string") process.exit(2);
+        process.stdout.write(value.mcpIdentity.buildCommit);
+      } catch {
+        process.exit(2);
+      }
+    });
+  ' 2>/dev/null)" || return 1
+  [[ "$actual_commit" == "$expected_commit" ]]
+}
+
+probe_release_health() {
+  local expected_commit="$1"
+  probe_mcp_runtime "$expected_commit" && probe_web_runtime "$expected_commit"
 }
 
 previous_active=""
@@ -214,7 +242,7 @@ atomic_link "$candidate" "$current_link"
 write_state status "activated"
 
 promotion_ok=false
-if restart_runtime && probe_runtime "$candidate_commit"; then
+if restart_runtime && probe_release_health "$candidate_commit"; then
   promotion_ok=true
 fi
 
@@ -233,7 +261,7 @@ write_state status "rollback_pending"
 if [[ -n "$rollback_target" ]]; then
   atomic_link "$rollback_target" "$current_link"
   rollback_commit="$(runtime_commit "$rollback_target" || true)"
-  if [[ -n "$rollback_commit" ]] && restart_runtime && probe_runtime "$rollback_commit"; then
+  if [[ -n "$rollback_commit" ]] && restart_runtime && probe_release_health "$rollback_commit"; then
     write_state rollback_result "success"
     write_state status "rolled_back"
     printf 'RUNTIME_PROMOTION_INCOMPLETE: candidate failed; rolled back to last-known-good %s\n' "$rollback_target" >&2

@@ -9,6 +9,7 @@ export * from './goal-continuation-service.js';
 export * from './goal-task-cancellation-service.js';
 export * from './goal-request-cancellation-service.js';
 export * from './goal-mutation-fence-service.js';
+export * from './goal-runtime-control-plane-service.js';
 export * from './goal-runtime-reconciliation-service.js';
 export * from './managed-resource-recovery-service.js';
 export * from './scheduled-continuation-service.js';

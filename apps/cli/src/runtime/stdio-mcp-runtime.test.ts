@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import {
+  SqliteDatabase,
+  SqliteGoalRepository,
+  SqliteGoalRuntimeSnapshotRepository,
+  SqliteSettingsRepository,
+  SqliteWorkspaceRepository,
+} from '@unified-mpc/storage';
 import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY } from '@unified-mpc/extensions';
@@ -169,6 +175,65 @@ describe('stdio MCP runtime', () => {
       await expect(runtime.activeWorkspaceScopesProvider()).resolves.toEqual([]);
     } finally {
       externalDatabase.close();
+      await runtime.close();
+    }
+  });
+
+  it('bootstraps Goal runtime truth for registered workspaces outside the current Web selection', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-runtime-all-projects-'));
+    const primaryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-runtime-primary-'));
+    const secondaryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-runtime-secondary-'));
+    temporaryRoots.push(dataPath, primaryRoot, secondaryRoot);
+    const primary = {
+      ...workspace,
+      rootPath: primaryRoot,
+      realRootPath: await realpath(primaryRoot),
+    };
+    const secondary = {
+      id: 'workspace-2',
+      displayName: 'background runtime project',
+      rootPath: secondaryRoot,
+      realRootPath: await realpath(secondaryRoot),
+      createdAt: '2026-09-22T00:00:00.000Z',
+    };
+
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    const workspaceRepository = new SqliteWorkspaceRepository(database);
+    await workspaceRepository.insert(primary);
+    await workspaceRepository.insert(secondary);
+    const goalRepository = new SqliteGoalRepository(database);
+    const acquired = await goalRepository.acquire({
+      goalId: 'goal-background-runtime',
+      workspaceId: secondary.id,
+      goalKey: 'background-runtime',
+      ownerClientId: 'background-client',
+      ownerSessionId: 'background-session',
+      objective: 'Keep runtime truth independent from UI selection.',
+      plan: { steps: [] },
+      leaseTokenHash: 'a'.repeat(64),
+      leaseSeconds: 600,
+      now: '2026-09-22T00:01:00.000Z',
+    });
+    expect(acquired.acquired).toBe(true);
+    database.close();
+
+    const runtime = createStdioMcpRuntime(dataPath, primary, false, { persistWorkspaceSelection: true });
+    try {
+      await runtime.recoveryReady;
+      const verificationDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+      try {
+        const snapshot = await new SqliteGoalRuntimeSnapshotRepository(verificationDatabase)
+          .getGoalRuntimeSnapshot('goal-background-runtime');
+        expect(snapshot?.projection).toMatchObject({
+          workspaceId: secondary.id,
+          lifecycleState: 'open',
+          runtimeState: 'queued',
+          desiredRuntimeState: 'running',
+        });
+      } finally {
+        verificationDatabase.close();
+      }
+    } finally {
       await runtime.close();
     }
   });

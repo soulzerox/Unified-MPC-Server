@@ -12,6 +12,7 @@ import {
   type ScheduledContinuationWorkerLivenessPort,
 } from '@unified-mpc/domain';
 import type { FileActor } from './file-service.js';
+import type { GoalRuntimeEventPublisher } from './goal-runtime-control-plane-service.js';
 
 export type ManagedGoalTaskState = 'running' | 'terminal' | 'absent' | 'unknown';
 
@@ -23,6 +24,7 @@ export interface GoalMutationFenceServiceOptions {
   readonly now?: () => Date;
   readonly callLeaseSeconds?: number;
   readonly taskStateReader?: GoalManagedTaskStateReader;
+  readonly runtimeEvents?: GoalRuntimeEventPublisher;
 }
 
 export interface GoalMutationFenceAdmission {
@@ -35,10 +37,19 @@ export interface WorkspaceGoalFenceSnapshot {
   readonly leaseGeneration: number;
 }
 
+interface GoalRuntimeCallBinding {
+  readonly goalId: string;
+  readonly workspaceId: string;
+  readonly executionId: string;
+  readonly executionGeneration: number;
+}
+
 export class GoalMutationFenceService implements ScheduledContinuationWorkerLivenessPort {
   private readonly now: () => Date;
   private readonly callLeaseSeconds: number;
   private readonly taskStateReader: GoalManagedTaskStateReader | undefined;
+  private readonly runtimeEvents: GoalRuntimeEventPublisher | undefined;
+  private readonly runtimeCalls = new Map<string, GoalRuntimeCallBinding>();
 
   public constructor(
     private readonly repository: ScheduledContinuationRepository,
@@ -47,6 +58,7 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     this.now = options.now ?? ((): Date => new Date());
     this.callLeaseSeconds = normalizeCallLeaseSeconds(options.callLeaseSeconds);
     this.taskStateReader = options.taskStateReader;
+    this.runtimeEvents = options.runtimeEvents;
   }
 
   public async inspectWorkspaceFence(
@@ -83,6 +95,7 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
         startedAt,
         expiresAt,
       });
+      await this.recordRuntimeStartBestEffort(callId, workspaceId, admitted.goalId, admitted.leaseGeneration, startedAt);
       return ok(admitted);
     } catch (error: unknown) {
       return mapFenceError(error);
@@ -94,10 +107,15 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     const heartbeatAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + this.callLeaseSeconds * 1000).toISOString();
     await this.repository.heartbeatGoalFencedMutation(callId, leaseGeneration, heartbeatAt, expiresAt);
+    await this.recordRuntimeHeartbeatBestEffort(callId, leaseGeneration, heartbeatAt);
   }
 
   public async end(callId: string): Promise<void> {
-    await this.repository.endGoalFencedMutation(callId, this.now().toISOString());
+    try {
+      await this.repository.endGoalFencedMutation(callId, this.now().toISOString());
+    } finally {
+      this.runtimeCalls.delete(callId);
+    }
   }
 
   public async observe(goalId: string, trackedTasks: readonly (GoalTrackedTask | string)[]): Promise<ScheduledContinuationWorkerLiveness> {
@@ -120,6 +138,75 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
       blockingTaskStates,
       activeTaskStates: blockingTaskStates.map(({ taskId, state }) => ({ taskId, state })),
     };
+  }
+
+  private async recordRuntimeStartBestEffort(
+    callId: string,
+    workspaceId: string,
+    goalId: string,
+    leaseGeneration: number,
+    occurredAt: string,
+  ): Promise<void> {
+    if (this.runtimeEvents === undefined) return;
+    try {
+      const snapshot = await this.runtimeEvents.ensureGoalSnapshot(goalId);
+      const projection = snapshot.projection;
+      if (
+        projection.workspaceId !== workspaceId
+        || projection.activeExecutionId === undefined
+        || projection.executionGeneration !== leaseGeneration
+      ) return;
+
+      this.runtimeCalls.set(callId, {
+        goalId,
+        workspaceId,
+        executionId: projection.activeExecutionId,
+        executionGeneration: projection.executionGeneration,
+      });
+      const type = projection.runtimeState === 'queued'
+        || projection.runtimeState === 'starting'
+        || projection.runtimeState === 'recovering'
+          ? 'execution_started'
+          : 'execution_heartbeat';
+      await this.runtimeEvents.publishGoalRuntimeEvent({
+        eventId: runtimeFenceEventId(goalId, type, `${callId}:start`),
+        type,
+        workspaceId,
+        goalId,
+        executionId: projection.activeExecutionId,
+        executionGeneration: projection.executionGeneration,
+        occurredAt,
+        detail: 'authoritative fenced mutation activity',
+      });
+    } catch {
+      // Runtime projection is a recoverable side path. A durable mutation fence
+      // that was already admitted must not be failed by event delivery.
+    }
+  }
+
+  private async recordRuntimeHeartbeatBestEffort(
+    callId: string,
+    leaseGeneration: number,
+    occurredAt: string,
+  ): Promise<void> {
+    if (this.runtimeEvents === undefined) return;
+    const binding = this.runtimeCalls.get(callId);
+    if (binding === undefined || binding.executionGeneration !== leaseGeneration) return;
+    try {
+      await this.runtimeEvents.publishGoalRuntimeEvent({
+        eventId: runtimeFenceEventId(binding.goalId, 'execution_heartbeat', `${callId}:${occurredAt}`),
+        type: 'execution_heartbeat',
+        workspaceId: binding.workspaceId,
+        goalId: binding.goalId,
+        executionId: binding.executionId,
+        executionGeneration: binding.executionGeneration,
+        occurredAt,
+        detail: 'authoritative fenced mutation heartbeat',
+      });
+    } catch {
+      // Durable fence heartbeat remains authoritative for admission/liveness.
+      // Event delivery is repaired by later runtime activity/reconciliation.
+    }
   }
 
   private async readTaskState(workspaceId: string, task: GoalTrackedTask | string): Promise<ManagedGoalTaskState> {
@@ -145,6 +232,13 @@ function normalizeCallLeaseSeconds(value: number | undefined): number {
 function hashLeaseToken(token: string): string {
   if (typeof token !== 'string' || token.trim().length === 0 || token.length > 256) throw new Error('Goal lease token is invalid');
   return createHash('sha256').update(token).digest('hex');
+}
+
+function runtimeFenceEventId(goalId: string, type: 'execution_started' | 'execution_heartbeat', discriminator: string): string {
+  const digest = createHash('sha256')
+    .update([goalId, type, discriminator].join('\0'))
+    .digest('hex');
+  return `goal-runtime-fence-${digest}`;
 }
 
 function mapFenceError(error: unknown): Result<never> {

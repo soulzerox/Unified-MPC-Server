@@ -129,7 +129,7 @@ describe('NativeThaiRagProviderDriver', () => {
       if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
     }
     expect(terminal).toMatchObject({ ok: true, value: { status: 'completed', result: { indexed: 3 } } });
-    expect(calls.find(({ tool }) => tool === 'code_index')?.args).toMatchObject({
+    expect(calls.find(({ tool, args }) => tool === 'code_index' && args.background === true)?.args).toMatchObject({
       workspace_id: workspaceId,
       background: true,
     });

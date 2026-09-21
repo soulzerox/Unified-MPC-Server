@@ -17,6 +17,7 @@ async function fixture(): Promise<{
   database: SqliteDatabase;
   events: SqliteGoalRuntimeEventRepository;
   snapshots: SqliteGoalRuntimeSnapshotRepository;
+  goals: SqliteGoalRepository;
   executionId: string;
   initial: GoalRuntimeProjection;
 }> {
@@ -50,6 +51,7 @@ async function fixture(): Promise<{
     database,
     events: new SqliteGoalRuntimeEventRepository(database),
     snapshots: new SqliteGoalRuntimeSnapshotRepository(database),
+    goals,
     executionId: acquired.goal.executionId,
     initial: baseProjection(),
   };
@@ -100,6 +102,27 @@ async function appendAndProject(
   const projected = projectGoalRuntimeEvent(current, event);
   expect(projected.decision).toEqual({ disposition: 'apply' });
   return { projection: projected.projection, sequence: appended.record.sequence };
+}
+
+async function storeRunningSnapshot(
+  runtime: Awaited<ReturnType<typeof fixture>>,
+): Promise<{ projection: GoalRuntimeProjection; sequence: number }> {
+  const submitted = await appendAndProject(
+    runtime,
+    runtime.initial,
+    executionEvent(runtime.executionId, 'execution_submitted', 1),
+  );
+  const started = await appendAndProject(
+    runtime,
+    submitted.projection,
+    executionEvent(runtime.executionId, 'execution_started', 2),
+  );
+  await runtime.snapshots.storeGoalRuntimeSnapshot({
+    projection: started.projection,
+    lastEventSequence: started.sequence,
+    updatedAt: '2026-09-21T14:00:03.000Z',
+  });
+  return started;
 }
 
 describe('SqliteGoalRuntimeSnapshotRepository', () => {
@@ -290,6 +313,103 @@ describe('SqliteGoalRuntimeSnapshotRepository', () => {
         reason: 'invalid_projection',
         message: expect.stringContaining('receipt'),
       });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
+  it('atomically appends worker_lost only while the probed runtime fence is still current', async () => {
+    const runtime = await fixture();
+    try {
+      const running = await storeRunningSnapshot(runtime);
+      const workerLost = executionEvent(runtime.executionId, 'worker_lost', 3, {
+        blockerKind: 'worker_lost',
+        detail: 'restart reconciliation: no_live_worker',
+      });
+
+      const committed = await runtime.events.appendGoalRuntimeReconciliationEvent({
+        event: workerLost,
+        recordedAt: workerLost.occurredAt,
+        expectedSnapshotSequence: running.sequence,
+        expectedLeaseGeneration: 1,
+        expectedLeaseActivitySeq: 0,
+        expectedLiveScheduledContinuation: null,
+      });
+
+      expect(committed).toMatchObject({
+        disposition: 'appended',
+        record: { sequence: 3, event: workerLost },
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
+  it('does not append worker_lost when the event stream advances after the liveness probe', async () => {
+    const runtime = await fixture();
+    try {
+      const running = await storeRunningSnapshot(runtime);
+      await runtime.events.appendGoalRuntimeEvent({
+        event: executionEvent(runtime.executionId, 'execution_heartbeat', 3),
+        recordedAt: '2026-09-21T14:00:03.000Z',
+      });
+
+      const result = await runtime.events.appendGoalRuntimeReconciliationEvent({
+        event: executionEvent(runtime.executionId, 'worker_lost', 4, {
+          blockerKind: 'worker_lost',
+        }),
+        recordedAt: '2026-09-21T14:00:04.000Z',
+        expectedSnapshotSequence: running.sequence,
+        expectedLeaseGeneration: 1,
+        expectedLeaseActivitySeq: 0,
+        expectedLiveScheduledContinuation: null,
+      });
+
+      expect(result).toEqual({
+        disposition: 'concurrent_change',
+        reason: 'event_stream_advanced',
+      });
+      expect((await runtime.events.listGoalRuntimeEvents({ goalId: 'goal-1', limit: 10 }))
+        .some((entry) => entry.event.type === 'worker_lost')).toBe(false);
+    } finally {
+      runtime.database.close();
+    }
+  });
+
+  it('does not append worker_lost when lease generation rotates after the liveness probe', async () => {
+    const runtime = await fixture();
+    try {
+      const running = await storeRunningSnapshot(runtime);
+      const takeover = await runtime.goals.acquire({
+        goalId: 'ignored-for-existing-goal',
+        workspaceId: 'workspace-1',
+        goalKey: 'runtime-snapshots',
+        ownerClientId: 'client-2',
+        ownerSessionId: 'session-2',
+        leaseTokenHash: 'lease-hash-2',
+        leaseSeconds: 60,
+        now: '2026-09-21T14:02:00.000Z',
+      });
+      expect(takeover.acquired).toBe(true);
+      expect(takeover.goal.leaseGeneration).toBe(2);
+
+      const result = await runtime.events.appendGoalRuntimeReconciliationEvent({
+        event: executionEvent(runtime.executionId, 'worker_lost', 3, {
+          blockerKind: 'worker_lost',
+        }),
+        recordedAt: '2026-09-21T14:02:00.000Z',
+        expectedSnapshotSequence: running.sequence,
+        expectedLeaseGeneration: 1,
+        expectedLeaseActivitySeq: 0,
+        expectedLiveScheduledContinuation: null,
+      });
+
+      expect(result).toEqual({
+        disposition: 'concurrent_change',
+        reason: 'lease_changed',
+      });
+      expect((await runtime.events.listGoalRuntimeEvents({ goalId: 'goal-1', limit: 10 }))
+        .some((entry) => entry.event.type === 'worker_lost')).toBe(false);
     } finally {
       runtime.database.close();
     }

@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
+  DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
   DEFAULT_LSP_PROCESS_ADMISSION_COST,
   DEFAULT_RAG_INDEX_ADMISSION_COST,
   ResourceAdmissionController,
   sharedProcessResourceAdmissionController,
   tryAdmitChildMcpCall,
+  tryAdmitContextScan,
   tryAdmitDependencyBootstrap,
   tryAdmitLspProcess,
   tryAdmitRagIndex,
@@ -57,6 +59,48 @@ describe('resource admission contract', () => {
     expect(first.admitted).toBe(true);
     expect(rejected).toMatchObject({ admitted: false, code: 'RESOURCE_PRESSURE', reason: 'workspace_cost_exhausted' });
     expect(admitted).toMatchObject({ admitted: true, lease: { workspaceId: 'workspace-b' } });
+  });
+
+  it('keeps context scan admission fair across workspaces while enforcing each workspace ceiling', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 4,
+      sessionCost: 8,
+      maxOperations: 2,
+      resourceClassCost: { context_scan: 8 },
+    });
+    const first = tryAdmitContextScan(controller, {
+      operationId: 'context-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
+    });
+    if (!first.admitted) throw new Error('expected first context admission');
+
+    const sameWorkspace = tryAdmitContextScan(controller, {
+      operationId: 'context-a-2',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-b',
+      cost: DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
+    });
+    const otherWorkspace = tryAdmitContextScan(controller, {
+      operationId: 'context-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
+    });
+
+    expect(sameWorkspace).toMatchObject({ admitted: false, code: 'RESOURCE_PRESSURE', reason: 'workspace_cost_exhausted' });
+    expect(otherWorkspace).toMatchObject({ admitted: true, lease: { resourceClass: 'context_scan', workspaceId: 'workspace-b', cost: 4 } });
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 8,
+      activeOperations: 2,
+      activeCostByClass: { context_scan: 8 },
+      activeCostByWorkspace: { 'workspace-a': 4, 'workspace-b': 4 },
+    });
+
+    expect(controller.release(first.lease)).toBe(true);
+    if (otherWorkspace.admitted) expect(controller.release(otherWorkspace.lease)).toBe(true);
   });
 
   it('releases capacity deterministically and rejects duplicate operation ids', () => {

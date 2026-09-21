@@ -65,11 +65,12 @@ export function getClientScriptJs(): string {
           ['Context ledger', 'contextLedgerEntries'],
           ['Tool availability subscriptions', 'toolAvailabilitySubscriptions'],
         ];
+        const formatCounter = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(value) : '—';
         for (const [label, key, limitKey] of rows) {
           const row = document.createElement('tr');
           addCell(row, label);
-          addCell(row, Number.isFinite(Number(retention?.[key])) ? String(retention[key]) : '—', 'mono');
-          addCell(row, limitKey && Number.isFinite(Number(retention?.[limitKey])) && Number(retention[limitKey]) > 0 ? String(retention[limitKey]) : '—', 'mono');
+          addCell(row, formatCounter(retention?.[key]), 'mono');
+          addCell(row, limitKey ? formatCounter(retention?.[limitKey]) : '—', 'mono');
           body.appendChild(row);
         }
       }

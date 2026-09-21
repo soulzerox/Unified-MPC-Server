@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   GoalStateError,
+  assessGoalWorkerLiveness,
   type AcquireGoalRecordRequest,
   type AcquireGoalRecordResult,
   type BeginGoalFencedMutationRequest,
@@ -152,7 +153,6 @@ const LIVE_CONTINUATION_STATUSES = [
   'cancel_uncertain',
 ] as const;
 const ORPHAN_PROBE_MIN_SECONDS = 120;
-const RUN_GOAL_STALE_RECOVERY_GRACE_SECONDS = 60;
 const CLAIM_SUCCESSOR_MIN_SECONDS = 120;
 const COLLISION_SUCCESSOR_MIN_SECONDS = 240;
 const COLLISION_SUCCESSOR_MAX_SECONDS = 25 * 60;
@@ -2841,34 +2841,19 @@ function assessStaleGoalLeaseRecovery(
   now: string,
   hasLiveScheduledContinuation: boolean,
 ): { readonly recover: boolean; readonly retryAfterSeconds?: number } {
-  if (evidence === undefined || !evidence.trustworthy) return { recover: false };
-  if (evidence.leaseGeneration !== goal.leaseGeneration || evidence.leaseActivitySeq !== goal.leaseActivitySeq) return { recover: false };
-  if (evidence.liveFencedCallCount !== 0) return { recover: false };
-  const nowMs = parseIso(now, 'request time');
-  const observedAtMs = parseIso(evidence.observedAt, 'worker liveness observation');
-  if (observedAtMs > nowMs) return { recover: false };
-  if (goal.leaseHeartbeatAt === undefined) return { recover: false };
-
-  const blockingTasks = (goal.trackedTasks ?? legacyTrackedTasks(goal.activeTaskIds)).filter((task) => task.role === 'blocking_job');
-  const stateByBinding = new Map(evidence.blockingTaskStates.map((entry) => [`${entry.provider}\0${entry.taskId}`, entry.state]));
-  const allBlockingInactive = blockingTasks.every((task) => {
-    const state = stateByBinding.get(`${task.provider}\0${task.taskId}`) ?? 'unknown';
-    return state === 'terminal' || state === 'absent';
+  const assessment = assessGoalWorkerLiveness({
+    goal,
+    evidence,
+    now,
+    hasLiveScheduledContinuation,
   });
-  if (!allBlockingInactive) return { recover: false };
-
-  // A lease without a live scheduled continuation has no rolling watchdog to
-  // protect. Trustworthy zero-worker evidence is enough to reclaim it now,
-  // rather than making the next real worker wait for an arbitrary lease TTL.
-  if (!hasLiveScheduledContinuation) return { recover: true };
-
-  // A live rolling watchdog may legitimately be between tool calls. Preserve
-  // the existing inactivity grace before rotating that worker's generation.
-  const heartbeatAgeSeconds = Math.floor((nowMs - parseIso(goal.leaseHeartbeatAt, 'goal lease heartbeat')) / 1000);
-  if (heartbeatAgeSeconds < RUN_GOAL_STALE_RECOVERY_GRACE_SECONDS) {
-    return { recover: false, retryAfterSeconds: RUN_GOAL_STALE_RECOVERY_GRACE_SECONDS - heartbeatAgeSeconds };
+  if (assessment.state === 'inactive') return { recover: true };
+  if (assessment.state === 'live'
+    && assessment.reason === 'heartbeat_grace'
+    && assessment.retryAfterSeconds !== undefined) {
+    return { recover: false, retryAfterSeconds: assessment.retryAfterSeconds };
   }
-  return { recover: true };
+  return { recover: false };
 }
 
 function legacyTrackedTask(taskId: string): GoalTrackedTask {

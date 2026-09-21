@@ -283,6 +283,179 @@ describe('scheduled continuation mutation fence', () => {
     expect(end).toHaveBeenCalledTimes(1);
   });
 
+  it('still dispatches an admitted durable mutation when the parent aborts before backend execution starts', async (): Promise<void> => {
+    let releaseFence: (() => void) | undefined;
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn(async () => new Promise<ReturnType<typeof ok>>((resolve) => {
+      releaseFence = (): void => resolve(activeFence());
+    }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let settleWrite: (() => void) | undefined;
+    let started = false;
+    const writeFile = vi.fn(async (...args: unknown[]) => {
+      executionSignal = args[3] as AbortSignal | undefined;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        settleWrite = (): void => resolve(ok({ path: 'src/file.ts', bytesWritten: 1 }));
+      });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      file: { writeFile },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor);
+    const parent = new AbortController();
+
+    const pending = registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/file.ts',
+      content: 'durable pre-start work',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    }, undefined, parent.signal);
+
+    for (let attempt = 0; attempt < 20 && begin.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(started).toBe(false);
+
+    parent.abort();
+    releaseFence?.();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(started).toBe(true);
+    expect(executionSignal?.aborted).toBe(false);
+
+    settleWrite?.();
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['test', 'project_test', { workspaceId: 'workspace-1', userConfirmed: true }],
+    ['build', 'project_build', { workspaceId: 'workspace-1', userConfirmed: true }],
+    ['final integration', 'git', { workspaceId: 'workspace-1', args: ['add', '--', 'src/file.ts'], userConfirmed: true }],
+  ] as const)('keeps durable %s execution alive when the parent request aborts mid-phase', async (_phase, toolName, rawInput): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(activeFence());
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let settleOperation: (() => void) | undefined;
+    let started = false;
+    const hold = async (signal: AbortSignal | undefined): Promise<ReturnType<typeof ok>> => {
+      executionSignal = signal;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        settleOperation = (): void => resolve(ok({ processId: 'phase-process', exitCode: 0, stdout: '', stderr: '' }));
+      });
+    };
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      process: {
+        async previewProjectCommand(...args: unknown[]) {
+          return ok({ executable: 'pnpm', args: [String(args[1] ?? 'test')] });
+        },
+        async startProjectCommand(...args: unknown[]) {
+          return hold(args[3] as AbortSignal | undefined);
+        },
+      },
+      git: {
+        async run(...args: unknown[]) {
+          return hold(args[2] as AbortSignal | undefined);
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor);
+    const parent = new AbortController();
+    const input = {
+      ...rawInput,
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    };
+
+    const pending = registry.invoke(toolName, input, undefined, parent.signal);
+    for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();
+    expect(started).toBe(true);
+
+    parent.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+
+    settleOperation?.();
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a completed checkpoint when the next durable phase loses its parent request', async (): Promise<void> => {
+    const checkpointGoal = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', revision: 1, status: 'active' }));
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(activeFence());
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    let executionSignal: AbortSignal | undefined;
+    let settleWrite: (() => void) | undefined;
+    let started = false;
+    const writeFile = vi.fn(async (...args: unknown[]) => {
+      executionSignal = args[3] as AbortSignal | undefined;
+      started = true;
+      return new Promise<ReturnType<typeof ok>>((resolve) => {
+        settleWrite = (): void => resolve(ok({ path: 'src/after-checkpoint.ts', bytesWritten: 1 }));
+      });
+    });
+    const services = {
+      goals: { checkpointGoal },
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      file: { writeFile },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor);
+
+    const checkpoint = await registry.invoke('checkpoint_goal', {
+      goalId: 'goal-1',
+      leaseToken: 'current-token',
+      expectedRevision: 0,
+      currentPhase: 'verification',
+      summary: 'Durable progress is persisted before the next phase.',
+      stepUpdates: [],
+      nextAction: 'Continue final work.',
+      blockers: [],
+      evidence: [],
+      activeTaskIds: [],
+    });
+    expect(checkpoint.isError).not.toBe(true);
+    expect(checkpointGoal).toHaveBeenCalledTimes(1);
+
+    const parent = new AbortController();
+    const pending = registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/after-checkpoint.ts',
+      content: 'continue after checkpoint',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    }, undefined, parent.signal);
+
+    for (let attempt = 0; attempt < 20 && !started; attempt += 1) await Promise.resolve();
+    expect(started).toBe(true);
+    parent.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT' } },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+    expect(checkpointGoal).toHaveBeenCalledTimes(1);
+
+    settleWrite?.();
+    for (let attempt = 0; attempt < 20 && end.mock.calls.length === 0; attempt += 1) await Promise.resolve();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
   it('detaches an admitted durable goal mutation when only the response budget expires', async (): Promise<void> => {
     const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
     const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));

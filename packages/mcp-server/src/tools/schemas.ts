@@ -657,6 +657,8 @@ export const ragIndexStatusSchema = z.object({
   jobId: z.string().trim().min(1).max(256),
 }).strict();
 
+export const ragCancelIndexSchema = ragIndexStatusSchema;
+
 export const mcpCallSchema = z.object({
   server: z.string().trim().min(1).max(256),
   tool: z.string().trim().min(1).max(256),

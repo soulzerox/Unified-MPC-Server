@@ -11,9 +11,9 @@ Type=simple
 Environment=NODE_ENV=production
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.config/unified-mpc/service.env
-ExecStartPre=/usr/bin/bash %h/.config/unified-mpc/validate-runtime-root.sh web ${UNIFIED_MPC_ROOT}
-ExecStart=/usr/bin/env node ${UNIFIED_MPC_ROOT}/apps/cli/dist/index.js web --port 3000
+ExecStart=/usr/bin/bash %h/.config/unified-mpc/launch-runtime.sh web ${UNIFIED_MPC_ROOT}
 Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true

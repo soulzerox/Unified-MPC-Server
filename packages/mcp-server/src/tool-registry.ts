@@ -747,8 +747,9 @@ export class ToolRegistry {
       ) {
         const backgroundLease = resourceAdmissionLease;
         const backgroundController = this.resourceAdmissionController;
+        const backgroundWorkspaceId = backgroundRagAdmissionWorkspaceId;
         if (execution.settledResult !== undefined) {
-          if (this.transferRagIndexAdmissionLease(backgroundRagAdmissionWorkspaceId, execution.settledResult, backgroundLease)) {
+          if (this.transferRagIndexAdmissionLease(backgroundWorkspaceId, execution.settledResult, backgroundLease)) {
             resourceAdmissionLease = undefined;
           } else {
             releaseResourceAdmission();
@@ -758,7 +759,7 @@ export class ToolRegistry {
           void execution.deferredSettlement.then((settledResult) => {
             if (
               settledResult !== undefined
-              && this.transferRagIndexAdmissionLease(backgroundRagAdmissionWorkspaceId, settledResult, backgroundLease)
+              && this.transferRagIndexAdmissionLease(backgroundWorkspaceId, settledResult, backgroundLease)
             ) return;
             backgroundController.release(backgroundLease);
           });

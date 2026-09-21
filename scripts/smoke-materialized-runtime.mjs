@@ -4,8 +4,11 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const releaseRoot = path.resolve(process.argv[2] ?? '');
-if (releaseRoot.length === 0) throw new Error('usage: smoke-materialized-runtime.mjs <release-root>');
+const releaseArgument = process.argv[2];
+if (releaseArgument === undefined || releaseArgument.length === 0) {
+  throw new Error('usage: smoke-materialized-runtime.mjs <release-root>');
+}
+const releaseRoot = path.resolve(releaseArgument);
 
 const provenancePath = path.join(releaseRoot, 'apps', 'cli', 'dist', 'build-provenance.json');
 const provenance = JSON.parse(await readFile(provenancePath, 'utf8'));

@@ -125,9 +125,9 @@ The promoter:
 4. acquires a non-blocking promotion lock;
 5. persists the candidate, previous active root, rollback target and build commit before activation;
 6. atomically replaces the `current` symlink;
-7. restarts `unified-mpc.service` and checks `/_unified-mpc/identity`;
-8. requires the running `buildCommit` to equal the promoted artifact;
-9. advances `last-known-good` only after the new runtime is healthy;
+7. restarts `unified-mpc.service` and checks both MCP `/_unified-mpc/identity` and Web `/api/status`;
+8. requires the MCP identity and Web-projected MCP `buildCommit` to equal the promoted artifact;
+9. advances `last-known-good` only after both local services are healthy;
 10. atomically restores the previous known-good release and re-verifies it when activation fails.
 
 Deployment evidence is stored under `~/.local/state/unified-mpc/deployments/<deployment-id>/` with bounded status/health/rollback fields. Deployment IDs are immutable; reusing an existing ID fails closed.

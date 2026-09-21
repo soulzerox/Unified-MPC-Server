@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { createCrossClientHostMutationApprovalProvider, createMcpRuntimeDiagnosticsProvider, hostApprovalBrokerDirectory, startMcpHttp } from '@unified-mpc/mcp-server';
+import { createCrossClientHostMutationApprovalProvider, createMcpRuntimeDiagnosticsProvider, hostApprovalBrokerDirectory, IncrementalVerifier, startMcpHttp } from '@unified-mpc/mcp-server';
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
@@ -47,10 +47,12 @@ async function main(): Promise<void> {
   const brokeredHostMutationApprovalProvider = createCrossClientHostMutationApprovalProvider({
     directory: hostApprovalBrokerDirectory(dataPath),
   });
+  const incrementalVerifier = new IncrementalVerifier();
   const runtimeDiagnosticsProvider = createMcpRuntimeDiagnosticsProvider({
     services: runtime.services,
     actor: runtime.actor,
     activityTracker: runtime.activityTracker,
+    incrementalVerifier,
   });
   const startup = await startMcpHttpBeforeProvider({
     start: async () => startMcpHttp(createWebMcpHttpServerOptions({
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
       toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
       toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
       legacySessionTtlMs: configuredLegacySessionTtlMs(),
+      incrementalVerifier,
       runtimeDiagnosticsProvider,
       allowedHostnamesProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_hostnames', 'UNIFIED_MPC_MCP_ALLOWED_HOSTNAMES'),
       allowedOriginsProvider: (): readonly string[] | undefined => settingList(settings, 'mcp_allowed_origins', 'UNIFIED_MPC_MCP_ALLOWED_ORIGINS'),

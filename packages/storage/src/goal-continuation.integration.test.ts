@@ -55,6 +55,8 @@ async function open(
   const service = new GoalContinuationService(workspaces, repository, {
     now,
     scheduledContinuations: repository,
+    goalExecutions: repository,
+    executionCancellation: repository,
     ...(taskCancellation === undefined ? {} : { taskCancellation }),
     ...(requestCancellation === undefined ? {} : { requestCancellation }),
   });

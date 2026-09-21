@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Redactor } from '@unified-mpc/audit';
 import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
-import type { ManagedProcess, ProcessLogResult } from '@unified-mpc/process';
+import type { ManagedProcess, ManagedProcessRecoveryIdentity, ProcessLogResult } from '@unified-mpc/process';
 import { DEFAULT_DELEGATED_AGENT_ADMISSION_COST, tryAdmitDelegatedAgent, type ResourceAdmissionController, type ResourceAdmissionLease } from '@unified-mpc/workspace';
 import {
   SqliteAgentSwarmRepository,
+  type SqliteManagedResourceBindingRepository,
   type StoredAgentSwarm,
   type StoredAgentSwarmState,
   type StoredAgentSwarmTask,
@@ -32,11 +33,16 @@ export interface AgentSwarmCodexPort {
   taskStatus(actor: FileActor, workspaceId: string, codexTaskId: string): Promise<Result<ManagedProcess>>;
   taskLogs(actor: FileActor, workspaceId: string, codexTaskId: string, query: { tailLines?: number; sinceSequence?: number }): Promise<Result<ProcessLogResult>>;
   stop(actor: FileActor, workspaceId: string, codexTaskId: string, userConfirmed?: boolean, authorization?: InvocationAuthorization): Promise<Result<void>>;
+  recoveryIdentityForGoal?(workspaceId: string, codexTaskId: string): Promise<Result<ManagedProcessRecoveryIdentity>>;
 }
 
 export interface AgentSwarmServiceOptions {
   readonly resourceAdmissionController?: ResourceAdmissionController;
   readonly delegatedAgentAdmissionCost?: number;
+  readonly managedResourceBindings?: Pick<
+    SqliteManagedResourceBindingRepository,
+    'storeActive' | 'markTerminationUnverified' | 'markReleased'
+  >;
 }
 
 interface LiveSwarm {
@@ -53,6 +59,7 @@ export class AgentSwarmService {
   private readonly live = new Map<string, LiveSwarm>();
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
   private readonly delegatedAgentAdmissionCost: number;
+  private readonly managedResourceBindings: AgentSwarmServiceOptions['managedResourceBindings'];
 
   public constructor(
     private readonly repository: SqliteAgentSwarmRepository,
@@ -63,6 +70,7 @@ export class AgentSwarmService {
   ) {
     this.resourceAdmissionController = options.resourceAdmissionController;
     this.delegatedAgentAdmissionCost = normalizePositiveInteger(options.delegatedAgentAdmissionCost, DEFAULT_DELEGATED_AGENT_ADMISSION_COST);
+    this.managedResourceBindings = options.managedResourceBindings;
     // Never reattach by PID/task id after restart. Persisted active tasks are
     // explicitly downgraded to termination_unverified until a future verified
     // runtime-handle protocol exists.
@@ -192,6 +200,7 @@ export class AgentSwarmService {
       if (task.state !== 'running' || task.codexTaskId === undefined) continue;
       const stopped = await this.codex.stop(actor, workspaceId, task.codexTaskId, false, authorization);
       if (stopped.ok) this.releaseTaskAdmission(live, task.id);
+      else this.retainTaskAdmissionAsUnverified(live, task.id);
       this.repository.updateTask(swarmId, task.id, stopped.ok
         ? { state: 'cancelled', finishedAt: this.now().toISOString() }
         : { state: 'termination_unverified', error: boundedError(stopped.error.message), finishedAt: this.now().toISOString() }, this.now().toISOString());
@@ -254,6 +263,7 @@ export class AgentSwarmService {
       const status = await this.codex.taskStatus(live.actor, swarm.workspaceId, task.codexTaskId!);
       if (!status.ok) {
         if (status.error.code === 'PROCESS_NOT_FOUND') {
+          this.retainTaskAdmissionAsUnverified(live, task.id);
           this.repository.updateTask(swarmId, task.id, { state: 'termination_unverified', error: 'verified runtime handle is no longer available', finishedAt: this.now().toISOString() }, this.now().toISOString());
         }
         continue;
@@ -318,6 +328,26 @@ export class AgentSwarmService {
         this.repository.updateTask(swarmId, task.id, { state: 'failed', error: boundedError(started.error.message), finishedAt: this.now().toISOString() }, this.now().toISOString());
         continue;
       }
+      if (!(await this.persistTaskAdmission(live, task.id, launchSwarm.workspaceId, started.value.codexTaskId))) {
+        const stopped = await this.codex.stop(live.actor, launchSwarm.workspaceId, started.value.codexTaskId, false, live.authorization);
+        if (stopped.ok) {
+          this.releaseTaskAdmission(live, task.id);
+          this.repository.updateTask(swarmId, task.id, {
+            state: 'failed',
+            error: 'delegated worker recovery identity could not be persisted',
+            finishedAt: this.now().toISOString(),
+          }, this.now().toISOString());
+        } else {
+          this.retainTaskAdmissionAsUnverified(live, task.id);
+          this.repository.updateTask(swarmId, task.id, {
+            state: 'termination_unverified',
+            codexTaskId: started.value.codexTaskId,
+            error: 'delegated worker recovery identity is unavailable and stop could not be verified',
+            finishedAt: this.now().toISOString(),
+          }, this.now().toISOString());
+        }
+        continue;
+      }
       this.repository.updateTask(swarmId, task.id, { state: 'running', codexTaskId: started.value.codexTaskId, startedAt: this.now().toISOString() }, this.now().toISOString());
       running += 1;
     }
@@ -334,10 +364,56 @@ export class AgentSwarmService {
     this.repository.updateSwarmState(swarmId, state, this.now().toISOString());
   }
 
+  private async persistTaskAdmission(
+    live: LiveSwarm,
+    taskId: string,
+    workspaceId: string,
+    codexTaskId: string,
+  ): Promise<boolean> {
+    if (this.managedResourceBindings === undefined) return true;
+    const lease = live.resourceLeases.get(taskId);
+    if (lease === undefined || lease.resourceClass !== 'delegated_agent') return false;
+    const recoveryIdentity = this.codex.recoveryIdentityForGoal;
+    if (recoveryIdentity === undefined) return false;
+
+    const identity = await recoveryIdentity.call(this.codex, workspaceId, codexTaskId);
+    if (!identity.ok) return false;
+    try {
+      this.managedResourceBindings.storeActive({
+        lease: { ...lease, resourceClass: 'delegated_agent' },
+        logicalHandle: codexTaskId,
+        platform: identity.value.platform,
+        pid: identity.value.pid,
+        processStartedAt: identity.value.processStartedAt,
+        createdAt: this.now().toISOString(),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private retainTaskAdmissionAsUnverified(live: LiveSwarm | undefined, taskId: string): void {
+    if (live === undefined) return;
+    const lease = live.resourceLeases.get(taskId);
+    if (lease === undefined) return;
+    try {
+      this.managedResourceBindings?.markTerminationUnverified(lease.operationId, this.now().toISOString());
+    } catch {
+      // Fail closed: keep the in-memory lease reserved when durable state cannot be advanced.
+    }
+  }
+
   private releaseTaskAdmission(live: LiveSwarm | undefined, taskId: string): void {
     if (live === undefined || this.resourceAdmissionController === undefined) return;
     const lease = live.resourceLeases.get(taskId);
     if (lease === undefined) return;
+    try {
+      this.managedResourceBindings?.markReleased(lease.operationId, this.now().toISOString());
+    } catch {
+      // Fail closed: durable ownership still says unreleased, so retain runtime debt too.
+      return;
+    }
     if (this.resourceAdmissionController.release(lease)) live.resourceLeases.delete(taskId);
   }
 

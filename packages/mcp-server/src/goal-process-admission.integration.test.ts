@@ -164,4 +164,100 @@ describe('Goal-owned managed process resource admission', () => {
       vi.useRealTimers();
     }
   });
+  it('persists Goal process recovery identity before transferring the runtime lease', async () => {
+    const admission = controller();
+    let state: 'running' | 'exited' = 'running';
+    const storeActive = vi.fn();
+    const markReleased = vi.fn();
+    const services = {
+      managedResourceBindings: {
+        storeActive,
+        markReleased,
+        markTerminationUnverified: vi.fn(),
+      },
+      goalMutationFence: {
+        inspectWorkspaceFence: vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 })),
+        begin: vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 })),
+        heartbeat: vi.fn(),
+        end: vi.fn().mockResolvedValue(undefined),
+      },
+      process: {
+        previewProjectCommand: vi.fn().mockResolvedValue(ok({ executable: 'pnpm', args: ['test'] })),
+        startProjectCommand: vi.fn().mockResolvedValue(ok(runningProcess())),
+        statusForGoalLiveness: vi.fn(() => ok({ ...runningProcess(), state })),
+        recoveryIdentityForGoal: vi.fn().mockResolvedValue(ok({
+          processId: 'process-1',
+          platform: 'linux',
+          pid: 7070,
+          processStartedAt: '2026-09-21T16:00:00.000Z',
+        })),
+      },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      sessionId: actor.sessionId,
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      resourceAdmissionController: admission,
+      goalProcessAdmissionCost: 8,
+    });
+
+    const response = await registry.invoke('project_test', {
+      workspaceId: 'workspace-1',
+      userConfirmed: true,
+      goalLease,
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(storeActive).toHaveBeenCalledWith(expect.objectContaining({
+      lease: expect.objectContaining({
+        workspaceId: 'workspace-1',
+        sessionId: 'session-a',
+        resourceClass: 'goal_process',
+        cost: 8,
+      }),
+      logicalHandle: 'process-1',
+      platform: 'linux',
+      pid: 7070,
+      processStartedAt: '2026-09-21T16:00:00.000Z',
+    }));
+    const tracker = sharedProcessGoalProcessAdmissionTracker(admission);
+    expect(tracker.has('workspace-1', 'process-1')).toBe(true);
+
+    state = 'exited';
+    expect(tracker.reconcile('workspace-1', 'process-1', { state })).toBe(true);
+    expect(markReleased).toHaveBeenCalledTimes(1);
+    expect(admission.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('keeps Goal process capacity fail-closed until durable release succeeds', () => {
+    const admission = controller();
+    const held = tryAdmitGoalProcess(admission, {
+      operationId: 'durable-release-retry',
+      workspaceId: 'workspace-1',
+      sessionId: 'session-a',
+      cost: 8,
+    });
+    if (!held.admitted) throw new Error('expected process admission');
+
+    let releaseAllowed = false;
+    const tracker = new GoalProcessAdmissionTracker(admission);
+    expect(tracker.bind({
+      workspaceId: 'workspace-1',
+      processId: 'process-durable-release',
+      lease: held.lease,
+      initialStatus: { state: 'running' },
+      readStatus: () => ok({ state: 'exited' }),
+      releaseDurable: () => releaseAllowed,
+    })).toBe(true);
+
+    expect(tracker.reconcile('workspace-1', 'process-durable-release', { state: 'exited' })).toBe(false);
+    expect(tracker.has('workspace-1', 'process-durable-release')).toBe(true);
+    expect(admission.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+
+    releaseAllowed = true;
+    expect(tracker.reconcile('workspace-1', 'process-durable-release', { state: 'exited' })).toBe(true);
+    expect(tracker.has('workspace-1', 'process-durable-release')).toBe(false);
+    expect(admission.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
 });

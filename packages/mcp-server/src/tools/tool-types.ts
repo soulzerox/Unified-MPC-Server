@@ -1,7 +1,7 @@
 import { err, ok, type InvocationAuthorization, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
-import type { ResourceAdmissionController } from '@unified-mpc/workspace';
+import type { ResourceAdmissionController, ResourceAdmissionLease } from '@unified-mpc/workspace';
 import type {
   AgentSwarmService,
   ApplyPatchRequest,
@@ -91,6 +91,21 @@ export interface ThaiRagProviderPort {
   call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>>;
 }
 
+export interface ManagedResourceBindingPort {
+  storeActive(input: {
+    readonly lease: ResourceAdmissionLease & {
+      readonly resourceClass: 'goal_process' | 'delegated_agent';
+    };
+    readonly logicalHandle: string;
+    readonly platform: 'linux' | 'darwin';
+    readonly pid: number;
+    readonly processStartedAt: string;
+    readonly createdAt: string;
+  }): unknown;
+  markTerminationUnverified(operationId: string, updatedAt: string): unknown;
+  markReleased(operationId: string, updatedAt: string): unknown;
+}
+
 export interface McpApplicationServices {
   /** Host platform selected by the composition root; tests may inject a deterministic profile. */
   readonly platform?: NodeJS.Platform;
@@ -116,6 +131,8 @@ export interface McpApplicationServices {
   readonly project?: Pick<ProjectService, 'detect'>;
   readonly file?: Pick<FileService, 'readFile' | 'readFiles' | 'writeFile' | 'applyPatch' | 'editFile' | 'moveFile' | 'copyFile' | 'deleteFile' | 'listRecoveryItems' | 'restoreDeletedFile' | 'prepareExternalFileMutation'>;
   readonly checkpoint?: Pick<CheckpointService, 'list' | 'restore'>;
+  /** Internal durable resource ownership store; raw host identities never cross MCP responses. */
+  readonly managedResourceBindings?: ManagedResourceBindingPort;
   readonly goals?: Pick<GoalContinuationService, 'runGoal' | 'getGoal' | 'getGoalExecution' | 'checkpointGoal' | 'finishGoal' | 'cancelGoal' | 'cancelGoalExecution' | 'reconcileGoals' | 'listGoals'>;
   /** Runtime-shared cancellation registry for in-flight fenced MCP requests. */
   readonly goalRequestCancellation?: GoalRequestCancellationPort;

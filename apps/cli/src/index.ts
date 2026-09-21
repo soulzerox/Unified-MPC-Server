@@ -455,6 +455,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         ...(options.thaiRagDriver === undefined ? {} : { thaiRagDriver: options.thaiRagDriver }),
         ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
       });
+      await mcpRuntime.recoveryReady;
     }
     const services = mcpRuntime?.services ?? { extensions: options.extensions ?? getExtensions(), installer: new InstallerService({ workspaceRoot: process.cwd() }) };
     toolRegistry = new ToolRegistry(

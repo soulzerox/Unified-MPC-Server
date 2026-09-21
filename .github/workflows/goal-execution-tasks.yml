@@ -5,12 +5,15 @@ on:
     paths:
       - ".github/workflows/goal-execution-tasks.yml"
       - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
+      - "apps/cli/src/index.ts"
       - "packages/application/src/agent-swarm-service.ts"
       - "packages/application/src/agent-swarm-service.test.ts"
       - "packages/application/src/goal-continuation-service.ts"
       - "packages/application/src/goal-task-cancellation-service.ts"
       - "packages/application/src/goal-task-cancellation-service.test.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.ts"
+      - "packages/application/src/managed-resource-recovery-service.ts"
+      - "packages/application/src/managed-resource-recovery-service.test.ts"
       - "packages/application/src/scheduled-continuation-service.ts"
       - "packages/domain/src/goal-continuation.ts"
       - "packages/domain/src/goal-runtime.ts"
@@ -101,7 +104,7 @@ jobs:
       - name: Recovery identity service plumbing
         run: |
           pnpm --filter @unified-mpc/codex exec vitest run --fileParallelism=false src/codex-adapter.test.ts
-          pnpm --filter @unified-mpc/application exec vitest run --fileParallelism=false src/process-service.test.ts src/codex-service.test.ts
+          pnpm --filter @unified-mpc/application exec vitest run --fileParallelism=false src/process-service.test.ts src/codex-service.test.ts src/managed-resource-recovery-service.test.ts
 
       - name: Goal resource admission contract
         run: pnpm --filter @unified-mpc/workspace exec vitest run --fileParallelism=false src/resource-admission.test.ts
@@ -158,6 +161,8 @@ jobs:
           packages/application/src/goal-task-cancellation-service.test.ts
           packages/application/src/scheduled-continuation-service.ts
           packages/application/src/goal-runtime-reconciliation-service.ts
+          packages/application/src/managed-resource-recovery-service.ts
+          packages/application/src/managed-resource-recovery-service.test.ts
           packages/workspace/src/resource-admission.ts
           packages/workspace/src/resource-admission.test.ts
           packages/mcp-server/src/goal-managed-task-state-reader.ts
@@ -177,3 +182,4 @@ jobs:
           packages/storage/src/managed-resource-binding-repository.integration.test.ts
           packages/storage/src/migrations/managed-resource-binding-migration.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts
+          apps/cli/src/index.ts

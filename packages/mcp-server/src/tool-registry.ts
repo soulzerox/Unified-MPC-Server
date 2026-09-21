@@ -834,17 +834,17 @@ export class ToolRegistry {
         const processController = this.resourceAdmissionController;
         const processWorkspaceId = goalProcessAdmissionWorkspaceId;
         if (execution.settledResult !== undefined) {
-          if (this.transferGoalProcessAdmissionLease(processWorkspaceId, execution.settledResult, processLease)) {
+          if (await this.transferGoalProcessAdmissionLease(processWorkspaceId, execution.settledResult, processLease)) {
             resourceAdmissionLease = undefined;
           } else {
             releaseResourceAdmission();
           }
         } else if (execution.deferredSettlement !== undefined) {
           resourceAdmissionLease = undefined;
-          void execution.deferredSettlement.then((settledResult) => {
+          void execution.deferredSettlement.then(async (settledResult) => {
             if (
               settledResult !== undefined
-              && this.transferGoalProcessAdmissionLease(processWorkspaceId, settledResult, processLease)
+              && await this.transferGoalProcessAdmissionLease(processWorkspaceId, settledResult, processLease)
             ) return;
             processController.release(processLease);
           });
@@ -1230,22 +1230,61 @@ export class ToolRegistry {
     return result;
   }
 
-  private transferGoalProcessAdmissionLease(
+  private async transferGoalProcessAdmissionLease(
     workspaceId: string,
     result: Result<unknown>,
     lease: ResourceAdmissionLease,
-  ): boolean {
+  ): Promise<boolean> {
     if (!result.ok || !isRecord(result.value)) return false;
     const processId = readTrimmedString(result.value.processId);
     const tracker = this.goalProcessAdmissionTracker;
     const processService = this.services.process;
-    if (processId === undefined || tracker === undefined || processService?.statusForGoalLiveness === undefined) return false;
+    if (
+      processId === undefined
+      || tracker === undefined
+      || processService?.statusForGoalLiveness === undefined
+    ) return false;
+    if (tracker.has(workspaceId, processId)) return false;
+
+    let releaseDurable: (() => boolean) | undefined;
+    const bindings = this.services.managedResourceBindings;
+    if (
+      bindings !== undefined
+      && lease.resourceClass === 'goal_process'
+      && processService.recoveryIdentityForGoal !== undefined
+    ) {
+      try {
+        const identity = await processService.recoveryIdentityForGoal(workspaceId, processId);
+        if (identity.ok) {
+          bindings.storeActive({
+            lease: { ...lease, resourceClass: 'goal_process' },
+            logicalHandle: processId,
+            platform: identity.value.platform,
+            pid: identity.value.pid,
+            processStartedAt: identity.value.processStartedAt,
+            createdAt: new Date().toISOString(),
+          });
+          releaseDurable = (): boolean => {
+            try {
+              bindings.markReleased(lease.operationId, new Date().toISOString());
+              return true;
+            } catch {
+              return false;
+            }
+          };
+        }
+      } catch {
+        // Keep the runtime lease fail-closed when durable identity persistence is unavailable.
+      }
+    }
+
     return tracker.bind({
       workspaceId,
       processId,
       lease,
       initialStatus: result.value,
       readStatus: () => processService.statusForGoalLiveness(workspaceId, processId),
+      ...(releaseDurable === undefined ? {} : { releaseDurable }),
     });
   }
 

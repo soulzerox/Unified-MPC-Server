@@ -8,6 +8,8 @@ export interface GoalProcessAdmissionBinding {
   readonly processId: string;
   readonly lease: ResourceAdmissionLease;
   readonly readStatus: () => Result<unknown> | Promise<Result<unknown>>;
+  /** Persist release before in-memory capacity is returned. False/throw keeps debt fail-closed. */
+  readonly releaseDurable?: () => boolean;
   readonly initialStatus?: unknown;
 }
 
@@ -37,7 +39,7 @@ export class GoalProcessAdmissionTracker {
     if (this.processes.has(key)) return false;
     this.processes.set(key, binding);
     if (isTerminalGoalProcessStatus(binding.initialStatus)) {
-      this.releaseBinding(key, binding);
+      if (!this.releaseBinding(key, binding)) this.schedulePoll();
       return true;
     }
     this.schedulePoll();
@@ -80,6 +82,11 @@ export class GoalProcessAdmissionTracker {
 
   private releaseBinding(key: string, binding: GoalProcessAdmissionBinding): boolean {
     if (this.processes.get(key) !== binding) return false;
+    try {
+      if (binding.releaseDurable?.() === false) return false;
+    } catch {
+      return false;
+    }
     this.processes.delete(key);
     this.controller.release(binding.lease);
     return true;

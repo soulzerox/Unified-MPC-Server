@@ -13,6 +13,7 @@ import {
   GoalTaskCancellationService,
   GoalMutationFenceService,
   GoalRuntimeReconciliationService,
+  ManagedResourceRecoveryService,
   ScheduledContinuationService,
   ProcessService,
   ProjectService,
@@ -51,6 +52,7 @@ import {
   SqliteGoalRepository,
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
+  SqliteManagedResourceBindingRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
@@ -101,6 +103,12 @@ export function createStdioMcpRuntime(
 ): StdioMcpRuntime {
   const databaseFilename = path.join(dataPath, 'unified-mpc.sqlite');
   const database = new SqliteDatabase(databaseFilename, { backupDirectory: path.join(dataPath, 'backups') });
+  const resourceAdmissionController = sharedProcessResourceAdmissionController();
+  const managedResourceBindings = new SqliteManagedResourceBindingRepository(database);
+  const managedResourceRecovery = new ManagedResourceRecoveryService(
+    managedResourceBindings,
+    resourceAdmissionController,
+  );
   const rawWorkspaceRepository = new SqliteWorkspaceRepository(database);
   const workspaceRepository = options.strictAllowedRoots === undefined
     ? rawWorkspaceRepository
@@ -240,7 +248,7 @@ export function createStdioMcpRuntime(
     codexService,
     undefined,
     undefined,
-    { resourceAdmissionController: sharedProcessResourceAdmissionController() },
+    { resourceAdmissionController, managedResourceBindings },
   );
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
@@ -283,7 +291,12 @@ export function createStdioMcpRuntime(
       await goalRuntimeReconciliation.reconcileWorkspace(activeWorkspace.id);
     }
   })();
-  const recoveryReady = Promise.all([fileRecoveryReady, goalRuntimeRecoveryReady]).then(() => undefined);
+  const managedResourceRecoveryReady = managedResourceRecovery.start().then(() => undefined);
+  const recoveryReady = Promise.all([
+    fileRecoveryReady,
+    goalRuntimeRecoveryReady,
+    managedResourceRecoveryReady,
+  ]).then(() => undefined);
   const actor: FileActor = { clientId: 'cli-mcp-stdio', clientName: 'Unified-MPC-Server CLI' };
   const sharedActivityLease = createSharedActivityLease(process.env.TUNNEL_CLIENT_PROFILE_DIR);
   const activityReady = sharedActivityLease.then(async (lease) => lease?.initialize());
@@ -369,6 +382,7 @@ export function createStdioMcpRuntime(
     project: projectService,
     file: fileService,
     checkpoint: checkpointService,
+    managedResourceBindings,
     goals: goalService,
     goalRequestCancellation: requestCancellation,
     scheduledContinuations: scheduledContinuationService,
@@ -410,6 +424,7 @@ export function createStdioMcpRuntime(
     close: async (): Promise<void> => {
       stopToolAvailabilityWatch();
       await recoveryReady.catch(() => undefined);
+      managedResourceRecovery.close();
       await thaiRagCoordinator.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);

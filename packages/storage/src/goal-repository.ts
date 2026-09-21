@@ -14,6 +14,8 @@ import {
   type FinishGoalRecordRequest,
   type GoalCheckpointRecord,
   type GoalEvidence,
+  type GoalExecutionRecord,
+  type GoalExecutionRepository,
   type GoalPlan,
   type GoalPlanStep,
   type GoalPonytailMode,
@@ -25,6 +27,7 @@ import {
   type GoalStepUpdate,
   type GoalTrackedTask,
   type ListGoalRecordsRequest,
+  type ListGoalExecutionsRequest,
   type ClaimScheduledContinuationRecordRequest,
   type ClaimScheduledContinuationRecordResult,
   type ClaimSuccessorDisposition,
@@ -85,7 +88,7 @@ interface GoalExecutionRow {
   readonly lease_generation: number;
   readonly owner_client_id: string;
   readonly owner_session_id: string;
-  readonly state: string;
+  readonly state: GoalExecutionRecord['receiptState'];
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -156,7 +159,7 @@ const COLLISION_SUCCESSOR_MAX_SECONDS = 25 * 60;
 const EXPEDITE_MIN_SECONDS = 120;
 const EXPEDITE_MAX_SECONDS = 5 * 60;
 
-export class SqliteGoalRepository implements GoalRepository, ScheduledContinuationRepository {
+export class SqliteGoalRepository implements GoalRepository, ScheduledContinuationRepository, GoalExecutionRepository {
   public constructor(private readonly database: SqliteDatabase) {}
 
   public async acquire(request: AcquireGoalRecordRequest): Promise<AcquireGoalRecordResult> {
@@ -282,6 +285,19 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
   public async getByKey(workspaceId: string, goalKey: string): Promise<GoalRecord | null> {
     const row = this.selectByKey(workspaceId, goalKey);
     return row === undefined ? null : this.toGoalRecord(row);
+  }
+
+  public async getExecutionById(executionId: string): Promise<GoalExecutionRecord | null> {
+    const row = this.database.connection.prepare('SELECT * FROM goal_executions WHERE id = ?').get(executionId);
+    return row === undefined ? null : this.toGoalExecutionRecord(this.requireExecutionRow(row));
+  }
+
+  public async listGoalExecutions(request: ListGoalExecutionsRequest): Promise<readonly GoalExecutionRecord[]> {
+    const boundedLimit = Math.min(100, Math.max(1, Math.trunc(request.limit)));
+    const rows = this.database.connection.prepare(
+      'SELECT * FROM goal_executions WHERE goal_id = ? ORDER BY lease_generation DESC LIMIT ?',
+    ).all(request.goalId, boundedLimit);
+    return rows.map((row) => this.toGoalExecutionRecord(this.requireExecutionRow(row)));
   }
 
   public async list(request: ListGoalRecordsRequest): Promise<readonly GoalRecord[]> {
@@ -2327,6 +2343,21 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       SELECT * FROM goal_executions WHERE goal_id = ? AND lease_generation = ?
     `).get(goalId, leaseGeneration);
     return value === undefined ? undefined : this.requireExecutionRow(value);
+  }
+
+  private toGoalExecutionRecord(row: GoalExecutionRow): GoalExecutionRecord {
+    return {
+      id: row.id,
+      goalId: row.goal_id,
+      workspaceId: row.workspace_id,
+      executionGeneration: row.lease_generation,
+      leaseGeneration: row.lease_generation,
+      ownerClientId: row.owner_client_id,
+      ownerSessionId: row.owner_session_id,
+      receiptState: row.state,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   private requireExecutionRow(value: unknown): GoalExecutionRow {

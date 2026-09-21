@@ -409,7 +409,7 @@ function isBoundedId(value: unknown): value is string {
 }
 
 function isResourceClass(value: unknown): value is ResourceAdmissionClass {
-  return value === 'dependency_bootstrap' || value === 'context_scan' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing' || value === 'goal_process';
+  return value === 'dependency_bootstrap' || value === 'context_scan' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing' || value === 'goal_process' || value === 'delegated_agent';
 }
 
 function normalizeSessionId(value: string | undefined): string {

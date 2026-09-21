@@ -1,0 +1,53 @@
+name: Runtime root safety gate
+
+on:
+  pull_request:
+    paths:
+      - "scripts/validate-runtime-root.sh"
+      - "scripts/validate-runtime-root.test.sh"
+      - "scripts/unified-mpc-mcp-http.service"
+      - "scripts/unified-mpc-web.service"
+      - "scripts/unified-mpc.service.env.example"
+      - "docs/DEPLOYMENT_LINUX.md"
+      - ".github/workflows/runtime-root-safety.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/validate-runtime-root.sh"
+      - "scripts/validate-runtime-root.test.sh"
+      - "scripts/unified-mpc-mcp-http.service"
+      - "scripts/unified-mpc-web.service"
+      - "scripts/unified-mpc.service.env.example"
+      - "docs/DEPLOYMENT_LINUX.md"
+      - ".github/workflows/runtime-root-safety.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate shell syntax
+        run: |
+          bash -n scripts/validate-runtime-root.sh
+          bash -n scripts/validate-runtime-root.test.sh
+
+      - name: Runtime root regression
+        run: bash scripts/validate-runtime-root.test.sh
+
+      - name: Verify systemd units
+        run: |
+          systemd-analyze verify \
+            scripts/unified-mpc.service \
+            scripts/unified-mpc-mcp-http.service \
+            scripts/unified-mpc-web.service
+
+      - name: Verify stable preflight wiring
+        run: |
+          grep -Fq '%h/.config/unified-mpc/validate-runtime-root.sh mcp-http' scripts/unified-mpc-mcp-http.service
+          grep -Fq '%h/.config/unified-mpc/validate-runtime-root.sh web' scripts/unified-mpc-web.service

@@ -1525,7 +1525,7 @@ export class ToolRegistry {
         };
         if (parentSignal?.aborted) {
           onParentAbort();
-          return;
+          if (!detachExecutionFromParent) return;
         }
         if (registration?.accepted === false) {
           finish(mapError(appError('CONFLICT', `MCP tool ${tool.name} was cancelled because its durable goal is already cancelled`, true)));

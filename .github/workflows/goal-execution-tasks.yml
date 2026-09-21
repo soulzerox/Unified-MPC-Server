@@ -12,6 +12,8 @@ on:
       - "packages/domain/src/goal-runtime.ts"
       - "packages/mcp-server/src/modern-tasks-protocol.ts"
       - "packages/mcp-server/src/modern-tasks-goal.test.ts"
+      - "packages/mcp-server/src/scheduled-continuation-fence.test.ts"
+      - "packages/mcp-server/src/tool-registry.ts"
       - "packages/mcp-server/src/modern-tasks.integration.test.ts"
       - "packages/mcp-server/src/tools/tool-types.ts"
       - "packages/storage/src/goal-continuation.integration.test.ts"
@@ -59,8 +61,12 @@ jobs:
           src/goal-restart-reconnect.integration.test.ts
           src/goal-scheduled-execution-ownership.integration.test.ts
 
-      - name: Goal-backed MCP Tasks regression
-        run: pnpm --filter @unified-mpc/mcp-server exec vitest run --fileParallelism=false src/modern-tasks-goal.test.ts src/modern-tasks.integration.test.ts
+      - name: Goal-backed MCP Tasks and parent-abort regression
+        run: >-
+          pnpm --filter @unified-mpc/mcp-server exec vitest run --fileParallelism=false
+          src/modern-tasks-goal.test.ts
+          src/modern-tasks.integration.test.ts
+          src/scheduled-continuation-fence.test.ts
 
       - name: Targeted typecheck
         run: |
@@ -83,5 +89,7 @@ jobs:
           packages/application/src/goal-runtime-reconciliation-service.ts
           packages/mcp-server/src/modern-tasks-protocol.ts
           packages/mcp-server/src/modern-tasks-goal.test.ts
+          packages/mcp-server/src/scheduled-continuation-fence.test.ts
+          packages/mcp-server/src/tool-registry.ts
           packages/mcp-server/src/tools/tool-types.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts

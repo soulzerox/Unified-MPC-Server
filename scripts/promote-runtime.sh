@@ -160,11 +160,15 @@ probe_runtime() {
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => { input += chunk; });
     process.stdin.on("end", () => {
-      const value = JSON.parse(input);
-      if (!value || typeof value.buildCommit !== "string") process.exit(2);
-      process.stdout.write(value.buildCommit);
+      try {
+        const value = JSON.parse(input);
+        if (!value || typeof value.buildCommit !== "string") process.exit(2);
+        process.stdout.write(value.buildCommit);
+      } catch {
+        process.exit(2);
+      }
     });
-  ')" || return 1
+  ' 2>/dev/null)" || return 1
   [[ "$actual_commit" == "$expected_commit" ]]
 }
 

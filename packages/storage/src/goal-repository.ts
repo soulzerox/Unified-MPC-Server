@@ -2843,7 +2843,7 @@ function assessStaleGoalLeaseRecovery(
 ): { readonly recover: boolean; readonly retryAfterSeconds?: number } {
   const assessment = assessGoalWorkerLiveness({
     goal,
-    evidence,
+    ...(evidence === undefined ? {} : { evidence }),
     now,
     hasLiveScheduledContinuation,
   });

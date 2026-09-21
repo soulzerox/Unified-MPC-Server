@@ -62,6 +62,37 @@ describe('MCP localhost HTTP security boundary', () => {
     }
   });
 
+  it('exposes immutable build provenance without replacing the semantic app version', async () => {
+    const buildProvenance = {
+      version: '4.61.0',
+      buildVersion: '4.61.0+0123456789ab',
+      buildCommit: '0123456789abcdef0123456789abcdef01234567',
+      buildShortCommit: '0123456789ab',
+      buildTime: '2026-09-21T09:00:00.000Z',
+      buildDirty: false,
+    };
+    const provenanceHandle = await startMcpHttp({
+      port: 0,
+      services: {},
+      actor: { clientId: 'build-provenance-test', clientName: 'build-provenance-test' },
+      buildProvenance,
+    });
+    try {
+      const response = await fetch(new URL('/_unified-mpc/identity', provenanceHandle.endpoint));
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-unified-mpc-build')).toBe(buildProvenance.buildShortCommit);
+      await expect(response.json()).resolves.toMatchObject({
+        product: 'Unified-MPC-Server',
+        service: 'desktop-mcp',
+        protocol: 1,
+        version: '4.61.0',
+        ...buildProvenance,
+      });
+    } finally {
+      await provenanceHandle.close();
+    }
+  });
+
   it('keeps loopback identity reachable when public allowlists are provided dynamically', async () => {
     const publicHandle = await startMcpHttp({
       port: 0,

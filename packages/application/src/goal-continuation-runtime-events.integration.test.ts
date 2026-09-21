@@ -15,7 +15,14 @@ afterEach(() => {
   for (const database of databases.splice(0)) database.close();
 });
 
-async function fixture() {
+async function fixture(): Promise<{
+  readonly goals: SqliteGoalRepository;
+  readonly events: SqliteGoalRuntimeEventRepository;
+  readonly snapshots: SqliteGoalRuntimeSnapshotRepository;
+  readonly runtime: GoalRuntimeControlPlaneService;
+  readonly service: GoalContinuationService;
+  readonly actor: { readonly clientId: string; readonly clientName: string; readonly sessionId: string };
+}> {
   const database = new SqliteDatabase(':memory:');
   databases.push(database);
   const workspaces = new SqliteWorkspaceRepository(database);
@@ -34,7 +41,7 @@ async function fixture() {
     runtimeEvents: runtime,
     goalExecutions: goals,
     executionCancellation: goals,
-    now: () => new Date('2026-09-22T00:01:00.000Z'),
+    now: (): Date => new Date('2026-09-22T00:01:00.000Z'),
   });
   const actor = {
     clientId: 'runtime-producer-test',

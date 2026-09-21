@@ -123,6 +123,8 @@ export function inspectMutationOperation(
       return boundedWrite('rag_remember commits one bounded selective long-term memory through the parent-owned native Thai-RAG provider');
     case 'rag_code_index':
       return boundedWrite('rag_code_index refreshes only the parent-owned native code index for one registered workspace');
+    case 'rag_cancel_index':
+      return boundedWrite('rag_cancel_index requests cancellation of one parent-owned native background index job');
     case 'rag_forget':
       return opaque('rag_forget deletes a persistent native Thai-RAG memory and remains explicitly approval-guarded');
     case 'write_file':

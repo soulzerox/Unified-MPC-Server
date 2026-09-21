@@ -17,6 +17,7 @@ restore_source() {
 trap restore_source EXIT
 
 export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/runtime"
+export UNIFIED_MPC_MATERIALIZE_STATE_DIR="$TMP_ROOT/materializations"
 export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$SCRIPT_DIR/validate-runtime-root.sh"
 
 commit="$(git -C "$REPO_ROOT" rev-parse --verify HEAD)"
@@ -25,6 +26,8 @@ deployment_id="portable-${commit:0:12}"
 bash "$SCRIPT_DIR/materialize-runtime-release.sh" "$deployment_id" "$REPO_ROOT" >"$TMP_ROOT/materialize.log"
 release="$UNIFIED_MPC_RUNTIME_DIR/releases/$deployment_id"
 
+grep -Fxq published "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/status"
+grep -Fxq "$REPO_ROOT" "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/source_path"
 test -f "$release/runtime-release.json"
 test -f "$release/apps/cli/dist/bin/mcp-http.js"
 test -f "$release/apps/cli/dist/index.js"

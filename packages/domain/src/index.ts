@@ -2,6 +2,7 @@ export * from './command.js';
 export * from './errors.js';
 export * from './goal-continuation.js';
 export * from './goal-runtime.js';
+export * from './goal-runtime-event.js';
 export * from './goal-workspace.js';
 export * from './invocation-authorization.js';
 export * from './scheduled-continuation.js';

@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/goal-runtime-reconciliation.yml"
+      - "apps/cli/package.json"
       - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
       - "apps/cli/src/runtime/stdio-mcp-runtime.test.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.ts"

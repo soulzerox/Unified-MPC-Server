@@ -14,6 +14,7 @@ import type { GoalWorkspaceTruthObservation, GoalWorkspaceTruthReader } from './
 
 const DEFAULT_BOOTSTRAP_LIMIT = 500;
 const EVENT_REPLAY_PAGE_SIZE = 500;
+const MAX_DURABLE_GOAL_BLOCKER_DETAIL = 2_000;
 
 export interface GoalRuntimeEventPublisher {
   ensureGoalSnapshot(goalId: string): Promise<GoalRuntimeSnapshotRecord>;
@@ -71,7 +72,8 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
       snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
-      return this.refreshWorkspaceTruthUnlocked(snapshot);
+      snapshot = await this.refreshWorkspaceTruthUnlocked(snapshot);
+      return this.reconcileDurableBlockerTruthUnlocked(snapshot);
     });
   }
 
@@ -80,7 +82,8 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       let snapshot = await this.ensureGoalSnapshotUnlocked(event.goalId);
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
 
-      return this.appendAndReplayUnlocked(snapshot, event);
+      snapshot = await this.appendAndReplayUnlocked(snapshot, event);
+      return this.reconcileDurableBlockerTruthUnlocked(snapshot);
     });
   }
 
@@ -89,7 +92,8 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
       snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
-      return this.refreshWorkspaceTruthUnlocked(snapshot);
+      snapshot = await this.refreshWorkspaceTruthUnlocked(snapshot);
+      return this.reconcileDurableBlockerTruthUnlocked(snapshot);
     });
   }
 
@@ -105,7 +109,8 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
         let snapshot = await this.ensureGoalSnapshotUnlocked(goal.id);
         snapshot = await this.catchUpSnapshotUnlocked(snapshot);
         snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
-        await this.refreshWorkspaceTruthUnlocked(snapshot, workspaceObservation);
+        snapshot = await this.refreshWorkspaceTruthUnlocked(snapshot, workspaceObservation);
+        await this.reconcileDurableBlockerTruthUnlocked(snapshot);
       });
       snapshotsReady += 1;
     }

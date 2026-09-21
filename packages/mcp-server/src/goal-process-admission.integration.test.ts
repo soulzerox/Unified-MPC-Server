@@ -22,7 +22,14 @@ function controller(): ResourceAdmissionController {
   });
 }
 
-function runningProcess(processId = 'process-1') {
+function runningProcess(processId = 'process-1'): {
+  readonly processId: string;
+  readonly executable: 'pnpm';
+  readonly args: readonly ['test'];
+  readonly cwd: '/workspace';
+  readonly state: 'running';
+  readonly startedAt: '2026-09-21T16:00:00.000Z';
+} {
   return {
     processId,
     executable: 'pnpm',
@@ -52,8 +59,8 @@ describe('Goal-owned managed process resource admission', () => {
     } as unknown as McpApplicationServices;
     const registry = new ToolRegistry(services, actor, {
       sessionId: actor.sessionId,
-      profileProvider: () => permissionProfiles.full,
-      authorizationModeProvider: () => 'full_bypass',
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
       resourceAdmissionController: admission,
       goalProcessAdmissionCost: DEFAULT_GOAL_PROCESS_ADMISSION_COST,
     });
@@ -106,8 +113,8 @@ describe('Goal-owned managed process resource admission', () => {
     } as unknown as McpApplicationServices;
     const registry = new ToolRegistry(services, actor, {
       sessionId: actor.sessionId,
-      profileProvider: () => permissionProfiles.full,
-      authorizationModeProvider: () => 'full_bypass',
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
       resourceAdmissionController: admission,
       goalProcessAdmissionCost: 8,
     });

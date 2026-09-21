@@ -80,6 +80,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
   ): Promise<AppendGoalRuntimeEventResult> {
     validateEvent(request.event);
     validateIso(request.recordedAt, 'recordedAt');
+    this.validateStoredScope(request.event);
 
     const event = request.event;
     const execution = isGoalScopedRuntimeEvent(event) ? undefined : event;
@@ -175,6 +176,42 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       LIMIT ?
     `).all(request.goalId, boundedLimit(request.limit));
     return rows.map((row) => this.toRecord(this.requireRow(row)));
+  }
+
+  private validateStoredScope(event: GoalRuntimeEvent): void {
+    const goal = this.database.connection.prepare(
+      'SELECT workspace_id FROM goals WHERE id = ?',
+    ).get(event.goalId) as { workspace_id?: string } | undefined;
+    if (goal === undefined || typeof goal.workspace_id !== 'string') {
+      throw new GoalRuntimeEventStoreError('invalid_event', `Goal '${event.goalId}' does not exist`);
+    }
+    if (goal.workspace_id !== event.workspaceId) {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'Goal runtime event workspace does not match its Goal');
+    }
+
+    if (isGoalScopedRuntimeEvent(event)) return;
+
+    const execution = this.database.connection.prepare(`
+      SELECT goal_id, workspace_id, lease_generation
+      FROM goal_executions
+      WHERE id = ?
+    `).get(event.executionId) as {
+      goal_id?: string;
+      workspace_id?: string;
+      lease_generation?: number;
+    } | undefined;
+    if (execution === undefined
+      || typeof execution.goal_id !== 'string'
+      || typeof execution.workspace_id !== 'string'
+      || typeof execution.lease_generation !== 'number') {
+      throw new GoalRuntimeEventStoreError('invalid_event', `Execution '${event.executionId}' does not exist`);
+    }
+    if (execution.goal_id !== event.goalId || execution.workspace_id !== event.workspaceId) {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'Goal runtime event execution scope does not match its Goal');
+    }
+    if (execution.lease_generation !== event.executionGeneration) {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'Goal runtime event execution generation does not match its durable receipt');
+    }
   }
 
   private requireEventById(eventId: string): GoalRuntimeEventRow {

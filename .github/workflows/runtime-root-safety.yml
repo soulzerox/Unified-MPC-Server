@@ -49,5 +49,5 @@ jobs:
 
       - name: Verify stable preflight wiring
         run: |
-          grep -Fq '%h/.config/unified-mpc/validate-runtime-root.sh mcp-http' scripts/unified-mpc-mcp-http.service
-          grep -Fq '%h/.config/unified-mpc/validate-runtime-root.sh web' scripts/unified-mpc-web.service
+          grep -Fq '/usr/bin/bash %h/.config/unified-mpc/validate-runtime-root.sh mcp-http' scripts/unified-mpc-mcp-http.service
+          grep -Fq '/usr/bin/bash %h/.config/unified-mpc/validate-runtime-root.sh web' scripts/unified-mpc-web.service

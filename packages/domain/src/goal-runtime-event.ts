@@ -74,6 +74,48 @@ export interface ExecutionScopedRuntimeEvent extends GoalRuntimeEventBase {
 
 export type GoalRuntimeEvent = GoalScopedRuntimeEvent | ExecutionScopedRuntimeEvent;
 
+
+export interface GoalRuntimeEventRecord {
+  readonly sequence: number;
+  readonly event: GoalRuntimeEvent;
+  readonly recordedAt: string;
+}
+
+export interface AppendGoalRuntimeEventRequest {
+  readonly event: GoalRuntimeEvent;
+  readonly recordedAt: string;
+}
+
+export interface AppendGoalRuntimeEventResult {
+  readonly appended: boolean;
+  readonly record: GoalRuntimeEventRecord;
+}
+
+export interface ReplayWorkspaceGoalRuntimeEventsRequest {
+  readonly workspaceId: string;
+  /** Exclusive durable cursor. Omit for the oldest currently retained event. */
+  readonly afterSequence?: number;
+  readonly limit: number;
+}
+
+export interface ListGoalRuntimeEventsRequest {
+  readonly goalId: string;
+  readonly limit: number;
+}
+
+export interface GoalRuntimeEventReplayPage {
+  readonly events: readonly GoalRuntimeEventRecord[];
+  readonly oldestAvailableSequence?: number;
+  readonly latestSequence?: number;
+  readonly replayWindowMissed: boolean;
+}
+
+export interface GoalRuntimeEventRepository {
+  appendGoalRuntimeEvent(request: AppendGoalRuntimeEventRequest): Promise<AppendGoalRuntimeEventResult>;
+  replayWorkspaceGoalRuntimeEvents(request: ReplayWorkspaceGoalRuntimeEventsRequest): Promise<GoalRuntimeEventReplayPage>;
+  listGoalRuntimeEvents(request: ListGoalRuntimeEventsRequest): Promise<readonly GoalRuntimeEventRecord[]>;
+}
+
 export type GoalRuntimeEventRejectionReason =
   | 'goal_mismatch'
   | 'workspace_mismatch'
@@ -138,6 +180,14 @@ export function classifyGoalRuntimeEvent(
 
 export function isGoalScopedRuntimeEvent(event: GoalRuntimeEvent): event is GoalScopedRuntimeEvent {
   return (GOAL_SCOPED_RUNTIME_EVENT_TYPES as readonly string[]).includes(event.type);
+}
+
+export function isGoalScopedRuntimeEventType(value: unknown): value is GoalScopedRuntimeEventType {
+  return typeof value === 'string' && (GOAL_SCOPED_RUNTIME_EVENT_TYPES as readonly string[]).includes(value);
+}
+
+export function isExecutionScopedRuntimeEventType(value: unknown): value is ExecutionScopedRuntimeEventType {
+  return typeof value === 'string' && (EXECUTION_SCOPED_RUNTIME_EVENT_TYPES as readonly string[]).includes(value);
 }
 
 export type GoalStateTransition =

@@ -10,6 +10,7 @@ import {
   type GoalFencedMutationObservation,
   type CheckpointGoalRecordRequest,
   type CancelGoalRecordRequest,
+  type CancelGoalExecutionRecordRequest,
   type CancelGoalRecordResult,
   type ReconcileGoalRecordRequest,
   type FinishGoalRecordRequest,
@@ -17,6 +18,7 @@ import {
   type GoalEvidence,
   type GoalExecutionRecord,
   type GoalExecutionRepository,
+  type GoalExecutionCancellationRepository,
   type GoalPlan,
   type GoalPlanStep,
   type GoalPonytailMode,
@@ -159,7 +161,7 @@ const COLLISION_SUCCESSOR_MAX_SECONDS = 25 * 60;
 const EXPEDITE_MIN_SECONDS = 120;
 const EXPEDITE_MAX_SECONDS = 5 * 60;
 
-export class SqliteGoalRepository implements GoalRepository, ScheduledContinuationRepository, GoalExecutionRepository {
+export class SqliteGoalRepository implements GoalRepository, ScheduledContinuationRepository, GoalExecutionRepository, GoalExecutionCancellationRepository {
   public constructor(private readonly database: SqliteDatabase) {}
 
   public async acquire(request: AcquireGoalRecordRequest): Promise<AcquireGoalRecordResult> {
@@ -579,6 +581,90 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         createdAt: request.now,
       });
       this.updateExecutionState(request.goalId, current.leaseGeneration, 'terminal', request.now);
+      return { goal: this.requireById(request.goalId), trackedTaskIds, trackedTasks };
+    });
+  }
+
+  public async cancelExecution(request: CancelGoalExecutionRecordRequest): Promise<CancelGoalRecordResult> {
+    return this.transaction(() => {
+      const executionRow = this.database.connection.prepare(
+        'SELECT * FROM goal_executions WHERE id = ?',
+      ).get(request.executionId);
+      if (executionRow === undefined) throw new GoalStateError('not_found', 'Goal execution was not found');
+      const execution = this.toGoalExecutionRecord(this.requireExecutionRow(executionRow));
+      if (
+        execution.goalId !== request.goalId
+        || execution.ownerClientId !== request.ownerClientId
+      ) {
+        throw new GoalStateError('not_found', 'Goal execution was not found');
+      }
+      if (
+        execution.executionGeneration !== request.expectedExecutionGeneration
+        || execution.leaseGeneration !== request.expectedExecutionGeneration
+        || execution.receiptState !== 'active'
+      ) {
+        throw new GoalStateError('conflict', 'Goal execution is no longer the active generation');
+      }
+
+      const current = this.requireById(request.goalId);
+      this.assertOwner(current, request.ownerClientId);
+      if (current.status !== 'active') throw new GoalStateError('terminal', 'Goal is already terminal');
+      if (
+        current.executionId !== request.executionId
+        || current.executionGeneration !== request.expectedExecutionGeneration
+        || current.leaseGeneration !== request.expectedExecutionGeneration
+      ) {
+        throw new GoalStateError('conflict', 'Goal execution changed after the task handle was issued');
+      }
+
+      const trackedTasks = trackedTasksAtCancellation(current);
+      const trackedTaskIds = trackedTasks.map((task) => task.taskId);
+      const revision = current.revision + 1;
+      const changed = this.database.connection.prepare(`
+        UPDATE goals
+        SET status = 'cancelled', revision = ?, current_phase = 'cancelled', next_action = '', blockers_json = '[]', active_task_ids_json = '[]', tracked_tasks_json = '[]',
+            lease_owner_client_id = NULL, lease_owner_session_id = NULL, lease_token_hash = NULL, lease_duration_seconds = NULL,
+            lease_heartbeat_at = NULL, lease_expires_at = NULL, updated_at = ?,
+            terminal_summary = ?, terminal_evidence_json = ?, terminal_at = ?
+        WHERE id = ? AND revision = ? AND lease_generation = ? AND status = 'active'
+      `).run(
+        revision,
+        request.now,
+        request.summary,
+        JSON.stringify(request.evidence),
+        request.now,
+        request.goalId,
+        current.revision,
+        request.expectedExecutionGeneration,
+      );
+      if (Number(changed.changes) !== 1) {
+        throw new GoalStateError('conflict', 'Exact execution cancellation lost the generation fence race');
+      }
+      this.database.connection.prepare(`
+        UPDATE goal_fenced_mutation_calls
+        SET completed_at = ?
+        WHERE goal_id = ? AND lease_generation = ? AND completed_at IS NULL
+      `).run(request.now, request.goalId, request.expectedExecutionGeneration);
+      this.insertCheckpoint({
+        id: request.checkpointId,
+        goalId: request.goalId,
+        revision,
+        currentPhase: 'cancelled',
+        summary: request.summary,
+        stepUpdates: [],
+        nextAction: '',
+        blockers: [],
+        evidence: request.evidence,
+        activeTaskIds: blockingTaskIds(trackedTasks),
+        trackedTasks,
+        createdAt: request.now,
+      });
+      this.updateExecutionState(
+        request.goalId,
+        request.expectedExecutionGeneration,
+        'terminal',
+        request.now,
+      );
       return { goal: this.requireById(request.goalId), trackedTaskIds, trackedTasks };
     });
   }

@@ -1028,6 +1028,8 @@ function toPublicContinuation(record: ScheduledContinuationSnapshot): ScheduledC
 function toGoalSnapshot(goal: GoalRecord): GoalSnapshot {
   return {
     goalId: goal.id,
+    ...(goal.executionId === undefined ? {} : { executionId: goal.executionId }),
+    ...(goal.executionGeneration === undefined ? {} : { executionGeneration: goal.executionGeneration }),
     goalKey: goal.goalKey,
     workspaceId: goal.workspaceId,
     objective: goal.objective,
@@ -1057,6 +1059,8 @@ function toGoalSnapshot(goal: GoalRecord): GoalSnapshot {
 function toRunSnapshot(goal: GoalSnapshot): Omit<RunGoalResult, 'leaseToken' | 'acquired'> {
   return {
     goalId: goal.goalId,
+    ...(goal.executionId === undefined ? {} : { executionId: goal.executionId }),
+    ...(goal.executionGeneration === undefined ? {} : { executionGeneration: goal.executionGeneration }),
     goalKey: goal.goalKey,
     status: goal.status,
     revision: goal.revision,

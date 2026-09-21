@@ -258,17 +258,10 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
         existing.leaseActivitySeq,
       );
       if (Number(changed.changes) !== 1) throw new GoalStateError('conflict', 'Goal lease changed concurrently');
-      if (existing.leaseGeneration > 0) {
-        this.updateExecutionState(existing.id, existing.leaseGeneration, 'superseded', request.now);
-      }
-      this.insertExecution({
-        id: randomUUID(),
-        goalId: existing.id,
-        workspaceId: existing.workspaceId,
-        leaseGeneration: existing.leaseGeneration + 1,
+      this.rotateExecutionReceiptForLeaseAcquisition({
+        goal: existing,
         ownerClientId: request.ownerClientId,
         ownerSessionId: request.ownerSessionId,
-        state: 'active',
         now: request.now,
       });
       return {
@@ -1604,6 +1597,12 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (Number(cleared.changes) !== 1) throw new GoalStateError('conflict', 'Recurring continuation claim lost the orphan-probe compare-and-swap race');
       observedContinuation = this.requireScheduledContinuationById(continuation.continuationId);
     }
+    this.rotateExecutionReceiptForLeaseAcquisition({
+      goal,
+      ownerClientId: request.ownerClientId,
+      ownerSessionId: request.ownerSessionId,
+      now: request.now,
+    });
     const claimedGoal = this.requireById(goal.id);
     this.recordRecurringRun(
       observedContinuation,
@@ -1718,6 +1717,12 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       throw new GoalStateError('conflict', 'Scheduled continuation claim lost the continuation compare-and-swap race');
     }
     const claimedContinuation = this.requireScheduledContinuationById(request.continuationId);
+    this.rotateExecutionReceiptForLeaseAcquisition({
+      goal,
+      ownerClientId: request.ownerClientId,
+      ownerSessionId: request.ownerSessionId,
+      now: request.now,
+    });
     const claimedGoal = this.requireById(goal.id);
     const prepared = this.prepareFreshClaimSuccessor(request, claimedContinuation, claimedGoal, true);
     const reservedGoal = this.requireById(goal.id);
@@ -2266,6 +2271,32 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       `).run(nextStatus, now, terminalAt, row.id, row.version);
       if (Number(changed.changes) !== 1) throw new GoalStateError('conflict', 'Scheduled continuation finish marker lost the compare-and-swap race');
       return { continuation: this.requireScheduledContinuationById(row.id) };
+    });
+  }
+
+  private rotateExecutionReceiptForLeaseAcquisition(input: {
+    readonly goal: GoalRecord;
+    readonly ownerClientId: string;
+    readonly ownerSessionId: string;
+    readonly now: string;
+  }): void {
+    if (input.goal.leaseGeneration > 0) {
+      this.updateExecutionState(
+        input.goal.id,
+        input.goal.leaseGeneration,
+        'superseded',
+        input.now,
+      );
+    }
+    this.insertExecution({
+      id: randomUUID(),
+      goalId: input.goal.id,
+      workspaceId: input.goal.workspaceId,
+      leaseGeneration: input.goal.leaseGeneration + 1,
+      ownerClientId: input.ownerClientId,
+      ownerSessionId: input.ownerSessionId,
+      state: 'active',
+      now: input.now,
     });
   }
 

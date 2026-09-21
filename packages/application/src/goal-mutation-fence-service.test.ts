@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { GoalStateError, type ScheduledContinuationRepository } from '@unified-mpc/domain';
+import {
+  GoalStateError,
+  type GoalRuntimeSnapshotRecord,
+  type ScheduledContinuationRepository,
+} from '@unified-mpc/domain';
 import { GoalMutationFenceService } from './goal-mutation-fence-service.js';
+import type { GoalRuntimeEventPublisher } from './goal-runtime-control-plane-service.js';
 
 const actor = { clientId: 'client-a', clientName: 'Client A', sessionId: 'shared-session' };
 
@@ -127,4 +132,82 @@ describe('GoalMutationFenceService', () => {
     });
     expect(read).toHaveBeenCalledTimes(1);
   });
+
+  it('publishes execution activity only after an exact-generation fenced mutation is admitted', async (): Promise<void> => {
+    const ensureGoalSnapshot = vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> => runtimeSnapshot());
+    const publishGoalRuntimeEvent = vi.fn(async (): Promise<GoalRuntimeSnapshotRecord> =>
+      runtimeSnapshot({ runtimeState: 'running', lastHeartbeatAt: '2026-08-27T10:00:10.000Z' }));
+    const runtimeEvents: GoalRuntimeEventPublisher = { ensureGoalSnapshot, publishGoalRuntimeEvent };
+    const times = [
+      new Date('2026-08-27T10:00:00.000Z'),
+      new Date('2026-08-27T10:00:10.000Z'),
+      new Date('2026-08-27T10:00:20.000Z'),
+    ];
+    const service = new GoalMutationFenceService(repository(), {
+      now: (): Date => times.shift() ?? new Date('2026-08-27T10:00:20.000Z'),
+      runtimeEvents,
+    });
+
+    await expect(service.begin(actor, 'workspace-1', 'call-runtime', {
+      goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 3,
+    })).resolves.toMatchObject({ ok: true });
+
+    expect(ensureGoalSnapshot).toHaveBeenCalledWith('goal-1');
+    expect(publishGoalRuntimeEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      type: 'execution_started',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      executionId: 'execution-3',
+      executionGeneration: 3,
+      occurredAt: '2026-08-27T10:00:00.000Z',
+    }));
+
+    await service.heartbeat('call-runtime', 3);
+    expect(publishGoalRuntimeEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      type: 'execution_heartbeat',
+      executionId: 'execution-3',
+      executionGeneration: 3,
+      occurredAt: '2026-08-27T10:00:10.000Z',
+    }));
+
+    await service.end('call-runtime');
+    await service.heartbeat('call-runtime', 3);
+    expect(publishGoalRuntimeEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps durable fence admission successful when runtime projection delivery is unavailable', async (): Promise<void> => {
+    const service = new GoalMutationFenceService(repository(), {
+      runtimeEvents: {
+        ensureGoalSnapshot: vi.fn(async (): Promise<never> => { throw new Error('runtime store unavailable'); }),
+        publishGoalRuntimeEvent: vi.fn() as never,
+      },
+    });
+
+    await expect(service.begin(actor, 'workspace-1', 'call-side-path', {
+      goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 3,
+    })).resolves.toMatchObject({ ok: true });
+  });
 });
+
+function runtimeSnapshot(
+  overrides: Partial<GoalRuntimeSnapshotRecord['projection']> = {},
+): GoalRuntimeSnapshotRecord {
+  return {
+    projection: {
+      contractVersion: 1,
+      goalId: 'goal-1',
+      workspaceId: 'workspace-1',
+      lifecycleState: 'open',
+      runtimeState: 'queued',
+      desiredRuntimeState: 'running',
+      integrationState: 'unknown',
+      workspaceState: 'unknown',
+      activeExecutionId: 'execution-3',
+      executionGeneration: 3,
+      lastActivityAt: '2026-08-27T10:00:00.000Z',
+      ...overrides,
+    },
+    lastEventSequence: 1,
+    updatedAt: '2026-08-27T10:00:00.000Z',
+  };
+}

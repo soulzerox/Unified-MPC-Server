@@ -9,6 +9,8 @@ on:
       - "apps/cli/src/runtime/stdio-mcp-runtime.test.ts"
       - "packages/application/src/goal-continuation-service.ts"
       - "packages/application/src/goal-continuation-runtime-events.integration.test.ts"
+      - "packages/application/src/goal-mutation-fence-service.ts"
+      - "packages/application/src/goal-mutation-fence-service.test.ts"
       - "packages/application/src/goal-runtime-control-plane-service.ts"
       - "packages/application/src/goal-runtime-control-plane-service.test.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.ts"
@@ -54,6 +56,7 @@ jobs:
           pnpm --filter @unified-mpc/application exec vitest run
           src/goal-runtime-control-plane-service.test.ts
           src/goal-continuation-runtime-events.integration.test.ts
+          src/goal-mutation-fence-service.test.ts
           src/goal-runtime-reconciliation-service.test.ts
 
       - name: STDIO runtime regression
@@ -75,6 +78,8 @@ jobs:
           packages/storage/src/goal-runtime-snapshot-repository.test.ts
           packages/application/src/goal-continuation-service.ts
           packages/application/src/goal-continuation-runtime-events.integration.test.ts
+          packages/application/src/goal-mutation-fence-service.ts
+          packages/application/src/goal-mutation-fence-service.test.ts
           packages/application/src/goal-runtime-control-plane-service.ts
           packages/application/src/goal-runtime-control-plane-service.test.ts
           packages/application/src/goal-runtime-reconciliation-service.ts

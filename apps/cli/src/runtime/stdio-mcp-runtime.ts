@@ -260,14 +260,6 @@ export function createStdioMcpRuntime(
     { provider: 'agent_swarm', cancelForGoal: agentSwarmService.cancelForGoal.bind(agentSwarmService) },
   ]);
   const requestCancellation = new GoalRequestCancellationService();
-  const goalMutationFence = new GoalMutationFenceService(goalRepository, {
-    taskStateReader: new RuntimeGoalManagedTaskStateReader({
-      process: processService,
-      codex: codexService,
-      shell: capabilityRuntime.shell,
-      agentSwarm: agentSwarmService,
-    }),
-  });
   const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
   const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
   const goalRuntimeControlPlane = new GoalRuntimeControlPlaneService(
@@ -275,6 +267,15 @@ export function createStdioMcpRuntime(
     goalRuntimeSnapshots,
     goalRuntimeEvents,
   );
+  const goalMutationFence = new GoalMutationFenceService(goalRepository, {
+    taskStateReader: new RuntimeGoalManagedTaskStateReader({
+      process: processService,
+      codex: codexService,
+      shell: capabilityRuntime.shell,
+      agentSwarm: agentSwarmService,
+    }),
+    runtimeEvents: goalRuntimeControlPlane,
+  });
   const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {
     scheduledContinuations: goalRepository,
     workerLiveness: goalMutationFence,

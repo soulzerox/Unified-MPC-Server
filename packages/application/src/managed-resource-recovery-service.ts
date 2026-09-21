@@ -57,7 +57,7 @@ export class ManagedResourceRecoveryService {
   ) {
     this.platform = options.platform ?? process.platform;
     this.pollIntervalMs = normalizePollInterval(options.pollIntervalMs);
-    this.now = options.now ?? (() => new Date());
+    this.now = options.now ?? ((): Date => new Date());
     this.probe = options.probe ?? (
       isPosixRecoveryPlatform(this.platform)
         ? new PosixProcessRecoveryProbe({ platform: this.platform })

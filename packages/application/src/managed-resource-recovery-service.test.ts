@@ -18,11 +18,11 @@ import {
 
 const roots: string[] = [];
 
-afterEach(async () => {
+afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture() {
+async function fixture(): Promise<{ database: SqliteDatabase; repository: SqliteManagedResourceBindingRepository; controller: ResourceAdmissionController }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-managed-resource-recovery-'));
   roots.push(root);
   const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
@@ -42,7 +42,7 @@ function store(
   workspaceId = 'workspace-a',
   resourceClass: 'goal_process' | 'delegated_agent' = 'goal_process',
   cost = 4,
-) {
+): void {
   repository.storeActive({
     lease: {
       operationId,
@@ -60,7 +60,7 @@ function store(
 }
 
 function probe(observation: () => PosixProcessRecoveryObservation): ManagedResourceRecoveryProbe {
-  return { inspect: async () => observation() };
+  return { inspect: async (): Promise<PosixProcessRecoveryObservation> => observation() };
 }
 
 describe('ManagedResourceRecoveryService', () => {
@@ -76,8 +76,8 @@ describe('ManagedResourceRecoveryService', () => {
       let tick = 0;
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'linux',
-        probe: probe(() => state),
-        now: () => new Date(`2026-09-21T00:00:0${++tick}.000Z`),
+        probe: probe((): PosixProcessRecoveryObservation => state),
+        now: (): Date => new Date(`2026-09-21T00:00:0${++tick}.000Z`),
       });
 
       expect(await service.reconcileOnce()).toMatchObject({ restored: 1, released: 0 });
@@ -109,8 +109,8 @@ describe('ManagedResourceRecoveryService', () => {
       store(repository, 'goal-already-gone', 'workspace-a', 'goal_process', 4);
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'linux',
-        probe: probe(() => ({ state: 'verified_gone', pid: 4017 })),
-        now: () => new Date('2026-09-21T00:00:02.000Z'),
+        probe: probe((): PosixProcessRecoveryObservation => ({ state: 'verified_gone', pid: 4017 })),
+        now: (): Date => new Date('2026-09-21T00:00:02.000Z'),
       });
 
       expect(await service.reconcileOnce()).toMatchObject({ restored: 0, released: 1 });
@@ -127,7 +127,7 @@ describe('ManagedResourceRecoveryService', () => {
       store(repository, 'delegated-survivor', 'workspace-a', 'delegated_agent', 4);
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'linux',
-        probe: probe(() => ({
+        probe: probe((): PosixProcessRecoveryObservation => ({
           state: 'verified_live',
           pid: 4018,
           startedAt: '2026-09-21T00:00:00.000Z',
@@ -157,12 +157,12 @@ describe('ManagedResourceRecoveryService', () => {
       store(repository, 'delegated-live', 'workspace-a', 'delegated_agent');
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'linux',
-        probe: probe(() => ({
+        probe: probe((): PosixProcessRecoveryObservation => ({
           state: 'termination_unverified',
           pid: 4014,
           reason: 'orphan_group',
         })),
-        now: () => new Date('2026-09-21T00:00:02.000Z'),
+        now: (): Date => new Date('2026-09-21T00:00:02.000Z'),
       });
 
       await service.reconcileOnce();
@@ -189,13 +189,13 @@ describe('ManagedResourceRecoveryService', () => {
       store(repository, 'pid-reused');
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'linux',
-        probe: probe(() => ({
+        probe: probe((): PosixProcessRecoveryObservation => ({
           state: 'identity_mismatch',
           pid: 4010,
           expectedStartedAt: '2026-09-21T00:00:00.000Z',
           observedStartedAt: '2026-09-21T00:01:00.000Z',
         })),
-        now: () => new Date('2026-09-21T00:00:02.000Z'),
+        now: (): Date => new Date('2026-09-21T00:00:02.000Z'),
       });
 
       expect(await service.reconcileOnce()).toMatchObject({ restored: 0, released: 1 });
@@ -213,7 +213,7 @@ describe('ManagedResourceRecoveryService', () => {
       store(repository, 'agent-b', 'workspace-b', 'delegated_agent', 2);
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'linux',
-        probe: probe(() => ({
+        probe: probe((): PosixProcessRecoveryObservation => ({
           state: 'verified_live',
           pid: 4006,
           startedAt: '2026-09-21T00:00:00.000Z',
@@ -240,7 +240,7 @@ describe('ManagedResourceRecoveryService', () => {
       store(repository, 'windows-unverifiable');
       const service = new ManagedResourceRecoveryService(repository, controller, {
         platform: 'win32',
-        now: () => new Date('2026-09-21T00:00:02.000Z'),
+        now: (): Date => new Date('2026-09-21T00:00:02.000Z'),
       });
 
       expect(await service.reconcileOnce()).toMatchObject({

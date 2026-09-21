@@ -601,9 +601,9 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (
         execution.executionGeneration !== request.expectedExecutionGeneration
         || execution.leaseGeneration !== request.expectedExecutionGeneration
-        || execution.receiptState !== 'active'
+        || (execution.receiptState !== 'active' && execution.receiptState !== 'released')
       ) {
-        throw new GoalStateError('conflict', 'Goal execution is no longer the active generation');
+        throw new GoalStateError('conflict', 'Goal execution is no longer the cancellable current generation');
       }
 
       const current = this.requireById(request.goalId);

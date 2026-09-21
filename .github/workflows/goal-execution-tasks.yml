@@ -10,6 +10,8 @@ on:
       - "packages/application/src/scheduled-continuation-service.ts"
       - "packages/domain/src/goal-continuation.ts"
       - "packages/domain/src/goal-runtime.ts"
+      - "packages/mcp-server/src/goal-process-admission.ts"
+      - "packages/mcp-server/src/goal-process-admission.integration.test.ts"
       - "packages/mcp-server/src/modern-tasks-protocol.ts"
       - "packages/mcp-server/src/modern-tasks-goal.test.ts"
       - "packages/mcp-server/src/scheduled-continuation-fence.test.ts"
@@ -22,6 +24,8 @@ on:
       - "packages/storage/src/goal-scheduled-execution-ownership.integration.test.ts"
       - "packages/storage/src/goal-runtime-event-repository.ts"
       - "packages/storage/src/goal-runtime-snapshot-repository.ts"
+      - "packages/workspace/src/resource-admission.ts"
+      - "packages/workspace/src/resource-admission.test.ts"
   workflow_dispatch:
 
 permissions:
@@ -61,16 +65,21 @@ jobs:
           src/goal-restart-reconnect.integration.test.ts
           src/goal-scheduled-execution-ownership.integration.test.ts
 
-      - name: Goal-backed MCP Tasks and parent-abort regression
+      - name: Goal resource admission contract
+        run: pnpm --filter @unified-mpc/workspace exec vitest run --fileParallelism=false src/resource-admission.test.ts
+
+      - name: Goal-backed MCP Tasks, parent-abort, and process-lifetime regression
         run: >-
           pnpm --filter @unified-mpc/mcp-server exec vitest run --fileParallelism=false
           src/modern-tasks-goal.test.ts
           src/modern-tasks.integration.test.ts
           src/scheduled-continuation-fence.test.ts
+          src/goal-process-admission.integration.test.ts
 
       - name: Targeted typecheck
         run: |
           pnpm --filter @unified-mpc/domain typecheck
+          pnpm --filter @unified-mpc/workspace typecheck
           pnpm --filter @unified-mpc/storage typecheck
           pnpm --filter @unified-mpc/application typecheck
           pnpm --filter @unified-mpc/mcp-server typecheck
@@ -87,6 +96,10 @@ jobs:
           packages/application/src/goal-continuation-service.ts
           packages/application/src/scheduled-continuation-service.ts
           packages/application/src/goal-runtime-reconciliation-service.ts
+          packages/workspace/src/resource-admission.ts
+          packages/workspace/src/resource-admission.test.ts
+          packages/mcp-server/src/goal-process-admission.ts
+          packages/mcp-server/src/goal-process-admission.integration.test.ts
           packages/mcp-server/src/modern-tasks-protocol.ts
           packages/mcp-server/src/modern-tasks-goal.test.ts
           packages/mcp-server/src/scheduled-continuation-fence.test.ts

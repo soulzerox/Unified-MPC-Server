@@ -60,6 +60,13 @@ if is_disposable_runtime_root "$resolved_root"; then
   fail 65 "RUNTIME_ROOT_DISPOSABLE: runtime root resolves to managed worktree/workspace '$resolved_root'"
 fi
 
+# A linked Git worktree has a .git *file* pointing back to the common Git dir,
+# whereas a canonical checkout normally has a .git directory. Reject linked
+# worktrees even when they live outside Unified's conventional path prefixes.
+if [[ -f "$resolved_root/.git" ]]; then
+  fail 65 "RUNTIME_ROOT_DISPOSABLE: refusing linked Git worktree runtime root '$resolved_root'"
+fi
+
 if [[ ! -f "$resolved_root/$entrypoint" ]]; then
   fail 67 "RUNTIME_ARTIFACT_MISSING: expected service entrypoint '$resolved_root/$entrypoint'"
 fi

@@ -667,6 +667,115 @@ describe('MCP tool registry', () => {
     vi.useRealTimers();
   });
 
+  it('governs all heavy context reads while cheap workspace metadata stays responsive', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 2,
+      resourceClassCost: { context_scan: 4 },
+    });
+    const held = controller.tryAcquire({
+      operationId: 'held-context-scan',
+      workspaceId: 'workspace-held',
+      sessionId: 'session-held',
+      resourceClass: 'context_scan',
+      cost: 4,
+    });
+    if (!held.admitted) throw new Error('expected held context admission');
+    const workspaceInfo = vi.fn(async () => ok({ id: 'workspace-a' }));
+    const registry = new ToolRegistry({
+      workspaceInfo: { info: workspaceInfo },
+    } as unknown as McpApplicationServices, actor, {
+      sessionId: 'session-a',
+      resourceAdmissionController: controller,
+      contextScanAdmissionCost: 4,
+    });
+
+    const heavyCalls: Array<readonly [string, unknown]> = [
+      ['workspace_context', { workspaceId: 'workspace-a', query: 'needle' }],
+      ['workspace_full_scan', { workspaceId: 'workspace-a' }],
+      ['search_all', { workspaceId: 'workspace-a', query: 'needle' }],
+      ['read_many_files', { workspaceId: 'workspace-a', files: [{ path: 'README.md' }] }],
+    ];
+    for (const [tool, input] of heavyCalls) {
+      await expect(registry.invoke(tool, input)).resolves.toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: 'RESOURCE_PRESSURE',
+            recoverable: true,
+            details: { reason: 'resource_class_cost_exhausted' },
+          },
+        },
+      });
+    }
+
+    const metadata = await registry.invoke('workspace_snapshot', { workspaceId: 'workspace-a' });
+    expect(metadata.isError).not.toBe(true);
+    expect(workspaceInfo).toHaveBeenCalledTimes(1);
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 4,
+      activeOperations: 1,
+      activeCostByClass: { context_scan: 4 },
+    });
+    expect(controller.release(held.lease)).toBe(true);
+  });
+
+  it('keeps heavy context admission while a timed-out backend is still settling', async () => {
+    vi.useFakeTimers();
+    const controller = new ResourceAdmissionController({
+      globalCost: 4,
+      workspaceCost: 4,
+      sessionCost: 4,
+      maxOperations: 1,
+      resourceClassCost: { context_scan: 4 },
+    });
+    let settleSearch: (() => void) | undefined;
+    let searchStarted = false;
+    const registry = new ToolRegistry({
+      search: {
+        async searchText(): Promise<ReturnType<typeof ok>> {
+          searchStarted = true;
+          return await new Promise((resolve) => {
+            settleSearch = (): void => resolve(ok({ matches: [], truncated: false }));
+          });
+        },
+        async searchFiles(): Promise<ReturnType<typeof ok>> {
+          return ok({ paths: [], truncated: false });
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      sessionId: 'session-a',
+      resourceAdmissionController: controller,
+      contextScanAdmissionCost: 4,
+      maxToolDurationMs: 10,
+    });
+
+    const pending = registry.invoke('search_all', { workspaceId: 'workspace-a', query: 'needle' });
+    for (let attempt = 0; attempt < 20 && !searchStarted; attempt += 1) await Promise.resolve();
+    expect(searchStarted).toBe(true);
+    expect(controller.snapshot()).toMatchObject({
+      activeCost: 4,
+      activeOperations: 1,
+      activeCostByClass: { context_scan: 4 },
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT', recoverable: true } },
+    });
+    expect(controller.snapshot()).toMatchObject({ activeCost: 4, activeOperations: 1 });
+
+    settleSearch?.();
+    for (let attempt = 0; attempt < 20 && controller.snapshot().activeOperations > 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+    vi.useRealTimers();
+  });
+
   it('lets an already-started call settle after disable while blocking future calls', async () => {
     let snapshot = { version: 1 as const, generation: 0, overrides: {} as Record<string, 'enabled' | 'disabled'> };
     let releaseRead!: () => void;

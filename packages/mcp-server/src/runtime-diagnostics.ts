@@ -1,6 +1,7 @@
 import type { FileActor } from '@unified-mpc/application';
 import { isMcpRuntimeDiagnosticsSnapshot, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import type { ActivityTracker } from './activity-tracker.js';
+import type { IncrementalVerifier } from './incremental-verifier.js';
 import type { McpApplicationServices } from './tools/tool-types.js';
 import { UpgradeRuntimeService } from './upgrade-runtime.js';
 
@@ -10,6 +11,7 @@ export function createMcpRuntimeDiagnosticsProvider(options: {
   readonly services: McpApplicationServices;
   readonly actor: FileActor;
   readonly activityTracker?: ActivityTracker;
+  readonly incrementalVerifier?: IncrementalVerifier;
 }): McpRuntimeDiagnosticsProvider {
   return async (): Promise<McpRuntimeDiagnosticsSnapshot> => {
     const runtime = new UpgradeRuntimeService(
@@ -17,7 +19,7 @@ export function createMcpRuntimeDiagnosticsProvider(options: {
       options.actor,
       undefined,
       () => true,
-      undefined,
+      options.incrementalVerifier,
       options.activityTracker,
     );
     const result = await runtime.execute('telemetry_dashboard', {});

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -69,6 +69,24 @@ describe('MCP runtime diagnostics provider', () => {
         worktrees: 1,
         contextLedgerEntries: null,
       });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports shared retention unavailable when the persisted store cannot be read', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'runtime-diagnostics-unreadable-'));
+    try {
+      const blockedParent = path.join(directory, 'not-a-directory');
+      await writeFile(blockedParent, 'blocked');
+      const provider = createMcpRuntimeDiagnosticsProvider({
+        services: { runtimeStatePath: path.join(blockedParent, 'upgrade-runtime.json') },
+        actor: { clientId: 'diagnostics-provider-test', clientName: 'diagnostics-provider-test' },
+      });
+
+      const diagnostics = await provider();
+      expect(diagnostics.runtimeRetention.plugins).toBeNull();
+      expect(diagnostics.runtimeRetention.worktrees).toBeNull();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

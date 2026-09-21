@@ -171,6 +171,14 @@ export function classifyGoalRuntimeEvent(
     return { disposition: 'reject', reason: 'execution_identity_mismatch' };
   }
 
+  if (current.activeExecutionId === undefined
+    && current.executionGeneration === event.executionGeneration
+    && event.type !== 'integration_started'
+    && event.type !== 'integration_completed'
+    && event.type !== 'integration_conflict') {
+    return { disposition: 'reject', reason: 'terminal_generation' };
+  }
+
   if (isTerminalRuntimeState(current.runtimeState) && isExecutionActivityEvent(event.type)) {
     return { disposition: 'reject', reason: 'terminal_generation' };
   }

@@ -14,6 +14,8 @@ on:
       - "packages/application/src/scheduled-continuation-service.ts"
       - "packages/domain/src/goal-continuation.ts"
       - "packages/domain/src/goal-runtime.ts"
+      - "packages/process/src/process-recovery.ts"
+      - "packages/process/src/process-recovery.test.ts"
       - "packages/mcp-server/src/goal-managed-task-state-reader.ts"
       - "packages/mcp-server/src/goal-managed-task-state-reader.test.ts"
       - "packages/mcp-server/src/goal-process-admission.ts"
@@ -73,6 +75,9 @@ jobs:
           src/goal-restart-reconnect.integration.test.ts
           src/goal-scheduled-execution-ownership.integration.test.ts
 
+      - name: Managed process restart identity contract
+        run: pnpm --filter @unified-mpc/process exec vitest run --fileParallelism=false src/process-recovery.test.ts
+
       - name: Goal resource admission contract
         run: pnpm --filter @unified-mpc/workspace exec vitest run --fileParallelism=false src/resource-admission.test.ts
 
@@ -94,6 +99,7 @@ jobs:
       - name: Targeted typecheck
         run: |
           pnpm --filter @unified-mpc/domain typecheck
+          pnpm --filter @unified-mpc/process typecheck
           pnpm --filter @unified-mpc/workspace typecheck
           pnpm --filter @unified-mpc/storage typecheck
           pnpm --filter @unified-mpc/application typecheck
@@ -104,6 +110,8 @@ jobs:
         run: >-
           pnpm exec eslint
           packages/domain/src/goal-continuation.ts
+          packages/process/src/process-recovery.ts
+          packages/process/src/process-recovery.test.ts
           packages/storage/src/goal-repository.ts
           packages/storage/src/goal-continuation.integration.test.ts
           packages/storage/src/goal-restart-reconnect.integration.test.ts

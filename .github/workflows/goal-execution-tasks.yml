@@ -37,6 +37,11 @@ on:
       - "packages/mcp-server/src/tools/goal-tools.ts"
       - "packages/mcp-server/src/tools/tool-types.ts"
       - "packages/storage/src/agent-swarm-repository.ts"
+      - "packages/storage/src/database.ts"
+      - "packages/storage/src/index.ts"
+      - "packages/storage/src/managed-resource-binding-repository.ts"
+      - "packages/storage/src/managed-resource-binding-repository.integration.test.ts"
+      - "packages/storage/src/migrations/managed-resource-binding-migration.ts"
       - "packages/storage/src/goal-continuation.integration.test.ts"
       - "packages/storage/src/goal-repository.ts"
       - "packages/storage/src/goal-restart-reconnect.integration.test.ts"
@@ -83,6 +88,9 @@ jobs:
           src/goal-continuation.integration.test.ts
           src/goal-restart-reconnect.integration.test.ts
           src/goal-scheduled-execution-ownership.integration.test.ts
+
+      - name: Durable managed resource binding contract
+        run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/managed-resource-binding-repository.integration.test.ts
 
       - name: Managed process restart identity contract
         run: >-
@@ -163,4 +171,9 @@ jobs:
           packages/mcp-server/src/tools/goal-tools.ts
           packages/mcp-server/src/tools/tool-types.ts
           packages/storage/src/agent-swarm-repository.ts
+          packages/storage/src/database.ts
+          packages/storage/src/index.ts
+          packages/storage/src/managed-resource-binding-repository.ts
+          packages/storage/src/managed-resource-binding-repository.integration.test.ts
+          packages/storage/src/migrations/managed-resource-binding-migration.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts

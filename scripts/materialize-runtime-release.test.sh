@@ -32,7 +32,12 @@ test -d "$release/apps/cli/node_modules"
 test ! -e "$release/apps/cli/node_modules/.pnpm/node_modules/@unified-mpc/cli"
 
 while IFS= read -r -d '' link; do
+  raw_target="$(readlink -- "$link" 2>/dev/null || true)"
   resolved="$(readlink -f -- "$link" 2>/dev/null || true)"
+  [[ "$raw_target" != /* ]] || {
+    printf 'release contains absolute symlink: %s -> %s\n' "$link" "$raw_target" >&2
+    exit 1
+  }
   [[ -n "$resolved" && ( "$resolved" == "$release" || "$resolved" == "$release/"* ) ]] || {
     printf 'release contains escaping symlink: %s -> %s\n' "$link" "$resolved" >&2
     exit 1

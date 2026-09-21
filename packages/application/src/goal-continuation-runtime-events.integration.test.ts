@@ -140,6 +140,6 @@ describe('GoalContinuationService authoritative runtime producer', () => {
 
     const snapshot = await snapshots.getGoalRuntimeSnapshot(started.value.goalId);
     expect(snapshot?.projection.runtimeState).toBe('queued');
-    expect(snapshot?.projection.lastHeartbeatAt).toBe('2026-09-22T00:01:00.000Z');
+    expect(snapshot?.projection.lastHeartbeatAt).toBeUndefined();
   });
 });

@@ -521,6 +521,29 @@ function projectionFromDurableGoal(goal: GoalRecord): GoalRuntimeProjection {
   }
 }
 
+function durableGoalBlockerDetail(goal: GoalRecord): string | undefined {
+  const blockers = goal.blockers.map((value) => value.trim()).filter((value) => value.length > 0);
+  if (blockers.length === 0) return undefined;
+
+  const prefix = `Durable Goal blockers at revision ${goal.revision}: `;
+  const joined = blockers.join(' • ');
+  if (prefix.length + joined.length <= MAX_DURABLE_GOAL_BLOCKER_DETAIL) return `${prefix}${joined}`;
+
+  const available = Math.max(0, MAX_DURABLE_GOAL_BLOCKER_DETAIL - prefix.length - 1);
+  return `${prefix}${joined.slice(0, available).trimEnd()}…`;
+}
+
+function durableGoalBlockerRuntimeEventId(
+  goalId: string,
+  goalRevision: number,
+  state: 'blocked' | 'clear',
+  snapshotSequence: number,
+): string {
+  const digest = createHash('sha256')
+    .update([goalId, 'goal_blocker_observed', String(goalRevision), state, String(snapshotSequence)].join('\0'))
+    .digest('hex');
+  return `goal-runtime-blocker-${digest}`;
+}
 function durableRuntimeEventId(goalId: string, type: GoalRuntimeEvent['type'], discriminator: string): string {
   const digest = createHash('sha256')
     .update([goalId, type, discriminator].join('\0'))

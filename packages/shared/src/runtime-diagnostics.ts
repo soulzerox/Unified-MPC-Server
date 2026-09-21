@@ -7,18 +7,19 @@ export interface McpProcessMemorySnapshot {
 }
 
 export interface McpRuntimeRetentionSnapshot {
-  readonly tasks: number;
-  readonly checkpoints: number;
-  readonly hooks: number;
-  readonly plugins: number;
-  readonly sessionEntries: number;
-  readonly worktrees: number;
-  readonly activityInflight: number;
-  readonly activityCompletedEntries: number;
-  readonly activityCompletedEntryLimit: number;
-  readonly incrementalVerificationEntries: number;
-  readonly contextLedgerEntries: number;
-  readonly toolAvailabilitySubscriptions: number;
+  /** null means no process-authoritative owner is exposed for this counter. */
+  readonly tasks: number | null;
+  readonly checkpoints: number | null;
+  readonly hooks: number | null;
+  readonly plugins: number | null;
+  readonly sessionEntries: number | null;
+  readonly worktrees: number | null;
+  readonly activityInflight: number | null;
+  readonly activityCompletedEntries: number | null;
+  readonly activityCompletedEntryLimit: number | null;
+  readonly incrementalVerificationEntries: number | null;
+  readonly contextLedgerEntries: number | null;
+  readonly toolAvailabilitySubscriptions: number | null;
 }
 
 export interface McpRuntimeDiagnosticsSnapshot {
@@ -49,7 +50,7 @@ export function isMcpRuntimeDiagnosticsSnapshot(value: unknown): value is McpRun
     'contextLedgerEntries',
     'toolAvailabilitySubscriptions',
   ] as const) {
-    if (!isCounter(value.runtimeRetention[key])) return false;
+    if (!isCounterOrUnavailable(value.runtimeRetention[key])) return false;
   }
 
   return true;
@@ -61,4 +62,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isCounter(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isCounterOrUnavailable(value: unknown): value is number | null {
+  return value === null || isCounter(value);
 }

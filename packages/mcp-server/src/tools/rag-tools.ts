@@ -1,5 +1,6 @@
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import {
+  ragCancelIndexSchema,
   ragCodeBlastRadiusSchema,
   ragCodeContextSchema,
   ragCodeIndexSchema,
@@ -135,6 +136,15 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
         ? missingService()
         : context.nativeRagCall(input.workspaceId, 'index_status', { job_id: input.jobId }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_cancel_index',
+      description: 'Request cancellation of one parent-owned native Thai-RAG background indexing job in the selected canonical workspace.',
+      ...safeWrite,
+      inputSchema: ragCancelIndexSchema,
+      handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
+        ? missingService()
+        : context.nativeRagCall(input.workspaceId, 'cancel_index', { job_id: input.jobId }, signal, budget),
     }),
   ];
 }

@@ -63,7 +63,7 @@ describe('resource governor mixed-client stress acceptance', () => {
       } as unknown as McpApplicationServices['extensions'],
     } as unknown as McpApplicationServices, actorA, {
       sessionId: 'session-a',
-      profileProvider: () => permissionProfiles.full,
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
       authorizationModeProvider: () => 'full_bypass' as const,
       activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({
         workspaceId: 'workspace-a',
@@ -86,7 +86,7 @@ describe('resource governor mixed-client stress acceptance', () => {
       },
     } as unknown as McpApplicationServices, { clientId: 'stress-b', clientName: 'stress-b' }, {
       sessionId: 'session-b',
-      profileProvider: () => permissionProfiles.full,
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
       authorizationModeProvider: () => 'full_bypass' as const,
       activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({
         workspaceId: 'workspace-b',

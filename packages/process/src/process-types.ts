@@ -19,6 +19,19 @@ export interface ManagedProcess {
   readonly error?: string;
 }
 
+/**
+ * Internal host identity used only for restart reconciliation.
+ *
+ * This is intentionally separate from ManagedProcess so raw OS process ids are
+ * not projected through normal MCP process responses.
+ */
+export interface ManagedProcessRecoveryIdentity {
+  readonly processId: string;
+  readonly platform: 'linux' | 'darwin';
+  readonly pid: number;
+  readonly processStartedAt: string;
+}
+
 export type ProcessLogStream = 'stdout' | 'stderr';
 
 export interface ProcessLogEntry {

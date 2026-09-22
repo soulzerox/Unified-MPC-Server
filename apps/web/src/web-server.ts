@@ -1023,13 +1023,13 @@ export class ControlPlaneServer {
       : requestedCursor!;
     let closed = false;
     let pollTimer: NodeJS.Timeout | undefined;
-    let keepaliveTimer: NodeJS.Timeout | undefined;
+    let keepaliveTimer: NodeJS.Timeout | null = null;
 
     const dispose = (): void => {
       if (closed) return;
       closed = true;
       if (pollTimer !== undefined) clearTimeout(pollTimer);
-      if (keepaliveTimer !== undefined) clearInterval(keepaliveTimer);
+      if (keepaliveTimer !== null) clearInterval(keepaliveTimer);
       this.goalRuntimeStreamClosers.delete(closeStream);
     };
     const closeStream = (): void => {

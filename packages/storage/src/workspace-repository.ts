@@ -8,12 +8,20 @@ interface WorkspaceRow {
   readonly real_root_path: string;
   readonly created_at: string;
   readonly archived_at: string | null;
-  readonly workspace_kind: 'project' | 'temporary' | 'inspection';
+  readonly workspace_kind: 'project' | 'goal' | 'temporary' | 'inspection';
   readonly owner_session_id: string | null;
   readonly owner_job_id: string | null;
   readonly auto_cleanup: number;
   readonly expires_at: string | null;
   readonly unavailable_since: string | null;
+  readonly goal_id: string | null;
+  readonly parent_workspace_id: string | null;
+  readonly goal_workspace_kind: 'git_worktree' | 'snapshot' | null;
+  readonly parent_source: 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | null;
+  readonly base_revision: string | null;
+  readonly branch_name: string | null;
+  readonly checkpoint_id: string | null;
+  readonly integration_state: 'pending' | 'integrated' | 'conflict' | 'unknown' | null;
 }
 
 const workspaceColumns = [
@@ -29,6 +37,14 @@ const workspaceColumns = [
   'auto_cleanup',
   'expires_at',
   'unavailable_since',
+  'goal_id',
+  'parent_workspace_id',
+  'goal_workspace_kind',
+  'parent_source',
+  'base_revision',
+  'branch_name',
+  'checkpoint_id',
+  'integration_state',
 ].join(', ');
 
 export class SqliteWorkspaceRepository {
@@ -66,7 +82,7 @@ export class SqliteWorkspaceRepository {
 
   public async insert(workspace: Workspace): Promise<void> {
     this.database.connection.prepare(
-      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
       workspace.id,
       workspace.displayName,
@@ -80,6 +96,14 @@ export class SqliteWorkspaceRepository {
       workspace.autoCleanup === true ? 1 : 0,
       workspace.expiresAt ?? null,
       workspace.unavailableSince ?? null,
+      workspace.goalId ?? null,
+      workspace.parentWorkspaceId ?? null,
+      workspace.goalWorkspaceKind ?? null,
+      workspace.parentSource ?? null,
+      workspace.baseRevision ?? null,
+      workspace.branchName ?? null,
+      workspace.checkpointId ?? null,
+      workspace.integrationState ?? null,
     );
   }
 
@@ -94,7 +118,7 @@ export class SqliteWorkspaceRepository {
         return false;
       }
       this.database.connection.prepare(
-        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       ).run(
         workspace.id,
         workspace.displayName,
@@ -108,6 +132,14 @@ export class SqliteWorkspaceRepository {
         workspace.autoCleanup === true ? 1 : 0,
         workspace.expiresAt ?? null,
         workspace.unavailableSince ?? null,
+        workspace.goalId ?? null,
+        workspace.parentWorkspaceId ?? null,
+        workspace.goalWorkspaceKind ?? null,
+        workspace.parentSource ?? null,
+        workspace.baseRevision ?? null,
+        workspace.branchName ?? null,
+        workspace.checkpointId ?? null,
+        workspace.integrationState ?? null,
       );
       this.database.connection.exec('COMMIT;');
       return true;
@@ -145,7 +177,7 @@ export class SqliteWorkspaceRepository {
       ).get(workspace.realRootPath, id);
       if (existing !== undefined) throw new Error('Workspace root is already registered');
       this.database.connection.prepare(
-        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, archived_at = NULL WHERE id = ?',
+        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, goal_id = ?, parent_workspace_id = ?, goal_workspace_kind = ?, parent_source = ?, base_revision = ?, branch_name = ?, checkpoint_id = ?, integration_state = ?, archived_at = NULL WHERE id = ?',
       ).run(
         workspace.displayName,
         workspace.rootPath,
@@ -156,6 +188,14 @@ export class SqliteWorkspaceRepository {
         workspace.autoCleanup === true ? 1 : 0,
         workspace.expiresAt ?? null,
         workspace.unavailableSince ?? null,
+        workspace.goalId ?? null,
+        workspace.parentWorkspaceId ?? null,
+        workspace.goalWorkspaceKind ?? null,
+        workspace.parentSource ?? null,
+        workspace.baseRevision ?? null,
+        workspace.branchName ?? null,
+        workspace.checkpointId ?? null,
+        workspace.integrationState ?? null,
         id,
       );
       this.database.connection.exec('COMMIT;');
@@ -195,6 +235,14 @@ export class SqliteWorkspaceRepository {
       ...(value.expires_at === null ? {} : { expiresAt: value.expires_at }),
       ...(value.unavailable_since === null ? {} : { unavailableSince: value.unavailable_since }),
       ...(value.archived_at === null ? {} : { archivedAt: value.archived_at }),
+      ...(value.goal_id === null ? {} : { goalId: value.goal_id }),
+      ...(value.parent_workspace_id === null ? {} : { parentWorkspaceId: value.parent_workspace_id }),
+      ...(value.goal_workspace_kind === null ? {} : { goalWorkspaceKind: value.goal_workspace_kind }),
+      ...(value.parent_source === null ? {} : { parentSource: value.parent_source }),
+      ...(value.base_revision === null ? {} : { baseRevision: value.base_revision }),
+      ...(value.branch_name === null ? {} : { branchName: value.branch_name }),
+      ...(value.checkpoint_id === null ? {} : { checkpointId: value.checkpoint_id }),
+      ...(value.integration_state === null ? {} : { integrationState: value.integration_state }),
     };
   }
 
@@ -210,11 +258,19 @@ export class SqliteWorkspaceRepository {
       && typeof value.real_root_path === 'string'
       && typeof value.created_at === 'string'
       && (value.archived_at === null || typeof value.archived_at === 'string')
-      && (value.workspace_kind === 'project' || value.workspace_kind === 'temporary' || value.workspace_kind === 'inspection')
+      && (value.workspace_kind === 'project' || value.workspace_kind === 'goal' || value.workspace_kind === 'temporary' || value.workspace_kind === 'inspection')
       && (value.owner_session_id === null || typeof value.owner_session_id === 'string')
       && (value.owner_job_id === null || typeof value.owner_job_id === 'string')
       && (value.auto_cleanup === 0 || value.auto_cleanup === 1)
       && (value.expires_at === null || typeof value.expires_at === 'string')
-      && (value.unavailable_since === null || typeof value.unavailable_since === 'string');
+      && (value.unavailable_since === null || typeof value.unavailable_since === 'string')
+      && (value.goal_id === null || typeof value.goal_id === 'string')
+      && (value.parent_workspace_id === null || typeof value.parent_workspace_id === 'string')
+      && (value.goal_workspace_kind === null || value.goal_workspace_kind === 'git_worktree' || value.goal_workspace_kind === 'snapshot')
+      && (value.parent_source === null || value.parent_source === 'committed_head' || value.parent_source === 'named_revision' || value.parent_source === 'checkpoint' || value.parent_source === 'patch')
+      && (value.base_revision === null || typeof value.base_revision === 'string')
+      && (value.branch_name === null || typeof value.branch_name === 'string')
+      && (value.checkpoint_id === null || typeof value.checkpoint_id === 'string')
+      && (value.integration_state === null || value.integration_state === 'pending' || value.integration_state === 'integrated' || value.integration_state === 'conflict' || value.integration_state === 'unknown');
   }
 }

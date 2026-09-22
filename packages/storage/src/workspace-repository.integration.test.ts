@@ -72,6 +72,38 @@ describe('SqliteWorkspaceRepository', () => {
     }
   });
 
+  it('round-trips durable Goal Workspace ownership and source metadata', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-workspace-db-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    try {
+      const repository = new SqliteWorkspaceRepository(database);
+      const goalWorkspace: Workspace = {
+        id: 'goal-workspace-1',
+        displayName: 'Goal workspace',
+        rootPath: root,
+        realRootPath: root,
+        createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal',
+        goalId: 'goal-1',
+        parentWorkspaceId: 'project-1',
+        goalWorkspaceKind: 'git_worktree',
+        parentSource: 'committed_head',
+        baseRevision: 'abc123',
+        branchName: 'goal/goal-1',
+        checkpointId: 'checkpoint-1',
+        integrationState: 'pending',
+      };
+
+      await repository.insert(goalWorkspace);
+
+      await expect(repository.get(goalWorkspace.id)).resolves.toEqual(goalWorkspace);
+      await expect(repository.list()).resolves.toEqual([goalWorkspace]);
+    } finally {
+      database.close();
+    }
+  });
+
   it('archives registrations outside the runtime view and restores them without deleting project data', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-archive-'));
     temporaryRoots.push(root);

@@ -241,4 +241,99 @@ describe('GoalWorkspaceService', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('preflights explicit integration against a clean target and unchanged base', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-preflight-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+      const goalRoot = path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1');
+      await mkdir(goalRoot, { recursive: true });
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: goalRoot, realRootPath: goalRoot, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'base123', branchName: 'goal/goal-1', integrationState: 'pending',
+      });
+      const git = new FakeGitPort();
+      git.runResults = [
+        { exitCode: 0, stdout: 'goal/goal-1\n', stderr: '' },
+        { exitCode: 0, stdout: 'goal123\n', stderr: '' },
+        { exitCode: 0, stdout: 'main\n', stderr: '' },
+        { exitCode: 0, stdout: 'target123\n', stderr: '' },
+        { exitCode: 0, stdout: '', stderr: '' },
+      ];
+
+      await expect(new GoalWorkspaceService(repository, git).integrationPreflight('goal-1')).resolves.toMatchObject({
+        ok: true,
+        value: {
+          canIntegrate: true, blockers: [], goalHeadRevision: 'goal123', baseRevision: 'base123',
+          targetBranchName: 'main', targetHeadRevision: 'target123', targetWorkspaceState: 'clean',
+        },
+      });
+      expect(git.commands.at(-1)).toEqual(['merge-base', '--is-ancestor', 'base123', 'target123']);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks explicit integration when the canonical target is dirty', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-preflight-dirty-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+      const goalRoot = path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1');
+      await mkdir(goalRoot, { recursive: true });
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: goalRoot, realRootPath: goalRoot, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'base123', branchName: 'goal/goal-1', integrationState: 'pending',
+      });
+      const git = new FakeGitPort();
+      git.statusEntries = [{ path: 'unrelated.ts', kind: 'modified', indexStatus: ' ', worktreeStatus: 'M' }];
+
+      await expect(new GoalWorkspaceService(repository, git).integrationPreflight('goal-1')).resolves.toMatchObject({
+        ok: true,
+        value: { canIntegrate: false, blockers: ['target_workspace_dirty'], targetWorkspaceState: 'dirty' },
+      });
+      expect(git.commands).toEqual([]);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports target branch drift as a guarded integration blocker', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-preflight-drift-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+      const goalRoot = path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1');
+      await mkdir(goalRoot, { recursive: true });
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: goalRoot, realRootPath: goalRoot, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'base123', branchName: 'goal/goal-1', integrationState: 'pending',
+      });
+      const git = new FakeGitPort();
+      git.runResults = [
+        { exitCode: 0, stdout: 'goal/goal-1\n', stderr: '' },
+        { exitCode: 0, stdout: 'goal123\n', stderr: '' },
+        { exitCode: 0, stdout: 'main\n', stderr: '' },
+        { exitCode: 0, stdout: 'target123\n', stderr: '' },
+        { exitCode: 1, stdout: '', stderr: 'base is not an ancestor' },
+      ];
+
+      await expect(new GoalWorkspaceService(repository, git).integrationPreflight('goal-1')).resolves.toMatchObject({
+        ok: true,
+        value: { canIntegrate: false, blockers: ['target_branch_drift'], targetHeadRevision: 'target123' },
+      });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
 });

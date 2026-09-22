@@ -52,6 +52,7 @@ export interface GoalWorkspaceStatus {
   readonly headRevision?: string;
   readonly checkpointId?: string;
   readonly integrationState?: Workspace['integrationState'];
+  readonly writerLease?: WorkspaceWriterLease;
   readonly branchDrift: boolean;
   readonly detail?: string;
 }
@@ -492,6 +493,7 @@ function workspaceStatus(
     ...(headRevision === undefined ? {} : { headRevision }),
     ...(workspace.checkpointId === undefined ? {} : { checkpointId: workspace.checkpointId }),
     ...(workspace.integrationState === undefined ? {} : { integrationState: workspace.integrationState }),
+    ...(workspace.writerLease === undefined ? {} : { writerLease: workspace.writerLease }),
     branchDrift: branchName !== undefined && workspace.branchName !== undefined && branchName !== workspace.branchName,
     ...(detail === undefined ? {} : { detail }),
   };

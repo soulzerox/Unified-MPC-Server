@@ -999,28 +999,6 @@ export class ControlPlaneServer {
     const runtime = this.goalRuntimeRead;
     if (runtime === undefined) throw new Error('Goal runtime projection service is unavailable');
 
-    const initialPage = await runtime.replayWorkspaceGoalRuntimeEvents({
-      workspaceId,
-      ...(requestedCursor === undefined ? {} : { afterSequence: requestedCursor }),
-      limit: GOAL_RUNTIME_REPLAY_LIMIT,
-    });
-    const initialWindowMissed = requestedCursor !== undefined && (
-      initialPage.replayWindowMissed
-      || (initialPage.latestSequence !== undefined && requestedCursor > initialPage.latestSequence)
-    );
-    const needsSnapshot = requestedCursor === undefined
-      || initialWindowMissed
-      || initialPage.latestSequence === undefined;
-    const initialSnapshots = needsSnapshot
-      ? await runtime.listWorkspaceGoalRuntimeSnapshots({
-          workspaceId,
-          limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
-        })
-      : undefined;
-
-    let cursor = needsSnapshot
-      ? goalRuntimeSnapshotCursor(initialSnapshots ?? [], initialPage)
-      : requestedCursor!;
     let closed = false;
     let pollTimer: NodeJS.Timeout | undefined;
     let keepaliveTimer: NodeJS.Timeout | null = null;
@@ -1038,6 +1016,32 @@ export class ControlPlaneServer {
     };
     this.goalRuntimeStreamClosers.add(closeStream);
     res.once('close', dispose);
+
+    const initialPage = await runtime.replayWorkspaceGoalRuntimeEvents({
+      workspaceId,
+      ...(requestedCursor === undefined ? {} : { afterSequence: requestedCursor }),
+      limit: GOAL_RUNTIME_REPLAY_LIMIT,
+    });
+    if (closed || res.writableEnded || res.destroyed) return;
+
+    const initialWindowMissed = requestedCursor !== undefined && (
+      initialPage.replayWindowMissed
+      || (initialPage.latestSequence !== undefined && requestedCursor > initialPage.latestSequence)
+    );
+    const needsSnapshot = requestedCursor === undefined
+      || initialWindowMissed
+      || initialPage.latestSequence === undefined;
+    const initialSnapshots = needsSnapshot
+      ? await runtime.listWorkspaceGoalRuntimeSnapshots({
+          workspaceId,
+          limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
+        })
+      : undefined;
+    if (closed || res.writableEnded || res.destroyed) return;
+
+    let cursor = needsSnapshot
+      ? goalRuntimeSnapshotCursor(initialSnapshots ?? [], initialPage)
+      : requestedCursor!;
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1081,6 +1085,8 @@ export class ControlPlaneServer {
           afterSequence: cursor,
           limit: GOAL_RUNTIME_REPLAY_LIMIT,
         });
+        if (closed || res.writableEnded || res.destroyed) return;
+
         const replayWindowMissed = page.replayWindowMissed
           || (page.latestSequence !== undefined && cursor > page.latestSequence);
         if (replayWindowMissed) {
@@ -1088,6 +1094,8 @@ export class ControlPlaneServer {
             workspaceId,
             limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
           });
+          if (closed || res.writableEnded || res.destroyed) return;
+
           cursor = goalRuntimeSnapshotCursor(snapshots, page);
           if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
             workspaceId,
@@ -1111,6 +1119,7 @@ export class ControlPlaneServer {
         const hasMore = page.latestSequence !== undefined && cursor < page.latestSequence;
         schedule(hasMore ? 0 : this.goalRuntimeStreamPollMs);
       } catch {
+        if (closed || res.writableEnded || res.destroyed) return;
         this.recordLog('WARN', `Goal runtime event stream read failed for workspace ${workspaceId}`);
         if (!res.writableEnded && !res.destroyed) {
           writeGoalRuntimeSseEvent(res, 'goal-runtime-stream-error', undefined, {
@@ -1120,6 +1129,8 @@ export class ControlPlaneServer {
         closeStream();
       }
     };
+
+    if (closed || res.writableEnded || res.destroyed) return;
 
     keepaliveTimer = setInterval(() => {
       if (!closed && !res.writableEnded && !res.destroyed && !res.writableNeedDrain) {

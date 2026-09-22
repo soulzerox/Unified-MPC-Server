@@ -109,18 +109,26 @@ export class WorkspaceService {
       if (this.repository.restore === undefined) {
         return err(appError('CONFLICT', 'Workspace identity is archived and cannot be relinked by this repository', true));
       }
-      const { archivedAt: _archivedAt, ...archivedWorkspace } = archived[0]!;
+      const {
+        archivedAt: _archivedAt,
+        lifecycleKind: _archivedLifecycleKind,
+        ownerSessionId: _archivedOwnerSessionId,
+        ownerJobId: _archivedOwnerJobId,
+        autoCleanup: _archivedAutoCleanup,
+        expiresAt: _archivedExpiresAt,
+        unavailableSince: _archivedUnavailableSince,
+        ...archivedWorkspace
+      } = archived[0]!;
       const restored: Workspace = {
         ...archivedWorkspace,
         displayName: displayName.trim(),
         rootPath: absoluteRootPath,
         realRootPath: canonicalRootPath,
-        ...(registration.lifecycleKind === undefined ? {} : { lifecycleKind }),
+        ...(lifecycleKind === 'project' ? {} : { lifecycleKind }),
         ...(registration.ownerSessionId === undefined ? {} : { ownerSessionId: registration.ownerSessionId }),
         ...(registration.ownerJobId === undefined ? {} : { ownerJobId: registration.ownerJobId }),
-        ...(registration.autoCleanup === undefined ? {} : { autoCleanup: registration.autoCleanup }),
+        ...(registration.autoCleanup === true ? { autoCleanup: true } : {}),
         ...(registration.expiresAt === undefined ? {} : { expiresAt: registration.expiresAt }),
-        unavailableSince: null,
       };
       try {
         await this.repository.restore(archived[0]!.id, restored);

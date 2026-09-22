@@ -93,6 +93,27 @@ describe('WorkspaceInfoService.register', () => {
     expect(listed).toMatchObject({ ok: true, value: [{ kind: 'machine_root' }] });
   });
 
+  it('reports temporary and inspection lifecycle kinds distinctly from projects', async () => {
+    const entries: Workspace[] = [
+      { id: 'temporary', displayName: 'Temporary', rootPath: '/tmp/a', realRootPath: '/tmp/a', createdAt: new Date(0).toISOString(), lifecycleKind: 'temporary' },
+      { id: 'inspection', displayName: 'Inspection', rootPath: '/tmp/b', realRootPath: '/tmp/b', createdAt: new Date(0).toISOString(), lifecycleKind: 'inspection' },
+    ];
+    const repository: WorkspaceRepository = {
+      async list(): Promise<Workspace[]> { return entries; },
+      async get(id: string): Promise<Workspace | null> { return entries.find((entry) => entry.id === id) ?? null; },
+      async insert(): Promise<void> {},
+      async delete(): Promise<void> {},
+    };
+    const listed = await new WorkspaceInfoService(repository).list({ clientId: 't', clientName: 't' });
+    expect(listed).toMatchObject({
+      ok: true,
+      value: [
+        { id: 'temporary', kind: 'temporary' },
+        { id: 'inspection', kind: 'inspection' },
+      ],
+    });
+  });
+
   it('relinks an archived canonical path without creating a second workspace identity', async () => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-register-relink-'));
     temporaryRoots.push(projectRoot);

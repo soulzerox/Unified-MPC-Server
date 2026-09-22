@@ -568,7 +568,11 @@ export function getClientScriptJs(): string {
 
       function syncWorkspaceRuntimeStreams() {
         const registeredIds = new Set(cachedWorkspaces.map((workspace) => workspace.id));
-        for (const workspaceId of [...workspaceRuntimeStreams.keys()]) {
+        const trackedIds = new Set([
+          ...workspaceRuntimeStreams.keys(),
+          ...workspaceRuntimeRefreshControllers.keys(),
+        ]);
+        for (const workspaceId of trackedIds) {
           if (!registeredIds.has(workspaceId)) closeWorkspaceRuntimeStream(workspaceId);
         }
         for (const workspaceId of [...workspaceRuntime.keys()]) {
@@ -1559,7 +1563,11 @@ export function getClientScriptJs(): string {
       document.getElementById('logs-filter-text')?.addEventListener('input', renderLogs);
 
       window.addEventListener('pagehide', () => {
-        for (const workspaceId of [...workspaceRuntimeStreams.keys()]) closeWorkspaceRuntimeStream(workspaceId);
+        const trackedIds = new Set([
+          ...workspaceRuntimeStreams.keys(),
+          ...workspaceRuntimeRefreshControllers.keys(),
+        ]);
+        for (const workspaceId of trackedIds) closeWorkspaceRuntimeStream(workspaceId);
       });
 
       // Initial boot

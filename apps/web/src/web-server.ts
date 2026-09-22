@@ -427,11 +427,13 @@ export class ControlPlaneServer {
           limit: 1,
         }),
       ]);
+      const cursor = goalRuntimeSnapshotCursor(snapshots, bounds);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         workspaceId,
         snapshots,
-        cursor: bounds.latestSequence ?? 0,
+        cursor,
+        latestSequence: bounds.latestSequence ?? null,
         oldestAvailableSequence: bounds.oldestAvailableSequence ?? null,
       }));
       return;
@@ -1016,7 +1018,9 @@ export class ControlPlaneServer {
         })
       : undefined;
 
-    let cursor = needsSnapshot ? initialPage.latestSequence ?? 0 : requestedCursor!;
+    let cursor = needsSnapshot
+      ? goalRuntimeSnapshotCursor(initialSnapshots ?? [], initialPage)
+      : requestedCursor!;
     let closed = false;
     let pollTimer: NodeJS.Timeout | undefined;
     let keepaliveTimer: NodeJS.Timeout | undefined;
@@ -1041,18 +1045,22 @@ export class ControlPlaneServer {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
-    res.write('retry: 1000\n\n');
+    if (!res.write('retry: 1000\n\n')) await waitForGoalRuntimeSseDrain(res);
 
     if (initialSnapshots !== undefined) {
-      writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
+      if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
         workspaceId,
         snapshots: initialSnapshots,
         cursor,
         replayWindowMissed: initialWindowMissed,
-      });
+      })) {
+        await waitForGoalRuntimeSseDrain(res);
+      }
     } else {
       for (const record of initialPage.events) {
-        writeGoalRuntimeSseEvent(res, 'goal-runtime-event', record.sequence, record);
+        if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-event', record.sequence, record)) {
+          await waitForGoalRuntimeSseDrain(res);
+        }
         cursor = record.sequence;
       }
     }
@@ -1080,26 +1088,31 @@ export class ControlPlaneServer {
             workspaceId,
             limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
           });
-          cursor = page.latestSequence ?? 0;
-          writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
+          cursor = goalRuntimeSnapshotCursor(snapshots, page);
+          if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
             workspaceId,
             snapshots,
             cursor,
             replayWindowMissed: true,
-          });
-          schedule(this.goalRuntimeStreamPollMs);
+          })) {
+            await waitForGoalRuntimeSseDrain(res);
+          }
+          const hasMoreAfterSnapshot = page.latestSequence !== undefined && cursor < page.latestSequence;
+          schedule(hasMoreAfterSnapshot ? 0 : this.goalRuntimeStreamPollMs);
           return;
         }
 
         for (const record of page.events) {
-          writeGoalRuntimeSseEvent(res, 'goal-runtime-event', record.sequence, record);
+          if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-event', record.sequence, record)) {
+            await waitForGoalRuntimeSseDrain(res);
+          }
           cursor = record.sequence;
         }
         const hasMore = page.latestSequence !== undefined && cursor < page.latestSequence;
         schedule(hasMore ? 0 : this.goalRuntimeStreamPollMs);
       } catch {
         this.recordLog('WARN', `Goal runtime event stream read failed for workspace ${workspaceId}`);
-        if (!res.writableEnded) {
+        if (!res.writableEnded && !res.destroyed) {
           writeGoalRuntimeSseEvent(res, 'goal-runtime-stream-error', undefined, {
             error: 'Goal runtime stream unavailable; reconnect for an authoritative snapshot',
           });
@@ -1109,12 +1122,13 @@ export class ControlPlaneServer {
     };
 
     keepaliveTimer = setInterval(() => {
-      if (!closed && !res.writableEnded) res.write(': keepalive\n\n');
+      if (!closed && !res.writableEnded && !res.destroyed && !res.writableNeedDrain) {
+        res.write(': keepalive\n\n');
+      }
     }, GOAL_RUNTIME_STREAM_KEEPALIVE_MS);
     keepaliveTimer.unref?.();
 
-    const hasMoreInitialEvents = initialSnapshots === undefined
-      && initialPage.latestSequence !== undefined
+    const hasMoreInitialEvents = initialPage.latestSequence !== undefined
       && cursor < initialPage.latestSequence;
     schedule(hasMoreInitialEvents ? 0 : this.goalRuntimeStreamPollMs);
   }
@@ -1255,16 +1269,53 @@ function parseGoalRuntimeEventCursor(
   return { ok: true, value: parsed };
 }
 
+function goalRuntimeSnapshotCursor(
+  snapshots: readonly GoalRuntimeSnapshotRecord[],
+  page: Pick<GoalRuntimeEventReplayPage, 'oldestAvailableSequence' | 'latestSequence'>,
+): number {
+  const latest = page.latestSequence;
+  if (latest === undefined) return 0;
+
+  const retainedFloor = page.oldestAvailableSequence === undefined
+    ? 0
+    : Math.max(0, page.oldestAvailableSequence - 1);
+  if (snapshots.length === 0) return Math.min(retainedFloor, latest);
+
+  const snapshotFloor = snapshots.reduce(
+    (minimum, snapshot) => Math.min(minimum, snapshot.lastEventSequence),
+    latest,
+  );
+  return Math.min(latest, Math.max(retainedFloor, snapshotFloor));
+}
+
 function writeGoalRuntimeSseEvent(
   res: ServerResponse,
   event: string,
   id: number | undefined,
   data: unknown,
-): void {
-  if (res.writableEnded) return;
-  if (id !== undefined) res.write(`id: ${id}\n`);
-  res.write(`event: ${event}\n`);
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
+): boolean {
+  if (res.writableEnded || res.destroyed) return true;
+  const frame = [
+    ...(id === undefined ? [] : [`id: ${id}\n`]),
+    `event: ${event}\n`,
+    `data: ${JSON.stringify(data)}\n\n`,
+  ].join('');
+  return res.write(frame);
+}
+
+async function waitForGoalRuntimeSseDrain(res: ServerResponse): Promise<void> {
+  if (res.writableEnded || res.destroyed || !res.writableNeedDrain) return;
+  await new Promise<void>((resolve) => {
+    const finish = (): void => {
+      res.off('drain', finish);
+      res.off('close', finish);
+      res.off('error', finish);
+      resolve();
+    };
+    res.once('drain', finish);
+    res.once('close', finish);
+    res.once('error', finish);
+  });
 }
 
 function isLoopbackHost(value: string | string[] | undefined): boolean {

@@ -190,8 +190,11 @@ export class GoalWorkspaceService {
 
   private async createSnapshot(parent: Workspace, request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {
     const snapshotPath = path.join(parent.realRootPath, '.unified-mpc', 'snapshots', request.goalId);
+    let ownsSnapshotPath = false;
     try {
       await mkdir(path.dirname(snapshotPath), { recursive: true });
+      await mkdir(snapshotPath);
+      ownsSnapshotPath = true;
       await copySnapshot(parent.realRootPath, snapshotPath, this.maxSnapshotBytes, this.maxSnapshotEntries);
       const registered = await this.workspaces.add(request.displayName ?? `Goal ${request.goalId}`, snapshotPath, {
         lifecycleKind: 'goal',
@@ -206,11 +209,14 @@ export class GoalWorkspaceService {
       });
       if (!registered.ok) {
         await rm(snapshotPath, { recursive: true, force: true });
+        ownsSnapshotPath = false;
         return registered;
       }
       return ok({ workspace: registered.value, worktreePath: snapshotPath });
     } catch (error: unknown) {
-      await rm(snapshotPath, { recursive: true, force: true }).catch(() => undefined);
+      if (ownsSnapshotPath) {
+        await rm(snapshotPath, { recursive: true, force: true }).catch(() => undefined);
+      }
       return err(appError('CONFLICT', `Goal Workspace snapshot could not be created: ${errorMessage(error)}`, true));
     }
   }

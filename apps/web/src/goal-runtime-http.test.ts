@@ -198,6 +198,7 @@ describe('Goal runtime Web API and SSE boundary', () => {
       workspaceId,
       snapshots: [snapshot],
       cursor: 12,
+      latestSequence: 12,
       oldestAvailableSequence: 10,
     });
   });
@@ -230,6 +231,58 @@ describe('Goal runtime Web API and SSE boundary', () => {
     expect(refreshed.body).toContain('id: 12');
     expect(refreshed.body).toContain('"replayWindowMissed":true');
     expect(refreshed.body).not.toContain('"eventId":"runtime-event-11"');
+  });
+
+  it('uses snapshot coverage as the SSE cursor so committed-but-unprojected events are not skipped', async () => {
+    const laggingSnapshot: GoalRuntimeSnapshotRecord = {
+      ...snapshot,
+      lastEventSequence: 10,
+      updatedAt: '2026-09-22T10:29:59.000Z',
+    };
+    const laggingRuntime: GoalRuntimeReadPort = {
+      listWorkspaceGoalRuntimeSnapshots: async () => [laggingSnapshot],
+      replayWorkspaceGoalRuntimeEvents: async (request) => {
+        if (request.afterSequence === undefined) {
+          return {
+            events: [event11],
+            oldestAvailableSequence: 10,
+            latestSequence: 12,
+            replayWindowMissed: false,
+          };
+        }
+        if (request.afterSequence === 10) {
+          return {
+            events: [event11, event12],
+            oldestAvailableSequence: 10,
+            latestSequence: 12,
+            replayWindowMissed: false,
+          };
+        }
+        return {
+          events: [],
+          oldestAvailableSequence: 10,
+          latestSequence: 12,
+          replayWindowMissed: false,
+        };
+      },
+    };
+
+    server = new ControlPlaneServer({
+      port: 0,
+      workspaceControl: workspaceControl(),
+      goalRuntimeRead: laggingRuntime,
+      goalRuntimeStreamPollMs: 10,
+    });
+    await server.listen();
+
+    const url = `http://127.0.0.1:${server.port}/api/workspaces/${workspaceId}/goal-runtime/events`;
+    const streamed = await readSse(url, {}, (body) => body.includes('id: 12'));
+
+    expect(streamed.body).toContain('event: goal-runtime-snapshot');
+    expect(streamed.body).toContain('id: 10');
+    expect(streamed.body).toContain('"lastEventSequence":10');
+    expect(streamed.body).toContain('"eventId":"runtime-event-11"');
+    expect(streamed.body).toContain('"eventId":"runtime-event-12"');
   });
 
   it('pushes newly durable events and stops polling after the client closes', async () => {

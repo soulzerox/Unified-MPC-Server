@@ -8,6 +8,10 @@ export function getClientScriptJs(): string {
       let cachedPolicies = [];
       let cachedWorkspaces = [];
       let workspaceSelection = null;
+      const workspaceRuntime = new Map();
+      const workspaceRuntimeStreams = new Map();
+      const workspaceRuntimeRefreshes = new Map();
+      const workspaceRuntimeRefreshPending = new Set();
       const workspaceGoals = new Map();
       const expandedWorkspaceGoals = new Set();
       const loadingWorkspaceGoals = new Set();
@@ -432,6 +436,149 @@ export function getClientScriptJs(): string {
         }
       }
 
+      function applyWorkspaceRuntimeSnapshot(workspaceId, data) {
+        if (!data || !Array.isArray(data.snapshots)) return;
+        workspaceRuntime.set(workspaceId, {
+          snapshots: data.snapshots,
+          cursor: Number.isSafeInteger(Number(data.cursor)) ? Number(data.cursor) : null,
+          error: null,
+        });
+        renderWorkspaces();
+      }
+
+      async function refreshWorkspaceRuntime(workspaceId) {
+        const currentRefresh = workspaceRuntimeRefreshes.get(workspaceId);
+        if (currentRefresh) {
+          workspaceRuntimeRefreshPending.add(workspaceId);
+          return currentRefresh;
+        }
+
+        const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goal-runtime';
+        const refresh = (async () => {
+          try {
+            const res = await fetch(endpoint);
+            const data = await res.json();
+            if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
+            applyWorkspaceRuntimeSnapshot(workspaceId, data);
+          } catch (err) {
+            const current = workspaceRuntime.get(workspaceId);
+            workspaceRuntime.set(workspaceId, {
+              snapshots: Array.isArray(current?.snapshots) ? current.snapshots : [],
+              cursor: current?.cursor ?? null,
+              error: err.message,
+            });
+            renderWorkspaces();
+            logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
+          }
+        })();
+        workspaceRuntimeRefreshes.set(workspaceId, refresh);
+        try {
+          await refresh;
+        } finally {
+          workspaceRuntimeRefreshes.delete(workspaceId);
+          if (workspaceRuntimeRefreshPending.delete(workspaceId)) {
+            void refreshWorkspaceRuntime(workspaceId);
+          }
+        }
+      }
+
+      function closeWorkspaceRuntimeStream(workspaceId) {
+        const stream = workspaceRuntimeStreams.get(workspaceId);
+        if (stream) stream.close();
+        workspaceRuntimeStreams.delete(workspaceId);
+        workspaceRuntimeRefreshPending.delete(workspaceId);
+      }
+
+      function syncWorkspaceRuntimeStreams() {
+        const registeredIds = new Set(cachedWorkspaces.map((workspace) => workspace.id));
+        for (const workspaceId of [...workspaceRuntimeStreams.keys()]) {
+          if (!registeredIds.has(workspaceId)) closeWorkspaceRuntimeStream(workspaceId);
+        }
+        for (const workspaceId of [...workspaceRuntime.keys()]) {
+          if (!registeredIds.has(workspaceId)) workspaceRuntime.delete(workspaceId);
+        }
+
+        for (const workspace of cachedWorkspaces) {
+          if (!workspaceRuntime.has(workspace.id)) void refreshWorkspaceRuntime(workspace.id);
+          if (workspaceRuntimeStreams.has(workspace.id) || typeof EventSource !== 'function') continue;
+
+          const endpoint = '/api/workspaces/' + encodeURIComponent(workspace.id) + '/goal-runtime/events';
+          const stream = new EventSource(endpoint);
+          stream.addEventListener('goal-runtime-snapshot', (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data?.workspaceId === workspace.id) applyWorkspaceRuntimeSnapshot(workspace.id, data);
+            } catch {
+              void refreshWorkspaceRuntime(workspace.id);
+            }
+          });
+          stream.addEventListener('goal-runtime-event', () => {
+            void refreshWorkspaceRuntime(workspace.id);
+          });
+          stream.addEventListener('goal-runtime-stream-error', () => {
+            void refreshWorkspaceRuntime(workspace.id);
+          });
+          workspaceRuntimeStreams.set(workspace.id, stream);
+        }
+      }
+
+      function runtimeBadgeClass(runtimeState) {
+        if (['blocked', 'recovery_required', 'failed'].includes(runtimeState)) return 'badge-offline';
+        if (['queued', 'starting', 'running', 'waiting_approval', 'waiting_input', 'recovering'].includes(runtimeState)) return 'badge-syncing';
+        return 'badge-state';
+      }
+
+      function renderWorkspaceRuntimeCell(workspaceId) {
+        const cell = document.createElement('td');
+        const runtime = workspaceRuntime.get(workspaceId);
+        if (!runtime) {
+          const loading = document.createElement('span');
+          loading.className = 'badge badge-state';
+          loading.textContent = 'Loading runtime';
+          cell.appendChild(loading);
+          return cell;
+        }
+
+        const snapshots = Array.isArray(runtime.snapshots) ? runtime.snapshots : [];
+        if (snapshots.length === 0) {
+          const empty = document.createElement('span');
+          empty.className = 'badge badge-state';
+          empty.textContent = runtime.error ? 'Runtime unavailable' : 'No runtime snapshots';
+          cell.appendChild(empty);
+          return cell;
+        }
+
+        const counts = new Map();
+        for (const record of snapshots) {
+          const state = typeof record?.projection?.runtimeState === 'string' ? record.projection.runtimeState : 'unknown';
+          counts.set(state, (counts.get(state) || 0) + 1);
+        }
+        const order = ['running', 'starting', 'queued', 'waiting_approval', 'waiting_input', 'blocked', 'recovering', 'recovery_required', 'paused', 'idle', 'failed', 'cancelled', 'unknown'];
+        for (const state of order) {
+          const count = counts.get(state);
+          if (!count) continue;
+          const badge = document.createElement('span');
+          badge.className = 'badge ' + runtimeBadgeClass(state);
+          badge.style.marginRight = '6px';
+          badge.textContent = state + (count > 1 ? ' ×' + count : '');
+          cell.appendChild(badge);
+        }
+        if (runtime.error) {
+          const stale = document.createElement('span');
+          stale.className = 'badge badge-optional';
+          stale.textContent = 'Refresh unavailable';
+          stale.title = runtime.error;
+          cell.appendChild(stale);
+        }
+        return cell;
+      }
+
+      function goalRuntimeSnapshot(workspaceId, goalId) {
+        const runtime = workspaceRuntime.get(workspaceId);
+        if (!runtime || !Array.isArray(runtime.snapshots)) return null;
+        return runtime.snapshots.find((record) => record?.projection?.goalId === goalId) || null;
+      }
+
       async function loadWorkspaces() {
         const body = document.getElementById('projects-table-body');
         try {
@@ -445,6 +592,7 @@ export function getClientScriptJs(): string {
           loadingWorkspaceGoals.clear();
           openGoalDetails.clear();
           renderWorkspaces();
+          syncWorkspaceRuntimeStreams();
         } catch (err) {
           if (body) body.replaceChildren(emptyRow(6, 'Failed to load projects: ' + err.message));
           logEvent('ERROR', 'Project refresh failed: ' + err.message);
@@ -456,7 +604,7 @@ export function getClientScriptJs(): string {
         if (!body) return;
         body.replaceChildren();
         if (cachedWorkspaces.length === 0) {
-          body.appendChild(emptyRow(6, 'No registered project workspaces'));
+          body.appendChild(emptyRow(7, 'No registered project workspaces'));
           return;
         }
         const activeIds = new Set(workspaceSelection?.activeWorkspaceIds || []);
@@ -468,8 +616,9 @@ export function getClientScriptJs(): string {
           const row = document.createElement('tr');
           addCell(row, workspace.displayName || workspace.id);
           addCell(row, workspace.realRootPath || workspace.rootPath || '', 'mono');
-          addCell(row, active ? 'Active' : 'Inactive');
-          addCell(row, primary ? 'Primary' : '—');
+          addCell(row, active ? 'In Scope' : 'Out of Scope');
+          addCell(row, primary ? 'Default' : '—');
+          row.appendChild(renderWorkspaceRuntimeCell(workspace.id));
 
           const goalsCell = document.createElement('td');
           if (openGoalCount <= 0) {
@@ -499,9 +648,9 @@ export function getClientScriptJs(): string {
           const activeButton = document.createElement('button');
           activeButton.type = 'button';
           activeButton.className = active ? 'btn btn-secondary btn-sm' : 'btn btn-sm';
-          activeButton.textContent = active ? 'Deactivate' : 'Activate';
+          activeButton.textContent = active ? 'Remove Scope' : 'Add Scope';
           activeButton.disabled = primary;
-          activeButton.title = primary ? 'Choose another Primary Project before deactivating this project' : '';
+          activeButton.title = primary ? 'Set another Default project before removing this project from Web scope' : '';
           activeButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, active ? 'deactivate' : 'activate'));
           action.appendChild(activeButton);
           if (!primary) {
@@ -509,7 +658,7 @@ export function getClientScriptJs(): string {
             primaryButton.type = 'button';
             primaryButton.className = 'btn btn-secondary btn-sm';
             primaryButton.style.marginLeft = '8px';
-            primaryButton.textContent = 'Make Primary';
+            primaryButton.textContent = 'Set Default';
             primaryButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, 'primary'));
             action.appendChild(primaryButton);
           }
@@ -528,7 +677,7 @@ export function getClientScriptJs(): string {
             const goalsRow = document.createElement('tr');
             goalsRow.className = 'project-goals-row';
             const goalsPanelCell = document.createElement('td');
-            goalsPanelCell.colSpan = 6;
+            goalsPanelCell.colSpan = 7;
             goalsPanelCell.appendChild(renderWorkspaceGoalsPanel(workspace));
             goalsRow.appendChild(goalsPanelCell);
             body.appendChild(goalsRow);
@@ -573,9 +722,9 @@ export function getClientScriptJs(): string {
         key.textContent = goal.goalKey || goal.goalId;
         title.appendChild(key);
         const status = document.createElement('span');
-        status.className = 'badge badge-syncing';
+        status.className = 'badge badge-state';
         status.style.marginLeft = '8px';
-        status.textContent = goal.status || 'active';
+        status.textContent = 'Lifecycle: ' + (goal.status || 'active');
         title.appendChild(status);
         if (preferredGoalId === goal.goalId) {
           const preferred = document.createElement('span');
@@ -602,8 +751,8 @@ export function getClientScriptJs(): string {
         const completed = Number(goal.progress?.completed || 0);
         const total = Number(goal.progress?.total || 0);
         const metadataValues = [
-          'Phase: ' + (goal.currentPhase || 'unknown'),
-          'Progress: ' + completed + ' / ' + total + ' steps',
+          'Plan phase: ' + (goal.currentPhase || 'unknown'),
+          'Plan progress: ' + completed + ' / ' + total + ' steps',
         ];
         for (const value of metadataValues) {
           const chip = document.createElement('span');
@@ -611,12 +760,35 @@ export function getClientScriptJs(): string {
           chip.textContent = value;
           metadata.appendChild(chip);
         }
+        const runtimeSnapshot = goalRuntimeSnapshot(workspaceId, goal.goalId);
+        const runtimeProjection = runtimeSnapshot?.projection;
+        if (runtimeProjection) {
+          for (const value of [
+            'Runtime: ' + runtimeProjection.runtimeState,
+            'Integration: ' + runtimeProjection.integrationState,
+            'Workspace: ' + runtimeProjection.workspaceState,
+            ...(runtimeProjection.phase ? ['Runtime phase: ' + runtimeProjection.phase] : []),
+            ...(Number.isInteger(runtimeProjection.executionGeneration) ? ['Execution gen: ' + runtimeProjection.executionGeneration] : []),
+          ]) {
+            const chip = document.createElement('span');
+            chip.className = 'badge ' + (value.startsWith('Runtime: ') ? runtimeBadgeClass(runtimeProjection.runtimeState) : 'badge-state');
+            chip.textContent = value;
+            metadata.appendChild(chip);
+          }
+        }
         card.appendChild(metadata);
 
+        if (runtimeProjection?.blocker) {
+          const blocker = document.createElement('div');
+          blocker.className = 'project-goal-blockers';
+          blocker.textContent = 'Runtime blocker: ' + runtimeProjection.blocker.kind
+            + (runtimeProjection.blocker.detail ? ' — ' + runtimeProjection.blocker.detail : '');
+          card.appendChild(blocker);
+        }
         if (Array.isArray(goal.blockers) && goal.blockers.length > 0) {
           const blockers = document.createElement('div');
           blockers.className = 'project-goal-blockers';
-          blockers.textContent = 'Blockers: ' + goal.blockers.join(' • ');
+          blockers.textContent = 'Plan blockers: ' + goal.blockers.join(' • ');
           card.appendChild(blockers);
         }
 
@@ -626,8 +798,8 @@ export function getClientScriptJs(): string {
         continueButton.type = 'button';
         continueButton.className = 'btn btn-sm goal-continue-btn';
         continueButton.disabled = preferredGoalId === goal.goalId;
-        continueButton.textContent = preferredGoalId === goal.goalId ? 'Selected' : 'Continue';
-        continueButton.title = 'Select this goal for workspace continuation without taking its execution lease';
+        continueButton.textContent = preferredGoalId === goal.goalId ? 'Selected' : 'Select Goal';
+        continueButton.title = 'Select this preferred goal for Web context only; this does not start or resume runtime execution';
         continueButton.addEventListener('click', () => continueWorkspaceGoal(workspaceId, goal.goalId));
         actions.appendChild(continueButton);
 
@@ -731,7 +903,7 @@ export function getClientScriptJs(): string {
           if (!res.ok || !data.selection) throw new Error(errorMessage(data, 'Workspace selection failed'));
           workspaceSelection = data.selection;
           renderWorkspaces();
-          showToast(operation === 'primary' ? 'Primary Project updated' : 'Active Projects updated');
+          showToast(operation === 'primary' ? 'Default Project updated' : 'Project scope updated');
           logEvent('SUCCESS', 'Workspace selection updated for ' + workspaceId + ' (' + operation + ')');
         } catch (err) {
           showToast('Project update failed: ' + err.message, true);
@@ -1297,6 +1469,10 @@ export function getClientScriptJs(): string {
       });
       document.getElementById('logs-level-select')?.addEventListener('change', renderLogs);
       document.getElementById('logs-filter-text')?.addEventListener('input', renderLogs);
+
+      window.addEventListener('pagehide', () => {
+        for (const workspaceId of [...workspaceRuntimeStreams.keys()]) closeWorkspaceRuntimeStream(workspaceId);
+      });
 
       // Initial boot
       logEvent('INFO', 'Bootstrapping Obsidian Telemetry SPA runtime');

@@ -1,7 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { appError, err, ok, type Result, type WorkspaceId } from '@unified-mpc/domain';
-import { workspaceLifecycleKind, type Workspace, type WorkspaceLifecycleKind } from './workspace-types.js';
+import { workspaceLifecycleKind, type GoalWorkspaceIntegrationState, type GoalWorkspaceKind, type GoalWorkspaceParentSource, type Workspace, type WorkspaceLifecycleKind } from './workspace-types.js';
 import { isPosixMountRoot, resolveHostPath } from './filesystem-root.js';
 
 export interface WorkspaceRepository {
@@ -24,6 +24,14 @@ export interface WorkspaceRegistrationOptions {
   readonly ownerJobId?: string;
   readonly autoCleanup?: boolean;
   readonly expiresAt?: string;
+  readonly goalId?: string;
+  readonly parentWorkspaceId?: WorkspaceId;
+  readonly goalWorkspaceKind?: GoalWorkspaceKind;
+  readonly parentSource?: GoalWorkspaceParentSource;
+  readonly baseRevision?: string;
+  readonly branchName?: string;
+  readonly checkpointId?: string;
+  readonly integrationState?: GoalWorkspaceIntegrationState;
 }
 
 export interface WorkspaceLifecycleReconcileOptions {
@@ -61,8 +69,23 @@ export class WorkspaceService {
     }
 
     const lifecycleKind = registration.lifecycleKind ?? 'project';
-    if (lifecycleKind === 'project' && registration.autoCleanup === true) {
+    if ((lifecycleKind === 'project' || lifecycleKind === 'goal') && registration.autoCleanup === true) {
       return err(appError('INVALID_INPUT', 'Automatic cleanup is only allowed for temporary or inspection workspaces'));
+    }
+    if (lifecycleKind === 'goal') {
+      if (registration.goalId?.trim() === undefined || registration.goalId.trim().length === 0) {
+        return err(appError('INVALID_INPUT', 'Goal workspace requires goalId'));
+      }
+      if (registration.parentWorkspaceId?.trim() === undefined || registration.parentWorkspaceId.trim().length === 0) {
+        return err(appError('INVALID_INPUT', 'Goal workspace requires parentWorkspaceId'));
+      }
+      if (registration.goalWorkspaceKind === undefined || registration.baseRevision?.trim() === undefined || registration.baseRevision.trim().length === 0) {
+        return err(appError('INVALID_INPUT', 'Goal workspace requires kind and baseRevision'));
+      }
+      if (registration.goalWorkspaceKind === 'git_worktree'
+        && (registration.branchName?.trim() === undefined || registration.branchName.trim().length === 0)) {
+        return err(appError('INVALID_INPUT', 'Git goal workspace requires branchName'));
+      }
     }
     if (registration.expiresAt !== undefined && !Number.isFinite(Date.parse(registration.expiresAt))) {
       return err(appError('INVALID_INPUT', 'Workspace expiry must be a valid ISO-compatible timestamp'));
@@ -121,6 +144,7 @@ export class WorkspaceService {
         ...(registration.ownerJobId === undefined ? {} : { ownerJobId: registration.ownerJobId }),
         ...(registration.autoCleanup === true ? { autoCleanup: true } : {}),
         ...(registration.expiresAt === undefined ? {} : { expiresAt: registration.expiresAt }),
+        ...goalMetadata(lifecycleKind, registration),
       };
       try {
         await this.repository.restore(archived[0]!.id, restored);
@@ -141,6 +165,7 @@ export class WorkspaceService {
       ...(registration.ownerJobId === undefined ? {} : { ownerJobId: registration.ownerJobId }),
       ...(registration.autoCleanup === true ? { autoCleanup: true } : {}),
       ...(registration.expiresAt === undefined ? {} : { expiresAt: registration.expiresAt }),
+      ...goalMetadata(lifecycleKind, registration),
     };
     try {
       const inserted = this.repository.insertIfAvailable === undefined
@@ -280,4 +305,21 @@ function samePath(left: string, right: string, platform: NodeJS.Platform): boole
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+function goalMetadata(
+  lifecycleKind: WorkspaceLifecycleKind,
+  registration: WorkspaceRegistrationOptions,
+): Pick<Workspace, 'goalId' | 'parentWorkspaceId' | 'goalWorkspaceKind' | 'parentSource' | 'baseRevision' | 'branchName' | 'checkpointId' | 'integrationState'> {
+  if (lifecycleKind !== 'goal') return {};
+  return {
+    ...(registration.goalId === undefined ? {} : { goalId: registration.goalId }),
+    ...(registration.parentWorkspaceId === undefined ? {} : { parentWorkspaceId: registration.parentWorkspaceId }),
+    ...(registration.goalWorkspaceKind === undefined ? {} : { goalWorkspaceKind: registration.goalWorkspaceKind }),
+    ...(registration.parentSource === undefined ? {} : { parentSource: registration.parentSource }),
+    ...(registration.baseRevision === undefined ? {} : { baseRevision: registration.baseRevision }),
+    ...(registration.branchName === undefined ? {} : { branchName: registration.branchName }),
+    ...(registration.checkpointId === undefined ? {} : { checkpointId: registration.checkpointId }),
+    ...(registration.integrationState === undefined ? {} : { integrationState: registration.integrationState }),
+  };
 }

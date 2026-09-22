@@ -338,6 +338,65 @@ describe('Goal runtime Web API and SSE boundary', () => {
     expect(replayCalls).toBe(callsAfterDisconnect);
   });
 
+  it('stops initial SSE reads when the client disconnects before the first replay completes', async () => {
+    let replayCalls = 0;
+    let snapshotCalls = 0;
+    let resolveReplay!: (page: GoalRuntimeEventReplayPage) => void;
+    let signalReplayStarted!: () => void;
+    const replayStarted = new Promise<void>((resolve) => {
+      signalReplayStarted = resolve;
+    });
+    const pendingReplay = new Promise<GoalRuntimeEventReplayPage>((resolve) => {
+      resolveReplay = resolve;
+    });
+    const disconnectRuntime: GoalRuntimeReadPort = {
+      listWorkspaceGoalRuntimeSnapshots: async () => {
+        snapshotCalls += 1;
+        return [snapshot];
+      },
+      replayWorkspaceGoalRuntimeEvents: async () => {
+        replayCalls += 1;
+        if (replayCalls === 1) {
+          signalReplayStarted();
+          return pendingReplay;
+        }
+        return {
+          events: [],
+          oldestAvailableSequence: 10,
+          latestSequence: 12,
+          replayWindowMissed: false,
+        };
+      },
+    };
+
+    server = new ControlPlaneServer({
+      port: 0,
+      workspaceControl: workspaceControl(),
+      goalRuntimeRead: disconnectRuntime,
+      goalRuntimeStreamPollMs: 10,
+    });
+    await server.listen();
+    const url = `http://127.0.0.1:${server.port}/api/workspaces/${workspaceId}/goal-runtime/events`;
+    const controller = new AbortController();
+    const request = fetch(url, { signal: controller.signal }).catch(() => undefined);
+
+    await replayStarted;
+    controller.abort();
+    await request;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    resolveReplay({
+      events: [event11],
+      oldestAvailableSequence: 10,
+      latestSequence: 12,
+      replayWindowMissed: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(replayCalls).toBe(1);
+    expect(snapshotCalls).toBe(0);
+  });
+
   it('rejects malformed SSE replay cursors before opening a stream', async () => {
     server = new ControlPlaneServer({
       port: 0,

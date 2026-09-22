@@ -104,6 +104,30 @@ describe('SqliteWorkspaceRepository', () => {
     }
   });
 
+  it('round-trips snapshot provenance and fences writer lease generations', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-lease-db-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    try {
+      const repository = new SqliteWorkspaceRepository(database);
+      const workspace: Workspace = {
+        id: 'goal-snapshot-1', displayName: 'Snapshot goal', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-snapshot', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'source-v1', integrationState: 'pending',
+      };
+      await repository.insert(workspace);
+      await expect(repository.get(workspace.id)).resolves.toEqual(workspace);
+
+      const first = await repository.acquireGoalWriterLease(workspace.id, 'lease-a', 'client-a', '2026-09-22T19:00:00.000Z', '2026-09-22T19:00:01.000Z');
+      expect(first).toEqual({ leaseId: 'lease-a', ownerId: 'client-a', generation: 1, expiresAt: '2026-09-22T19:00:01.000Z' });
+      await expect(repository.acquireGoalWriterLease(workspace.id, 'lease-b', 'client-b', '2026-09-22T19:00:00.500Z', '2026-09-22T19:00:02.000Z')).resolves.toBeNull();
+      await expect(repository.renewGoalWriterLease(workspace.id, 'lease-a', 0, '2026-09-22T19:00:00.500Z', '2026-09-22T19:00:02.000Z')).resolves.toBe(false);
+      await expect(repository.acquireGoalWriterLease(workspace.id, 'lease-b', 'client-b', '2026-09-22T19:00:01.001Z', '2026-09-22T19:00:02.000Z')).resolves.toMatchObject({ generation: 2 });
+    } finally {
+      database.close();
+    }
+  });
+
   it('archives registrations outside the runtime view and restores them without deleting project data', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-archive-'));
     temporaryRoots.push(root);

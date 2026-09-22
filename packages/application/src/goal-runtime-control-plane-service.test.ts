@@ -188,6 +188,211 @@ describe('GoalRuntimeControlPlaneService', () => {
       'goal_blocker_observed',
     ]);
   });
+  it('clears durable Goal blockers when the durable source is cleared', async () => {
+    const times = [
+      new Date('2026-09-22T00:00:30.000Z'),
+      new Date('2026-09-22T00:01:01.000Z'),
+    ];
+    const runtime = fixture({
+      goals: [goal({ revision: 2, blockers: ['Dependency unavailable'] })],
+      now: (): Date => times.shift() ?? new Date('2026-09-22T00:01:01.000Z'),
+    });
+    await runtime.service.ensureGoalSnapshot('goal-1');
+
+    runtime.setGoal(goal({
+      revision: 3,
+      blockers: [],
+      updatedAt: '2026-09-22T00:01:00.000Z',
+    }));
+    const snapshot = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'heartbeat-after-durable-blocker-clear',
+      type: 'execution_heartbeat',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+    });
+
+    expect(snapshot.projection.integrationState).toBe('unknown');
+    expect(snapshot.projection.blocker).toBeUndefined();
+    expect(runtime.records.map((entry) => entry.event.type)).toEqual([
+      'goal_blocker_observed',
+      'execution_heartbeat',
+      'goal_blocker_observed',
+    ]);
+    const clearEvent = runtime.records.at(-1)?.event;
+    expect(clearEvent?.type).toBe('goal_blocker_observed');
+    if (clearEvent?.type === 'goal_blocker_observed') {
+      expect(clearEvent.blockerKind).toBeUndefined();
+    }
+  });
+
+  it('keeps approval and input blockers above durable Goal blockers until they resolve', async () => {
+    const runtime = fixture({
+      goals: [goal({ revision: 2, blockers: ['Dependency unavailable'] })],
+      now: (): Date => new Date('2026-09-22T00:02:00.000Z'),
+    });
+    await runtime.service.ensureGoalSnapshot('goal-1');
+
+    const approval = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'approval-over-durable-blocker',
+      type: 'approval_required',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+      detail: 'Host approval required',
+    });
+    expect(approval.projection.blocker?.kind).toBe('waiting_approval');
+
+    const approved = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'approval-resolved-over-durable-blocker',
+      type: 'approval_resolved',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:10.000Z',
+    });
+    expect(approved.projection.blocker?.kind).toBe('goal_blocked');
+
+    const input = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'input-over-durable-blocker',
+      type: 'input_required',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:20.000Z',
+      detail: 'Operator input required',
+    });
+    expect(input.projection.blocker?.kind).toBe('waiting_input');
+
+    const inputResolved = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'input-resolved-over-durable-blocker',
+      type: 'input_resolved',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:30.000Z',
+    });
+    expect(inputResolved.projection.blocker?.kind).toBe('goal_blocked');
+    expect(inputResolved.projection.integrationState).toBe('unknown');
+  });
+
+  it('keeps worker loss above durable Goal blockers and restores them after a fenced takeover', async () => {
+    const runtime = fixture({
+      goals: [goal({ revision: 2, blockers: ['Dependency unavailable'] })],
+      now: (): Date => new Date('2026-09-22T00:03:00.000Z'),
+    });
+    await runtime.service.ensureGoalSnapshot('goal-1');
+
+    const lost = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'worker-lost-over-durable-blocker',
+      type: 'worker_lost',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+      detail: 'Authoritative worker liveness expired',
+    });
+    expect(lost.projection.blocker?.kind).toBe('worker_lost');
+
+    runtime.setGoal(goal({
+      revision: 3,
+      blockers: ['Dependency unavailable'],
+      leaseGeneration: 2,
+      executionId: 'execution-2',
+      executionGeneration: 2,
+      updatedAt: '2026-09-22T00:02:00.000Z',
+    }));
+    const takeover = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'takeover-after-worker-loss',
+      type: 'execution_submitted',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-2',
+      executionGeneration: 2,
+      occurredAt: '2026-09-22T00:02:00.000Z',
+    });
+    expect(takeover.projection).toMatchObject({
+      activeExecutionId: 'execution-2',
+      executionGeneration: 2,
+      blocker: { kind: 'goal_blocked' },
+      integrationState: 'unknown',
+    });
+  });
+
+  it('keeps integration conflict above durable Goal blockers until integration evidence changes', async () => {
+    const runtime = fixture({
+      goals: [goal({ revision: 2, blockers: ['Dependency unavailable'] })],
+      now: (): Date => new Date('2026-09-22T00:03:00.000Z'),
+    });
+    await runtime.service.ensureGoalSnapshot('goal-1');
+
+    const conflict = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'integration-conflict-over-durable-blocker',
+      type: 'integration_conflict',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+      detail: 'Authoritative integration conflict',
+    });
+    expect(conflict.projection).toMatchObject({
+      integrationState: 'conflict',
+      blocker: { kind: 'integration_conflict' },
+    });
+
+    const retry = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'integration-retry-after-conflict',
+      type: 'integration_started',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:02:00.000Z',
+    });
+    expect(retry.projection).toMatchObject({
+      integrationState: 'integrating',
+      blocker: { kind: 'goal_blocked' },
+    });
+  });
+
+  it('keeps workspace blockers above durable Goal blockers and restores them when workspace truth clears', async () => {
+    let observation: GoalWorkspaceTruthObservation = {
+      state: 'dirty',
+      detail: 'Git workspace has uncommitted changes',
+    };
+    const runtime = fixture({
+      goals: [goal({ revision: 2, blockers: ['Dependency unavailable'] })],
+      workspaceTruth: {
+        read: async () => observation,
+      },
+      now: (): Date => new Date('2026-09-22T00:03:00.000Z'),
+    });
+
+    const dirty = await runtime.service.ensureGoalSnapshot('goal-1');
+    expect(dirty.projection).toMatchObject({
+      workspaceState: 'dirty',
+      integrationState: 'unknown',
+      blocker: { kind: 'dirty_workspace' },
+    });
+
+    observation = { state: 'clean', detail: 'Git workspace is clean' };
+    const clean = await runtime.service.refreshGoalWorkspaceTruth('goal-1');
+    expect(clean.projection).toMatchObject({
+      workspaceState: 'clean',
+      integrationState: 'unknown',
+      blocker: { kind: 'goal_blocked' },
+    });
+  });
+
   it('projects conservative workspace truth without changing integration state', async () => {
     const runtime = fixture({
       workspaceTruth: {

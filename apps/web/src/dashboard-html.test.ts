@@ -60,6 +60,10 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("'/goal-runtime'");
     expect(html).toContain("'/goal-runtime/events'");
     expect(html).toContain('new EventSource(endpoint)');
+    expect(html).toContain('const workspaceRuntimeRefreshControllers = new Map()');
+    expect(html).toContain('fetch(endpoint, { signal: controller.signal })');
+    expect(html).toContain('if (controller) controller.abort()');
+    expect(html).toContain("cachedWorkspaces.some((workspace) => workspace.id === workspaceId)");
     expect(html).toContain("stream.addEventListener('goal-runtime-snapshot'");
     expect(html).toContain("stream.addEventListener('goal-runtime-event', (event) => {");
     expect(html).toContain('noteWorkspaceRuntimeEvent(workspace.id, JSON.parse(event.data))');

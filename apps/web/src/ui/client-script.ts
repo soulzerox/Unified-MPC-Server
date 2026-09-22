@@ -12,6 +12,7 @@ export function getClientScriptJs(): string {
       const workspaceRuntimeStreams = new Map();
       const workspaceRuntimeRefreshes = new Map();
       const workspaceRuntimeRefreshPending = new Set();
+      const workspaceRuntimeRefreshControllers = new Map();
       const workspaceRuntimeTargets = new Map();
       const workspaceRuntimeCatchupTimers = new Map();
       const workspaceRuntimeCatchupAttempts = new Map();
@@ -477,13 +478,17 @@ export function getClientScriptJs(): string {
         }
 
         const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goal-runtime';
+        const controller = new AbortController();
+        workspaceRuntimeRefreshControllers.set(workspaceId, controller);
         const refresh = (async () => {
           try {
-            const res = await fetch(endpoint);
+            const res = await fetch(endpoint, { signal: controller.signal });
             const data = await res.json();
             if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
+            if (controller.signal.aborted) return;
             applyWorkspaceRuntimeSnapshot(workspaceId, data);
           } catch (err) {
+            if (controller.signal.aborted) return;
             const current = workspaceRuntime.get(workspaceId);
             workspaceRuntime.set(workspaceId, {
               snapshots: Array.isArray(current?.snapshots) ? current.snapshots : [],
@@ -499,7 +504,11 @@ export function getClientScriptJs(): string {
           await refresh;
         } finally {
           workspaceRuntimeRefreshes.delete(workspaceId);
-          if (workspaceRuntimeRefreshPending.delete(workspaceId)) {
+          if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
+            workspaceRuntimeRefreshControllers.delete(workspaceId);
+          }
+          if (workspaceRuntimeRefreshPending.delete(workspaceId)
+            && cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) {
             void refreshWorkspaceRuntime(workspaceId);
           }
         }
@@ -545,6 +554,9 @@ export function getClientScriptJs(): string {
         const stream = workspaceRuntimeStreams.get(workspaceId);
         if (stream) stream.close();
         workspaceRuntimeStreams.delete(workspaceId);
+        const controller = workspaceRuntimeRefreshControllers.get(workspaceId);
+        if (controller) controller.abort();
+        workspaceRuntimeRefreshControllers.delete(workspaceId);
         workspaceRuntimeRefreshPending.delete(workspaceId);
         workspaceRuntimeTargets.delete(workspaceId);
         workspaceRuntimeCatchupAttempts.delete(workspaceId);

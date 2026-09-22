@@ -1,4 +1,4 @@
-import { mkdir, stat } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type GoalWorkspaceState, type Result } from '@unified-mpc/domain';
 import { GitAdapter, type GitCommandResult, type GitStatusResult } from '@unified-mpc/git';
@@ -12,12 +12,18 @@ export interface GoalWorkspaceGitPort {
 export interface GoalWorkspaceCreateRequest {
   readonly goalId: string;
   readonly parentWorkspaceId: string;
-  readonly branchName: string;
+  readonly branchName?: string;
   readonly baseRevision: string;
+  readonly goalWorkspaceKind?: 'git_worktree' | 'snapshot';
   readonly displayName?: string;
   readonly ownerSessionId?: string;
   readonly ownerJobId?: string;
-  readonly parentSource?: 'committed_head' | 'named_revision' | 'checkpoint' | 'patch';
+  readonly parentSource?: 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | 'snapshot';
+}
+
+export interface GoalWorkspaceServiceOptions {
+  readonly maxSnapshotBytes?: number;
+  readonly maxSnapshotEntries?: number;
 }
 
 export interface GoalWorkspaceCreateResult {
@@ -62,12 +68,17 @@ export interface GoalWorkspaceIntegrationPreflight {
  */
 export class GoalWorkspaceService {
   private readonly workspaces: WorkspaceService;
+  private readonly maxSnapshotBytes: number;
+  private readonly maxSnapshotEntries: number;
 
   public constructor(
     private readonly repository: WorkspaceRepository,
     private readonly git: GoalWorkspaceGitPort = new GitAdapter(),
+    options: GoalWorkspaceServiceOptions = {},
   ) {
     this.workspaces = new WorkspaceService(repository);
+    this.maxSnapshotBytes = positiveLimit(options.maxSnapshotBytes, DEFAULT_MAX_SNAPSHOT_BYTES, 'maxSnapshotBytes');
+    this.maxSnapshotEntries = positiveLimit(options.maxSnapshotEntries, DEFAULT_MAX_SNAPSHOT_ENTRIES, 'maxSnapshotEntries');
   }
 
   public async create(request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {
@@ -79,6 +90,9 @@ export class GoalWorkspaceService {
     if (parent.lifecycleKind !== undefined && parent.lifecycleKind !== 'project') {
       return err(appError('INVALID_INPUT', 'Goal Workspace parent must be a project workspace'));
     }
+
+    const workspaceKind = request.goalWorkspaceKind ?? 'git_worktree';
+    if (workspaceKind === 'snapshot') return this.createSnapshot(parent, request);
 
     const status = await this.git.status(parent.realRootPath);
     if (!status.ok) return status;
@@ -95,7 +109,7 @@ export class GoalWorkspaceService {
     const worktreePath = path.join(parent.realRootPath, '.unified-mpc', 'worktrees', request.goalId);
     await mkdir(path.dirname(worktreePath), { recursive: true });
     const add = await this.git.run(parent.realRootPath, [
-      'worktree', 'add', '-b', request.branchName, worktreePath, request.baseRevision,
+      'worktree', 'add', '-b', request.branchName!, worktreePath, request.baseRevision,
     ]);
     const addError = successfulGitCommand(add, 'Goal Workspace worktree could not be created');
     if (addError !== null) return addError;
@@ -104,10 +118,10 @@ export class GoalWorkspaceService {
       lifecycleKind: 'goal',
       goalId: request.goalId,
       parentWorkspaceId: request.parentWorkspaceId,
-      goalWorkspaceKind: 'git_worktree',
+      goalWorkspaceKind: workspaceKind,
       parentSource: request.parentSource ?? 'committed_head',
       baseRevision: request.baseRevision,
-      branchName: request.branchName,
+      branchName: request.branchName!,
       integrationState: 'pending',
       ...(request.ownerSessionId === undefined ? {} : { ownerSessionId: request.ownerSessionId }),
       ...(request.ownerJobId === undefined ? {} : { ownerJobId: request.ownerJobId }),
@@ -117,6 +131,33 @@ export class GoalWorkspaceService {
       return registered;
     }
     return ok({ workspace: registered.value, worktreePath });
+  }
+
+  private async createSnapshot(parent: Workspace, request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {
+    const snapshotPath = path.join(parent.realRootPath, '.unified-mpc', 'snapshots', request.goalId);
+    try {
+      await mkdir(path.dirname(snapshotPath), { recursive: true });
+      await copySnapshot(parent.realRootPath, snapshotPath, this.maxSnapshotBytes, this.maxSnapshotEntries);
+      const registered = await this.workspaces.add(request.displayName ?? `Goal ${request.goalId}`, snapshotPath, {
+        lifecycleKind: 'goal',
+        goalId: request.goalId,
+        parentWorkspaceId: request.parentWorkspaceId,
+        goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot',
+        baseRevision: request.baseRevision,
+        integrationState: 'pending',
+        ...(request.ownerSessionId === undefined ? {} : { ownerSessionId: request.ownerSessionId }),
+        ...(request.ownerJobId === undefined ? {} : { ownerJobId: request.ownerJobId }),
+      });
+      if (!registered.ok) {
+        await rm(snapshotPath, { recursive: true, force: true });
+        return registered;
+      }
+      return ok({ workspace: registered.value, worktreePath: snapshotPath });
+    } catch (error: unknown) {
+      await rm(snapshotPath, { recursive: true, force: true }).catch(() => undefined);
+      return err(appError('CONFLICT', `Goal Workspace snapshot could not be created: ${errorMessage(error)}`, true));
+    }
   }
 
   public async resume(goalId: string): Promise<Result<Workspace>> {
@@ -246,12 +287,9 @@ export class GoalWorkspaceService {
     if (workspace.integrationState !== 'integrated') {
       return err(appError('CONFLICT', 'Goal Workspace must be integrated before removal', true));
     }
-    const status = await this.git.status(workspace.realRootPath);
-    if (!status.ok) return status;
-    if (status.value.entries.length > 0) {
-      return err(appError('CONFLICT', 'Dirty Goal Workspace cannot be removed automatically', true));
-    }
-    const removed = await this.removeWorktree(await this.parentRoot(workspace), workspace.realRootPath);
+    const removed = workspace.goalWorkspaceKind === 'snapshot'
+      ? await this.removeSnapshot(await this.parentRoot(workspace), workspace.realRootPath)
+      : await this.removeGitWorktree(workspace);
     if (!removed.ok) return removed;
     if (this.repository.archive === undefined) {
       return err(appError('CONFLICT', 'Goal Workspace removal requires durable archival support', true));
@@ -296,12 +334,38 @@ export class GoalWorkspaceService {
     const error = successfulGitCommand(result, 'Goal Workspace worktree could not be removed');
     return error ?? ok(undefined);
   }
+
+  private async removeGitWorktree(workspace: Workspace): Promise<Result<void>> {
+    const status = await this.git.status(workspace.realRootPath);
+    if (!status.ok) return status;
+    if (status.value.entries.length > 0) {
+      return err(appError('CONFLICT', 'Dirty Goal Workspace cannot be removed automatically', true));
+    }
+    return this.removeWorktree(await this.parentRoot(workspace), workspace.realRootPath);
+  }
+
+  private async removeSnapshot(parentRoot: string, snapshotPath: string): Promise<Result<void>> {
+    if (!isManagedSnapshotPath(parentRoot, snapshotPath)) {
+      return err(appError('CONFLICT', 'Snapshot path is outside the managed Goal Workspace root', true));
+    }
+    try {
+      await rm(snapshotPath, { recursive: true, force: true });
+      return ok(undefined);
+    } catch (error: unknown) {
+      return err(appError('CONFLICT', `Goal Workspace snapshot could not be removed: ${errorMessage(error)}`, true));
+    }
+  }
 }
 
 function validateCreateRequest(request: GoalWorkspaceCreateRequest): string | null {
   if (!isGoalId(request.goalId)) return 'Goal id is invalid';
   if (request.parentWorkspaceId.trim().length === 0) return 'Parent workspace id is required';
-  if (!isSafeBranchName(request.branchName)) return 'Goal branch name is invalid';
+  const workspaceKind = request.goalWorkspaceKind ?? 'git_worktree';
+  if (workspaceKind !== 'git_worktree' && workspaceKind !== 'snapshot') return 'Goal workspace kind is invalid';
+  if (workspaceKind === 'git_worktree' && (request.branchName === undefined || !isSafeBranchName(request.branchName))) {
+    return 'Goal branch name is invalid';
+  }
+  if (workspaceKind === 'snapshot' && request.parentSource !== 'snapshot') return 'Snapshot goal workspace requires snapshot parentSource';
   if (!isSafeRevision(request.baseRevision)) return 'Goal base revision is invalid';
   return null;
 }
@@ -383,4 +447,50 @@ function integrationPreflight(
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+const DEFAULT_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_SNAPSHOT_ENTRIES = 20_000;
+const SNAPSHOT_EXCLUDED_NAMES = new Set(['.git', '.unified-mpc', 'build', 'coverage', 'dist', 'node_modules']);
+
+function positiveLimit(value: number | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive safe integer`);
+  return value;
+}
+
+async function copySnapshot(sourceRoot: string, destinationRoot: string, maxBytes: number, maxEntries: number): Promise<void> {
+  let bytes = 0;
+  let entries = 0;
+
+  const copyDirectory = async (source: string, destination: string): Promise<void> => {
+    await mkdir(destination, { recursive: true });
+    const children = await readdir(source, { withFileTypes: true });
+    for (const child of children) {
+      if (SNAPSHOT_EXCLUDED_NAMES.has(child.name)) continue;
+      entries += 1;
+      if (entries > maxEntries) throw new Error(`snapshot entry limit exceeded (${maxEntries})`);
+      const sourcePath = path.join(source, child.name);
+      const destinationPath = path.join(destination, child.name);
+      const metadata = await lstat(sourcePath);
+      if (metadata.isSymbolicLink()) throw new Error(`snapshot contains unsupported symbolic link: ${path.relative(sourceRoot, sourcePath)}`);
+      if (metadata.isDirectory()) {
+        await copyDirectory(sourcePath, destinationPath);
+      } else if (metadata.isFile()) {
+        bytes += metadata.size;
+        if (bytes > maxBytes) throw new Error(`snapshot byte limit exceeded (${maxBytes})`);
+        await copyFile(sourcePath, destinationPath);
+      } else {
+        throw new Error(`snapshot contains unsupported filesystem entry: ${path.relative(sourceRoot, sourcePath)}`);
+      }
+    }
+  };
+
+  await copyDirectory(sourceRoot, destinationRoot);
+}
+
+function isManagedSnapshotPath(parentRoot: string, snapshotPath: string): boolean {
+  const expectedRoot = path.resolve(parentRoot, '.unified-mpc', 'snapshots');
+  const resolved = path.resolve(snapshotPath);
+  return path.dirname(resolved) === expectedRoot;
 }

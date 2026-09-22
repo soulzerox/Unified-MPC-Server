@@ -61,8 +61,10 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("'/goal-runtime/events'");
     expect(html).toContain('new EventSource(endpoint)');
     expect(html).toContain("stream.addEventListener('goal-runtime-snapshot'");
-    expect(html).toContain("stream.addEventListener('goal-runtime-event', () => {");
-    expect(html).toContain('void refreshWorkspaceRuntime(workspace.id);');
+    expect(html).toContain("stream.addEventListener('goal-runtime-event', (event) => {");
+    expect(html).toContain('noteWorkspaceRuntimeEvent(workspace.id, JSON.parse(event.data))');
+    expect(html).toContain('Number(record.lastEventSequence) >= sequence');
+    expect(html).toContain('Projection catching up');
     expect(html).toContain("'Integration: ' + runtimeProjection.integrationState");
     expect(html).toContain('Runtime blocker: ');
     expect(html).not.toContain("addCell(row, active ? 'Active' : 'Inactive')");

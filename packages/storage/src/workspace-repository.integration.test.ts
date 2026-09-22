@@ -35,6 +35,43 @@ describe('SqliteWorkspaceRepository', () => {
     database.close();
   });
 
+  it('round-trips lifecycle metadata while legacy project defaults remain conservative', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-lifecycle-db-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    try {
+      const repository = new SqliteWorkspaceRepository(database);
+      const temporary: Workspace = {
+        id: 'workspace-temporary',
+        displayName: 'Temporary',
+        rootPath: root,
+        realRootPath: root,
+        createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'temporary',
+        ownerSessionId: 'session-1',
+        ownerJobId: 'job-1',
+        autoCleanup: true,
+        expiresAt: '2026-09-22T13:00:00.000Z',
+        unavailableSince: '2026-09-22T12:00:00.000Z',
+      };
+      await repository.insert(temporary);
+      await expect(repository.get(temporary.id)).resolves.toEqual(temporary);
+
+      database.connection.prepare(
+        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ).run('legacy', 'Legacy', '/legacy', '/legacy', new Date(0).toISOString(), null);
+      await expect(repository.get('legacy')).resolves.toEqual({
+        id: 'legacy',
+        displayName: 'Legacy',
+        rootPath: '/legacy',
+        realRootPath: '/legacy',
+        createdAt: new Date(0).toISOString(),
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('archives registrations outside the runtime view and restores them without deleting project data', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-archive-'));
     temporaryRoots.push(root);

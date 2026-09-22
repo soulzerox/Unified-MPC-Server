@@ -6,13 +6,15 @@ import {
   isHostPathWithin,
   isMachineRootPath,
   resolveHostPath,
+  workspaceLifecycleKind,
   type Workspace,
+  type WorkspaceLifecycleKind,
   type WorkspaceRepository,
   type WorkspaceService,
 } from '@unified-mpc/workspace';
 import type { FileActor } from './file-service.js';
 
-export type WorkspaceKind = 'machine_root' | 'project';
+export type WorkspaceKind = 'machine_root' | WorkspaceLifecycleKind;
 
 export interface WorkspaceInfo {
   readonly id: string;
@@ -59,7 +61,7 @@ export class WorkspaceInfoService {
       rootPath: workspace.rootPath,
       realRootPath: workspace.realRootPath,
       createdAt: workspace.createdAt,
-      kind: isRoot ? 'machine_root' : 'project',
+      kind: isRoot ? 'machine_root' : workspaceLifecycleKind(workspace),
     };
   }
 

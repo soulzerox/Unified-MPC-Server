@@ -1,5 +1,10 @@
 import { ok, err, appError, type GoalRecord, type Result } from '@unified-mpc/domain';
-import { JsonWorkspaceIndexStore, WorkspaceIndexService, WorkspaceSelectionService } from '@unified-mpc/application';
+import {
+  JsonWorkspaceIndexStore,
+  WorkspaceIndexService,
+  WorkspaceSelectionService,
+  workspaceSelectionReferences,
+} from '@unified-mpc/application';
 import {
   ControlPlaneServer,
   type ControlPlaneServerOptions,
@@ -25,7 +30,7 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { WorkspaceService, isMachineRootPath } from '@unified-mpc/workspace';
+import { WorkspaceService, isMachineRootPath, isProjectWorkspace } from '@unified-mpc/workspace';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
 
@@ -81,6 +86,18 @@ export async function runWeb(
       replayWorkspaceGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayWorkspaceGoalRuntimeEvents(request),
     };
     bootstrapNonSecretSettings(settings);
+    const lifecycleCandidates = await workspaceService.list();
+    const protectedByOpenGoal: string[] = [];
+    for (const workspace of lifecycleCandidates) {
+      if (await goalRepository.countWorkspaceGoalsForHost(workspace.id) > 0) protectedByOpenGoal.push(workspace.id);
+    }
+    const lifecycle = await workspaceService.reconcileLifecycle({
+      protectedWorkspaceIds: [
+        ...workspaceSelectionReferences(settings.get(USER_SETTING_KEYS.httpWorkspaceSelection)),
+        ...protectedByOpenGoal,
+      ],
+    });
+    if (!lifecycle.ok) throw new Error(lifecycle.error.message);
     const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings, workspaceIndex);
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const server = new ControlPlaneServer({
@@ -122,7 +139,9 @@ function createWorkspaceControl(
   workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
 ): WorkspaceControlPort {
   const projectList = async (): Promise<readonly WebWorkspaceSummary[]> => (await workspaceService.list())
-    .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath));
+    .filter((workspace) => isProjectWorkspace(workspace)
+      && !isMachineRootPath(workspace.realRootPath)
+      && !isMachineRootPath(workspace.rootPath));
   const selection = async (): Promise<WorkspaceSelectionService | null> => {
     const projects = await projectList();
     const initial = projects[0];

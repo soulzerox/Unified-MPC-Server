@@ -14,6 +14,7 @@ import { SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/scheduled-con
 import { SCHEDULED_CONTINUATION_SESSION_FENCE_MIGRATION_SQL } from './migrations/scheduled-continuation-session-fence-migration.js';
 import { SCHEDULED_CONTINUATION_RESCHEDULE_MIGRATION_SQL } from './migrations/scheduled-continuation-reschedule-migration.js';
 import { WORKSPACE_ARCHIVE_MIGRATION_SQL } from './migrations/workspace-archive-migration.js';
+import { WORKSPACE_LIFECYCLE_MIGRATION_SQL } from './migrations/workspace-lifecycle-migration.js';
 import { RETIRE_AUTO_MACHINE_ROOTS_MIGRATION_SQL } from './migrations/retire-auto-machine-roots-migration.js';
 import { AGENT_SWARM_MIGRATION_SQL } from './migrations/agent-swarm-migration.js';
 import { RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/recurring-scheduled-continuation-migration.js';
@@ -84,6 +85,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '020_goal_runtime_snapshots', sql: GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL });
     this.applyMigration({ id: '021_managed_resource_bindings', sql: MANAGED_RESOURCE_BINDING_MIGRATION_SQL });
     this.applyMigration({ id: '022_goal_runtime_workspace_observations', sql: GOAL_RUNTIME_WORKSPACE_OBSERVATION_MIGRATION_SQL });
+    this.applyMigration({ id: '023_workspace_lifecycle', sql: WORKSPACE_LIFECYCLE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

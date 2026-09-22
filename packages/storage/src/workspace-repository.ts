@@ -8,9 +8,28 @@ interface WorkspaceRow {
   readonly real_root_path: string;
   readonly created_at: string;
   readonly archived_at: string | null;
+  readonly workspace_kind: 'project' | 'temporary' | 'inspection';
+  readonly owner_session_id: string | null;
+  readonly owner_job_id: string | null;
+  readonly auto_cleanup: number;
+  readonly expires_at: string | null;
+  readonly unavailable_since: string | null;
 }
 
-const workspaceColumns = 'id, display_name, root_path, real_root_path, created_at, archived_at';
+const workspaceColumns = [
+  'id',
+  'display_name',
+  'root_path',
+  'real_root_path',
+  'created_at',
+  'archived_at',
+  'workspace_kind',
+  'owner_session_id',
+  'owner_job_id',
+  'auto_cleanup',
+  'expires_at',
+  'unavailable_since',
+].join(', ');
 
 export class SqliteWorkspaceRepository {
   public constructor(private readonly database: SqliteDatabase) {}
@@ -47,8 +66,21 @@ export class SqliteWorkspaceRepository {
 
   public async insert(workspace: Workspace): Promise<void> {
     this.database.connection.prepare(
-      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run(workspace.id, workspace.displayName, workspace.rootPath, workspace.realRootPath, workspace.createdAt, workspace.archivedAt ?? null);
+      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      workspace.id,
+      workspace.displayName,
+      workspace.rootPath,
+      workspace.realRootPath,
+      workspace.createdAt,
+      workspace.archivedAt ?? null,
+      workspace.lifecycleKind ?? 'project',
+      workspace.ownerSessionId ?? null,
+      workspace.ownerJobId ?? null,
+      workspace.autoCleanup === true ? 1 : 0,
+      workspace.expiresAt ?? null,
+      workspace.unavailableSince ?? null,
+    );
   }
 
   public async insertIfAvailable(workspace: Workspace): Promise<boolean> {
@@ -62,8 +94,21 @@ export class SqliteWorkspaceRepository {
         return false;
       }
       this.database.connection.prepare(
-        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ).run(workspace.id, workspace.displayName, workspace.rootPath, workspace.realRootPath, workspace.createdAt, workspace.archivedAt ?? null);
+        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        workspace.id,
+        workspace.displayName,
+        workspace.rootPath,
+        workspace.realRootPath,
+        workspace.createdAt,
+        workspace.archivedAt ?? null,
+        workspace.lifecycleKind ?? 'project',
+        workspace.ownerSessionId ?? null,
+        workspace.ownerJobId ?? null,
+        workspace.autoCleanup === true ? 1 : 0,
+        workspace.expiresAt ?? null,
+        workspace.unavailableSince ?? null,
+      );
       this.database.connection.exec('COMMIT;');
       return true;
     } catch (error) {
@@ -100,13 +145,28 @@ export class SqliteWorkspaceRepository {
       ).get(workspace.realRootPath, id);
       if (existing !== undefined) throw new Error('Workspace root is already registered');
       this.database.connection.prepare(
-        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, archived_at = NULL WHERE id = ?',
-      ).run(workspace.displayName, workspace.rootPath, workspace.realRootPath, id);
+        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, archived_at = NULL WHERE id = ?',
+      ).run(
+        workspace.displayName,
+        workspace.rootPath,
+        workspace.realRootPath,
+        workspace.lifecycleKind ?? 'project',
+        workspace.ownerSessionId ?? null,
+        workspace.ownerJobId ?? null,
+        workspace.autoCleanup === true ? 1 : 0,
+        workspace.expiresAt ?? null,
+        workspace.unavailableSince ?? null,
+        id,
+      );
       this.database.connection.exec('COMMIT;');
     } catch (error) {
       this.database.connection.exec('ROLLBACK;');
       throw error;
     }
+  }
+
+  public async setUnavailableSince(id: string, unavailableSince: string | null): Promise<void> {
+    this.database.connection.prepare('UPDATE workspaces SET unavailable_since = ? WHERE id = ?').run(unavailableSince, id);
   }
 
   public async delete(id: string): Promise<void> {
@@ -128,6 +188,12 @@ export class SqliteWorkspaceRepository {
       rootPath: value.root_path,
       realRootPath: value.real_root_path,
       createdAt: value.created_at,
+      ...(value.workspace_kind === 'project' ? {} : { lifecycleKind: value.workspace_kind }),
+      ...(value.owner_session_id === null ? {} : { ownerSessionId: value.owner_session_id }),
+      ...(value.owner_job_id === null ? {} : { ownerJobId: value.owner_job_id }),
+      ...(value.auto_cleanup === 0 ? {} : { autoCleanup: true }),
+      ...(value.expires_at === null ? {} : { expiresAt: value.expires_at }),
+      ...(value.unavailable_since === null ? {} : { unavailableSince: value.unavailable_since }),
       ...(value.archived_at === null ? {} : { archivedAt: value.archived_at }),
     };
   }
@@ -135,12 +201,20 @@ export class SqliteWorkspaceRepository {
   private isWorkspaceRow(value: unknown): value is WorkspaceRow {
     if (typeof value !== 'object' || value === null) return false;
     if (!('id' in value) || !('display_name' in value) || !('root_path' in value)
-      || !('real_root_path' in value) || !('created_at' in value) || !('archived_at' in value)) return false;
+      || !('real_root_path' in value) || !('created_at' in value) || !('archived_at' in value)
+      || !('workspace_kind' in value) || !('owner_session_id' in value) || !('owner_job_id' in value)
+      || !('auto_cleanup' in value) || !('expires_at' in value) || !('unavailable_since' in value)) return false;
     return typeof value.id === 'string'
       && typeof value.display_name === 'string'
       && typeof value.root_path === 'string'
       && typeof value.real_root_path === 'string'
       && typeof value.created_at === 'string'
-      && (value.archived_at === null || typeof value.archived_at === 'string');
+      && (value.archived_at === null || typeof value.archived_at === 'string')
+      && (value.workspace_kind === 'project' || value.workspace_kind === 'temporary' || value.workspace_kind === 'inspection')
+      && (value.owner_session_id === null || typeof value.owner_session_id === 'string')
+      && (value.owner_job_id === null || typeof value.owner_job_id === 'string')
+      && (value.auto_cleanup === 0 || value.auto_cleanup === 1)
+      && (value.expires_at === null || typeof value.expires_at === 'string')
+      && (value.unavailable_since === null || typeof value.unavailable_since === 'string');
   }
 }

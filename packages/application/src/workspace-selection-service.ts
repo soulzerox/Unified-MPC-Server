@@ -1,5 +1,5 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import { isMachineRootPath, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
+import { isMachineRootPath, isProjectWorkspace, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 
 export interface WorkspaceSelectionSnapshot {
   readonly primaryWorkspaceId: string;
@@ -58,7 +58,9 @@ export class WorkspaceSelectionService {
   }
 
   private async state(): Promise<Result<ResolvedSelection>> {
-    const projects = (await this.repository.list()).filter((project) => !isMachineRootPath(project.realRootPath) && !isMachineRootPath(project.rootPath));
+    const projects = (await this.repository.list()).filter((project) => isProjectWorkspace(project)
+      && !isMachineRootPath(project.realRootPath)
+      && !isMachineRootPath(project.rootPath));
     if (projects.length === 0) {
       this.persist({ primaryWorkspaceId: '', activeWorkspaceIds: [] });
       return err(appError('WORKSPACE_NOT_FOUND', 'No registered project workspace is available', true));
@@ -97,6 +99,12 @@ export class WorkspaceSelectionService {
 
 interface ResolvedSelection extends WorkspaceSelectionSnapshot {
   readonly projects: readonly Workspace[];
+}
+
+export function workspaceSelectionReferences(value: string | null): readonly string[] {
+  const parsed = parseSelection(value);
+  if (parsed === null) return [];
+  return [...new Set([parsed.primaryWorkspaceId, ...parsed.activeWorkspaceIds])].filter((id) => id.length > 0);
 }
 
 function parseSelection(value: string | null): WorkspaceSelectionSnapshot | null {

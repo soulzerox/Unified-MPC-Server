@@ -1,13 +1,32 @@
 import type { WorkspaceId } from '@unified-mpc/domain';
 
+export type WorkspaceLifecycleKind = 'project' | 'temporary' | 'inspection';
+
 export interface Workspace {
   readonly id: WorkspaceId;
   readonly displayName: string;
   readonly rootPath: string;
   readonly realRootPath: string;
   readonly createdAt: string;
+  /** Omitted legacy rows are conservatively treated as persistent project workspaces. */
+  readonly lifecycleKind?: WorkspaceLifecycleKind;
+  readonly ownerSessionId?: string | null;
+  readonly ownerJobId?: string | null;
+  /** Automatic cleanup only archives registry state. It never authorizes filesystem deletion. */
+  readonly autoCleanup?: boolean;
+  readonly expiresAt?: string | null;
+  /** First observation that the persisted root was unavailable or no longer canonicalized to the same directory. */
+  readonly unavailableSince?: string | null;
   /** Present only for archived workspace registrations. Archived workspaces are excluded from the runtime trust boundary. */
   readonly archivedAt?: string | null;
+}
+
+export function workspaceLifecycleKind(workspace: Workspace): WorkspaceLifecycleKind {
+  return workspace.lifecycleKind ?? 'project';
+}
+
+export function isProjectWorkspace(workspace: Workspace): boolean {
+  return workspaceLifecycleKind(workspace) === 'project';
 }
 
 export interface ResolvedWorkspacePath {

@@ -1,7 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { appError, err, ok, type Result, type WorkspaceId } from '@unified-mpc/domain';
-import type { Workspace } from './workspace-types.js';
+import { workspaceLifecycleKind, type Workspace, type WorkspaceLifecycleKind } from './workspace-types.js';
 import { isPosixMountRoot, resolveHostPath } from './filesystem-root.js';
 
 export interface WorkspaceRepository {
@@ -15,11 +15,34 @@ export interface WorkspaceRepository {
   archive?(id: WorkspaceId, archivedAt?: string): Promise<void>;
   archiveMany?(ids: readonly WorkspaceId[], archivedAt?: string): Promise<void>;
   restore?(id: WorkspaceId, workspace?: Workspace): Promise<void>;
+  setUnavailableSince?(id: WorkspaceId, unavailableSince: string | null): Promise<void>;
+}
+
+export interface WorkspaceRegistrationOptions {
+  readonly lifecycleKind?: WorkspaceLifecycleKind;
+  readonly ownerSessionId?: string;
+  readonly ownerJobId?: string;
+  readonly autoCleanup?: boolean;
+  readonly expiresAt?: string;
+}
+
+export interface WorkspaceLifecycleReconcileOptions {
+  readonly protectedWorkspaceIds?: readonly WorkspaceId[];
+  readonly endedOwnerSessionIds?: readonly string[];
+  readonly endedOwnerJobIds?: readonly string[];
+}
+
+export interface WorkspaceLifecycleReconciliation {
+  readonly inspected: number;
+  readonly archivedWorkspaceIds: readonly WorkspaceId[];
+  readonly unavailableWorkspaceIds: readonly WorkspaceId[];
+  readonly skippedProtectedWorkspaceIds: readonly WorkspaceId[];
 }
 
 export interface WorkspaceServiceOptions {
   /** Test/fixture override; production composition uses the real host. */
   readonly platform?: NodeJS.Platform;
+  readonly now?: () => Date;
 }
 
 export class WorkspaceService {
@@ -28,9 +51,21 @@ export class WorkspaceService {
     private readonly options: WorkspaceServiceOptions = {},
   ) {}
 
-  public async add(displayName: string, rootPath: string): Promise<Result<Workspace>> {
+  public async add(
+    displayName: string,
+    rootPath: string,
+    registration: WorkspaceRegistrationOptions = {},
+  ): Promise<Result<Workspace>> {
     if (displayName.trim().length === 0 || rootPath.trim().length === 0) {
       return err(appError('INVALID_INPUT', 'Workspace name and root path are required'));
+    }
+
+    const lifecycleKind = registration.lifecycleKind ?? 'project';
+    if (lifecycleKind === 'project' && registration.autoCleanup === true) {
+      return err(appError('INVALID_INPUT', 'Automatic cleanup is only allowed for temporary or inspection workspaces'));
+    }
+    if (registration.expiresAt !== undefined && !Number.isFinite(Date.parse(registration.expiresAt))) {
+      return err(appError('INVALID_INPUT', 'Workspace expiry must be a valid ISO-compatible timestamp'));
     }
 
     const platform = this.options.platform ?? process.platform;
@@ -74,12 +109,18 @@ export class WorkspaceService {
       if (this.repository.restore === undefined) {
         return err(appError('CONFLICT', 'Workspace identity is archived and cannot be relinked by this repository', true));
       }
+      const { archivedAt: _archivedAt, ...archivedWorkspace } = archived[0]!;
       const restored: Workspace = {
-        id: archived[0]!.id,
+        ...archivedWorkspace,
         displayName: displayName.trim(),
         rootPath: absoluteRootPath,
         realRootPath: canonicalRootPath,
-        createdAt: archived[0]!.createdAt,
+        ...(registration.lifecycleKind === undefined ? {} : { lifecycleKind }),
+        ...(registration.ownerSessionId === undefined ? {} : { ownerSessionId: registration.ownerSessionId }),
+        ...(registration.ownerJobId === undefined ? {} : { ownerJobId: registration.ownerJobId }),
+        ...(registration.autoCleanup === undefined ? {} : { autoCleanup: registration.autoCleanup }),
+        ...(registration.expiresAt === undefined ? {} : { expiresAt: registration.expiresAt }),
+        unavailableSince: null,
       };
       try {
         await this.repository.restore(archived[0]!.id, restored);
@@ -94,7 +135,12 @@ export class WorkspaceService {
       displayName: displayName.trim(),
       rootPath: absoluteRootPath,
       realRootPath: canonicalRootPath,
-      createdAt: new Date().toISOString(),
+      createdAt: (this.options.now?.() ?? new Date()).toISOString(),
+      ...(lifecycleKind === 'project' ? {} : { lifecycleKind }),
+      ...(registration.ownerSessionId === undefined ? {} : { ownerSessionId: registration.ownerSessionId }),
+      ...(registration.ownerJobId === undefined ? {} : { ownerJobId: registration.ownerJobId }),
+      ...(registration.autoCleanup === true ? { autoCleanup: true } : {}),
+      ...(registration.expiresAt === undefined ? {} : { expiresAt: registration.expiresAt }),
     };
     try {
       const inserted = this.repository.insertIfAvailable === undefined
@@ -144,8 +190,83 @@ export class WorkspaceService {
     return ok(undefined);
   }
 
+  public async reconcileLifecycle(
+    options: WorkspaceLifecycleReconcileOptions = {},
+  ): Promise<Result<WorkspaceLifecycleReconciliation>> {
+    const protectedIds = new Set(options.protectedWorkspaceIds ?? []);
+    const endedSessions = new Set(options.endedOwnerSessionIds ?? []);
+    const endedJobs = new Set(options.endedOwnerJobIds ?? []);
+    const now = this.options.now?.() ?? new Date();
+    const nowIso = now.toISOString();
+    const workspaces = await this.repository.list();
+    const archivedWorkspaceIds: WorkspaceId[] = [];
+    const unavailableWorkspaceIds: WorkspaceId[] = [];
+    const skippedProtectedWorkspaceIds: WorkspaceId[] = [];
+
+    for (const workspace of workspaces) {
+      const available = await this.isWorkspaceAvailable(workspace);
+      const lifecycleKind = workspaceLifecycleKind(workspace);
+      const expired = workspace.expiresAt !== undefined
+        && workspace.expiresAt !== null
+        && Number.isFinite(Date.parse(workspace.expiresAt))
+        && Date.parse(workspace.expiresAt) <= now.getTime();
+      const ownerEnded = (workspace.ownerSessionId !== undefined
+          && workspace.ownerSessionId !== null
+          && endedSessions.has(workspace.ownerSessionId))
+        || (workspace.ownerJobId !== undefined
+          && workspace.ownerJobId !== null
+          && endedJobs.has(workspace.ownerJobId));
+      const autoCleanupEligible = lifecycleKind !== 'project'
+        && workspace.autoCleanup === true
+        && (!available || expired || ownerEnded);
+
+      if (autoCleanupEligible && protectedIds.has(workspace.id)) {
+        skippedProtectedWorkspaceIds.push(workspace.id);
+      } else if (autoCleanupEligible) {
+        if (this.repository.archive === undefined) {
+          return err(appError('CONFLICT', 'Workspace lifecycle cleanup requires durable archival support', true));
+        }
+        await this.repository.archive(workspace.id, nowIso);
+        archivedWorkspaceIds.push(workspace.id);
+        continue;
+      }
+
+      if (!available) {
+        unavailableWorkspaceIds.push(workspace.id);
+        if ((workspace.unavailableSince === undefined || workspace.unavailableSince === null)
+          && this.repository.setUnavailableSince !== undefined) {
+          await this.repository.setUnavailableSince(workspace.id, nowIso);
+        }
+      } else if (workspace.unavailableSince !== undefined
+        && workspace.unavailableSince !== null
+        && this.repository.setUnavailableSince !== undefined) {
+        await this.repository.setUnavailableSince(workspace.id, null);
+      }
+    }
+
+    return ok({
+      inspected: workspaces.length,
+      archivedWorkspaceIds,
+      unavailableWorkspaceIds,
+      skippedProtectedWorkspaceIds,
+    });
+  }
+
   public delete(id: WorkspaceId): Promise<void> {
     return this.repository.delete(id);
+  }
+
+  private async isWorkspaceAvailable(workspace: Workspace): Promise<boolean> {
+    const platform = this.options.platform ?? process.platform;
+    try {
+      const [stats, canonicalRootPath] = await Promise.all([
+        stat(workspace.rootPath),
+        realpath(workspace.rootPath),
+      ]);
+      return stats.isDirectory() && samePath(canonicalRootPath, workspace.realRootPath, platform);
+    } catch {
+      return false;
+    }
   }
 }
 

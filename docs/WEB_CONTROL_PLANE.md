@@ -66,6 +66,19 @@ The **Projects** view keeps durable work visible without eagerly loading every g
 
 The expanded dashboard card shows the goal objective (what the goal is trying to accomplish), phase, progress, blockers, last update, and actions. **Open** reveals the next action and step list inline; **Continue** selects the preferred goal without starting work by itself.
 
+### Authoritative Goal Runtime snapshots and SSE
+
+The runtime projection is exposed separately from the durable Goal summary so selection/default state cannot become execution truth.
+
+- `GET /api/workspaces/:workspaceId/goal-runtime` returns the bounded authoritative runtime snapshots for the registered project, a replay-safe snapshot `cursor`, the event log `latestSequence`, and the oldest retained sequence. The cursor is derived from the lowest snapshot event coverage and is kept inside the retained replay boundary. This prevents a newly committed event from being skipped while still allowing an authoritative snapshot to replace history that has already aged out of retention.
+- `GET /api/workspaces/:workspaceId/goal-runtime/events` is a loopback SSE stream. A new stream starts with an authoritative snapshot. Browser reconnects use the standard `Last-Event-ID` cursor and receive bounded missed events from the durable Goal event log.
+- If the requested cursor fell outside the retained replay window (or is ahead of the current durable log after replacement/recovery), the stream sends a fresh `goal-runtime-snapshot` event instead of pretending the missing delta is complete.
+- Live delivery polls only the bounded durable event log; it does not perform one-second full Projects polling or create a second frontend state store.
+- Closing the browser stream cancels that connection's poll/keepalive timers. A stream-side read failure closes only the observational stream and never mutates or stops Goal execution.
+- SSE event IDs are durable Goal runtime event sequences. `goal-runtime-event` carries a durable event record; `goal-runtime-snapshot` carries the current snapshot set and replacement cursor.
+
+`integrationState` remains `unknown` unless the parent runtime has authoritative integration evidence. Neither this API nor the WebUI may infer integration from Goal completion, worktree presence/cleanliness, PR state, selection/default state, or leases.
+
 ---
 
 ### 2. Multi-IDE Policy Management

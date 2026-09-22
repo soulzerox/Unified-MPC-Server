@@ -7,6 +7,12 @@ import { renderDashboardHtml } from './dashboard-html.js';
 import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
+import type {
+  GoalRuntimeEventReplayPage,
+  GoalRuntimeSnapshotRecord,
+  ListWorkspaceGoalRuntimeSnapshotsRequest,
+  ReplayWorkspaceGoalRuntimeEventsRequest,
+} from '@unified-mpc/domain';
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import { isMcpRuntimeDiagnosticsSnapshot, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import {
@@ -73,6 +79,15 @@ export interface GoalControlPort {
   continue(workspaceId: string, goalId: string): Promise<WebGoalSummary>;
 }
 
+export interface GoalRuntimeReadPort {
+  listWorkspaceGoalRuntimeSnapshots(
+    request: ListWorkspaceGoalRuntimeSnapshotsRequest,
+  ): Promise<readonly GoalRuntimeSnapshotRecord[]>;
+  replayWorkspaceGoalRuntimeEvents(
+    request: ReplayWorkspaceGoalRuntimeEventsRequest,
+  ): Promise<GoalRuntimeEventReplayPage>;
+}
+
 export interface WebMcpRuntimeIdentity {
   readonly product: string;
   readonly service: string;
@@ -105,10 +120,18 @@ export interface ControlPlaneServerOptions {
   readonly cloudflareReconciler?: CloudflareTunnelReconciler;
   readonly workspaceControl?: WorkspaceControlPort;
   readonly goalControl?: GoalControlPort;
+  readonly goalRuntimeRead?: GoalRuntimeReadPort;
+  /** Test-only override for the bounded SSE event-log poll cadence. */
+  readonly goalRuntimeStreamPollMs?: number;
   readonly mcpIdentityProbe?: McpIdentityProbe;
   readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
   readonly closeSettings?: () => void;
 }
+
+const GOAL_RUNTIME_SNAPSHOT_LIMIT = 500;
+const GOAL_RUNTIME_REPLAY_LIMIT = 100;
+const DEFAULT_GOAL_RUNTIME_STREAM_POLL_MS = 500;
+const GOAL_RUNTIME_STREAM_KEEPALIVE_MS = 15_000;
 
 const SETTING_KEYS = Object.freeze({
   tunnelName: 'cloudflare_tunnel_name',
@@ -157,6 +180,9 @@ export class ControlPlaneServer {
   private readonly cloudflareReconciler: CloudflareTunnelReconciler;
   private readonly workspaceControl: WorkspaceControlPort | undefined;
   private readonly goalControl: GoalControlPort | undefined;
+  private readonly goalRuntimeRead: GoalRuntimeReadPort | undefined;
+  private readonly goalRuntimeStreamPollMs: number;
+  private readonly goalRuntimeStreamClosers = new Set<() => void>();
   private readonly mcpIdentityProbe: McpIdentityProbe;
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly closeSettings: (() => void) | undefined;
@@ -186,6 +212,12 @@ export class ControlPlaneServer {
     this.cloudflareReconciler = options.cloudflareReconciler ?? new CloudflareTunnelReconciler();
     this.workspaceControl = options.workspaceControl;
     this.goalControl = options.goalControl;
+    this.goalRuntimeRead = options.goalRuntimeRead;
+    if (options.goalRuntimeStreamPollMs !== undefined
+      && (!Number.isInteger(options.goalRuntimeStreamPollMs) || options.goalRuntimeStreamPollMs <= 0)) {
+      throw new Error('Goal runtime SSE poll interval must be a positive integer');
+    }
+    this.goalRuntimeStreamPollMs = options.goalRuntimeStreamPollMs ?? DEFAULT_GOAL_RUNTIME_STREAM_POLL_MS;
     this.mcpIdentityProbe = options.mcpIdentityProbe ?? probeMcpRuntimeIdentity;
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.closeSettings = options.closeSettings;
@@ -217,6 +249,8 @@ export class ControlPlaneServer {
   }
 
   public async close(): Promise<void> {
+    for (const closeStream of [...this.goalRuntimeStreamClosers]) closeStream();
+    this.goalRuntimeStreamClosers.clear();
     await new Promise<void>((resolve, reject) => {
       this.server.close((err) => (err ? reject(err) : resolve()));
     });
@@ -265,7 +299,7 @@ export class ControlPlaneServer {
       }
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
     }
 
     if (req.method === 'OPTIONS') {
@@ -349,6 +383,59 @@ export class ControlPlaneServer {
       const preferredGoalId = this.goalControl === undefined ? null : await this.goalControl.preferred(workspaceId);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ goals, preferredGoalId }));
+      return;
+    }
+
+    const workspaceGoalRuntimeEventsRoute = pathname.match(/^\/api\/workspaces\/([^/]+)\/goal-runtime\/events$/);
+    if (workspaceGoalRuntimeEventsRoute !== null && req.method === 'GET') {
+      if (this.goalRuntimeRead === undefined) {
+        sendJsonError(res, 503, 'Goal runtime projection service is unavailable');
+        return;
+      }
+      const workspaceId = decodeURIComponent(workspaceGoalRuntimeEventsRoute[1]!);
+      if (!(await this.isRegisteredWorkspace(workspaceId))) {
+        sendJsonError(res, 404, 'Workspace is not a registered project');
+        return;
+      }
+      const cursor = parseGoalRuntimeEventCursor(req.headers['last-event-id']);
+      if (!cursor.ok) {
+        sendJsonError(res, 400, cursor.error);
+        return;
+      }
+      await this.openGoalRuntimeEventStream(res, workspaceId, cursor.value);
+      return;
+    }
+
+    const workspaceGoalRuntimeRoute = pathname.match(/^\/api\/workspaces\/([^/]+)\/goal-runtime$/);
+    if (workspaceGoalRuntimeRoute !== null && req.method === 'GET') {
+      if (this.goalRuntimeRead === undefined) {
+        sendJsonError(res, 503, 'Goal runtime projection service is unavailable');
+        return;
+      }
+      const workspaceId = decodeURIComponent(workspaceGoalRuntimeRoute[1]!);
+      if (!(await this.isRegisteredWorkspace(workspaceId))) {
+        sendJsonError(res, 404, 'Workspace is not a registered project');
+        return;
+      }
+      const [snapshots, bounds] = await Promise.all([
+        this.goalRuntimeRead.listWorkspaceGoalRuntimeSnapshots({
+          workspaceId,
+          limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
+        }),
+        this.goalRuntimeRead.replayWorkspaceGoalRuntimeEvents({
+          workspaceId,
+          limit: 1,
+        }),
+      ]);
+      const cursor = goalRuntimeSnapshotCursor(snapshots, bounds);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        workspaceId,
+        snapshots,
+        cursor,
+        latestSequence: bounds.latestSequence ?? null,
+        oldestAvailableSequence: bounds.oldestAvailableSequence ?? null,
+      }));
       return;
     }
 
@@ -899,6 +986,164 @@ export class ControlPlaneServer {
     };
   }
 
+  private async isRegisteredWorkspace(workspaceId: string): Promise<boolean> {
+    const registered = await this.workspaceControl?.list() ?? [];
+    return registered.some((workspace) => workspace.id === workspaceId);
+  }
+
+  private async openGoalRuntimeEventStream(
+    res: ServerResponse,
+    workspaceId: string,
+    requestedCursor: number | undefined,
+  ): Promise<void> {
+    const runtime = this.goalRuntimeRead;
+    if (runtime === undefined) throw new Error('Goal runtime projection service is unavailable');
+
+    let closed = false;
+    let pollTimer: NodeJS.Timeout | undefined;
+    let keepaliveTimer: NodeJS.Timeout | null = null;
+
+    const dispose = (): void => {
+      if (closed) return;
+      closed = true;
+      if (pollTimer !== undefined) clearTimeout(pollTimer);
+      if (keepaliveTimer !== null) clearInterval(keepaliveTimer);
+      this.goalRuntimeStreamClosers.delete(closeStream);
+    };
+    const closeStream = (): void => {
+      dispose();
+      if (!res.writableEnded) res.end();
+    };
+    this.goalRuntimeStreamClosers.add(closeStream);
+    res.once('close', dispose);
+
+    const initialPage = await runtime.replayWorkspaceGoalRuntimeEvents({
+      workspaceId,
+      ...(requestedCursor === undefined ? {} : { afterSequence: requestedCursor }),
+      limit: GOAL_RUNTIME_REPLAY_LIMIT,
+    });
+    if (closed || res.writableEnded || res.destroyed) return;
+
+    const initialWindowMissed = requestedCursor !== undefined && (
+      initialPage.replayWindowMissed
+      || (initialPage.latestSequence !== undefined && requestedCursor > initialPage.latestSequence)
+    );
+    const needsSnapshot = requestedCursor === undefined
+      || initialWindowMissed
+      || initialPage.latestSequence === undefined;
+    const initialSnapshots = needsSnapshot
+      ? await runtime.listWorkspaceGoalRuntimeSnapshots({
+          workspaceId,
+          limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
+        })
+      : undefined;
+    if (closed || res.writableEnded || res.destroyed) return;
+
+    let cursor = needsSnapshot
+      ? goalRuntimeSnapshotCursor(initialSnapshots ?? [], initialPage)
+      : requestedCursor!;
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    if (!res.write('retry: 1000\n\n')) await waitForGoalRuntimeSseDrain(res);
+
+    if (initialSnapshots !== undefined) {
+      if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
+        workspaceId,
+        snapshots: initialSnapshots,
+        cursor,
+        replayWindowMissed: initialWindowMissed,
+      })) {
+        await waitForGoalRuntimeSseDrain(res);
+      }
+    } else {
+      for (const record of initialPage.events) {
+        if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-event', record.sequence, record)) {
+          await waitForGoalRuntimeSseDrain(res);
+        }
+        cursor = record.sequence;
+      }
+    }
+
+    const schedule = (delayMs: number): void => {
+      if (closed) return;
+      pollTimer = setTimeout(() => {
+        void pump();
+      }, delayMs);
+      pollTimer.unref?.();
+    };
+
+    const pump = async (): Promise<void> => {
+      if (closed) return;
+      try {
+        const page = await runtime.replayWorkspaceGoalRuntimeEvents({
+          workspaceId,
+          afterSequence: cursor,
+          limit: GOAL_RUNTIME_REPLAY_LIMIT,
+        });
+        if (closed || res.writableEnded || res.destroyed) return;
+
+        const replayWindowMissed = page.replayWindowMissed
+          || (page.latestSequence !== undefined && cursor > page.latestSequence);
+        if (replayWindowMissed) {
+          const snapshots = await runtime.listWorkspaceGoalRuntimeSnapshots({
+            workspaceId,
+            limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
+          });
+          if (closed || res.writableEnded || res.destroyed) return;
+
+          cursor = goalRuntimeSnapshotCursor(snapshots, page);
+          if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
+            workspaceId,
+            snapshots,
+            cursor,
+            replayWindowMissed: true,
+          })) {
+            await waitForGoalRuntimeSseDrain(res);
+          }
+          const hasMoreAfterSnapshot = page.latestSequence !== undefined && cursor < page.latestSequence;
+          schedule(hasMoreAfterSnapshot ? 0 : this.goalRuntimeStreamPollMs);
+          return;
+        }
+
+        for (const record of page.events) {
+          if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-event', record.sequence, record)) {
+            await waitForGoalRuntimeSseDrain(res);
+          }
+          cursor = record.sequence;
+        }
+        const hasMore = page.latestSequence !== undefined && cursor < page.latestSequence;
+        schedule(hasMore ? 0 : this.goalRuntimeStreamPollMs);
+      } catch {
+        if (closed || res.writableEnded || res.destroyed) return;
+        this.recordLog('WARN', `Goal runtime event stream read failed for workspace ${workspaceId}`);
+        if (!res.writableEnded && !res.destroyed) {
+          writeGoalRuntimeSseEvent(res, 'goal-runtime-stream-error', undefined, {
+            error: 'Goal runtime stream unavailable; reconnect for an authoritative snapshot',
+          });
+        }
+        closeStream();
+      }
+    };
+
+    if (closed || res.writableEnded || res.destroyed) return;
+
+    keepaliveTimer = setInterval(() => {
+      if (!closed && !res.writableEnded && !res.destroyed && !res.writableNeedDrain) {
+        res.write(': keepalive\n\n');
+      }
+    }, GOAL_RUNTIME_STREAM_KEEPALIVE_MS);
+    keepaliveTimer.unref?.();
+
+    const hasMoreInitialEvents = initialPage.latestSequence !== undefined
+      && cursor < initialPage.latestSequence;
+    schedule(hasMoreInitialEvents ? 0 : this.goalRuntimeStreamPollMs);
+  }
+
   private async loadPersistedGatewayConfiguration(): Promise<void> {
     if (this.settingsRepository === undefined) return;
     const configuration = await this.readGatewayConfiguration();
@@ -1019,6 +1264,69 @@ export class ControlPlaneServer {
       return false;
     }
   }
+}
+
+function parseGoalRuntimeEventCursor(
+  value: string | string[] | undefined,
+): { readonly ok: true; readonly value: number | undefined } | { readonly ok: false; readonly error: string } {
+  if (value === undefined || value === '') return { ok: true, value: undefined };
+  if (Array.isArray(value)) return { ok: false, error: 'Last-Event-ID must be one non-negative integer' };
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return { ok: false, error: 'Last-Event-ID must be a non-negative integer' };
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    return { ok: false, error: 'Last-Event-ID must be a safe non-negative integer' };
+  }
+  return { ok: true, value: parsed };
+}
+
+function goalRuntimeSnapshotCursor(
+  snapshots: readonly GoalRuntimeSnapshotRecord[],
+  page: Pick<GoalRuntimeEventReplayPage, 'oldestAvailableSequence' | 'latestSequence'>,
+): number {
+  const latest = page.latestSequence;
+  if (latest === undefined) return 0;
+
+  const retainedFloor = page.oldestAvailableSequence === undefined
+    ? 0
+    : Math.max(0, page.oldestAvailableSequence - 1);
+  if (snapshots.length === 0) return Math.min(retainedFloor, latest);
+
+  const snapshotFloor = snapshots.reduce(
+    (minimum, snapshot) => Math.min(minimum, snapshot.lastEventSequence),
+    latest,
+  );
+  return Math.min(latest, Math.max(retainedFloor, snapshotFloor));
+}
+
+function writeGoalRuntimeSseEvent(
+  res: ServerResponse,
+  event: string,
+  id: number | undefined,
+  data: unknown,
+): boolean {
+  if (res.writableEnded || res.destroyed) return true;
+  const frame = [
+    ...(id === undefined ? [] : [`id: ${id}\n`]),
+    `event: ${event}\n`,
+    `data: ${JSON.stringify(data)}\n\n`,
+  ].join('');
+  return res.write(frame);
+}
+
+async function waitForGoalRuntimeSseDrain(res: ServerResponse): Promise<void> {
+  if (res.writableEnded || res.destroyed || !res.writableNeedDrain) return;
+  await new Promise<void>((resolve) => {
+    const finish = (): void => {
+      res.off('drain', finish);
+      res.off('close', finish);
+      res.off('error', finish);
+      resolve();
+    };
+    res.once('drain', finish);
+    res.once('close', finish);
+    res.once('error', finish);
+  });
 }
 
 function isLoopbackHost(value: string | string[] | undefined): boolean {

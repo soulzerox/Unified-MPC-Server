@@ -4,6 +4,7 @@ import {
   ControlPlaneServer,
   type ControlPlaneServerOptions,
   type GoalControlPort,
+  type GoalRuntimeReadPort,
   type WebGoalSummary,
   type WebWorkspaceSelectionSnapshot,
   type WebWorkspaceSummary,
@@ -19,6 +20,8 @@ import {
   SecretToolSecretStore,
   SqliteDatabase,
   SqliteGoalRepository,
+  SqliteGoalRuntimeEventRepository,
+  SqliteGoalRuntimeSnapshotRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
@@ -71,6 +74,12 @@ export async function runWeb(
     const workspaceService = new WorkspaceService(workspaceRepository);
     const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
     const goalRepository = new SqliteGoalRepository(database);
+    const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
+    const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
+    const goalRuntimeRead: GoalRuntimeReadPort = serverOptions?.goalRuntimeRead ?? {
+      listWorkspaceGoalRuntimeSnapshots: async (request) => goalRuntimeSnapshots.listWorkspaceGoalRuntimeSnapshots(request),
+      replayWorkspaceGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayWorkspaceGoalRuntimeEvents(request),
+    };
     bootstrapNonSecretSettings(settings);
     const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings, workspaceIndex);
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
@@ -82,6 +91,7 @@ export async function runWeb(
       secretStore: serverOptions?.secretStore ?? new SecretToolSecretStore(),
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       goalControl: serverOptions?.goalControl ?? goalControl,
+      goalRuntimeRead,
       closeSettings: (): void => {
         void workspaceIndex.close();
         if (serverOptions?.closeSettings === undefined) database.close();

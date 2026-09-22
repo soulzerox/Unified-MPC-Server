@@ -686,7 +686,7 @@ export function getClientScriptJs(): string {
           renderWorkspaces();
           syncWorkspaceRuntimeStreams();
         } catch (err) {
-          if (body) body.replaceChildren(emptyRow(6, 'Failed to load projects: ' + err.message));
+          if (body) body.replaceChildren(emptyRow(7, 'Failed to load projects: ' + err.message));
           logEvent('ERROR', 'Project refresh failed: ' + err.message);
         }
       }

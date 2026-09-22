@@ -57,6 +57,8 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("active ? 'In Scope' : 'Out of Scope'");
     expect(html).toContain("primary ? 'Default' : '—'");
     expect(html).toContain('Set Default');
+    expect(html).toContain("emptyRow(7, 'Failed to load projects: '");
+    expect(html).not.toContain("emptyRow(6, 'Failed to load projects: '");
     expect(html).toContain("'/goal-runtime'");
     expect(html).toContain("'/goal-runtime/events'");
     expect(html).toContain('new EventSource(endpoint)');

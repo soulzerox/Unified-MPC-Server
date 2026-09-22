@@ -201,7 +201,9 @@ export class SqliteWorkspaceRepository {
   private isWorkspaceRow(value: unknown): value is WorkspaceRow {
     if (typeof value !== 'object' || value === null) return false;
     if (!('id' in value) || !('display_name' in value) || !('root_path' in value)
-      || !('real_root_path' in value) || !('created_at' in value) || !('archived_at' in value)) return false;
+      || !('real_root_path' in value) || !('created_at' in value) || !('archived_at' in value)
+      || !('workspace_kind' in value) || !('owner_session_id' in value) || !('owner_job_id' in value)
+      || !('auto_cleanup' in value) || !('expires_at' in value) || !('unavailable_since' in value)) return false;
     return typeof value.id === 'string'
       && typeof value.display_name === 'string'
       && typeof value.root_path === 'string'

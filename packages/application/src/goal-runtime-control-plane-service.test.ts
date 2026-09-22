@@ -235,6 +235,20 @@ describe('GoalRuntimeControlPlaneService', () => {
     });
     await runtime.service.ensureGoalSnapshot('goal-1');
 
+    const started = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'execution-started-before-transient-blockers',
+      type: 'execution_started',
+      workspaceId,
+      goalId: 'goal-1',
+      executionId: 'execution-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:00:50.000Z',
+    });
+    expect(started.projection).toMatchObject({
+      runtimeState: 'running',
+      blocker: { kind: 'goal_blocked' },
+    });
+
     const approval = await runtime.service.publishGoalRuntimeEvent({
       eventId: 'approval-over-durable-blocker',
       type: 'approval_required',

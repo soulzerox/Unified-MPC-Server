@@ -365,6 +365,30 @@ describe('GoalWorkspaceService', () => {
     }
   });
 
+  it('does not reuse or remove an existing snapshot directory', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-existing-'));
+    const snapshotRoot = path.join(parentRoot, '.unified-mpc', 'snapshots', 'goal-1');
+    const markerPath = path.join(snapshotRoot, 'keep.txt');
+    try {
+      await mkdir(snapshotRoot, { recursive: true });
+      await writeFile(markerPath, 'pre-existing snapshot');
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+
+      await expect(new GoalWorkspaceService(repository, new FakeGitPort()).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'snapshot-source-v1',
+      })).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+
+      await expect(readFile(markerPath, 'utf8')).resolves.toBe('pre-existing snapshot');
+      expect(repository.workspaces).toHaveLength(1);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
   it('creates an explicitly requested bounded snapshot for a non-Git parent', async () => {
     const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-'));
     try {

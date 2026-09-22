@@ -36,15 +36,46 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('/api/chatgpt-web/connect');
   });
 
-  it('renders project goals collapsed by default and lazy-loads them with Continue/Open actions', () => {
+  it('renders project goals collapsed by default and lazy-loads them with Select Goal/Open actions', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('project-goals-toggle');
     expect(html).toContain('loadWorkspaceGoals');
     expect(html).toContain("'/goals'");
     expect(html).toContain("'/continue'");
     expect(html).toContain('goal-continue-btn');
+    expect(html).toContain('Select Goal');
     expect(html).toContain('goal-open-btn');
     expect(html).toContain('No open goals');
+  });
+
+  it('keeps Web context separate from authoritative concurrent Goal runtime state', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('Projects — Context & Runtime');
+    expect(html).toContain('<th>Scope</th>');
+    expect(html).toContain('<th>Default</th>');
+    expect(html).toContain('<th>Runtime</th>');
+    expect(html).toContain("active ? 'In Scope' : 'Out of Scope'");
+    expect(html).toContain("primary ? 'Default' : '—'");
+    expect(html).toContain('Set Default');
+    expect(html).toContain("emptyRow(7, 'Failed to load projects: '");
+    expect(html).not.toContain("emptyRow(6, 'Failed to load projects: '");
+    expect(html).toContain("'/goal-runtime'");
+    expect(html).toContain("'/goal-runtime/events'");
+    expect(html).toContain('new EventSource(endpoint)');
+    expect(html).toContain('const workspaceRuntimeRefreshControllers = new Map()');
+    expect(html).toContain("cachedWorkspaces.some((workspace) => workspace.id === workspaceId)");
+    expect(html).toContain('fetch(endpoint, { signal: controller.signal })');
+    expect(html).toContain('if (controller) controller.abort()');
+    expect(html).toContain('...workspaceRuntimeRefreshControllers.keys()');
+    expect(html).toContain("stream.addEventListener('goal-runtime-snapshot'");
+    expect(html).toContain("stream.addEventListener('goal-runtime-event', (event) => {");
+    expect(html).toContain('noteWorkspaceRuntimeEvent(workspace.id, JSON.parse(event.data))');
+    expect(html).toContain('Number(record.lastEventSequence) >= sequence');
+    expect(html).toContain('Projection catching up');
+    expect(html).toContain("'Integration: ' + runtimeProjection.integrationState");
+    expect(html).toContain('Runtime blocker: ');
+    expect(html).not.toContain("addCell(row, active ? 'Active' : 'Inactive')");
+    expect(html).not.toContain("addCell(row, primary ? 'Primary' : '—')");
   });
 
   it('renders a user-editable P1-Pn policy editor with reorder and save controls', () => {

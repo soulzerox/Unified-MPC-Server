@@ -91,6 +91,15 @@ This document serves as the canonical single-source-of-truth (SSOT) for the visu
 - Rows: 13px, padding 8px 12px, hover background `var(--surface-hover)` with 150ms transition.
 - Cells: Monospaced treatment for technical IDs (`serverId`, transport, commands).
 
+### Projects: Context vs Runtime Truth
+- **Scope** and **Default** are Web/client context only. Render them with neutral/context styling; never use them as evidence that a project is Running.
+- Runtime badges must come from authoritative Goal Runtime snapshots. If several Goal snapshots exist, show their exact runtime states/counts rather than collapsing them into one invented project status.
+- Several registered projects may show `running` simultaneously. There is no global active-runtime indicator for Projects.
+- A `goal-runtime-event` SSE delta is an invalidation signal for the WebUI, not permission to reimplement the runtime projector in the browser. Refresh the bounded authoritative snapshot and wait for that Goal snapshot's `lastEventSequence` to cover the durable event before presenting the new projection.
+- While projection coverage is catching up, keep the last authoritative snapshot visible and label the lag neutrally. Do not fabricate completion or a newer runtime state.
+- `integrationState: unknown` and `workspaceState: unknown` must remain visibly unknown until authoritative evidence changes them.
+- Preferred Goal selection is a context affordance labeled **Select Goal**; it does not start, resume, pause, or own execution.
+
 ### Modal Dialogs
 - Backdrop: `rgba(0, 0, 0, 0.75)` with `backdrop-filter: blur(6px)`.
 - Content: Centered, max-width 540px, `var(--surface-1)` with `var(--border-default)`.

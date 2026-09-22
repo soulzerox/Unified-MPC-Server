@@ -11,6 +11,11 @@ on:
       - "apps/web/src/index.ts"
       - "apps/web/src/web-server.ts"
       - "apps/web/src/goal-runtime-http.test.ts"
+      - "apps/web/src/dashboard-html.ts"
+      - "apps/web/src/dashboard-html.test.ts"
+      - "apps/web/src/ui/**"
+      - "DESIGN.md"
+      - "docs/WEB_CONTROL_PLANE.md"
       - "apps/cli/src/runtime/stdio-mcp-runtime.test.ts"
       - "packages/application/src/goal-continuation-service.ts"
       - "packages/application/src/goal-continuation-runtime-events.integration.test.ts"
@@ -83,8 +88,11 @@ jobs:
           src/goal-mutation-fence-service.test.ts
           src/goal-runtime-reconciliation-service.test.ts
 
-      - name: Web Goal runtime snapshot and SSE regression
-        run: pnpm --filter @unified-mpc/web exec vitest run src/goal-runtime-http.test.ts
+      - name: Web Goal runtime API and Projects consumer regression
+        run: >-
+          pnpm --filter @unified-mpc/web exec vitest run
+          src/goal-runtime-http.test.ts
+          src/dashboard-html.test.ts
 
       - name: STDIO runtime regression
         run: pnpm --filter @unified-mpc/cli exec vitest run src/runtime/stdio-mcp-runtime.test.ts
@@ -121,6 +129,10 @@ jobs:
           apps/web/src/index.ts
           apps/web/src/web-server.ts
           apps/web/src/goal-runtime-http.test.ts
+          apps/web/src/dashboard-html.ts
+          apps/web/src/dashboard-html.test.ts
+          apps/web/src/ui/client-script.ts
+          apps/web/src/ui/views.ts
           apps/cli/src/commands/web.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts
           apps/cli/src/runtime/stdio-mcp-runtime.test.ts

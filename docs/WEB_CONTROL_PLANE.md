@@ -64,7 +64,7 @@ The **Projects** view keeps durable work visible without eagerly loading every g
 - The preferred mapping is persisted in non-secret settings. `workspace_bootstrap` exposes the validated preferred goal as a continuation hint to MCP clients; stale or terminal selections are ignored.
 - Goals with terminal durable status (`completed`, `failed`, `blocked`, or `cancelled`) are excluded from the open-goal count and list.
 
-The expanded dashboard card shows the goal objective (what the goal is trying to accomplish), phase, progress, blockers, last update, and actions. **Open** reveals the next action and step list inline; **Continue** selects the preferred goal without starting work by itself.
+The expanded dashboard card keeps durable plan context separate from runtime truth. **Open** reveals the next action and step list inline; **Select Goal** chooses the preferred Web continuation context without starting or resuming work by itself.
 
 ### Authoritative Goal Runtime snapshots and SSE
 
@@ -76,6 +76,9 @@ The runtime projection is exposed separately from the durable Goal summary so se
 - Live delivery polls only the bounded durable event log; it does not perform one-second full Projects polling or create a second frontend state store.
 - Closing the browser stream cancels that connection's poll/keepalive timers. A stream-side read failure closes only the observational stream and never mutates or stops Goal execution.
 - SSE event IDs are durable Goal runtime event sequences. `goal-runtime-event` carries a durable event record; `goal-runtime-snapshot` carries the current snapshot set and replacement cursor.
+- The Projects view opens one reconnecting EventSource per registered project. The initial/current `goal-runtime-snapshot` is rendered directly. A `goal-runtime-event` is treated only as an invalidation signal: the browser refreshes `GET /api/workspaces/:workspaceId/goal-runtime` and waits until that Goal snapshot's `lastEventSequence` covers the durable event sequence. This preserves the parent projector as the only runtime truth implementation while tolerating the committed-event/projected-snapshot race.
+- Event-driven refreshes are coalesced and projection catch-up retries are bounded. The UI keeps the last authoritative snapshot visible while projection coverage catches up; it does not fall back to full Projects polling or infer a newer state from the event type.
+- Projects renders Web context as **In Scope / Out of Scope** and **Default**, independently from runtime badges. **Set Default** and **Select Goal** change context only; several projects can display authoritative `running` snapshots simultaneously.
 
 `integrationState` remains `unknown` unless the parent runtime has authoritative integration evidence. Neither this API nor the WebUI may infer integration from Goal completion, worktree presence/cleanliness, PR state, selection/default state, or leases.
 

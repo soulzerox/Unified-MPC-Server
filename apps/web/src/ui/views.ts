@@ -161,13 +161,13 @@ export function renderDashboardViewsHtml(): string {
     </div>
   </div>
 
-  <!-- VIEW: PROJECTS / ACTIVE WORKSPACE SET -->
+  <!-- VIEW: PROJECTS / CONTEXT + AUTHORITATIVE RUNTIME -->
   <div class="view-panel" id="view-projects">
     <div class="card">
       <div class="filter-bar">
         <div>
-          <h2 style="margin-bottom: 4px;">Projects & Active Workspace Set</h2>
-          <p style="font-size: 12px; color: var(--text-secondary);">Only registered project roots can be activated. The Primary Project is the default implicit project; active projects remain independently guarded by workspace containment.</p>
+          <h2 style="margin-bottom: 4px;">Projects — Context & Runtime</h2>
+          <p style="font-size: 12px; color: var(--text-secondary);">Web Scope and Default are context controls only. Runtime state comes from authoritative Goal Runtime snapshots, so several projects may report work independently.</p>
         </div>
         <button class="btn btn-secondary btn-sm" id="projects-refresh-btn" type="button">Refresh</button>
       </div>
@@ -177,14 +177,15 @@ export function renderDashboardViewsHtml(): string {
             <tr>
               <th>Project</th>
               <th>Path</th>
-              <th>Active</th>
-              <th>Primary</th>
+              <th>Scope</th>
+              <th>Default</th>
+              <th>Runtime</th>
               <th>Goals</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody id="projects-table-body">
-            <tr><td colspan="6" style="color: var(--text-muted); text-align: center;">Loading registered projects...</td></tr>
+            <tr><td colspan="7" style="color: var(--text-muted); text-align: center;">Loading registered projects...</td></tr>
           </tbody>
         </table>
       </div>

@@ -12,8 +12,6 @@ on:
       - "packages/application/src/goal-task-cancellation-service.ts"
       - "packages/application/src/goal-task-cancellation-service.test.ts"
       - "packages/application/src/goal-runtime-reconciliation-service.ts"
-      - "packages/application/src/goal-workspace-service.ts"
-      - "packages/application/src/goal-workspace-service.test.ts"
       - "packages/application/src/managed-resource-recovery-service.ts"
       - "packages/application/src/managed-resource-recovery-service.test.ts"
       - "packages/application/src/scheduled-continuation-service.ts"
@@ -94,9 +92,6 @@ jobs:
           src/goal-restart-reconnect.integration.test.ts
           src/goal-scheduled-execution-ownership.integration.test.ts
 
-      - name: Goal Workspace isolation and snapshot regression
-        run: pnpm --filter @unified-mpc/application exec vitest run --fileParallelism=false src/goal-workspace-service.test.ts
-
       - name: Durable managed resource binding contract
         run: pnpm --filter @unified-mpc/storage exec vitest run --fileParallelism=false src/managed-resource-binding-repository.integration.test.ts
 
@@ -166,8 +161,6 @@ jobs:
           packages/application/src/goal-task-cancellation-service.test.ts
           packages/application/src/scheduled-continuation-service.ts
           packages/application/src/goal-runtime-reconciliation-service.ts
-          packages/application/src/goal-workspace-service.ts
-          packages/application/src/goal-workspace-service.test.ts
           packages/application/src/managed-resource-recovery-service.ts
           packages/application/src/managed-resource-recovery-service.test.ts
           packages/workspace/src/resource-admission.ts

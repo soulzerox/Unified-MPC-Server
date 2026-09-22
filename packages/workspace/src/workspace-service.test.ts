@@ -109,6 +109,54 @@ describe('WorkspaceService', () => {
     expect(repository.inserted).toEqual([]);
   });
 
+  it('requires explicit durable identity for Goal Workspaces and keeps them out of auto-cleanup', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-workspace-'));
+    temporaryRoots.push(parent);
+    const rootPath = path.join(parent, 'goal');
+    await mkdir(rootPath);
+    const repository = repositorySpy();
+    const service = new WorkspaceService(repository);
+
+    await expect(service.add('Goal', rootPath, { lifecycleKind: 'goal' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    await expect(service.add('Goal', rootPath, {
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      autoCleanup: true,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+
+    const result = await service.add('Goal', rootPath, {
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      parentSource: 'committed_head',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'pending',
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        lifecycleKind: 'goal',
+        goalId: 'goal-1',
+        parentWorkspaceId: 'project-1',
+        goalWorkspaceKind: 'git_worktree',
+        parentSource: 'committed_head',
+        baseRevision: 'abc123',
+        branchName: 'goal/goal-1',
+        integrationState: 'pending',
+      },
+    });
+  });
+
   it('unregisters a workspace without deleting its source directory', async () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-service-remove-'));
     temporaryRoots.push(parent);

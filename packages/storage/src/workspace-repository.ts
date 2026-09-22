@@ -1,4 +1,4 @@
-import type { Workspace } from '@unified-mpc/workspace';
+import type { Workspace, WorkspaceWriterLease } from '@unified-mpc/workspace';
 import type { SqliteDatabase } from './database.js';
 
 interface WorkspaceRow {
@@ -17,11 +17,15 @@ interface WorkspaceRow {
   readonly goal_id: string | null;
   readonly parent_workspace_id: string | null;
   readonly goal_workspace_kind: 'git_worktree' | 'snapshot' | null;
-  readonly parent_source: 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | null;
+  readonly parent_source: 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | 'snapshot' | null;
   readonly base_revision: string | null;
   readonly branch_name: string | null;
   readonly checkpoint_id: string | null;
   readonly integration_state: 'pending' | 'integrated' | 'conflict' | 'unknown' | null;
+  readonly writer_lease_id: string | null;
+  readonly writer_lease_owner_id: string | null;
+  readonly writer_lease_generation: number | null;
+  readonly writer_lease_expires_at: string | null;
 }
 
 const workspaceColumns = [
@@ -45,6 +49,10 @@ const workspaceColumns = [
   'branch_name',
   'checkpoint_id',
   'integration_state',
+  'writer_lease_id',
+  'writer_lease_owner_id',
+  'writer_lease_generation',
+  'writer_lease_expires_at',
 ].join(', ');
 
 export class SqliteWorkspaceRepository {
@@ -82,7 +90,7 @@ export class SqliteWorkspaceRepository {
 
   public async insert(workspace: Workspace): Promise<void> {
     this.database.connection.prepare(
-      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
       workspace.id,
       workspace.displayName,
@@ -104,6 +112,10 @@ export class SqliteWorkspaceRepository {
       workspace.branchName ?? null,
       workspace.checkpointId ?? null,
       workspace.integrationState ?? null,
+      workspace.writerLease?.leaseId ?? null,
+      workspace.writerLease?.ownerId ?? null,
+      workspace.writerLease?.generation ?? null,
+      workspace.writerLease?.expiresAt ?? null,
     );
   }
 
@@ -118,7 +130,7 @@ export class SqliteWorkspaceRepository {
         return false;
       }
       this.database.connection.prepare(
-        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       ).run(
         workspace.id,
         workspace.displayName,
@@ -140,6 +152,10 @@ export class SqliteWorkspaceRepository {
         workspace.branchName ?? null,
         workspace.checkpointId ?? null,
         workspace.integrationState ?? null,
+        workspace.writerLease?.leaseId ?? null,
+        workspace.writerLease?.ownerId ?? null,
+        workspace.writerLease?.generation ?? null,
+        workspace.writerLease?.expiresAt ?? null,
       );
       this.database.connection.exec('COMMIT;');
       return true;
@@ -177,7 +193,7 @@ export class SqliteWorkspaceRepository {
       ).get(workspace.realRootPath, id);
       if (existing !== undefined) throw new Error('Workspace root is already registered');
       this.database.connection.prepare(
-        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, goal_id = ?, parent_workspace_id = ?, goal_workspace_kind = ?, parent_source = ?, base_revision = ?, branch_name = ?, checkpoint_id = ?, integration_state = ?, archived_at = NULL WHERE id = ?',
+        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, goal_id = ?, parent_workspace_id = ?, goal_workspace_kind = ?, parent_source = ?, base_revision = ?, branch_name = ?, checkpoint_id = ?, integration_state = ?, writer_lease_id = ?, writer_lease_owner_id = ?, writer_lease_generation = ?, writer_lease_expires_at = ?, archived_at = NULL WHERE id = ?',
       ).run(
         workspace.displayName,
         workspace.rootPath,
@@ -196,6 +212,10 @@ export class SqliteWorkspaceRepository {
         workspace.branchName ?? null,
         workspace.checkpointId ?? null,
         workspace.integrationState ?? null,
+        workspace.writerLease?.leaseId ?? null,
+        workspace.writerLease?.ownerId ?? null,
+        workspace.writerLease?.generation ?? null,
+        workspace.writerLease?.expiresAt ?? null,
         id,
       );
       this.database.connection.exec('COMMIT;');
@@ -207,6 +227,46 @@ export class SqliteWorkspaceRepository {
 
   public async setUnavailableSince(id: string, unavailableSince: string | null): Promise<void> {
     this.database.connection.prepare('UPDATE workspaces SET unavailable_since = ? WHERE id = ?').run(unavailableSince, id);
+  }
+
+  public async acquireGoalWriterLease(id: string, leaseId: string, ownerId: string, now: string, expiresAt: string): Promise<WorkspaceWriterLease | null> {
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const row = this.database.connection.prepare(
+        'SELECT writer_lease_id, writer_lease_generation, writer_lease_expires_at FROM workspaces WHERE id = ? AND archived_at IS NULL',
+      ).get(id) as { writer_lease_id: string | null; writer_lease_generation: number | null; writer_lease_expires_at: string | null } | undefined;
+      if (row === undefined) {
+        this.database.connection.exec('ROLLBACK;');
+        return null;
+      }
+      if (row.writer_lease_id !== null && row.writer_lease_expires_at !== null && row.writer_lease_expires_at > now && row.writer_lease_id !== leaseId) {
+        this.database.connection.exec('ROLLBACK;');
+        return null;
+      }
+      const generation = (row.writer_lease_generation ?? 0) + (row.writer_lease_id === leaseId ? 0 : 1);
+      this.database.connection.prepare(
+        'UPDATE workspaces SET writer_lease_id = ?, writer_lease_owner_id = ?, writer_lease_generation = ?, writer_lease_expires_at = ? WHERE id = ? AND archived_at IS NULL',
+      ).run(leaseId, ownerId, generation, expiresAt, id);
+      this.database.connection.exec('COMMIT;');
+      return { leaseId, ownerId, generation, expiresAt };
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  public async renewGoalWriterLease(id: string, leaseId: string, generation: number, now: string, expiresAt: string): Promise<boolean> {
+    const result = this.database.connection.prepare(
+      'UPDATE workspaces SET writer_lease_expires_at = ? WHERE id = ? AND archived_at IS NULL AND writer_lease_id = ? AND writer_lease_generation = ? AND writer_lease_expires_at > ?',
+    ).run(expiresAt, id, leaseId, generation, now);
+    return Number(result.changes) === 1;
+  }
+
+  public async releaseGoalWriterLease(id: string, leaseId: string, generation: number): Promise<boolean> {
+    const result = this.database.connection.prepare(
+      'UPDATE workspaces SET writer_lease_id = NULL, writer_lease_owner_id = NULL, writer_lease_expires_at = NULL WHERE id = ? AND archived_at IS NULL AND writer_lease_id = ? AND writer_lease_generation = ?',
+    ).run(id, leaseId, generation);
+    return Number(result.changes) === 1;
   }
 
   public async delete(id: string): Promise<void> {
@@ -243,6 +303,14 @@ export class SqliteWorkspaceRepository {
       ...(value.branch_name === null ? {} : { branchName: value.branch_name }),
       ...(value.checkpoint_id === null ? {} : { checkpointId: value.checkpoint_id }),
       ...(value.integration_state === null ? {} : { integrationState: value.integration_state }),
+      ...(value.writer_lease_id === null || value.writer_lease_owner_id === null || value.writer_lease_generation === null || value.writer_lease_expires_at === null ? {} : {
+        writerLease: {
+          leaseId: value.writer_lease_id,
+          ownerId: value.writer_lease_owner_id,
+          generation: value.writer_lease_generation,
+          expiresAt: value.writer_lease_expires_at,
+        },
+      }),
     };
   }
 
@@ -254,7 +322,9 @@ export class SqliteWorkspaceRepository {
       || !('auto_cleanup' in value) || !('expires_at' in value) || !('unavailable_since' in value)
       || !('goal_id' in value) || !('parent_workspace_id' in value) || !('goal_workspace_kind' in value)
       || !('parent_source' in value) || !('base_revision' in value) || !('branch_name' in value)
-      || !('checkpoint_id' in value) || !('integration_state' in value)) return false;
+      || !('checkpoint_id' in value) || !('integration_state' in value)
+      || !('writer_lease_id' in value) || !('writer_lease_owner_id' in value)
+      || !('writer_lease_generation' in value) || !('writer_lease_expires_at' in value)) return false;
     return typeof value.id === 'string'
       && typeof value.display_name === 'string'
       && typeof value.root_path === 'string'
@@ -270,10 +340,14 @@ export class SqliteWorkspaceRepository {
       && (value.goal_id === null || typeof value.goal_id === 'string')
       && (value.parent_workspace_id === null || typeof value.parent_workspace_id === 'string')
       && (value.goal_workspace_kind === null || value.goal_workspace_kind === 'git_worktree' || value.goal_workspace_kind === 'snapshot')
-      && (value.parent_source === null || value.parent_source === 'committed_head' || value.parent_source === 'named_revision' || value.parent_source === 'checkpoint' || value.parent_source === 'patch')
+      && (value.parent_source === null || value.parent_source === 'committed_head' || value.parent_source === 'named_revision' || value.parent_source === 'checkpoint' || value.parent_source === 'patch' || value.parent_source === 'snapshot')
       && (value.base_revision === null || typeof value.base_revision === 'string')
       && (value.branch_name === null || typeof value.branch_name === 'string')
       && (value.checkpoint_id === null || typeof value.checkpoint_id === 'string')
-      && (value.integration_state === null || value.integration_state === 'pending' || value.integration_state === 'integrated' || value.integration_state === 'conflict' || value.integration_state === 'unknown');
+      && (value.integration_state === null || value.integration_state === 'pending' || value.integration_state === 'integrated' || value.integration_state === 'conflict' || value.integration_state === 'unknown')
+      && (value.writer_lease_id === null || typeof value.writer_lease_id === 'string')
+      && (value.writer_lease_owner_id === null || typeof value.writer_lease_owner_id === 'string')
+      && (value.writer_lease_generation === null || (typeof value.writer_lease_generation === 'number' && Number.isSafeInteger(value.writer_lease_generation) && value.writer_lease_generation > 0))
+      && (value.writer_lease_expires_at === null || typeof value.writer_lease_expires_at === 'string');
   }
 }

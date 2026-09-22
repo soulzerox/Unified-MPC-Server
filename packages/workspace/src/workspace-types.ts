@@ -5,6 +5,13 @@ export type GoalWorkspaceKind = 'git_worktree' | 'snapshot';
 export type GoalWorkspaceParentSource = 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | 'snapshot';
 export type GoalWorkspaceIntegrationState = 'pending' | 'integrated' | 'conflict' | 'unknown';
 
+export interface WorkspaceWriterLease {
+  readonly leaseId: string;
+  readonly ownerId: string;
+  readonly generation: number;
+  readonly expiresAt: string;
+}
+
 export interface Workspace {
   readonly id: WorkspaceId;
   readonly displayName: string;
@@ -31,6 +38,7 @@ export interface Workspace {
   readonly branchName?: string;
   readonly checkpointId?: string;
   readonly integrationState?: GoalWorkspaceIntegrationState;
+  readonly writerLease?: WorkspaceWriterLease;
 }
 
 export function workspaceLifecycleKind(workspace: Workspace): WorkspaceLifecycleKind {

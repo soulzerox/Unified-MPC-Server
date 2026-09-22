@@ -1,8 +1,9 @@
 import { copyFile, lstat, mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { appError, err, ok, type GoalWorkspaceState, type Result } from '@unified-mpc/domain';
 import { GitAdapter, type GitCommandResult, type GitStatusResult } from '@unified-mpc/git';
-import { WorkspaceService, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
+import { WorkspaceService, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
 
 export interface GoalWorkspaceGitPort {
   status(cwd: string, signal?: AbortSignal): Promise<Result<GitStatusResult>>;
@@ -24,6 +25,13 @@ export interface GoalWorkspaceCreateRequest {
 export interface GoalWorkspaceServiceOptions {
   readonly maxSnapshotBytes?: number;
   readonly maxSnapshotEntries?: number;
+  readonly now?: () => Date;
+  readonly writerLeaseDurationMs?: number;
+}
+
+export interface GoalWorkspaceWriterLease extends WorkspaceWriterLease {
+  readonly goalId: string;
+  readonly workspaceId: string;
 }
 
 export interface GoalWorkspaceCreateResult {
@@ -70,6 +78,8 @@ export class GoalWorkspaceService {
   private readonly workspaces: WorkspaceService;
   private readonly maxSnapshotBytes: number;
   private readonly maxSnapshotEntries: number;
+  private readonly now: () => Date;
+  private readonly writerLeaseDurationMs: number;
 
   public constructor(
     private readonly repository: WorkspaceRepository,
@@ -79,6 +89,50 @@ export class GoalWorkspaceService {
     this.workspaces = new WorkspaceService(repository);
     this.maxSnapshotBytes = positiveLimit(options.maxSnapshotBytes, DEFAULT_MAX_SNAPSHOT_BYTES, 'maxSnapshotBytes');
     this.maxSnapshotEntries = positiveLimit(options.maxSnapshotEntries, DEFAULT_MAX_SNAPSHOT_ENTRIES, 'maxSnapshotEntries');
+    this.now = options.now ?? ((): Date => new Date());
+    this.writerLeaseDurationMs = positiveLimit(options.writerLeaseDurationMs, DEFAULT_WRITER_LEASE_DURATION_MS, 'writerLeaseDurationMs');
+  }
+
+  public async acquireWriterLease(goalId: string, ownerId: string): Promise<Result<GoalWorkspaceWriterLease>> {
+    if (!isGoalId(goalId) || ownerId.trim().length === 0) return err(appError('INVALID_INPUT', 'Goal id and writer owner are required'));
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (this.repository.acquireGoalWriterLease === undefined) {
+      return err(appError('CONFLICT', 'Goal Workspace writer lease requires durable repository support', true));
+    }
+    const now = this.now();
+    const lease = await this.repository.acquireGoalWriterLease(
+      workspace.id,
+      randomUUID(),
+      ownerId.trim(),
+      now.toISOString(),
+      new Date(now.getTime() + this.writerLeaseDurationMs).toISOString(),
+    );
+    if (lease === null) return err(appError('CONFLICT', 'Goal Workspace is already owned by another writer', true));
+    return ok({ goalId, workspaceId: workspace.id, ...lease });
+  }
+
+  public async renewWriterLease(goalId: string, leaseId: string, generation: number): Promise<Result<GoalWorkspaceWriterLease>> {
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (this.repository.renewGoalWriterLease === undefined) {
+      return err(appError('CONFLICT', 'Goal Workspace writer lease requires durable repository support', true));
+    }
+    const now = this.now();
+    const expiresAt = new Date(now.getTime() + this.writerLeaseDurationMs).toISOString();
+    const renewed = await this.repository.renewGoalWriterLease(workspace.id, leaseId, generation, now.toISOString(), expiresAt);
+    if (!renewed) return err(appError('CONFLICT', 'Goal Workspace writer lease is stale or expired', true));
+    return ok({ goalId, workspaceId: workspace.id, leaseId, ownerId: workspace.writerLease?.ownerId ?? '', generation, expiresAt });
+  }
+
+  public async releaseWriterLease(goalId: string, leaseId: string, generation: number): Promise<Result<void>> {
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (this.repository.releaseGoalWriterLease === undefined) {
+      return err(appError('CONFLICT', 'Goal Workspace writer lease requires durable repository support', true));
+    }
+    const released = await this.repository.releaseGoalWriterLease(workspace.id, leaseId, generation);
+    return released ? ok(undefined) : err(appError('CONFLICT', 'Goal Workspace writer lease is stale', true));
   }
 
   public async create(request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {
@@ -271,13 +325,14 @@ export class GoalWorkspaceService {
   public recordIntegrationState(
     goalId: string,
     integrationState: NonNullable<Workspace['integrationState']>,
+    lease?: Pick<WorkspaceWriterLease, 'leaseId' | 'generation'>,
   ): Promise<Result<Workspace>> {
-    return this.updateGoalWorkspace(goalId, { integrationState });
+    return this.updateGoalWorkspace(goalId, { integrationState }, lease);
   }
 
   /** Bind an existing durable checkpoint to the Goal Workspace metadata. */
-  public recordCheckpoint(goalId: string, checkpointId: string): Promise<Result<Workspace>> {
-    return this.updateGoalWorkspace(goalId, { checkpointId });
+  public recordCheckpoint(goalId: string, checkpointId: string, lease?: Pick<WorkspaceWriterLease, 'leaseId' | 'generation'>): Promise<Result<Workspace>> {
+    return this.updateGoalWorkspace(goalId, { checkpointId }, lease);
   }
 
   public async remove(goalId: string): Promise<Result<void>> {
@@ -313,10 +368,24 @@ export class GoalWorkspaceService {
     return parent?.realRootPath ?? workspace.realRootPath;
   }
 
-  private async updateGoalWorkspace(goalId: string, patch: Pick<Workspace, 'checkpointId' | 'integrationState'>): Promise<Result<Workspace>> {
+  private async updateGoalWorkspace(
+    goalId: string,
+    patch: Pick<Workspace, 'checkpointId' | 'integrationState'>,
+    lease?: Pick<WorkspaceWriterLease, 'leaseId' | 'generation'>,
+  ): Promise<Result<Workspace>> {
     if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
     const workspace = await this.findActiveGoal(goalId);
     if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (workspace.writerLease !== undefined) {
+      if (workspace.writerLease.expiresAt <= this.now().toISOString()) {
+        return err(appError('CONFLICT', 'Goal Workspace writer lease is expired', true));
+      }
+      if (lease === undefined || lease.leaseId !== workspace.writerLease.leaseId || lease.generation !== workspace.writerLease.generation) {
+        return err(appError('CONFLICT', 'Goal Workspace metadata mutation requires the current writer lease', true));
+      }
+    } else if (lease !== undefined) {
+      return err(appError('CONFLICT', 'Goal Workspace writer lease is no longer current', true));
+    }
     if (this.repository.restore === undefined) {
       return err(appError('CONFLICT', 'Goal Workspace metadata updates require durable restore support', true));
     }
@@ -451,6 +520,7 @@ function errorMessage(value: unknown): string {
 
 const DEFAULT_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_SNAPSHOT_ENTRIES = 20_000;
+const DEFAULT_WRITER_LEASE_DURATION_MS = 30_000;
 const SNAPSHOT_EXCLUDED_NAMES = new Set(['.git', '.unified-mpc', 'build', 'coverage', 'dist', 'node_modules']);
 
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {

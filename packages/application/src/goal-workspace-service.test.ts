@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { GitCommandResult, GitStatusResult } from '@unified-mpc/git';
 import type { Result } from '@unified-mpc/domain';
-import type { Workspace, WorkspaceRepository } from '@unified-mpc/workspace';
+import type { Workspace, WorkspaceRepository, WorkspaceWriterLease } from '@unified-mpc/workspace';
 import { GoalWorkspaceService, type GoalWorkspaceGitPort } from './goal-workspace-service.js';
 
 class MemoryWorkspaceRepository implements WorkspaceRepository {
@@ -31,6 +31,31 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
   public async delete(id: string): Promise<void> {
     const index = this.workspaces.findIndex((workspace) => workspace.id === id);
     if (index >= 0) this.workspaces.splice(index, 1);
+  }
+
+  public async acquireGoalWriterLease(id: string, leaseId: string, ownerId: string, now: string, expiresAt: string): Promise<WorkspaceWriterLease | null> {
+    const current = this.workspaces.find((workspace) => workspace.id === id && workspace.archivedAt == null);
+    if (current === undefined) return null;
+    if (current.writerLease !== undefined && current.writerLease.expiresAt > now && current.writerLease.leaseId !== leaseId) return null;
+    const generation = (current.writerLease?.generation ?? 0) + (current.writerLease?.leaseId === leaseId ? 0 : 1);
+    const lease = { leaseId, ownerId, generation, expiresAt };
+    this.workspaces[this.workspaces.indexOf(current)] = { ...current, writerLease: lease };
+    return lease;
+  }
+
+  public async renewGoalWriterLease(id: string, leaseId: string, generation: number, now: string, expiresAt: string): Promise<boolean> {
+    const current = this.workspaces.find((workspace) => workspace.id === id && workspace.archivedAt == null);
+    if (current?.writerLease === undefined || current.writerLease.leaseId !== leaseId || current.writerLease.generation !== generation || current.writerLease.expiresAt <= now) return false;
+    this.workspaces[this.workspaces.indexOf(current)] = { ...current, writerLease: { ...current.writerLease, expiresAt } };
+    return true;
+  }
+
+  public async releaseGoalWriterLease(id: string, leaseId: string, generation: number): Promise<boolean> {
+    const current = this.workspaces.find((workspace) => workspace.id === id && workspace.archivedAt == null);
+    if (current?.writerLease === undefined || current.writerLease.leaseId !== leaseId || current.writerLease.generation !== generation) return false;
+    const { writerLease: _writerLease, ...withoutLease } = current;
+    this.workspaces[this.workspaces.indexOf(current)] = withoutLease;
+    return true;
   }
 }
 
@@ -413,6 +438,38 @@ describe('GoalWorkspaceService', () => {
       expect(repository.workspaces.find((workspace) => workspace.goalId === 'goal-1')?.archivedAt).toBeDefined();
     } finally {
       await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fences Goal Workspace writer leases by owner and monotonically increasing generation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-lease-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'source-v1', integrationState: 'pending',
+      });
+      let now = new Date('2026-09-22T19:00:00.000Z');
+      const service = new GoalWorkspaceService(repository, new FakeGitPort(), {
+        now: () => now,
+        writerLeaseDurationMs: 1_000,
+      });
+
+      const first = await service.acquireWriterLease('goal-1', 'client-a');
+      expect(first).toMatchObject({ ok: true, value: { ownerId: 'client-a', generation: 1 } });
+      if (!first.ok) throw new Error(first.error.message);
+      await expect(service.recordCheckpoint('goal-1', 'checkpoint-1')).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      await expect(service.recordCheckpoint('goal-1', 'checkpoint-1', first.value)).resolves.toMatchObject({ ok: true });
+      await expect(service.acquireWriterLease('goal-1', 'client-b')).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      await expect(service.renewWriterLease('goal-1', first.value.leaseId, 0)).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+
+      now = new Date('2026-09-22T19:00:01.001Z');
+      const second = await service.acquireWriterLease('goal-1', 'client-b');
+      expect(second).toMatchObject({ ok: true, value: { ownerId: 'client-b', generation: 2 } });
+      await expect(service.releaseWriterLease('goal-1', first.value.leaseId, first.value.generation)).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -1,7 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { appError, err, ok, type Result, type WorkspaceId } from '@unified-mpc/domain';
-import { workspaceLifecycleKind, type GoalWorkspaceIntegrationState, type GoalWorkspaceKind, type GoalWorkspaceParentSource, type Workspace, type WorkspaceLifecycleKind } from './workspace-types.js';
+import { workspaceLifecycleKind, type GoalWorkspaceIntegrationState, type GoalWorkspaceKind, type GoalWorkspaceParentSource, type Workspace, type WorkspaceLifecycleKind, type WorkspaceWriterLease } from './workspace-types.js';
 import { isPosixMountRoot, resolveHostPath } from './filesystem-root.js';
 
 export interface WorkspaceRepository {
@@ -16,6 +16,9 @@ export interface WorkspaceRepository {
   archiveMany?(ids: readonly WorkspaceId[], archivedAt?: string): Promise<void>;
   restore?(id: WorkspaceId, workspace?: Workspace): Promise<void>;
   setUnavailableSince?(id: WorkspaceId, unavailableSince: string | null): Promise<void>;
+  acquireGoalWriterLease?(id: WorkspaceId, leaseId: string, ownerId: string, now: string, expiresAt: string): Promise<WorkspaceWriterLease | null>;
+  renewGoalWriterLease?(id: WorkspaceId, leaseId: string, generation: number, now: string, expiresAt: string): Promise<boolean>;
+  releaseGoalWriterLease?(id: WorkspaceId, leaseId: string, generation: number): Promise<boolean>;
 }
 
 export interface WorkspaceRegistrationOptions {

@@ -66,6 +66,22 @@ const event12: GoalRuntimeEventRecord = {
   recordedAt: '2026-09-22T10:30:01.000Z',
 };
 
+const event13: GoalRuntimeEventRecord = {
+  sequence: 13,
+  event: {
+    eventId: 'runtime-event-13',
+    type: 'task_progress',
+    workspaceId,
+    goalId: 'goal-a',
+    executionId: 'execution-a',
+    executionGeneration: 3,
+    taskId: 'task-a',
+    detail: '18/24 tests passed',
+    occurredAt: '2026-09-22T10:30:02.000Z',
+  },
+  recordedAt: '2026-09-22T10:30:02.000Z',
+};
+
 function workspaceControl(): WorkspaceControlPort {
   const selection: WebWorkspaceSelectionSnapshot = {
     primaryWorkspaceId: workspaceId,
@@ -214,6 +230,59 @@ describe('Goal runtime Web API and SSE boundary', () => {
     expect(refreshed.body).toContain('id: 12');
     expect(refreshed.body).toContain('"replayWindowMissed":true');
     expect(refreshed.body).not.toContain('"eventId":"runtime-event-11"');
+  });
+
+  it('pushes newly durable events and stops polling after the client closes', async () => {
+    let replayCalls = 0;
+    let delivered = false;
+    const liveRuntime: GoalRuntimeReadPort = {
+      listWorkspaceGoalRuntimeSnapshots: async () => [snapshot],
+      replayWorkspaceGoalRuntimeEvents: async (request) => {
+        replayCalls += 1;
+        if (request.afterSequence === undefined) {
+          return {
+            events: [event11],
+            oldestAvailableSequence: 10,
+            latestSequence: 12,
+            replayWindowMissed: false,
+          };
+        }
+        if (request.afterSequence === 12 && !delivered) {
+          delivered = true;
+          return {
+            events: [event13],
+            oldestAvailableSequence: 10,
+            latestSequence: 13,
+            replayWindowMissed: false,
+          };
+        }
+        return {
+          events: [],
+          oldestAvailableSequence: 10,
+          latestSequence: delivered ? 13 : 12,
+          replayWindowMissed: false,
+        };
+      },
+    };
+
+    server = new ControlPlaneServer({
+      port: 0,
+      workspaceControl: workspaceControl(),
+      goalRuntimeRead: liveRuntime,
+      goalRuntimeStreamPollMs: 10,
+    });
+    await server.listen();
+    const url = `http://127.0.0.1:${server.port}/api/workspaces/${workspaceId}/goal-runtime/events`;
+
+    const streamed = await readSse(url, {}, (body) => body.includes('id: 13'));
+    expect(streamed.body).toContain('event: goal-runtime-snapshot');
+    expect(streamed.body).toContain('event: goal-runtime-event');
+    expect(streamed.body).toContain('"eventId":"runtime-event-13"');
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const callsAfterDisconnect = replayCalls;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(replayCalls).toBe(callsAfterDisconnect);
   });
 
   it('rejects malformed SSE replay cursors before opening a stream', async () => {

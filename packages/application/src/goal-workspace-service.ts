@@ -102,6 +102,19 @@ export class GoalWorkspaceService {
     return ok(workspace);
   }
 
+  /** Record caller-verified integration evidence without performing a merge implicitly. */
+  public recordIntegrationState(
+    goalId: string,
+    integrationState: NonNullable<Workspace['integrationState']>,
+  ): Promise<Result<Workspace>> {
+    return this.updateGoalWorkspace(goalId, { integrationState });
+  }
+
+  /** Bind an existing durable checkpoint to the Goal Workspace metadata. */
+  public recordCheckpoint(goalId: string, checkpointId: string): Promise<Result<Workspace>> {
+    return this.updateGoalWorkspace(goalId, { checkpointId });
+  }
+
   public async remove(goalId: string): Promise<Result<void>> {
     if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
     const workspace = await this.findActiveGoal(goalId);
@@ -136,6 +149,22 @@ export class GoalWorkspaceService {
     if (workspace.parentWorkspaceId === undefined) return workspace.realRootPath;
     const parent = await this.repository.get(workspace.parentWorkspaceId);
     return parent?.realRootPath ?? workspace.realRootPath;
+  }
+
+  private async updateGoalWorkspace(goalId: string, patch: Pick<Workspace, 'checkpointId' | 'integrationState'>): Promise<Result<Workspace>> {
+    if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (this.repository.restore === undefined) {
+      return err(appError('CONFLICT', 'Goal Workspace metadata updates require durable restore support', true));
+    }
+    const updated = { ...workspace, ...patch };
+    try {
+      await this.repository.restore(workspace.id, updated);
+    } catch (error: unknown) {
+      return err(appError('CONFLICT', `Goal Workspace metadata could not be updated: ${errorMessage(error)}`, true));
+    }
+    return ok(updated);
   }
 
   private async removeWorktree(parentRoot: string, worktreePath: string): Promise<Result<void>> {

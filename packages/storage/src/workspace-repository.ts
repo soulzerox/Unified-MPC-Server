@@ -251,7 +251,10 @@ export class SqliteWorkspaceRepository {
     if (!('id' in value) || !('display_name' in value) || !('root_path' in value)
       || !('real_root_path' in value) || !('created_at' in value) || !('archived_at' in value)
       || !('workspace_kind' in value) || !('owner_session_id' in value) || !('owner_job_id' in value)
-      || !('auto_cleanup' in value) || !('expires_at' in value) || !('unavailable_since' in value)) return false;
+      || !('auto_cleanup' in value) || !('expires_at' in value) || !('unavailable_since' in value)
+      || !('goal_id' in value) || !('parent_workspace_id' in value) || !('goal_workspace_kind' in value)
+      || !('parent_source' in value) || !('base_revision' in value) || !('branch_name' in value)
+      || !('checkpoint_id' in value) || !('integration_state' in value)) return false;
     return typeof value.id === 'string'
       && typeof value.display_name === 'string'
       && typeof value.root_path === 'string'

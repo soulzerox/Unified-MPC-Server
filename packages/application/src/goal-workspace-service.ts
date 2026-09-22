@@ -529,7 +529,7 @@ function errorMessage(value: unknown): string {
 const DEFAULT_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_SNAPSHOT_ENTRIES = 20_000;
 const DEFAULT_WRITER_LEASE_DURATION_MS = 30_000;
-const SNAPSHOT_EXCLUDED_NAMES = new Set(['.git', '.unified-mpc', 'build', 'coverage', 'dist', 'node_modules']);
+const SNAPSHOT_EXCLUDED_NAMES = new Set(['.git', '.unified-mpc', 'build', 'coverage', 'dist', 'node_modules', '.next', '.turbo', '.cache', 'cache', 'vendor', 'target', 'bin', 'obj', '.venv', 'venv', '__pycache__']);
 
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;

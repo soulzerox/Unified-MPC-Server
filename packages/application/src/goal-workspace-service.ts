@@ -1,6 +1,6 @@
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type GoalWorkspaceState, type Result } from '@unified-mpc/domain';
 import { GitAdapter, type GitCommandResult, type GitStatusResult } from '@unified-mpc/git';
 import { WorkspaceService, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 
@@ -23,6 +23,23 @@ export interface GoalWorkspaceCreateRequest {
 export interface GoalWorkspaceCreateResult {
   readonly workspace: Workspace;
   readonly worktreePath: string;
+}
+
+/** Bounded, read-only evidence used to resume or reconcile a Goal Workspace. */
+export interface GoalWorkspaceStatus {
+  readonly goalId: string;
+  readonly workspaceId: string;
+  readonly rootPath: string;
+  readonly workspaceState: GoalWorkspaceState;
+  readonly changedFileCount: number;
+  readonly branchName?: string;
+  readonly expectedBranchName?: string;
+  readonly baseRevision?: string;
+  readonly headRevision?: string;
+  readonly checkpointId?: string;
+  readonly integrationState?: Workspace['integrationState'];
+  readonly branchDrift: boolean;
+  readonly detail?: string;
 }
 
 /**
@@ -100,6 +117,47 @@ export class GoalWorkspaceService {
       return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace worktree is missing'));
     }
     return ok(workspace);
+  }
+
+  /**
+   * Reads the existing workspace and its current Git identity without changing
+   * registry metadata or attempting recovery. A branch mismatch is explicit
+   * conflict evidence, not permission to silently rebind the goal.
+   */
+  public async status(goalId: string): Promise<Result<GoalWorkspaceStatus>> {
+    if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+
+    let root;
+    try {
+      root = await stat(workspace.realRootPath);
+    } catch {
+      return ok(workspaceStatus(workspace, 'missing', 0, 'Goal Workspace worktree is missing'));
+    }
+    if (!root.isDirectory()) return ok(workspaceStatus(workspace, 'unavailable', 0, 'Goal Workspace root is not a directory'));
+    if (workspace.goalWorkspaceKind !== 'git_worktree') {
+      return ok(workspaceStatus(workspace, 'unknown', 0, 'Goal Workspace is not Git-backed'));
+    }
+
+    const current = await this.git.status(workspace.realRootPath);
+    if (!current.ok) return ok(workspaceStatus(workspace, 'unavailable', 0, 'Git status is unavailable'));
+    const branch = await this.git.run(workspace.realRootPath, ['branch', '--show-current']);
+    const branchName = successfulOutput(branch);
+    if (branchName === null) return ok(workspaceStatus(workspace, 'unavailable', current.value.entries.length, 'Goal Workspace branch could not be resolved'));
+    const head = await this.git.run(workspace.realRootPath, ['rev-parse', '--verify', 'HEAD']);
+    const headRevision = successfulOutput(head);
+    if (headRevision === null) return ok(workspaceStatus(workspace, 'unavailable', current.value.entries.length, 'Goal Workspace head could not be resolved', branchName));
+
+    const branchDrift = workspace.branchName !== undefined && branchName !== workspace.branchName;
+    return ok(workspaceStatus(
+      workspace,
+      branchDrift ? 'conflict' : current.value.entries.length === 0 ? 'clean' : 'dirty',
+      current.value.entries.length,
+      branchDrift ? 'Goal Workspace branch differs from persisted branch' : undefined,
+      branchName,
+      headRevision,
+    ));
   }
 
   /** Record caller-verified integration evidence without performing a merge implicitly. */
@@ -207,6 +265,37 @@ function isSafeRevision(value: string): boolean {
 function successfulGitCommand(result: Result<GitCommandResult>, message: string): Result<never> | null {
   if (!result.ok) return result;
   return result.value.exitCode === 0 ? null : err(appError('CONFLICT', message, true));
+}
+
+function successfulOutput(result: Result<GitCommandResult>): string | null {
+  if (!result.ok || result.value.exitCode !== 0) return null;
+  const output = result.value.stdout.trim();
+  return output.length === 0 ? null : output;
+}
+
+function workspaceStatus(
+  workspace: Workspace,
+  workspaceState: GoalWorkspaceState,
+  changedFileCount: number,
+  detail?: string,
+  branchName?: string,
+  headRevision?: string,
+): GoalWorkspaceStatus {
+  return {
+    goalId: workspace.goalId ?? '',
+    workspaceId: workspace.id,
+    rootPath: workspace.realRootPath,
+    workspaceState,
+    changedFileCount,
+    ...(branchName === undefined ? {} : { branchName }),
+    ...(workspace.branchName === undefined ? {} : { expectedBranchName: workspace.branchName }),
+    ...(workspace.baseRevision === undefined ? {} : { baseRevision: workspace.baseRevision }),
+    ...(headRevision === undefined ? {} : { headRevision }),
+    ...(workspace.checkpointId === undefined ? {} : { checkpointId: workspace.checkpointId }),
+    ...(workspace.integrationState === undefined ? {} : { integrationState: workspace.integrationState }),
+    branchDrift: branchName !== undefined && workspace.branchName !== undefined && branchName !== workspace.branchName,
+    ...(detail === undefined ? {} : { detail }),
+  };
 }
 
 function errorMessage(value: unknown): string {

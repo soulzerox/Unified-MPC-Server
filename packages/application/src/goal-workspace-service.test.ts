@@ -179,4 +179,66 @@ describe('GoalWorkspaceService', () => {
       await rm(parentRoot, { recursive: true, force: true });
     }
   });
+
+  it('returns bounded resume evidence for a clean goal worktree', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-status-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'abc123', branchName: 'goal/goal-1', checkpointId: 'checkpoint-1', integrationState: 'pending',
+      });
+      const git = new FakeGitPort();
+      git.runResults = [
+        { exitCode: 0, stdout: 'goal/goal-1\n', stderr: '' },
+        { exitCode: 0, stdout: 'def456\n', stderr: '' },
+      ];
+
+      await expect(new GoalWorkspaceService(repository, git).status('goal-1')).resolves.toEqual({
+        ok: true,
+        value: {
+          goalId: 'goal-1', workspaceId: 'goal-workspace-1', rootPath: root,
+          workspaceState: 'clean', changedFileCount: 0, branchName: 'goal/goal-1',
+          expectedBranchName: 'goal/goal-1', baseRevision: 'abc123', headRevision: 'def456',
+          checkpointId: 'checkpoint-1', integrationState: 'pending', branchDrift: false,
+        },
+      });
+      expect(git.commands).toEqual([
+        ['branch', '--show-current'],
+        ['rev-parse', '--verify', 'HEAD'],
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('marks branch drift as a conflict without mutating the workspace registry', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-branch-drift-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      const workspace: Workspace = {
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'abc123', branchName: 'goal/goal-1', integrationState: 'pending',
+      };
+      repository.workspaces.push(workspace);
+      const git = new FakeGitPort();
+      git.runResults = [
+        { exitCode: 0, stdout: 'unexpected-branch\n', stderr: '' },
+        { exitCode: 0, stdout: 'def456\n', stderr: '' },
+      ];
+
+      await expect(new GoalWorkspaceService(repository, git).status('goal-1')).resolves.toMatchObject({
+        ok: true,
+        value: {
+          workspaceState: 'conflict', branchName: 'unexpected-branch', expectedBranchName: 'goal/goal-1',
+          headRevision: 'def456', branchDrift: true,
+        },
+      });
+      expect(repository.workspaces).toEqual([workspace]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

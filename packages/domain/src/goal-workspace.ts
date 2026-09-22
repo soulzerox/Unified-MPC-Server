@@ -2,7 +2,7 @@
 export type GoalWorkspaceKind = 'git_worktree' | 'snapshot';
 
 /** How the goal workspace was sourced from its canonical project. */
-export type GoalWorkspaceParentSource = 'committed_head' | 'named_revision' | 'checkpoint' | 'patch';
+export type GoalWorkspaceParentSource = 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | 'snapshot';
 
 export type GoalWorkspaceResolution = 'resumable' | 'requires_explicit_source' | 'recovery_required';
 export type GoalWorkspaceDirtyState = 'clean' | 'dirty' | 'missing';

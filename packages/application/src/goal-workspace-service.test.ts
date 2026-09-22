@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -332,6 +332,85 @@ describe('GoalWorkspaceService', () => {
         ok: true,
         value: { canIntegrate: false, blockers: ['target_branch_drift'], targetHeadRevision: 'target123' },
       });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('creates an explicitly requested bounded snapshot for a non-Git parent', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-'));
+    try {
+      await mkdir(path.join(parentRoot, 'src'), { recursive: true });
+      await mkdir(path.join(parentRoot, 'node_modules', 'ignored'), { recursive: true });
+      await writeFile(path.join(parentRoot, 'src', 'input.txt'), 'snapshot content');
+      await writeFile(path.join(parentRoot, 'node_modules', 'ignored', 'generated.txt'), 'do not copy');
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+      const git = new FakeGitPort();
+
+      const result = await new GoalWorkspaceService(repository, git).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'snapshot-source-v1',
+      });
+
+      const snapshotRoot = path.join(parentRoot, '.unified-mpc', 'snapshots', 'goal-1');
+      expect(result).toMatchObject({
+        ok: true,
+        value: { worktreePath: snapshotRoot, workspace: {
+          lifecycleKind: 'goal', goalId: 'goal-1', goalWorkspaceKind: 'snapshot',
+          parentSource: 'snapshot', baseRevision: 'snapshot-source-v1',
+        } },
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      expect(result.value.workspace.branchName).toBeUndefined();
+      await expect(readFile(path.join(snapshotRoot, 'src', 'input.txt'), 'utf8')).resolves.toBe('snapshot content');
+      await expect(access(path.join(snapshotRoot, 'node_modules'))).rejects.toThrow();
+      expect(git.commands).toEqual([]);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a snapshot exceeds its configured byte limit', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-limit-'));
+    try {
+      await writeFile(path.join(parentRoot, 'large.txt'), '1234');
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+
+      await expect(new GoalWorkspaceService(repository, new FakeGitPort(), { maxSnapshotBytes: 3 }).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'snapshot-source-v1',
+      })).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      expect(repository.workspaces).toHaveLength(1);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('removes an integrated snapshot only from its managed snapshot root', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-remove-'));
+    try {
+      await writeFile(path.join(parentRoot, 'input.txt'), 'snapshot content');
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({
+        id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
+      });
+      const service = new GoalWorkspaceService(repository, new FakeGitPort());
+      const created = await service.create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'snapshot-source-v1',
+      });
+      if (!created.ok) throw new Error(created.error.message);
+
+      await expect(service.recordIntegrationState('goal-1', 'integrated')).resolves.toMatchObject({ ok: true });
+      await expect(service.remove('goal-1')).resolves.toEqual({ ok: true, value: undefined });
+      await expect(access(created.value.worktreePath)).rejects.toThrow();
+      expect(repository.workspaces.find((workspace) => workspace.goalId === 'goal-1')?.archivedAt).toBeDefined();
     } finally {
       await rm(parentRoot, { recursive: true, force: true });
     }

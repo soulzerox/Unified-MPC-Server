@@ -2,7 +2,7 @@ import type { WorkspaceId } from '@unified-mpc/domain';
 
 export type WorkspaceLifecycleKind = 'project' | 'goal' | 'temporary' | 'inspection';
 export type GoalWorkspaceKind = 'git_worktree' | 'snapshot';
-export type GoalWorkspaceParentSource = 'committed_head' | 'named_revision' | 'checkpoint' | 'patch';
+export type GoalWorkspaceParentSource = 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | 'snapshot';
 export type GoalWorkspaceIntegrationState = 'pending' | 'integrated' | 'conflict' | 'unknown';
 
 export interface Workspace {

@@ -12,6 +12,9 @@ export function getClientScriptJs(): string {
       const workspaceRuntimeStreams = new Map();
       const workspaceRuntimeRefreshes = new Map();
       const workspaceRuntimeRefreshPending = new Set();
+      const workspaceRuntimeTargets = new Map();
+      const workspaceRuntimeCatchupTimers = new Map();
+      const workspaceRuntimeCatchupAttempts = new Map();
       const workspaceGoals = new Map();
       const expandedWorkspaceGoals = new Set();
       const loadingWorkspaceGoals = new Set();
@@ -443,6 +446,26 @@ export function getClientScriptJs(): string {
           cursor: Number.isSafeInteger(Number(data.cursor)) ? Number(data.cursor) : null,
           error: null,
         });
+
+        const targets = workspaceRuntimeTargets.get(workspaceId);
+        if (targets) {
+          for (const [goalId, sequence] of targets) {
+            const covered = data.snapshots.some((record) =>
+              record?.projection?.goalId === goalId
+              && Number.isSafeInteger(Number(record.lastEventSequence))
+              && Number(record.lastEventSequence) >= sequence);
+            if (covered) targets.delete(goalId);
+          }
+          if (targets.size === 0) {
+            workspaceRuntimeTargets.delete(workspaceId);
+            workspaceRuntimeCatchupAttempts.delete(workspaceId);
+            const timer = workspaceRuntimeCatchupTimers.get(workspaceId);
+            if (timer) clearTimeout(timer);
+            workspaceRuntimeCatchupTimers.delete(workspaceId);
+          } else {
+            scheduleWorkspaceRuntimeCatchup(workspaceId);
+          }
+        }
         renderWorkspaces();
       }
 
@@ -482,11 +505,52 @@ export function getClientScriptJs(): string {
         }
       }
 
+      function noteWorkspaceRuntimeEvent(workspaceId, record) {
+        const goalId = record?.event?.goalId;
+        const sequence = Number(record?.sequence);
+        if (typeof goalId !== 'string' || goalId.length === 0 || !Number.isSafeInteger(sequence) || sequence < 0) {
+          void refreshWorkspaceRuntime(workspaceId);
+          return;
+        }
+        let targets = workspaceRuntimeTargets.get(workspaceId);
+        if (!targets) {
+          targets = new Map();
+          workspaceRuntimeTargets.set(workspaceId, targets);
+        }
+        targets.set(goalId, Math.max(targets.get(goalId) || 0, sequence));
+        workspaceRuntimeCatchupAttempts.set(workspaceId, 0);
+        void refreshWorkspaceRuntime(workspaceId);
+      }
+
+      function scheduleWorkspaceRuntimeCatchup(workspaceId) {
+        if (workspaceRuntimeCatchupTimers.has(workspaceId)) return;
+        const attempt = workspaceRuntimeCatchupAttempts.get(workspaceId) || 0;
+        if (attempt >= 5) {
+          if (attempt === 5) {
+            logEvent('WARN', 'Goal runtime projection is still catching up for ' + workspaceId + '; preserving the last authoritative snapshot');
+            workspaceRuntimeCatchupAttempts.set(workspaceId, 6);
+          }
+          return;
+        }
+        const delayMs = [50, 100, 200, 400, 800][attempt];
+        workspaceRuntimeCatchupAttempts.set(workspaceId, attempt + 1);
+        const timer = setTimeout(() => {
+          workspaceRuntimeCatchupTimers.delete(workspaceId);
+          void refreshWorkspaceRuntime(workspaceId);
+        }, delayMs);
+        workspaceRuntimeCatchupTimers.set(workspaceId, timer);
+      }
+
       function closeWorkspaceRuntimeStream(workspaceId) {
         const stream = workspaceRuntimeStreams.get(workspaceId);
         if (stream) stream.close();
         workspaceRuntimeStreams.delete(workspaceId);
         workspaceRuntimeRefreshPending.delete(workspaceId);
+        workspaceRuntimeTargets.delete(workspaceId);
+        workspaceRuntimeCatchupAttempts.delete(workspaceId);
+        const timer = workspaceRuntimeCatchupTimers.get(workspaceId);
+        if (timer) clearTimeout(timer);
+        workspaceRuntimeCatchupTimers.delete(workspaceId);
       }
 
       function syncWorkspaceRuntimeStreams() {
@@ -512,8 +576,12 @@ export function getClientScriptJs(): string {
               void refreshWorkspaceRuntime(workspace.id);
             }
           });
-          stream.addEventListener('goal-runtime-event', () => {
-            void refreshWorkspaceRuntime(workspace.id);
+          stream.addEventListener('goal-runtime-event', (event) => {
+            try {
+              noteWorkspaceRuntimeEvent(workspace.id, JSON.parse(event.data));
+            } catch {
+              void refreshWorkspaceRuntime(workspace.id);
+            }
           });
           stream.addEventListener('goal-runtime-stream-error', () => {
             void refreshWorkspaceRuntime(workspace.id);
@@ -562,6 +630,13 @@ export function getClientScriptJs(): string {
           badge.style.marginRight = '6px';
           badge.textContent = state + (count > 1 ? ' ×' + count : '');
           cell.appendChild(badge);
+        }
+        if (workspaceRuntimeTargets.has(workspaceId)) {
+          const catchingUp = document.createElement('span');
+          catchingUp.className = 'badge badge-optional';
+          catchingUp.style.marginRight = '6px';
+          catchingUp.textContent = 'Projection catching up';
+          cell.appendChild(catchingUp);
         }
         if (runtime.error) {
           const stale = document.createElement('span');

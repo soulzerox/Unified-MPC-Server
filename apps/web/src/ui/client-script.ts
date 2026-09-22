@@ -441,6 +441,7 @@ export function getClientScriptJs(): string {
       }
 
       function applyWorkspaceRuntimeSnapshot(workspaceId, data) {
+        if (!cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) return;
         if (!data || !Array.isArray(data.snapshots)) return;
         workspaceRuntime.set(workspaceId, {
           snapshots: data.snapshots,

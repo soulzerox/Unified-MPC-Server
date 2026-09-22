@@ -393,9 +393,16 @@ describe('GoalWorkspaceService', () => {
     const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-snapshot-'));
     try {
       await mkdir(path.join(parentRoot, 'src'), { recursive: true });
-      await mkdir(path.join(parentRoot, 'node_modules', 'ignored'), { recursive: true });
       await writeFile(path.join(parentRoot, 'src', 'input.txt'), 'snapshot content');
-      await writeFile(path.join(parentRoot, 'node_modules', 'ignored', 'generated.txt'), 'do not copy');
+      const ignoredNames = [
+        'node_modules', 'build', 'coverage', 'dist', '.next', '.turbo', '.cache', 'cache',
+        'vendor', 'target', 'bin', 'obj', '.venv', 'venv', '__pycache__',
+      ];
+      for (const name of ignoredNames) {
+        const ignoredRoot = path.join(parentRoot, name);
+        await mkdir(ignoredRoot, { recursive: true });
+        await writeFile(path.join(ignoredRoot, 'generated.txt'), 'do not copy');
+      }
       const repository = new MemoryWorkspaceRepository();
       repository.workspaces.push({
         id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString(),
@@ -418,7 +425,7 @@ describe('GoalWorkspaceService', () => {
       if (!result.ok) throw new Error(result.error.message);
       expect(result.value.workspace.branchName).toBeUndefined();
       await expect(readFile(path.join(snapshotRoot, 'src', 'input.txt'), 'utf8')).resolves.toBe('snapshot content');
-      await expect(access(path.join(snapshotRoot, 'node_modules'))).rejects.toThrow();
+      for (const name of ignoredNames) await expect(access(path.join(snapshotRoot, name))).rejects.toThrow();
       expect(git.commands).toEqual([]);
     } finally {
       await rm(parentRoot, { recursive: true, force: true });

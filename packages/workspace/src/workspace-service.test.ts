@@ -160,7 +160,7 @@ describe('WorkspaceService', () => {
       createdAt: new Date(0).toISOString(),
     }]);
     const now = new Date('2026-09-22T12:00:00.000Z');
-    const result = await new WorkspaceService(repository, { now: () => now }).reconcileLifecycle();
+    const result = await new WorkspaceService(repository, { now: (): Date => now }).reconcileLifecycle();
 
     expect(result).toEqual({
       ok: true,
@@ -198,7 +198,7 @@ describe('WorkspaceService', () => {
         autoCleanup: true,
       },
     ]);
-    const service = new WorkspaceService(repository, { now: () => new Date('2026-09-22T12:00:00.000Z') });
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') });
     const first = await service.reconcileLifecycle({ protectedWorkspaceIds: ['temporary-b'] });
     const second = await service.reconcileLifecycle({ protectedWorkspaceIds: ['temporary-b'] });
 
@@ -230,7 +230,7 @@ describe('WorkspaceService', () => {
       expiresAt: '2026-09-22T11:00:00.000Z',
     }]);
 
-    const result = await new WorkspaceService(repository, { now: () => new Date('2026-09-22T12:00:00.000Z') }).reconcileLifecycle();
+    const result = await new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') }).reconcileLifecycle();
 
     expect(result).toMatchObject({ ok: true, value: { archivedWorkspaceIds: ['inspection'] } });
     await expect(readFile(path.join(rootPath, 'keep.txt'), 'utf8')).resolves.toBe('keep');

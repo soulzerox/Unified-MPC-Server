@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import type { GitCommandResult, GitStatusResult } from '@unified-mpc/git';
+import { GitAdapter, type GitCommandResult, type GitStatusResult } from '@unified-mpc/git';
 import { WorkspaceService, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 
 export interface GoalWorkspaceGitPort {
@@ -35,7 +34,7 @@ export class GoalWorkspaceService {
 
   public constructor(
     private readonly repository: WorkspaceRepository,
-    private readonly git: GoalWorkspaceGitPort,
+    private readonly git: GoalWorkspaceGitPort = new GitAdapter(),
   ) {
     this.workspaces = new WorkspaceService(repository);
   }

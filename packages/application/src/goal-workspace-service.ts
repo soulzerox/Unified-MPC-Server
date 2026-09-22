@@ -42,6 +42,20 @@ export interface GoalWorkspaceStatus {
   readonly detail?: string;
 }
 
+/** Read-only guard evidence for an explicit integration attempt. */
+export interface GoalWorkspaceIntegrationPreflight {
+  readonly goalId: string;
+  readonly workspaceId: string;
+  readonly canIntegrate: boolean;
+  readonly blockers: readonly string[];
+  readonly baseRevision?: string;
+  readonly goalHeadRevision?: string;
+  readonly targetBranchName?: string;
+  readonly targetHeadRevision?: string;
+  readonly targetWorkspaceState: GoalWorkspaceState;
+  readonly targetChangedFileCount: number;
+}
+
 /**
  * Owns the minimal filesystem/Git boundary for primary Goal Workspaces.
  * Creation is explicit and durable; resume never silently creates a replacement.
@@ -158,6 +172,58 @@ export class GoalWorkspaceService {
       branchName,
       headRevision,
     ));
+  }
+
+  /**
+   * Checks integration preconditions without merging, rebasing, or changing
+   * either workspace. Callers must use this evidence before recording an
+   * integration result.
+   */
+  public async integrationPreflight(goalId: string): Promise<Result<GoalWorkspaceIntegrationPreflight>> {
+    if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (workspace.parentWorkspaceId === undefined) return err(appError('CONFLICT', 'Goal Workspace has no integration target', true));
+    const parent = await this.repository.get(workspace.parentWorkspaceId);
+    if (parent === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace integration target was not found'));
+
+    const targetStatus = await this.git.status(parent.realRootPath);
+    if (!targetStatus.ok) {
+      return ok(integrationPreflight(workspace, 'unavailable', 0, ['target_workspace_unavailable']));
+    }
+    if (targetStatus.value.entries.length > 0) {
+      return ok(integrationPreflight(workspace, 'dirty', targetStatus.value.entries.length, ['target_workspace_dirty']));
+    }
+
+    const goalStatus = await this.status(goalId);
+    if (!goalStatus.ok) return goalStatus;
+    const blockers: string[] = [];
+    if (goalStatus.value.workspaceState !== 'clean') {
+      blockers.push(`goal_workspace_${goalStatus.value.workspaceState}`);
+    }
+    if (workspace.baseRevision === undefined) blockers.push('base_revision_missing');
+
+    const targetBranch = successfulOutput(await this.git.run(parent.realRootPath, ['branch', '--show-current']));
+    const targetHead = successfulOutput(await this.git.run(parent.realRootPath, ['rev-parse', '--verify', 'HEAD']));
+    if (targetBranch === null || targetHead === null) {
+      blockers.push('target_git_identity_unavailable');
+    } else if (workspace.baseRevision !== undefined) {
+      const ancestor = await this.git.run(parent.realRootPath, ['merge-base', '--is-ancestor', workspace.baseRevision, targetHead]);
+      if (!ancestor.ok || ancestor.value.exitCode !== 0) blockers.push('target_branch_drift');
+    }
+
+    return ok({
+      goalId,
+      workspaceId: workspace.id,
+      canIntegrate: blockers.length === 0,
+      blockers,
+      ...(workspace.baseRevision === undefined ? {} : { baseRevision: workspace.baseRevision }),
+      ...(goalStatus.value.headRevision === undefined ? {} : { goalHeadRevision: goalStatus.value.headRevision }),
+      ...(targetBranch === null ? {} : { targetBranchName: targetBranch }),
+      ...(targetHead === null ? {} : { targetHeadRevision: targetHead }),
+      targetWorkspaceState: 'clean',
+      targetChangedFileCount: 0,
+    });
   }
 
   /** Record caller-verified integration evidence without performing a merge implicitly. */
@@ -295,6 +361,23 @@ function workspaceStatus(
     ...(workspace.integrationState === undefined ? {} : { integrationState: workspace.integrationState }),
     branchDrift: branchName !== undefined && workspace.branchName !== undefined && branchName !== workspace.branchName,
     ...(detail === undefined ? {} : { detail }),
+  };
+}
+
+function integrationPreflight(
+  workspace: Workspace,
+  targetWorkspaceState: GoalWorkspaceState,
+  targetChangedFileCount: number,
+  blockers: readonly string[],
+): GoalWorkspaceIntegrationPreflight {
+  return {
+    goalId: workspace.goalId ?? '',
+    workspaceId: workspace.id,
+    canIntegrate: false,
+    blockers,
+    ...(workspace.baseRevision === undefined ? {} : { baseRevision: workspace.baseRevision }),
+    targetWorkspaceState,
+    targetChangedFileCount,
   };
 }
 

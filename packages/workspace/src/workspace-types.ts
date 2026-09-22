@@ -1,6 +1,9 @@
 import type { WorkspaceId } from '@unified-mpc/domain';
 
-export type WorkspaceLifecycleKind = 'project' | 'temporary' | 'inspection';
+export type WorkspaceLifecycleKind = 'project' | 'goal' | 'temporary' | 'inspection';
+export type GoalWorkspaceKind = 'git_worktree' | 'snapshot';
+export type GoalWorkspaceParentSource = 'committed_head' | 'named_revision' | 'checkpoint' | 'patch';
+export type GoalWorkspaceIntegrationState = 'pending' | 'integrated' | 'conflict' | 'unknown';
 
 export interface Workspace {
   readonly id: WorkspaceId;
@@ -19,6 +22,15 @@ export interface Workspace {
   readonly unavailableSince?: string | null;
   /** Present only for archived workspace registrations. Archived workspaces are excluded from the runtime trust boundary. */
   readonly archivedAt?: string | null;
+  /** Durable ownership and source identity for a goal-owned workspace. */
+  readonly goalId?: string;
+  readonly parentWorkspaceId?: WorkspaceId;
+  readonly goalWorkspaceKind?: GoalWorkspaceKind;
+  readonly parentSource?: GoalWorkspaceParentSource;
+  readonly baseRevision?: string;
+  readonly branchName?: string;
+  readonly checkpointId?: string;
+  readonly integrationState?: GoalWorkspaceIntegrationState;
 }
 
 export function workspaceLifecycleKind(workspace: Workspace): WorkspaceLifecycleKind {

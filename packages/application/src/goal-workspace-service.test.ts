@@ -23,6 +23,11 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
     const workspace = this.workspaces.find((current) => current.id === id);
     if (workspace !== undefined) this.workspaces[this.workspaces.indexOf(workspace)] = { ...workspace, archivedAt };
   }
+  public async restore(id: string, workspace?: Workspace): Promise<void> {
+    if (workspace === undefined) return;
+    const index = this.workspaces.findIndex((current) => current.id === id);
+    if (index >= 0) this.workspaces[index] = workspace;
+  }
   public async delete(id: string): Promise<void> {
     const index = this.workspaces.findIndex((workspace) => workspace.id === id);
     if (index >= 0) this.workspaces.splice(index, 1);
@@ -147,6 +152,31 @@ describe('GoalWorkspaceService', () => {
       expect(git.removed).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records caller-verified integration and checkpoint metadata before safe removal', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-integrate-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({ id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString() });
+      const git = new FakeGitPort();
+      const workspaceRoot = path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1');
+      await mkdir(workspaceRoot, { recursive: true });
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: workspaceRoot, realRootPath: workspaceRoot, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'abc123', branchName: 'goal/goal-1', integrationState: 'pending',
+      });
+      const service = new GoalWorkspaceService(repository, git);
+
+      await expect(service.recordCheckpoint('goal-1', 'checkpoint-1')).resolves.toMatchObject({ ok: true, value: { checkpointId: 'checkpoint-1' } });
+      await expect(service.recordIntegrationState('goal-1', 'integrated')).resolves.toMatchObject({ ok: true, value: { integrationState: 'integrated' } });
+      await expect(service.remove('goal-1')).resolves.toEqual({ ok: true, value: undefined });
+      expect(git.removed).toEqual([workspaceRoot]);
+      expect(repository.workspaces.find((workspace) => workspace.goalId === 'goal-1')?.archivedAt).toBeDefined();
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
     }
   });
 });

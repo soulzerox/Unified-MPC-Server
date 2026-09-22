@@ -24,6 +24,7 @@ import { GOAL_RUNTIME_EVENT_MIGRATION_SQL } from './migrations/goal-runtime-even
 import { GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL } from './migrations/goal-runtime-snapshot-migration.js';
 import { MANAGED_RESOURCE_BINDING_MIGRATION_SQL } from './migrations/managed-resource-binding-migration.js';
 import { GOAL_RUNTIME_WORKSPACE_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-workspace-observation-migration.js';
+import { GOAL_WORKSPACE_METADATA_MIGRATION_SQL } from './migrations/goal-workspace-metadata-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -86,6 +87,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '021_managed_resource_bindings', sql: MANAGED_RESOURCE_BINDING_MIGRATION_SQL });
     this.applyMigration({ id: '022_goal_runtime_workspace_observations', sql: GOAL_RUNTIME_WORKSPACE_OBSERVATION_MIGRATION_SQL });
     this.applyMigration({ id: '023_workspace_lifecycle', sql: WORKSPACE_LIFECYCLE_MIGRATION_SQL });
+    this.applyMigration({ id: '024_goal_workspace_metadata', sql: GOAL_WORKSPACE_METADATA_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

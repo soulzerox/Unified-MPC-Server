@@ -213,6 +213,7 @@ describe('GoalWorkspaceService', () => {
         id: 'goal-workspace-1', displayName: 'Goal', rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
         lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
         baseRevision: 'abc123', branchName: 'goal/goal-1', checkpointId: 'checkpoint-1', integrationState: 'pending',
+        writerLease: { leaseId: 'lease-1', ownerId: 'client-a', generation: 3, expiresAt: '2026-09-22T19:05:00.000Z' },
       });
       const git = new FakeGitPort();
       git.runResults = [
@@ -226,7 +227,9 @@ describe('GoalWorkspaceService', () => {
           goalId: 'goal-1', workspaceId: 'goal-workspace-1', rootPath: root,
           workspaceState: 'clean', changedFileCount: 0, branchName: 'goal/goal-1',
           expectedBranchName: 'goal/goal-1', baseRevision: 'abc123', headRevision: 'def456',
-          checkpointId: 'checkpoint-1', integrationState: 'pending', branchDrift: false,
+          checkpointId: 'checkpoint-1', integrationState: 'pending',
+          writerLease: { leaseId: 'lease-1', ownerId: 'client-a', generation: 3, expiresAt: '2026-09-22T19:05:00.000Z' },
+          branchDrift: false,
         },
       });
       expect(git.commands).toEqual([

@@ -70,7 +70,7 @@ The expanded dashboard card shows the goal objective (what the goal is trying to
 
 The runtime projection is exposed separately from the durable Goal summary so selection/default state cannot become execution truth.
 
-- `GET /api/workspaces/:workspaceId/goal-runtime` returns the bounded authoritative runtime snapshots for the registered project plus the latest durable event `cursor` and oldest retained sequence.
+- `GET /api/workspaces/:workspaceId/goal-runtime` returns the bounded authoritative runtime snapshots for the registered project, a replay-safe snapshot `cursor`, the event log `latestSequence`, and the oldest retained sequence. The cursor is deliberately no newer than the runtime state represented by the returned snapshot set, so a consumer can reconnect without skipping a committed event that has not reached its projection yet.
 - `GET /api/workspaces/:workspaceId/goal-runtime/events` is a loopback SSE stream. A new stream starts with an authoritative snapshot. Browser reconnects use the standard `Last-Event-ID` cursor and receive bounded missed events from the durable Goal event log.
 - If the requested cursor fell outside the retained replay window (or is ahead of the current durable log after replacement/recovery), the stream sends a fresh `goal-runtime-snapshot` event instead of pretending the missing delta is complete.
 - Live delivery polls only the bounded durable event log; it does not perform one-second full Projects polling or create a second frontend state store.

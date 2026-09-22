@@ -134,6 +134,60 @@ describe('projectGoalRuntimeEvent', () => {
     });
   });
 
+  it('projects durable Goal blockers as their own source and clears only that source', () => {
+    const blocked = projectGoalRuntimeEvent(base(), {
+      eventId: 'goal-blocked',
+      type: 'goal_blocker_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      blockerKind: 'goal_blocked',
+      occurredAt: '2026-09-21T13:00:02.000Z',
+      detail: 'Durable Goal blockers at revision 2: dependency unavailable',
+    });
+    expect(blocked.projection.blocker).toMatchObject({
+      kind: 'goal_blocked',
+      detail: 'Durable Goal blockers at revision 2: dependency unavailable',
+    });
+
+    const workerLost = { ...blocked.projection, blocker: { kind: 'worker_lost' as const } };
+    const clearWhileWorkerLost = projectGoalRuntimeEvent(workerLost, {
+      eventId: 'goal-blocked-clear-deferred',
+      type: 'goal_blocker_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      occurredAt: '2026-09-21T13:00:03.000Z',
+    });
+    expect(clearWhileWorkerLost.projection.blocker?.kind).toBe('worker_lost');
+
+    const cleared = projectGoalRuntimeEvent(blocked.projection, {
+      eventId: 'goal-blocked-clear',
+      type: 'goal_blocker_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      occurredAt: '2026-09-21T13:00:04.000Z',
+    });
+    expect(cleared.projection.blocker).toBeUndefined();
+  });
+
+  it('lets workspace truth supersede the lower-priority durable Goal blocker', () => {
+    const blocked = base({
+      workspaceState: 'clean',
+      blocker: { kind: 'goal_blocked', detail: 'durable blocker' },
+    });
+    const missing = projectGoalRuntimeEvent(blocked, {
+      eventId: 'workspace-missing-over-goal-blocker',
+      type: 'workspace_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      workspaceState: 'missing',
+      occurredAt: '2026-09-21T13:00:05.000Z',
+    });
+    expect(missing.projection).toMatchObject({
+      workspaceState: 'missing',
+      blocker: { kind: 'recovery_required' },
+    });
+  });
+
   it('projects authoritative workspace observations without overwriting unrelated blockers', () => {
     const dirty = projectGoalRuntimeEvent(base({ workspaceState: 'unknown' }), {
       eventId: 'workspace-dirty',

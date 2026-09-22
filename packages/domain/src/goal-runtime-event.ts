@@ -14,6 +14,7 @@ export const GOAL_SCOPED_RUNTIME_EVENT_TYPES = [
   'goal_abandoned',
   'goal_archived',
   'goal_cleaned',
+  'goal_blocker_observed',
   'workspace_observed',
 ] as const;
 export type GoalScopedRuntimeEventType = typeof GOAL_SCOPED_RUNTIME_EVENT_TYPES[number];
@@ -61,11 +62,16 @@ interface GoalRuntimeEventBase {
 
 export type GoalScopedRuntimeEvent =
   | (GoalRuntimeEventBase & {
-      readonly type: Exclude<GoalScopedRuntimeEventType, 'workspace_observed'>;
+      readonly type: Exclude<GoalScopedRuntimeEventType, 'workspace_observed' | 'goal_blocker_observed'>;
     })
   | (GoalRuntimeEventBase & {
       readonly type: 'workspace_observed';
       readonly workspaceState: GoalWorkspaceState;
+    })
+  | (GoalRuntimeEventBase & {
+      readonly type: 'goal_blocker_observed';
+      /** Present when durable Goal blockers exist; omitted when that source clears. */
+      readonly blockerKind?: 'goal_blocked';
     });
 
 export interface ExecutionScopedRuntimeEvent extends GoalRuntimeEventBase {

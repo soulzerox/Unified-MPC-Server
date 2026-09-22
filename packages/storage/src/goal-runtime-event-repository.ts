@@ -107,7 +107,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       execution?.phase ?? null,
       execution?.taskId ?? null,
       execution?.checkpointId ?? null,
-      execution?.blockerKind ?? null,
+      (event.type === 'goal_blocker_observed' ? event.blockerKind : execution?.blockerKind) ?? null,
       event.type === 'workspace_observed' ? event.workspaceState : null,
       request.recordedAt,
     );
@@ -442,17 +442,32 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
     let event: GoalRuntimeEvent;
     if (isGoalScopedRuntimeEventType(row.event_type)) {
       if (row.execution_id !== null || row.execution_generation !== null
-        || row.phase !== null || row.task_id !== null || row.checkpoint_id !== null || row.blocker_kind !== null) {
+        || row.phase !== null || row.task_id !== null || row.checkpoint_id !== null) {
         throw new GoalRuntimeEventStoreError('corrupt', 'Goal-scoped runtime event contains execution-only fields');
       }
       if (row.event_type === 'workspace_observed') {
+        if (row.blocker_kind !== null) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Workspace observation event contains blocker state');
+        }
         if (!isGoalWorkspaceState(row.workspace_state)) {
           throw new GoalRuntimeEventStoreError('corrupt', 'Workspace observation event is missing a valid workspace state');
         }
         event = { ...common, type: 'workspace_observed', workspaceState: row.workspace_state };
-      } else {
+      } else if (row.event_type === 'goal_blocker_observed') {
         if (row.workspace_state !== null) {
-          throw new GoalRuntimeEventStoreError('corrupt', 'Non-workspace Goal event contains workspace state');
+          throw new GoalRuntimeEventStoreError('corrupt', 'Goal blocker observation contains workspace state');
+        }
+        if (row.blocker_kind !== null && row.blocker_kind !== 'goal_blocked') {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Goal blocker observation contains an invalid blocker kind');
+        }
+        event = {
+          ...common,
+          type: 'goal_blocker_observed',
+          ...(row.blocker_kind === null ? {} : { blockerKind: 'goal_blocked' as const }),
+        };
+      } else {
+        if (row.workspace_state !== null || row.blocker_kind !== null) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Ordinary Goal event contains observation-only state');
         }
         event = { ...common, type: row.event_type };
       }
@@ -527,6 +542,11 @@ function validateEvent(event: GoalRuntimeEvent): void {
     if (event.type === 'workspace_observed' && !isGoalWorkspaceState(event.workspaceState)) {
       throw new GoalRuntimeEventStoreError('invalid_event', 'workspaceState is invalid');
     }
+    if (event.type === 'goal_blocker_observed'
+      && event.blockerKind !== undefined
+      && event.blockerKind !== 'goal_blocked') {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'Goal blocker observation kind is invalid');
+    }
     return;
   }
 
@@ -554,6 +574,11 @@ function sameEvent(left: GoalRuntimeEvent, right: GoalRuntimeEvent): boolean {
       return left.type === 'workspace_observed'
         && right.type === 'workspace_observed'
         && left.workspaceState === right.workspaceState;
+    }
+    if (left.type === 'goal_blocker_observed' || right.type === 'goal_blocker_observed') {
+      return left.type === 'goal_blocker_observed'
+        && right.type === 'goal_blocker_observed'
+        && left.blockerKind === right.blockerKind;
     }
     return true;
   }

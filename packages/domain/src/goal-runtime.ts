@@ -71,6 +71,7 @@ export const GOAL_BLOCKER_KINDS = [
   'active_lease_elsewhere',
   'provider_unavailable',
   'task_failed',
+  'goal_blocked',
   'recovery_required',
   'unknown',
 ] as const;

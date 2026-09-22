@@ -11,6 +11,7 @@ export * from './goal-request-cancellation-service.js';
 export * from './goal-mutation-fence-service.js';
 export * from './goal-runtime-control-plane-service.js';
 export * from './goal-workspace-truth-reader.js';
+export * from './goal-workspace-service.js';
 export * from './goal-runtime-reconciliation-service.js';
 export * from './managed-resource-recovery-service.js';
 export * from './scheduled-continuation-service.js';

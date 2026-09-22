@@ -5,7 +5,12 @@ on:
     paths:
       - ".github/workflows/goal-runtime-reconciliation.yml"
       - "apps/cli/package.json"
+      - "apps/cli/src/commands/web.ts"
       - "apps/cli/src/runtime/stdio-mcp-runtime.ts"
+      - "apps/web/package.json"
+      - "apps/web/src/index.ts"
+      - "apps/web/src/web-server.ts"
+      - "apps/web/src/goal-runtime-http.test.ts"
       - "apps/cli/src/runtime/stdio-mcp-runtime.test.ts"
       - "packages/application/src/goal-continuation-service.ts"
       - "packages/application/src/goal-continuation-runtime-events.integration.test.ts"
@@ -78,6 +83,9 @@ jobs:
           src/goal-mutation-fence-service.test.ts
           src/goal-runtime-reconciliation-service.test.ts
 
+      - name: Web Goal runtime snapshot and SSE regression
+        run: pnpm --filter @unified-mpc/web exec vitest run src/goal-runtime-http.test.ts
+
       - name: STDIO runtime regression
         run: pnpm --filter @unified-mpc/cli exec vitest run src/runtime/stdio-mcp-runtime.test.ts
 
@@ -85,6 +93,7 @@ jobs:
         run: |
           pnpm --filter @unified-mpc/storage typecheck
           pnpm --filter @unified-mpc/application typecheck
+          pnpm --filter @unified-mpc/web typecheck
           pnpm --filter @unified-mpc/cli typecheck
 
       - name: Targeted ESLint
@@ -109,6 +118,10 @@ jobs:
           packages/domain/src/goal-runtime-event.ts
           packages/domain/src/goal-runtime-projector.ts
           packages/domain/src/goal-runtime-projector.test.ts
+          apps/web/src/index.ts
+          apps/web/src/web-server.ts
+          apps/web/src/goal-runtime-http.test.ts
+          apps/cli/src/commands/web.ts
           apps/cli/src/runtime/stdio-mcp-runtime.ts
           apps/cli/src/runtime/stdio-mcp-runtime.test.ts
 

@@ -54,20 +54,25 @@ function fixture(options: {
   readonly setGoal: (entry: GoalRecord) => void;
 } {
   const goals = new Map((options.goals ?? [goal()]).map((entry) => [entry.id, entry]));
-  let snapshot = options.snapshot ?? null;
+  const snapshotByGoal = new Map<string, GoalRuntimeSnapshotRecord>();
+  if (options.snapshot !== undefined) {
+    snapshotByGoal.set(options.snapshot.projection.goalId, options.snapshot);
+  }
   const stored: GoalRuntimeSnapshotRecord[] = [];
   const records = [...(options.events ?? [])];
 
   const snapshots: GoalRuntimeSnapshotRepository = {
-    getGoalRuntimeSnapshot: async (goalId) =>
-      snapshot?.projection.goalId === goalId ? snapshot : null,
-    listWorkspaceGoalRuntimeSnapshots: async () => snapshot === null ? [] : [snapshot],
+    getGoalRuntimeSnapshot: async (goalId) => snapshotByGoal.get(goalId) ?? null,
+    listWorkspaceGoalRuntimeSnapshots: async (request) => [...snapshotByGoal.values()]
+      .filter((entry) => entry.projection.workspaceId === request.workspaceId)
+      .slice(0, request.limit),
     storeGoalRuntimeSnapshot: async (request) => {
-      snapshot = {
+      const snapshot = {
         projection: request.projection,
         lastEventSequence: request.lastEventSequence,
         updatedAt: request.updatedAt,
       };
+      snapshotByGoal.set(request.projection.goalId, snapshot);
       stored.push(snapshot);
       return snapshot;
     },
@@ -467,6 +472,153 @@ describe('GoalRuntimeControlPlaneService', () => {
       runtimeState: 'running',
       phase: 'test',
       progress: { phase: 'test', detail: 'integration tests' },
+    });
+  });
+
+  it('keeps concurrent Goal projections isolated across workspaces, shared sequence, and stale generations', async () => {
+    const runtime = fixture({
+      goals: [
+        goal({
+          id: 'goal-a',
+          goalKey: 'runtime-a',
+          ownerClientId: 'client-a',
+          executionId: 'execution-a-1',
+        }),
+        goal({
+          id: 'goal-b',
+          goalKey: 'runtime-b',
+          ownerClientId: 'client-b',
+          executionId: 'execution-b-1',
+        }),
+        goal({
+          id: 'goal-c',
+          goalKey: 'runtime-c',
+          workspaceId: 'workspace-2',
+          ownerClientId: 'client-c',
+          executionId: 'execution-c-1',
+        }),
+      ],
+    });
+
+    const runningA = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'goal-a-running',
+      type: 'phase_started',
+      workspaceId,
+      goalId: 'goal-a',
+      executionId: 'execution-a-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:00.000Z',
+      phase: 'implement',
+    });
+    const runningB = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'goal-b-running',
+      type: 'phase_started',
+      workspaceId,
+      goalId: 'goal-b',
+      executionId: 'execution-b-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:10.000Z',
+      phase: 'test',
+    });
+    const runningC = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'goal-c-running',
+      type: 'phase_started',
+      workspaceId: 'workspace-2',
+      goalId: 'goal-c',
+      executionId: 'execution-c-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:01:20.000Z',
+      phase: 'review',
+    });
+
+    expect(runningA.lastEventSequence).toBe(1);
+    expect(runningA.projection).toMatchObject({
+      goalId: 'goal-a',
+      runtimeState: 'running',
+      activeExecutionId: 'execution-a-1',
+      executionGeneration: 1,
+      phase: 'implement',
+    });
+    expect(runningB.lastEventSequence).toBe(2);
+    expect(runningB.projection).toMatchObject({
+      goalId: 'goal-b',
+      runtimeState: 'running',
+      activeExecutionId: 'execution-b-1',
+      executionGeneration: 1,
+      phase: 'test',
+    });
+    expect(runningC.lastEventSequence).toBe(3);
+    expect(runningC.projection).toMatchObject({
+      goalId: 'goal-c',
+      workspaceId: 'workspace-2',
+      runtimeState: 'running',
+      activeExecutionId: 'execution-c-1',
+      executionGeneration: 1,
+      phase: 'review',
+    });
+
+    runtime.setGoal(goal({
+      id: 'goal-a',
+      goalKey: 'runtime-a',
+      ownerClientId: 'client-a',
+      revision: 2,
+      leaseGeneration: 2,
+      executionId: 'execution-a-2',
+      executionGeneration: 2,
+      updatedAt: '2026-09-22T00:02:00.000Z',
+    }));
+    const takeoverA = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'goal-a-takeover',
+      type: 'execution_submitted',
+      workspaceId,
+      goalId: 'goal-a',
+      executionId: 'execution-a-2',
+      executionGeneration: 2,
+      occurredAt: '2026-09-22T00:02:00.000Z',
+    });
+    expect(takeoverA.lastEventSequence).toBe(4);
+    expect(takeoverA.projection).toMatchObject({
+      runtimeState: 'queued',
+      activeExecutionId: 'execution-a-2',
+      executionGeneration: 2,
+    });
+
+    const staleA = await runtime.service.publishGoalRuntimeEvent({
+      eventId: 'goal-a-stale-heartbeat',
+      type: 'execution_heartbeat',
+      workspaceId,
+      goalId: 'goal-a',
+      executionId: 'execution-a-1',
+      executionGeneration: 1,
+      occurredAt: '2026-09-22T00:02:10.000Z',
+    });
+    expect(staleA.lastEventSequence).toBe(5);
+    expect(staleA.projection).toMatchObject({
+      runtimeState: 'queued',
+      activeExecutionId: 'execution-a-2',
+      executionGeneration: 2,
+    });
+    expect(staleA.projection.lastHeartbeatAt).toBeUndefined();
+
+    const stillRunningB = await runtime.service.ensureGoalSnapshot('goal-b');
+    expect(stillRunningB.lastEventSequence).toBe(2);
+    expect(stillRunningB.projection).toMatchObject({
+      goalId: 'goal-b',
+      runtimeState: 'running',
+      activeExecutionId: 'execution-b-1',
+      executionGeneration: 1,
+      phase: 'test',
+    });
+
+    const stillRunningC = await runtime.service.ensureGoalSnapshot('goal-c');
+    expect(stillRunningC.lastEventSequence).toBe(3);
+    expect(stillRunningC.projection).toMatchObject({
+      goalId: 'goal-c',
+      workspaceId: 'workspace-2',
+      runtimeState: 'running',
+      activeExecutionId: 'execution-c-1',
+      executionGeneration: 1,
+      phase: 'review',
     });
   });
 

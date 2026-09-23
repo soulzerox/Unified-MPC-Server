@@ -7,8 +7,8 @@ import type { ExternalMcpContractDrift, McpResourceSummary, McpServerLaunchConfi
 export interface McpClientSession {
   listTools(signal?: AbortSignal): Promise<readonly McpToolSummary[]>;
   listResources(signal?: AbortSignal): Promise<readonly McpResourceSummary[]>;
-  callTool(name: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<unknown>;
-  callToolBounded?(name: string, args: Readonly<Record<string, unknown>>, budget: ResultBudget, signal?: AbortSignal): Promise<unknown>;
+  callTool(name: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal, timeoutMs?: number): Promise<unknown>;
+  callToolBounded?(name: string, args: Readonly<Record<string, unknown>>, budget: ResultBudget, signal?: AbortSignal, timeoutMs?: number): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -171,10 +171,10 @@ export class McpSessionManager {
       const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
       const result = await withTimeout(
         (callSignal) => this.enqueue(activeManaged, () => budget === undefined
-          ? activeManaged.session.callTool(tool, args, callSignal)
+          ? activeManaged.session.callTool(tool, args, callSignal, this.callTimeoutMs)
           : activeManaged.session.callToolBounded === undefined
-            ? activeManaged.session.callTool(tool, args, callSignal)
-            : activeManaged.session.callToolBounded(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal), callSignal),
+            ? activeManaged.session.callTool(tool, args, callSignal, this.callTimeoutMs)
+            : activeManaged.session.callToolBounded(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal, this.callTimeoutMs), callSignal),
         this.callTimeoutMs,
         `Timed out calling ${server}/${tool}`,
         signal,
@@ -447,8 +447,13 @@ export const defaultMcpClientFactory: McpClientFactory = {
           ...(resource.mimeType === undefined ? {} : { mimeType: resource.mimeType }),
         }));
       },
-      async callTool(name: string, args: Readonly<Record<string, unknown>>, callSignal?: AbortSignal): Promise<unknown> {
-        return client.callTool({ name, arguments: { ...args } }, callSignal === undefined ? undefined : { signal: callSignal });
+      async callTool(name: string, args: Readonly<Record<string, unknown>>, callSignal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
+        return client.callTool(
+          { name, arguments: { ...args } },
+          callSignal === undefined && timeoutMs === undefined
+            ? undefined
+            : { ...(callSignal === undefined ? {} : { signal: callSignal }), ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
+        );
       },
       async close(): Promise<void> {
         if (closed) return;

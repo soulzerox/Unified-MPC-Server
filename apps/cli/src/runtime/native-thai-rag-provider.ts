@@ -244,10 +244,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const bypassBusyRefresh = tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args);
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : undefined;
-    const refreshed = bypassBusyRefresh || tool === 'cancel_index'
+    const refreshed = tool === 'cancel_index' || bypassBusyRefresh
       ? ok(undefined)
-      : await this.refreshWorkspaceRoots(this.lifecycleGeneration, tool === 'code_index' ? undefined : workspaceId);
-    if (!refreshed.ok) return refreshed;
+      : await this.refreshWorkspaceRoots(this.lifecycleGeneration, workspaceId);
+    if (!refreshed.ok) {
+      const details = refreshed.error.details;
+      if (tool === 'code_index' && isRecord(details)
+        && details.reason === 'workspace-indexing'
+        && typeof details.jobId === 'string') {
+        return ok({ job_id: details.jobId, status: 'running', workspace_id: workspaceId });
+      }
+      return refreshed;
+    }
     if (tool === 'cancel_index') return this.cancelIndex(args, budget);
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);
     const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);

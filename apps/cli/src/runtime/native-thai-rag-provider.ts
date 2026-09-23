@@ -244,7 +244,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const bypassBusyRefresh = tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args);
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : undefined;
-    const refreshed = bypassBusyRefresh ? ok(undefined) : await this.refreshWorkspaceRoots(this.lifecycleGeneration, workspaceId);
+    const refreshed = bypassBusyRefresh || tool === 'cancel_index'
+      ? ok(undefined)
+      : await this.refreshWorkspaceRoots(this.lifecycleGeneration, tool === 'code_index' ? undefined : workspaceId);
     if (!refreshed.ok) return refreshed;
     if (tool === 'cancel_index') return this.cancelIndex(args, budget);
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);

@@ -22,6 +22,7 @@ import {
 } from '@unified-mpc/thai-rag';
 
 const SERVER_NAME = 'thai-rag-native';
+const INDEX_CALL_TIMEOUT_MS = 180_000;
 const REQUIRED_TOOLS = new Set([
   'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',
   'forget', 'code_index', 'index_status', 'code_search', 'code_context',
@@ -83,7 +84,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     });
     this.indexSessions = new McpSessionManager({
       ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
-      ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
+      callTimeoutMs: Math.max(options.callTimeoutMs ?? 60_000, INDEX_CALL_TIMEOUT_MS),
       validateToolSchemas: false,
       idleTimeoutMs: 24 * 60 * 60_000,
     });

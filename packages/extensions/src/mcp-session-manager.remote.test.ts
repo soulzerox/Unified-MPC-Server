@@ -4,6 +4,7 @@ const transportState = vi.hoisted(() => ({
   connected: [] as string[],
   httpUrls: [] as string[],
   sseUrls: [] as string[],
+  requestOptions: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('@modelcontextprotocol/client', () => {
@@ -22,9 +23,9 @@ vi.mock('@modelcontextprotocol/client', () => {
   class Client {
     async connect(): Promise<void> {}
     async close(): Promise<void> {}
-    async listTools(): Promise<{ tools: never[] }> { return { tools: [] }; }
+    async listTools(): Promise<{ tools: Array<{ name: string; description: string }> }> { return { tools: [{ name: 'slow', description: 'Slow tool' }] }; }
     async listResources(): Promise<{ resources: never[] }> { return { resources: [] }; }
-    async callTool(): Promise<Record<string, never>> { return {}; }
+    async callTool(_request: unknown, options?: Record<string, unknown>): Promise<unknown> { transportState.requestOptions.push(options ?? {}); return { content: [{ type: 'text', text: 'ok' }] }; }
   }
   return { Client, StreamableHTTPClientTransport, SSEClientTransport };
 });
@@ -38,7 +39,7 @@ vi.mock('@modelcontextprotocol/client/stdio', () => ({
   },
 }));
 
-import { defaultMcpClientFactory } from './mcp-session-manager.js';
+import { defaultMcpClientFactory, McpSessionManager } from './mcp-session-manager.js';
 import type { McpServerLaunchConfig } from './types.js';
 
 describe('defaultMcpClientFactory remote transports', () => {
@@ -46,6 +47,19 @@ describe('defaultMcpClientFactory remote transports', () => {
     transportState.connected.length = 0;
     transportState.httpUrls.length = 0;
     transportState.sseUrls.length = 0;
+    transportState.requestOptions.length = 0;
+  });
+
+  it('passes the configured manager timeout to the MCP SDK request', async () => {
+    const manager = new McpSessionManager({ clientFactory: defaultMcpClientFactory, callTimeoutMs: 180_000 });
+
+    await expect(manager.call('remote', {
+      type: 'http',
+      url: 'https://mcp.example.com/rpc',
+    } as McpServerLaunchConfig, 'slow', {})).resolves.toMatchObject({ ok: true });
+    expect(transportState.requestOptions[0]).toMatchObject({ timeout: 180_000 });
+
+    await manager.close();
   });
 
   it('uses Streamable HTTP for type=http URL configs', async () => {

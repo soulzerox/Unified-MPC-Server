@@ -452,6 +452,66 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('uses the provider-owned background index job for cold workspace admission', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let completeIndex = false;
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 20,
+      indexJobPollMs: 10,
+      workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index') {
+            if (args.background !== true) return structuredFailure('background_required');
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_admission', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'index_status') {
+            return success('index_status', {
+              status: 'ok',
+              data: completeIndex
+                ? { status: 'done', job_id: 'idx_provider_admission', workspace_id: workspaceId, result: { indexed: 3 } }
+                : { status: 'running', job_id: 'idx_provider_admission', workspace_id: workspaceId },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const admission = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    expect(admission).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing' } },
+    });
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; providerJobId?: string; workspaceId: string; status: string }>;
+    };
+    const indexingJob = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running');
+    expect(indexingJob).toMatchObject({ providerJobId: 'idx_provider_admission' });
+    expect(calls.find(({ tool }) => tool === 'code_index')?.args.background).toBe(true);
+
+    completeIndex = true;
+    await expect.poll(async () => {
+      const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: indexingJob!.jobId });
+      return status.ok && isRecord(status.value) ? status.value.status : 'unavailable';
+    }).toBe('completed');
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(1);
+    expect(calls.some(({ tool }) => tool === 'index_status')).toBe(true);
+    await driver.stop();
+  });
+
   it('admits a cold Goal workspace without waiting for an unrelated startup index', async () => {
     const dataRoot = await tempRoot();
     const rootWorkspace = { id: workspaceId, realRootPath: await tempRoot() };

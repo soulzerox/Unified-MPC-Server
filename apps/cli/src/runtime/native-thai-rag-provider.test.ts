@@ -145,6 +145,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
+      callTimeoutMs: 20,
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       indexJobPollMs: 10,
       clientFactory: clientFactory({

@@ -408,6 +408,27 @@ describe('NativeThaiRagProviderDriver', () => {
     }
   });
 
+  it('lets a cold workspace index exceed the ordinary MCP call timeout', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 500,
+      workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') await new Promise((resolve) => setTimeout(resolve, 650));
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await driver.stop();
+  });
+
   it('admits a cold Goal workspace without waiting for an unrelated startup index', async () => {
     const dataRoot = await tempRoot();
     const rootWorkspace = { id: workspaceId, realRootPath: await tempRoot() };

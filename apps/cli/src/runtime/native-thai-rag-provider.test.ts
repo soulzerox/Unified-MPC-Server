@@ -382,7 +382,7 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/probe.ts' })).resolves.toMatchObject({ ok: true });
     const rootIndex = driver.call('code_index', { workspace_path: blockedRoot, workspace_id: workspaceId, background: true });
     await blockedIndexStarted;
-    expect(connections).toBe(3);
+    expect(connections).toBe(2);
     const preEdit = driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/probe.ts' });
     let runningJobId: string | undefined;
     const health = driver.health().then((result) => {
@@ -408,9 +408,10 @@ describe('NativeThaiRagProviderDriver', () => {
     }
   });
 
-  it('lets a cold workspace index exceed the ordinary MCP call timeout', async () => {
+  it('keeps pre-edit fail-closed while a cold workspace index runs as a durable job', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
@@ -418,14 +419,36 @@ describe('NativeThaiRagProviderDriver', () => {
       workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory({
         async onCall(tool): Promise<unknown> {
-          if (tool === 'code_index') await new Promise((resolve) => setTimeout(resolve, 650));
+          calls.push(tool);
+          if (tool === 'code_index') await new Promise((resolve) => setTimeout(resolve, 900));
           return success('ok');
         },
       }),
     });
 
     expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const admission = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    expect(admission).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing' } },
+    });
+    expect(calls).not.toContain('pre_edit_context');
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/other.ts' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'workspace-indexing' } },
+    });
+    expect(calls.filter((tool) => tool === 'code_index')).toHaveLength(1);
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; workspaceId: string; status: string }>;
+    };
+    const indexingJob = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running');
+    expect(indexingJob).toBeDefined();
+    await expect.poll(async () => {
+      const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: indexingJob!.jobId });
+      return status.ok && isRecord(status.value) ? status.value.status : 'unavailable';
+    }).toBe('completed');
     await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'pre_edit_context')).toHaveLength(1);
     await driver.stop();
   });
 

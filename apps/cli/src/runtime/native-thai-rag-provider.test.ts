@@ -401,7 +401,10 @@ describe('NativeThaiRagProviderDriver', () => {
       await preEdit;
       await health;
       if (runningJobId !== undefined) {
-        await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: runningJobId })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
+        await expect.poll(async () => {
+          const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: runningJobId });
+          return status.ok ? (status.value as { status: string }).status : 'unavailable';
+        }).toBe('completed');
       }
       await driver.stop();
     }
@@ -488,6 +491,45 @@ describe('NativeThaiRagProviderDriver', () => {
     releaseBlockedIndex?.();
     await expect(preEdit).resolves.toMatchObject({ ok: true });
     await expect(realpath(alias)).resolves.toBe(await realpath(readyRoot));
+    await driver.stop();
+  });
+
+  it('keeps ready pre-edit and failed index status available after another workspace index fails', async () => {
+    const dataRoot = await tempRoot();
+    const readyRoot = await tempRoot();
+    const failedRoot = await tempRoot();
+    let failedIndexCalls = 0;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async () => [
+        { id: recoveredWorkspaceId, realRootPath: readyRoot },
+        { id: workspaceId, realRootPath: failedRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index' && args.workspace_id === workspaceId) {
+            failedIndexCalls += 1;
+            return { content: [{ type: 'text', text: 'Error: index failed' }] };
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect.poll(() => failedIndexCalls).toBeGreaterThan(0);
+    const jobsPath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    let failedJobId: string | undefined;
+    await expect.poll(async () => {
+      const persisted = JSON.parse(await readFile(jobsPath, 'utf8')) as { jobs: Array<{ jobId: string; workspaceId: string; status: string }> };
+      failedJobId = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'failed')?.jobId;
+      return failedJobId !== undefined;
+    }).toBe(true);
+    expect(failedJobId).toBeDefined();
+    await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: failedJobId })).resolves.toMatchObject({ ok: true, value: { status: 'failed' } });
+    await expect(driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/probe.ts' })).resolves.toMatchObject({ ok: true });
+    expect(failedIndexCalls).toBe(1);
     await driver.stop();
   });
 

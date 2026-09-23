@@ -230,9 +230,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
-    const bypassBusyRefresh = tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args);
-    const refreshed = bypassBusyRefresh ? ok(undefined) : await this.refreshWorkspaceRoots();
-    if (!refreshed.ok) return refreshed;
     if (tool === 'index_status') {
       const jobId = typeof args.job_id === 'string' ? args.job_id : '';
       const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
@@ -243,6 +240,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`))
         : ok(job);
     }
+    const bypassBusyRefresh = tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args);
+    const refreshed = bypassBusyRefresh ? ok(undefined) : await this.refreshWorkspaceRoots();
+    if (!refreshed.ok) return refreshed;
     if (tool === 'cancel_index') return this.cancelIndex(args, budget);
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);
     const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
@@ -253,7 +253,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   private async canServeReadyWorkspaceDuringIndex(args: Readonly<Record<string, unknown>>): Promise<boolean> {
-    if (this.indexingWorkspaceId === undefined) return false;
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : '';
     const knownRoot = this.workspaceRoots.get(workspaceId);
     const sourcesRoot = this.launchConfig?.cwd;
@@ -548,7 +547,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
           }
           if (!indexed.ok) {
-            for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
+            for (const entry of workspaces) {
+              if (previousRoots.get(entry.id) !== path.resolve(entry.realRootPath)) this.pendingReindexIds.add(entry.id);
+            }
             const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
             if (!rolledBack.ok) {
               this.workspaceRoots.clear();

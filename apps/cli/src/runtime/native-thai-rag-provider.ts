@@ -210,7 +210,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
-    const refreshed = await this.refreshWorkspaceRoots();
+    const refreshed = this.indexingWorkspaceId === undefined ? await this.refreshWorkspaceRoots() : ok(undefined);
     if (!refreshed.ok) return refreshed;
     const activeJobs = await this.jobs.active(this.ownerId ?? '');
     if (activeJobs.length > 0 && this.lastHealth !== undefined) {
@@ -256,10 +256,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (this.indexingWorkspaceId === undefined) return false;
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : '';
     const knownRoot = this.workspaceRoots.get(workspaceId);
-    if (knownRoot === undefined || this.pendingReindexIds.has(workspaceId)) return false;
+    const sourcesRoot = this.launchConfig?.cwd;
+    if (knownRoot === undefined || sourcesRoot === undefined || this.pendingReindexIds.has(workspaceId)) return false;
     try {
       const current = (await this.options.workspacesProvider()).find((workspace) => workspace.id === workspaceId);
-      return current !== undefined && path.resolve(current.realRootPath) === knownRoot;
+      if (current === undefined || path.resolve(current.realRootPath) !== knownRoot) return false;
+      const alias = path.join(sourcesRoot, workspaceId);
+      const metadata = await lstat(alias);
+      return metadata.isSymbolicLink() && path.resolve(path.dirname(alias), await readlink(alias)) === knownRoot;
     } catch {
       return false;
     }
@@ -519,37 +523,44 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     for (const workspace of relinked) this.pendingReindexIds.add(workspace.id);
     if (generation === this.lifecycleGeneration && this.started && this.launchConfig !== undefined) {
       const pending = new Set(this.pendingReindexIds);
-      for (const workspace of workspaces.filter((entry) => pending.has(entry.id))) {
-        this.indexingWorkspaceId = workspace.id;
-        let indexed: Result<unknown>;
-        try {
-          indexed = normalizeWorkerCallResult(
-            'code_index',
-            await this.indexSessions.call(SERVER_NAME, this.launchConfig, 'code_index', {
-              workspace_path: path.resolve(workspace.realRootPath),
-              workspace_id: workspace.id,
-              force: true,
-              background: false,
-            }),
-          );
-        } finally {
-          this.indexingWorkspaceId = undefined;
-        }
-
-        if (!this.refreshIsCurrent(generation) || !this.started) {
-          return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
-        }
-        if (!indexed.ok) {
-          for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
-           const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
-          if (!rolledBack.ok) {
-            this.workspaceRoots.clear();
-            this.workspaceRootIds.clear();
-            return err(appError('CONFLICT', `Native Thai-RAG refresh failed and could not restore its previous state: ${rolledBack.error.message}`, true));
+      try {
+        for (const workspace of workspaces.filter((entry) => pending.has(entry.id))) {
+          const job = await this.jobs.create(workspace.id, true, this.ownerId ?? '');
+          this.indexingWorkspaceId = workspace.id;
+          let indexed: Result<unknown>;
+          try {
+            indexed = normalizeWorkerCallResult(
+              'code_index',
+              await this.indexSessions.call(SERVER_NAME, this.launchConfig, 'code_index', {
+                workspace_path: path.resolve(workspace.realRootPath),
+                workspace_id: workspace.id,
+                force: true,
+                background: false,
+              }),
+            );
+          } finally {
+            this.indexingWorkspaceId = undefined;
           }
-          return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
+          if (indexed.ok) await this.jobs.complete(job.jobId, indexed.value, this.ownerId ?? '');
+          else await this.jobs.fail(job.jobId, indexed.error.message, this.ownerId ?? '');
+
+          if (!this.refreshIsCurrent(generation) || !this.started) {
+            return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
+          }
+          if (!indexed.ok) {
+            for (const workspaceId of pending) this.pendingReindexIds.add(workspaceId);
+            const rolledBack = await syncWorkspaceSourceAliases(sourcesRoot, previousWorkspaces);
+            if (!rolledBack.ok) {
+              this.workspaceRoots.clear();
+              this.workspaceRootIds.clear();
+              return err(appError('CONFLICT', `Native Thai-RAG refresh failed and could not restore its previous state: ${rolledBack.error.message}`, true));
+            }
+            return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
+          }
+          this.pendingReindexIds.delete(workspace.id);
         }
-        this.pendingReindexIds.delete(workspace.id);
+      } finally {
+        await this.indexSessions.dropServer(SERVER_NAME);
       }
     }
 

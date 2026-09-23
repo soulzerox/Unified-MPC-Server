@@ -59,11 +59,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly workspaceRoots = new Map<string, string>();
   private readonly workspaceRootIds = new Map<string, string>();
   private readonly pendingReindexIds = new Set<string>();
+  private readonly forceReindexIds = new Set<string>();
   private indexingWorkspaceId: string | undefined;
   private expectedEmbeddingIndexGeneration = 1;
   private started = false;
   private lifecycleGeneration = 0;
-  private backgroundRefresh: Promise<Result<void>> | undefined;
   private shuttingDown = false;
   private stopRequested = false;
   private stopped = false;
@@ -197,8 +197,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       await this.sessions.close().catch(() => undefined);
       return err(appError('CONFLICT', 'Native Thai-RAG provider stopped during startup', true));
     }
-    const generation = this.lifecycleGeneration;
-    this.backgroundRefresh = this.refreshWorkspaceRoots(generation).then((result) => result, () => ok(undefined));
     return health;
   }
 
@@ -241,7 +239,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         : ok(job);
     }
     const bypassBusyRefresh = tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args);
-    const refreshed = bypassBusyRefresh ? ok(undefined) : await this.refreshWorkspaceRoots();
+    const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : undefined;
+    const refreshed = bypassBusyRefresh ? ok(undefined) : await this.refreshWorkspaceRoots(this.lifecycleGeneration, workspaceId);
     if (!refreshed.ok) return refreshed;
     if (tool === 'cancel_index') return this.cancelIndex(args, budget);
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);
@@ -278,21 +277,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private async stopNow(): Promise<Result<void>> {
     this.started = false;
     this.shuttingDown = true;
-    const generation = ++this.lifecycleGeneration;
+    this.lifecycleGeneration += 1;
     if (this.cancellableIndexJobs) await this.cancelActiveProviderIndexJobs();
     await this.jobs.interruptRunning(this.ownerId ?? '');
     await this.waitForOperations();
     await this.workerQueue.catch(() => undefined);
-    const backgroundRefresh = this.backgroundRefresh;
-    const refreshResult = backgroundRefresh === undefined
-      ? ok(undefined)
-      : await backgroundRefresh.catch((error: unknown) => err(appError('CONFLICT', `Native Thai-RAG background refresh failed during shutdown: ${errorMessage(error)}`, true)));
-    if (generation === this.lifecycleGeneration) this.backgroundRefresh = undefined;
     this.sessions.unpin(SERVER_NAME);
     await this.sessions.close().catch(() => undefined);
     await this.indexSessions.close().catch(() => undefined);
     this.stopped = true;
-    return refreshResult;
+    return ok(undefined);
   }
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
@@ -479,11 +473,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       : ok({ workspaceId, rootPath });
   }
 
-  private refreshWorkspaceRoots(generation = this.lifecycleGeneration): Promise<Result<void>> {
-    return this.enqueueWorker(() => this.refreshWorkspaceRootsNow(generation));
+  private refreshWorkspaceRoots(generation = this.lifecycleGeneration, requestedWorkspaceId?: string): Promise<Result<void>> {
+    return this.enqueueWorker(() => this.refreshWorkspaceRootsNow(generation, requestedWorkspaceId));
   }
 
-  private async refreshWorkspaceRootsNow(generation: number): Promise<Result<void>> {
+  private async refreshWorkspaceRootsNow(generation: number, requestedWorkspaceId?: string): Promise<Result<void>> {
     const providerRoot = resolveThaiRagProviderRoot(this.options.dataRoot);
     if (!providerRoot.ok) return providerRoot;
     let rawWorkspaces: readonly NativeThaiRagWorkspace[];
@@ -514,17 +508,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const aliases = await syncWorkspaceSourceAliases(sourcesRoot, workspaces, () => this.refreshIsCurrent(generation));
     if (!aliases.ok) return aliases;
     if (!this.refreshIsCurrent(generation)) return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
-    for (const workspaceId of aliases.value) this.pendingReindexIds.add(workspaceId);
+    for (const workspaceId of aliases.value) {
+      this.pendingReindexIds.add(workspaceId);
+      this.forceReindexIds.add(workspaceId);
+    }
     const relinked = workspaces.filter((workspace) => {
       const previousRoot = this.workspaceRoots.get(workspace.id);
       return previousRoot !== undefined && previousRoot !== path.resolve(workspace.realRootPath);
     });
-    for (const workspace of relinked) this.pendingReindexIds.add(workspace.id);
+    for (const workspace of relinked) {
+      this.pendingReindexIds.add(workspace.id);
+      this.forceReindexIds.add(workspace.id);
+    }
     if (generation === this.lifecycleGeneration && this.started && this.launchConfig !== undefined) {
       const pending = new Set(this.pendingReindexIds);
       try {
-        for (const workspace of workspaces.filter((entry) => pending.has(entry.id))) {
-          const job = await this.jobs.create(workspace.id, true, this.ownerId ?? '');
+        for (const workspace of workspaces.filter((entry) => pending.has(entry.id)
+          && requestedWorkspaceId === entry.id)) {
+          const forceReindex = this.forceReindexIds.has(workspace.id);
+          const job = await this.jobs.create(workspace.id, forceReindex, this.ownerId ?? '');
           this.indexingWorkspaceId = workspace.id;
           let indexed: Result<unknown>;
           try {
@@ -533,7 +535,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
               await this.indexSessions.call(SERVER_NAME, this.launchConfig, 'code_index', {
                 workspace_path: path.resolve(workspace.realRootPath),
                 workspace_id: workspace.id,
-                force: true,
+                force: forceReindex,
                 background: false,
               }),
             );
@@ -559,6 +561,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
           }
           this.pendingReindexIds.delete(workspace.id);
+          this.forceReindexIds.delete(workspace.id);
         }
       } finally {
         await this.indexSessions.dropServer(SERVER_NAME);

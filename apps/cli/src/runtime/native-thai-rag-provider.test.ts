@@ -353,6 +353,92 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('serves pre-edit for a ready workspace while another startup reindex is blocked', async () => {
+    const dataRoot = await tempRoot();
+    const readyRoot = await tempRoot();
+    const blockedRoot = await tempRoot();
+    let releaseBlockedIndex: (() => void) | undefined;
+    const blockedIndex = new Promise<void>((resolve) => { releaseBlockedIndex = resolve; });
+    let markBlockedIndexStarted: (() => void) | undefined;
+    const blockedIndexStarted = new Promise<void>((resolve) => { markBlockedIndexStarted = resolve; });
+    const calls: string[] = [];
+    let connections = 0;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async () => [
+        { id: recoveredWorkspaceId, realRootPath: readyRoot },
+        { id: workspaceId, realRootPath: blockedRoot },
+      ],
+      clientFactory: clientFactory({
+        onConnect(): void { connections += 1; },
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index' && args.workspace_id === workspaceId) {
+            markBlockedIndexStarted?.();
+            await blockedIndex;
+          }
+          calls.push(`${tool}:${String(args.workspace_id ?? '')}`);
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await blockedIndexStarted;
+    expect(connections).toBe(2);
+    const preEdit = driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/probe.ts' });
+    try {
+      await expect.poll(() => calls.includes(`pre_edit_context:${recoveredWorkspaceId}`), { interval: 10, timeout: 500 }).toBe(true);
+      await expect(preEdit).resolves.toMatchObject({ ok: true });
+    } finally {
+      releaseBlockedIndex?.();
+      await preEdit;
+      await driver.stop();
+    }
+  });
+
+  it('does not serve a relinked workspace from a stale index while another workspace reindexes', async () => {
+    const dataRoot = await tempRoot();
+    const originalRoot = await tempRoot();
+    const relinkedRoot = await tempRoot();
+    const blockedRoot = await tempRoot();
+    let currentReadyRoot = originalRoot;
+    let releaseBlockedIndex: (() => void) | undefined;
+    const blockedIndex = new Promise<void>((resolve) => { releaseBlockedIndex = resolve; });
+    let markBlockedIndexStarted: (() => void) | undefined;
+    const blockedIndexStarted = new Promise<void>((resolve) => { markBlockedIndexStarted = resolve; });
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async () => [
+        { id: recoveredWorkspaceId, realRootPath: currentReadyRoot },
+        { id: workspaceId, realRootPath: blockedRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index' && args.workspace_id === workspaceId) {
+            markBlockedIndexStarted?.();
+            await blockedIndex;
+          }
+          calls.push(`${tool}:${String(args.workspace_id ?? '')}`);
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await blockedIndexStarted;
+    currentReadyRoot = relinkedRoot;
+    const preEdit = driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/probe.ts' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).not.toContain(`pre_edit_context:${recoveredWorkspaceId}`);
+    releaseBlockedIndex?.();
+    await expect(preEdit).resolves.toMatchObject({ ok: true });
+    expect(calls.at(-1)).toBe(`pre_edit_context:${recoveredWorkspaceId}`);
+    await driver.stop();
+  });
+
   it('waits for background reindex before completing stop', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

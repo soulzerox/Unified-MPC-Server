@@ -375,10 +375,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ));
     }
 
-    const cancelled = await this.callWorker('cancel_index', {
-      job_id: job.providerJobId,
-      workspace_id: workspace.value,
-    }, undefined, budget);
+    const cancelled = this.workspaceIndexJobIds.get(workspace.value) === jobId
+      ? await this.callAdmissionWorker('cancel_index', { job_id: job.providerJobId, workspace_id: workspace.value })
+      : await this.callWorker('cancel_index', { job_id: job.providerJobId, workspace_id: workspace.value }, undefined, budget);
     if (!cancelled.ok) return cancelled;
 
     const remoteStatus = nestedString(cancelled.value, 'status');
@@ -450,10 +449,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const active = await this.jobs.active(ownerId);
     for (const job of active) {
       if (job.providerJobId === undefined) continue;
-      await this.callWorker('cancel_index', {
-        job_id: job.providerJobId,
-        workspace_id: job.workspaceId,
-      }).catch(() => undefined);
+      const isAdmissionJob = this.workspaceIndexJobIds.get(job.workspaceId) === job.jobId;
+      const cancellation = isAdmissionJob
+        ? this.callAdmissionWorker('cancel_index', { job_id: job.providerJobId, workspace_id: job.workspaceId })
+        : this.callWorker('cancel_index', { job_id: job.providerJobId, workspace_id: job.workspaceId });
+      await cancellation.catch(() => undefined);
     }
   }
 
@@ -584,13 +584,45 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.workspaceIndexJobIds.set(workspace.id, job.jobId);
     const monitor = (async (): Promise<Result<void>> => {
       try {
-        const raw = await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', {
-          workspace_path: path.resolve(workspace.realRootPath),
-          workspace_id: workspace.id,
-          force,
-          background: false,
-        });
-        const indexed = normalizeWorkerCallResult('code_index', raw);
+        let indexed: Result<unknown>;
+        if (this.cancellableIndexJobs) {
+          const started = await this.callAdmissionWorker('code_index', {
+            workspace_path: path.resolve(workspace.realRootPath),
+            workspace_id: workspace.id,
+            force,
+            background: true,
+          });
+          if (!started.ok) {
+            indexed = started;
+          } else {
+            const providerJobId = nestedString(started.value, 'job_id');
+            if (providerJobId === undefined) {
+              indexed = err(appError('CONFLICT', 'Native Thai-RAG background index response omitted provider job_id', true, {
+                reason: 'missing-provider-job-id',
+              }));
+            } else {
+              await this.jobs.bindProviderJob(job.jobId, providerJobId, ownerId);
+              if (this.shuttingDown) {
+                await this.callAdmissionWorker('cancel_index', {
+                  job_id: providerJobId,
+                  workspace_id: workspace.id,
+                }).catch(() => undefined);
+                indexed = err(appError('CONFLICT', 'Native Thai-RAG workspace indexing was interrupted during shutdown', true));
+              } else {
+                indexed = await this.waitForWorkspaceAdmissionIndex(job.jobId, providerJobId, workspace.id, ownerId);
+              }
+            }
+          }
+        } else {
+          const raw = await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', {
+            workspace_path: path.resolve(workspace.realRootPath),
+            workspace_id: workspace.id,
+            force,
+            background: false,
+          });
+          indexed = normalizeWorkerCallResult('code_index', raw);
+        }
+
         if (indexed.ok) await this.jobs.complete(job.jobId, indexed.value, ownerId);
         else await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
 
@@ -636,6 +668,37 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }));
   }
 
+  private async waitForWorkspaceAdmissionIndex(
+    jobId: string,
+    providerJobId: string,
+    workspaceId: string,
+    ownerId: string,
+  ): Promise<Result<unknown>> {
+    while (!this.shuttingDown) {
+      await delay(this.indexJobPollMs);
+      if (this.shuttingDown) break;
+      const local = await this.jobs.get(jobId, ownerId, workspaceId);
+      if (local === null || (local.status !== 'running' && local.status !== 'cancelling')) {
+        return err(appError('CONFLICT', `Native Thai-RAG admission index job is no longer active: ${jobId}`, true));
+      }
+
+      const status = await this.callAdmissionWorker('index_status', { job_id: providerJobId, workspace_id: workspaceId });
+      if (!status.ok) return status;
+      const remoteStatus = nestedString(status.value, 'status');
+      if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
+      if (remoteStatus === 'done') return ok(nestedValue(status.value, 'result') ?? status.value);
+      if (remoteStatus === 'cancelled') {
+        await this.jobs.cancel(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
+        return err(appError('CONFLICT', `Native Thai-RAG admission index job was cancelled: ${jobId}`, true));
+      }
+      if (remoteStatus === 'error') {
+        return err(appError('CONFLICT', nestedString(status.value, 'error') ?? 'Native Thai-RAG provider background index failed', true));
+      }
+      return err(appError('CONFLICT', `Native Thai-RAG provider returned unknown index status: ${remoteStatus ?? 'missing'}`, true));
+    }
+    return err(appError('CONFLICT', 'Native Thai-RAG workspace indexing stopped before completion', true));
+  }
+
   private async restoreRefreshState(
     sourcesRoot: string,
     previousWorkspaces: readonly NativeThaiRagWorkspace[],
@@ -663,6 +726,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   ): Promise<Result<unknown>> {
     const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget));
     return normalizeWorkerCallResult(tool, raw);
+  }
+
+  private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>): Promise<Result<unknown>> {
+    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args));
   }
 
   private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {

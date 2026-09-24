@@ -46,6 +46,7 @@ export interface GatewayServiceOptions {
   readonly healthTimeoutMs?: number;
   readonly healthAttempts?: number;
   readonly healthRetryDelayMs?: number;
+  readonly bridgeReadinessTimeoutMs?: number;
   readonly tunnelStartupTimeoutMs?: number;
   readonly sessionLeaseTtlMs?: number;
   readonly healthMonitorIntervalMs?: number;
@@ -66,6 +67,9 @@ export interface GatewayTunnelConfiguration {
 
 const DEFAULT_HEALTH_PATH = '/_unified-mpc/identity';
 const DEFAULT_HEALTH_TIMEOUT_MS = 10_000;
+const DEFAULT_HEALTH_ATTEMPTS = 30;
+const DEFAULT_HEALTH_RETRY_DELAY_MS = 1_000;
+const DEFAULT_BRIDGE_READINESS_TIMEOUT_MS = 30_000;
 
 export class GatewayService {
   private state: BridgeState = 'STOPPED';
@@ -78,6 +82,7 @@ export class GatewayService {
   private readonly healthTimeoutMs: number;
   private readonly healthAttempts: number;
   private readonly healthRetryDelayMs: number;
+  private readonly bridgeReadinessTimeoutMs: number;
   private readonly tunnelStartupTimeoutMs: number;
   private readonly sessionLeaseTtlMs: number | undefined;
   private readonly healthMonitorIntervalMs: number;
@@ -107,8 +112,9 @@ export class GatewayService {
     this.healthPath = options.healthPath ?? DEFAULT_HEALTH_PATH;
     this.mcpPath = '/mcp';
     this.healthTimeoutMs = options.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS;
-    this.healthAttempts = options.healthAttempts ?? 5;
-    this.healthRetryDelayMs = options.healthRetryDelayMs ?? 250;
+    this.healthAttempts = options.healthAttempts ?? DEFAULT_HEALTH_ATTEMPTS;
+    this.healthRetryDelayMs = options.healthRetryDelayMs ?? DEFAULT_HEALTH_RETRY_DELAY_MS;
+    this.bridgeReadinessTimeoutMs = options.bridgeReadinessTimeoutMs ?? DEFAULT_BRIDGE_READINESS_TIMEOUT_MS;
     this.tunnelStartupTimeoutMs = options.tunnelStartupTimeoutMs ?? 10_000;
     this.sessionLeaseTtlMs = options.sessionLeaseTtlMs;
     this.healthMonitorIntervalMs = options.healthMonitorIntervalMs ?? 10_000;
@@ -117,6 +123,9 @@ export class GatewayService {
     this.reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? 30_000;
     this.reconnectJitterRatio = options.reconnectJitterRatio ?? 0.2;
     if (this.sessionLeaseTtlMs !== undefined && (!Number.isInteger(this.sessionLeaseTtlMs) || this.sessionLeaseTtlMs <= 0)) throw new Error('Session lease TTL must be positive');
+    if (!Number.isInteger(this.healthAttempts) || this.healthAttempts <= 0) throw new Error('Health attempts must be positive');
+    if (!Number.isInteger(this.healthRetryDelayMs) || this.healthRetryDelayMs < 0) throw new Error('Health retry delay must be non-negative');
+    if (!Number.isInteger(this.bridgeReadinessTimeoutMs) || this.bridgeReadinessTimeoutMs <= 0) throw new Error('Bridge readiness timeout must be positive');
     if (!Number.isInteger(this.healthMonitorIntervalMs) || this.healthMonitorIntervalMs <= 0) throw new Error('Health monitor interval must be positive');
     if (!Number.isInteger(this.healthFailureThreshold) || this.healthFailureThreshold <= 0) throw new Error('Health failure threshold must be positive');
     if (!Number.isInteger(this.reconnectBaseDelayMs) || this.reconnectBaseDelayMs <= 0) throw new Error('Reconnect base delay must be positive');
@@ -226,14 +235,16 @@ export class GatewayService {
         this.healthTimeoutMs,
         this.healthAttempts,
         this.healthRetryDelayMs,
+        this.bridgeReadinessTimeoutMs,
+        () => generation === this.startGeneration && this.state === 'INITIALIZING',
       );
       this.latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
-      if (statusCode < 200 || statusCode >= 300) {
-        throw new Error(`Bridge health probe returned HTTP ${statusCode}`);
-      }
       if (generation !== this.startGeneration || this.state !== 'INITIALIZING') {
         await tunnel.stop();
         return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
+      }
+      if (statusCode < 200 || statusCode >= 300) {
+        throw new Error(`Bridge health probe returned HTTP ${statusCode}`);
       }
       this.tunnel = tunnel;
       this.tunnelUrl = tunnel.url;
@@ -500,17 +511,37 @@ async function probeWithRetry(
   timeoutMs: number,
   attempts: number,
   retryDelayMs: number,
+  readinessTimeoutMs: number,
+  shouldContinue: () => boolean,
 ): Promise<number> {
   let statusCode = 0;
-  for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+  const deadline = performance.now() + readinessTimeoutMs;
+  const maxAttempts = Math.max(1, attempts);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (!shouldContinue()) break;
+
+    const remainingBeforeProbe = deadline - performance.now();
+    if (attempt > 0 && remainingBeforeProbe <= 0) break;
+    const attemptTimeoutMs = Math.max(1, Math.min(timeoutMs, Math.ceil(Math.max(1, remainingBeforeProbe))));
+
     try {
-      statusCode = await probe(url, timeoutMs);
+      statusCode = await probe(url, attemptTimeoutMs);
     } catch {
       statusCode = 0;
     }
+
     if (statusCode >= 200 && statusCode < 300) return statusCode;
-    if (attempt + 1 < Math.max(1, attempts)) await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+    if (!shouldContinue() || attempt + 1 >= maxAttempts) break;
+
+    const remainingBeforeRetry = deadline - performance.now();
+    if (remainingBeforeRetry <= 0) break;
+    const delayMs = Math.min(retryDelayMs, Math.max(0, Math.floor(remainingBeforeRetry)));
+    if (delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
   }
+
   return statusCode;
 }
 

@@ -515,34 +515,49 @@ async function probeWithRetry(
   shouldContinue: () => boolean,
 ): Promise<number> {
   let statusCode = 0;
-  const deadline = performance.now() + readinessTimeoutMs;
+  let deadlineReached = false;
+  let resolveDeadline!: () => void;
+  const deadlineReachedPromise = new Promise<void>((resolve) => { resolveDeadline = resolve; });
+  const deadlineTimer = setTimeout(() => {
+    deadlineReached = true;
+    resolveDeadline();
+  }, readinessTimeoutMs);
   const maxAttempts = Math.max(1, attempts);
+  const attemptTimeoutMs = Math.max(1, Math.min(timeoutMs, readinessTimeoutMs));
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    if (!shouldContinue()) break;
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (deadlineReached || !shouldContinue()) break;
 
-    const remainingBeforeProbe = deadline - performance.now();
-    if (attempt > 0 && remainingBeforeProbe <= 0) break;
-    const attemptTimeoutMs = Math.max(1, Math.min(timeoutMs, Math.ceil(Math.max(1, remainingBeforeProbe))));
+      const probeResult = await Promise.race([
+        (async (): Promise<{ readonly kind: 'probe'; readonly statusCode: number }> => {
+          try {
+            return { kind: 'probe', statusCode: await probe(url, attemptTimeoutMs) };
+          } catch {
+            return { kind: 'probe', statusCode: 0 };
+          }
+        })(),
+        deadlineReachedPromise.then(() => ({ kind: 'deadline' as const })),
+      ]);
 
-    try {
-      statusCode = await probe(url, attemptTimeoutMs);
-    } catch {
-      statusCode = 0;
+      if (probeResult.kind === 'deadline') break;
+      statusCode = probeResult.statusCode;
+      if (statusCode >= 200 && statusCode < 300) return statusCode;
+      if (deadlineReached || !shouldContinue() || attempt + 1 >= maxAttempts) break;
+
+      if (retryDelayMs > 0) {
+        const retryResult = await Promise.race([
+          new Promise<'retry'>((resolve) => setTimeout(() => resolve('retry'), retryDelayMs)),
+          deadlineReachedPromise.then(() => 'deadline' as const),
+        ]);
+        if (retryResult === 'deadline') break;
+      }
     }
 
-    if (statusCode >= 200 && statusCode < 300) return statusCode;
-    if (!shouldContinue() || attempt + 1 >= maxAttempts) break;
-
-    const remainingBeforeRetry = deadline - performance.now();
-    if (remainingBeforeRetry <= 0) break;
-    const delayMs = Math.min(retryDelayMs, Math.max(0, Math.floor(remainingBeforeRetry)));
-    if (delayMs > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-    }
+    return statusCode;
+  } finally {
+    clearTimeout(deadlineTimer);
   }
-
-  return statusCode;
 }
 
 async function probeHttpEndpoint(url: string, timeoutMs: number): Promise<number> {

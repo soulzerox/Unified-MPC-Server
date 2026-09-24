@@ -60,8 +60,10 @@ jobs:
       - name: Build production CLI dependency graph
         run: corepack pnpm --filter @unified-mpc/cli build
 
-      - name: Cloudflare gateway regression tests
-        run: corepack pnpm --filter @unified-mpc/cf-gateway test
+      - name: Cloudflare gateway regression gates
+        run: |
+          corepack pnpm --filter @unified-mpc/cf-gateway typecheck
+          corepack pnpm --filter @unified-mpc/cf-gateway test
 
       - name: Validate release scripts
         run: |

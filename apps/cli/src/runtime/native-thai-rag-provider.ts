@@ -251,7 +251,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       const details = refreshed.error.details;
       if (tool === 'code_index' && isRecord(details)
         && details.reason === 'workspace-indexing'
-        && typeof details.jobId === 'string') {
+        && typeof details.jobId === 'string'
+        && typeof details.workspaceId === 'string'
+        && details.workspaceId === workspaceId) {
         return ok({ job_id: details.jobId, status: 'running', workspace_id: workspaceId });
       }
       return refreshed;

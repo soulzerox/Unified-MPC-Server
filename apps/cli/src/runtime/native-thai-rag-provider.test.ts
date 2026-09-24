@@ -409,6 +409,55 @@ describe('NativeThaiRagProviderDriver', () => {
     }
   });
 
+  it('does not report another workspace admission job as a code-index receipt', async () => {
+    const dataRoot = await tempRoot();
+    const blockedRoot = await tempRoot();
+    const otherRoot = await tempRoot();
+    let releaseBlockedIndex: (() => void) | undefined;
+    const blockedIndex = new Promise<void>((resolve) => { releaseBlockedIndex = resolve; });
+    let markBlockedIndexStarted: (() => void) | undefined;
+    const blockedIndexStarted = new Promise<void>((resolve) => { markBlockedIndexStarted = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 20,
+      workspacesProvider: async () => [
+        { id: workspaceId, realRootPath: blockedRoot },
+        { id: recoveredWorkspaceId, realRootPath: otherRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index' && args.workspace_id === workspaceId) {
+            markBlockedIndexStarted?.();
+            await blockedIndex;
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const admission = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    expect(admission).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing', workspaceId } },
+    });
+    await blockedIndexStarted;
+
+    const otherIndex = await driver.call('code_index', {
+      workspace_path: otherRoot,
+      workspace_id: recoveredWorkspaceId,
+      background: true,
+    });
+    expect(otherIndex).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing', workspaceId } },
+    });
+
+    releaseBlockedIndex?.();
+    await driver.stop();
+  });
+
   it('keeps pre-edit fail-closed while a cold workspace index runs as a durable job', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

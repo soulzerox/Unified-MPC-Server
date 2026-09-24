@@ -126,6 +126,7 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
   it('requires a real tunnel URL and successful origin health probe before becoming healthy', async () => {
     const gateway = new GatewayService({
       tunnelProvider: async (): Promise<TunnelHandle> => tunnel('https://real.example.trycloudflare.com'),
+      healthAttempts: 1,
       healthProbe: async (): Promise<number> => 503,
     });
 
@@ -133,6 +134,64 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
 
     expect(result.ok).toBe(false);
     expect(gateway.status()).toMatchObject({ state: 'ERROR', lastError: 'Bridge health probe returned HTTP 503' });
+  });
+
+  it('keeps one named tunnel alive through delayed public bridge readiness', async () => {
+    let probes = 0;
+    let stops = 0;
+    const gateway = new GatewayService({
+      tunnelName: 'named-bridge',
+      publicUrl: 'https://mcp.example.com',
+      bridgeReadinessTimeoutMs: 100,
+      healthRetryDelayMs: 1,
+      tunnelProviderFactory: () => async (): Promise<TunnelHandle> => ({
+        url: 'https://mcp.example.com',
+        stop: async (): Promise<void> => { stops += 1; },
+      }),
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        if (probes === 1) throw new Error('edge not connected yet');
+        return probes < 8 ? 530 : 200;
+      },
+    });
+
+    const result = await gateway.start();
+
+    expect(result.ok).toBe(true);
+    expect(probes).toBe(8);
+    expect(stops).toBe(0);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+    await gateway.stop();
+    expect(stops).toBe(1);
+  });
+
+  it('bounds bridge readiness and stops the tunnel when the public route never becomes healthy', async () => {
+    let probes = 0;
+    let stops = 0;
+    const gateway = new GatewayService({
+      bridgeReadinessTimeoutMs: 20,
+      healthAttempts: 100,
+      healthRetryDelayMs: 5,
+      tunnelProvider: async (): Promise<TunnelHandle> => ({
+        url: 'https://mcp.example.com',
+        stop: async (): Promise<void> => { stops += 1; },
+      }),
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return 530;
+      },
+    });
+
+    const result = await gateway.start();
+
+    expect(result.ok).toBe(false);
+    expect(probes).toBeLessThan(100);
+    expect(stops).toBe(1);
+    expect(gateway.status()).toMatchObject({
+      state: 'ERROR',
+      lastError: 'Bridge health probe returned HTTP 530',
+    });
   });
 
   it('measures health latency and stops owned tunnel process', async () => {
@@ -165,6 +224,7 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
         const url = urls.shift()!;
         return { url, stop: async (): Promise<void> => { stopped.push(configuration.publicUrl ?? 'quick'); } };
       },
+      healthAttempts: 1,
       healthProbe: async (url): Promise<number> => url.includes('broken') ? 503 : 200,
     });
     expect((await gateway.start()).ok).toBe(true);

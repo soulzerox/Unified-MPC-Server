@@ -194,6 +194,38 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     });
   });
 
+  it('cancels an in-flight readiness start when an explicit stop supersedes it', async () => {
+    let probes = 0;
+    let stops = 0;
+    let releaseProbe: ((statusCode: number) => void) | undefined;
+    const pendingProbe = new Promise<number>((resolve) => { releaseProbe = resolve; });
+    const gateway = new GatewayService({
+      bridgeReadinessTimeoutMs: 1_000,
+      healthAttempts: 30,
+      healthRetryDelayMs: 1,
+      tunnelProvider: async (): Promise<TunnelHandle> => ({
+        url: 'https://mcp.example.com',
+        stop: async (): Promise<void> => { stops += 1; },
+      }),
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return probes === 1 ? 530 : pendingProbe;
+      },
+    });
+
+    const starting = gateway.start();
+    await expect.poll(() => probes, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+
+    await gateway.stop();
+    releaseProbe?.(200);
+    const result = await starting;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('CONFLICT');
+    expect(stops).toBe(1);
+    expect(gateway.status().state).toBe('STOPPED');
+  });
+
   it('measures health latency and stops owned tunnel process', async () => {
     let stopped = false;
     const gateway = new GatewayService({

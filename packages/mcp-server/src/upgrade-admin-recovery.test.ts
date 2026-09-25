@@ -38,6 +38,11 @@ describe('upgrade administrative recovery snapshots', () => {
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
       },
+      workspaceInfo: {
+        async info(): Promise<ReturnType<typeof ok>> {
+          return ok({ id: 'ws-1', rootPath: directory, realRootPath: directory });
+        },
+      },
     }, actor);
 
     await expect(runtime.execute('git_worktree_spawn', {

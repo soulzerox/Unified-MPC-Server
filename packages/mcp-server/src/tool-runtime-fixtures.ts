@@ -372,7 +372,7 @@ export const PHASE_34_TO_46_TOOL_RUNTIME_FIXTURES = {
   debug_attach: unavailable({ workspaceId }, 'needs_setup'),
   debug_step: unavailable({ workspaceId }, 'needs_setup'),
   git_worktree_spawn: deterministic({ workspaceId, worktreePath: '.worktrees/runtime-contract', ref: 'HEAD' }, { expected: { dryRun: true, sideEffectsStarted: false, mutationPolicy: 'explicit-confirmation-and-dry-run' } }),
-  git_worktree_remove: deterministic({ workspaceId, worktreePath: '.worktrees/runtime-contract' }, { expected: { dryRun: true, mutationPolicy: 'explicit-confirmation-and-dry-run' } }, 'git_worktree_spawn'),
+  git_worktree_remove: service({ workspaceId, worktreePath: '.worktrees/runtime-contract' }, 'workspaceInfo.info', 'git_worktree_spawn'),
   db_inspect: unavailable({}, 'needs_setup'),
   db_query: unavailable({}, 'needs_setup'),
   office_ppt: service({ action: 'read', file_path: 'package.json' }, 'capabilities.office'),

@@ -458,6 +458,7 @@ function isSafeBranchName(value: string): boolean {
     && !value.endsWith('/')
     && !value.includes('..')
     && !value.includes('//')
+    // eslint-disable-next-line no-control-regex -- validation intentionally rejects ASCII control characters.
     && !/[\u0000-\u0020\u007f~^:?*[\\]/.test(value);
 }
 
@@ -465,6 +466,7 @@ function isSafeRevision(value: string): boolean {
   return value.length > 0
     && value.length <= 256
     && !value.startsWith('-')
+    // eslint-disable-next-line no-control-regex -- validation intentionally rejects ASCII control characters.
     && !/[\u0000-\u0020\u007f]/.test(value);
 }
 

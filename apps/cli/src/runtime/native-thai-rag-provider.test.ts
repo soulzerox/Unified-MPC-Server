@@ -362,7 +362,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
         { id: recoveredWorkspaceId, realRootPath: readyRoot },
         { id: workspaceId, realRootPath: blockedRoot },
       ],
@@ -421,7 +421,7 @@ describe('NativeThaiRagProviderDriver', () => {
       dataRoot,
       launchConfig: { command: '/python' },
       callTimeoutMs: 20,
-      workspacesProvider: async () => [
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
         { id: workspaceId, realRootPath: blockedRoot },
         { id: recoveredWorkspaceId, realRootPath: otherRoot },
       ],
@@ -466,7 +466,7 @@ describe('NativeThaiRagProviderDriver', () => {
       dataRoot,
       launchConfig: { command: '/python' },
       callTimeoutMs: 500,
-      workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory({
         async onCall(tool): Promise<unknown> {
           calls.push(tool);
@@ -512,7 +512,7 @@ describe('NativeThaiRagProviderDriver', () => {
       launchConfig: { command: '/python' },
       callTimeoutMs: 20,
       indexJobPollMs: 10,
-      workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory({
         handshake: cancellableHandshake(),
         includeCancelIndex: true,
@@ -572,7 +572,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [rootWorkspace, goalWorkspace],
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [rootWorkspace, goalWorkspace],
       clientFactory: clientFactory({
         async onCall(tool, args): Promise<unknown> {
           calls.push({ tool, workspaceId: args.workspace_id });
@@ -603,7 +603,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [rootWorkspace, goalWorkspace],
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [rootWorkspace, goalWorkspace],
       clientFactory: clientFactory({
         async onCall(tool, args): Promise<unknown> {
           if (tool === 'code_index' && args.workspace_id === workspaceId) {
@@ -643,7 +643,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
         { id: recoveredWorkspaceId, realRootPath: currentReadyRoot },
         { id: workspaceId, realRootPath: otherRoot },
       ],
@@ -682,7 +682,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
         { id: recoveredWorkspaceId, realRootPath: readyRoot },
         { id: workspaceId, realRootPath: otherRoot },
       ],
@@ -715,7 +715,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
         { id: recoveredWorkspaceId, realRootPath: readyRoot },
         { id: workspaceId, realRootPath: failedRoot },
       ],
@@ -753,7 +753,7 @@ describe('NativeThaiRagProviderDriver', () => {
     let markIndexStarted: (() => void) | undefined;
     const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
     let releaseIndex: (() => void) | undefined;
-    let indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
     let indexActive = false;
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
@@ -795,7 +795,7 @@ describe('NativeThaiRagProviderDriver', () => {
     let markIndexStarted: (() => void) | undefined;
     const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
     let releaseIndex: (() => void) | undefined;
-    let indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    const indexBlocked = new Promise<void>((resolve) => { releaseIndex = resolve; });
     let closed = false;
     const calls: string[] = [];
     const driver = new NativeThaiRagProviderDriver({

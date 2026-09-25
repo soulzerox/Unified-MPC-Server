@@ -53,7 +53,8 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
   public async releaseGoalWriterLease(id: string, leaseId: string, generation: number): Promise<boolean> {
     const current = this.workspaces.find((workspace) => workspace.id === id && workspace.archivedAt == null);
     if (current?.writerLease === undefined || current.writerLease.leaseId !== leaseId || current.writerLease.generation !== generation) return false;
-    const { writerLease: _writerLease, ...withoutLease } = current;
+    const { writerLease, ...withoutLease } = current;
+    void writerLease;
     this.workspaces[this.workspaces.indexOf(current)] = withoutLease;
     return true;
   }
@@ -486,7 +487,7 @@ describe('GoalWorkspaceService', () => {
       });
       let now = new Date('2026-09-22T19:00:00.000Z');
       const service = new GoalWorkspaceService(repository, new FakeGitPort(), {
-        now: () => now,
+        now: (): Date => now,
         writerLeaseDurationMs: 1_000,
       });
 

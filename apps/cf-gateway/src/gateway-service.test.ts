@@ -285,6 +285,115 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     expect(stopsB).toBe(1);
   });
 
+  it('does not publish a new pending start after an explicit stop lands during stale shutdown', async () => {
+    let probes = 0;
+    let providerCalls = 0;
+    let stopACalls = 0;
+    let releaseStopA!: () => void;
+    const stopABlocked = new Promise<void>((resolve) => { releaseStopA = resolve; });
+    let releaseProbe!: (statusCode: number) => void;
+    const pendingProbe = new Promise<number>((resolve) => { releaseProbe = resolve; });
+    const gateway = new GatewayService({
+      bridgeReadinessTimeoutMs: 1_000,
+      healthAttempts: 30,
+      healthRetryDelayMs: 1,
+      tunnelProvider: async (): Promise<TunnelHandle> => {
+        providerCalls += 1;
+        return {
+          url: 'https://mcp.example.com',
+          stop: async (): Promise<void> => {
+            stopACalls += 1;
+            await stopABlocked;
+          },
+        };
+      },
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        return pendingProbe;
+      },
+    });
+
+    const startA = gateway.start();
+    await expect.poll(() => probes, { timeout: 500 }).toBeGreaterThanOrEqual(1);
+    expect(providerCalls).toBe(1);
+
+    const startB = gateway.start();
+    await expect.poll(() => stopACalls, { timeout: 500 }).toBeGreaterThanOrEqual(1);
+
+    await gateway.stop();
+    expect(gateway.status().state).toBe('STOPPED');
+
+    releaseStopA();
+    const resultB = await startB;
+    expect(resultB.ok).toBe(false);
+    if (!resultB.ok) expect(resultB.error.code).toBe('CONFLICT');
+
+    const resultA = await startA;
+    expect(resultA.ok).toBe(false);
+    if (!resultA.ok) expect(resultA.error.code).toBe('CONFLICT');
+
+    expect(providerCalls).toBe(1);
+    expect(gateway.status().state).toBe('STOPPED');
+
+    releaseProbe(200);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(providerCalls).toBe(1);
+    expect(gateway.status().state).toBe('STOPPED');
+  });
+
+  it('does not let an older stop clobber a newer start that took ownership during shutdown', async () => {
+    let providerCalls = 0;
+    let stopACalls = 0;
+    let stopsB = 0;
+    let releaseStopA!: () => void;
+    const stopABlocked = new Promise<void>((resolve) => { releaseStopA = resolve; });
+    const gateway = new GatewayService({
+      bridgeReadinessTimeoutMs: 1_000,
+      healthAttempts: 30,
+      healthRetryDelayMs: 1,
+      tunnelProvider: async (): Promise<TunnelHandle> => {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          return {
+            url: 'https://mcp.example.com',
+            stop: async (): Promise<void> => {
+              stopACalls += 1;
+              await stopABlocked;
+            },
+          };
+        }
+        return { url: 'https://mcp.example.com', stop: async (): Promise<void> => { stopsB += 1; } };
+      },
+      healthProbe: async (): Promise<number> => 200,
+    });
+
+    const first = await gateway.start();
+    expect(first.ok).toBe(true);
+    expect(providerCalls).toBe(1);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+    const oldStop = gateway.stop();
+    await expect.poll(() => stopACalls, { timeout: 500 }).toBeGreaterThanOrEqual(1);
+
+    const newStart = gateway.start();
+    // Newer start must launch a fresh tunnel instead of returning the stale URL
+    // whose handle was already captured for shutdown.
+    await expect.poll(() => providerCalls, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+    const newResult = await newStart;
+    expect(newResult.ok).toBe(true);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+    releaseStopA();
+    await oldStop;
+
+    expect(stopACalls).toBe(1);
+    expect(stopsB).toBe(0);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+    await gateway.stop();
+    expect(stopsB).toBe(1);
+  });
+
   it('measures health latency and stops owned tunnel process', async () => {
     let stopped = false;
     const gateway = new GatewayService({

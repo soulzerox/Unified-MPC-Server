@@ -216,7 +216,7 @@ export class GatewayService {
   public async start(): Promise<Result<{ readonly tunnelUrl: string; readonly localPort: number }>> {
     this.desiredRunning = true;
     this.clearReconnectTimer();
-    if (this.state === 'BRIDGE_HEALTHY' || this.state === 'SESSION_CONNECTED') {
+    if ((this.state === 'BRIDGE_HEALTHY' || this.state === 'SESSION_CONNECTED') && this.tunnel !== undefined && this.tunnelUrl !== undefined) {
       this.scheduleHealthMonitor();
       return ok({
         tunnelUrl: this.tunnelUrl!,
@@ -234,6 +234,9 @@ export class GatewayService {
       previousPending.tunnel = undefined;
       if (staleTunnel !== undefined) {
         await staleTunnel.stop().catch(() => undefined);
+      }
+      if (generation !== this.startGeneration || !this.desiredRunning) {
+        return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
       }
     }
     let resolveCancelled!: () => void;
@@ -319,7 +322,7 @@ export class GatewayService {
   public async stop(): Promise<Result<void>> {
     this.desiredRunning = false;
     this.desiredSessionConnected = false;
-    this.startGeneration += 1;
+    const generation = ++this.startGeneration;
     const pending = this.pendingStart;
     this.pendingStart = undefined;
     let pendingTunnel: TunnelHandle | undefined;
@@ -335,6 +338,12 @@ export class GatewayService {
     this.tunnel = undefined;
     if (pendingTunnel !== undefined && pendingTunnel !== tunnel) await pendingTunnel.stop().catch(() => undefined);
     if (tunnel !== undefined) await tunnel.stop();
+    if (generation !== this.startGeneration) {
+      if (this.desiredRunning) {
+        return err(appError('CONFLICT', 'Gateway stop was superseded by a newer lifecycle operation'));
+      }
+      return ok(undefined);
+    }
     this.state = 'STOPPED';
     this.tunnelUrl = undefined;
     this.leaseToken = undefined;

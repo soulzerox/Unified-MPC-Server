@@ -96,6 +96,15 @@ export class GatewayService {
   private readonly mcpPath: string;
   private configurationValue: GatewayTunnelConfiguration;
   private tunnel: TunnelHandle | undefined;
+  private pendingStart:
+    | {
+        readonly generation: number;
+        tunnel: TunnelHandle | undefined;
+        cancelled: boolean;
+        resolveCancelled: () => void;
+        readonly cancelledPromise: Promise<void>;
+      }
+    | undefined;
   private startGeneration = 0;
   private sessionLeaseTimer: ReturnType<typeof setTimeout> | undefined;
   private healthMonitorTimer: ReturnType<typeof setTimeout> | undefined;
@@ -217,17 +226,41 @@ export class GatewayService {
 
     this.clearHealthMonitorTimer();
     const generation = ++this.startGeneration;
+    const previousPending = this.pendingStart;
+    if (previousPending !== undefined) {
+      previousPending.cancelled = true;
+      previousPending.resolveCancelled();
+      const staleTunnel = previousPending.tunnel;
+      previousPending.tunnel = undefined;
+      if (staleTunnel !== undefined) {
+        await staleTunnel.stop().catch(() => undefined);
+      }
+    }
+    let resolveCancelled!: () => void;
+    const cancelledPromise = new Promise<void>((resolve) => {
+      resolveCancelled = resolve;
+    });
+    const pendingStart = {
+      generation,
+      tunnel: undefined as TunnelHandle | undefined,
+      cancelled: false,
+      resolveCancelled,
+      cancelledPromise,
+    };
+    this.pendingStart = pendingStart;
     this.state = 'INITIALIZING';
     this.lastError = undefined;
 
     let tunnel: TunnelHandle | undefined;
+    let promoted = false;
     try {
       tunnel = await this.tunnelProvider();
-      if (generation !== this.startGeneration || this.state !== 'INITIALIZING') {
-        await tunnel.stop();
+      if (pendingStart.cancelled || generation !== this.startGeneration || this.state !== 'INITIALIZING') {
+        if (tunnel !== undefined) await tunnel.stop().catch(() => undefined);
         return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
       }
       validateTunnelUrl(tunnel.url);
+      pendingStart.tunnel = tunnel;
       const startedAt = performance.now();
       const statusCode = await probeWithRetry(
         this.healthProbe,
@@ -236,17 +269,23 @@ export class GatewayService {
         this.healthAttempts,
         this.healthRetryDelayMs,
         this.bridgeReadinessTimeoutMs,
-        () => generation === this.startGeneration && this.state === 'INITIALIZING',
+        () => generation === this.startGeneration && this.state === 'INITIALIZING' && !pendingStart.cancelled,
+        pendingStart.cancelledPromise,
       );
       this.latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
-      if (generation !== this.startGeneration || this.state !== 'INITIALIZING') {
-        await tunnel.stop();
+      if (pendingStart.cancelled || generation !== this.startGeneration || this.state !== 'INITIALIZING') {
+        if (pendingStart.tunnel === tunnel) {
+          pendingStart.tunnel = undefined;
+          await tunnel.stop().catch(() => undefined);
+        }
         return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
       }
       if (statusCode < 200 || statusCode >= 300) {
         throw new Error(`Bridge health probe returned HTTP ${statusCode}`);
       }
+      pendingStart.tunnel = undefined;
       this.tunnel = tunnel;
+      promoted = true;
       this.tunnelUrl = tunnel.url;
       this.state = 'BRIDGE_HEALTHY';
       this.lastError = undefined;
@@ -258,13 +297,22 @@ export class GatewayService {
         localPort: this.localPort,
       });
     } catch (error) {
-      if (tunnel !== undefined && this.tunnel !== tunnel) await tunnel.stop().catch(() => undefined);
-      if (generation !== this.startGeneration || this.state !== 'INITIALIZING') {
+      if (pendingStart.cancelled || generation !== this.startGeneration || this.state !== 'INITIALIZING') {
+        if (tunnel !== undefined && !promoted && pendingStart.tunnel === tunnel) {
+          pendingStart.tunnel = undefined;
+          await tunnel.stop().catch(() => undefined);
+        }
         return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
+      }
+      if (tunnel !== undefined && !promoted && this.tunnel !== tunnel) {
+        if (pendingStart.tunnel === tunnel) pendingStart.tunnel = undefined;
+        await tunnel.stop().catch(() => undefined);
       }
       this.state = 'ERROR';
       this.lastError = error instanceof Error ? error.message : String(error);
       return err(appError('INTERNAL_ERROR', `Failed to initialize bridge tunnel: ${this.lastError}`));
+    } finally {
+      if (this.pendingStart === pendingStart) this.pendingStart = undefined;
     }
   }
 
@@ -272,10 +320,20 @@ export class GatewayService {
     this.desiredRunning = false;
     this.desiredSessionConnected = false;
     this.startGeneration += 1;
+    const pending = this.pendingStart;
+    this.pendingStart = undefined;
+    let pendingTunnel: TunnelHandle | undefined;
+    if (pending !== undefined) {
+      pending.cancelled = true;
+      pending.resolveCancelled();
+      pendingTunnel = pending.tunnel;
+      pending.tunnel = undefined;
+    }
     this.clearHealthMonitorTimer();
     this.clearReconnectTimer();
     const tunnel = this.tunnel;
     this.tunnel = undefined;
+    if (pendingTunnel !== undefined && pendingTunnel !== tunnel) await pendingTunnel.stop().catch(() => undefined);
     if (tunnel !== undefined) await tunnel.stop();
     this.state = 'STOPPED';
     this.tunnelUrl = undefined;
@@ -513,7 +571,9 @@ async function probeWithRetry(
   retryDelayMs: number,
   readinessTimeoutMs: number,
   shouldContinue: () => boolean,
+  cancelledPromise?: Promise<void>,
 ): Promise<number> {
+  const supersededError = (): Error => new Error('Gateway start was superseded by a newer lifecycle operation');
   let statusCode = 0;
   let deadlineReached = false;
   let resolveDeadline!: () => void;
@@ -524,10 +584,13 @@ async function probeWithRetry(
   }, readinessTimeoutMs);
   const maxAttempts = Math.max(1, attempts);
   const attemptTimeoutMs = Math.max(1, Math.min(timeoutMs, readinessTimeoutMs));
+  const cancellation: Promise<{ readonly kind: 'cancelled' }> | undefined = cancelledPromise?.then(() => ({ kind: 'cancelled' as const }));
+  const neverCancelled: Promise<{ readonly kind: 'cancelled' }> = new Promise(() => undefined);
 
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      if (deadlineReached || !shouldContinue()) break;
+      if (deadlineReached) break;
+      if (!shouldContinue()) throw supersededError();
 
       const probeResult = await Promise.race([
         (async (): Promise<{ readonly kind: 'probe'; readonly statusCode: number }> => {
@@ -538,18 +601,24 @@ async function probeWithRetry(
           }
         })(),
         deadlineReachedPromise.then(() => ({ kind: 'deadline' as const })),
+        cancellation ?? neverCancelled,
       ]);
 
+      if (probeResult.kind === 'cancelled') throw supersededError();
       if (probeResult.kind === 'deadline') break;
       statusCode = probeResult.statusCode;
       if (statusCode >= 200 && statusCode < 300) return statusCode;
-      if (deadlineReached || !shouldContinue() || attempt + 1 >= maxAttempts) break;
+      if (deadlineReached) break;
+      if (!shouldContinue()) throw supersededError();
+      if (attempt + 1 >= maxAttempts) break;
 
       if (retryDelayMs > 0) {
         const retryResult = await Promise.race([
           new Promise<'retry'>((resolve) => setTimeout(() => resolve('retry'), retryDelayMs)),
           deadlineReachedPromise.then(() => 'deadline' as const),
+          (cancellation?.then(() => 'cancelled' as const) ?? (neverCancelled.then(() => 'cancelled' as const) as Promise<'cancelled'>)) as Promise<'retry' | 'deadline' | 'cancelled'>,
         ]);
+        if (retryResult === 'cancelled') throw supersededError();
         if (retryResult === 'deadline') break;
       }
     }

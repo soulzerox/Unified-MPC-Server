@@ -217,13 +217,72 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     await expect.poll(() => probes, { timeout: 500 }).toBeGreaterThanOrEqual(2);
 
     await gateway.stop();
-    releaseProbe?.(200);
+    // Owned startup tunnel must be stopped as part of explicit stop itself,
+    // without needing to release the pending probe first.
+    expect(stops).toBe(1);
+    expect(gateway.status().state).toBe('STOPPED');
+
+    // Start must resolve as superseded without waiting for probe release.
     const result = await starting;
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('CONFLICT');
     expect(stops).toBe(1);
     expect(gateway.status().state).toBe('STOPPED');
+
+    // Late stale probe resolution must not resurrect state or double-stop.
+    releaseProbe?.(200);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(stops).toBe(1);
+    expect(gateway.status().state).toBe('STOPPED');
+  });
+
+  it('stops the superseded readiness owner before a newer start can become healthy', async () => {
+    let probes = 0;
+    let providerCalls = 0;
+    let stopsA = 0;
+    let stopsB = 0;
+    let releasePending: ((statusCode: number) => void) | undefined;
+    const pendingProbe = new Promise<number>((resolve) => { releasePending = resolve; });
+    const gateway = new GatewayService({
+      bridgeReadinessTimeoutMs: 1_000,
+      healthAttempts: 30,
+      healthRetryDelayMs: 1,
+      tunnelProvider: async (): Promise<TunnelHandle> => {
+        providerCalls += 1;
+        if (providerCalls === 1) return { url: 'https://mcp.example.com', stop: async (): Promise<void> => { stopsA += 1; } };
+        return { url: 'https://mcp.example.com', stop: async (): Promise<void> => { stopsB += 1; } };
+      },
+      healthProbe: async (): Promise<number> => {
+        probes += 1;
+        if (probes === 1) return 530;
+        if (probes === 2) return pendingProbe;
+        return 200;
+      },
+    });
+
+    const startA = gateway.start();
+    await expect.poll(() => probes, { timeout: 500 }).toBeGreaterThanOrEqual(2);
+
+    const startB = gateway.start();
+    const resultB = await startB;
+
+    expect(resultB.ok).toBe(true);
+    expect(stopsA).toBe(1);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+    const resultA = await startA;
+    expect(resultA.ok).toBe(false);
+    if (!resultA.ok) expect(resultA.error.code).toBe('CONFLICT');
+
+    releasePending?.(200);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(stopsA).toBe(1);
+    expect(stopsB).toBe(0);
+    expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+    await gateway.stop();
+    expect(stopsB).toBe(1);
   });
 
   it('measures health latency and stops owned tunnel process', async () => {

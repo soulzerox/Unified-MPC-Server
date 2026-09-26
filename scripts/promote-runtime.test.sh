@@ -15,6 +15,8 @@ export UNIFIED_MPC_DEPLOY_STATE_DIR="$XDG_STATE_HOME/unified-mpc/deployments"
 export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$VALIDATOR"
 export UNIFIED_MPC_SYSTEMD_SERVICE="unified-mpc.service"
 export UNIFIED_MPC_TEST_SYSTEMCTL_LOG="$TMP_ROOT/systemctl.log"
+export UNIFIED_MPC_READINESS_TIMEOUT_SECONDS="1"
+export UNIFIED_MPC_READINESS_RETRY_INTERVAL_SECONDS="0.05"
 
 mkdir -p "$HOME" "$UNIFIED_MPC_RUNTIME_DIR/releases" "$TMP_ROOT/bin"
 
@@ -33,13 +35,40 @@ active="$(readlink -f -- "$UNIFIED_MPC_RUNTIME_DIR/current" 2>/dev/null || true)
 [[ -n "$active" && -d "$active" ]] || exit 7
 [[ ! -f "$active/health.fail" ]] || exit 22
 provenance="$active/apps/cli/dist/build-provenance.json"
+
+should_fail_probe() {
+  local kind="$1"
+  local configured="$active/$kind.fail-count"
+  local counter="$active/.$kind.probe-count"
+  local attempt=0 failures=0
+  if [[ -f "$counter" ]]; then
+    read -r attempt <"$counter" || true
+  fi
+  attempt=$((attempt + 1))
+  printf '%s\n' "$attempt" >"$counter"
+  if [[ -f "$configured" ]]; then
+    read -r failures <"$configured" || true
+    [[ "$failures" =~ ^[0-9]+$ ]] || exit 97
+    if (( attempt <= failures )); then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 if [[ "$url" == *":3000/api/status" ]]; then
   [[ ! -f "$active/web.fail" ]] || exit 22
+  if should_fail_probe web; then
+    exit 22
+  fi
   printf '{"status":"healthy","mcpIdentity":'
   cat "$provenance"
   printf '}\n'
 else
   [[ ! -f "$active/mcp.fail" ]] || exit 22
+  if should_fail_probe mcp; then
+    exit 22
+  fi
   cat "$provenance"
 fi
 EOF
@@ -105,6 +134,8 @@ commit_b="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 commit_c="cccccccccccccccccccccccccccccccccccccccc"
 commit_d="dddddddddddddddddddddddddddddddddddddddd"
 commit_e="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+commit_f="ffffffffffffffffffffffffffffffffffffffff"
+commit_g="9999999999999999999999999999999999999999"
 
 release_a="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-a"
 make_runtime "$release_a" "$commit_a"
@@ -129,7 +160,9 @@ assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_a"
 assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_a"
 grep -Fxq rolled_back "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-b/status"
 grep -Fxq failed "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-b/health_result"
+grep -Fxq web_request_failed "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-b/health_failure_detail"
 grep -Fxq success "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-b/rollback_result"
+grep -Fxq none "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-b/rollback_health_failure_detail"
 
 release_c="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-c"
 make_runtime "$release_c" "$commit_c"
@@ -154,6 +187,31 @@ assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_c"
 expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_c" "deploy-c"
 assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_c"
 
+# Delayed MCP/Web readiness must be retried instead of rolling back after the first probe.
+release_slow="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-slow"
+make_runtime "$release_slow" "$commit_f"
+printf '1\n' >"$release_slow/mcp.fail-count"
+printf '2\n' >"$release_slow/web.fail-count"
+bash "$PROMOTER" "$release_slow" "deploy-slow" >/dev/null
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_slow"
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_slow"
+grep -Fxq healthy "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-slow/status"
+grep -Fxq 4 "$release_slow/.mcp.probe-count"
+grep -Fxq 3 "$release_slow/.web.probe-count"
+
+# First deployment with no last-known-good must tolerate slow readiness and promote once healthy.
+export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/data-fresh-slow/unified-mpc/runtime"
+export UNIFIED_MPC_DEPLOY_STATE_DIR="$TMP_ROOT/state-fresh-slow/unified-mpc/deployments"
+mkdir -p "$UNIFIED_MPC_RUNTIME_DIR/releases"
+release_g="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-g"
+make_runtime "$release_g" "$commit_g"
+printf '2\n' >"$release_g/web.fail-count"
+bash "$PROMOTER" "$release_g" "deploy-g" >/dev/null
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_g"
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_g"
+grep -Fxq healthy "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-g/status"
+grep -Fxq 3 "$release_g/.web.probe-count"
+
 # First deployment failure with no last-known-good must leave no active runtime.
 export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/data-fresh/unified-mpc/runtime"
 export UNIFIED_MPC_DEPLOY_STATE_DIR="$TMP_ROOT/state-fresh/unified-mpc/deployments"
@@ -164,6 +222,7 @@ touch "$release_e/health.fail"
 expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_e" "deploy-e"
 [[ ! -e "$UNIFIED_MPC_RUNTIME_DIR/current" && ! -L "$UNIFIED_MPC_RUNTIME_DIR/current" ]]
 grep -Fxq failed_no_rollback "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/status"
+grep -Fxq mcp_request_failed "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/health_failure_detail"
 grep -Fxq unavailable "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/rollback_result"
 
 printf 'runtime promotion regression: passed\n'

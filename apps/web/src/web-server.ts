@@ -817,8 +817,6 @@ export class ControlPlaneServer {
       };
       if (apiToken === undefined || apiToken === null || apiToken.length === 0) throw new Error('Cloudflare API token is required — enter a new token or keep the previously saved one');
 
-      this.cancelPersistedGatewayRestore();
-
       // Persist the user-entered desired configuration before contacting Cloudflare so a
       // failed attempt never forces re-typing the whole form. Secrets and runtime
       // identity are still rolled back on failure.
@@ -831,6 +829,7 @@ export class ControlPlaneServer {
       this.settingsRepository.set(SETTING_KEYS.allowedOrigins, allowlists.origins);
 
       const result = await this.cloudflareReconciler.reconcile(apiToken, setup);
+      this.cancelPersistedGatewayRestore();
       const applied = await this.gateway.applyConfiguration({ publicUrl: setup.publicUrl, tunnelToken: result.tunnelToken });
       if (!applied.ok) throw new Error(applied.error.message);
       runtimeChanged = true;

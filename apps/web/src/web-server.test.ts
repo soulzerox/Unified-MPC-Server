@@ -457,11 +457,11 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
 
     await restarted.listen();
     try {
+      await expect.poll(() => restartGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
       expect(restartGateway.configuration()).toEqual({
         publicUrl: 'https://mcp.example.com',
         tunnelToken: 'persisted-runtime-token',
       });
-      expect(restartGateway.status().state).toBe('SESSION_CONNECTED');
       expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
     } finally {
       await restarted.close();
@@ -497,7 +497,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const first = new ControlPlaneServer({ port: 0, gateway: firstGateway, capabilityToken, settingsRepository, secretStore });
     await first.listen();
     try {
-      expect(firstGateway.status().state).toBe('SESSION_CONNECTED');
+      await expect.poll(() => firstGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
       const stopped = await fetch(`http://127.0.0.1:${first.port}/api/chatgpt-gateway/stop`, {
         method: 'POST',
         headers: { Origin: `http://127.0.0.1:${first.port}`, 'x-unified-mpc-capability': capabilityToken },
@@ -512,7 +512,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const second = new ControlPlaneServer({ port: 0, gateway: secondGateway, capabilityToken, settingsRepository, secretStore });
     await second.listen();
     try {
-      expect(secondGateway.configuration()).toEqual({
+      await expect.poll(() => secondGateway.configuration(), { timeout: 1_500 }).toEqual({
         publicUrl: 'https://mcp.example.com',
         tunnelToken: 'persisted-runtime-token',
       });
@@ -552,6 +552,10 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const first = new ControlPlaneServer({ port: 0, gateway: firstGateway, capabilityToken, settingsRepository, secretStore });
     await first.listen();
     try {
+      await expect.poll(() => firstGateway.configuration(), { timeout: 1_500 }).toEqual({
+        publicUrl: 'https://mcp.example.com',
+        tunnelToken: 'persisted-runtime-token',
+      });
       expect(firstGateway.status().state).toBe('STOPPED');
       const started = await fetch(`http://127.0.0.1:${first.port}/api/chatgpt-gateway/start`, {
         method: 'POST',
@@ -568,7 +572,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const second = new ControlPlaneServer({ port: 0, gateway: secondGateway, capabilityToken, settingsRepository, secretStore });
     await second.listen();
     try {
-      expect(secondGateway.status().state).toBe('SESSION_CONNECTED');
+      await expect.poll(() => secondGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
     } finally {
       await second.close();
     }

@@ -603,6 +603,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/chatgpt-gateway/start' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       const result = await this.gateway.start();
       if (result.ok) this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `ChatGPT Gateway start: ${result.ok ? 'OK' : 'FAILED'}`);
@@ -612,6 +613,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/chatgpt-gateway/stop' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       const result = await this.gateway.stop();
       this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'STOPPED');
       this.recordLog('INFO', 'ChatGPT Gateway stopped');
@@ -631,11 +633,13 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/settings' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       await this.updateSettings(req, res);
       return;
     }
 
     if (pathname === '/api/cloudflare/reconcile' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       await this.reconcileCloudflare(req, res);
       return;
     }
@@ -663,6 +667,7 @@ export class ControlPlaneServer {
         return;
       }
 
+      this.cancelPersistedGatewayRestore();
       const sessionResult = await this.gateway.connectSession();
       if (!sessionResult.ok) {
         this.recordLog('ERROR', `Connect session failed: ${sessionResult.error.message}`);
@@ -678,6 +683,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/chatgpt-web/disconnect' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       const result = await this.gateway.disconnectSession();
       this.recordLog('INFO', 'Disconnected ChatGPT Web session');
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1158,6 +1164,10 @@ export class ControlPlaneServer {
     const hasMoreInitialEvents = initialPage.latestSequence !== undefined
       && cursor < initialPage.latestSequence;
     schedule(hasMoreInitialEvents ? 0 : this.goalRuntimeStreamPollMs);
+  }
+
+  private cancelPersistedGatewayRestore(): void {
+    this.gatewayRestoreGeneration += 1;
   }
 
   private isGatewayRestoreActive(generation: number): boolean {

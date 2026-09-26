@@ -23,6 +23,11 @@ describe('Dashboard HTML Reactive SPA', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('<script>');
     expect(html).toContain('</script>');
+    expect(html).toContain("let backendConnectionState = 'unknown'");
+    expect(html).toContain('if (statusRefreshInFlight) return');
+    expect(html).toContain("logEvent('ERROR', 'Backend unavailable: '");
+    expect(html).toContain("logEvent('SUCCESS', 'Backend connection restored')");
+    expect(html).toContain('if (isBackendTransportError(err)) noteBackendUnavailable(err)');
   });
 
   it('wires telemetry and policy API endpoints in script', () => {

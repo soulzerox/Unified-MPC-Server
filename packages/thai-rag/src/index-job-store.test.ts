@@ -24,8 +24,8 @@ describe('ThaiRagIndexJobStore', () => {
     await first.complete(job.jobId, { indexed: 2 }, 'owner-a');
 
     const replacement = new ThaiRagIndexJobStore(dataRoot);
-    const restored = await replacement.get(job.jobId, 'owner-a', '11111111-1111-4111-8111-111111111111');
-    expect(restored).toMatchObject({ status: 'completed', result: { indexed: 2 } });
+    const restored = await replacement.get(job.jobId, 'owner-b', '11111111-1111-4111-8111-111111111111');
+    expect(restored).toMatchObject({ status: 'completed', result: { indexed: 2 }, ownerId: 'owner-a' });
   });
 
   it('marks previously running jobs interrupted after a restart instead of pretending they still run', async () => {
@@ -42,6 +42,72 @@ describe('ThaiRagIndexJobStore', () => {
       error: expect.stringContaining('restarted'),
     });
     expect(await replacement.active('owner-a')).toEqual([]);
+  });
+
+  it('interrupts a foreign runtime job only when its old execution is provably gone', async () => {
+    const dataRoot = await root();
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:00.000Z'), {
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:old-start',
+    });
+    const job = await first.create(workspaceId, true, 'unified-mpc:424242');
+
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'), {
+      isProcessAlive: (pid): boolean => pid !== 424242,
+      processIdentityProbe: async (): Promise<string> => 'process:replacement',
+    });
+    await replacement.initialize('unified-mpc:777777');
+
+    await expect(replacement.get(job.jobId, 'unified-mpc:777777', workspaceId)).resolves.toMatchObject({
+      status: 'interrupted',
+      ownerId: 'unified-mpc:424242',
+      finishedAt: '2026-09-17T02:00:00.000Z',
+      error: expect.stringContaining('restarted'),
+    });
+  });
+
+  it('does not interrupt a live foreign runtime with the same process identity', async () => {
+    const dataRoot = await root();
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:00.000Z'), {
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:same-start',
+    });
+    const job = await first.create(workspaceId, true, 'unified-mpc:424242');
+
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'), {
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:same-start',
+    });
+    await replacement.initialize('unified-mpc:777777');
+
+    await expect(replacement.get(job.jobId, 'unified-mpc:777777', workspaceId)).resolves.toBeNull();
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    expect(persisted.jobs).toEqual([expect.objectContaining({ jobId: job.jobId, status: 'running' })]);
+  });
+
+  it('treats a reused PID with a different process identity as a dead old execution', async () => {
+    const dataRoot = await root();
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:00.000Z'), {
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:old-start',
+    });
+    const job = await first.create(workspaceId, true, 'unified-mpc:424242');
+
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'), {
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:reused-pid',
+    });
+    await replacement.initialize('unified-mpc:777777');
+
+    await expect(replacement.get(job.jobId, 'unified-mpc:777777', workspaceId)).resolves.toMatchObject({
+      status: 'interrupted',
+      ownerId: 'unified-mpc:424242',
+    });
   });
 
   it('does not interrupt another owner job during startup', async () => {
@@ -70,6 +136,8 @@ describe('ThaiRagIndexJobStore', () => {
     await expect(store.get(job.jobId, 'owner-a', '')).resolves.toBeNull();
     await expect(store.get(job.jobId, 'owner-b', '11111111-1111-4111-8111-111111111111')).resolves.toBeNull();
     await expect(store.get(job.jobId, 'owner-a', '22222222-2222-4222-8222-222222222222')).resolves.toBeNull();
+    await expect(store.bindProviderJob(job.jobId, 'idx_foreign', 'owner-b')).resolves.toBeNull();
+    await expect(store.requestCancellation(job.jobId, 'owner-b')).resolves.toBeNull();
     await expect(store.complete(job.jobId, { indexed: 1 }, 'owner-b')).resolves.toBeNull();
     await expect(store.complete(job.jobId, { indexed: 1 }, 'owner-a')).resolves.toMatchObject({ status: 'completed' });
   });

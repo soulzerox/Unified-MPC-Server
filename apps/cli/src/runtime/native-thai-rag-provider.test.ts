@@ -324,6 +324,53 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('reconciles a dead old runtime receipt before serving the replacement runtime', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 2, jobs: [{
+      jobId: 'idx_umcp_dead_runtime',
+      workspaceId,
+      ownerId: 'unified-mpc:2147483647',
+      providerJobId: 'idx_provider_dead_runtime',
+      status: 'running',
+      force: true,
+      startedAt: '2026-09-17T01:00:00.000Z',
+    }] }));
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: `unified-mpc:${process.pid}`, providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    expect(calls).not.toContain('code_index');
+    await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: 'idx_umcp_dead_runtime' })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: 'interrupted',
+        ownerId: 'unified-mpc:2147483647',
+        providerJobId: 'idx_provider_dead_runtime',
+        error: expect.stringContaining('restarted'),
+      },
+    });
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { jobs: Array<Record<string, unknown>> };
+    expect(persisted.jobs).toEqual([expect.objectContaining({
+      jobId: 'idx_umcp_dead_runtime',
+      status: 'interrupted',
+      providerJobId: 'idx_provider_dead_runtime',
+    })]);
+    await driver.stop();
+  });
+
   it('defers workspace indexing until a scoped operation needs that workspace', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -1141,7 +1188,7 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
-  it('does not expose index status to a foreign provider owner', async () => {
+  it('exposes a terminal receipt to a replacement provider owner without transferring active ownership', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
@@ -1162,7 +1209,10 @@ describe('NativeThaiRagProviderDriver', () => {
 
     const second = createDriver();
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner-b', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
-    await expect(second.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
+    await expect(second.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId })).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'completed', ownerId: 'owner-a' },
+    });
     await second.stop();
   });
 

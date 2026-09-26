@@ -138,11 +138,34 @@ export function getClientScriptJs(): string {
         setTab(initialHash);
       }
 
+      let backendConnectionState = 'unknown';
+      let statusRefreshInFlight = false;
+
+      function isBackendTransportError(err) {
+        return err instanceof TypeError || err?.message === 'Failed to fetch';
+      }
+
+      function noteBackendUnavailable(err) {
+        if (backendConnectionState === 'unavailable') return;
+        backendConnectionState = 'unavailable';
+        logEvent('ERROR', 'Backend unavailable: ' + (err?.message || String(err)));
+      }
+
+      function noteBackendAvailable() {
+        if (backendConnectionState === 'unavailable') {
+          logEvent('SUCCESS', 'Backend connection restored');
+        }
+        backendConnectionState = 'available';
+      }
+
       async function loadStatus() {
+        if (statusRefreshInFlight) return;
+        statusRefreshInFlight = true;
         try {
           const res = await fetch('/api/status');
           if (!res.ok) throw new Error('Status request failed');
           const data = await res.json();
+          noteBackendAvailable();
           const identity = data.mcpIdentity;
           const buildCommit = document.getElementById('build-commit');
           if (buildCommit && identity) {
@@ -174,7 +197,9 @@ export function getClientScriptJs(): string {
           if (led) led.className = 'led offline';
           const tel = document.getElementById('servers-telemetry');
           if (tel) tel.textContent = 'Unable to reach backend: ' + err.message;
-          logEvent('ERROR', 'Failed to reach status endpoint: ' + err.message);
+          noteBackendUnavailable(err);
+        } finally {
+          statusRefreshInFlight = false;
         }
       }
 
@@ -497,7 +522,8 @@ export function getClientScriptJs(): string {
               error: err.message,
             });
             renderWorkspaces();
-            logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
+            if (isBackendTransportError(err)) noteBackendUnavailable(err);
+            else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
           }
         })();
         workspaceRuntimeRefreshes.set(workspaceId, refresh);
@@ -1301,7 +1327,8 @@ export function getClientScriptJs(): string {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
         } catch (err) {
-          console.error(err);
+          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          else console.error(err);
         }
       }
 

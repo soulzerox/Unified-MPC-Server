@@ -186,6 +186,8 @@ export class ControlPlaneServer {
   private readonly mcpIdentityProbe: McpIdentityProbe;
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly closeSettings: (() => void) | undefined;
+  private gatewayRestoreGeneration = 0;
+  private closing = false;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
     const now = new Date();
@@ -234,8 +236,8 @@ export class ControlPlaneServer {
   }
 
   public async listen(): Promise<void> {
-    await this.loadPersistedGatewayConfiguration();
-    return new Promise((resolve, reject) => {
+    this.closing = false;
+    await new Promise<void>((resolve, reject) => {
       this.server.on('error', reject);
       this.server.listen(this.configuredPort, '127.0.0.1', () => {
         const addr = this.server.address();
@@ -246,9 +248,17 @@ export class ControlPlaneServer {
         resolve();
       });
     });
+
+    const generation = ++this.gatewayRestoreGeneration;
+    void this.loadPersistedGatewayConfiguration(generation).catch((error: unknown) => {
+      if (!this.isGatewayRestoreActive(generation)) return;
+      this.recordLog('ERROR', `Persisted ChatGPT Gateway restore failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+    });
   }
 
   public async close(): Promise<void> {
+    this.closing = true;
+    this.gatewayRestoreGeneration += 1;
     for (const closeStream of [...this.goalRuntimeStreamClosers]) closeStream();
     this.goalRuntimeStreamClosers.clear();
     await new Promise<void>((resolve, reject) => {
@@ -323,6 +333,12 @@ export class ControlPlaneServer {
     }
 
     // 3. API Routes
+    if (pathname === '/_unified-mpc/ready' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ status: 'ready', service: 'web', port: this.boundPort }));
+      return;
+    }
+
     if (pathname === '/api/status' && req.method === 'GET') {
       const gateway = this.gateway.status();
       const mcpIdentity = await this.mcpIdentityProbe(gateway.localPort);
@@ -587,6 +603,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/chatgpt-gateway/start' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       const result = await this.gateway.start();
       if (result.ok) this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `ChatGPT Gateway start: ${result.ok ? 'OK' : 'FAILED'}`);
@@ -596,6 +613,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/chatgpt-gateway/stop' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       const result = await this.gateway.stop();
       this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'STOPPED');
       this.recordLog('INFO', 'ChatGPT Gateway stopped');
@@ -647,6 +665,7 @@ export class ControlPlaneServer {
         return;
       }
 
+      this.cancelPersistedGatewayRestore();
       const sessionResult = await this.gateway.connectSession();
       if (!sessionResult.ok) {
         this.recordLog('ERROR', `Connect session failed: ${sessionResult.error.message}`);
@@ -662,6 +681,7 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/chatgpt-web/disconnect' && req.method === 'POST') {
+      this.cancelPersistedGatewayRestore();
       const result = await this.gateway.disconnectSession();
       this.recordLog('INFO', 'Disconnected ChatGPT Web session');
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -809,6 +829,7 @@ export class ControlPlaneServer {
       this.settingsRepository.set(SETTING_KEYS.allowedOrigins, allowlists.origins);
 
       const result = await this.cloudflareReconciler.reconcile(apiToken, setup);
+      this.cancelPersistedGatewayRestore();
       const applied = await this.gateway.applyConfiguration({ publicUrl: setup.publicUrl, tunnelToken: result.tunnelToken });
       if (!applied.ok) throw new Error(applied.error.message);
       runtimeChanged = true;
@@ -899,6 +920,7 @@ export class ControlPlaneServer {
       sendJsonError(res, 400, error instanceof Error ? error.message : 'Allowlist settings are invalid');
       return;
     }
+    this.cancelPersistedGatewayRestore();
     const applied = await this.gateway.applyConfiguration(configuration);
     if (!applied.ok) {
       res.writeHead(applied.error.code === 'INVALID_INPUT' ? 400 : 409, { 'Content-Type': 'application/json' });
@@ -1144,11 +1166,21 @@ export class ControlPlaneServer {
     schedule(hasMoreInitialEvents ? 0 : this.goalRuntimeStreamPollMs);
   }
 
-  private async loadPersistedGatewayConfiguration(): Promise<void> {
-    if (this.settingsRepository === undefined) return;
+  private cancelPersistedGatewayRestore(): void {
+    this.gatewayRestoreGeneration += 1;
+  }
+
+  private isGatewayRestoreActive(generation: number): boolean {
+    return !this.closing && this.server.listening && generation === this.gatewayRestoreGeneration;
+  }
+
+  private async loadPersistedGatewayConfiguration(generation: number): Promise<void> {
+    if (this.settingsRepository === undefined || !this.isGatewayRestoreActive(generation)) return;
     const configuration = await this.readGatewayConfiguration();
+    if (!this.isGatewayRestoreActive(generation)) return;
     if (configuration.tunnelName === undefined && configuration.tunnelToken === undefined && configuration.publicUrl === undefined) return;
     const applied = await this.gateway.applyConfiguration(configuration);
+    if (!this.isGatewayRestoreActive(generation)) return;
     if (!applied.ok) throw new Error(`Persisted gateway settings rejected: ${applied.error.message}`);
     if (this.settingsRepository.get(SETTING_KEYS.gatewayDesiredState) === 'STOPPED') {
       this.recordLog('INFO', 'Persisted ChatGPT Gateway desired state is STOPPED');
@@ -1157,10 +1189,13 @@ export class ControlPlaneServer {
 
     let retryDelayMs = 1_000;
     const restore = async (): Promise<void> => {
+      if (!this.isGatewayRestoreActive(generation)) return;
       const started = await this.gateway.start();
+      if (!this.isGatewayRestoreActive(generation)) return;
       if (started.ok) {
         this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
         const connected = await this.gateway.connectSession();
+        if (!this.isGatewayRestoreActive(generation)) return;
         if (!connected.ok) {
           this.recordLog('ERROR', `Persisted ChatGPT Web auto-connect failed: ${connected.error.message}`);
           return;
@@ -1170,7 +1205,7 @@ export class ControlPlaneServer {
       }
       this.recordLog('ERROR', `Persisted ChatGPT Gateway auto-start failed: ${started.error.message}`);
       const retry = setTimeout(() => {
-        if (this.server.listening) void restore();
+        if (this.isGatewayRestoreActive(generation)) void restore();
       }, retryDelayMs);
       retry.unref?.();
       retryDelayMs = Math.min(retryDelayMs * 2, 30_000);

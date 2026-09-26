@@ -12,9 +12,15 @@ Environment=NODE_ENV=production
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.config/unified-mpc/service.env
 ExecStart=/usr/bin/bash %h/.config/unified-mpc/launch-runtime.sh web ${UNIFIED_MPC_ROOT}
-Restart=on-failure
+ExecStartPost=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:3000/_unified-mpc/ready
+ExecStartPost=/usr/bin/systemd-notify WATCHDOG=1
+ExecStartPost=/usr/bin/bash -c 'while /usr/bin/sleep 10; do /usr/bin/curl --fail --silent --max-time 3 http://127.0.0.1:3000/_unified-mpc/ready >/dev/null && /usr/bin/systemd-notify WATCHDOG=1; done &'
+Restart=always
 RestartPreventExitStatus=78
 RestartSec=5
+TimeoutStartSec=45
+WatchdogSec=30
+NotifyAccess=all
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

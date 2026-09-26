@@ -162,6 +162,127 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(data.status).toBe('healthy');
   });
 
+
+  it('exposes local Web readiness without probing downstream MCP health', async () => {
+    const readinessServer = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      mcpIdentityProbe: async () => { throw new Error('downstream MCP unavailable'); },
+    });
+    await readinessServer.listen();
+    try {
+      const ready = await fetch(`http://127.0.0.1:${readinessServer.port}/_unified-mpc/ready`);
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toMatchObject({ status: 'ready', service: 'web', port: readinessServer.port });
+    } finally {
+      await readinessServer.close();
+    }
+  });
+
+  it('binds the local Web listener before delayed persisted Gateway restore completes', async () => {
+    let markProviderStarted!: () => void;
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+    const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const delayedGateway = new GatewayService({
+      localPort: 0,
+      tunnelProvider: async () => {
+        markProviderStarted();
+        await providerRelease;
+        return { url: 'https://delayed.example.com', stop: async (): Promise<void> => {} };
+      },
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const persisted = new Map<string, string>([
+      ['cloudflare_tunnel_name', 'delayed-tunnel'],
+      ['cloudflare_public_url', 'https://delayed.example.com'],
+      ['cloudflare_gateway_desired_state', 'RUNNING'],
+    ]);
+    const settingsRepository = {
+      get: (key: string): string | null => persisted.get(key) ?? null,
+      set: (key: string, value: string): void => { persisted.set(key, value); },
+      delete: (key: string): void => { persisted.delete(key); },
+    };
+    const delayedServer = new ControlPlaneServer({
+      port: 0,
+      gateway: delayedGateway,
+      settingsRepository,
+    });
+
+    await delayedServer.listen();
+    try {
+      const ready = await fetch(`http://127.0.0.1:${delayedServer.port}/_unified-mpc/ready`);
+      expect(ready.status).toBe(200);
+      await providerStarted;
+      expect(delayedGateway.status().state).toBe('INITIALIZING');
+      releaseProvider();
+      for (let attempt = 0; attempt < 50 && delayedGateway.status().state !== 'SESSION_CONNECTED'; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(delayedGateway.status().state).toBe('SESSION_CONNECTED');
+    } finally {
+      releaseProvider();
+      await delayedServer.close();
+    }
+  });
+
+
+  it('manual gateway stop supersedes an in-flight persisted restore', async () => {
+    let markProviderStarted!: () => void;
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+    const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const delayedGateway = new GatewayService({
+      localPort: 0,
+      tunnelProvider: async () => {
+        markProviderStarted();
+        await providerRelease;
+        return { url: 'https://delayed-stop.example.com', stop: async (): Promise<void> => {} };
+      },
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const persisted = new Map<string, string>([
+      ['cloudflare_tunnel_name', 'delayed-stop-tunnel'],
+      ['cloudflare_public_url', 'https://delayed-stop.example.com'],
+      ['cloudflare_gateway_desired_state', 'RUNNING'],
+    ]);
+    const settingsRepository = {
+      get: (key: string): string | null => persisted.get(key) ?? null,
+      set: (key: string, value: string): void => { persisted.set(key, value); },
+      delete: (key: string): void => { persisted.delete(key); },
+    };
+    const delayedServer = new ControlPlaneServer({
+      port: 0,
+      gateway: delayedGateway,
+      capabilityToken,
+      settingsRepository,
+    });
+
+    await delayedServer.listen();
+    try {
+      await providerStarted;
+      expect(delayedGateway.status().state).toBe('INITIALIZING');
+      const stopRequest = fetch(`http://127.0.0.1:${delayedServer.port}/api/chatgpt-gateway/stop`, {
+        method: 'POST',
+        headers: {
+          Origin: `http://127.0.0.1:${delayedServer.port}`,
+          'x-unified-mpc-capability': capabilityToken,
+        },
+      });
+      releaseProvider();
+      const stopped = await stopRequest;
+      expect(stopped.status).toBe(200);
+      await expect.poll(() => delayedGateway.status().state, { timeout: 1_500 }).toBe('STOPPED');
+      expect(persisted.get('cloudflare_gateway_desired_state')).toBe('STOPPED');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(delayedGateway.status().state).toBe('STOPPED');
+      expect(persisted.get('cloudflare_gateway_desired_state')).toBe('STOPPED');
+    } finally {
+      releaseProvider();
+      await delayedServer.close();
+    }
+  });
+
   it('projects the live MCP artifact identity through /api/status for WebUI build inspection', async () => {
     const probedPorts: number[] = [];
     const identity = {
@@ -393,11 +514,11 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
 
     await restarted.listen();
     try {
+      await expect.poll(() => restartGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
       expect(restartGateway.configuration()).toEqual({
         publicUrl: 'https://mcp.example.com',
         tunnelToken: 'persisted-runtime-token',
       });
-      expect(restartGateway.status().state).toBe('SESSION_CONNECTED');
       expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
     } finally {
       await restarted.close();
@@ -433,7 +554,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const first = new ControlPlaneServer({ port: 0, gateway: firstGateway, capabilityToken, settingsRepository, secretStore });
     await first.listen();
     try {
-      expect(firstGateway.status().state).toBe('SESSION_CONNECTED');
+      await expect.poll(() => firstGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
       const stopped = await fetch(`http://127.0.0.1:${first.port}/api/chatgpt-gateway/stop`, {
         method: 'POST',
         headers: { Origin: `http://127.0.0.1:${first.port}`, 'x-unified-mpc-capability': capabilityToken },
@@ -448,7 +569,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const second = new ControlPlaneServer({ port: 0, gateway: secondGateway, capabilityToken, settingsRepository, secretStore });
     await second.listen();
     try {
-      expect(secondGateway.configuration()).toEqual({
+      await expect.poll(() => secondGateway.configuration(), { timeout: 1_500 }).toEqual({
         publicUrl: 'https://mcp.example.com',
         tunnelToken: 'persisted-runtime-token',
       });
@@ -488,6 +609,10 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const first = new ControlPlaneServer({ port: 0, gateway: firstGateway, capabilityToken, settingsRepository, secretStore });
     await first.listen();
     try {
+      await expect.poll(() => firstGateway.configuration(), { timeout: 1_500 }).toEqual({
+        publicUrl: 'https://mcp.example.com',
+        tunnelToken: 'persisted-runtime-token',
+      });
       expect(firstGateway.status().state).toBe('STOPPED');
       const started = await fetch(`http://127.0.0.1:${first.port}/api/chatgpt-gateway/start`, {
         method: 'POST',
@@ -504,7 +629,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const second = new ControlPlaneServer({ port: 0, gateway: secondGateway, capabilityToken, settingsRepository, secretStore });
     await second.listen();
     try {
-      expect(secondGateway.status().state).toBe('SESSION_CONNECTED');
+      await expect.poll(() => secondGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
     } finally {
       await second.close();
     }

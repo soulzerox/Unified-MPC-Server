@@ -633,13 +633,11 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/settings' && req.method === 'POST') {
-      this.cancelPersistedGatewayRestore();
       await this.updateSettings(req, res);
       return;
     }
 
     if (pathname === '/api/cloudflare/reconcile' && req.method === 'POST') {
-      this.cancelPersistedGatewayRestore();
       await this.reconcileCloudflare(req, res);
       return;
     }
@@ -819,6 +817,8 @@ export class ControlPlaneServer {
       };
       if (apiToken === undefined || apiToken === null || apiToken.length === 0) throw new Error('Cloudflare API token is required — enter a new token or keep the previously saved one');
 
+      this.cancelPersistedGatewayRestore();
+
       // Persist the user-entered desired configuration before contacting Cloudflare so a
       // failed attempt never forces re-typing the whole form. Secrets and runtime
       // identity are still rolled back on failure.
@@ -921,6 +921,7 @@ export class ControlPlaneServer {
       sendJsonError(res, 400, error instanceof Error ? error.message : 'Allowlist settings are invalid');
       return;
     }
+    this.cancelPersistedGatewayRestore();
     const applied = await this.gateway.applyConfiguration(configuration);
     if (!applied.ok) {
       res.writeHead(applied.error.code === 'INVALID_INPUT' ? 400 : 409, { 'Content-Type': 'application/json' });

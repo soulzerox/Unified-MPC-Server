@@ -31,6 +31,31 @@ service="${UNIFIED_MPC_SYSTEMD_SERVICE:-unified-mpc.service}"
 health_url="${UNIFIED_MPC_HEALTH_URL:-http://127.0.0.1:18765/_unified-mpc/identity}"
 web_health_url="${UNIFIED_MPC_WEB_HEALTH_URL:-http://127.0.0.1:3000/api/status}"
 health_timeout="${UNIFIED_MPC_HEALTH_TIMEOUT_SECONDS:-10}"
+readiness_timeout="${UNIFIED_MPC_READINESS_TIMEOUT_SECONDS:-30}"
+readiness_retry_interval="${UNIFIED_MPC_READINESS_RETRY_INTERVAL_SECONDS:-1}"
+
+seconds_to_millis() {
+  local value="$1"
+  local allow_zero="${2:-false}"
+  local whole fraction millis
+  if [[ ! "$value" =~ ^([0-9]+)([.]([0-9]{1,3}))?$ ]]; then
+    return 1
+  fi
+  whole="${BASH_REMATCH[1]}"
+  fraction="${BASH_REMATCH[3]:-0}000"
+  fraction="${fraction:0:3}"
+  millis=$((10#$whole * 1000 + 10#$fraction))
+  if [[ "$allow_zero" == "true" ]]; then
+    (( millis >= 0 )) || return 1
+  else
+    (( millis > 0 )) || return 1
+  fi
+  printf '%s\n' "$millis"
+}
+
+health_timeout_ms="$(seconds_to_millis "$health_timeout")" || fail 64 "RUNTIME_PROMOTION_INCOMPLETE: health timeout must be a positive number with at most millisecond precision"
+readiness_timeout_ms="$(seconds_to_millis "$readiness_timeout")" || fail 64 "RUNTIME_PROMOTION_INCOMPLETE: readiness timeout must be a positive number with at most millisecond precision"
+readiness_retry_interval_ms="$(seconds_to_millis "$readiness_retry_interval" true)" || fail 64 "RUNTIME_PROMOTION_INCOMPLETE: readiness retry interval must be a non-negative number with at most millisecond precision"
 
 mkdir -p "$runtime_dir/releases" "$state_root"
 runtime_dir="$(readlink -f -- "$runtime_dir")"
@@ -152,11 +177,35 @@ restart_runtime() {
   "$systemctl_bin" --user restart "$service"
 }
 
+now_millis() {
+  local raw seconds fraction
+  raw="${EPOCHREALTIME:-}"
+  if [[ "$raw" =~ ^([0-9]+)[.]([0-9]+)$ ]]; then
+    seconds="${BASH_REMATCH[1]}"
+    fraction="${BASH_REMATCH[2]}000"
+    fraction="${fraction:0:3}"
+    printf '%s\n' "$((10#$seconds * 1000 + 10#$fraction))"
+    return 0
+  fi
+  "$node_bin" -e 'process.stdout.write(String(Date.now()))'
+}
+
+format_millis_as_seconds() {
+  local millis="$1"
+  printf '%d.%03d\n' "$((millis / 1000))" "$((millis % 1000))"
+}
+
+last_health_failure="not_started"
+
 probe_mcp_runtime() {
   local expected_commit="$1"
+  local probe_timeout="$2"
   local payload actual_commit
-  payload="$("$curl_bin" --fail --silent --show-error --max-time "$health_timeout" "$health_url")" || return 1
-  actual_commit="$(printf '%s' "$payload" | "$node_bin" --input-type=commonjs -e '
+  if ! payload="$("$curl_bin" --fail --silent --show-error --max-time "$probe_timeout" "$health_url")"; then
+    last_health_failure="mcp_request_failed"
+    return 1
+  fi
+  if ! actual_commit="$(printf '%s' "$payload" | "$node_bin" --input-type=commonjs -e '
     let input = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => { input += chunk; });
@@ -169,15 +218,26 @@ probe_mcp_runtime() {
         process.exit(2);
       }
     });
-  ' 2>/dev/null)" || return 1
-  [[ "$actual_commit" == "$expected_commit" ]]
+  ' 2>/dev/null)"; then
+    last_health_failure="mcp_identity_invalid"
+    return 1
+  fi
+  if [[ "$actual_commit" != "$expected_commit" ]]; then
+    last_health_failure="mcp_commit_mismatch"
+    return 1
+  fi
+  return 0
 }
 
 probe_web_runtime() {
   local expected_commit="$1"
+  local probe_timeout="$2"
   local payload actual_commit
-  payload="$("$curl_bin" --fail --silent --show-error --max-time "$health_timeout" "$web_health_url")" || return 1
-  actual_commit="$(printf '%s' "$payload" | "$node_bin" --input-type=commonjs -e '
+  if ! payload="$("$curl_bin" --fail --silent --show-error --max-time "$probe_timeout" "$web_health_url")"; then
+    last_health_failure="web_request_failed"
+    return 1
+  fi
+  if ! actual_commit="$(printf '%s' "$payload" | "$node_bin" --input-type=commonjs -e '
     let input = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => { input += chunk; });
@@ -191,13 +251,102 @@ probe_web_runtime() {
         process.exit(2);
       }
     });
-  ' 2>/dev/null)" || return 1
-  [[ "$actual_commit" == "$expected_commit" ]]
+  ' 2>/dev/null)"; then
+    last_health_failure="web_not_healthy_or_identity_invalid"
+    return 1
+  fi
+  if [[ "$actual_commit" != "$expected_commit" ]]; then
+    last_health_failure="web_commit_mismatch"
+    return 1
+  fi
+  return 0
+}
+
+probe_release_health_once() {
+  local expected_commit="$1"
+  local deadline_ms="$2"
+  local now remaining timeout_ms timeout_seconds
+
+  now="$(now_millis)" || {
+    last_health_failure="clock_unavailable"
+    return 1
+  }
+  remaining=$((deadline_ms - now))
+  if (( remaining <= 0 )); then
+    last_health_failure="readiness_deadline_exceeded"
+    return 1
+  fi
+  timeout_ms="$health_timeout_ms"
+  if (( remaining < timeout_ms )); then
+    timeout_ms="$remaining"
+  fi
+  timeout_seconds="$(format_millis_as_seconds "$timeout_ms")"
+  probe_mcp_runtime "$expected_commit" "$timeout_seconds" || return 1
+
+  now="$(now_millis)" || {
+    last_health_failure="clock_unavailable"
+    return 1
+  }
+  remaining=$((deadline_ms - now))
+  if (( remaining <= 0 )); then
+    last_health_failure="readiness_deadline_exceeded"
+    return 1
+  fi
+  timeout_ms="$health_timeout_ms"
+  if (( remaining < timeout_ms )); then
+    timeout_ms="$remaining"
+  fi
+  timeout_seconds="$(format_millis_as_seconds "$timeout_ms")"
+  probe_web_runtime "$expected_commit" "$timeout_seconds" || return 1
+
+  last_health_failure="none"
+  return 0
 }
 
 probe_release_health() {
   local expected_commit="$1"
-  probe_mcp_runtime "$expected_commit" && probe_web_runtime "$expected_commit"
+  local start_ms deadline_ms now remaining sleep_ms sleep_seconds
+
+  start_ms="$(now_millis)" || {
+    last_health_failure="clock_unavailable"
+    return 1
+  }
+  deadline_ms=$((start_ms + readiness_timeout_ms))
+  last_health_failure="not_ready"
+
+  while true; do
+    now="$(now_millis)" || {
+      last_health_failure="clock_unavailable"
+      return 1
+    }
+    if (( now >= deadline_ms )); then
+      return 1
+    fi
+
+    if probe_release_health_once "$expected_commit" "$deadline_ms"; then
+      return 0
+    fi
+
+    now="$(now_millis)" || {
+      last_health_failure="clock_unavailable"
+      return 1
+    }
+    if (( now >= deadline_ms )); then
+      return 1
+    fi
+
+    if (( readiness_retry_interval_ms > 0 )); then
+      remaining=$((deadline_ms - now))
+      sleep_ms="$readiness_retry_interval_ms"
+      if (( remaining < sleep_ms )); then
+        sleep_ms="$remaining"
+      fi
+      if (( sleep_ms > 0 )); then
+        sleep_seconds="$(format_millis_as_seconds "$sleep_ms")"
+        sleep "$sleep_seconds"
+      fi
+    fi
+  done
 }
 
 previous_active=""
@@ -236,38 +385,57 @@ write_state previous_active "$previous_active"
 write_state rollback_target "$rollback_target"
 write_state promoted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 write_state health_result "pending"
+write_state health_failure_detail "pending"
 write_state rollback_result "not_needed"
+write_state rollback_health_failure_detail "not_needed"
 
 atomic_link "$candidate" "$current_link"
 write_state status "activated"
 
 promotion_ok=false
-if restart_runtime && probe_release_health "$candidate_commit"; then
-  promotion_ok=true
+last_health_failure="candidate_restart_failed"
+if restart_runtime; then
+  last_health_failure="not_ready"
+  if probe_release_health "$candidate_commit"; then
+    promotion_ok=true
+  fi
 fi
 
 if [[ "$promotion_ok" == "true" ]]; then
   atomic_link "$candidate" "$lkg_link"
   write_state health_result "healthy"
+  write_state health_failure_detail "none"
   write_state rollback_result "not_needed"
+  write_state rollback_health_failure_detail "not_needed"
   write_state status "healthy"
   printf 'RUNTIME_PROMOTION_OK: deployment=%s commit=%s root=%s\n' "$deployment_id" "$candidate_commit" "$candidate"
   exit 0
 fi
 
+candidate_health_failure="${last_health_failure:-unknown}"
 write_state health_result "failed"
+write_state health_failure_detail "$candidate_health_failure"
 write_state status "rollback_pending"
 
 if [[ -n "$rollback_target" ]]; then
   atomic_link "$rollback_target" "$current_link"
   rollback_commit="$(runtime_commit "$rollback_target" || true)"
-  if [[ -n "$rollback_commit" ]] && restart_runtime && probe_release_health "$rollback_commit"; then
-    write_state rollback_result "success"
-    write_state status "rolled_back"
-    printf 'RUNTIME_PROMOTION_INCOMPLETE: candidate failed; rolled back to last-known-good %s\n' "$rollback_target" >&2
-    exit 70
+  last_health_failure="rollback_commit_unavailable"
+  if [[ -n "$rollback_commit" ]]; then
+    last_health_failure="rollback_restart_failed"
+    if restart_runtime; then
+      last_health_failure="not_ready"
+      if probe_release_health "$rollback_commit"; then
+        write_state rollback_result "success"
+        write_state rollback_health_failure_detail "none"
+        write_state status "rolled_back"
+        printf 'RUNTIME_PROMOTION_INCOMPLETE: candidate failed; rolled back to last-known-good %s\n' "$rollback_target" >&2
+        exit 70
+      fi
+    fi
   fi
   write_state rollback_result "failed"
+  write_state rollback_health_failure_detail "${last_health_failure:-unknown}"
   write_state status "rollback_failed"
   printf 'RUNTIME_PROMOTION_INCOMPLETE: candidate failed and rollback health verification failed; LAST_KNOWN_GOOD_AVAILABLE=%s\n' "$rollback_target" >&2
   exit 71

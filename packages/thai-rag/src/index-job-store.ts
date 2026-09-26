@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createPosixProcessIdentityProbe, type PosixProcessIdentityProbe } from '@unified-mpc/process';
 import { parseCanonicalWorkspaceId, resolveThaiRagProviderRoot } from './canonical-workspace.js';
 
 export type ThaiRagIndexJobStatus = 'running' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'interrupted' | 'legacy-unavailable';
@@ -11,6 +12,7 @@ export interface ThaiRagIndexJob {
   readonly jobId: string;
   readonly workspaceId: string;
   readonly ownerId?: string;
+  readonly ownerProcessIdentity?: string;
   readonly providerJobId?: string;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
@@ -26,16 +28,30 @@ interface JobFile {
   readonly jobs: readonly ThaiRagIndexJob[];
 }
 
+export interface ThaiRagIndexJobStoreOptions {
+  readonly isProcessAlive?: (pid: number) => boolean;
+  readonly processIdentityProbe?: PosixProcessIdentityProbe;
+  readonly platform?: NodeJS.Platform;
+}
+
 export class ThaiRagIndexJobStore {
   private readonly filePath: string;
   private jobs = new Map<string, ThaiRagIndexJob>();
   private initialized = false;
   private migrated = false;
+  private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly processIdentityProbe: PosixProcessIdentityProbe;
 
-  public constructor(dataRoot: string, private readonly now: () => Date = () => new Date()) {
+  public constructor(
+    dataRoot: string,
+    private readonly now: () => Date = () => new Date(),
+    options: ThaiRagIndexJobStoreOptions = {},
+  ) {
     const root = resolveThaiRagProviderRoot(dataRoot);
     if (!root.ok) throw new Error(root.error.message);
     this.filePath = path.join(root.value, 'index-jobs.json');
+    this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+    this.processIdentityProbe = options.processIdentityProbe ?? defaultProcessIdentityProbe(options.platform ?? process.platform);
   }
 
   public async initialize(ownerId?: string): Promise<void> {
@@ -61,7 +77,9 @@ export class ThaiRagIndexJobStore {
     const finishedAt = this.now().toISOString();
     let changed = false;
     for (const [id, job] of this.jobs) {
-      if (!ACTIVE_JOB_STATUSES.has(job.status) || job.ownerId !== ownerId) continue;
+      if (!ACTIVE_JOB_STATUSES.has(job.status) || ownerId === undefined) continue;
+      const sameOwner = job.ownerId === ownerId;
+      if (!sameOwner && !await this.isProvablyDeadRuntimeOwner(job)) continue;
       this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: 'Provider restarted before the indexing job completed' });
       changed = true;
     }
@@ -74,10 +92,12 @@ export class ThaiRagIndexJobStore {
     if (!parsedWorkspaceId.ok) throw new Error(parsedWorkspaceId.error.message);
     if (ownerId.trim().length === 0) throw new Error('Thai-RAG index job owner is required');
     await this.initialize();
+    const ownerProcessIdentity = await this.readOwnerProcessIdentity(ownerId);
     const job: ThaiRagIndexJob = {
       jobId: `idx_umcp_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
       workspaceId: parsedWorkspaceId.value,
       ownerId,
+      ...(ownerProcessIdentity === null ? {} : { ownerProcessIdentity }),
       status: 'running',
       force,
       startedAt: this.now().toISOString(),
@@ -142,8 +162,8 @@ export class ThaiRagIndexJobStore {
     const job = this.jobs.get(jobId);
     return job !== undefined
       && job.status !== 'legacy-unavailable'
-      && job.ownerId === ownerId
       && job.workspaceId === workspaceId
+      && (job.ownerId === ownerId || !ACTIVE_JOB_STATUSES.has(job.status))
       ? job
       : null;
   }
@@ -151,6 +171,41 @@ export class ThaiRagIndexJobStore {
   public async active(ownerId: string): Promise<readonly ThaiRagIndexJob[]> {
     await this.initialize();
     return [...this.jobs.values()].filter((job) => ACTIVE_JOB_STATUSES.has(job.status) && job.ownerId === ownerId);
+  }
+
+  private async isProvablyDeadRuntimeOwner(job: ThaiRagIndexJob): Promise<boolean> {
+    const pid = parseUnifiedRuntimeOwnerPid(job.ownerId);
+    if (pid === null) return false;
+    let alive: boolean;
+    try {
+      alive = this.isProcessAlive(pid);
+    } catch {
+      return false;
+    }
+    if (!alive) return true;
+    if (job.ownerProcessIdentity === undefined) return false;
+    let observedIdentity: string | null;
+    try {
+      observedIdentity = await this.processIdentityProbe(pid);
+    } catch {
+      return false;
+    }
+    if (observedIdentity !== null) return observedIdentity !== job.ownerProcessIdentity;
+    try {
+      return !this.isProcessAlive(pid);
+    } catch {
+      return false;
+    }
+  }
+
+  private async readOwnerProcessIdentity(ownerId: string): Promise<string | null> {
+    const pid = parseUnifiedRuntimeOwnerPid(ownerId);
+    if (pid === null) return null;
+    try {
+      return await this.processIdentityProbe(pid);
+    } catch {
+      return null;
+    }
   }
 
   private async finish(
@@ -202,6 +257,7 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       jobId: value.jobId,
       workspaceId,
       ...(ownerId === undefined ? {} : { ownerId }),
+      ...(typeof value.ownerProcessIdentity === 'string' && value.ownerProcessIdentity.trim().length > 0 ? { ownerProcessIdentity: value.ownerProcessIdentity } : {}),
       ...(typeof value.providerJobId === 'string' && value.providerJobId.trim().length > 0 ? { providerJobId: value.providerJobId } : {}),
       status,
       force: typeof value.force === 'boolean' ? value.force : false,
@@ -212,6 +268,28 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       ...(typeof value.error === 'string' ? { error: value.error } : {}),
     },
   };
+}
+
+function parseUnifiedRuntimeOwnerPid(ownerId: string | undefined): number | null {
+  if (ownerId === undefined) return null;
+  const match = /^unified-mpc:(\d+)$/.exec(ownerId);
+  if (match === null) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 && pid <= 2_147_483_647 ? pid : null;
+}
+
+function defaultProcessIdentityProbe(platform: NodeJS.Platform): PosixProcessIdentityProbe {
+  if (platform === 'darwin' || platform === 'linux') return createPosixProcessIdentityProbe(platform);
+  return async (): Promise<null> => null;
+}
+
+function defaultIsProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return !isNodeError(error) || error.code !== 'ESRCH';
+  }
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {

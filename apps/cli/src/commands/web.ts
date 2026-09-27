@@ -1,5 +1,6 @@
-import { ok, err, appError, type GoalRecord, type Result } from '@unified-mpc/domain';
+import { ok, err, appError, type GoalRecord, type Result, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import {
+  GoalRuntimeControlPlaneService,
   JsonWorkspaceIndexStore,
   WorkspaceIndexService,
   WorkspaceSelectionService,
@@ -81,9 +82,20 @@ export async function runWeb(
     const goalRepository = new SqliteGoalRepository(database);
     const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
     const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
+    const goalRuntimeProjection = new GoalRuntimeControlPlaneService(
+      goalRepository,
+      goalRuntimeSnapshots,
+      goalRuntimeEvents,
+      {
+        workspaceAdmissionReceipts: {
+          getAdmissionReceipt: async (workspaceId): Promise<WorkspaceAdmissionReceipt | null> => workspaceRepository.getAdmissionReceipt(workspaceId),
+        },
+      },
+    );
     const goalRuntimeRead: GoalRuntimeReadPort = serverOptions?.goalRuntimeRead ?? {
       listWorkspaceGoalRuntimeSnapshots: async (request) => goalRuntimeSnapshots.listWorkspaceGoalRuntimeSnapshots(request),
       replayWorkspaceGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayWorkspaceGoalRuntimeEvents(request),
+      readWorkspaceAdmissionProjection: async (workspaceId) => goalRuntimeProjection.readWorkspaceAdmissionProjection(workspaceId),
     };
     bootstrapNonSecretSettings(settings);
     const lifecycleCandidates = await workspaceService.list();

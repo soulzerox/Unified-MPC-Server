@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { err, ok, type AppError, type Result, type ResultBudget } from '@unified-mpc/domain';
+import { err, ok, type AppError, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { FileActor, GitService, SearchService } from '@unified-mpc/application';
 import { classifyContextPath } from '@unified-mpc/search';
 import type { McpApplicationServices } from './tools/tool-types.js';
@@ -132,6 +132,7 @@ export interface ReadManyFilesResult {
 export interface WorkspaceSnapshotResult {
   readonly workspace?: unknown;
   readonly project?: unknown;
+  readonly admission?: WorkspaceAdmissionProjection;
 }
 
 interface Candidate {
@@ -433,10 +434,19 @@ export class ContextEngine {
       ? undefined
       : await this.services.projectSnapshot.snapshot(this.actor, workspaceId);
     if (project !== undefined && !project.ok) return err(project.error);
-    if (workspace === undefined && project === undefined) return err({ code: 'INTERNAL_ERROR', message: 'Workspace snapshot service is unavailable', recoverable: true });
+    let admission: WorkspaceAdmissionProjection | undefined;
+    try {
+      admission = await this.services.workspaceAdmissionProjection?.readWorkspaceAdmissionProjection(workspaceId);
+    } catch {
+      admission = undefined;
+    }
+    if (workspace === undefined && project === undefined && admission === undefined) {
+      return err({ code: 'INTERNAL_ERROR', message: 'Workspace snapshot service is unavailable', recoverable: true });
+    }
     return ok({
       ...(workspace?.ok === true ? { workspace: workspace.value } : {}),
       ...(project?.ok === true ? { project: project.value } : {}),
+      ...(admission === undefined ? {} : { admission }),
     });
   }
 

@@ -114,6 +114,16 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       if (method === 'status') return { entries: [] };
       if (method === 'diff') return { patch: '', truncated: false };
       if (method === 'log') return { commits: [], truncated: false };
+      if (method === 'observeWorkspace') return {
+        repositoryIdentity: 'repo-identity',
+        gitCommonDirIdentity: 'git-common-dir-identity',
+        worktreeIdentity: 'worktree-identity',
+        branch: 'main',
+        head: 'a'.repeat(40),
+        statusEntries: [],
+        stagedFingerprint: 'staged-fingerprint',
+        dirtyFingerprint: 'dirty-fingerprint',
+      };
       return { exitCode: 0, stdout: '', stderr: '' };
     }),
     process: serviceProxy('process', calls, (method) => {

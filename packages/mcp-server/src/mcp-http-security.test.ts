@@ -71,11 +71,21 @@ describe('MCP localhost HTTP security boundary', () => {
       buildTime: '2026-09-21T09:00:00.000Z',
       buildDirty: false,
     };
+    const runtimeAdmissionIdentity = {
+      runtimeDeploymentId: 'deploy-test',
+      runtimeGeneration: 'f3ff1d58-d2ae-4af3-a52a-7f0b30f0f0a2',
+      runtimeBuildVersion: buildProvenance.buildVersion,
+      runtimeBuildCommit: buildProvenance.buildCommit,
+      runtimeBuildDirty: buildProvenance.buildDirty,
+      runtimeProtocolGeneration: 1,
+      runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+    };
     const provenanceHandle = await startMcpHttp({
       port: 0,
       services: {},
       actor: { clientId: 'build-provenance-test', clientName: 'build-provenance-test' },
       buildProvenance,
+      runtimeAdmissionIdentity,
     });
     try {
       const response = await fetch(new URL('/_unified-mpc/identity', provenanceHandle.endpoint));
@@ -87,6 +97,7 @@ describe('MCP localhost HTTP security boundary', () => {
         protocol: 1,
         version: '4.61.0',
         ...buildProvenance,
+        ...runtimeAdmissionIdentity,
       });
     } finally {
       await provenanceHandle.close();

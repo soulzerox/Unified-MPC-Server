@@ -9,12 +9,21 @@ import {
   type GoalRuntimeProjection,
   type GoalRuntimeSnapshotRecord,
   type GoalRuntimeSnapshotRepository,
+  type WorkspaceAdmissionDecision,
+  type WorkspaceAdmissionProjection,
+  type WorkspaceAdmissionReceipt,
+  appError,
+  err,
+  ok,
+  type Result,
 } from '@unified-mpc/domain';
-import type { GoalWorkspaceTruthObservation, GoalWorkspaceTruthReader } from './goal-workspace-truth-reader.js';
+import { classifyWorkspaceAdmission } from '@unified-mpc/domain';
+import type { GoalWorkspaceAdmissionObservation, GoalWorkspaceTruthObservation, GoalWorkspaceTruthReader } from './goal-workspace-truth-reader.js';
 
 const DEFAULT_BOOTSTRAP_LIMIT = 500;
 const EVENT_REPLAY_PAGE_SIZE = 500;
 const MAX_DURABLE_GOAL_BLOCKER_DETAIL = 2_000;
+const INITIAL_ADMISSION_WORKFLOW_VERSION = 1;
 
 export interface GoalRuntimeEventPublisher {
   ensureGoalSnapshot(goalId: string): Promise<GoalRuntimeSnapshotRecord>;
@@ -22,14 +31,29 @@ export interface GoalRuntimeEventPublisher {
   refreshGoalWorkspaceTruth?(goalId: string): Promise<GoalRuntimeSnapshotRecord>;
 }
 
+export type GoalRuntimeAdmissionIdentity = Pick<WorkspaceAdmissionReceipt,
+  'runtimeDeploymentId' | 'runtimeGeneration' | 'runtimeBuildVersion' | 'runtimeBuildCommit'
+  | 'runtimeBuildDirty' | 'runtimeProtocolGeneration' | 'runtimeStartedAt'>;
+
 export interface GoalRuntimeBootstrapResult {
   readonly workspaceId: string;
   readonly goalsScanned: number;
   readonly snapshotsReady: number;
+  readonly admissionProjection?: WorkspaceAdmissionProjection;
+  readonly admission?: WorkspaceAdmissionDecision & {
+    readonly admissionGeneration?: number;
+    readonly refreshedFromRuntimeGeneration?: boolean;
+  };
 }
 
 export interface GoalRuntimeControlPlaneOptions {
   readonly workspaceTruth?: Pick<GoalWorkspaceTruthReader, 'read'>;
+  readonly workspaceAdmission?: Pick<GoalWorkspaceTruthReader, 'readAdmission'>;
+  readonly workspaceAdmissionReceipts?: {
+    getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null>;
+    compareAndSwapAdmissionReceipt?(workspaceId: string, expectedGeneration: number, leaseGeneration: number, receipt: WorkspaceAdmissionReceipt): Promise<boolean>;
+  };
+  readonly runtimeAdmissionIdentity?: GoalRuntimeAdmissionIdentity;
   readonly now?: () => Date;
 }
 
@@ -55,6 +79,9 @@ export class GoalRuntimeControlPlaneError extends Error {
 export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher {
   private readonly goalChains = new Map<string, Promise<void>>();
   private readonly workspaceTruth: Pick<GoalWorkspaceTruthReader, 'read'> | undefined;
+  private readonly workspaceAdmission: Pick<GoalWorkspaceTruthReader, 'readAdmission'> | undefined;
+  private readonly workspaceAdmissionReceipts: GoalRuntimeControlPlaneOptions['workspaceAdmissionReceipts'];
+  private readonly runtimeAdmissionIdentity: GoalRuntimeAdmissionIdentity | undefined;
   private readonly now: () => Date;
 
   public constructor(
@@ -64,6 +91,9 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     options: GoalRuntimeControlPlaneOptions = {},
   ) {
     this.workspaceTruth = options.workspaceTruth;
+    this.workspaceAdmission = options.workspaceAdmission;
+    this.workspaceAdmissionReceipts = options.workspaceAdmissionReceipts;
+    this.runtimeAdmissionIdentity = options.runtimeAdmissionIdentity;
     this.now = options.now ?? ((): Date => new Date());
   }
 
@@ -87,6 +117,60 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     });
   }
 
+  public async recordSuccessfulWorkspaceMutation(binding: {
+    readonly callId: string;
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseGeneration: number;
+    readonly admissionGeneration: number;
+  }): Promise<void> {
+    const receipts = this.workspaceAdmissionReceipts;
+    const runtime = this.runtimeAdmissionIdentity;
+    if (receipts?.compareAndSwapAdmissionReceipt === undefined || runtime === undefined || runtime.runtimeBuildDirty) {
+      throw new Error('Workspace admission progress cannot be recorded safely');
+    }
+    const [receipt, observed] = await Promise.all([
+      receipts.getAdmissionReceipt(binding.workspaceId),
+      this.readWorkspaceAdmissionBestEffort(binding.workspaceId),
+    ]);
+    const now = this.now();
+    if (receipt === null || observed === null || observed.workspaceKind !== 'git' || observed.dirtyState === 'unknown'
+      || observed.workspaceHead === undefined || observed.dirtyFingerprint === undefined || observed.stagedFingerprint === undefined
+      || observed.writerLeaseGeneration !== binding.leaseGeneration
+      || observed.writerLeaseExpiresAt === undefined || Date.parse(observed.writerLeaseExpiresAt) <= now.getTime()
+      || observed.goalId !== binding.goalId || observed.projectId !== receipt.projectId
+      || observed.checkpointId !== receipt.checkpointId || receipt.goalId !== binding.goalId
+      || receipt.workspaceId !== binding.workspaceId || receipt.workspaceKind !== 'git'
+      || receipt.writeLeaseGeneration !== binding.leaseGeneration
+      || receipt.admissionGeneration !== binding.admissionGeneration || receipt.invalidatedAt !== undefined
+      || (receipt.expiresAt !== undefined && Date.parse(receipt.expiresAt) <= now.getTime())
+      || observed.repositoryIdentity !== receipt.repositoryIdentity
+      || observed.gitCommonDirIdentity !== receipt.gitCommonDirIdentity
+      || observed.worktreeIdentity !== receipt.worktreeIdentity
+      || observed.branchName !== receipt.branchName
+      || observed.baseRef !== receipt.baseRef || observed.baseSha !== receipt.resolvedBaseSha
+      || observed.mergeBaseSha !== receipt.mergeBaseSha || (observed.remoteGoalSha ?? undefined) !== receipt.remoteGoalSha
+      || runtimeAdmissionGeneration(runtime) !== runtimeAdmissionGeneration(receipt)) {
+      throw new Error('Successful workspace mutation no longer matches its admitted source and writer proof');
+    }
+
+    const nextReceipt: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      admissionId: createHash('sha256').update(`${receipt.admissionId}:${binding.callId}:${binding.admissionGeneration + 1}`).digest('hex'),
+      expectedWorkspaceHead: observed.workspaceHead,
+      observedWorkspaceHead: observed.workspaceHead,
+      dirtyState: observed.dirtyState,
+      dirtyFingerprint: observed.dirtyFingerprint,
+      stagedFingerprint: observed.stagedFingerprint,
+      admissionGeneration: receipt.admissionGeneration + 1,
+      createdAt: now.toISOString(),
+    };
+    const saved = await receipts.compareAndSwapAdmissionReceipt(
+      binding.workspaceId, binding.admissionGeneration, binding.leaseGeneration, nextReceipt,
+    );
+    if (!saved) throw new Error('Workspace admission progress lost its generation compare-and-swap');
+  }
+
   public async refreshGoalWorkspaceTruth(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
     return this.withGoalLock(goalId, async () => {
       let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);
@@ -97,12 +181,43 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     });
   }
 
+  public async validateWorkspaceAdmission(
+    workspaceId: string,
+    goalId: string,
+    leaseGeneration: number,
+    expectedAdmissionGeneration: number | undefined,
+  ): Promise<Result<void>> {
+    const observation = await this.readWorkspaceAdmissionBestEffort(workspaceId);
+    const admission = await this.classifyAdmissionBestEffort(workspaceId, observation);
+    if (admission?.status === 'ADMITTED'
+      && expectedAdmissionGeneration !== undefined
+      && admission.admissionGeneration === expectedAdmissionGeneration
+      && observation?.goalId === goalId
+      && observation.writerLeaseGeneration === leaseGeneration) {
+      return ok(undefined);
+    }
+    const reason = admission?.reason ?? admission?.status ?? 'admission_unavailable';
+    return err(appError(
+      'WORKSPACE_ADMISSION_STALE',
+      `WORKSPACE_ADMISSION_STALE: ${reason}; refresh workspace admission before retrying`,
+      true,
+      {
+        expectedAdmissionGeneration: expectedAdmissionGeneration ?? 0,
+        observedAdmissionGeneration: admission?.admissionGeneration ?? 0,
+        leaseGeneration,
+      },
+    ));
+  }
+
   public async bootstrapWorkspace(
     workspaceId: string,
     limit = DEFAULT_BOOTSTRAP_LIMIT,
   ): Promise<GoalRuntimeBootstrapResult> {
     const goals = await this.goals.list({ workspaceId, limit });
     const workspaceObservation = await this.readWorkspaceTruthBestEffort(workspaceId);
+    const admissionObservation = await this.readWorkspaceAdmissionBestEffort(workspaceId);
+    const admission = await this.classifyAdmissionBestEffort(workspaceId, admissionObservation);
+    const admissionProjection = await this.projectWorkspaceAdmissionBestEffort(workspaceId, admissionObservation, admission);
     let snapshotsReady = 0;
     for (const goal of goals) {
       await this.withGoalLock(goal.id, async () => {
@@ -114,7 +229,262 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       });
       snapshotsReady += 1;
     }
-    return { workspaceId, goalsScanned: goals.length, snapshotsReady };
+    return {
+      workspaceId,
+      goalsScanned: goals.length,
+      snapshotsReady,
+      ...(admissionProjection === undefined ? {} : { admissionProjection }),
+      ...(admission === undefined ? {} : { admission }),
+    };
+  }
+
+  public async readWorkspaceAdmissionProjection(workspaceId: string): Promise<WorkspaceAdmissionProjection | undefined> {
+    const observation = await this.readWorkspaceAdmissionBestEffort(workspaceId);
+    const admission = await this.classifyAdmissionBestEffort(workspaceId, observation);
+    return this.projectWorkspaceAdmissionBestEffort(workspaceId, observation, admission);
+  }
+
+  private async projectWorkspaceAdmissionBestEffort(
+    workspaceId: string,
+    observed: GoalWorkspaceAdmissionObservation | null,
+    admission: GoalRuntimeBootstrapResult['admission'] | undefined,
+  ): Promise<WorkspaceAdmissionProjection | undefined> {
+    let receipt: WorkspaceAdmissionReceipt | null = null;
+    if (this.workspaceAdmissionReceipts !== undefined) {
+      try {
+        receipt = await this.workspaceAdmissionReceipts.getAdmissionReceipt(workspaceId);
+      } catch {
+        receipt = null;
+      }
+    }
+    const currentRuntime = this.runtimeAdmissionIdentity;
+    const admittedRuntime: GoalRuntimeAdmissionIdentity | undefined = currentRuntime ?? (receipt === null ? undefined : {
+      runtimeDeploymentId: receipt.runtimeDeploymentId,
+      runtimeGeneration: receipt.runtimeGeneration,
+      runtimeBuildVersion: receipt.runtimeBuildVersion,
+      ...(receipt.runtimeBuildCommit === undefined ? {} : { runtimeBuildCommit: receipt.runtimeBuildCommit }),
+      runtimeBuildDirty: receipt.runtimeBuildDirty,
+      runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+      runtimeStartedAt: receipt.runtimeStartedAt,
+    });
+    if (observed === null && receipt === null && admittedRuntime === undefined && admission === undefined) return undefined;
+
+    const branch = observed?.branchName ?? receipt?.branchName;
+    const baseRef = observed?.baseRef ?? receipt?.baseRef;
+    const goalId = observed?.goalId ?? receipt?.goalId;
+    const writeLeaseGeneration = observed?.writerLeaseGeneration ?? receipt?.writeLeaseGeneration;
+    const recordedBaseSha = receipt?.resolvedBaseSha;
+    const currentResolvedSha = observed?.baseSha;
+    const baseFreshness: WorkspaceAdmissionProjection['base']['freshness'] =
+      recordedBaseSha === undefined || currentResolvedSha === undefined
+        ? 'unknown'
+        : recordedBaseSha === currentResolvedSha ? 'current' : 'stale';
+    const status = admission?.status ?? 'RECOVERY_REQUIRED';
+    const remediation: WorkspaceAdmissionProjection['admission']['remediation'] =
+      status === 'ADMITTED' || status === 'EXPECTED_PROGRESS' ? 'none'
+        : status === 'BASE_STALE' ? 'guarded_rebase'
+          : status === 'REMOTE_GOAL_BRANCH_DRIFT' ? 'inspect_remote_goal'
+            : status === 'WORKSPACE_STATE_CHANGED' ? 'refresh_workspace_admission'
+              : status === 'RUNTIME_GENERATION_CHANGED' ? 'refresh_admission'
+                : 'recover_workspace';
+
+    return {
+      ...(admittedRuntime === undefined ? {} : {
+        runtime: {
+          source: currentRuntime === undefined ? 'last_admitted' : 'current',
+          deploymentId: admittedRuntime.runtimeDeploymentId,
+          generation: admittedRuntime.runtimeGeneration,
+          buildVersion: admittedRuntime.runtimeBuildVersion,
+          ...(admittedRuntime.runtimeBuildCommit === undefined ? {} : { buildCommit: admittedRuntime.runtimeBuildCommit }),
+          buildDirty: admittedRuntime.runtimeBuildDirty,
+          protocolGeneration: admittedRuntime.runtimeProtocolGeneration,
+          startedAt: admittedRuntime.runtimeStartedAt,
+        },
+      }),
+      workspace: {
+        id: workspaceId,
+        kind: observed?.workspaceKind ?? receipt?.workspaceKind ?? 'unknown',
+        ...(branch === undefined ? {} : { branch }),
+        ...(receipt?.expectedWorkspaceHead === undefined ? {} : { expectedHead: receipt.expectedWorkspaceHead }),
+        ...(observed?.workspaceHead === undefined ? {} : { observedHead: observed.workspaceHead }),
+        dirtyState: observed?.dirtyState ?? receipt?.dirtyState ?? 'unknown',
+      },
+      base: {
+        ...(baseRef === undefined ? {} : { ref: baseRef }),
+        ...(recordedBaseSha === undefined ? {} : { recordedSha: recordedBaseSha }),
+        ...(currentResolvedSha === undefined ? {} : { currentResolvedSha }),
+        freshness: baseFreshness,
+      },
+      ownership: {
+        ...(goalId === undefined ? {} : { goalId }),
+        ...(writeLeaseGeneration === undefined ? {} : { writeLeaseGeneration }),
+      },
+      admission: {
+        status,
+        ...(admission?.admissionGeneration === undefined ? {} : { generation: admission.admissionGeneration }),
+        ...(admission?.reason === undefined ? {} : { blocker: admission.reason }),
+        remediation,
+      },
+    };
+  }
+
+  private async classifyAdmissionBestEffort(
+    workspaceId: string,
+    observed: GoalWorkspaceAdmissionObservation | null,
+  ): Promise<GoalRuntimeBootstrapResult['admission'] | undefined> {
+    if (this.workspaceAdmissionReceipts === undefined) return undefined;
+    if (observed === null || observed.workspaceKind !== 'git' || observed.dirtyState === 'unknown'
+      || observed.workspaceHead === undefined || observed.dirtyFingerprint === undefined
+      || observed.stagedFingerprint === undefined || observed.repositoryIdentity === undefined
+      || observed.gitCommonDirIdentity === undefined || observed.worktreeIdentity === undefined
+      || observed.baseRef === undefined || observed.baseSha === undefined || observed.mergeBaseSha === undefined
+      || observed.goalId === undefined || observed.projectId === undefined || observed.writerLeaseGeneration === undefined
+      || observed.writerLeaseExpiresAt === undefined
+      || Date.parse(observed.writerLeaseExpiresAt) <= this.now().getTime()) {
+      return { status: 'RECOVERY_REQUIRED', reason: 'required_workspace_or_lease_proof_missing' };
+    }
+    if (this.runtimeAdmissionIdentity === undefined) {
+      return { status: 'RECOVERY_REQUIRED', reason: 'runtime_provenance_missing' };
+    }
+    if (this.runtimeAdmissionIdentity.runtimeBuildDirty) {
+      return { status: 'RECOVERY_REQUIRED', reason: 'runtime_build_provenance_dirty' };
+    }
+    let receipt: WorkspaceAdmissionReceipt | null;
+    try {
+      receipt = await this.workspaceAdmissionReceipts.getAdmissionReceipt(workspaceId);
+    } catch {
+      return { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_unavailable' };
+    }
+    if (receipt === null) {
+      if (observed.dirtyState !== 'clean') {
+        return { status: 'RECOVERY_REQUIRED', reason: 'dirty_workspace_requires_checkpoint_admission' };
+      }
+      const compareAndSwap = this.workspaceAdmissionReceipts.compareAndSwapAdmissionReceipt;
+      if (compareAndSwap === undefined) {
+        return { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_storage_unavailable' };
+      }
+      const currentRuntime = this.runtimeAdmissionIdentity;
+      const now = this.now().toISOString();
+      const initialReceipt: WorkspaceAdmissionReceipt = {
+        admissionId: createHash('sha256')
+          .update([workspaceId, observed.workspaceHead, String(observed.writerLeaseGeneration), currentRuntime.runtimeGeneration, now].join('\0'))
+          .digest('hex'),
+        projectId: observed.projectId,
+        workspaceId,
+        goalId: observed.goalId,
+        workspaceKind: 'git',
+        repositoryIdentity: observed.repositoryIdentity,
+        gitCommonDirIdentity: observed.gitCommonDirIdentity,
+        worktreeIdentity: observed.worktreeIdentity,
+        ...(observed.branchName === undefined ? {} : { branchName: observed.branchName }),
+        expectedWorkspaceHead: observed.workspaceHead,
+        observedWorkspaceHead: observed.workspaceHead,
+        baseRef: observed.baseRef,
+        resolvedBaseSha: observed.baseSha,
+        ...(observed.remoteGoalSha === undefined ? {} : { remoteGoalSha: observed.remoteGoalSha }),
+        mergeBaseSha: observed.mergeBaseSha,
+        dirtyState: 'clean',
+        dirtyFingerprint: observed.dirtyFingerprint,
+        stagedFingerprint: observed.stagedFingerprint,
+        ...(observed.checkpointId === undefined ? {} : { checkpointId: observed.checkpointId }),
+        writeLeaseGeneration: observed.writerLeaseGeneration,
+        ...currentRuntime,
+        workflowVersion: INITIAL_ADMISSION_WORKFLOW_VERSION,
+        admissionGeneration: 1,
+        createdAt: now,
+      };
+      try {
+        const saved = await compareAndSwap(workspaceId, 0, observed.writerLeaseGeneration, initialReceipt);
+        if (!saved) return { status: 'RECOVERY_REQUIRED', reason: 'initial_admission_capture_raced' };
+      } catch {
+        return { status: 'RECOVERY_REQUIRED', reason: 'initial_admission_capture_failed' };
+      }
+      receipt = initialReceipt;
+    }
+    if (receipt.invalidatedAt !== undefined || (receipt.expiresAt !== undefined && Date.parse(receipt.expiresAt) <= this.now().getTime())) {
+      return { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_invalid_or_expired', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (receipt.workspaceId !== workspaceId || receipt.workspaceKind !== observed.workspaceKind
+      || receipt.projectId !== observed.projectId || receipt.goalId !== observed.goalId
+      || receipt.checkpointId !== observed.checkpointId) {
+      return { status: 'WORKSPACE_STATE_CHANGED', reason: 'workspace_or_checkpoint_identity_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+
+    const currentRuntime = this.runtimeAdmissionIdentity;
+    const currentRuntimeGeneration = currentRuntime === undefined
+      ? ''
+      : runtimeAdmissionGeneration(currentRuntime);
+    const decision = classifyWorkspaceAdmission({
+      repositoryIdentity: receipt.repositoryIdentity ?? '',
+      worktreeIdentity: receipt.worktreeIdentity,
+      workspaceHead: receipt.expectedWorkspaceHead,
+      dirtyFingerprint: receipt.dirtyFingerprint,
+      checkpointRevision: receipt.checkpointRevision ?? 0,
+      checkpointHead: receipt.expectedWorkspaceHead,
+      baseRef: receipt.baseRef ?? '',
+      baseSha: receipt.resolvedBaseSha ?? '',
+      mergeBaseSha: receipt.mergeBaseSha ?? '',
+      remoteGoalSha: receipt.remoteGoalSha ?? '',
+      leaseGeneration: receipt.writeLeaseGeneration,
+      runtimeGeneration: runtimeAdmissionGeneration(receipt),
+      workflowVersion: receipt.workflowVersion,
+    }, {
+      repositoryIdentity: observed.repositoryIdentity,
+      worktreeIdentity: observed.worktreeIdentity,
+      workspaceHead: observed.workspaceHead,
+      dirtyFingerprint: observed.dirtyFingerprint,
+      checkpointRevision: receipt.checkpointRevision ?? 0,
+      checkpointHead: observed.workspaceHead,
+      baseRef: observed.baseRef,
+      baseSha: observed.baseSha,
+      mergeBaseSha: observed.mergeBaseSha,
+      remoteGoalSha: observed.remoteGoalSha ?? '',
+      leaseGeneration: observed.writerLeaseGeneration,
+      runtimeGeneration: currentRuntimeGeneration,
+      workflowVersion: receipt.workflowVersion,
+    });
+    if (observed.branchName !== receipt.branchName) {
+      return { status: 'WORKSPACE_STATE_CHANGED', reason: 'workspace_branch_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (observed.dirtyState !== receipt.dirtyState || observed.stagedFingerprint !== receipt.stagedFingerprint) {
+      return { status: 'WORKSPACE_STATE_CHANGED', reason: 'workspace_dirty_state_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (decision.status !== 'RUNTIME_GENERATION_CHANGED') {
+      return { ...decision, admissionGeneration: receipt.admissionGeneration };
+    }
+    if (currentRuntime === undefined || this.workspaceAdmissionReceipts.compareAndSwapAdmissionReceipt === undefined) {
+      return { ...decision, admissionGeneration: receipt.admissionGeneration };
+    }
+
+    const refreshed: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      admissionId: createHash('sha256').update(`${receipt.admissionId}:${currentRuntime.runtimeGeneration}:${this.now().toISOString()}`).digest('hex'),
+      ...currentRuntime,
+      admissionGeneration: receipt.admissionGeneration + 1,
+      createdAt: this.now().toISOString(),
+    };
+    try {
+      const saved = await this.workspaceAdmissionReceipts.compareAndSwapAdmissionReceipt(
+        workspaceId,
+        receipt.admissionGeneration,
+        observed.writerLeaseGeneration,
+        refreshed,
+      );
+      return saved
+        ? { status: 'ADMITTED', admissionGeneration: refreshed.admissionGeneration, refreshedFromRuntimeGeneration: true }
+        : { status: 'RECOVERY_REQUIRED', reason: 'admission_refresh_raced', admissionGeneration: receipt.admissionGeneration };
+    } catch {
+      return { status: 'RECOVERY_REQUIRED', reason: 'admission_refresh_failed', admissionGeneration: receipt.admissionGeneration };
+    }
+  }
+
+  private async readWorkspaceAdmissionBestEffort(workspaceId: string): Promise<GoalWorkspaceAdmissionObservation | null> {
+    if (this.workspaceAdmission === undefined) return null;
+    try {
+      return await this.workspaceAdmission.readAdmission(workspaceId);
+    } catch {
+      return { workspaceId, workspaceKind: 'unknown', dirtyState: 'unknown', detail: 'workspace admission observation failed' };
+    }
   }
 
   private async readWorkspaceTruthBestEffort(
@@ -457,6 +827,19 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
   }
 }
 
+function runtimeAdmissionGeneration(identity: Pick<WorkspaceAdmissionReceipt,
+  'runtimeDeploymentId' | 'runtimeGeneration' | 'runtimeBuildVersion' | 'runtimeBuildCommit'
+  | 'runtimeBuildDirty' | 'runtimeProtocolGeneration'> | WorkspaceAdmissionReceipt): string {
+  return [
+    identity.runtimeDeploymentId,
+    identity.runtimeGeneration,
+    identity.runtimeBuildVersion,
+    identity.runtimeBuildCommit ?? '',
+    String(identity.runtimeBuildDirty),
+    String(identity.runtimeProtocolGeneration),
+  ].join(':');
+}
+
 function projectionFromDurableGoal(goal: GoalRecord): GoalRuntimeProjection {
   const exactExecutionId = goal.status === 'active'
     && goal.executionId !== undefined
@@ -561,4 +944,3 @@ function workspaceRuntimeEventId(
     .digest('hex');
   return `goal-runtime-workspace-${digest}`;
 }
-

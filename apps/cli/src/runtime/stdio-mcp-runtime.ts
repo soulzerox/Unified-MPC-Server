@@ -59,10 +59,13 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
+import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
+import type { UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
 
 export interface StdioMcpRuntime {
+  readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
   readonly services: McpApplicationServices;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
@@ -83,6 +86,7 @@ export interface StdioMcpRuntime {
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
+  readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
   readonly permissionProfile?: PermissionProfileName;
   readonly strictAllowedRoots?: readonly string[];
   readonly fullBypassAll?: boolean;
@@ -245,21 +249,8 @@ export function createStdioMcpRuntime(
     auditService,
     profileProvider,
   });
-  const agentSwarmService = new AgentSwarmService(
-    new SqliteAgentSwarmRepository(database),
-    codexService,
-    undefined,
-    undefined,
-    { resourceAdmissionController, managedResourceBindings },
-  );
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
-  const taskCancellation = new GoalTaskCancellationService([
-    { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
-    { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
-    { provider: 'shell', cancelForGoal: capabilityRuntime.shell.cancelForGoal.bind(capabilityRuntime.shell) },
-    { provider: 'agent_swarm', cancelForGoal: agentSwarmService.cancelForGoal.bind(agentSwarmService) },
-  ]);
   const requestCancellation = new GoalRequestCancellationService();
   const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
   const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
@@ -268,8 +259,39 @@ export function createStdioMcpRuntime(
     goalRepository,
     goalRuntimeSnapshots,
     goalRuntimeEvents,
-    { workspaceTruth: goalWorkspaceTruth },
+    {
+      workspaceTruth: goalWorkspaceTruth,
+      workspaceAdmission: goalWorkspaceTruth,
+      workspaceAdmissionReceipts: {
+        getAdmissionReceipt: async (workspaceId: string): Promise<WorkspaceAdmissionReceipt | null> => {
+          if (await workspaceRepository.get(workspaceId) === null) return null;
+          return rawWorkspaceRepository.getAdmissionReceipt(workspaceId);
+        },
+        compareAndSwapAdmissionReceipt: async (workspaceId, expectedGeneration, leaseGeneration, receipt): Promise<boolean> => {
+          if (await workspaceRepository.get(workspaceId) === null) return false;
+          return rawWorkspaceRepository.compareAndSwapAdmissionReceipt(workspaceId, expectedGeneration, leaseGeneration, receipt);
+        },
+      },
+      ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
+    },
   );
+  const agentSwarmService = new AgentSwarmService(
+    new SqliteAgentSwarmRepository(database),
+    codexService,
+    undefined,
+    undefined,
+    {
+      resourceAdmissionController,
+      managedResourceBindings,
+      workspaceAdmissionProjection: goalRuntimeControlPlane,
+    },
+  );
+  const taskCancellation = new GoalTaskCancellationService([
+    { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
+    { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
+    { provider: 'shell', cancelForGoal: capabilityRuntime.shell.cancelForGoal.bind(capabilityRuntime.shell) },
+    { provider: 'agent_swarm', cancelForGoal: agentSwarmService.cancelForGoal.bind(agentSwarmService) },
+  ]);
   const goalMutationFence = new GoalMutationFenceService(goalRepository, {
     taskStateReader: new RuntimeGoalManagedTaskStateReader({
       process: processService,
@@ -278,6 +300,8 @@ export function createStdioMcpRuntime(
       agentSwarm: agentSwarmService,
     }),
     runtimeEvents: goalRuntimeControlPlane,
+    validateAdmission: goalRuntimeControlPlane.validateWorkspaceAdmission.bind(goalRuntimeControlPlane),
+    recordSuccessfulMutation: goalRuntimeControlPlane.recordSuccessfulWorkspaceMutation.bind(goalRuntimeControlPlane),
   });
   const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {
     scheduledContinuations: goalRepository,
@@ -372,6 +396,7 @@ export function createStdioMcpRuntime(
       installServer: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installServer(input),
     },
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
+    workspaceAdmissionProjection: goalRuntimeControlPlane,
     workspaceSelection,
     preferredGoal: {
       get: async (workspaceId) => {
@@ -412,6 +437,7 @@ export function createStdioMcpRuntime(
   };
 
   return {
+    ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
     services,
     actor,
     extensions,

@@ -7,7 +7,7 @@ import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } f
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
-import { loadBuildProvenance } from '../build-provenance.js';
+import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
 
 function envPort(): number {
   const value = Number(process.env.UNIFIED_MPC_PORT ?? 18765);
@@ -39,8 +39,10 @@ async function main(): Promise<void> {
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
 
   const buildProvenance = loadBuildProvenance();
+  const runtimeAdmissionIdentity = createRuntimeAdmissionIdentity(buildProvenance);
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), {
     persistWorkspaceSelection: true,
+    runtimeAdmissionIdentity,
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
@@ -58,6 +60,7 @@ async function main(): Promise<void> {
     start: async () => startMcpHttp(createWebMcpHttpServerOptions({
       port: envPort(),
       buildProvenance,
+      runtimeAdmissionIdentity,
       services: runtime.services,
       actor: runtime.actor,
       activityTracker: runtime.activityTracker,

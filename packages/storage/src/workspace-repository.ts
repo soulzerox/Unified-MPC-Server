@@ -1,4 +1,5 @@
 import type { Workspace, WorkspaceWriterLease } from '@unified-mpc/workspace';
+import type { WorkspaceAdmissionReceipt, WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import type { SqliteDatabase } from './database.js';
 
 interface WorkspaceRow {
@@ -18,6 +19,7 @@ interface WorkspaceRow {
   readonly parent_workspace_id: string | null;
   readonly goal_workspace_kind: 'git_worktree' | 'snapshot' | null;
   readonly parent_source: 'committed_head' | 'named_revision' | 'checkpoint' | 'patch' | 'snapshot' | null;
+  readonly base_ref: string | null;
   readonly base_revision: string | null;
   readonly branch_name: string | null;
   readonly checkpoint_id: string | null;
@@ -45,6 +47,7 @@ const workspaceColumns = [
   'parent_workspace_id',
   'goal_workspace_kind',
   'parent_source',
+  'base_ref',
   'base_revision',
   'branch_name',
   'checkpoint_id',
@@ -57,6 +60,222 @@ const workspaceColumns = [
 
 export class SqliteWorkspaceRepository {
   public constructor(private readonly database: SqliteDatabase) {}
+
+  public async getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null> {
+    const row = this.database.connection.prepare(
+      'SELECT receipt_json FROM workspace_admission_receipts WHERE workspace_id = ?',
+    ).get(workspaceId) as { receipt_json: string } | undefined;
+    if (row === undefined) return null;
+    try {
+      const receipt: unknown = JSON.parse(row.receipt_json);
+      return isWorkspaceAdmissionReceipt(receipt) && receipt.workspaceId === workspaceId ? receipt : null;
+    } catch {
+      return null;
+    }
+  }
+
+  public async compareAndSwapAdmissionReceipt(
+    workspaceId: string,
+    expectedAdmissionGeneration: number,
+    writeLeaseGeneration: number,
+    receipt: WorkspaceAdmissionReceipt,
+  ): Promise<boolean> {
+    if (receipt.workspaceId !== workspaceId
+      || receipt.writeLeaseGeneration !== writeLeaseGeneration
+      || receipt.admissionGeneration !== expectedAdmissionGeneration + 1
+      || !Number.isSafeInteger(expectedAdmissionGeneration) || expectedAdmissionGeneration < 0
+      || !Number.isSafeInteger(writeLeaseGeneration) || writeLeaseGeneration < 1
+      || !isWorkspaceAdmissionReceipt(receipt)) return false;
+    let receiptJson: string;
+    try {
+      receiptJson = JSON.stringify(receipt);
+    } catch {
+      return false;
+    }
+    if (Buffer.byteLength(receiptJson, 'utf8') > 16_384) return false;
+
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const workspace = this.database.connection.prepare(
+        'SELECT writer_lease_id, writer_lease_generation, writer_lease_expires_at FROM workspaces WHERE id = ? AND archived_at IS NULL',
+      ).get(workspaceId) as { writer_lease_id: string | null; writer_lease_generation: number | null; writer_lease_expires_at: string | null } | undefined;
+      const stored = this.database.connection.prepare(
+        'SELECT admission_generation FROM workspace_admission_receipts WHERE workspace_id = ?',
+      ).get(workspaceId) as { admission_generation: number } | undefined;
+      if (workspace === undefined || workspace.writer_lease_id === null
+        || workspace.writer_lease_generation !== writeLeaseGeneration
+        || workspace.writer_lease_expires_at === null || workspace.writer_lease_expires_at <= receipt.createdAt
+        || (stored?.admission_generation ?? 0) !== expectedAdmissionGeneration) {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+
+      this.database.connection.prepare(
+        `INSERT INTO workspace_admission_receipts (workspace_id, admission_generation, write_lease_generation, receipt_json, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+           admission_generation = excluded.admission_generation,
+           write_lease_generation = excluded.write_lease_generation,
+           receipt_json = excluded.receipt_json,
+           updated_at = excluded.updated_at
+         WHERE workspace_admission_receipts.admission_generation = ?`,
+      ).run(workspaceId, receipt.admissionGeneration, writeLeaseGeneration, receiptJson, receipt.createdAt, expectedAdmissionGeneration);
+      this.database.connection.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  public async invalidateAdmissionReceipt(
+    workspaceId: string,
+    expectedAdmissionGeneration: number,
+    reason: string,
+    invalidatedAt: string = new Date().toISOString(),
+  ): Promise<boolean> {
+    if (reason.length > 256) return false;
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const row = this.database.connection.prepare(
+        'SELECT admission_generation, receipt_json FROM workspace_admission_receipts WHERE workspace_id = ?',
+      ).get(workspaceId) as { admission_generation: number; receipt_json: string } | undefined;
+      if (row === undefined || row.admission_generation !== expectedAdmissionGeneration) {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+      let stored: unknown;
+      try {
+        stored = JSON.parse(row.receipt_json);
+      } catch {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+      if (!isWorkspaceAdmissionReceipt(stored) || stored.workspaceId !== workspaceId) {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+
+      const receipt = { ...stored, invalidatedAt, invalidationReason: reason };
+      const receiptJson = JSON.stringify(receipt);
+      if (Buffer.byteLength(receiptJson, 'utf8') > 16_384) {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+      const result = this.database.connection.prepare(
+        'UPDATE workspace_admission_receipts SET receipt_json = ?, updated_at = ? WHERE workspace_id = ? AND admission_generation = ?',
+      ).run(receiptJson, invalidatedAt, workspaceId, expectedAdmissionGeneration);
+      this.database.connection.exec('COMMIT;');
+      return Number(result.changes) === 1;
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  public async getBaseRebaseReceipt(workspaceId: string): Promise<WorkspaceBaseRebaseReceipt | null> {
+    const row = this.database.connection.prepare(
+      'SELECT receipt_json FROM workspace_base_rebase_receipts WHERE workspace_id = ?',
+    ).get(workspaceId) as { receipt_json: string } | undefined;
+    if (row === undefined) return null;
+    if (Buffer.byteLength(row.receipt_json, 'utf8') > 16_384) {
+      throw new Error('Stored guarded rebase receipt exceeds the trusted size limit');
+    }
+    let receipt: unknown;
+    try {
+      receipt = JSON.parse(row.receipt_json);
+    } catch {
+      throw new Error('Stored guarded rebase receipt is malformed');
+    }
+    if (!isWorkspaceBaseRebaseReceipt(receipt) || receipt.workspaceId !== workspaceId) {
+      throw new Error('Stored guarded rebase receipt failed validation');
+    }
+    return receipt;
+  }
+
+  public async compareAndSwapBaseRebaseReceipt(
+    workspaceId: string,
+    expectedReceiptRevision: number,
+    expectedAdmissionGeneration: number,
+    writeLeaseGeneration: number,
+    receipt: WorkspaceBaseRebaseReceipt,
+  ): Promise<boolean> {
+    if (!Number.isSafeInteger(expectedReceiptRevision) || expectedReceiptRevision < 0
+      || !Number.isSafeInteger(expectedAdmissionGeneration) || expectedAdmissionGeneration < 1
+      || !Number.isSafeInteger(writeLeaseGeneration) || writeLeaseGeneration < 1
+      || receipt.workspaceId !== workspaceId
+      || receipt.receiptRevision !== expectedReceiptRevision + 1
+      || receipt.admissionGeneration !== expectedAdmissionGeneration
+      || receipt.writeLeaseGeneration !== writeLeaseGeneration
+      || !isWorkspaceBaseRebaseReceipt(receipt)) return false;
+    let receiptJson: string;
+    try {
+      receiptJson = JSON.stringify(receipt);
+    } catch {
+      return false;
+    }
+    if (Buffer.byteLength(receiptJson, 'utf8') > 16_384) return false;
+    const timestamp = receipt.finishedAt ?? receipt.startedAt;
+
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const workspace = this.database.connection.prepare(
+        'SELECT writer_lease_id, writer_lease_generation, writer_lease_expires_at FROM workspaces WHERE id = ? AND archived_at IS NULL',
+      ).get(workspaceId) as { writer_lease_id: string | null; writer_lease_generation: number | null; writer_lease_expires_at: string | null } | undefined;
+      const admission = this.database.connection.prepare(
+        'SELECT admission_generation FROM workspace_admission_receipts WHERE workspace_id = ?',
+      ).get(workspaceId) as { admission_generation: number } | undefined;
+      const stored = this.database.connection.prepare(
+        'SELECT receipt_revision, receipt_json FROM workspace_base_rebase_receipts WHERE workspace_id = ?',
+      ).get(workspaceId) as { receipt_revision: number; receipt_json: string } | undefined;
+      if (workspace === undefined || workspace.writer_lease_id === null
+        || workspace.writer_lease_generation !== writeLeaseGeneration
+        || workspace.writer_lease_expires_at === null || workspace.writer_lease_expires_at <= timestamp
+        || admission?.admission_generation !== expectedAdmissionGeneration
+        || (stored?.receipt_revision ?? 0) !== expectedReceiptRevision) {
+        this.database.connection.exec('ROLLBACK;');
+        return false;
+      }
+      if (stored !== undefined && receipt.status !== 'started') {
+        try {
+          const previous: unknown = JSON.parse(stored.receipt_json);
+          if (!isWorkspaceBaseRebaseReceipt(previous) || previous.operationId !== receipt.operationId) {
+            this.database.connection.exec('ROLLBACK;');
+            return false;
+          }
+        } catch {
+          this.database.connection.exec('ROLLBACK;');
+          return false;
+        }
+      }
+
+      const result = this.database.connection.prepare(
+        `INSERT INTO workspace_base_rebase_receipts
+          (workspace_id, receipt_revision, admission_generation, write_lease_generation, receipt_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+           receipt_revision = excluded.receipt_revision,
+           admission_generation = excluded.admission_generation,
+           write_lease_generation = excluded.write_lease_generation,
+           receipt_json = excluded.receipt_json,
+           updated_at = excluded.updated_at
+         WHERE workspace_base_rebase_receipts.receipt_revision = ?`,
+      ).run(
+        workspaceId,
+        receipt.receiptRevision,
+        expectedAdmissionGeneration,
+        writeLeaseGeneration,
+        receiptJson,
+        timestamp,
+        expectedReceiptRevision,
+      );
+      this.database.connection.exec('COMMIT;');
+      return Number(result.changes) === 1;
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
 
   /** Runtime-visible workspaces only. Archived registrations are intentionally outside the active trust boundary. */
   public async list(): Promise<Workspace[]> {
@@ -90,7 +309,7 @@ export class SqliteWorkspaceRepository {
 
   public async insert(workspace: Workspace): Promise<void> {
     this.database.connection.prepare(
-      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_ref, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
       workspace.id,
       workspace.displayName,
@@ -108,6 +327,7 @@ export class SqliteWorkspaceRepository {
       workspace.parentWorkspaceId ?? null,
       workspace.goalWorkspaceKind ?? null,
       workspace.parentSource ?? null,
+      workspace.baseRef ?? null,
       workspace.baseRevision ?? null,
       workspace.branchName ?? null,
       workspace.checkpointId ?? null,
@@ -130,7 +350,7 @@ export class SqliteWorkspaceRepository {
         return false;
       }
       this.database.connection.prepare(
-        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_ref, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       ).run(
         workspace.id,
         workspace.displayName,
@@ -148,6 +368,7 @@ export class SqliteWorkspaceRepository {
         workspace.parentWorkspaceId ?? null,
         workspace.goalWorkspaceKind ?? null,
         workspace.parentSource ?? null,
+        workspace.baseRef ?? null,
         workspace.baseRevision ?? null,
         workspace.branchName ?? null,
         workspace.checkpointId ?? null,
@@ -193,7 +414,7 @@ export class SqliteWorkspaceRepository {
       ).get(workspace.realRootPath, id);
       if (existing !== undefined) throw new Error('Workspace root is already registered');
       this.database.connection.prepare(
-        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, goal_id = ?, parent_workspace_id = ?, goal_workspace_kind = ?, parent_source = ?, base_revision = ?, branch_name = ?, checkpoint_id = ?, integration_state = ?, writer_lease_id = ?, writer_lease_owner_id = ?, writer_lease_generation = ?, writer_lease_expires_at = ?, archived_at = NULL WHERE id = ?',
+        'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, goal_id = ?, parent_workspace_id = ?, goal_workspace_kind = ?, parent_source = ?, base_ref = ?, base_revision = ?, branch_name = ?, checkpoint_id = ?, integration_state = ?, writer_lease_id = ?, writer_lease_owner_id = ?, writer_lease_generation = ?, writer_lease_expires_at = ?, archived_at = NULL WHERE id = ?',
       ).run(
         workspace.displayName,
         workspace.rootPath,
@@ -208,6 +429,7 @@ export class SqliteWorkspaceRepository {
         workspace.parentWorkspaceId ?? null,
         workspace.goalWorkspaceKind ?? null,
         workspace.parentSource ?? null,
+        workspace.baseRef ?? null,
         workspace.baseRevision ?? null,
         workspace.branchName ?? null,
         workspace.checkpointId ?? null,
@@ -299,6 +521,7 @@ export class SqliteWorkspaceRepository {
       ...(value.parent_workspace_id === null ? {} : { parentWorkspaceId: value.parent_workspace_id }),
       ...(value.goal_workspace_kind === null ? {} : { goalWorkspaceKind: value.goal_workspace_kind }),
       ...(value.parent_source === null ? {} : { parentSource: value.parent_source }),
+      ...(value.base_ref === null ? {} : { baseRef: value.base_ref }),
       ...(value.base_revision === null ? {} : { baseRevision: value.base_revision }),
       ...(value.branch_name === null ? {} : { branchName: value.branch_name }),
       ...(value.checkpoint_id === null ? {} : { checkpointId: value.checkpoint_id }),
@@ -350,4 +573,82 @@ export class SqliteWorkspaceRepository {
       && (value.writer_lease_generation === null || (typeof value.writer_lease_generation === 'number' && Number.isSafeInteger(value.writer_lease_generation) && value.writer_lease_generation > 0))
       && (value.writer_lease_expires_at === null || typeof value.writer_lease_expires_at === 'string');
   }
+}
+
+function isWorkspaceBaseRebaseReceipt(value: unknown): value is WorkspaceBaseRebaseReceipt {
+  if (typeof value !== 'object' || value === null) return false;
+  const receipt = value as Partial<WorkspaceBaseRebaseReceipt>;
+  const allowedKeys = new Set([
+    'operationId', 'receiptRevision', 'workspaceId', 'goalId', 'branchName', 'status',
+    'oldHead', 'oldBaseSha', 'newBaseSha', 'checkpointId', 'checkpointRevision', 'checkpointHead',
+    'recoveryRef', 'admissionGeneration', 'writeLeaseGeneration', 'remoteGoalRef', 'remoteGoalSha',
+    'resultHead', 'conflictedPaths', 'abortSucceeded', 'startedAt', 'finishedAt', 'failureReason',
+  ]);
+  if (Object.keys(receipt).some((key) => !allowedKeys.has(key))) return false;
+  const sha = (input: unknown): input is string => typeof input === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(input);
+  const paths = receipt.conflictedPaths;
+  return typeof receipt.operationId === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(receipt.operationId)
+    && Number.isSafeInteger(receipt.receiptRevision) && (receipt.receiptRevision ?? 0) > 0
+    && typeof receipt.workspaceId === 'string' && receipt.workspaceId.length > 0 && receipt.workspaceId.length <= 128
+    && typeof receipt.goalId === 'string' && receipt.goalId.length > 0 && receipt.goalId.length <= 128
+    && typeof receipt.branchName === 'string' && receipt.branchName.length > 0 && receipt.branchName.length <= 1024 && !receipt.branchName.includes('\0')
+    && (receipt.status === 'started' || receipt.status === 'completed' || receipt.status === 'recovery_required')
+    && sha(receipt.oldHead) && sha(receipt.oldBaseSha) && sha(receipt.newBaseSha) && sha(receipt.checkpointHead)
+    && typeof receipt.checkpointId === 'string' && receipt.checkpointId.length > 0 && receipt.checkpointId.length <= 128 && !receipt.checkpointId.includes('\0')
+    && Number.isSafeInteger(receipt.checkpointRevision) && (receipt.checkpointRevision ?? 0) > 0
+    && typeof receipt.recoveryRef === 'string'
+    && /^refs\/unified-mpc\/recovery\/rebase\/[A-Za-z0-9._-]{1,128}$/.test(receipt.recoveryRef)
+    && Number.isSafeInteger(receipt.admissionGeneration) && (receipt.admissionGeneration ?? 0) > 0
+    && Number.isSafeInteger(receipt.writeLeaseGeneration) && (receipt.writeLeaseGeneration ?? 0) > 0
+    && (receipt.remoteGoalRef === undefined || (typeof receipt.remoteGoalRef === 'string'
+      && receipt.remoteGoalRef.length <= 2048 && receipt.remoteGoalRef.startsWith('refs/heads/') && !receipt.remoteGoalRef.includes('\0')))
+    && (receipt.remoteGoalSha === undefined || sha(receipt.remoteGoalSha))
+    && (receipt.resultHead === undefined || sha(receipt.resultHead))
+    && (paths === undefined || (Array.isArray(paths) && paths.length <= 100
+      && paths.every((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 4096 && !entry.includes('\0'))))
+    && (receipt.abortSucceeded === undefined || typeof receipt.abortSucceeded === 'boolean')
+    && typeof receipt.startedAt === 'string' && Number.isFinite(Date.parse(receipt.startedAt))
+    && (receipt.finishedAt === undefined || (typeof receipt.finishedAt === 'string' && Number.isFinite(Date.parse(receipt.finishedAt))))
+    && (receipt.failureReason === undefined || (typeof receipt.failureReason === 'string' && receipt.failureReason.length <= 256))
+    && (receipt.status !== 'completed' || (receipt.resultHead !== undefined && receipt.finishedAt !== undefined))
+    && (receipt.status !== 'recovery_required' || (receipt.failureReason !== undefined && receipt.finishedAt !== undefined));
+}
+
+function isWorkspaceAdmissionReceipt(value: unknown): value is WorkspaceAdmissionReceipt {
+  if (typeof value !== 'object' || value === null) return false;
+  const receipt = value as Partial<WorkspaceAdmissionReceipt>;
+  const allowedKeys = new Set([
+    'admissionId', 'projectId', 'workspaceId', 'goalId', 'workspaceKind', 'repositoryIdentity',
+    'gitCommonDirIdentity', 'worktreeIdentity', 'branchName', 'expectedWorkspaceHead',
+    'observedWorkspaceHead', 'baseRef', 'expectedBaseSha', 'resolvedBaseSha', 'remoteGoalRef',
+    'remoteGoalSha', 'mergeBaseSha', 'dirtyState', 'dirtyFingerprint', 'stagedFingerprint',
+    'untrackedFingerprint', 'checkpointId', 'checkpointRevision', 'writeLeaseGeneration',
+    'runtimeDeploymentId', 'runtimeGeneration', 'runtimeBuildVersion', 'runtimeBuildCommit',
+    'runtimeBuildDirty', 'runtimeProtocolGeneration', 'runtimeStartedAt', 'workflowVersion',
+    'admissionGeneration', 'createdAt', 'expiresAt', 'invalidatedAt', 'invalidationReason',
+  ]);
+  if (Object.keys(receipt).some((key) => !allowedKeys.has(key))) return false;
+  return typeof receipt.admissionId === 'string'
+    && typeof receipt.projectId === 'string'
+    && typeof receipt.workspaceId === 'string'
+    && (receipt.workspaceKind === 'git' || receipt.workspaceKind === 'non_git')
+    && typeof receipt.worktreeIdentity === 'string'
+    && typeof receipt.expectedWorkspaceHead === 'string'
+    && typeof receipt.observedWorkspaceHead === 'string'
+    && (receipt.dirtyState === 'clean' || receipt.dirtyState === 'dirty' || receipt.dirtyState === 'unknown')
+    && typeof receipt.dirtyFingerprint === 'string'
+    && Number.isSafeInteger(receipt.writeLeaseGeneration)
+    && typeof receipt.runtimeDeploymentId === 'string'
+    && typeof receipt.runtimeGeneration === 'string'
+    && typeof receipt.runtimeBuildVersion === 'string'
+    && (receipt.runtimeBuildCommit === undefined || typeof receipt.runtimeBuildCommit === 'string')
+    && typeof receipt.runtimeBuildDirty === 'boolean'
+    && Number.isSafeInteger(receipt.runtimeProtocolGeneration)
+    && typeof receipt.runtimeStartedAt === 'string'
+    && Number.isSafeInteger(receipt.workflowVersion)
+    && Number.isSafeInteger(receipt.admissionGeneration)
+    && typeof receipt.createdAt === 'string'
+    && (receipt.expiresAt === undefined || typeof receipt.expiresAt === 'string')
+    && (receipt.invalidatedAt === undefined || typeof receipt.invalidatedAt === 'string')
+    && (receipt.invalidationReason === undefined || (typeof receipt.invalidationReason === 'string' && receipt.invalidationReason.length <= 256));
 }

@@ -70,14 +70,27 @@ describe('session tools', () => {
     expect(value.prompt).not.toEqual(expect.stringContaining('Before ending'));
   });
 
-  it('returns verify_incremental cache hit for unchanged diff and miss after the diff changes', async () => {
+  it('returns verify_incremental cache hit only while the exact source HEAD and diff stay unchanged', async () => {
     let patch = '+first-diff';
+    let head = 'a'.repeat(40);
     let starts = 0;
     const context = {
       actor,
       contextEconomy: new ContextEconomyRuntime(),
       services: {
         git: {
+          async observeWorkspace() {
+            return ok({
+              repositoryIdentity: 'repo-1',
+              gitCommonDirIdentity: 'common-1',
+              worktreeIdentity: 'worktree-1',
+              branch: 'feat/task-7',
+              head,
+              statusEntries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }],
+              stagedFingerprint: 'staged-1',
+              dirtyFingerprint: patch,
+            });
+          },
           async status() {
             return ok({ entries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }] });
           },
@@ -120,14 +133,17 @@ describe('session tools', () => {
     const second = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     patch = '+second-diff';
     const third = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    head = 'b'.repeat(40);
+    const fourth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
 
     expect(first).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
     expect(second).toMatchObject({ ok: true, value: { cache: 'hit', passed: true } });
     expect(third).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 1, misses: 2, hitRate: 1 / 3 });
+    expect(fourth).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
+    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 1, misses: 3, hitRate: 1 / 4 });
     expect(verifier.stats().bytesSaved).toBeGreaterThan(0);
     expect(verifier.invalidate('workspace-1')).toBe(1);
-    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 1, misses: 2 });
-    expect(starts).toBe(2);
+    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 1, misses: 3 });
+    expect(starts).toBe(3);
   });
 });

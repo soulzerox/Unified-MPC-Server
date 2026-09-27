@@ -26,6 +26,9 @@ import { MANAGED_RESOURCE_BINDING_MIGRATION_SQL } from './migrations/managed-res
 import { GOAL_RUNTIME_WORKSPACE_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-workspace-observation-migration.js';
 import { GOAL_WORKSPACE_METADATA_MIGRATION_SQL } from './migrations/goal-workspace-metadata-migration.js';
 import { GOAL_WORKSPACE_WRITER_LEASE_MIGRATION_SQL } from './migrations/goal-workspace-writer-lease-migration.js';
+import { WORKSPACE_ADMISSION_MIGRATION_SQL } from './migrations/workspace-admission-migration.js';
+import { WORKSPACE_BASE_REF_MIGRATION_SQL } from './migrations/workspace-base-ref-migration.js';
+import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base-rebase-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -90,6 +93,9 @@ export class SqliteDatabase {
     this.applyMigration({ id: '023_workspace_lifecycle', sql: WORKSPACE_LIFECYCLE_MIGRATION_SQL });
     this.applyMigration({ id: '024_goal_workspace_metadata', sql: GOAL_WORKSPACE_METADATA_MIGRATION_SQL });
     this.applyMigration({ id: '025_goal_workspace_writer_lease', sql: GOAL_WORKSPACE_WRITER_LEASE_MIGRATION_SQL });
+    this.applyMigration({ id: '026_workspace_admission', sql: WORKSPACE_ADMISSION_MIGRATION_SQL });
+    this.applyMigration({ id: '027_workspace_base_ref', sql: WORKSPACE_BASE_REF_MIGRATION_SQL });
+    this.applyMigration({ id: '028_workspace_base_rebase', sql: WORKSPACE_BASE_REBASE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

@@ -35,6 +35,86 @@ function repository(workspace: Workspace): WorkspaceRepository {
 }
 
 describe('GitService', () => {
+  it('routes admission observations and explicit-ref refresh through the registered workspace root', async () => {
+    const workspace = await createWorkspace();
+    const calls: unknown[][] = [];
+    const adapter = {
+      async observeWorkspace(cwd: string, options: unknown, signal?: AbortSignal) {
+        calls.push(['observe', cwd, options, signal]);
+        return { ok: true as const, value: { head: 'a'.repeat(40) } };
+      },
+      async refreshRemoteRef(cwd: string, remote: string, sourceRef: string, destinationRef: string, signal?: AbortSignal) {
+        calls.push(['refresh', cwd, remote, sourceRef, destinationRef, signal]);
+        return { ok: true as const, value: 'b'.repeat(40) };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const secondWorkspace = { ...workspace, id: 'workspace-2' };
+    const secondService = new GitService(repository(secondWorkspace), undefined, adapter);
+    const actor = { clientId: 'test', clientName: 'test' };
+    const signal = new AbortController().signal;
+    const options = { baseRef: 'refs/heads/main' };
+
+    await expect(service.observeWorkspace(actor, workspace.id, options, signal)).resolves.toMatchObject({ ok: true });
+    const firstRefresh = await service.refreshAdmissionRef(actor, workspace.id, 'origin', 'refs/heads/main', signal);
+    const secondRefresh = await secondService.refreshAdmissionRef(actor, secondWorkspace.id, 'origin', 'refs/heads/main', signal);
+    expect(firstRefresh).toEqual({ ok: true, value: { ref: calls[1]?.[4], sha: 'b'.repeat(40) } });
+    expect(secondRefresh).toEqual({ ok: true, value: { ref: calls[2]?.[4], sha: 'b'.repeat(40) } });
+    expect(calls[0]).toEqual(['observe', workspace.realRootPath, options, signal]);
+    expect(calls[1]?.slice(0, 4)).toEqual(['refresh', workspace.realRootPath, 'origin', 'refs/heads/main']);
+    expect(calls[2]?.slice(0, 4)).toEqual(['refresh', secondWorkspace.realRootPath, 'origin', 'refs/heads/main']);
+    expect(calls[1]?.[4]).toMatch(/^refs\/unified-mpc\/admission\/workspaces\/[a-f0-9]{64}\/[a-f0-9]{64}$/);
+    expect(calls[2]?.[4]).not.toBe(calls[1]?.[4]);
+  });
+
+  it('routes guarded rebase primitives through the registered workspace root', async () => {
+    const workspace = await createWorkspace();
+    const calls: unknown[][] = [];
+    const adapter = {
+      async remoteBranchSha(cwd: string, remote: string, branchName: string, signal?: AbortSignal) {
+        calls.push(['remoteBranchSha', cwd, remote, branchName, signal]);
+        return { ok: true as const, value: null };
+      },
+      async isAncestor(cwd: string, ancestorSha: string, descendantSha: string, signal?: AbortSignal) {
+        calls.push(['isAncestor', cwd, ancestorSha, descendantSha, signal]);
+        return { ok: true as const, value: true };
+      },
+      async createRecoveryRef(cwd: string, recoveryRef: string, expectedHead: string, signal?: AbortSignal) {
+        calls.push(['createRecoveryRef', cwd, recoveryRef, expectedHead, signal]);
+        return { ok: true as const, value: undefined };
+      },
+      async guardedRebase(cwd: string, request: unknown, signal?: AbortSignal) {
+        calls.push(['guardedRebase', cwd, request, signal]);
+        return { ok: true as const, value: { status: 'completed' as const, newHead: '4'.repeat(40) } };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const actor = { clientId: 'test', clientName: 'test' };
+    const signal = new AbortController().signal;
+    const oldHead = '1'.repeat(40);
+    const oldBase = '2'.repeat(40);
+    const newBase = '3'.repeat(40);
+    const recoveryRef = 'refs/unified-mpc/recovery/rebase/operation-1';
+    const request = {
+      expectedBranch: 'codex/goal-1', oldHead, oldBaseSha: oldBase, newBaseSha: newBase, recoveryRef,
+    };
+
+    await expect(service.remoteBranchSha(actor, workspace.id, 'origin', 'codex/goal-1', signal))
+      .resolves.toEqual({ ok: true, value: null });
+    await expect(service.isAncestor(actor, workspace.id, oldBase, newBase, signal))
+      .resolves.toEqual({ ok: true, value: true });
+    await expect(service.createRecoveryRef(actor, workspace.id, recoveryRef, oldHead, signal))
+      .resolves.toEqual({ ok: true, value: undefined });
+    await expect(service.guardedRebase(actor, workspace.id, request, signal))
+      .resolves.toMatchObject({ ok: true, value: { status: 'completed', newHead: '4'.repeat(40) } });
+    expect(calls).toEqual([
+      ['remoteBranchSha', workspace.realRootPath, 'origin', 'codex/goal-1', signal],
+      ['isAncestor', workspace.realRootPath, oldBase, newBase, signal],
+      ['createRecoveryRef', workspace.realRootPath, recoveryRef, oldHead, signal],
+      ['guardedRebase', workspace.realRootPath, request, signal],
+    ]);
+  });
+
   it('accepts prohibited Git forms and an outside cwd only with trusted Full Bypass authorization', async () => {
     const workspace = await createWorkspace();
     const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-outside-'));

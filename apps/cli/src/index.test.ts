@@ -6,6 +6,16 @@ import { ok, err } from '@unified-mpc/domain';
 import type { ExtensionsService } from '@unified-mpc/extensions';
 import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
 
+const sourceRuntimeAdmissionIdentity = {
+  runtimeDeploymentId: 'cli-test-deployment',
+  runtimeGeneration: 'cli-test-generation',
+  runtimeBuildVersion: '4.61.0+0123456789ab',
+  runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567',
+  runtimeBuildDirty: false,
+  runtimeProtocolGeneration: 1,
+  runtimeStartedAt: '2026-09-28T00:00:00.000Z',
+} as const;
+
 describe('CLI argument parser', () => {
   it('parses workspace, MCP, doctor, and Codex doctor commands', () => {
     expect(parseCliArgs(['workspace', 'add', '/home/qwerty/project'])).toEqual({
@@ -144,7 +154,7 @@ describe('CLI default dependency lifecycle', () => {
   });
 
   it('projects canonical harness contracts through CLI tools list', async () => {
-    const dependencies = createDefaultCliDependencies();
+    const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
     const tools = await dependencies.toolsList?.();
     const bootstrap = tools?.find((tool) => tool.name === 'workspace_bootstrap');
     const prepare = tools?.find((tool) => tool.name === 'prepare_code_change');
@@ -194,7 +204,11 @@ describe('CLI default dependency lifecycle', () => {
     };
     try {
       await writeFile(path.join(root, 'AGENTS.md'), '# CLI harness rules\\n');
-      const dependencies = createDefaultCliDependencies({ thaiRagDriver, extensions });
+      const dependencies = createDefaultCliDependencies({
+        runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity,
+        thaiRagDriver,
+        extensions,
+      });
       const workspace = await dependencies.workspaceAdd(root);
       expect(workspace.ok).toBe(true);
       if (!workspace.ok) return;
@@ -218,7 +232,7 @@ describe('CLI default dependency lifecycle', () => {
   }, 30_000);
 
   it('wires the standalone tools facade to extension services so child MCP inspection is available', async () => {
-    const dependencies = createDefaultCliDependencies();
+    const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
     const result = await dependencies.toolsCall?.('mcp_list', {});
     expect(result).toMatchObject({ ok: true });
   }, 15_000);

@@ -2,8 +2,8 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { GitCommandResult, GitStatusResult } from '@unified-mpc/git';
-import type { Result } from '@unified-mpc/domain';
+import type { GitCommandResult, GitGuardedRebaseResult, GitStatusResult, GitWorkspaceSnapshot } from '@unified-mpc/git';
+import type { Result, WorkspaceAdmissionReceipt, WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import type { Workspace, WorkspaceRepository, WorkspaceWriterLease } from '@unified-mpc/workspace';
 import { GoalWorkspaceService, type GoalWorkspaceGitPort } from './goal-workspace-service.js';
 
@@ -53,8 +53,8 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
   public async releaseGoalWriterLease(id: string, leaseId: string, generation: number): Promise<boolean> {
     const current = this.workspaces.find((workspace) => workspace.id === id && workspace.archivedAt == null);
     if (current?.writerLease === undefined || current.writerLease.leaseId !== leaseId || current.writerLease.generation !== generation) return false;
-    const { writerLease, ...withoutLease } = current;
-    void writerLease;
+    const { writerLease: releasedWriterLease, ...withoutLease } = current;
+    void releasedWriterLease;
     this.workspaces[this.workspaces.indexOf(current)] = withoutLease;
     return true;
   }
@@ -63,6 +63,8 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
 class FakeGitPort implements GoalWorkspaceGitPort {
   public readonly commands: string[][] = [];
   public readonly removed: string[] = [];
+  public readonly refreshedRefs: Array<{ remote: string; sourceRef: string }> = [];
+  public refreshedBaseSha = 'c'.repeat(40);
   public statusEntries: GitStatusResult['entries'] = [];
   public runResults: GitCommandResult[] = [];
 
@@ -75,9 +77,457 @@ class FakeGitPort implements GoalWorkspaceGitPort {
     if (args[0] === 'worktree' && args[1] === 'remove') this.removed.push(args[2] ?? '');
     return { ok: true, value: this.runResults.shift() ?? { exitCode: 0, stdout: '', stderr: '' } };
   }
+
+  public async refreshRemoteRef(_cwd: string, remote: string, sourceRef: string): Promise<Result<string>> {
+    this.refreshedRefs.push({ remote, sourceRef });
+    return { ok: true, value: this.refreshedBaseSha };
+  }
+}
+
+interface GuardedRebaseHarnessOptions {
+  readonly workspacePatch?: Partial<Workspace>;
+  readonly admissionPatch?: Partial<WorkspaceAdmissionReceipt>;
+  readonly admissionMissing?: boolean;
+  readonly observedHead?: string;
+  readonly observedDirtyFingerprint?: string;
+  readonly observedStatusEntries?: GitStatusResult['entries'];
+  readonly remoteGoalSha?: string | null;
+  readonly ancestry?: boolean;
+  readonly priorReceipt?: WorkspaceBaseRebaseReceipt | null;
+  readonly failStartedReceiptCas?: boolean;
+  readonly rebaseResult?: Result<GitGuardedRebaseResult>;
+  readonly expireLeaseAfterRebase?: boolean;
+}
+
+interface GuardedRebaseHarness {
+  readonly repository: MemoryWorkspaceRepository;
+  readonly service: GoalWorkspaceService;
+  readonly head: string;
+  readonly oldBase: string;
+  readonly newBase: string;
+  readonly newHead: string;
+  readonly lease: WorkspaceWriterLease;
+  readonly admission: WorkspaceAdmissionReceipt;
+  readonly receipts: WorkspaceBaseRebaseReceipt[];
+  readonly invalidationReasons: string[];
+  readonly guardedRebaseCalls: () => number;
+}
+
+function guardedRebaseHarness(options: GuardedRebaseHarnessOptions = {}): GuardedRebaseHarness {
+  const repository = new MemoryWorkspaceRepository();
+  const head = 'a'.repeat(40);
+  const oldBase = 'b'.repeat(40);
+  const newBase = 'c'.repeat(40);
+  const newHead = 'd'.repeat(40);
+  const lease: WorkspaceWriterLease = {
+    leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2026-09-23T01:00:00.000Z',
+  };
+  const workspace: Workspace = {
+    id: 'goal-workspace-1', displayName: 'Goal', rootPath: '/goal', realRootPath: '/goal',
+    createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'goal', goalId: 'goal-1',
+    parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree', baseRef: 'origin/main',
+    baseRevision: oldBase, branchName: 'codex/goal-1', checkpointId: 'checkpoint-1',
+    integrationState: 'pending', writerLease: lease, ...options.workspacePatch,
+  };
+  repository.workspaces.push(workspace);
+  const admission: WorkspaceAdmissionReceipt = {
+    admissionId: 'admission-1', projectId: 'project-1', workspaceId: workspace.id, goalId: 'goal-1',
+    workspaceKind: 'git', repositoryIdentity: 'repo-1', worktreeIdentity: 'worktree-1',
+    branchName: 'codex/goal-1', expectedWorkspaceHead: head, observedWorkspaceHead: head,
+    baseRef: 'origin/main', expectedBaseSha: oldBase, resolvedBaseSha: oldBase, mergeBaseSha: oldBase,
+    dirtyState: 'clean', dirtyFingerprint: 'clean-1', stagedFingerprint: 'staged-1',
+    checkpointId: 'checkpoint-1', checkpointRevision: 7, writeLeaseGeneration: 3,
+    runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1',
+    runtimeBuildVersion: '4.61.0+0123456789ab',
+    runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567', runtimeBuildDirty: false,
+    runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+    workflowVersion: 1, admissionGeneration: 4, createdAt: '2026-09-23T00:00:00.000Z',
+    ...options.admissionPatch,
+  };
+  const receipts: WorkspaceBaseRebaseReceipt[] = [];
+  const invalidationReasons: string[] = [];
+  let storedReceipt = options.priorReceipt ?? null;
+  Object.assign(repository, {
+    getAdmissionReceipt: async () => options.admissionMissing === true ? null : admission,
+    getBaseRebaseReceipt: async () => storedReceipt,
+    compareAndSwapBaseRebaseReceipt: async (
+      _workspaceId: string,
+      expectedRevision: number,
+      _expectedAdmissionGeneration: number,
+      _writeLeaseGeneration: number,
+      receipt: WorkspaceBaseRebaseReceipt,
+    ) => {
+      if (options.failStartedReceiptCas === true && receipt.status === 'started') return false;
+      if ((storedReceipt?.receiptRevision ?? 0) !== expectedRevision) return false;
+      storedReceipt = receipt;
+      receipts.push(receipt);
+      return true;
+    },
+    invalidateAdmissionReceipt: async (
+      _workspaceId: string,
+      _generation: number,
+      reason: string,
+    ) => {
+      invalidationReasons.push(reason);
+      return true;
+    },
+  });
+
+  const git = new FakeGitPort();
+  git.refreshedBaseSha = newBase;
+  let guardedRebaseCalls = 0;
+  Object.assign(git, {
+    observeWorkspace: async () => ({ ok: true, value: {
+      repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+      branch: 'codex/goal-1', head: options.observedHead ?? head,
+      statusEntries: options.observedStatusEntries ?? [],
+      stagedFingerprint: 'staged-1', dirtyFingerprint: options.observedDirtyFingerprint ?? 'clean-1',
+      baseRef: oldBase, baseSha: oldBase, mergeBaseSha: oldBase,
+    } }),
+    remoteBranchSha: async () => ({ ok: true, value: options.remoteGoalSha ?? null }),
+    isAncestor: async () => ({ ok: true, value: options.ancestry ?? true }),
+    createRecoveryRef: async () => ({ ok: true, value: undefined }),
+    guardedRebase: async () => {
+      guardedRebaseCalls += 1;
+      if (options.expireLeaseAfterRebase === true) {
+        repository.workspaces[0] = {
+          ...repository.workspaces[0]!,
+          writerLease: { ...lease, expiresAt: '2026-09-23T00:00:00.000Z' },
+        };
+      }
+      return options.rebaseResult ?? { ok: true, value: { status: 'completed', newHead } };
+    },
+  });
+  return {
+    repository,
+    service: new GoalWorkspaceService(repository, git, { now: () => new Date('2026-09-23T00:30:00.000Z') }),
+    head, oldBase, newBase, newHead, lease, admission, receipts, invalidationReasons,
+    guardedRebaseCalls: () => guardedRebaseCalls,
+  };
 }
 
 describe('GoalWorkspaceService', () => {
+  it('creates a new worktree from the freshly fetched origin/main commit and records that exact SHA', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-main-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    git.runResults = [
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'), { recursive: true });
+      const result = await new GoalWorkspaceService(repository, git).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', branchName: 'codex/goal-1',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(git.refreshedRefs).toEqual([{ remote: 'origin', sourceRef: 'refs/heads/main' }]);
+      expect(git.commands.find((command) => command[0] === 'worktree')).toEqual([
+        'worktree', 'add', '-b', 'codex/goal-1', path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'), git.refreshedBaseSha,
+      ]);
+      expect(repository.workspaces.find((workspace) => workspace.id !== 'project-1')).toMatchObject({
+        baseRef: 'origin/main',
+        baseRevision: git.refreshedBaseSha,
+      });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('persists admission only when exact checkpoint, current writer lease, and runtime identity agree', async () => {
+    const repository = new MemoryWorkspaceRepository();
+    const head = 'a'.repeat(40);
+    const base = 'b'.repeat(40);
+    repository.workspaces.push({
+      id: 'goal-workspace-1', displayName: 'Goal', rootPath: '/goal', realRootPath: '/goal', createdAt: '2026-09-23T00:00:00.000Z',
+      lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+      baseRevision: base, branchName: 'codex/goal-1', checkpointId: 'checkpoint-1',
+      writerLease: { leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2026-09-23T01:00:00.000Z' },
+    });
+    let stored: WorkspaceAdmissionReceipt | null = null;
+    repository.getAdmissionReceipt = async (): Promise<WorkspaceAdmissionReceipt | null> => stored;
+    repository.compareAndSwapAdmissionReceipt = async (_id, expectedGeneration, _leaseGeneration, receipt): Promise<boolean> => {
+      if ((stored?.admissionGeneration ?? 0) !== expectedGeneration) return false;
+      stored = receipt;
+      return true;
+    };
+    const git = new FakeGitPort();
+    git.observeWorkspace = async (): Promise<Result<GitWorkspaceSnapshot>> => ({
+      ok: true,
+      value: {
+        repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+        branch: 'codex/goal-1', head, statusEntries: [], stagedFingerprint: 'staged-1', dirtyFingerprint: 'dirty-1',
+        baseRef: base, baseSha: base, mergeBaseSha: base,
+      },
+    });
+    const service = new GoalWorkspaceService(repository, git, { now: (): Date => new Date('2026-09-23T00:30:00.000Z') });
+
+    const result = await service.captureAdmission({
+      workspaceId: 'goal-workspace-1', checkpointId: 'checkpoint-1', checkpointRevision: 7, checkpointHead: head,
+      workflowVersion: 1,
+      runtime: {
+        runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1', runtimeBuildVersion: '4.61.0+0123456789ab',
+        runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567', runtimeBuildDirty: false,
+        runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { admissionGeneration: 1, expectedWorkspaceHead: head, observedWorkspaceHead: head, expectedBaseSha: base, resolvedBaseSha: base, checkpointRevision: 7, writeLeaseGeneration: 3, runtimeGeneration: 'generation-1' } });
+    expect(stored).toEqual(result.ok ? result.value : null);
+  });
+
+  it('refuses an admission receipt when the workspace head no longer matches its checkpoint', async () => {
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'goal-workspace-1', displayName: 'Goal', rootPath: '/goal', realRootPath: '/goal', createdAt: '2026-09-23T00:00:00.000Z',
+      lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'b'.repeat(40), branchName: 'codex/goal-1', checkpointId: 'checkpoint-1',
+      writerLease: { leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2026-09-23T01:00:00.000Z' },
+    });
+    let writes = 0;
+    repository.getAdmissionReceipt = async (): Promise<WorkspaceAdmissionReceipt | null> => null;
+    repository.compareAndSwapAdmissionReceipt = async (): Promise<boolean> => { writes += 1; return true; };
+    const git = new FakeGitPort();
+    git.observeWorkspace = async (): Promise<Result<GitWorkspaceSnapshot>> => ({ ok: true, value: {
+      repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1', branch: 'codex/goal-1',
+      head: 'a'.repeat(40), statusEntries: [], stagedFingerprint: 'staged-1', dirtyFingerprint: 'dirty-1',
+      baseRef: 'b'.repeat(40), baseSha: 'b'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+    } });
+    const service = new GoalWorkspaceService(repository, git, { now: (): Date => new Date('2026-09-23T00:30:00.000Z') });
+
+    const result = await service.captureAdmission({
+      workspaceId: 'goal-workspace-1', checkpointId: 'checkpoint-1', checkpointRevision: 7, checkpointHead: 'c'.repeat(40),
+      workflowVersion: 1,
+      runtime: {
+        runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1', runtimeBuildVersion: '4.61.0+0123456789ab',
+        runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567', runtimeBuildDirty: false,
+        runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+      },
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(writes).toBe(0);
+  });
+
+  it('rebases a clean private goal branch only after exact admission, lease, checkpoint, and frozen-base checks pass', async () => {
+    const repository = new MemoryWorkspaceRepository();
+    const head = 'a'.repeat(40);
+    const oldBase = 'b'.repeat(40);
+    const newBase = 'c'.repeat(40);
+    const newHead = 'd'.repeat(40);
+    const lease = { leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2026-09-23T01:00:00.000Z' };
+    repository.workspaces.push({
+      id: 'goal-workspace-1', displayName: 'Goal', rootPath: '/goal', realRootPath: '/goal', createdAt: '2026-09-23T00:00:00.000Z',
+      lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+      baseRef: 'origin/main', baseRevision: oldBase, branchName: 'codex/goal-1', checkpointId: 'checkpoint-1',
+      integrationState: 'pending', writerLease: lease,
+    });
+    const admission: WorkspaceAdmissionReceipt = {
+      admissionId: 'admission-1', projectId: 'project-1', workspaceId: 'goal-workspace-1', goalId: 'goal-1',
+      workspaceKind: 'git', repositoryIdentity: 'repo-1', worktreeIdentity: 'worktree-1', branchName: 'codex/goal-1',
+      expectedWorkspaceHead: head, observedWorkspaceHead: head, baseRef: 'origin/main', expectedBaseSha: oldBase,
+      resolvedBaseSha: oldBase, mergeBaseSha: oldBase, dirtyState: 'clean', dirtyFingerprint: 'clean-1',
+      stagedFingerprint: 'staged-1', checkpointId: 'checkpoint-1', checkpointRevision: 7, writeLeaseGeneration: 3,
+      runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1', runtimeBuildVersion: '4.61.0+0123456789ab',
+      runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567', runtimeBuildDirty: false,
+      runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z', workflowVersion: 1,
+      admissionGeneration: 4, createdAt: '2026-09-23T00:00:00.000Z',
+    };
+    const rebaseReceipts: Array<{ status: string; oldHead: string; newBaseSha: string; resultHead?: string }> = [];
+    let invalidated = false;
+    Object.assign(repository, {
+      getAdmissionReceipt: async () => admission,
+      getBaseRebaseReceipt: async () => null,
+      compareAndSwapBaseRebaseReceipt: async (
+        _workspaceId: string,
+        _expectedRevision: number,
+        _expectedAdmissionGeneration: number,
+        _writeLeaseGeneration: number,
+        receipt: { status: string; oldHead: string; newBaseSha: string; resultHead?: string },
+      ) => { rebaseReceipts.push(receipt); return true; },
+      invalidateAdmissionReceipt: async () => { invalidated = true; return true; },
+    });
+    const git = new FakeGitPort();
+    git.refreshedBaseSha = newBase;
+    Object.assign(git, {
+      observeWorkspace: async () => ({ ok: true, value: {
+        repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+        branch: 'codex/goal-1', head, statusEntries: [], stagedFingerprint: 'staged-1', dirtyFingerprint: 'clean-1',
+        baseRef: oldBase, baseSha: oldBase, mergeBaseSha: oldBase,
+      } }),
+      remoteBranchSha: async () => ({ ok: true, value: null }),
+      isAncestor: async () => ({ ok: true, value: true }),
+      createRecoveryRef: async () => ({ ok: true, value: undefined }),
+      guardedRebase: async (_cwd: string, request: { oldHead: string; oldBaseSha: string; newBaseSha: string }) => {
+        expect(request).toMatchObject({ oldHead: head, oldBaseSha: oldBase, newBaseSha: newBase });
+        return { ok: true, value: { status: 'completed', newHead } };
+      },
+    });
+    const service = new GoalWorkspaceService(repository, git, { now: (): Date => new Date('2026-09-23T00:30:00.000Z') });
+
+    const result = await service.rebaseStaleBase({
+      goalId: 'goal-1',
+      expectedAdmissionGeneration: 4,
+      lease: { leaseId: lease.leaseId, generation: lease.generation },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { status: 'REBASED', oldHead: head, newHead, oldBaseSha: oldBase, newBaseSha: newBase, checkpointId: 'checkpoint-1' },
+    });
+    expect(repository.workspaces[0]).toMatchObject({ baseRevision: newBase });
+    expect(rebaseReceipts.map((receipt) => receipt.status)).toEqual(['started', 'completed']);
+    expect(invalidated).toBe(true);
+  });
+
+  it('fails closed across guarded rebase denial evidence before Git mutation', async () => {
+    const cases: ReadonlyArray<readonly [string, GuardedRebaseHarnessOptions, string]> = [
+      ['dirty workspace', { observedStatusEntries: [{ path: 'dirty.ts', kind: 'modified' }] }, 'dirty_workspace'],
+      ['pinned base', { workspacePatch: { baseRef: undefined } }, 'pinned_base'],
+      ['published branch', { remoteGoalSha: 'e'.repeat(40) }, 'published_branch'],
+      ['moved remote goal branch', {
+        admissionPatch: { remoteGoalSha: 'e'.repeat(40) }, remoteGoalSha: 'f'.repeat(40),
+      }, 'remote_goal_branch_moved'],
+      ['rewritten base', { ancestry: false }, 'base_history_rewritten_or_unrelated'],
+      ['expired writer lease', {
+        workspacePatch: {
+          writerLease: {
+            leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2026-09-23T00:30:00.000Z',
+          },
+        },
+      }, 'stale_writer_lease'],
+      ['stale checkpoint', { workspacePatch: { checkpointId: 'checkpoint-2' } }, 'admission_or_checkpoint_missing_or_stale'],
+      ['workspace head drift', { observedHead: 'e'.repeat(40) }, 'workspace_state_changed'],
+      ['admission generation mismatch', { admissionPatch: { admissionGeneration: 5 } }, 'admission_or_checkpoint_missing_or_stale'],
+      ['frozen base revision drift', { workspacePatch: { baseRevision: 'e'.repeat(40) } }, 'workspace_base_revision_changed'],
+    ];
+
+    for (const [label, options, expectedReason] of cases) {
+      const harness = guardedRebaseHarness(options);
+      const result = await harness.service.rebaseStaleBase({
+        goalId: 'goal-1',
+        expectedAdmissionGeneration: 4,
+        lease: { leaseId: harness.lease.leaseId, generation: harness.lease.generation },
+      });
+      expect(result, label).toMatchObject({ ok: true, value: { status: 'RECOVERY_REQUIRED', reason: expectedReason } });
+      expect(harness.guardedRebaseCalls(), label).toBe(0);
+      expect(harness.receipts, label).toHaveLength(0);
+    }
+  });
+
+  it('fails closed for a prior started receipt and a started-receipt CAS race', async () => {
+    const prior: WorkspaceBaseRebaseReceipt = {
+      operationId: 'prior-operation', receiptRevision: 1, workspaceId: 'goal-workspace-1', goalId: 'goal-1',
+      branchName: 'codex/goal-1', status: 'started', oldHead: 'a'.repeat(40), oldBaseSha: 'b'.repeat(40),
+      newBaseSha: 'c'.repeat(40), checkpointId: 'checkpoint-1', checkpointRevision: 7,
+      checkpointHead: 'a'.repeat(40), recoveryRef: 'refs/unified-mpc/recovery/rebase/prior-operation',
+      admissionGeneration: 4, writeLeaseGeneration: 3, startedAt: '2026-09-23T00:20:00.000Z',
+    };
+    const priorHarness = guardedRebaseHarness({ priorReceipt: prior });
+    await expect(priorHarness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: priorHarness.lease.leaseId, generation: priorHarness.lease.generation },
+    })).resolves.toMatchObject({
+      ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'prior_rebase_incomplete', operationId: 'prior-operation' },
+    });
+    expect(priorHarness.guardedRebaseCalls()).toBe(0);
+
+    const recoveryHarness = guardedRebaseHarness({
+      priorReceipt: {
+        ...prior, receiptRevision: 2, status: 'recovery_required',
+        finishedAt: '2026-09-23T00:21:00.000Z', failureReason: 'rebase_conflict',
+      },
+    });
+    await expect(recoveryHarness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: recoveryHarness.lease.leaseId, generation: recoveryHarness.lease.generation },
+    })).resolves.toMatchObject({
+      ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'prior_rebase_recovery_required', operationId: 'prior-operation' },
+    });
+    expect(recoveryHarness.guardedRebaseCalls()).toBe(0);
+
+    const racedHarness = guardedRebaseHarness({ failStartedReceiptCas: true });
+    await expect(racedHarness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: racedHarness.lease.leaseId, generation: racedHarness.lease.generation },
+    })).resolves.toMatchObject({
+      ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'rebase_receipt_raced' },
+    });
+    expect(racedHarness.guardedRebaseCalls()).toBe(0);
+  });
+
+  it('persists exact durable recovery evidence after an aborted rebase conflict', async () => {
+    const harness = guardedRebaseHarness({
+      rebaseResult: {
+        ok: true,
+        value: {
+          status: 'conflict', conflictedPaths: ['conflict.txt'], abortSucceeded: true,
+          headAfterAbort: 'a'.repeat(40), cleanAfterAbort: true, reason: 'rebase_conflict',
+        },
+      },
+    });
+    const result = await harness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: harness.lease.leaseId, generation: harness.lease.generation },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        status: 'RECOVERY_REQUIRED', reason: 'rebase_conflict', oldHead: harness.head,
+        oldBaseSha: harness.oldBase, newBaseSha: harness.newBase, checkpointId: 'checkpoint-1',
+        conflictedPaths: ['conflict.txt'], abortSucceeded: true,
+      },
+    });
+    expect(harness.receipts.map((receipt) => receipt.status)).toEqual(['started', 'recovery_required']);
+    expect(harness.receipts[1]).toMatchObject({
+      oldHead: harness.head, oldBaseSha: harness.oldBase, newBaseSha: harness.newBase,
+      checkpointId: 'checkpoint-1', checkpointRevision: 7, checkpointHead: harness.head,
+      recoveryRef: harness.receipts[0]?.recoveryRef, conflictedPaths: ['conflict.txt'],
+      abortSucceeded: true, failureReason: 'rebase_conflict',
+    });
+    expect(harness.invalidationReasons).toEqual([]);
+  });
+
+  it('invalidates admission when guarded Git execution fails after the started receipt is durable', async () => {
+    const harness = guardedRebaseHarness({
+      rebaseResult: {
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'guarded rebase failed', recoverable: true },
+      },
+    });
+    const result = await harness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: harness.lease.leaseId, generation: harness.lease.generation },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    expect(harness.invalidationReasons).toEqual(['guarded_rebase_git_failure']);
+    expect(harness.receipts.map((receipt) => receipt.status)).toEqual(['started', 'recovery_required']);
+    expect(harness.receipts[1]).toMatchObject({ failureReason: 'guarded_rebase_git_failure' });
+  });
+
+  it('invalidates admission when a successful Git rebase cannot durably update workspace metadata', async () => {
+    const harness = guardedRebaseHarness({ expireLeaseAfterRebase: true });
+    const result = await harness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: harness.lease.leaseId, generation: harness.lease.generation },
+    });
+
+    expect(result).toMatchObject({
+      ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'workspace_metadata_update_failed' },
+    });
+    expect(harness.invalidationReasons).toEqual(['guarded_rebase_head_changed']);
+    expect(harness.receipts.map((receipt) => receipt.status)).toEqual(['started', 'recovery_required']);
+    expect(harness.receipts[1]).toMatchObject({
+      resultHead: harness.newHead, failureReason: 'workspace_metadata_update_failed',
+    });
+  });
+
   it('creates a durable Goal Workspace from an explicit base revision and branch', async () => {
     const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-parent-'));
     try {
@@ -89,8 +539,9 @@ describe('GoalWorkspaceService', () => {
       };
       repository.workspaces.push(parent);
       const git = new FakeGitPort();
+      const resolvedBase = 'd'.repeat(40);
       git.runResults = [
-        { exitCode: 0, stdout: 'abc123\n', stderr: '' },
+        { exitCode: 0, stdout: `${resolvedBase}\n`, stderr: '' },
         { exitCode: 0, stdout: '', stderr: '' },
       ];
 
@@ -110,7 +561,7 @@ describe('GoalWorkspaceService', () => {
             parentWorkspaceId: 'project-1',
             goalWorkspaceKind: 'git_worktree',
             parentSource: 'committed_head',
-            baseRevision: 'abc123',
+            baseRevision: resolvedBase,
             branchName: 'goal/goal-1',
             integrationState: 'pending',
           },
@@ -119,7 +570,7 @@ describe('GoalWorkspaceService', () => {
       });
       expect(git.commands).toEqual([
         ['rev-parse', '--verify', '--end-of-options', 'abc123^{commit}'],
-        ['worktree', 'add', '-b', 'goal/goal-1', worktreeRoot, 'abc123'],
+        ['worktree', 'add', '-b', 'goal/goal-1', worktreeRoot, resolvedBase],
       ]);
     } finally {
       await rm(parentRoot, { recursive: true, force: true });

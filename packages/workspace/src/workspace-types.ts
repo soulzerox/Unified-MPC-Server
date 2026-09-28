@@ -34,6 +34,8 @@ export interface Workspace {
   readonly parentWorkspaceId?: WorkspaceId;
   readonly goalWorkspaceKind?: GoalWorkspaceKind;
   readonly parentSource?: GoalWorkspaceParentSource;
+  /** Symbolic moving-base policy (for example origin/main); baseRevision stores the frozen creation SHA. */
+  readonly baseRef?: string;
   readonly baseRevision?: string;
   readonly branchName?: string;
   readonly checkpointId?: string;

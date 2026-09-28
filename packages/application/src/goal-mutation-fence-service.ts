@@ -25,6 +25,19 @@ export interface GoalMutationFenceServiceOptions {
   readonly callLeaseSeconds?: number;
   readonly taskStateReader?: GoalManagedTaskStateReader;
   readonly runtimeEvents?: GoalRuntimeEventPublisher;
+  readonly validateAdmission?: (
+    workspaceId: string,
+    goalId: string,
+    leaseGeneration: number,
+    admissionGeneration: number | undefined,
+  ) => Promise<Result<void>>;
+  readonly recordSuccessfulMutation?: (binding: {
+    readonly callId: string;
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseGeneration: number;
+    readonly admissionGeneration: number;
+  }) => Promise<void>;
 }
 
 export interface GoalMutationFenceAdmission {
@@ -47,6 +60,8 @@ interface GoalRuntimeCallBinding {
 interface GoalWorkspaceCallBinding {
   readonly goalId: string;
   readonly workspaceId: string;
+  readonly leaseGeneration: number;
+  readonly admissionGeneration?: number;
 }
 
 export class GoalMutationFenceService implements ScheduledContinuationWorkerLivenessPort {
@@ -54,6 +69,8 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
   private readonly callLeaseSeconds: number;
   private readonly taskStateReader: GoalManagedTaskStateReader | undefined;
   private readonly runtimeEvents: GoalRuntimeEventPublisher | undefined;
+  private readonly validateAdmission: GoalMutationFenceServiceOptions['validateAdmission'];
+  private readonly recordSuccessfulMutation: GoalMutationFenceServiceOptions['recordSuccessfulMutation'];
   private readonly runtimeCalls = new Map<string, GoalRuntimeCallBinding>();
   private readonly workspaceCalls = new Map<string, GoalWorkspaceCallBinding>();
 
@@ -65,6 +82,8 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     this.callLeaseSeconds = normalizeCallLeaseSeconds(options.callLeaseSeconds);
     this.taskStateReader = options.taskStateReader;
     this.runtimeEvents = options.runtimeEvents;
+    this.validateAdmission = options.validateAdmission;
+    this.recordSuccessfulMutation = options.recordSuccessfulMutation;
   }
 
   public async inspectWorkspaceFence(
@@ -87,6 +106,10 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     proof: GoalLeaseProof,
   ): Promise<Result<GoalMutationFenceAdmission>> {
     try {
+      if (this.validateAdmission !== undefined) {
+        const admission = await this.validateAdmission(workspaceId, proof.goalId, proof.leaseGeneration, proof.admissionGeneration);
+        if (!admission.ok) return admission;
+      }
       const now = this.now();
       const startedAt = now.toISOString();
       const expiresAt = new Date(now.getTime() + this.callLeaseSeconds * 1000).toISOString();
@@ -98,10 +121,14 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
         ownerSessionId: actor.sessionId ?? actor.clientId,
         leaseTokenHash: hashLeaseToken(proof.leaseToken),
         leaseGeneration: proof.leaseGeneration,
+        ...(proof.admissionGeneration === undefined ? {} : { admissionGeneration: proof.admissionGeneration }),
         startedAt,
         expiresAt,
       });
-      this.workspaceCalls.set(callId, { goalId: admitted.goalId, workspaceId });
+      this.workspaceCalls.set(callId, {
+        goalId: admitted.goalId, workspaceId, leaseGeneration: admitted.leaseGeneration,
+        ...(proof.admissionGeneration === undefined ? {} : { admissionGeneration: proof.admissionGeneration }),
+      });
       await this.recordRuntimeStartBestEffort(callId, workspaceId, admitted.goalId, admitted.leaseGeneration, startedAt);
       return ok(admitted);
     } catch (error: unknown) {
@@ -117,10 +144,23 @@ export class GoalMutationFenceService implements ScheduledContinuationWorkerLive
     await this.recordRuntimeHeartbeatBestEffort(callId, leaseGeneration, heartbeatAt);
   }
 
-  public async end(callId: string): Promise<void> {
+  public async end(callId: string, mutationSucceeded = false): Promise<void> {
     const workspaceBinding = this.workspaceCalls.get(callId);
     try {
       await this.repository.endGoalFencedMutation(callId, this.now().toISOString());
+      if (mutationSucceeded && workspaceBinding?.admissionGeneration !== undefined) {
+        try {
+          await this.recordSuccessfulMutation?.({
+            callId,
+            workspaceId: workspaceBinding.workspaceId,
+            goalId: workspaceBinding.goalId,
+            leaseGeneration: workspaceBinding.leaseGeneration,
+            admissionGeneration: workspaceBinding.admissionGeneration,
+          });
+        } catch {
+          // A missed receipt update leaves the next mutation fail-closed.
+        }
+      }
       await this.refreshWorkspaceTruthBestEffort(workspaceBinding?.goalId);
     } finally {
       this.runtimeCalls.delete(callId);

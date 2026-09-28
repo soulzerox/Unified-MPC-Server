@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type WorkspaceAdmissionReceipt,
   GOAL_RUNTIME_CONTRACT_VERSION,
   type AppendGoalRuntimeEventRequest,
   type GoalRecord,
@@ -9,7 +10,7 @@ import {
   type GoalRuntimeSnapshotRepository,
 } from '@unified-mpc/domain';
 import { GoalRuntimeControlPlaneError, GoalRuntimeControlPlaneService } from './goal-runtime-control-plane-service.js';
-import type { GoalWorkspaceTruthObservation } from './goal-workspace-truth-reader.js';
+import type { GoalWorkspaceAdmissionObservation, GoalWorkspaceTruthObservation } from './goal-workspace-truth-reader.js';
 
 const workspaceId = 'workspace-1';
 
@@ -46,6 +47,15 @@ function fixture(options: {
   events?: readonly GoalRuntimeEventRecord[];
   replayWindowMissed?: boolean;
   workspaceTruth?: { read(workspaceId: string): Promise<GoalWorkspaceTruthObservation> };
+  workspaceAdmission?: { readAdmission(workspaceId: string): Promise<GoalWorkspaceAdmissionObservation> };
+  workspaceAdmissionReceipt?: {
+    getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null>;
+    compareAndSwapAdmissionReceipt?(workspaceId: string, expectedGeneration: number, leaseGeneration: number, receipt: WorkspaceAdmissionReceipt): Promise<boolean>;
+  };
+  runtimeAdmissionIdentity?: {
+    runtimeDeploymentId: string; runtimeGeneration: string; runtimeBuildVersion: string; runtimeBuildCommit: string;
+    runtimeBuildDirty: boolean; runtimeProtocolGeneration: number; runtimeStartedAt: string;
+  };
   now?: () => Date;
 } = {}): {
   readonly service: GoalRuntimeControlPlaneService;
@@ -115,6 +125,9 @@ function fixture(options: {
       .slice(0, request.limit),
   }, snapshots, events, {
     ...(options.workspaceTruth === undefined ? {} : { workspaceTruth: options.workspaceTruth }),
+    ...(options.workspaceAdmission === undefined ? {} : { workspaceAdmission: options.workspaceAdmission }),
+    ...(options.workspaceAdmissionReceipt === undefined ? {} : { workspaceAdmissionReceipts: options.workspaceAdmissionReceipt }),
+    ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 
@@ -122,6 +135,458 @@ function fixture(options: {
 }
 
 describe('GoalRuntimeControlPlaneService', () => {
+  const receipt: WorkspaceAdmissionReceipt = {
+    admissionId: 'admission-1', projectId: 'project-1', workspaceId, goalId: 'goal-1', workspaceKind: 'git',
+    repositoryIdentity: 'opaque-repo', gitCommonDirIdentity: 'opaque-common', worktreeIdentity: 'opaque-worktree',
+    branchName: 'goal/one', expectedWorkspaceHead: 'a'.repeat(40), observedWorkspaceHead: 'a'.repeat(40),
+    baseRef: 'main', expectedBaseSha: 'b'.repeat(40), resolvedBaseSha: 'b'.repeat(40),
+    remoteGoalRef: 'origin/goal/one', remoteGoalSha: 'c'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+    dirtyState: 'clean', dirtyFingerprint: 'opaque-dirty', stagedFingerprint: 'opaque-staged',
+    checkpointId: 'checkpoint-1', checkpointRevision: 4, writeLeaseGeneration: 3,
+    runtimeDeploymentId: 'deploy-7', runtimeGeneration: 'generation-7', runtimeBuildVersion: '4.61.0+0123456789ab',
+    runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567', runtimeBuildDirty: false,
+    runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z', workflowVersion: 1,
+    admissionGeneration: 2, createdAt: '2026-09-23T00:00:00.000Z',
+  };
+  const observedAdmission: GoalWorkspaceAdmissionObservation = {
+    workspaceId, workspaceKind: 'git', dirtyState: 'clean', goalId: 'goal-1', projectId: 'project-1',
+    checkpointId: 'checkpoint-1', writerLeaseGeneration: 3, writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+    repositoryIdentity: 'opaque-repo', gitCommonDirIdentity: 'opaque-common', worktreeIdentity: 'opaque-worktree',
+    branchName: 'goal/one', workspaceHead: 'a'.repeat(40), dirtyFingerprint: 'opaque-dirty',
+    stagedFingerprint: 'opaque-staged', baseRef: 'main', baseSha: 'b'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+    remoteGoalSha: 'c'.repeat(40),
+  };
+
+  it('admits bootstrap only when persisted receipt and exact current workspace/runtime identities match', async () => {
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observedAdmission },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => receipt },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'ADMITTED', admissionGeneration: 2 },
+    });
+  });
+
+  it('captures the first admission from exact clean Git truth under a live writer lease', async () => {
+    let savedReceipt: WorkspaceAdmissionReceipt | null = null;
+    const initialObservation: GoalWorkspaceAdmissionObservation = {
+      workspaceId, workspaceKind: 'git', dirtyState: 'clean', goalId: 'goal-1', projectId: 'project-1',
+      writerLeaseGeneration: 3, writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+      repositoryIdentity: 'opaque-repo', gitCommonDirIdentity: 'opaque-common', worktreeIdentity: 'opaque-worktree',
+      branchName: 'goal/one', workspaceHead: 'a'.repeat(40), dirtyFingerprint: 'opaque-dirty',
+      stagedFingerprint: 'opaque-staged', baseRef: 'main', baseSha: 'b'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+      remoteGoalSha: 'c'.repeat(40),
+    };
+    let compareAndSwapCalls = 0;
+    const compareAndSwapAdmissionReceipt = async (
+      _workspaceId: string, expectedGeneration: number, leaseGeneration: number, next: WorkspaceAdmissionReceipt,
+    ): Promise<boolean> => {
+      if (expectedGeneration !== 0 || leaseGeneration !== 3) return false;
+      savedReceipt = next;
+      compareAndSwapCalls += 1;
+      return true;
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => initialObservation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt,
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'ADMITTED', admissionGeneration: 1 },
+    });
+    expect(compareAndSwapCalls).toBe(1);
+    expect(savedReceipt).toMatchObject({
+      projectId: 'project-1', workspaceId, goalId: 'goal-1', workspaceKind: 'git',
+      expectedWorkspaceHead: 'a'.repeat(40), observedWorkspaceHead: 'a'.repeat(40),
+      resolvedBaseSha: 'b'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+      dirtyState: 'clean', writeLeaseGeneration: 3, admissionGeneration: 1,
+    });
+  });
+
+  it('captures non-Git admission from the durable snapshot generation and content fingerprint', async () => {
+    const nonGitObservation: GoalWorkspaceAdmissionObservation = {
+      workspaceId,
+      workspaceKind: 'non_git',
+      dirtyState: 'clean',
+      goalId: 'goal-1',
+      projectId: 'project-1',
+      checkpointId: 'snapshot-checkpoint',
+      writerLeaseGeneration: 3,
+      writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+      sourceSnapshotGeneration: 'snapshot-generation-1',
+      sourceContentFingerprint: 'snapshot-content-1',
+    };
+    let savedReceipt: WorkspaceAdmissionReceipt | null = null;
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => nonGitObservation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_id, expected, leaseGeneration, next): Promise<boolean> => {
+          if (expected !== 0 || leaseGeneration !== 3) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'ADMITTED', admissionGeneration: 1 },
+    });
+    expect(savedReceipt).toMatchObject({
+      workspaceKind: 'non_git',
+      expectedWorkspaceHead: 'snapshot-generation-1',
+      observedWorkspaceHead: 'snapshot-generation-1',
+      dirtyFingerprint: 'snapshot-content-1',
+      writeLeaseGeneration: 3,
+      admissionGeneration: 1,
+    });
+  });
+
+  it('reports non-Git runtime drift without writing through a read-only admission port', async () => {
+    const sourceSnapshotGeneration = 'snapshot-generation-1';
+    const snapshotReceipt: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      workspaceKind: 'non_git',
+      worktreeIdentity: sourceSnapshotGeneration,
+      expectedWorkspaceHead: sourceSnapshotGeneration,
+      observedWorkspaceHead: sourceSnapshotGeneration,
+      dirtyState: 'clean',
+      dirtyFingerprint: 'snapshot-content-1',
+      checkpointId: 'snapshot-checkpoint',
+      runtimeGeneration: 'old-runtime',
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => ({
+        workspaceId, workspaceKind: 'non_git', dirtyState: 'clean',
+        goalId: 'goal-1', projectId: 'project-1', checkpointId: 'snapshot-checkpoint',
+        writerLeaseGeneration: 3, writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+        sourceSnapshotGeneration, sourceContentFingerprint: 'snapshot-content-1',
+      }) },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => snapshotReceipt },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.readWorkspaceAdmissionProjection(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'RUNTIME_GENERATION_CHANGED', blocker: 'runtime_generation_changed' },
+    });
+  });
+
+  it('fails closed rather than capturing an initially dirty workspace without checkpoint provenance', async () => {
+    let compareAndSwapCalls = 0;
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => ({ ...observedAdmission, dirtyState: 'dirty' }) },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => null,
+        compareAndSwapAdmissionReceipt: async (): Promise<boolean> => {
+          compareAndSwapCalls += 1;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'RECOVERY_REQUIRED', reason: 'dirty_workspace_requires_checkpoint_admission' },
+    });
+    expect(compareAndSwapCalls).toBe(0);
+  });
+
+  it('advances expected workspace source state with the exact successful owner admission proof', async () => {
+    let savedReceipt: WorkspaceAdmissionReceipt | null = receipt;
+    const nextObservation: GoalWorkspaceAdmissionObservation = {
+      ...observedAdmission, workspaceHead: 'd'.repeat(40), dirtyState: 'dirty',
+      dirtyFingerprint: 'opaque-dirty-after-write', stagedFingerprint: 'opaque-staged-after-write',
+    };
+    const compareAndSwapAdmissionReceipt = async (
+      _workspaceId: string, expectedGeneration: number, leaseGeneration: number, next: WorkspaceAdmissionReceipt,
+    ): Promise<boolean> => {
+      if (savedReceipt?.admissionGeneration !== expectedGeneration || next.writeLeaseGeneration !== leaseGeneration) return false;
+      savedReceipt = next;
+      return true;
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => nextObservation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt,
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+      now: () => new Date('2026-09-27T00:00:00.000Z'),
+    });
+
+    await runtime.service.recordSuccessfulWorkspaceMutation({
+      callId: 'call-1', workspaceId, goalId: 'goal-1', leaseGeneration: 3, admissionGeneration: 2,
+    });
+
+    expect(savedReceipt).toMatchObject({
+      expectedWorkspaceHead: 'd'.repeat(40), observedWorkspaceHead: 'd'.repeat(40),
+      dirtyState: 'dirty', dirtyFingerprint: 'opaque-dirty-after-write',
+      stagedFingerprint: 'opaque-staged-after-write', writeLeaseGeneration: 3, admissionGeneration: 3,
+    });
+  });
+
+  it('advances non-Git admission after an exact successful owner mutation', async () => {
+    const sourceSnapshotGeneration = 'snapshot-generation-1';
+    let savedReceipt: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      workspaceKind: 'non_git',
+      worktreeIdentity: sourceSnapshotGeneration,
+      expectedWorkspaceHead: sourceSnapshotGeneration,
+      observedWorkspaceHead: sourceSnapshotGeneration,
+      dirtyFingerprint: 'content-before',
+    };
+    const observation: GoalWorkspaceAdmissionObservation = {
+      workspaceId,
+      workspaceKind: 'non_git',
+      dirtyState: 'clean',
+      goalId: 'goal-1',
+      projectId: 'project-1',
+      checkpointId: 'checkpoint-1',
+      writerLeaseGeneration: 3,
+      writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+      sourceSnapshotGeneration,
+      sourceContentFingerprint: 'content-after',
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_id, expected, leaseGeneration, next): Promise<boolean> => {
+          if (savedReceipt.admissionGeneration !== expected || leaseGeneration !== 3) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.recordSuccessfulWorkspaceMutation({
+      callId: 'non-git-call-1', workspaceId, goalId: 'goal-1', leaseGeneration: 3, admissionGeneration: 2,
+    })).resolves.toBeUndefined();
+    expect(savedReceipt).toMatchObject({
+      workspaceKind: 'non_git',
+      expectedWorkspaceHead: sourceSnapshotGeneration,
+      observedWorkspaceHead: sourceSnapshotGeneration,
+      dirtyFingerprint: 'content-after',
+      writeLeaseGeneration: 3,
+      admissionGeneration: 3,
+    });
+  });
+
+  it('fails closed when the running artifact has a dirty build provenance', async () => {
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observedAdmission },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => receipt },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: true, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'RECOVERY_REQUIRED', reason: 'runtime_build_provenance_dirty' },
+    });
+  });
+
+  it('classifies runtime-only generation drift without changing the workspace admission', async () => {
+    let savedReceipt: WorkspaceAdmissionReceipt | null = receipt;
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observedAdmission },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_workspaceId, expectedGeneration, leaseGeneration, next) => {
+          if (savedReceipt?.admissionGeneration !== expectedGeneration || next.writeLeaseGeneration !== leaseGeneration) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: 'deploy-8', runtimeGeneration: 'generation-8',
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: '2026-09-23T00:01:00.000Z',
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'ADMITTED', admissionGeneration: 3, refreshedFromRuntimeGeneration: true },
+      admissionProjection: {
+        workspace: { observedHead: receipt.expectedWorkspaceHead },
+        base: { currentResolvedSha: receipt.resolvedBaseSha },
+      },
+    });
+    expect(savedReceipt).toMatchObject({ runtimeGeneration: 'generation-8', admissionGeneration: 3 });
+  });
+
+  it('fails closed when a missing admission receipt cannot be persisted with compare-and-swap', async () => {
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observedAdmission },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => null },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_storage_unavailable' },
+    });
+  });
+
+  it('rejects workspace head changes before reporting runtime generation drift', async () => {
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => ({ ...observedAdmission, workspaceHead: 'd'.repeat(40) }) },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => receipt },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: 'deploy-8', runtimeGeneration: 'generation-8',
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: '2026-09-23T00:01:00.000Z',
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'WORKSPACE_STATE_CHANGED' },
+    });
+  });
+
+  it('projects bounded workspace admission truth without exposing opaque source identities', async () => {
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observedAdmission },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => receipt },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId,
+        runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion,
+        runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty,
+        runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    const result = await runtime.service.bootstrapWorkspace(workspaceId);
+    expect(result).toMatchObject({
+      workspaceId,
+      goalsScanned: 1,
+      snapshotsReady: 1,
+      admissionProjection: {
+        runtime: {
+          source: 'current',
+          deploymentId: receipt.runtimeDeploymentId,
+          generation: receipt.runtimeGeneration,
+          buildVersion: receipt.runtimeBuildVersion,
+          buildCommit: receipt.runtimeBuildCommit,
+          buildDirty: false,
+          protocolGeneration: 1,
+          startedAt: receipt.runtimeStartedAt,
+        },
+        workspace: {
+          id: workspaceId,
+          kind: 'git',
+          branch: 'goal/one',
+          expectedHead: receipt.expectedWorkspaceHead,
+          observedHead: observedAdmission.workspaceHead,
+          dirtyState: 'clean',
+        },
+        base: {
+          ref: 'main',
+          recordedSha: receipt.resolvedBaseSha,
+          currentResolvedSha: observedAdmission.baseSha,
+          freshness: 'current',
+        },
+        ownership: { goalId: 'goal-1', writeLeaseGeneration: 3 },
+        admission: { status: 'ADMITTED', generation: 2, remediation: 'none' },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('opaque-repo');
+    expect(JSON.stringify(result)).not.toContain('opaque-worktree');
+    expect(JSON.stringify(result)).not.toContain('opaque-dirty');
+    expect(result).not.toHaveProperty('admissionObservation');
+    expect(result).not.toHaveProperty('runtimeAdmissionIdentity');
+  });
+
+  it('projects persisted admission as last-admitted recovery evidence when live workspace proof is unavailable', async () => {
+    const runtime = fixture({
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => receipt },
+    });
+
+    const projection = await runtime.service.readWorkspaceAdmissionProjection(workspaceId);
+    expect(projection).toMatchObject({
+      runtime: {
+        source: 'last_admitted',
+        deploymentId: receipt.runtimeDeploymentId,
+        generation: receipt.runtimeGeneration,
+      },
+      workspace: {
+        id: workspaceId,
+        kind: 'git',
+        branch: 'goal/one',
+        expectedHead: receipt.expectedWorkspaceHead,
+        dirtyState: 'clean',
+      },
+      base: {
+        ref: 'main',
+        recordedSha: receipt.resolvedBaseSha,
+        freshness: 'unknown',
+      },
+      ownership: { goalId: 'goal-1', writeLeaseGeneration: 3 },
+      admission: {
+        status: 'RECOVERY_REQUIRED',
+        blocker: 'required_workspace_or_lease_proof_missing',
+        remediation: 'recover_workspace',
+      },
+    });
+    expect(projection?.workspace.observedHead).toBeUndefined();
+    expect(projection?.base.currentResolvedSha).toBeUndefined();
+  });
+
   it('bootstraps an active leased Goal as queued rather than fabricating running state', async () => {
     const runtime = fixture();
     const snapshot = await runtime.service.ensureGoalSnapshot('goal-1');

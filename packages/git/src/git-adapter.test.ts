@@ -68,6 +68,76 @@ describe('GitAdapter', () => {
     expect(calls).toHaveLength(3);
   });
 
+  it('reads an exact published goal branch from every configured push target without using FETCH_HEAD', async () => {
+    const sha = 'a'.repeat(40);
+    const calls: readonly string[][] = [];
+    const mutableCalls = calls as string[][];
+    const runner: GitRunner = {
+      async run(args: readonly string[]): Promise<GitRunResult> {
+        mutableCalls.push([...args]);
+        if (args[0] === 'check-ref-format') return { exitCode: 0, stdout: '', stderr: '' };
+        if (args[0] === 'config') return { exitCode: 1, stdout: '', stderr: '' };
+        if (args[0] === 'rev-parse' && args[1] === '--git-path') return { exitCode: 0, stdout: '.git/hooks\n', stderr: '' };
+        if (args[0] === 'remote') return { exitCode: 0, stdout: 'https://example.test/repository.git\n', stderr: '' };
+        if (args[0] === 'ls-remote') return { exitCode: 0, stdout: `${sha}\trefs/heads/codex/goal-1\n`, stderr: '' };
+        return { exitCode: 1, stdout: '', stderr: 'unexpected command' };
+      },
+    };
+
+    await expect(new GitAdapter(runner).remoteBranchSha('C:\\workspace', 'origin', 'codex/goal-1')).resolves.toEqual({
+      ok: true,
+      value: sha,
+    });
+    expect(calls[0]).toEqual(['check-ref-format', 'refs/heads/codex/goal-1']);
+    expect(calls.some((args) => args[0] === 'config' && args.includes('core.sshCommand'))).toBe(true);
+    expect(calls.slice(-3)).toEqual([
+      ['rev-parse', '--git-path', 'hooks'],
+      ['remote', 'get-url', '--push', '--all', 'origin'],
+      ['ls-remote', '--heads', 'https://example.test/repository.git', 'refs/heads/codex/goal-1'],
+    ]);
+    expect(calls.flat()).not.toContain('FETCH_HEAD');
+  });
+
+  it('runs a guarded rebase only from the exact clean branch/head and an existing recovery ref', async () => {
+    const oldHead = '1'.repeat(40);
+    const oldBase = '2'.repeat(40);
+    const newBase = '3'.repeat(40);
+    const newHead = '4'.repeat(40);
+    let headReads = 0;
+    const calls: string[][] = [];
+    const runner: GitRunner = {
+      async run(args: readonly string[]): Promise<GitRunResult> {
+        calls.push([...args]);
+        if (args[0] === 'config') return { exitCode: 1, stdout: '', stderr: '' };
+        if (args[0] === 'branch') return { exitCode: 0, stdout: 'codex/goal-1\n', stderr: '' };
+        if (args[0] === 'rev-parse') {
+          if ((args[2] ?? '').startsWith('refs/unified-mpc/recovery/')) {
+            return { exitCode: 0, stdout: `${oldHead}\n`, stderr: '' };
+          }
+          headReads += 1;
+          return { exitCode: 0, stdout: `${headReads === 1 ? oldHead : newHead}\n`, stderr: '' };
+        }
+        if (args[0] === 'status') return { exitCode: 0, stdout: '', stderr: '' };
+        if (args.includes('rebase')) return { exitCode: 0, stdout: '', stderr: '' };
+        return { exitCode: 1, stdout: '', stderr: 'unexpected command' };
+      },
+    };
+
+    await expect(new GitAdapter(runner).guardedRebase('C:\\workspace', {
+      expectedBranch: 'codex/goal-1',
+      oldHead,
+      oldBaseSha: oldBase,
+      newBaseSha: newBase,
+      recoveryRef: 'refs/unified-mpc/recovery/rebase/operation-1',
+    })).resolves.toEqual({ ok: true, value: { status: 'completed', newHead } });
+    expect(calls.find((args) => args.includes('rebase'))).toEqual([
+      '-c', 'core.hooksPath=/dev/null',
+      '-c', 'commit.gpgSign=false',
+      '-c', 'submodule.recurse=false',
+      'rebase', '--no-autostash', '--onto', newBase, oldBase,
+    ]);
+  });
+
   it('bounds diff output and keeps the path as a separate argument', async () => {
     const runner = new FakeGitRunner({ exitCode: 0, stdout: '0123456789', stderr: '' });
     const result = await new GitAdapter(runner).diff('C:\\workspace', { path: 'src\\space file.txt', maxBytes: 5 });

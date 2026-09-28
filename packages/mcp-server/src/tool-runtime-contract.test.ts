@@ -247,7 +247,7 @@ describe('tool runtime delivery contract', () => {
     if (oracle === undefined) return;
     expect(output, `${name} did not produce its tool-specific deterministic output`).toMatchObject(oracle.expected);
     for (const key of oracle.requiredKeys ?? []) expect(output, `${name} omitted ${key}`).toHaveProperty(key);
-    expect(calls, `${name} deterministic operation dispatched a backing service`).toHaveLength(callsBefore);
+    expect(calls.slice(callsBefore), `${name} deterministic operation dispatched an unexpected backing service`).toEqual(oracle.allowedServiceCalls ?? []);
 
     if (oracle.alternate !== undefined) {
       const alternate = await executeDefinition(registry, name, oracle.alternate.input);

@@ -261,6 +261,7 @@ describe('Ponytail ToolRegistry enforcement', () => {
   it('requires a fresh exact Ponytail review before completing a FULL goal after code mutation', async () => {
     const base = createServices();
     let finishes = 0;
+    let head = 'a'.repeat(40);
     const goalSnapshot = {
       goalId: 'goal-full',
       goalKey: 'goal-full-key',
@@ -296,6 +297,12 @@ describe('Ponytail ToolRegistry enforcement', () => {
         async status() { return ok({ entries: [{ path: 'src/goal.ts', kind: 'modified', indexStatus: ' ', worktreeStatus: 'M' }] }); },
         async diff() { return ok({ text: 'diff --git a/src/goal.ts b/src/goal.ts' }); },
         async log() { return ok({ commits: [] }); },
+        async observeWorkspace() {
+          return ok({
+            repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+            branch: 'goal/one', head, statusEntries: [], dirtyFingerprint: 'dirty-1', stagedFingerprint: 'staged-1',
+          });
+        },
       },
     } as unknown as McpApplicationServices;
     const registry = new ToolRegistry(services, actor, { ponytailModeProvider: (): 'off' => 'off' });
@@ -323,6 +330,18 @@ describe('Ponytail ToolRegistry enforcement', () => {
       goalId: 'goal-full', leaseToken: 'lease-token', expectedRevision: 2, status: 'completed', summary: 'done', evidence: [],
     })).isError).not.toBe(true);
     expect(finishes).toBe(1);
+
+    head = 'b'.repeat(40);
+    const staleAfterHeadDrift = await registry.invoke('finish_goal', {
+      goalId: 'goal-full', leaseToken: 'lease-token', expectedRevision: 2, status: 'completed', summary: 'stale external head', evidence: [],
+    });
+    expect(staleAfterHeadDrift).toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+    expect(finishes).toBe(1);
+
+    expect((await registry.invoke('skill_load', {
+      skillId: BUNDLED_PONYTAIL_REVIEW_SKILL_ID, workspaceId: 'workspace-1', goalId: 'goal-full',
+    })).isError).not.toBe(true);
+    expect((await registry.invoke('review_changes', { workspaceId: 'workspace-1', goalId: 'goal-full' })).isError).not.toBe(true);
 
     expect((await registry.invoke('write_file', {
       workspaceId: 'workspace-1', path: 'src/goal.ts', content: 'export const goal = 2;\n', goalLease,

@@ -60,6 +60,7 @@ export interface GoalLeaseProof {
   readonly goalId: string;
   readonly leaseToken: string;
   readonly leaseGeneration: number;
+  readonly admissionGeneration?: number;
 }
 
 export interface GoalCheckpointRecord {

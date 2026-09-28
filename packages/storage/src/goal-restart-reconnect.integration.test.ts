@@ -4,8 +4,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   GoalContinuationService,
+  GoalRuntimeControlPlaneService,
   GoalRuntimeReconciliationService,
   type FileActor,
+  type GoalWorkspaceAdmissionObservation,
 } from '@unified-mpc/application';
 import {
   GOAL_RUNTIME_CONTRACT_VERSION,
@@ -13,6 +15,7 @@ import {
   type ExecutionScopedRuntimeEvent,
   type GoalRuntimeProjection,
   type ScheduledContinuationWorkerLiveness,
+  type WorkspaceAdmissionReceipt,
 } from '@unified-mpc/domain';
 import type { Workspace } from '@unified-mpc/workspace';
 import { SqliteDatabase } from './database.js';
@@ -274,6 +277,111 @@ describe('durable Goal restart + reconnect integration', () => {
       ]);
     } finally {
       third.database.close();
+    }
+  });
+
+  it('revalidates a persisted workspace admission receipt against fresh truth after restart', async () => {
+    const { filename, workspace } = await fixture();
+    const first = await openDatabase(filename, workspace);
+    const writerLease = await first.workspaces.acquireGoalWriterLease(
+      workspace.id,
+      'lease-admission-1',
+      'owner-admission-1',
+      '2026-09-23T00:00:00.000Z',
+      '2099-01-01T00:00:00.000Z',
+    );
+    expect(writerLease).not.toBeNull();
+    if (writerLease === null) throw new Error('writer lease create failed');
+
+    const receipt: WorkspaceAdmissionReceipt = {
+      admissionId: 'admission-restart-1',
+      projectId: 'project-1',
+      workspaceId: workspace.id,
+      goalId: 'goal-admission-1',
+      workspaceKind: 'git',
+      repositoryIdentity: 'repo-1',
+      gitCommonDirIdentity: 'common-1',
+      worktreeIdentity: 'worktree-1',
+      branchName: 'goal/admission',
+      expectedWorkspaceHead: 'a'.repeat(40),
+      observedWorkspaceHead: 'a'.repeat(40),
+      baseRef: 'origin/main',
+      expectedBaseSha: 'b'.repeat(40),
+      resolvedBaseSha: 'b'.repeat(40),
+      mergeBaseSha: 'b'.repeat(40),
+      dirtyState: 'clean',
+      dirtyFingerprint: 'dirty-clean',
+      stagedFingerprint: 'staged-clean',
+      checkpointId: 'checkpoint-admission-1',
+      checkpointRevision: 1,
+      writeLeaseGeneration: writerLease.generation,
+      runtimeDeploymentId: 'deploy-admission-1',
+      runtimeGeneration: 'runtime-admission-1',
+      runtimeBuildVersion: '4.61.0+cccccccccccc',
+      runtimeBuildCommit: 'c'.repeat(40),
+      runtimeBuildDirty: false,
+      runtimeProtocolGeneration: 1,
+      runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+      workflowVersion: 1,
+      admissionGeneration: 1,
+      createdAt: '2026-09-23T00:00:00.000Z',
+    };
+    await expect(first.workspaces.compareAndSwapAdmissionReceipt(
+      workspace.id,
+      0,
+      writerLease.generation,
+      receipt,
+    )).resolves.toBe(true);
+    first.database.close();
+
+    const second = await openDatabase(filename, workspace);
+    try {
+      const observation: GoalWorkspaceAdmissionObservation = {
+        workspaceId: workspace.id,
+        workspaceKind: 'git',
+        dirtyState: 'clean',
+        goalId: receipt.goalId,
+        projectId: receipt.projectId,
+        checkpointId: receipt.checkpointId,
+        writerLeaseGeneration: writerLease.generation,
+        writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+        repositoryIdentity: receipt.repositoryIdentity,
+        gitCommonDirIdentity: receipt.gitCommonDirIdentity,
+        worktreeIdentity: receipt.worktreeIdentity,
+        branchName: receipt.branchName,
+        workspaceHead: 'd'.repeat(40),
+        dirtyFingerprint: receipt.dirtyFingerprint,
+        stagedFingerprint: receipt.stagedFingerprint,
+        baseRef: receipt.baseRef,
+        baseSha: receipt.resolvedBaseSha,
+        mergeBaseSha: receipt.mergeBaseSha,
+      };
+      const controlPlane = new GoalRuntimeControlPlaneService(
+        second.goals,
+        second.snapshots,
+        second.events,
+        {
+          workspaceAdmission: { readAdmission: async (): Promise<GoalWorkspaceAdmissionObservation> => observation },
+          workspaceAdmissionReceipts: {
+            getAdmissionReceipt: async (workspaceId: string): Promise<WorkspaceAdmissionReceipt | undefined> => second.workspaces.getAdmissionReceipt(workspaceId),
+          },
+          runtimeAdmissionIdentity: {
+            runtimeDeploymentId: receipt.runtimeDeploymentId,
+            runtimeGeneration: receipt.runtimeGeneration,
+            runtimeBuildVersion: receipt.runtimeBuildVersion,
+            runtimeBuildCommit: receipt.runtimeBuildCommit,
+            runtimeBuildDirty: receipt.runtimeBuildDirty,
+            runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+            runtimeStartedAt: receipt.runtimeStartedAt,
+          },
+        },
+      );
+
+      await expect(controlPlane.bootstrapWorkspace(workspace.id)).resolves.toMatchObject({
+        admission: { status: 'WORKSPACE_STATE_CHANGED' },
+      });
+    } finally {
+      second.database.close();
     }
   });
 });

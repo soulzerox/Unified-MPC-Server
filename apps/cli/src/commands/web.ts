@@ -1,5 +1,8 @@
-import { ok, err, appError, type GoalRecord, type Result } from '@unified-mpc/domain';
+import { ok, err, appError, type GoalRecord, type Result, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import {
+  GitService,
+  GoalRuntimeControlPlaneService,
+  GoalWorkspaceTruthReader,
   JsonWorkspaceIndexStore,
   WorkspaceIndexService,
   WorkspaceSelectionService,
@@ -81,10 +84,19 @@ export async function runWeb(
     const goalRepository = new SqliteGoalRepository(database);
     const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
     const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
-    const goalRuntimeRead: GoalRuntimeReadPort = serverOptions?.goalRuntimeRead ?? {
-      listWorkspaceGoalRuntimeSnapshots: async (request) => goalRuntimeSnapshots.listWorkspaceGoalRuntimeSnapshots(request),
-      replayWorkspaceGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayWorkspaceGoalRuntimeEvents(request),
-    };
+    const goalRuntimeRead: GoalRuntimeReadPort = serverOptions?.goalRuntimeRead ?? ((): GoalRuntimeReadPort => {
+      const goalRuntimeProjection = createWebGoalRuntimeProjection(
+        goalRepository,
+        goalRuntimeSnapshots,
+        goalRuntimeEvents,
+        workspaceRepository,
+      );
+      return {
+        listWorkspaceGoalRuntimeSnapshots: async (request) => goalRuntimeSnapshots.listWorkspaceGoalRuntimeSnapshots(request),
+        replayWorkspaceGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayWorkspaceGoalRuntimeEvents(request),
+        readWorkspaceAdmissionProjection: async (workspaceId) => goalRuntimeProjection.readWorkspaceAdmissionProjection(workspaceId),
+      };
+    })();
     bootstrapNonSecretSettings(settings);
     const lifecycleCandidates = await workspaceService.list();
     const protectedByOpenGoal: string[] = [];
@@ -130,6 +142,25 @@ export async function runWeb(
     const message = error instanceof Error ? error.message : String(error);
     return err(appError('INTERNAL_ERROR', `Failed to start control plane server: ${message}`));
   }
+}
+
+export function createWebGoalRuntimeProjection(
+  goals: SqliteGoalRepository,
+  snapshots: SqliteGoalRuntimeSnapshotRepository,
+  events: SqliteGoalRuntimeEventRepository,
+  workspaces: SqliteWorkspaceRepository,
+): GoalRuntimeControlPlaneService {
+  const workspaceTruth = new GoalWorkspaceTruthReader(workspaces, new GitService(workspaces));
+  return new GoalRuntimeControlPlaneService(goals, snapshots, events, {
+    workspaceTruth,
+    workspaceAdmission: workspaceTruth,
+    workspaceAdmissionReceipts: {
+      getAdmissionReceipt: async (workspaceId): Promise<WorkspaceAdmissionReceipt | null> => {
+        if (await workspaces.get(workspaceId) === null) return null;
+        return workspaces.getAdmissionReceipt(workspaceId);
+      },
+    },
+  });
 }
 
 function createWorkspaceControl(

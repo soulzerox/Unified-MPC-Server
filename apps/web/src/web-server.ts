@@ -12,6 +12,7 @@ import type {
   GoalRuntimeSnapshotRecord,
   ListWorkspaceGoalRuntimeSnapshotsRequest,
   ReplayWorkspaceGoalRuntimeEventsRequest,
+  WorkspaceAdmissionProjection,
 } from '@unified-mpc/domain';
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import { isMcpRuntimeDiagnosticsSnapshot, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
@@ -86,6 +87,7 @@ export interface GoalRuntimeReadPort {
   replayWorkspaceGoalRuntimeEvents(
     request: ReplayWorkspaceGoalRuntimeEventsRequest,
   ): Promise<GoalRuntimeEventReplayPage>;
+  readWorkspaceAdmissionProjection?(workspaceId: string): Promise<WorkspaceAdmissionProjection | undefined>;
 }
 
 export interface WebMcpRuntimeIdentity {
@@ -417,7 +419,7 @@ export class ControlPlaneServer {
         sendJsonError(res, 404, 'Workspace is not a registered project');
         return;
       }
-      const [snapshots, bounds] = await Promise.all([
+      const [snapshots, bounds, admission] = await Promise.all([
         this.goalRuntimeRead.listWorkspaceGoalRuntimeSnapshots({
           workspaceId,
           limit: GOAL_RUNTIME_SNAPSHOT_LIMIT,
@@ -426,12 +428,14 @@ export class ControlPlaneServer {
           workspaceId,
           limit: 1,
         }),
+        this.goalRuntimeRead.readWorkspaceAdmissionProjection?.(workspaceId) ?? Promise.resolve(undefined),
       ]);
       const cursor = goalRuntimeSnapshotCursor(snapshots, bounds);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         workspaceId,
         snapshots,
+        ...(admission === undefined ? {} : { admission }),
         cursor,
         latestSequence: bounds.latestSequence ?? null,
         oldestAvailableSequence: bounds.oldestAvailableSequence ?? null,

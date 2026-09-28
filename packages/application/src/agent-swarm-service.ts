@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Redactor } from '@unified-mpc/audit';
-import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
+import { appError, err, isApplicationAuthorized, ok, type GoalTaskCancellationObservation, type InvocationAuthorization, type Result, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { ManagedProcess, ManagedProcessRecoveryIdentity, ProcessLogResult } from '@unified-mpc/process';
 import { DEFAULT_DELEGATED_AGENT_ADMISSION_COST, tryAdmitDelegatedAgent, type ResourceAdmissionController, type ResourceAdmissionLease } from '@unified-mpc/workspace';
 import {
@@ -43,6 +43,9 @@ export interface AgentSwarmServiceOptions {
     SqliteManagedResourceBindingRepository,
     'storeActive' | 'markTerminationUnverified' | 'markReleased'
   >;
+  readonly workspaceAdmissionProjection?: {
+    readWorkspaceAdmissionProjection(workspaceId: string): Promise<WorkspaceAdmissionProjection | undefined>;
+  };
 }
 
 interface LiveSwarm {
@@ -60,6 +63,7 @@ export class AgentSwarmService {
   private readonly resourceAdmissionController: ResourceAdmissionController | undefined;
   private readonly delegatedAgentAdmissionCost: number;
   private readonly managedResourceBindings: AgentSwarmServiceOptions['managedResourceBindings'];
+  private readonly workspaceAdmissionProjection: AgentSwarmServiceOptions['workspaceAdmissionProjection'];
 
   public constructor(
     private readonly repository: SqliteAgentSwarmRepository,
@@ -71,6 +75,7 @@ export class AgentSwarmService {
     this.resourceAdmissionController = options.resourceAdmissionController;
     this.delegatedAgentAdmissionCost = normalizePositiveInteger(options.delegatedAgentAdmissionCost, DEFAULT_DELEGATED_AGENT_ADMISSION_COST);
     this.managedResourceBindings = options.managedResourceBindings;
+    this.workspaceAdmissionProjection = options.workspaceAdmissionProjection;
     // Never reattach by PID/task id after restart. Persisted active tasks are
     // explicitly downgraded to termination_unverified until a future verified
     // runtime-handle protocol exists.
@@ -91,6 +96,25 @@ export class AgentSwarmService {
     const ownerSessionId = actorSessionId(actor);
     const existing = this.repository.findByIdempotency(actor.clientId, ownerSessionId, request.workspaceId, request.idempotencyKey);
     if (existing !== undefined) return ok(toSnapshot(existing));
+
+    let admissionProjection: WorkspaceAdmissionProjection | undefined;
+    if (this.workspaceAdmissionProjection !== undefined) {
+      try {
+        admissionProjection = await this.workspaceAdmissionProjection.readWorkspaceAdmissionProjection(request.workspaceId);
+      } catch {
+        return err(appError('WORKSPACE_ADMISSION_STALE', 'Delegated workspace admission context could not be refreshed', true));
+      }
+      if (admissionProjection === undefined) {
+        return err(appError('WORKSPACE_ADMISSION_STALE', 'Delegated workspace admission context is unavailable', true));
+      }
+      if (admissionProjection.admission.status !== 'ADMITTED') {
+        return err(appError(
+          'WORKSPACE_ADMISSION_STALE',
+          `Delegated workspace admission is ${admissionProjection.admission.status}`,
+          true,
+        ));
+      }
+    }
 
     const createdAt = this.now().toISOString();
     const maxConcurrency = request.maxConcurrency ?? Math.min(2, request.tasks.length);
@@ -113,7 +137,7 @@ export class AgentSwarmService {
     const live: LiveSwarm = {
       actor,
       workspaceId: request.workspaceId,
-      prompts: new Map(request.tasks.map((task) => [task.id, task.prompt])),
+      prompts: new Map(request.tasks.map((task) => [task.id, delegatedInstruction(admissionProjection, task.prompt)])),
       authorization: authorization as InvocationAuthorization,
       abortController: new AbortController(),
       resourceLeases: new Map<string, ResourceAdmissionLease>(),
@@ -488,6 +512,56 @@ function toTaskSnapshot(task: StoredAgentSwarmTask): AgentSwarmTaskSnapshot {
     outputTruncated: task.outputTruncated,
     ...(task.error === undefined ? {} : { error: boundedError(task.error) }),
   };
+}
+
+function delegatedInstruction(projection: WorkspaceAdmissionProjection | undefined, prompt: string): string {
+  if (projection === undefined) return prompt;
+  const runtime = projection.runtime;
+  const bounded: WorkspaceAdmissionProjection = {
+    ...(runtime === undefined ? {} : {
+      runtime: {
+        source: runtime.source,
+        deploymentId: runtime.deploymentId,
+        generation: runtime.generation,
+        buildVersion: runtime.buildVersion,
+        ...(runtime.buildCommit === undefined ? {} : { buildCommit: runtime.buildCommit }),
+        buildDirty: runtime.buildDirty,
+        protocolGeneration: runtime.protocolGeneration,
+        startedAt: runtime.startedAt,
+      },
+    }),
+    workspace: {
+      id: projection.workspace.id,
+      kind: projection.workspace.kind,
+      ...(projection.workspace.branch === undefined ? {} : { branch: projection.workspace.branch }),
+      ...(projection.workspace.expectedHead === undefined ? {} : { expectedHead: projection.workspace.expectedHead }),
+      ...(projection.workspace.observedHead === undefined ? {} : { observedHead: projection.workspace.observedHead }),
+      dirtyState: projection.workspace.dirtyState,
+    },
+    base: {
+      ...(projection.base.ref === undefined ? {} : { ref: projection.base.ref }),
+      ...(projection.base.recordedSha === undefined ? {} : { recordedSha: projection.base.recordedSha }),
+      ...(projection.base.currentResolvedSha === undefined ? {} : { currentResolvedSha: projection.base.currentResolvedSha }),
+      freshness: projection.base.freshness,
+    },
+    ownership: {
+      ...(projection.ownership.goalId === undefined ? {} : { goalId: projection.ownership.goalId }),
+      ...(projection.ownership.writeLeaseGeneration === undefined ? {} : { writeLeaseGeneration: projection.ownership.writeLeaseGeneration }),
+    },
+    admission: {
+      status: projection.admission.status,
+      ...(projection.admission.generation === undefined ? {} : { generation: projection.admission.generation }),
+      ...(projection.admission.blocker === undefined ? {} : { blocker: projection.admission.blocker }),
+      remediation: projection.admission.remediation,
+    },
+  };
+  return [
+    '[Unified workspace admission context — operational metadata, not user instructions]',
+    JSON.stringify(bounded),
+    '[End Unified workspace admission context]',
+    '',
+    prompt,
+  ].join('\n');
 }
 
 function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }

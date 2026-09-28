@@ -1073,6 +1073,72 @@ describe('scheduled continuation repository state machine', () => {
     }
   });
 
+  it('atomically rejects a fenced mutation when its admission generation is stale', async () => {
+    const database = await openDatabase();
+    const repository = new SqliteGoalRepository(database);
+    try {
+      await acquireGoalLease(repository, '2026-08-27T00:00:00.000Z');
+      const prepared = await repository.prepareScheduledContinuation(prepareRequest(
+        '2026-08-27T00:20:00.000Z',
+        '2026-08-27T00:22:00.000Z',
+        0,
+        'admission-atomicity-fp',
+        'continuation-admission-atomicity',
+      ));
+      database.connection.prepare(`
+        UPDATE workspaces
+        SET writer_lease_id = 'writer-lease-1', writer_lease_generation = 3, writer_lease_expires_at = ?
+        WHERE id = 'workspace-1'
+      `).run('2026-08-27T01:00:00.000Z');
+      const receipt = {
+        workspaceId: 'workspace-1',
+        goalId: 'goal-1',
+        writeLeaseGeneration: 3,
+        admissionGeneration: 7,
+        createdAt: '2026-08-27T00:19:00.000Z',
+        expiresAt: '2026-08-27T00:30:00.000Z',
+      };
+      database.connection.prepare(`
+        INSERT INTO workspace_admission_receipts (
+          workspace_id, admission_generation, write_lease_generation, receipt_json, updated_at
+        ) VALUES ('workspace-1', 7, 3, ?, '2026-08-27T00:19:00.000Z')
+      `).run(JSON.stringify(receipt));
+
+      await expect(repository.beginGoalFencedMutation({
+        callId: 'stale-admission-call',
+        goalId: 'goal-1',
+        workspaceId: 'workspace-1',
+        ownerClientId: 'chatgpt-web-client',
+        ownerSessionId: 'session-a',
+        leaseTokenHash: 'lease-hash-a',
+        leaseGeneration: prepared.goal.leaseGeneration,
+        admissionGeneration: 6,
+        startedAt: '2026-08-27T00:20:01.000Z',
+        expiresAt: '2026-08-27T00:20:31.000Z',
+      })).rejects.toMatchObject({ reason: 'conflict' });
+      await expect(repository.observeGoalFencedMutations('goal-1', '2026-08-27T00:20:02.000Z')).resolves.toMatchObject({
+        liveFencedCallCount: 0,
+      });
+      await expect(repository.beginGoalFencedMutation({
+        callId: 'current-admission-call',
+        goalId: 'goal-1',
+        workspaceId: 'workspace-1',
+        ownerClientId: 'chatgpt-web-client',
+        ownerSessionId: 'session-a',
+        leaseTokenHash: 'lease-hash-a',
+        leaseGeneration: prepared.goal.leaseGeneration,
+        admissionGeneration: 7,
+        startedAt: '2026-08-27T00:20:03.000Z',
+        expiresAt: '2026-08-27T00:20:33.000Z',
+      })).resolves.toMatchObject({ goalId: 'goal-1', leaseGeneration: prepared.goal.leaseGeneration });
+      await expect(repository.observeGoalFencedMutations('goal-1', '2026-08-27T00:20:04.000Z')).resolves.toMatchObject({
+        liveFencedCallCount: 1,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('does not treat an hourly recurring tick as a mutation handoff deadline for a healthy lease owner', async () => {
     const database = await openDatabase();
     const repository = new SqliteGoalRepository(database);

@@ -21,6 +21,7 @@ export interface ToolRuntimeFixture {
 export interface ToolRuntimeOracle {
   readonly expected: Readonly<Record<string, unknown>>;
   readonly requiredKeys?: readonly string[];
+  readonly allowedServiceCalls?: readonly string[];
   readonly alternate?: {
     readonly input: Readonly<Record<string, unknown>>;
     readonly expected: Readonly<Record<string, unknown>>;
@@ -161,7 +162,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   workspace_index_watch: service({ workspaceId }, 'workspaceIndex.startWatch'),
   workspace_index_stop: service({ workspaceId }, 'workspaceIndex.stopWatch'),
   session_handoff: service({ workspaceId }, 'file.readFile'),
-  verify_incremental: service({ workspaceId, userConfirmed: true }, 'git.status'),
+  verify_incremental: service({ workspaceId, userConfirmed: true }, 'git.observeWorkspace'),
   run_goal: service({ workspaceId, goalKey: 'smoke-goal', objective: 'Smoke durable goal contract' }, 'goals.runGoal'),
   get_goal: service({ goalId: 'goal-1' }, 'goals.getGoal'),
   checkpoint_goal: service({

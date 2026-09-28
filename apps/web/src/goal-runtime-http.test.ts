@@ -37,6 +37,35 @@ const snapshot: GoalRuntimeSnapshotRecord = {
   updatedAt: occurredAt,
 };
 
+const admissionProjection = {
+  runtime: {
+    source: 'last_admitted' as const,
+    deploymentId: 'deploy-7',
+    generation: 'generation-7',
+    buildVersion: '4.61.0+0123456789ab',
+    buildCommit: '0123456789abcdef0123456789abcdef01234567',
+    buildDirty: false,
+    protocolGeneration: 1,
+    startedAt: '2026-09-23T00:00:00.000Z',
+  },
+  workspace: {
+    id: workspaceId,
+    kind: 'git' as const,
+    branch: 'goal/one',
+    expectedHead: 'a'.repeat(40),
+    observedHead: 'a'.repeat(40),
+    dirtyState: 'clean' as const,
+  },
+  base: {
+    ref: 'main',
+    recordedSha: 'b'.repeat(40),
+    currentResolvedSha: 'b'.repeat(40),
+    freshness: 'current' as const,
+  },
+  ownership: { goalId: 'goal-a', writeLeaseGeneration: 3 },
+  admission: { status: 'ADMITTED' as const, generation: 2, remediation: 'none' as const },
+};
+
 const event11: GoalRuntimeEventRecord = {
   sequence: 11,
   event: {
@@ -186,7 +215,10 @@ describe('Goal runtime Web API and SSE boundary', () => {
     server = new ControlPlaneServer({
       port: 0,
       workspaceControl: workspaceControl(),
-      goalRuntimeRead: runtimeRead(),
+      goalRuntimeRead: {
+        ...runtimeRead(),
+        readWorkspaceAdmissionProjection: async () => admissionProjection,
+      } as unknown as GoalRuntimeReadPort,
       goalRuntimeStreamPollMs: 25,
     });
     await server.listen();
@@ -194,13 +226,17 @@ describe('Goal runtime Web API and SSE boundary', () => {
     const response = await fetch(`http://127.0.0.1:${server.port}/api/workspaces/${workspaceId}/goal-runtime`);
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
-    await expect(response.json()).resolves.toEqual({
+    const body = await response.json();
+    expect(body).toEqual({
       workspaceId,
       snapshots: [snapshot],
+      admission: admissionProjection,
       cursor: 12,
       latestSequence: 12,
       oldestAvailableSequence: 10,
     });
+    expect(JSON.stringify(body)).not.toContain('repositoryIdentity');
+    expect(JSON.stringify(body)).not.toContain('dirtyFingerprint');
   });
 
   it('streams an initial snapshot, replays from Last-Event-ID, and refreshes when replay retention was missed', async () => {

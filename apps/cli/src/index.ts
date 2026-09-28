@@ -46,6 +46,7 @@ import {
 import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
 import { parseWebArgs, runWeb, type WebCommand, type WebRunResult } from './commands/web.js';
 import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/tools.js';
+import { createRuntimeAdmissionIdentity, loadBuildProvenance } from './build-provenance.js';
 
 export { formatDoctorReport } from './commands/doctor.js';
 export { createStdioMcpRuntime, type StdioMcpRuntime } from './runtime/stdio-mcp-runtime.js';
@@ -391,6 +392,7 @@ async function runWorkspaceSelectionCommand(
 }
 
 export interface DefaultCliDependenciesOptions {
+  readonly runtimeAdmissionIdentity?: StdioMcpRuntimeOptions['runtimeAdmissionIdentity'];
   readonly thaiRagDriver?: StdioMcpRuntimeOptions['thaiRagDriver'];
   readonly extensions?: ExtensionsService;
 }
@@ -451,7 +453,9 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     const workspace = workspaces[0];
     if (toolRegistry !== undefined && (mcpRuntime !== undefined || workspace === undefined)) return toolRegistry;
     if (workspace !== undefined) {
+      const runtimeAdmissionIdentity = options.runtimeAdmissionIdentity ?? createRuntimeAdmissionIdentity(loadBuildProvenance());
       mcpRuntime = createStdioMcpRuntime(resolveDataPathFromShared(), workspace, true, {
+        runtimeAdmissionIdentity,
         ...(options.thaiRagDriver === undefined ? {} : { thaiRagDriver: options.thaiRagDriver }),
         ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
       });

@@ -1592,6 +1592,56 @@ describe('MCP tool registry', () => {
     await expect(pending).resolves.toMatchObject({ structuredContent: { path: 'src/file.ts' } });
   });
 
+  it('rejects stale workspace admission before a write handler is invoked', async () => {
+    const writeFile = vi.fn(async () => ok({ path: 'src/file.ts', bytesWritten: 1 }));
+    const begin = vi.fn(async () => err(appError('WORKSPACE_ADMISSION_STALE', 'WORKSPACE_ADMISSION_STALE: workspace HEAD changed', true)));
+    const registry = new ToolRegistry({
+      file: { writeFile } as unknown as McpApplicationServices['file'],
+      goalMutationFence: {
+        inspectWorkspaceFence: async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }),
+        begin,
+        heartbeat: async () => undefined,
+        end: async () => undefined,
+        observe: async () => ({ trustworthy: true, observedAt: '2026-09-23T00:00:00.000Z', leaseGeneration: 7, leaseActivitySeq: 0, liveFencedCallCount: 0, blockingTaskStates: [], activeTaskStates: [] }),
+      } as unknown as McpApplicationServices['goalMutationFence'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/file.ts', content: 'changed',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 7, admissionGeneration: 4 },
+    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'WORKSPACE_ADMISSION_STALE' } } });
+    expect(begin).toHaveBeenCalledWith(expect.anything(), 'workspace-1', expect.any(String), expect.objectContaining({ admissionGeneration: 4 }));
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it('marks a fenced mutation successful only after its handler succeeds', async () => {
+    const writeFile = vi.fn(async () => ok({ path: 'src/file.ts', bytesWritten: 1 }));
+    const end = vi.fn(async () => undefined);
+    const registry = new ToolRegistry({
+      file: { writeFile } as unknown as McpApplicationServices['file'],
+      goalMutationFence: {
+        inspectWorkspaceFence: async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }),
+        begin: async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }),
+        heartbeat: async () => undefined,
+        end,
+        observe: async () => ({ trustworthy: true, observedAt: '2026-09-23T00:00:00.000Z', leaseGeneration: 7, leaseActivitySeq: 0, liveFencedCallCount: 0, blockingTaskStates: [], activeTaskStates: [] }),
+      } as unknown as McpApplicationServices['goalMutationFence'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/file.ts', content: 'changed',
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 7, admissionGeneration: 4 },
+    })).resolves.not.toMatchObject({ isError: true });
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledWith(expect.any(String), true);
+  });
+
   it('honors Custom ALLOW for ordinary replacement and opaque operations instead of silently converting it to ASK', async () => {
     const customAllow: PermissionProfile = {
       name: 'custom',

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appError, err, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
+import { appError, classifyWorkspaceSourceEvidence, err, ok, type InvocationAuthorization, type Result, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { McpToolContext } from './tools/tool-types.js';
 
 const DEFAULT_VERIFY_WAIT_MS = 5 * 60 * 1000;
@@ -140,21 +140,58 @@ async function buildDiffFingerprint(
 ): Promise<Result<{ readonly cacheKey: string; readonly changedFiles: readonly string[] }>> {
   const git = context.services.git;
   if (git === undefined) return err(appError('INTERNAL_ERROR', 'Git service is unavailable', true));
-  const status = await git.status(context.actor, workspaceId, signal);
-  if (!status.ok) return status;
+  const before = await git.observeWorkspace(context.actor, workspaceId, {}, signal);
+  if (!before.ok) return before;
   const unstaged = await git.diff(context.actor, workspaceId, { maxBytes: 2 * 1024 * 1024 }, signal);
   if (!unstaged.ok) return unstaged;
   const staged = await git.diff(context.actor, workspaceId, { staged: true, maxBytes: 2 * 1024 * 1024 }, signal);
   if (!staged.ok) return staged;
-  const changedFiles = status.value.entries.map((entry) => entry.path).sort();
+  const after = await git.observeWorkspace(context.actor, workspaceId, {}, signal);
+  if (!after.ok) return after;
+  if (classifyWorkspaceSourceEvidence(
+    workspaceSourceEvidenceIdentity(before.value),
+    workspaceSourceEvidenceIdentity(after.value),
+  ) !== 'fresh') {
+    return err(appError('CONFLICT', 'Workspace source changed during incremental verification fingerprinting', true));
+  }
+  const changedFiles = after.value.statusEntries.map((entry) => entry.path).sort();
   const hash = createHash('sha256')
-    .update(JSON.stringify(status.value.entries))
+    .update(JSON.stringify({
+      repositoryIdentity: after.value.repositoryIdentity,
+      worktreeIdentity: after.value.worktreeIdentity,
+      branch: after.value.branch,
+      head: after.value.head,
+      dirtyFingerprint: after.value.dirtyFingerprint,
+      stagedFingerprint: after.value.stagedFingerprint,
+    }))
+    .update('\0')
+    .update(JSON.stringify(after.value.statusEntries))
     .update('\0')
     .update(unstaged.value.patch)
     .update('\0')
     .update(staged.value.patch)
     .digest('hex');
   return ok({ cacheKey: hash, changedFiles });
+}
+
+function workspaceSourceEvidenceIdentity(source: {
+  readonly repositoryIdentity: string;
+  readonly gitCommonDirIdentity: string;
+  readonly worktreeIdentity: string;
+  readonly branch: string | null;
+  readonly head: string;
+  readonly dirtyFingerprint: string;
+  readonly stagedFingerprint: string;
+}): WorkspaceSourceEvidenceIdentity {
+  return {
+    repositoryIdentity: source.repositoryIdentity,
+    gitCommonDirIdentity: source.gitCommonDirIdentity,
+    worktreeIdentity: source.worktreeIdentity,
+    ...(source.branch === null ? {} : { branchName: source.branch }),
+    workspaceHead: source.head,
+    dirtyFingerprint: source.dirtyFingerprint,
+    stagedFingerprint: source.stagedFingerprint,
+  };
 }
 
 function cancelledVerification(): Result<never> {

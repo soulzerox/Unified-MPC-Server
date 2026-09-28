@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { classifyWorkspaceSourceEvidence, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { MandatoryMcpBootstrapResult, MandatoryMcpServerStatus } from '@unified-mpc/extensions';
 
 export interface HarnessActivationContext {
@@ -11,6 +12,7 @@ export interface HarnessActivationState {
   readonly agentsMdHash: string;
   readonly mandatoryMcp: MandatoryMcpBootstrapResult;
   readonly preparedPaths: ReadonlySet<string>;
+  readonly sourceIdentity?: WorkspaceSourceEvidenceIdentity;
 }
 
 export class HarnessActivationLedger {
@@ -24,12 +26,14 @@ export class HarnessActivationLedger {
     context: HarnessActivationContext,
     agentsMdHash: string,
     mandatoryMcp: MandatoryMcpBootstrapResult,
+    sourceIdentity?: WorkspaceSourceEvidenceIdentity,
   ): HarnessActivationState {
     const state: HarnessActivationState = {
       harnessFingerprint: fingerprintHarness(agentsMdHash, mandatoryMcp.servers),
       agentsMdHash,
       mandatoryMcp,
       preparedPaths: new Set<string>(),
+      ...(sourceIdentity === undefined ? {} : { sourceIdentity }),
     };
     this.states.set(key(context), state);
     return state;
@@ -47,6 +51,14 @@ export class HarnessActivationLedger {
 
   public isPathPrepared(context: HarnessActivationContext, path: string): boolean {
     return this.state(context)?.preparedPaths.has(normalizePath(path)) === true;
+  }
+
+  public synchronizeSource(context: HarnessActivationContext, sourceIdentity: WorkspaceSourceEvidenceIdentity): boolean {
+    const current = this.state(context);
+    if (current === undefined) return false;
+    if (classifyWorkspaceSourceEvidence(current.sourceIdentity, sourceIdentity) === 'fresh') return false;
+    this.states.set(key(context), { ...current, sourceIdentity, preparedPaths: new Set<string>() });
+    return true;
   }
 
   public consumePath(context: HarnessActivationContext, path: string): void {

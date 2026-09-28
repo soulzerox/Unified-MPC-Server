@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadBuildProvenance } from './build-provenance.js';
+import { createRuntimeAdmissionIdentity, loadBuildProvenance } from './build-provenance.js';
 
 const roots: string[] = [];
 
@@ -51,5 +51,33 @@ describe('build provenance loader', () => {
       buildDirty: false,
     });
     expect(() => loadBuildProvenance(inconsistent)).toThrow('Invalid Unified build version');
+  });
+
+  it('binds each runtime admission identity to immutable artifact provenance and a fresh process generation', async () => {
+    const artifact = loadBuildProvenance(await fixture({
+      version: '4.61.0',
+      buildVersion: '4.61.0+0123456789ab',
+      buildCommit: '0123456789abcdef0123456789abcdef01234567',
+      buildShortCommit: '0123456789ab',
+      buildTime: '2026-09-21T09:00:00.000Z',
+      buildDirty: false,
+    }));
+
+    const first = createRuntimeAdmissionIdentity(artifact, { deploymentId: 'deploy-7', startedAt: '2026-09-23T00:00:00.000Z' });
+    const second = createRuntimeAdmissionIdentity(artifact, { deploymentId: 'deploy-7', startedAt: '2026-09-23T00:00:01.000Z' });
+
+    expect(first).toMatchObject({
+      runtimeDeploymentId: 'deploy-7',
+      runtimeBuildVersion: artifact.buildVersion,
+      runtimeBuildCommit: artifact.buildCommit,
+      runtimeBuildDirty: artifact.buildDirty,
+      runtimeProtocolGeneration: 1,
+      runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+    });
+    expect(first.runtimeGeneration).not.toBe(second.runtimeGeneration);
+  });
+
+  it('fails closed when required artifact identity is absent', () => {
+    expect(() => createRuntimeAdmissionIdentity(undefined as never)).toThrow('requires valid artifact build provenance');
   });
 });

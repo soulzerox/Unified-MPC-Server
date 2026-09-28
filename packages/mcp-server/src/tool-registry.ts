@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {
   appError,
+  classifyWorkspaceSourceEvidence,
   err,
   ok,
   type CommandSpec,
@@ -10,6 +11,7 @@ import {
   type InvocationAuthorizationSource,
   type Result,
   type ResultBudget,
+  type WorkspaceSourceEvidenceIdentity,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
 import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
@@ -439,7 +441,7 @@ export class ToolRegistry {
       authorizationMode,
     );
     const started = Date.now();
-    let fencedMutationEnd: (() => Promise<void>) | undefined;
+    let fencedMutationEnd: ((mutationSucceeded?: boolean) => Promise<void>) | undefined;
     let durableGoalExecutionAdmitted = false;
     let resourceAdmissionLease: ResourceAdmissionLease | undefined;
     let backgroundRagAdmissionWorkspaceId: string | undefined;
@@ -560,10 +562,19 @@ export class ToolRegistry {
         const finishInvocation = finishGoalId === undefined ? undefined : await this.resolvePonytailInvocation(undefined, finishGoalId);
         if (finishInvocation !== undefined && (finishInvocation.policy.mode === 'full' || finishInvocation.policy.mode === 'ultra')) {
           const reviewState = this.ponytailActivation.state(finishInvocation.context, finishInvocation.policy);
+          const currentSource = await this.observeWorkspaceSourceIdentity(finishInvocation.context.workspaceId, parentSignal);
+          if (!currentSource.ok) {
+            const message = `Ponytail ${finishInvocation.policy.mode.toUpperCase()} review freshness could not be verified: ${currentSource.error.message}`;
+            const response = mapError(appError('CONFLICT', message, true));
+            await this.activity.end(callId, 'CONFLICT', Date.now() - started, message);
+            return response;
+          }
+          const sourceReviewStale = currentSource.value !== undefined
+            && classifyWorkspaceSourceEvidence(reviewState.reviewSourceIdentity, currentSource.value) !== 'fresh';
           if (!reviewState.sessionSuppressed
             && reviewState.codeMutationGeneration > 0
-            && reviewState.reviewGeneration !== reviewState.codeMutationGeneration) {
-            const message = `Ponytail ${finishInvocation.policy.mode.toUpperCase()} review is stale for the latest code mutation. Load ${BUNDLED_PONYTAIL_REVIEW_SKILL_ID}, run review_changes for this workspace/goal, then retry finish_goal.`;
+            && (reviewState.reviewGeneration !== reviewState.codeMutationGeneration || sourceReviewStale)) {
+            const message = `Ponytail ${finishInvocation.policy.mode.toUpperCase()} review is stale for the latest code/source state. Load ${BUNDLED_PONYTAIL_REVIEW_SKILL_ID}, run review_changes for this workspace/goal, then retry finish_goal.`;
             const response = mapError(appError('CONFLICT', message, true));
             await this.activity.end(callId, 'CONFLICT', Date.now() - started, message);
             return response;
@@ -909,12 +920,12 @@ export class ToolRegistry {
       if (execution.deferredSettlement !== undefined) {
         const endFence = fencedMutationEnd;
         fencedMutationEnd = undefined;
-        void execution.deferredSettlement.then(async () => {
-          await endFence?.();
+        void execution.deferredSettlement.then(async (settledResult) => {
+          await endFence?.(codingMutation && settledResult?.ok === true);
           await this.activity.end(callId, resultCode, Date.now() - started, resultMessage, resultDetail);
         });
       } else {
-        await fencedMutationEnd?.();
+        await fencedMutationEnd?.(codingMutation && response.isError !== true);
         fencedMutationEnd = undefined;
         await this.activity.end(callId, resultCode, Date.now() - started, resultMessage, resultDetail);
       }
@@ -1012,6 +1023,28 @@ export class ToolRegistry {
     }
   }
 
+  private async observeWorkspaceSourceIdentity(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<Result<WorkspaceSourceEvidenceIdentity | undefined>> {
+    const git = this.services.git;
+    if (git?.observeWorkspace === undefined) return ok(undefined);
+    const observed = await git.observeWorkspace(this.actor, workspaceId, {}, signal);
+    if (!observed.ok) {
+      if (observed.error.code === 'GIT_NOT_REPOSITORY') return ok(undefined);
+      return observed;
+    }
+    return ok({
+      repositoryIdentity: observed.value.repositoryIdentity,
+      gitCommonDirIdentity: observed.value.gitCommonDirIdentity,
+      worktreeIdentity: observed.value.worktreeIdentity,
+      ...(observed.value.branch === null ? {} : { branchName: observed.value.branch }),
+      workspaceHead: observed.value.head,
+      dirtyFingerprint: observed.value.dirtyFingerprint,
+      stagedFingerprint: observed.value.stagedFingerprint,
+    });
+  }
+
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
@@ -1039,7 +1072,14 @@ export class ToolRegistry {
     }
     const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
     if (!agentsMdHash.ok) return agentsMdHash;
-    const state = this.harnessActivation.markBootstrapped(this.harnessContext(workspaceId), agentsMdHash.value, mandatoryMcp.value);
+    const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
+    if (!sourceIdentity.ok) return sourceIdentity;
+    const state = this.harnessActivation.markBootstrapped(
+      this.harnessContext(workspaceId),
+      agentsMdHash.value,
+      mandatoryMcp.value,
+      sourceIdentity.value,
+    );
     let preferredGoal = null;
     try {
       preferredGoal = await this.services.preferredGoal?.get(workspaceId) ?? null;
@@ -1071,6 +1111,9 @@ export class ToolRegistry {
       this.harnessActivation.invalidate(context);
       return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again', true));
     }
+    const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
+    if (!sourceIdentity.ok) return sourceIdentity;
+    if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);
     const thaiRag = this.services.thaiRag;
     if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
     const thaiHealth = await thaiRag.health(signal);
@@ -1329,6 +1372,10 @@ export class ToolRegistry {
       }
     }
 
+    const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, operationSignal);
+    if (!sourceIdentity.ok) return sourceIdentity;
+    if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);
+
     const currentHash = await this.currentAgentsMdHash(workspaceId);
     if (!currentHash.ok) {
       this.harnessActivation.invalidate(context);
@@ -1460,7 +1507,10 @@ export class ToolRegistry {
         readExplicitWorkspaceId(input) ?? activityWorkspaceId,
         readTrimmedString(input.goalId),
       );
-      if (resolved !== undefined) this.ponytailActivation.markReviewComplete(resolved.context, resolved.policy);
+      if (resolved !== undefined) {
+        const sourceIdentity = await this.observeWorkspaceSourceIdentity(resolved.context.workspaceId);
+        if (sourceIdentity.ok) this.ponytailActivation.markReviewComplete(resolved.context, resolved.policy, sourceIdentity.value);
+      }
     }
   }
 
@@ -1915,6 +1965,7 @@ const goalLeaseProofSchema = z.object({
   goalId: z.string().min(1).max(128),
   leaseToken: z.string().min(1).max(256),
   leaseGeneration: z.number().int().nonnegative(),
+  admissionGeneration: z.number().int().positive().optional(),
 }).strict();
 const approvalEnvelopeSchema = z.boolean();
 const GOAL_MUTATION_HEARTBEAT_MS = 10_000;
@@ -2035,7 +2086,9 @@ function deriveHostAutomationApprovalScope(
 function readGoalLeaseProof(input: unknown): GoalLeaseProof | undefined {
   if (!isRecord(input) || input.goalLease === undefined) return undefined;
   const parsed = goalLeaseProofSchema.safeParse(input.goalLease);
-  return parsed.success ? parsed.data : undefined;
+  if (!parsed.success) return undefined;
+  const { admissionGeneration, ...proof } = parsed.data;
+  return admissionGeneration === undefined ? proof : { ...proof, admissionGeneration };
 }
 
 function stripGoalLeaseEnvelope(input: unknown): unknown {
@@ -2052,7 +2105,7 @@ function startGoalMutationFenceHeartbeat(
   service: NonNullable<McpApplicationServices['goalMutationFence']>,
   callId: string,
   leaseGeneration: number,
-): () => Promise<void> {
+): (mutationSucceeded?: boolean) => Promise<void> {
   let closed = false;
   let heartbeatInFlight = false;
   const timer = setInterval(() => {
@@ -2063,11 +2116,11 @@ function startGoalMutationFenceHeartbeat(
       .finally(() => { heartbeatInFlight = false; });
   }, GOAL_MUTATION_HEARTBEAT_MS);
   timer.unref?.();
-  return async (): Promise<void> => {
+  return async (mutationSucceeded = false): Promise<void> => {
     if (closed) return;
     closed = true;
     clearInterval(timer);
-    await service.end(callId);
+    await service.end(callId, mutationSucceeded);
   };
 }
 

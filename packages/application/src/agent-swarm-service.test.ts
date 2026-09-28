@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appError, err, ok, type InvocationAuthorization } from '@unified-mpc/domain';
+import { appError, err, ok, type InvocationAuthorization, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { ManagedProcess } from '@unified-mpc/process';
 import { SqliteAgentSwarmRepository, SqliteDatabase, SqliteManagedResourceBindingRepository } from '@unified-mpc/storage';
 import { AgentSwarmService, type AgentSwarmCodexPort, type AgentSwarmServiceOptions } from './agent-swarm-service.js';
@@ -109,6 +109,105 @@ describe('AgentSwarmService', () => {
       database.close();
     }
   });
+
+  it('injects bounded workspace admission truth into delegated child instructions without persisting it', async () => {
+    const originalPrompt = 'Inspect the repository.';
+    let launchedInstruction = '';
+    const codex: AgentSwarmCodexPort = {
+      run: async (_actor, _workspaceId, instruction, _signal, _userConfirmed, _authorization, sandboxMode) => {
+        launchedInstruction = instruction;
+        expect(sandboxMode).toBe('read-only');
+        return ok({ codexTaskId: 'codex-admission', processId: 'process-admission' });
+      },
+      taskStatus: async () => ok(managed('codex-admission')),
+      taskLogs: async () => ok({ entries: [], truncated: false, nextSequence: 0 }),
+      stop: async () => ok(undefined),
+    };
+    const projection: WorkspaceAdmissionProjection & { readonly secret: string; readonly repositoryIdentity: string } = {
+      runtime: {
+        source: 'current',
+        deploymentId: 'deploy-1',
+        generation: 'runtime-1',
+        buildVersion: '4.61.0+0123456789ab',
+        buildCommit: 'a'.repeat(40),
+        buildDirty: false,
+        protocolGeneration: 1,
+        startedAt: '2026-09-26T00:00:00.000Z',
+      },
+      workspace: {
+        id: 'workspace-a',
+        kind: 'git',
+        branch: 'goal/one',
+        expectedHead: 'b'.repeat(40),
+        observedHead: 'b'.repeat(40),
+        dirtyState: 'clean',
+      },
+      base: {
+        ref: 'origin/main',
+        recordedSha: 'c'.repeat(40),
+        currentResolvedSha: 'c'.repeat(40),
+        freshness: 'current',
+      },
+      ownership: { goalId: 'goal-1', writeLeaseGeneration: 3 },
+      admission: { status: 'ADMITTED', generation: 2, remediation: 'none' },
+      secret: 'do-not-project',
+      repositoryIdentity: 'opaque-repository',
+    };
+    const { database, repository, service } = await fixture(codex, {
+      workspaceAdmissionProjection: {
+        readWorkspaceAdmissionProjection: async () => projection,
+      },
+    });
+    try {
+      const started = await service.start(
+        actor,
+        startRequest([{ id: 'inspect', prompt: originalPrompt }]),
+        undefined,
+        authorization,
+      );
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+      await service.cancel(actor, 'workspace-a', started.value.swarmId, authorization);
+
+      expect(launchedInstruction).toContain('Unified workspace admission context');
+      expect(launchedInstruction).toContain('"status":"ADMITTED"');
+      expect(launchedInstruction).toContain('"generation":"runtime-1"');
+      expect(launchedInstruction).toContain('"buildCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"');
+      expect(launchedInstruction).toContain(originalPrompt);
+      expect(launchedInstruction).not.toContain('do-not-project');
+      expect(launchedInstruction).not.toContain('opaque-repository');
+      expect(launchedInstruction).not.toContain('dirtyFingerprint');
+      expect(launchedInstruction).not.toContain('leaseToken');
+
+      const stored = repository.getOwned(started.value.swarmId, actor.clientId, actor.sessionId!, 'workspace-a');
+      expect(stored?.tasks[0]?.promptLength).toBe(Buffer.byteLength(originalPrompt, 'utf8'));
+    } finally {
+      database.close();
+    }
+  });
+
+  it('fails closed before delegated child launch when workspace admission requires recovery', async () => {
+    const fake = runningCodex();
+    const projection: WorkspaceAdmissionProjection = {
+      workspace: { id: 'workspace-a', kind: 'git', branch: 'goal/one', dirtyState: 'clean' },
+      base: { freshness: 'current' },
+      ownership: { goalId: 'goal-1', writeLeaseGeneration: 3 },
+      admission: { status: 'RECOVERY_REQUIRED', blocker: 'base_history_rewritten_or_unrelated', remediation: 'recover_workspace' },
+    };
+    const { database, service } = await fixture(fake.codex, {
+      workspaceAdmissionProjection: {
+        readWorkspaceAdmissionProjection: async () => projection,
+      },
+    });
+    try {
+      const started = await service.start(actor, startRequest(), undefined, authorization);
+      expect(started).toMatchObject({ ok: false, error: { code: 'WORKSPACE_ADMISSION_STALE' } });
+      expect(fake.run).not.toHaveBeenCalled();
+    } finally {
+      database.close();
+    }
+  });
+
 
   it('lets durable Goal ownership observe and cancel a live swarm without transient session authority', async () => {
     const fake = runningCodex();

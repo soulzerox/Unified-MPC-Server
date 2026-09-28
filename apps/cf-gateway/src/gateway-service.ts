@@ -257,7 +257,23 @@ export class GatewayService {
     let tunnel: TunnelHandle | undefined;
     let promoted = false;
     try {
-      tunnel = await this.tunnelProvider();
+      const provider = this.tunnelProvider();
+      const providerResult = await Promise.race([
+        provider.then(
+          (value) => ({ kind: 'tunnel' as const, value }),
+          (error: unknown) => ({ kind: 'error' as const, error }),
+        ),
+        pendingStart.cancelledPromise.then(() => ({ kind: 'cancelled' as const })),
+      ]);
+      if (providerResult.kind === 'cancelled') {
+        void provider.then(
+          (lateTunnel) => lateTunnel.stop().catch(() => undefined),
+          () => undefined,
+        );
+        return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));
+      }
+      if (providerResult.kind === 'error') throw providerResult.error;
+      tunnel = providerResult.value;
       if (pendingStart.cancelled || generation !== this.startGeneration || this.state !== 'INITIALIZING') {
         if (tunnel !== undefined) await tunnel.stop().catch(() => undefined);
         return err(appError('CONFLICT', 'Gateway start was superseded by a newer lifecycle operation'));

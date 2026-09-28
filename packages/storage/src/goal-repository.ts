@@ -2112,6 +2112,50 @@ export class SqliteGoalRepository implements GoalRepository, ScheduledContinuati
       if (goal.leaseExpiresAt === undefined || parseIso(goal.leaseExpiresAt, 'lease expiry') <= parseIso(request.startedAt, 'mutation start')) {
         throw new GoalStateError('lease_invalid', 'Goal lease has expired');
       }
+      if (request.admissionGeneration !== undefined) {
+        const admission = this.database.connection.prepare(`
+          SELECT a.admission_generation, a.write_lease_generation, a.receipt_json,
+                 w.writer_lease_generation, w.writer_lease_expires_at, w.archived_at
+          FROM workspace_admission_receipts a
+          JOIN workspaces w ON w.id = a.workspace_id
+          WHERE a.workspace_id = ?
+        `).get(request.workspaceId) as {
+          admission_generation: number;
+          write_lease_generation: number;
+          receipt_json: string;
+          writer_lease_generation: number | null;
+          writer_lease_expires_at: string | null;
+          archived_at: string | null;
+        } | undefined;
+        let receipt: Record<string, unknown> | undefined;
+        try {
+          const parsed: unknown = admission === undefined ? undefined : JSON.parse(admission.receipt_json);
+          if (isRecord(parsed)) receipt = parsed;
+        } catch {
+          receipt = undefined;
+        }
+        const writerLeaseExpiry = admission?.writer_lease_expires_at;
+        const receiptExpiry = receipt?.expiresAt;
+        const receiptCreatedAt = receipt?.createdAt;
+        if (admission === undefined
+          || receipt === undefined
+          || admission.admission_generation !== request.admissionGeneration
+          || admission.write_lease_generation !== admission.writer_lease_generation
+          || admission.writer_lease_generation === null
+          || admission.archived_at !== null
+          || receipt.workspaceId !== request.workspaceId
+          || receipt.goalId !== goal.id
+          || receipt.admissionGeneration !== request.admissionGeneration
+          || receipt.writeLeaseGeneration !== admission.write_lease_generation
+          || typeof receipt.invalidatedAt === 'string'
+          || typeof writerLeaseExpiry !== 'string'
+          || parseIso(writerLeaseExpiry, 'workspace writer lease expiry') <= parseIso(request.startedAt, 'mutation start')
+          || (typeof receiptExpiry === 'string' && parseIso(receiptExpiry, 'admission receipt expiry') <= parseIso(request.startedAt, 'mutation start'))
+          || typeof receiptCreatedAt !== 'string'
+          || parseIso(receiptCreatedAt, 'admission receipt creation') > parseIso(request.startedAt, 'mutation start')) {
+          throw new GoalStateError('conflict', 'Workspace admission generation is stale or no longer valid');
+        }
+      }
       const fence = this.selectMutationFenceContinuation(goal.id);
       if (fence === undefined) throw new GoalStateError('conflict', 'Goal has no live scheduled-continuation fence');
       const effectiveDueAt = mutationFenceDueAt(fence);

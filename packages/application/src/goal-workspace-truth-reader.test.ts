@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { Workspace } from '@unified-mpc/workspace';
@@ -91,5 +93,103 @@ describe('GoalWorkspaceTruthReader', () => {
       state: 'unavailable',
       detail: 'Git status is unavailable',
     });
+  });
+
+  it('returns bounded Git admission evidence while keeping workspace HEAD distinct from the registered base', async () => {
+    const snapshot = {
+      repositoryIdentity: 'repo-1',
+      gitCommonDirIdentity: 'common-1',
+      worktreeIdentity: 'worktree-1',
+      branch: 'goal/one',
+      head: 'a'.repeat(40),
+      statusEntries: [],
+      stagedFingerprint: 'staged-hash',
+      dirtyFingerprint: 'dirty-hash',
+      baseRef: 'base-1',
+      resolvedBaseRef: 'refs/unified-mpc/admission/base-1',
+      baseSha: 'b'.repeat(40),
+      mergeBaseSha: 'b'.repeat(40),
+    };
+    const git: GoalWorkspaceGitStatusPort = {
+      status: vi.fn(async () => ok({ entries: [] })),
+      observeWorkspace: vi.fn(async (_actor, _workspaceId, options) => {
+        expect(options).toMatchObject({ baseRef: 'b'.repeat(40) });
+        return ok(snapshot);
+      }),
+    };
+    const { reader } = fixture({ git, workspace: { ...workspace, baseRevision: 'b'.repeat(40), lifecycleKind: 'goal', goalWorkspaceKind: 'git_worktree' } });
+
+    await expect(reader.readAdmission(workspace.id)).resolves.toMatchObject({
+      workspaceKind: 'git',
+      workspaceHead: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      dirtyState: 'clean',
+      dirtyFingerprint: 'dirty-hash',
+    });
+  });
+
+  it('refreshes a moving base directly into a private ref before classifying remote base drift', async () => {
+    const privateRef = 'refs/unified-mpc/admission/workspaces/workspace-1/main';
+    const currentBase = 'c'.repeat(40);
+    const git: GoalWorkspaceGitStatusPort = {
+      status: vi.fn(async () => ok({ entries: [] })),
+      refreshAdmissionRef: vi.fn(async () => ok({ ref: privateRef, sha: currentBase })),
+      observeWorkspace: vi.fn(async (_actor, _workspaceId, options) => {
+        expect(options).toMatchObject({ baseRef: 'origin/main', resolvedBaseRef: privateRef });
+        return ok({
+          repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+          branch: 'codex/goal-1', head: 'a'.repeat(40), statusEntries: [], stagedFingerprint: 'staged',
+          dirtyFingerprint: 'dirty', baseRef: 'origin/main', resolvedBaseRef: privateRef,
+          baseSha: currentBase, mergeBaseSha: 'b'.repeat(40),
+        });
+      }),
+    };
+    const { reader } = fixture({
+      git,
+      workspace: { ...workspace, lifecycleKind: 'goal', goalWorkspaceKind: 'git_worktree', baseRef: 'origin/main', baseRevision: 'b'.repeat(40) },
+    });
+
+    await expect(reader.readAdmission(workspace.id)).resolves.toMatchObject({
+      baseRef: 'origin/main', baseSha: currentBase, resolvedBaseRef: privateRef,
+    });
+    expect(git.refreshAdmissionRef).toHaveBeenCalledWith(expect.anything(), workspace.id, 'origin', 'refs/heads/main');
+  });
+
+  it('fingerprints bounded snapshot content as non-Git admission evidence', async () => {
+    const root = await mkdtemp(path.join(process.cwd(), '.goal-snapshot-'));
+    try {
+      await writeFile(path.join(root, 'source.ts'), 'snapshot source v1');
+      const observeWorkspace = vi.fn();
+      const git: GoalWorkspaceGitStatusPort = {
+        status: vi.fn(async () => ok({ entries: [] })),
+        observeWorkspace,
+      };
+      const snapshotWorkspace: Workspace = {
+        ...workspace,
+        realRootPath: root,
+        lifecycleKind: 'goal',
+        goalWorkspaceKind: 'snapshot',
+        goalId: 'goal-1',
+        parentWorkspaceId: 'project-1',
+        baseRevision: 'snapshot-base-1',
+        writerLease: { leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2099-01-01T00:00:00.000Z' },
+      };
+      const { reader } = fixture({ git, workspace: snapshotWorkspace });
+      const first = await reader.readAdmission(workspace.id);
+      expect(first).toMatchObject({
+        workspaceKind: 'non_git',
+        dirtyState: 'clean',
+        sourceSnapshotGeneration: '2026-09-22T00:00:00.000Z:snapshot-base-1',
+      });
+      expect(first.sourceContentFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+      expect(first).not.toHaveProperty('workspaceHead');
+
+      await writeFile(path.join(root, 'source.ts'), 'snapshot source v2');
+      const second = await reader.readAdmission(workspace.id);
+      expect(second.sourceContentFingerprint).not.toBe(first.sourceContentFingerprint);
+      expect(observeWorkspace).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

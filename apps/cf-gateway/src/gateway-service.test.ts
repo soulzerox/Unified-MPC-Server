@@ -108,6 +108,37 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
     expect(gateway.status().tunnelUrl).toBeUndefined();
   });
 
+  it('cancels a tunnel provider that has not resolved yet and disposes a late handle', async () => {
+    let releaseProvider!: (handle: TunnelHandle) => void;
+    const pendingProvider = new Promise<TunnelHandle>((resolve) => { releaseProvider = resolve; });
+    let lateStops = 0;
+    const gateway = new GatewayService({
+      tunnelProvider: async (): Promise<TunnelHandle> => pendingProvider,
+      healthProbe: async (): Promise<number> => 200,
+    });
+
+    const starting = gateway.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(gateway.status().state).toBe('INITIALIZING');
+
+    const stopped = await gateway.stop();
+    expect(stopped.ok).toBe(true);
+    const cancelled = await Promise.race([
+      starting,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('pending provider start did not cancel')), 100)),
+    ]);
+    expect(cancelled.ok).toBe(false);
+    if (!cancelled.ok) expect(cancelled.error.code).toBe('CONFLICT');
+    expect(gateway.status().state).toBe('STOPPED');
+
+    releaseProvider({
+      url: 'https://late-provider.example.com',
+      stop: async (): Promise<void> => { lateStops += 1; },
+    });
+    await expect.poll(() => lateStops, { timeout: 500 }).toBe(1);
+    expect(gateway.status().state).toBe('STOPPED');
+  });
+
   it('stops cleanly and returns to STOPPED state', async () => {
     const gateway = new GatewayService({
       localPort: 18765,

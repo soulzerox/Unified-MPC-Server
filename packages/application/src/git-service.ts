@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -14,9 +15,13 @@ import {
   type GitCommandResult,
   type GitDiffRequest,
   type GitDiffResult,
+  type GitGuardedRebaseRequest,
+  type GitGuardedRebaseResult,
   type GitLogRequest,
   type GitLogResult,
   type GitStatusResult,
+  type GitWorkspaceSnapshot,
+  type GitWorkspaceSnapshotOptions,
 } from '@unified-mpc/git';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitConfigMutationReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
@@ -29,6 +34,11 @@ export interface GitRunRequest {
   readonly cwd?: string;
   readonly timeoutMs?: number;
   readonly userConfirmed?: boolean;
+}
+
+export interface RefreshedAdmissionRef {
+  readonly ref: string;
+  readonly sha: string;
 }
 
 export class GitService {
@@ -50,6 +60,86 @@ export class GitService {
     const workspace = await this.getWorkspace(workspaceId);
     if (!workspace.ok) return workspace;
     return this.adapter.branch(workspace.value.realRootPath);
+  }
+
+  public async observeWorkspace(
+    actor: FileActor,
+    workspaceId: string,
+    options: GitWorkspaceSnapshotOptions = {},
+    signal?: AbortSignal,
+  ): Promise<Result<GitWorkspaceSnapshot>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    return this.adapter.observeWorkspace(workspace.value.realRootPath, options, signal);
+  }
+
+  public async refreshAdmissionRef(
+    actor: FileActor,
+    workspaceId: string,
+    remote: string,
+    sourceRef: string,
+    signal?: AbortSignal,
+  ): Promise<Result<RefreshedAdmissionRef>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    const workspaceKey = createHash('sha256').update(workspaceId).digest('hex');
+    const refKey = createHash('sha256').update(sourceRef).digest('hex');
+    const ref = `refs/unified-mpc/admission/workspaces/${workspaceKey}/${refKey}`;
+    const refreshed = await this.adapter.refreshRemoteRef(workspace.value.realRootPath, remote, sourceRef, ref, signal);
+    return refreshed.ok ? ok({ ref, sha: refreshed.value }) : refreshed;
+  }
+
+  public async remoteBranchSha(
+    actor: FileActor,
+    workspaceId: string,
+    remote: string,
+    branchName: string,
+    signal?: AbortSignal,
+  ): Promise<Result<string | null>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    return this.adapter.remoteBranchSha(workspace.value.realRootPath, remote, branchName, signal);
+  }
+
+  public async isAncestor(
+    actor: FileActor,
+    workspaceId: string,
+    ancestorSha: string,
+    descendantSha: string,
+    signal?: AbortSignal,
+  ): Promise<Result<boolean>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    return this.adapter.isAncestor(workspace.value.realRootPath, ancestorSha, descendantSha, signal);
+  }
+
+  public async createRecoveryRef(
+    actor: FileActor,
+    workspaceId: string,
+    recoveryRef: string,
+    expectedHead: string,
+    signal?: AbortSignal,
+  ): Promise<Result<void>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    return this.adapter.createRecoveryRef(workspace.value.realRootPath, recoveryRef, expectedHead, signal);
+  }
+
+  public async guardedRebase(
+    actor: FileActor,
+    workspaceId: string,
+    request: GitGuardedRebaseRequest,
+    signal?: AbortSignal,
+  ): Promise<Result<GitGuardedRebaseResult>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    return this.adapter.guardedRebase(workspace.value.realRootPath, request, signal);
   }
 
   public async diff(

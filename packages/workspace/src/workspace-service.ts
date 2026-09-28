@@ -1,6 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { appError, err, ok, type Result, type WorkspaceId } from '@unified-mpc/domain';
+import { appError, err, ok, type Result, type WorkspaceAdmissionReceipt, type WorkspaceBaseRebaseReceipt, type WorkspaceId } from '@unified-mpc/domain';
 import { workspaceLifecycleKind, type GoalWorkspaceIntegrationState, type GoalWorkspaceKind, type GoalWorkspaceParentSource, type Workspace, type WorkspaceLifecycleKind, type WorkspaceWriterLease } from './workspace-types.js';
 import { isPosixMountRoot, resolveHostPath } from './filesystem-root.js';
 
@@ -19,6 +19,22 @@ export interface WorkspaceRepository {
   acquireGoalWriterLease?(id: WorkspaceId, leaseId: string, ownerId: string, now: string, expiresAt: string): Promise<WorkspaceWriterLease | null>;
   renewGoalWriterLease?(id: WorkspaceId, leaseId: string, generation: number, now: string, expiresAt: string): Promise<boolean>;
   releaseGoalWriterLease?(id: WorkspaceId, leaseId: string, generation: number): Promise<boolean>;
+  getAdmissionReceipt?(workspaceId: WorkspaceId): Promise<WorkspaceAdmissionReceipt | null>;
+  compareAndSwapAdmissionReceipt?(
+    workspaceId: WorkspaceId,
+    expectedAdmissionGeneration: number,
+    writeLeaseGeneration: number,
+    receipt: WorkspaceAdmissionReceipt,
+  ): Promise<boolean>;
+  invalidateAdmissionReceipt?(workspaceId: WorkspaceId, expectedAdmissionGeneration: number, reason: string, invalidatedAt: string): Promise<boolean>;
+  getBaseRebaseReceipt?(workspaceId: WorkspaceId): Promise<WorkspaceBaseRebaseReceipt | null>;
+  compareAndSwapBaseRebaseReceipt?(
+    workspaceId: WorkspaceId,
+    expectedReceiptRevision: number,
+    expectedAdmissionGeneration: number,
+    writeLeaseGeneration: number,
+    receipt: WorkspaceBaseRebaseReceipt,
+  ): Promise<boolean>;
 }
 
 export interface WorkspaceRegistrationOptions {
@@ -31,6 +47,7 @@ export interface WorkspaceRegistrationOptions {
   readonly parentWorkspaceId?: WorkspaceId;
   readonly goalWorkspaceKind?: GoalWorkspaceKind;
   readonly parentSource?: GoalWorkspaceParentSource;
+  readonly baseRef?: string;
   readonly baseRevision?: string;
   readonly branchName?: string;
   readonly checkpointId?: string;
@@ -313,13 +330,14 @@ function errorMessage(value: unknown): string {
 function goalMetadata(
   lifecycleKind: WorkspaceLifecycleKind,
   registration: WorkspaceRegistrationOptions,
-): Pick<Workspace, 'goalId' | 'parentWorkspaceId' | 'goalWorkspaceKind' | 'parentSource' | 'baseRevision' | 'branchName' | 'checkpointId' | 'integrationState'> {
+): Pick<Workspace, 'goalId' | 'parentWorkspaceId' | 'goalWorkspaceKind' | 'parentSource' | 'baseRef' | 'baseRevision' | 'branchName' | 'checkpointId' | 'integrationState'> {
   if (lifecycleKind !== 'goal') return {};
   return {
     ...(registration.goalId === undefined ? {} : { goalId: registration.goalId }),
     ...(registration.parentWorkspaceId === undefined ? {} : { parentWorkspaceId: registration.parentWorkspaceId }),
     ...(registration.goalWorkspaceKind === undefined ? {} : { goalWorkspaceKind: registration.goalWorkspaceKind }),
     ...(registration.parentSource === undefined ? {} : { parentSource: registration.parentSource }),
+    ...(registration.baseRef === undefined ? {} : { baseRef: registration.baseRef }),
     ...(registration.baseRevision === undefined ? {} : { baseRevision: registration.baseRevision }),
     ...(registration.branchName === undefined ? {} : { branchName: registration.branchName }),
     ...(registration.checkpointId === undefined ? {} : { checkpointId: registration.checkpointId }),

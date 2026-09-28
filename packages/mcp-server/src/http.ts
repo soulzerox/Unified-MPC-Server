@@ -49,9 +49,20 @@ export interface UnifiedBuildProvenance {
   readonly buildDirty: boolean;
 }
 
+export interface UnifiedRuntimeAdmissionIdentity {
+  readonly runtimeDeploymentId: string;
+  readonly runtimeGeneration: string;
+  readonly runtimeBuildVersion: string;
+  readonly runtimeBuildCommit: string;
+  readonly runtimeBuildDirty: boolean;
+  readonly runtimeProtocolGeneration: number;
+  readonly runtimeStartedAt: string;
+}
+
 export interface McpHttpServerOptions extends McpServerOptions {
   readonly port: number;
   readonly buildProvenance?: UnifiedBuildProvenance;
+  readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
   readonly runtimeDiagnosticsProvider?: McpRuntimeDiagnosticsProvider;
   readonly maxBodyBytes?: number;
   readonly originPolicy?: OriginPolicy;
@@ -423,6 +434,7 @@ async function handleRequest(
   maxBodyBytes: number,
   allowedHostnames: readonly string[],
   buildProvenance?: UnifiedBuildProvenance,
+  runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity,
   runtimeDiagnosticsProvider?: McpRuntimeDiagnosticsProvider,
 ): Promise<void> {
   const requestedPath = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
@@ -486,6 +498,7 @@ async function handleRequest(
         buildTime: buildProvenance.buildTime,
         buildDirty: buildProvenance.buildDirty,
       }),
+      ...(runtimeAdmissionIdentity ?? {}),
     };
     await writeFetchResponse(response, Response.json(identity, {
       headers: {
@@ -533,7 +546,7 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
     const allowedHostnames = [...new Set([...localhostAllowedHostnames(), ...(configuredHostnames() ?? [])])];
     const allowedOrigins = [...new Set([...localhostAllowedOrigins(), ...(configuredOrigins() ?? [])])];
     const requestOriginPolicy = options.originPolicy ?? createOriginPolicy(allowedOrigins);
-    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames, options.buildProvenance, options.runtimeDiagnosticsProvider).catch((error: unknown) => {
+    void handleRequest(request, response, handler, requestOriginPolicy, maxBodyBytes, allowedHostnames, options.buildProvenance, options.runtimeAdmissionIdentity, options.runtimeDiagnosticsProvider).catch((error: unknown) => {
       writeDiagnostic(error instanceof Error ? error : new Error('Unhandled MCP HTTP request error'));
       if (!response.headersSent) sendStatus(response, 500, 'Internal server error');
       else response.destroy();
@@ -553,4 +566,3 @@ export async function startMcpHttp(options: McpHttpServerOptions): Promise<McpHt
     },
   };
 }
-

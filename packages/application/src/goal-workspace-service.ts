@@ -1,20 +1,38 @@
 import { copyFile, lstat, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { appError, err, ok, type GoalWorkspaceState, type Result } from '@unified-mpc/domain';
-import { GitAdapter, type GitCommandResult, type GitStatusResult } from '@unified-mpc/git';
+import { appError, decideGuardedBaseRebase, err, ok, type GoalWorkspaceState, type Result, type WorkspaceAdmissionReceipt, type WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
+import { GitAdapter, type GitCommandResult, type GitGuardedRebaseRequest, type GitGuardedRebaseResult, type GitStatusResult, type GitWorkspaceSnapshotOptions } from '@unified-mpc/git';
 import { WorkspaceService, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
 
 export interface GoalWorkspaceGitPort {
   status(cwd: string, signal?: AbortSignal): Promise<Result<GitStatusResult>>;
   run(cwd: string, args: readonly string[], timeoutMs?: number, signal?: AbortSignal): Promise<Result<GitCommandResult>>;
+  refreshRemoteRef?(cwd: string, remote: string, sourceRef: string, destinationRef: string, signal?: AbortSignal): Promise<Result<string>>;
+  observeWorkspace?(cwd: string, options?: GitWorkspaceSnapshotOptions, signal?: AbortSignal): Promise<Result<import('@unified-mpc/git').GitWorkspaceSnapshot>>;
+  remoteBranchSha?(cwd: string, remote: string, branchName: string, signal?: AbortSignal): Promise<Result<string | null>>;
+  isAncestor?(cwd: string, ancestorSha: string, descendantSha: string, signal?: AbortSignal): Promise<Result<boolean>>;
+  createRecoveryRef?(cwd: string, recoveryRef: string, expectedHead: string, signal?: AbortSignal): Promise<Result<void>>;
+  guardedRebase?(cwd: string, request: GitGuardedRebaseRequest, signal?: AbortSignal): Promise<Result<GitGuardedRebaseResult>>;
+}
+
+export interface GoalWorkspaceAdmissionCaptureRequest {
+  readonly workspaceId: string;
+  readonly checkpointId: string;
+  readonly checkpointRevision: number;
+  readonly checkpointHead: string;
+  readonly workflowVersion: number;
+  readonly runtime: Pick<WorkspaceAdmissionReceipt,
+    'runtimeDeploymentId' | 'runtimeGeneration' | 'runtimeBuildVersion' | 'runtimeBuildCommit'
+    | 'runtimeBuildDirty' | 'runtimeProtocolGeneration' | 'runtimeStartedAt'>;
 }
 
 export interface GoalWorkspaceCreateRequest {
   readonly goalId: string;
   readonly parentWorkspaceId: string;
   readonly branchName?: string;
-  readonly baseRevision: string;
+  /** Omit to fetch origin/main directly; provide to explicitly pin a historical base. */
+  readonly baseRevision?: string;
   readonly goalWorkspaceKind?: 'git_worktree' | 'snapshot';
   readonly displayName?: string;
   readonly ownerSessionId?: string;
@@ -70,6 +88,36 @@ export interface GoalWorkspaceIntegrationPreflight {
   readonly targetWorkspaceState: GoalWorkspaceState;
   readonly targetChangedFileCount: number;
 }
+
+export interface GoalWorkspaceGuardedRebaseRequest {
+  readonly goalId: string;
+  readonly expectedAdmissionGeneration: number;
+  readonly lease: Pick<WorkspaceWriterLease, 'leaseId' | 'generation'>;
+}
+
+export type GoalWorkspaceGuardedRebaseResult =
+  | {
+      readonly status: 'REBASED';
+      readonly operationId: string;
+      readonly oldHead: string;
+      readonly newHead: string;
+      readonly oldBaseSha: string;
+      readonly newBaseSha: string;
+      readonly checkpointId: string;
+      readonly recoveryRef: string;
+    }
+  | {
+      readonly status: 'RECOVERY_REQUIRED';
+      readonly reason: string;
+      readonly operationId?: string;
+      readonly oldHead?: string;
+      readonly oldBaseSha?: string;
+      readonly newBaseSha?: string;
+      readonly checkpointId?: string;
+      readonly recoveryRef?: string;
+      readonly conflictedPaths?: readonly string[];
+      readonly abortSucceeded?: boolean;
+    };
 
 /**
  * Owns the minimal filesystem/Git boundary for primary Goal Workspaces.
@@ -136,6 +184,84 @@ export class GoalWorkspaceService {
     return released ? ok(undefined) : err(appError('CONFLICT', 'Goal Workspace writer lease is stale', true));
   }
 
+  /** Persists a content-free receipt only when a caller-proven checkpoint still equals exact Git HEAD. */
+  public async captureAdmission(request: GoalWorkspaceAdmissionCaptureRequest): Promise<Result<WorkspaceAdmissionReceipt>> {
+    if (!Number.isSafeInteger(request.checkpointRevision) || request.checkpointRevision < 1
+      || !Number.isSafeInteger(request.workflowVersion) || request.workflowVersion < 1
+      || !/^[0-9a-f]{40,64}$/iu.test(request.checkpointHead)
+      || request.checkpointId.trim().length === 0) {
+      return err(appError('INVALID_INPUT', 'Admission requires an exact checkpoint revision, head, and workflow version'));
+    }
+    const workspace = await this.repository.get(request.workspaceId);
+    if (workspace === null || workspace.lifecycleKind !== 'goal' || workspace.goalWorkspaceKind !== 'git_worktree'
+      || workspace.goalId === undefined || workspace.parentWorkspaceId === undefined) {
+      return err(appError('CONFLICT', 'Admission requires an active registered Git Goal Workspace', true));
+    }
+    const now = this.now();
+    const lease = workspace.writerLease;
+    if (lease === undefined || lease.expiresAt <= now.toISOString()) {
+      return err(appError('CONFLICT', 'Admission requires a current Goal Workspace writer lease', true));
+    }
+    if (workspace.checkpointId !== request.checkpointId) {
+      return err(appError('CONFLICT', 'Admission checkpoint is not the registered Goal Workspace checkpoint', true));
+    }
+    if (this.git.observeWorkspace === undefined) {
+      return err(appError('CONFLICT', 'Bounded Git admission observation is unavailable', true));
+    }
+    const observed = await this.git.observeWorkspace(workspace.realRootPath, {
+      ...(workspace.baseRevision === undefined ? {} : { baseRef: workspace.baseRevision }),
+    });
+    if (!observed.ok) return observed;
+    const snapshot = observed.value;
+    if (snapshot.head !== request.checkpointHead || snapshot.baseSha === undefined || snapshot.mergeBaseSha === undefined
+      || (workspace.branchName !== undefined && snapshot.branch !== workspace.branchName)) {
+      return err(appError('CONFLICT', 'Workspace HEAD, base, or branch changed since the admission checkpoint', true));
+    }
+    if (this.repository.getAdmissionReceipt === undefined || this.repository.compareAndSwapAdmissionReceipt === undefined) {
+      return err(appError('CONFLICT', 'Durable admission receipt storage is unavailable', true));
+    }
+    const existing = await this.repository.getAdmissionReceipt(workspace.id);
+    const admissionGeneration = (existing?.admissionGeneration ?? 0) + 1;
+    const receipt: WorkspaceAdmissionReceipt = {
+      admissionId: randomUUID(),
+      projectId: workspace.parentWorkspaceId,
+      workspaceId: workspace.id,
+      goalId: workspace.goalId,
+      workspaceKind: 'git',
+      repositoryIdentity: snapshot.repositoryIdentity,
+      gitCommonDirIdentity: snapshot.gitCommonDirIdentity,
+      worktreeIdentity: snapshot.worktreeIdentity,
+      ...(snapshot.branch === null ? {} : { branchName: snapshot.branch }),
+      expectedWorkspaceHead: request.checkpointHead,
+      observedWorkspaceHead: snapshot.head,
+      ...(snapshot.baseRef === undefined ? {} : { baseRef: snapshot.baseRef }),
+      ...(isCommitSha(workspace.baseRevision) ? { expectedBaseSha: workspace.baseRevision } : {}),
+      resolvedBaseSha: snapshot.baseSha,
+      ...(snapshot.remoteGoalRef === undefined ? {} : { remoteGoalRef: snapshot.remoteGoalRef }),
+      ...(snapshot.remoteGoalSha === undefined ? {} : { remoteGoalSha: snapshot.remoteGoalSha }),
+      mergeBaseSha: snapshot.mergeBaseSha,
+      dirtyState: snapshot.statusEntries.length === 0 ? 'clean' : 'dirty',
+      dirtyFingerprint: snapshot.dirtyFingerprint,
+      stagedFingerprint: snapshot.stagedFingerprint,
+      checkpointId: request.checkpointId,
+      checkpointRevision: request.checkpointRevision,
+      writeLeaseGeneration: lease.generation,
+      ...request.runtime,
+      workflowVersion: request.workflowVersion,
+      admissionGeneration,
+      createdAt: now.toISOString(),
+    };
+    const saved = await this.repository.compareAndSwapAdmissionReceipt(
+      workspace.id,
+      existing?.admissionGeneration ?? 0,
+      lease.generation,
+      receipt,
+    );
+    return saved
+      ? ok(receipt)
+      : err(appError('CONFLICT', 'Admission receipt lost its writer lease or generation compare-and-swap', true));
+  }
+
   public async create(request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {
     const inputError = validateCreateRequest(request);
     if (inputError !== null) return err(appError('INVALID_INPUT', inputError));
@@ -155,16 +281,32 @@ export class GoalWorkspaceService {
       return err(appError('CONFLICT', 'Parent workspace is dirty; provide an explicit checkpoint or patch source', true));
     }
 
+    let requestedBase = request.baseRevision;
+    let movingBaseRef: string | undefined;
+    if (requestedBase === undefined) {
+      if (this.git.refreshRemoteRef === undefined) {
+        return err(appError('INTERNAL_ERROR', 'Fresh origin/main resolution is unavailable', true));
+      }
+      const destinationRef = `refs/unified-mpc/admission/base-${randomUUID()}`;
+      const refreshed = await this.git.refreshRemoteRef(parent.realRootPath, 'origin', 'refs/heads/main', destinationRef);
+      if (!refreshed.ok) return refreshed;
+      if (!isCommitSha(refreshed.value)) return err(appError('INTERNAL_ERROR', 'Fresh origin/main ref did not resolve to a commit SHA', true));
+      requestedBase = refreshed.value;
+      movingBaseRef = 'origin/main';
+    }
     const base = await this.git.run(parent.realRootPath, [
-      'rev-parse', '--verify', '--end-of-options', `${request.baseRevision}^{commit}`,
+      'rev-parse', '--verify', '--end-of-options', `${requestedBase}^{commit}`,
     ]);
+    if (!base.ok) return base;
     const baseError = successfulGitCommand(base, 'Goal Workspace base revision could not be resolved');
     if (baseError !== null) return baseError;
+    const resolvedBase = base.value.stdout.trim();
+    if (!isCommitSha(resolvedBase)) return err(appError('INTERNAL_ERROR', 'Resolved Goal Workspace base is invalid', true));
 
     const worktreePath = path.join(parent.realRootPath, '.unified-mpc', 'worktrees', request.goalId);
     await mkdir(path.dirname(worktreePath), { recursive: true });
     const add = await this.git.run(parent.realRootPath, [
-      'worktree', 'add', '-b', request.branchName!, worktreePath, request.baseRevision,
+      'worktree', 'add', '-b', request.branchName!, worktreePath, resolvedBase,
     ]);
     const addError = successfulGitCommand(add, 'Goal Workspace worktree could not be created');
     if (addError !== null) return addError;
@@ -175,7 +317,8 @@ export class GoalWorkspaceService {
       parentWorkspaceId: request.parentWorkspaceId,
       goalWorkspaceKind: workspaceKind,
       parentSource: request.parentSource ?? 'committed_head',
-      baseRevision: request.baseRevision,
+      ...(movingBaseRef === undefined ? {} : { baseRef: movingBaseRef }),
+      baseRevision: resolvedBase,
       branchName: request.branchName!,
       integrationState: 'pending',
       ...(request.ownerSessionId === undefined ? {} : { ownerSessionId: request.ownerSessionId }),
@@ -189,6 +332,9 @@ export class GoalWorkspaceService {
   }
 
   private async createSnapshot(parent: Workspace, request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {
+    if (request.baseRevision === undefined) {
+      return err(appError('INVALID_INPUT', 'Snapshot Goal Workspace requires an explicit base revision'));
+    }
     const snapshotPath = path.join(parent.realRootPath, '.unified-mpc', 'snapshots', request.goalId);
     let ownsSnapshotPath = false;
     try {
@@ -342,6 +488,333 @@ export class GoalWorkspaceService {
     return this.updateGoalWorkspace(goalId, { checkpointId }, lease);
   }
 
+  public async rebaseStaleBase(request: GoalWorkspaceGuardedRebaseRequest): Promise<Result<GoalWorkspaceGuardedRebaseResult>> {
+    if (!isGoalId(request.goalId)
+      || !Number.isSafeInteger(request.expectedAdmissionGeneration) || request.expectedAdmissionGeneration < 1
+      || request.lease.leaseId.trim().length === 0
+      || !Number.isSafeInteger(request.lease.generation) || request.lease.generation < 1) {
+      return err(appError('INVALID_INPUT', 'Guarded rebase request is invalid'));
+    }
+    const workspace = await this.findActiveGoal(request.goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (workspace.goalWorkspaceKind !== 'git_worktree' || workspace.branchName === undefined
+      || workspace.baseRevision === undefined || !isCommitSha(workspace.baseRevision)) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'git_workspace_or_frozen_base_missing' });
+    }
+    const currentLease = workspace.writerLease;
+    const now = this.now().toISOString();
+    if (currentLease === undefined || currentLease.leaseId !== request.lease.leaseId
+      || currentLease.generation !== request.lease.generation || currentLease.expiresAt <= now) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'stale_writer_lease' });
+    }
+    if (this.repository.getAdmissionReceipt === undefined
+      || this.repository.getBaseRebaseReceipt === undefined
+      || this.repository.compareAndSwapBaseRebaseReceipt === undefined
+      || this.repository.invalidateAdmissionReceipt === undefined
+      || this.git.observeWorkspace === undefined
+      || this.git.refreshRemoteRef === undefined
+      || this.git.remoteBranchSha === undefined
+      || this.git.isAncestor === undefined
+      || this.git.createRecoveryRef === undefined
+      || this.git.guardedRebase === undefined) {
+      return err(appError('CONFLICT', 'Guarded rebase requires durable admission, recovery receipt, and Git safety support', true));
+    }
+
+    const admission = await this.repository.getAdmissionReceipt(workspace.id);
+    if (admission === null || admission.invalidatedAt !== undefined
+      || admission.admissionGeneration !== request.expectedAdmissionGeneration
+      || admission.workspaceId !== workspace.id || admission.goalId !== request.goalId
+      || admission.branchName !== workspace.branchName
+      || admission.writeLeaseGeneration !== currentLease.generation
+      || admission.checkpointId === undefined || admission.checkpointRevision === undefined
+      || workspace.checkpointId !== admission.checkpointId) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'admission_or_checkpoint_missing_or_stale' });
+    }
+
+    if (workspace.baseRef === undefined) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'pinned_base' });
+    }
+    const movingBase = parseMovingBaseRef(workspace.baseRef);
+    if (movingBase === null) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'base_policy_changed' });
+    }
+    const oldBaseSha = admission.resolvedBaseSha ?? workspace.baseRevision;
+    if (!isCommitSha(oldBaseSha)) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'old_base_missing_or_invalid' });
+    }
+    if (!isCommitSha(admission.expectedBaseSha ?? '')
+      || admission.expectedBaseSha?.toLowerCase() !== workspace.baseRevision.toLowerCase()
+      || oldBaseSha.toLowerCase() !== workspace.baseRevision.toLowerCase()) {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'workspace_base_revision_changed' });
+    }
+
+    const observed = await this.git.observeWorkspace(workspace.realRootPath, { baseRef: oldBaseSha });
+    if (!observed.ok) return observed;
+    const operationId = randomUUID();
+    const refreshedBase = await this.git.refreshRemoteRef(
+      workspace.realRootPath,
+      movingBase.remote,
+      `refs/heads/${movingBase.branch}`,
+      `refs/unified-mpc/admission/rebase-${operationId}`,
+    );
+    if (!refreshedBase.ok) return refreshedBase;
+    if (!isCommitSha(refreshedBase.value)) {
+      return err(appError('INTERNAL_ERROR', 'Guarded rebase base refresh did not resolve to an exact commit', true));
+    }
+    const newBaseSha = refreshedBase.value.toLowerCase();
+
+    const remoteGoal = await this.git.remoteBranchSha(workspace.realRootPath, movingBase.remote, workspace.branchName);
+    if (!remoteGoal.ok) return remoteGoal;
+    const ancestry = await this.git.isAncestor(workspace.realRootPath, oldBaseSha, newBaseSha);
+    if (!ancestry.ok) return ancestry;
+
+    const decision = decideGuardedBaseRebase({
+      expectedHead: admission.expectedWorkspaceHead,
+      observedHead: observed.value.head,
+      expectedDirtyFingerprint: admission.dirtyFingerprint,
+      observedDirtyFingerprint: observed.value.dirtyFingerprint,
+      dirtyState: observed.value.statusEntries.length === 0 ? 'clean' : 'dirty',
+      expectedBaseRef: admission.baseRef ?? workspace.baseRef,
+      observedBaseRef: workspace.baseRef,
+      oldBaseSha,
+      newBaseSha,
+      oldBaseIsAncestorOfNewBase: ancestry.value,
+      branchPublished: remoteGoal.value !== null,
+      remoteGoalBranchMoved: admission.remoteGoalSha !== undefined
+        && remoteGoal.value !== admission.remoteGoalSha,
+      pinnedBase: false,
+      expectedLeaseGeneration: admission.writeLeaseGeneration,
+      observedLeaseGeneration: currentLease.generation,
+      leaseExpiresAt: currentLease.expiresAt,
+      now,
+      checkpointId: admission.checkpointId,
+      checkpointHead: admission.expectedWorkspaceHead,
+    });
+    if (decision.status !== 'REBASE_ALLOWED') {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: decision.reason });
+    }
+
+    const latestRebase = await this.repository.getBaseRebaseReceipt(workspace.id);
+    if (latestRebase?.status === 'started') {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'prior_rebase_incomplete', operationId: latestRebase.operationId });
+    }
+    if (latestRebase?.status === 'recovery_required') {
+      return ok({ status: 'RECOVERY_REQUIRED', reason: 'prior_rebase_recovery_required', operationId: latestRebase.operationId });
+    }
+    const expectedReceiptRevision = latestRebase?.receiptRevision ?? 0;
+    const recoveryRef = `refs/unified-mpc/recovery/rebase/${operationId}`;
+    const recovery = await this.git.createRecoveryRef(workspace.realRootPath, recoveryRef, decision.oldHead);
+    if (!recovery.ok) return recovery;
+
+    const started: WorkspaceBaseRebaseReceipt = {
+      operationId,
+      receiptRevision: expectedReceiptRevision + 1,
+      workspaceId: workspace.id,
+      goalId: request.goalId,
+      branchName: workspace.branchName,
+      status: 'started',
+      oldHead: decision.oldHead,
+      oldBaseSha: decision.oldBaseSha,
+      newBaseSha: decision.newBaseSha,
+      checkpointId: decision.checkpointId,
+      checkpointRevision: admission.checkpointRevision,
+      checkpointHead: admission.expectedWorkspaceHead,
+      recoveryRef,
+      admissionGeneration: admission.admissionGeneration,
+      writeLeaseGeneration: currentLease.generation,
+      remoteGoalRef: `refs/heads/${workspace.branchName}`,
+      ...(remoteGoal.value === null ? {} : { remoteGoalSha: remoteGoal.value }),
+      startedAt: now,
+    };
+    const startedSaved = await this.repository.compareAndSwapBaseRebaseReceipt(
+      workspace.id,
+      expectedReceiptRevision,
+      admission.admissionGeneration,
+      currentLease.generation,
+      started,
+    );
+    if (!startedSaved) {
+      return ok({
+        status: 'RECOVERY_REQUIRED',
+        reason: 'rebase_receipt_raced',
+        operationId,
+        oldHead: decision.oldHead,
+        oldBaseSha: decision.oldBaseSha,
+        newBaseSha: decision.newBaseSha,
+        checkpointId: decision.checkpointId,
+        recoveryRef,
+      });
+    }
+
+    const rebase = await this.git.guardedRebase(workspace.realRootPath, {
+      expectedBranch: workspace.branchName,
+      oldHead: decision.oldHead,
+      oldBaseSha: decision.oldBaseSha,
+      newBaseSha: decision.newBaseSha,
+      recoveryRef,
+    });
+    const finishedAt = this.now().toISOString();
+    if (!rebase.ok) {
+      const admissionInvalidated = await this.repository.invalidateAdmissionReceipt(
+        workspace.id, admission.admissionGeneration, 'guarded_rebase_git_failure', finishedAt,
+      );
+      const recoveryReceipt: WorkspaceBaseRebaseReceipt = {
+        ...started,
+        receiptRevision: started.receiptRevision + 1,
+        status: 'recovery_required',
+        finishedAt,
+        failureReason: 'guarded_rebase_git_failure',
+      };
+      const recoverySaved = await this.repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, started.receiptRevision, admission.admissionGeneration, currentLease.generation, recoveryReceipt,
+      );
+      if (!admissionInvalidated || !recoverySaved) {
+        return err(appError('CONFLICT', 'Guarded rebase failure could not be durably fenced for recovery', true));
+      }
+      return rebase;
+    }
+
+    if (rebase.value.status !== 'completed') {
+      const restoredExactly = rebase.value.abortSucceeded
+        && rebase.value.headAfterAbort === decision.oldHead
+        && rebase.value.cleanAfterAbort === true;
+      let admissionInvalidated = true;
+      if (!restoredExactly) {
+        admissionInvalidated = await this.repository.invalidateAdmissionReceipt(
+          workspace.id, admission.admissionGeneration, 'guarded_rebase_recovery_required', finishedAt,
+        );
+      }
+      const failureReason = rebase.value.status === 'conflict' ? 'rebase_conflict' : (rebase.value.reason ?? 'rebase_failed');
+      const recoveryReceipt: WorkspaceBaseRebaseReceipt = {
+        ...started,
+        receiptRevision: started.receiptRevision + 1,
+        status: 'recovery_required',
+        conflictedPaths: rebase.value.conflictedPaths,
+        abortSucceeded: rebase.value.abortSucceeded,
+        finishedAt,
+        failureReason,
+      };
+      const recoverySaved = await this.repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, started.receiptRevision, admission.admissionGeneration, currentLease.generation, recoveryReceipt,
+      );
+      if (!admissionInvalidated || !recoverySaved) {
+        return err(appError('CONFLICT', 'Guarded rebase recovery state could not be durably fenced', true));
+      }
+      return ok({
+        status: 'RECOVERY_REQUIRED',
+        reason: failureReason,
+        operationId,
+        oldHead: decision.oldHead,
+        oldBaseSha: decision.oldBaseSha,
+        newBaseSha: decision.newBaseSha,
+        checkpointId: decision.checkpointId,
+        recoveryRef,
+        conflictedPaths: rebase.value.conflictedPaths,
+        abortSucceeded: rebase.value.abortSucceeded,
+      });
+    }
+
+    const invalidated = await this.repository.invalidateAdmissionReceipt(
+      workspace.id, admission.admissionGeneration, 'guarded_rebase_head_changed', finishedAt,
+    );
+    if (!invalidated) {
+      const recoveryReceipt: WorkspaceBaseRebaseReceipt = {
+        ...started,
+        receiptRevision: started.receiptRevision + 1,
+        status: 'recovery_required',
+        resultHead: rebase.value.newHead,
+        finishedAt,
+        failureReason: 'admission_invalidation_failed',
+      };
+      const recoverySaved = await this.repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, started.receiptRevision, admission.admissionGeneration, currentLease.generation, recoveryReceipt,
+      );
+      if (!recoverySaved) {
+        return err(appError('CONFLICT', 'Rebased workspace admission could not be durably fenced for recovery', true));
+      }
+      return ok({
+        status: 'RECOVERY_REQUIRED',
+        reason: 'admission_invalidation_failed',
+        operationId,
+        oldHead: decision.oldHead,
+        oldBaseSha: decision.oldBaseSha,
+        newBaseSha: decision.newBaseSha,
+        checkpointId: decision.checkpointId,
+        recoveryRef,
+      });
+    }
+
+    const metadata = await this.updateGoalWorkspace(
+      request.goalId,
+      { baseRevision: decision.newBaseSha },
+      request.lease,
+    );
+    if (!metadata.ok) {
+      const recoveryReceipt: WorkspaceBaseRebaseReceipt = {
+        ...started,
+        receiptRevision: started.receiptRevision + 1,
+        status: 'recovery_required',
+        resultHead: rebase.value.newHead,
+        finishedAt,
+        failureReason: 'workspace_metadata_update_failed',
+      };
+      const recoverySaved = await this.repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, started.receiptRevision, admission.admissionGeneration, currentLease.generation, recoveryReceipt,
+      );
+      if (!recoverySaved) {
+        return err(appError('CONFLICT', 'Rebased workspace metadata failure could not be durably fenced for recovery', true));
+      }
+      return ok({
+        status: 'RECOVERY_REQUIRED',
+        reason: 'workspace_metadata_update_failed',
+        operationId,
+        oldHead: decision.oldHead,
+        oldBaseSha: decision.oldBaseSha,
+        newBaseSha: decision.newBaseSha,
+        checkpointId: decision.checkpointId,
+        recoveryRef,
+      });
+    }
+
+    const completed: WorkspaceBaseRebaseReceipt = {
+      ...started,
+      receiptRevision: started.receiptRevision + 1,
+      status: 'completed',
+      resultHead: rebase.value.newHead,
+      finishedAt,
+    };
+    const completedSaved = await this.repository.compareAndSwapBaseRebaseReceipt(
+      workspace.id,
+      started.receiptRevision,
+      admission.admissionGeneration,
+      currentLease.generation,
+      completed,
+    );
+    if (!completedSaved) {
+      return ok({
+        status: 'RECOVERY_REQUIRED',
+        reason: 'rebase_completion_receipt_raced',
+        operationId,
+        oldHead: decision.oldHead,
+        oldBaseSha: decision.oldBaseSha,
+        newBaseSha: decision.newBaseSha,
+        checkpointId: decision.checkpointId,
+        recoveryRef,
+      });
+    }
+
+    return ok({
+      status: 'REBASED',
+      operationId,
+      oldHead: decision.oldHead,
+      newHead: rebase.value.newHead,
+      oldBaseSha: decision.oldBaseSha,
+      newBaseSha: decision.newBaseSha,
+      checkpointId: decision.checkpointId,
+      recoveryRef,
+    });
+  }
+
   public async remove(goalId: string): Promise<Result<void>> {
     if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
     const workspace = await this.findActiveGoal(goalId);
@@ -377,7 +850,7 @@ export class GoalWorkspaceService {
 
   private async updateGoalWorkspace(
     goalId: string,
-    patch: Pick<Workspace, 'checkpointId' | 'integrationState'>,
+    patch: Pick<Workspace, 'checkpointId' | 'integrationState' | 'baseRevision'>,
     lease?: Pick<WorkspaceWriterLease, 'leaseId' | 'generation'>,
   ): Promise<Result<Workspace>> {
     if (!isGoalId(goalId)) return err(appError('INVALID_INPUT', 'Goal id is invalid'));
@@ -442,12 +915,30 @@ function validateCreateRequest(request: GoalWorkspaceCreateRequest): string | nu
     return 'Goal branch name is invalid';
   }
   if (workspaceKind === 'snapshot' && request.parentSource !== 'snapshot') return 'Snapshot goal workspace requires snapshot parentSource';
-  if (!isSafeRevision(request.baseRevision)) return 'Goal base revision is invalid';
+  if (request.baseRevision !== undefined && !isSafeRevision(request.baseRevision)) return 'Goal base revision is invalid';
+  if (workspaceKind === 'snapshot' && request.baseRevision === undefined) return 'Snapshot Goal Workspace requires an explicit base revision';
   return null;
+}
+
+function parseMovingBaseRef(value: string): { readonly remote: string; readonly branch: string } | null {
+  const slash = value.indexOf('/');
+  if (slash <= 0 || slash === value.length - 1) return null;
+  const remote = value.slice(0, slash);
+  const branch = value.slice(slash + 1);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(remote) || !isSafeBranchName(branch)) return null;
+  return { remote, branch };
 }
 
 function isGoalId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
+}
+
+function containsForbiddenGitRevisionCharacter(value: string, specials: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x20 || code === 0x7f || specials.includes(character)) return true;
+  }
+  return false;
 }
 
 function isSafeBranchName(value: string): boolean {
@@ -458,16 +949,18 @@ function isSafeBranchName(value: string): boolean {
     && !value.endsWith('/')
     && !value.includes('..')
     && !value.includes('//')
-    // eslint-disable-next-line no-control-regex -- validation intentionally rejects ASCII control characters.
-    && !/[\u0000-\u0020\u007f~^:?*[\\]/.test(value);
+    && !containsForbiddenGitRevisionCharacter(value, '~^:?*[\\');
 }
 
 function isSafeRevision(value: string): boolean {
   return value.length > 0
     && value.length <= 256
     && !value.startsWith('-')
-    // eslint-disable-next-line no-control-regex -- validation intentionally rejects ASCII control characters.
-    && !/[\u0000-\u0020\u007f]/.test(value);
+    && !containsForbiddenGitRevisionCharacter(value, '');
+}
+
+function isCommitSha(value: string | undefined): value is string {
+  return value !== undefined && /^[0-9a-f]{40,64}$/iu.test(value);
 }
 
 function successfulGitCommand(result: Result<GitCommandResult>, message: string): Result<never> | null {

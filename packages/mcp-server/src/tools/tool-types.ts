@@ -1,4 +1,4 @@
-import { err, ok, type InvocationAuthorization, type Result, type ResultBudget } from '@unified-mpc/domain';
+import { err, ok, type InvocationAuthorization, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
@@ -62,6 +62,10 @@ export interface PreferredGoalPort {
 
 export interface ProjectSnapshotPort {
   snapshot(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
+}
+
+export interface WorkspaceAdmissionProjectionPort {
+  readWorkspaceAdmissionProjection(workspaceId: string): Promise<WorkspaceAdmissionProjection | undefined>;
 }
 
 export interface McpRuntimeTiming {
@@ -130,6 +134,7 @@ export interface McpApplicationServices {
   readonly thaiRag?: ThaiRagProviderPort;
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
+  readonly workspaceAdmissionProjection?: WorkspaceAdmissionProjectionPort;
   readonly workspaceSelection?: WorkspaceSelectionPort;
   readonly preferredGoal?: PreferredGoalPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
@@ -146,7 +151,7 @@ export interface McpApplicationServices {
   readonly goalMutationFence?: Pick<GoalMutationFenceService, 'inspectWorkspaceFence' | 'begin' | 'heartbeat' | 'end' | 'observe'>;
   readonly search?: Pick<SearchService, 'searchFiles' | 'searchText'>;
   readonly workspaceIndex?: Pick<WorkspaceIndexService, 'indexWorkspace' | 'status' | 'startWatch' | 'stopWatch' | 'forgetWorkspace'>;
-  readonly git?: Pick<GitService, 'status' | 'diff' | 'log' | 'run'>;
+  readonly git?: Pick<GitService, 'status' | 'diff' | 'log' | 'run' | 'observeWorkspace'>;
   readonly process?: Pick<ProcessService, 'start' | 'list' | 'status' | 'logs' | 'stop' | 'previewProjectCommand' | 'startProjectCommand' | 'statusForGoalLiveness' | 'recoveryIdentityForGoal'>;
   readonly codex?: Pick<CodexService, 'status' | 'run' | 'list' | 'taskStatus' | 'taskLogs' | 'stop'>;
   readonly agentSwarm?: Pick<AgentSwarmService, 'start' | 'status' | 'result' | 'cancel' | 'list'>;

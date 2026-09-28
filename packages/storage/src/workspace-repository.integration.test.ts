@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { WorkspaceAdmissionReceipt, WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import type { Workspace } from '@unified-mpc/workspace';
 import { SqliteDatabase } from './database.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
@@ -89,6 +90,7 @@ describe('SqliteWorkspaceRepository', () => {
         parentWorkspaceId: 'project-1',
         goalWorkspaceKind: 'git_worktree',
         parentSource: 'committed_head',
+        baseRef: 'origin/main',
         baseRevision: 'abc123',
         branchName: 'goal/goal-1',
         checkpointId: 'checkpoint-1',
@@ -123,6 +125,149 @@ describe('SqliteWorkspaceRepository', () => {
       await expect(repository.acquireGoalWriterLease(workspace.id, 'lease-b', 'client-b', '2026-09-22T19:00:00.500Z', '2026-09-22T19:00:02.000Z')).resolves.toBeNull();
       await expect(repository.renewGoalWriterLease(workspace.id, 'lease-a', 0, '2026-09-22T19:00:00.500Z', '2026-09-22T19:00:02.000Z')).resolves.toBe(false);
       await expect(repository.acquireGoalWriterLease(workspace.id, 'lease-b', 'client-b', '2026-09-22T19:00:01.001Z', '2026-09-22T19:00:02.000Z')).resolves.toMatchObject({ generation: 2 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('persists admission receipts and compare-and-swaps only with the expected admission and writer lease generations', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-admission-db-'));
+    temporaryRoots.push(root);
+    const databasePath = path.join(root, 'state.sqlite');
+    let database = new SqliteDatabase(databasePath);
+    try {
+      let repository = new SqliteWorkspaceRepository(database);
+      const workspace: Workspace = {
+        id: 'admission-workspace-1', displayName: 'Admission workspace', rootPath: root,
+        realRootPath: root, createdAt: new Date(0).toISOString(), lifecycleKind: 'goal', goalId: 'goal-1',
+      };
+      await repository.insert(workspace);
+      const lease = await repository.acquireGoalWriterLease(
+        workspace.id, 'lease-1', 'owner-1', '2026-09-23T00:00:00.000Z', '2026-09-23T01:00:00.000Z',
+      );
+      expect(lease).not.toBeNull();
+
+      const receipt: WorkspaceAdmissionReceipt = {
+        admissionId: 'admission-1', projectId: 'project-1', workspaceId: workspace.id, goalId: 'goal-1',
+        workspaceKind: 'git', repositoryIdentity: 'repo-1', worktreeIdentity: root, branchName: 'goal/1',
+        expectedWorkspaceHead: '1111111111111111111111111111111111111111',
+        observedWorkspaceHead: '1111111111111111111111111111111111111111',
+        baseRef: 'refs/heads/main', expectedBaseSha: '2222222222222222222222222222222222222222',
+        resolvedBaseSha: '2222222222222222222222222222222222222222', mergeBaseSha: '2222222222222222222222222222222222222222',
+        dirtyState: 'clean', dirtyFingerprint: 'clean:sha256:0', checkpointId: 'checkpoint-1', checkpointRevision: 1,
+        writeLeaseGeneration: lease!.generation, runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'deploy-1',
+        runtimeBuildVersion: '1.0.0', runtimeBuildCommit: 'abc123', runtimeBuildDirty: false,
+        runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z', workflowVersion: 1,
+        admissionGeneration: 1, createdAt: '2026-09-23T00:00:00.000Z',
+      };
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, {
+        ...receipt, dirtyFingerprint: 'x'.repeat(20_000),
+      })).resolves.toBe(false);
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, {
+        ...receipt, sourceText: 'must never be persisted',
+      } as WorkspaceAdmissionReceipt)).resolves.toBe(false);
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, {
+        ...receipt, createdAt: '2026-09-23T01:00:00.000Z',
+      })).resolves.toBe(false);
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, receipt)).resolves.toBe(true);
+      await expect(repository.getAdmissionReceipt(workspace.id)).resolves.toEqual(receipt);
+
+      const nextReceipt = { ...receipt, admissionId: 'admission-2', admissionGeneration: 2 };
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, nextReceipt)).resolves.toBe(false);
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 1, lease!.generation + 1, nextReceipt)).resolves.toBe(false);
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 1, lease!.generation, nextReceipt)).resolves.toBe(true);
+      await expect(repository.invalidateAdmissionReceipt(workspace.id, 1, 'unexpected_workspace_change', '2026-09-23T00:30:00.000Z')).resolves.toBe(false);
+      await expect(repository.invalidateAdmissionReceipt(workspace.id, 2, 'unexpected_workspace_change', '2026-09-23T00:30:00.000Z')).resolves.toBe(true);
+
+      database.close();
+      database = new SqliteDatabase(databasePath);
+      repository = new SqliteWorkspaceRepository(database);
+      await expect(repository.getAdmissionReceipt(workspace.id)).resolves.toEqual({
+        ...nextReceipt, invalidatedAt: '2026-09-23T00:30:00.000Z', invalidationReason: 'unexpected_workspace_change',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('persists guarded rebase receipts only with the current admission and writer-lease generations', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-rebase-db-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    try {
+      const repository = new SqliteWorkspaceRepository(database);
+      const workspace: Workspace = {
+        id: 'rebase-workspace-1', displayName: 'Rebase workspace', rootPath: root, realRootPath: root,
+        createdAt: new Date(0).toISOString(), lifecycleKind: 'goal', goalId: 'goal-1',
+      };
+      await repository.insert(workspace);
+      const writerLease = await repository.acquireGoalWriterLease(
+        workspace.id, 'lease-1', 'owner-1', '2026-09-23T00:00:00.000Z', '2026-09-23T01:00:00.000Z',
+      );
+      expect(writerLease).not.toBeNull();
+      const admission: WorkspaceAdmissionReceipt = {
+        admissionId: 'admission-1', projectId: 'project-1', workspaceId: workspace.id, goalId: 'goal-1',
+        workspaceKind: 'git', worktreeIdentity: root, branchName: 'goal/1',
+        expectedWorkspaceHead: '1'.repeat(40), observedWorkspaceHead: '1'.repeat(40),
+        baseRef: 'origin/main', expectedBaseSha: '2'.repeat(40), resolvedBaseSha: '2'.repeat(40),
+        mergeBaseSha: '2'.repeat(40), dirtyState: 'clean', dirtyFingerprint: 'clean',
+        checkpointId: 'checkpoint-1', checkpointRevision: 7, writeLeaseGeneration: writerLease!.generation,
+        runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1', runtimeBuildVersion: '1.0.0',
+        runtimeBuildDirty: false, runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+        workflowVersion: 1, admissionGeneration: 1, createdAt: '2026-09-23T00:00:00.000Z',
+      };
+      await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, writerLease!.generation, admission)).resolves.toBe(true);
+      const started: WorkspaceBaseRebaseReceipt = {
+        operationId: 'operation-1', receiptRevision: 1, workspaceId: workspace.id, goalId: 'goal-1',
+        branchName: 'goal/1', status: 'started', oldHead: '1'.repeat(40), oldBaseSha: '2'.repeat(40),
+        newBaseSha: '3'.repeat(40), checkpointId: 'checkpoint-1', checkpointRevision: 7,
+        checkpointHead: '1'.repeat(40), recoveryRef: 'refs/unified-mpc/recovery/rebase/operation-1',
+        admissionGeneration: 1, writeLeaseGeneration: writerLease!.generation,
+        remoteGoalRef: 'refs/heads/goal/1', startedAt: '2026-09-23T00:30:00.000Z',
+      };
+      for (const invalid of [
+        { ...started, operationId: 'bad/operation' },
+        { ...started, checkpointId: 'x'.repeat(129) },
+        { ...started, remoteGoalRef: `refs/heads/${'x'.repeat(2048)}` },
+        { ...started, conflictedPaths: ['x'.repeat(4097)] },
+        { ...started, startedAt: 'not-a-timestamp' },
+        { ...started, failureReason: 'x'.repeat(257) },
+      ] satisfies WorkspaceBaseRebaseReceipt[]) {
+        await expect(repository.compareAndSwapBaseRebaseReceipt(
+          workspace.id, 0, 1, writerLease!.generation, invalid,
+        )).resolves.toBe(false);
+      }
+      await expect(repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, 0, 2, writerLease!.generation, started,
+      )).resolves.toBe(false);
+      await expect(repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, 0, 1, writerLease!.generation + 1, started,
+      )).resolves.toBe(false);
+      await expect(repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, 0, 1, writerLease!.generation, started,
+      )).resolves.toBe(true);
+      await expect(repository.getBaseRebaseReceipt(workspace.id)).resolves.toEqual(started);
+
+      const completed: WorkspaceBaseRebaseReceipt = {
+        ...started, receiptRevision: 2, status: 'completed', resultHead: '4'.repeat(40),
+        finishedAt: '2026-09-23T00:31:00.000Z',
+      };
+      await expect(repository.compareAndSwapBaseRebaseReceipt(
+        workspace.id, 1, 1, writerLease!.generation, completed,
+      )).resolves.toBe(true);
+      await expect(repository.getBaseRebaseReceipt(workspace.id)).resolves.toEqual(completed);
+
+      database.connection.prepare(
+        'UPDATE workspace_base_rebase_receipts SET receipt_json = ? WHERE workspace_id = ?',
+      ).run('{ malformed', workspace.id);
+      await expect(repository.getBaseRebaseReceipt(workspace.id)).rejects.toThrow(/malformed/i);
+
+      database.connection.exec('PRAGMA ignore_check_constraints = ON;');
+      database.connection.prepare(
+        'UPDATE workspace_base_rebase_receipts SET receipt_json = ? WHERE workspace_id = ?',
+      ).run(JSON.stringify({ ...completed, conflictedPaths: ['x'.repeat(20_000)] }), workspace.id);
+      await expect(repository.getBaseRebaseReceipt(workspace.id)).rejects.toThrow(/size limit/i);
+      database.connection.exec('PRAGMA ignore_check_constraints = OFF;');
     } finally {
       database.close();
     }

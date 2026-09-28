@@ -1,5 +1,23 @@
+export type BackendConnectionState = 'unknown' | 'available' | 'unavailable';
+export type BackendConnectionEvent = 'unavailable' | 'recovered' | null;
+
+export function transitionBackendConnectionState(
+  current: BackendConnectionState,
+  next: 'available' | 'unavailable',
+): { readonly state: BackendConnectionState; readonly event: BackendConnectionEvent } {
+  if (next === 'unavailable') {
+    return current === 'unavailable'
+      ? { state: 'unavailable', event: null }
+      : { state: 'unavailable', event: 'unavailable' };
+  }
+  return current === 'unavailable'
+    ? { state: 'available', event: 'recovered' }
+    : { state: 'available', event: null };
+}
+
 export function getClientScriptJs(): string {
   return `
+    const transitionBackendConnectionState = ${transitionBackendConnectionState.toString()};
     (function () {
       let activeTab = 'dashboard';
       let currentLogs = [];
@@ -146,16 +164,19 @@ export function getClientScriptJs(): string {
       }
 
       function noteBackendUnavailable(err) {
-        if (backendConnectionState === 'unavailable') return;
-        backendConnectionState = 'unavailable';
-        logEvent('ERROR', 'Backend unavailable: ' + (err?.message || String(err)));
+        const transition = transitionBackendConnectionState(backendConnectionState, 'unavailable');
+        backendConnectionState = transition.state;
+        if (transition.event === 'unavailable') {
+          logEvent('ERROR', 'Backend unavailable: ' + (err?.message || String(err)));
+        }
       }
 
       function noteBackendAvailable() {
-        if (backendConnectionState === 'unavailable') {
+        const transition = transitionBackendConnectionState(backendConnectionState, 'available');
+        backendConnectionState = transition.state;
+        if (transition.event === 'recovered') {
           logEvent('SUCCESS', 'Backend connection restored');
         }
-        backendConnectionState = 'available';
       }
 
       async function loadStatus() {
@@ -197,7 +218,8 @@ export function getClientScriptJs(): string {
           if (led) led.className = 'led offline';
           const tel = document.getElementById('servers-telemetry');
           if (tel) tel.textContent = 'Unable to reach backend: ' + err.message;
-          noteBackendUnavailable(err);
+          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          else logEvent('WARN', 'Status refresh failed: ' + err.message);
         } finally {
           statusRefreshInFlight = false;
         }

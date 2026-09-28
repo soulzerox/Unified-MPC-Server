@@ -56,6 +56,45 @@ function services(): McpApplicationServices {
 }
 
 describe('context engine', () => {
+  it('projects bounded workspace admission truth into the agent-visible snapshot', async () => {
+    const source = {
+      ...services(),
+      workspaceInfo: {
+        ...services().workspaceInfo!,
+        async info() { return ok({ id: 'workspace-1', displayName: 'Workspace 1', rootPath: '/tmp/workspace-1', realRootPath: '/tmp/workspace-1' }); },
+      },
+      workspaceAdmissionProjection: {
+        async readWorkspaceAdmissionProjection() {
+          return {
+            runtime: {
+              source: 'current', deploymentId: 'deploy-1', generation: 'runtime-1', buildVersion: '4.61.0',
+              buildCommit: 'a'.repeat(40), buildDirty: false, protocolGeneration: 1, startedAt: '2026-09-26T00:00:00.000Z',
+            },
+            workspace: {
+              id: 'workspace-1', kind: 'git', branch: 'goal/one', expectedHead: 'b'.repeat(40), observedHead: 'b'.repeat(40), dirtyState: 'clean',
+            },
+            base: { ref: 'main', recordedSha: 'c'.repeat(40), currentResolvedSha: 'c'.repeat(40), freshness: 'current' },
+            ownership: { goalId: 'goal-1', writeLeaseGeneration: 3 },
+            admission: { status: 'ADMITTED', generation: 2, remediation: 'none' },
+          };
+        },
+      },
+    } as unknown as McpApplicationServices;
+
+    const result = await new ContextEngine(source, actor).snapshot('workspace-1');
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        admission: {
+          workspace: { id: 'workspace-1', kind: 'git', branch: 'goal/one', dirtyState: 'clean' },
+          admission: { status: 'ADMITTED', generation: 2, remediation: 'none' },
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('dirtyFingerprint');
+    expect(JSON.stringify(result)).not.toContain('repositoryIdentity');
+  });
+
   it('aggregates matches across workspaces, ranks candidates, and filters vendor/build paths by default', async () => {
     const request: WorkspaceContextRequest = {
       query: 'login',

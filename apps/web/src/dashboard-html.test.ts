@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderDashboardHtml } from './dashboard-html.js';
+import { transitionBackendConnectionState } from './ui/client-script.js';
 
 describe('Dashboard HTML Reactive SPA', () => {
   it('renders complete HTML shell with Obsidian styling', () => {
@@ -28,6 +29,24 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("logEvent('ERROR', 'Backend unavailable: '");
     expect(html).toContain("logEvent('SUCCESS', 'Backend connection restored')");
     expect(html).toContain('if (isBackendTransportError(err)) noteBackendUnavailable(err)');
+  });
+
+  it('coalesces backend transport outages, emits one recovery, and leaves polling eligible to resume', () => {
+    let state: 'unknown' | 'available' | 'unavailable' = 'unknown';
+    const events: Array<string | null> = [];
+    for (const next of ['unavailable', 'unavailable', 'available', 'available'] as const) {
+      const transition = transitionBackendConnectionState(state, next);
+      state = transition.state;
+      events.push(transition.event);
+    }
+    expect(events).toEqual(['unavailable', null, 'recovered', null]);
+
+    const html = renderDashboardHtml();
+    expect(html).toContain('finally {');
+    expect(html).toContain('statusRefreshInFlight = false');
+    expect(html).toContain('setInterval(loadStatus, 5000)');
+    expect(html).toContain("if (isBackendTransportError(err)) noteBackendUnavailable(err)");
+    expect(html).toContain("logEvent('WARN', 'Status refresh failed: '");
   });
 
   it('wires telemetry and policy API endpoints in script', () => {

@@ -76,6 +76,38 @@ describe('GoalMutationFenceService', () => {
     });
   });
 
+  it('rejects stale workspace admission before persisting a fenced mutation', async (): Promise<void> => {
+    const beginGoalFencedMutation = vi.fn(async (request) => ({ goalId: request.goalId, leaseGeneration: request.leaseGeneration }));
+    const validateAdmission = vi.fn(async () => ({
+      ok: false as const,
+      error: { code: 'WORKSPACE_ADMISSION_STALE' as const, message: 'workspace HEAD changed', recoverable: true },
+    }));
+    const service = new GoalMutationFenceService(repository({ beginGoalFencedMutation }), {
+      validateAdmission,
+    });
+
+    await expect(service.begin(actor, 'workspace-1', 'call-stale-admission', {
+      goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 7, admissionGeneration: 4,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'WORKSPACE_ADMISSION_STALE' } });
+    expect(validateAdmission).toHaveBeenCalledWith('workspace-1', 'goal-1', 7, 4);
+    expect(beginGoalFencedMutation).not.toHaveBeenCalled();
+  });
+
+  it('records successful fenced mutation provenance for the exact workspace admission generation', async (): Promise<void> => {
+    const recordSuccessfulMutation = vi.fn(async () => undefined);
+    const service = new GoalMutationFenceService(repository(), { recordSuccessfulMutation });
+
+    await service.begin(actor, 'workspace-1', 'call-success', {
+      goalId: 'goal-1', leaseToken: 'private-token', leaseGeneration: 7, admissionGeneration: 4,
+    });
+    await service.end('call-success', true);
+
+    expect(recordSuccessfulMutation).toHaveBeenCalledWith({
+      callId: 'call-success', workspaceId: 'workspace-1', goalId: 'goal-1',
+      leaseGeneration: 7, admissionGeneration: 4,
+    });
+  });
+
   it('marks liveness untrustworthy when any managed task state is unknown', async (): Promise<void> => {
     const read = vi.fn(async (_workspaceId: string, taskId: string): Promise<'running' | 'unknown'> => (
       taskId === 'running' ? 'running' : 'unknown'

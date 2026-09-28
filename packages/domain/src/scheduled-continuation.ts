@@ -358,6 +358,7 @@ export interface BeginGoalFencedMutationRequest {
   readonly ownerSessionId: string;
   readonly leaseTokenHash: string;
   readonly leaseGeneration: number;
+  readonly admissionGeneration?: number;
   readonly startedAt: string;
   readonly expiresAt: string;
 }

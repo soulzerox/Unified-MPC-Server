@@ -1,3 +1,4 @@
+import type { WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { ResolvedPonytailPolicy } from '@unified-mpc/shared';
 
 export const BUNDLED_PONYTAIL_SKILL_ID = 'bundled:agent-skills/ponytail';
@@ -17,6 +18,7 @@ export interface PonytailActivationState {
   readonly codeMutationGeneration: number;
   readonly reviewGeneration: number;
   readonly reviewSkillLoadedAtGeneration?: number;
+  readonly reviewSourceIdentity?: WorkspaceSourceEvidenceIdentity;
   readonly sessionSuppressed: boolean;
 }
 
@@ -76,12 +78,17 @@ export class PonytailActivationLedger {
     });
   }
 
-  public markReviewComplete(context: PonytailActivationContext, policy: ResolvedPonytailPolicy): PonytailActivationState {
+  public markReviewComplete(
+    context: PonytailActivationContext,
+    policy: ResolvedPonytailPolicy,
+    sourceIdentity?: WorkspaceSourceEvidenceIdentity,
+  ): PonytailActivationState {
     const current = this.state(context, policy);
     if (current.reviewSkillLoadedAtGeneration !== current.codeMutationGeneration) return current;
     return this.replace(context, {
       ...current,
       reviewGeneration: current.codeMutationGeneration,
+      ...(sourceIdentity === undefined ? {} : { reviewSourceIdentity: sourceIdentity }),
     });
   }
 

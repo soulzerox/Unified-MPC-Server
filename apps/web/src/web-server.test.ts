@@ -1,5 +1,5 @@
 import { request as httpRequest } from 'node:http';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -167,7 +167,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const readinessServer = new ControlPlaneServer({
       port: 0,
       gateway,
-      mcpIdentityProbe: async () => { throw new Error('downstream MCP unavailable'); },
+      mcpIdentityProbe: async (): Promise<never> => { throw new Error('downstream MCP unavailable'); },
     });
     await readinessServer.listen();
     try {
@@ -186,7 +186,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
     const delayedGateway = new GatewayService({
       localPort: 0,
-      tunnelProvider: async () => {
+      tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => {
         markProviderStarted();
         await providerRelease;
         return { url: 'https://delayed.example.com', stop: async (): Promise<void> => {} };
@@ -207,6 +207,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       port: 0,
       gateway: delayedGateway,
       settingsRepository,
+      mcpIdentityProbe: async (): Promise<null> => null,
     });
 
     await delayedServer.listen();
@@ -215,14 +216,155 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(ready.status).toBe(200);
       await providerStarted;
       expect(delayedGateway.status().state).toBe('INITIALIZING');
+      const restoring = await fetch(`http://127.0.0.1:${delayedServer.port}/api/status`);
+      expect(restoring.status).toBe(200);
+      expect(await restoring.json()).toMatchObject({
+        status: 'healthy',
+        gatewayRestore: { state: 'restoring', attempt: 1 },
+      });
       releaseProvider();
       for (let attempt = 0; attempt < 50 && delayedGateway.status().state !== 'SESSION_CONNECTED'; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(delayedGateway.status().state).toBe('SESSION_CONNECTED');
+      const restored = await fetch(`http://127.0.0.1:${delayedServer.port}/api/status`);
+      expect(await restored.json()).toMatchObject({
+        gatewayRestore: { state: 'connected', attempt: 1 },
+      });
     } finally {
       releaseProvider();
       await delayedServer.close();
+    }
+  });
+
+
+  it('keeps systemd Web readiness and watchdog recovery scoped to local HTTP health', async () => {
+    const unit = await readFile(new URL('../../../scripts/unified-mpc-web.service', import.meta.url), 'utf8');
+    expect(unit).toContain('Restart=always');
+    expect(unit).toContain('RestartPreventExitStatus=78');
+    expect(unit).toContain('WatchdogSec=30');
+    expect(unit).toContain('NotifyAccess=all');
+    expect(unit).toContain('http://127.0.0.1:3000/_unified-mpc/ready');
+    expect(unit).toContain('&& /usr/bin/systemd-notify WATCHDOG=1');
+    expect(unit).not.toContain('/api/status');
+    expect(unit.indexOf('http://127.0.0.1:3000/_unified-mpc/ready'))
+      .toBeLessThan(unit.indexOf('ExecStartPost=/usr/bin/systemd-notify WATCHDOG=1'));
+  });
+
+  it('keeps /api/status locally healthy when the downstream MCP identity probe is unavailable', async () => {
+    const statusServer = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      mcpIdentityProbe: async (): Promise<never> => { throw new Error('downstream MCP unavailable'); },
+    });
+    await statusServer.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${statusServer.port}/api/status`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        status: 'healthy',
+        mcpIdentity: null,
+        mcpIdentityError: 'downstream MCP unavailable',
+      });
+    } finally {
+      await statusServer.close();
+    }
+  });
+
+  it('stops a boot-owned delayed Gateway restore before Web shutdown completes', async () => {
+    let markProviderStarted!: () => void;
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+    const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const delayedGateway = new GatewayService({
+      localPort: 0,
+      tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => {
+        markProviderStarted();
+        await providerRelease;
+        return {
+          url: 'https://shutdown-delayed.example.com',
+          stop: async (): Promise<void> => {},
+        };
+      },
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const persisted = new Map<string, string>([
+      ['cloudflare_tunnel_name', 'shutdown-delayed-tunnel'],
+      ['cloudflare_public_url', 'https://shutdown-delayed.example.com'],
+      ['cloudflare_gateway_desired_state', 'RUNNING'],
+    ]);
+    const delayedServer = new ControlPlaneServer({
+      port: 0,
+      gateway: delayedGateway,
+      settingsRepository: {
+        get: (key: string): string | null => persisted.get(key) ?? null,
+        set: (key: string, value: string): void => { persisted.set(key, value); },
+        delete: (key: string): void => { persisted.delete(key); },
+      },
+    });
+
+    await delayedServer.listen();
+    await providerStarted;
+    try {
+      await delayedServer.close();
+      expect(delayedGateway.status().state).toBe('STOPPED');
+      releaseProvider();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(delayedGateway.status().state).toBe('STOPPED');
+    } finally {
+      releaseProvider();
+      if (delayedGateway.status().state !== 'STOPPED') await delayedGateway.stop();
+    }
+  });
+
+  it('retries a transient persisted ChatGPT session reconnect failure with bounded delay', async () => {
+    const retryGateway = new GatewayService({
+      localPort: 0,
+      tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => ({
+        url: 'https://retry-session.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const realConnect = retryGateway.connectSession.bind(retryGateway);
+    let connectAttempts = 0;
+    retryGateway.connectSession = async (): ReturnType<GatewayService['connectSession']> => {
+      connectAttempts += 1;
+      if (connectAttempts === 1) {
+        return {
+          ok: false,
+          error: { code: 'CONFLICT', message: 'transient session reconnect failure', recoverable: true },
+        } as never;
+      }
+      return realConnect();
+    };
+    const persisted = new Map<string, string>([
+      ['cloudflare_tunnel_name', 'retry-session-tunnel'],
+      ['cloudflare_public_url', 'https://retry-session.example.com'],
+      ['cloudflare_gateway_desired_state', 'RUNNING'],
+    ]);
+    const retryServer = new ControlPlaneServer({
+      port: 0,
+      gateway: retryGateway,
+      settingsRepository: {
+        get: (key: string): string | null => persisted.get(key) ?? null,
+        set: (key: string, value: string): void => { persisted.set(key, value); },
+        delete: (key: string): void => { persisted.delete(key); },
+      },
+      mcpIdentityProbe: async (): Promise<null> => null,
+      gatewayRestoreRetryBaseMs: 5,
+      gatewayRestoreRetryMaxMs: 10,
+    });
+
+    await retryServer.listen();
+    try {
+      await expect.poll(() => connectAttempts, { timeout: 1_000 }).toBeGreaterThanOrEqual(2);
+      const response = await fetch(`http://127.0.0.1:${retryServer.port}/api/status`);
+      expect(await response.json()).toMatchObject({
+        gatewayRestore: { state: 'connected', attempt: 2 },
+      });
+    } finally {
+      await retryServer.close();
     }
   });
 
@@ -234,7 +376,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
     const delayedGateway = new GatewayService({
       localPort: 0,
-      tunnelProvider: async () => {
+      tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => {
         markProviderStarted();
         await providerRelease;
         return { url: 'https://delayed-stop.example.com', stop: async (): Promise<void> => {} };

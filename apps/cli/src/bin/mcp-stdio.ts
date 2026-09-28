@@ -16,6 +16,7 @@ import {
 import { applyPendingSqliteRestoreSync, SqliteBackupService, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceRoot, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/stdio-mcp-runtime.js';
+import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
 import { StrictWorkspaceRepository, canonicalizeAllowedRoots, requestedPathInsideAllowedRoot } from '../runtime/strict-workspace-repository.js';
 import { resolveRequestedWorkspacePath } from '../runtime/workspace-selection.js';
 import { resetWorkspaceRegistrations } from '../runtime/workspace-reset.js';
@@ -167,7 +168,10 @@ async function main(): Promise<void> {
   }
   database.close();
 
+  const buildProvenance = loadBuildProvenance();
+  const runtimeAdmissionIdentity = createRuntimeAdmissionIdentity(buildProvenance);
   const runtime = createStdioMcpRuntime(dataPath, workspace, unrestricted, {
+    runtimeAdmissionIdentity,
     checkpointEncryptionKey,
     permissionProfile: profileName,
     fullBypassAll: stdioFullBypassAll,

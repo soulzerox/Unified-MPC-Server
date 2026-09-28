@@ -53,6 +53,26 @@ afterEach(async () => {
 });
 
 describe('stdio MCP runtime', () => {
+  it('keeps runtime admission provenance attached to the parent-owned runtime', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-admission-identity-'));
+    temporaryRoots.push(dataPath);
+    const runtimeAdmissionIdentity = {
+      runtimeDeploymentId: 'deploy-test',
+      runtimeGeneration: 'f3ff1d58-d2ae-4af3-a52a-7f0b30f0f0a2',
+      runtimeBuildVersion: '4.61.0+0123456789ab',
+      runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567',
+      runtimeBuildDirty: false,
+      runtimeProtocolGeneration: 1,
+      runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+    };
+    const runtime = createStdioMcpRuntime(dataPath, workspace, false, { runtimeAdmissionIdentity });
+    try {
+      expect(runtime.runtimeAdmissionIdentity).toEqual(runtimeAdmissionIdentity);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('propagates result budgets through the stdio Thai-RAG port', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-rag-budget-'));
     temporaryRoots.push(dataPath);

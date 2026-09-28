@@ -6,13 +6,14 @@ import { HarnessActivationLedger } from './harness-runtime.js';
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 const activeWorkspaceScopeProvider = async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' });
 
-function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; nativeRagCalls: string[]; nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>; bootstrapEvents: string[]; setAgentsMd(content: string): void } {
+function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; nativeRagCalls: string[]; nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>; bootstrapEvents: string[]; setAgentsMd(content: string): void; setHead(value: string): void } {
   const writes: string[] = [];
   const childCalls: string[] = [];
   const nativeRagCalls: string[] = [];
   const nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
   const bootstrapEvents: string[] = [];
   let agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
+  let head = 'a'.repeat(40);
   const services = {
     file: {
       async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
@@ -22,6 +23,14 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       async writeFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
         writes.push(request.path);
         return ok({ path: request.path, replacedExisting: false });
+      },
+    },
+    git: {
+      async observeWorkspace() {
+        return ok({
+          repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+          branch: 'goal/one', head, statusEntries: [], dirtyFingerprint: 'dirty-1', stagedFingerprint: 'staged-1',
+        });
       },
     },
     thaiRag: {
@@ -88,7 +97,7 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
     },
   } as unknown as McpApplicationServices;
-  return { services, writes, childCalls, nativeRagCalls, nativeRagArguments, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; } };
+  return { services, writes, childCalls, nativeRagCalls, nativeRagArguments, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; }, setHead(value: string): void { head = value; } };
 }
 
 describe('workspace engineering harness enforcement', () => {
@@ -149,6 +158,25 @@ describe('workspace engineering harness enforcement', () => {
     })).isError).not.toBe(true);
     expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
     expect(writes).toEqual(['src/shared.ts', 'src/shared.ts']);
+  });
+
+  it('reruns mandatory pre-edit diagnostics when HEAD changes after a path was prepared', async () => {
+    const { services, writes, nativeRagCalls, setHead } = createHarnessServices();
+    const ledger = new HarnessActivationLedger();
+    const options = { harnessActivationLedger: ledger, sessionId: 'head-drift-session', activeWorkspaceScopeProvider };
+    const registry = new ToolRegistry(services, actor, options);
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    expect((await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/drift.ts' })).isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+
+    setHead('b'.repeat(40));
+    expect((await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/drift.ts', content: 'export const drift = true;\n',
+    })).isError).not.toBe(true);
+
+    expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
+    expect(writes).toEqual(['src/drift.ts']);
   });
 
   it('returns the preferred workspace goal as a non-leasing continuation hint during bootstrap', async () => {

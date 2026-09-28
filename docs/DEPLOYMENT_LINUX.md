@@ -85,7 +85,7 @@ The configured `UNIFIED_MPC_ROOT` remains authoritative when it is valid. If a l
 
 Fallback pointers are accepted only when they resolve under the deployment-owned `runtime/releases/*` directory and pass both MCP and Web runtime validation. The child process receives the reconciled path through its own exported `UNIFIED_MPC_ROOT`, so a stale override cannot redirect execution back into a disposable Goal/build worktree.
 
-A recovery emits an auditable `RUNTIME_ROOT_RECOVERED` diagnostic naming the selected pointer and resolved runtime. If no safe fallback exists, the launcher emits the underlying `RUNTIME_ROOT_*` diagnostics plus `RUNTIME_RECOVERY_UNAVAILABLE` and exits with status 78. The units set `RestartPreventExitStatus=78`, preventing an unrecoverable configuration from looping forever while preserving normal `Restart=on-failure` behavior for transient runtime failures.
+A recovery emits an auditable `RUNTIME_ROOT_RECOVERED` diagnostic naming the selected pointer and resolved runtime. If no safe fallback exists, the launcher emits the underlying `RUNTIME_ROOT_*` diagnostics plus `RUNTIME_RECOVERY_UNAVAILABLE` and exits with status 78. Both units set `RestartPreventExitStatus=78`, preventing an unrecoverable configuration from looping forever. The MCP HTTP unit uses `Restart=on-failure`; the Web unit uses `Restart=always` so watchdog-triggered or clean transient exits recover automatically while exit 78 remains restart-prevented.
 
 The launcher does **not** rewrite `service.env`, legacy drop-ins, or deployment pointers. Recovery is therefore idempotent and conservative; remove the stale configuration after inspecting the effective unit:
 
@@ -195,12 +195,12 @@ Gateway lifecycle intent is persistent:
 
 - A successful **Start Gateway** or successful **Validate, Configure & Start** stores desired state `RUNNING`.
 - An explicit **Stop Gateway** stores desired state `STOPPED`.
-- On Web service restart/reboot, persisted configuration is applied first. `RUNNING` is automatically reconciled back to a healthy bridge with bounded retry/backoff; `STOPPED` remains stopped.
+- On Web service restart/reboot, persisted configuration is applied first. Once persisted configuration and credentials can be read, `RUNNING` is automatically reconciled back to a healthy bridge with bounded retry/backoff; `STOPPED` remains stopped.
 - Legacy installations that have persisted tunnel configuration but no desired-state key are treated as `RUNNING` once, then migrated by persisting `RUNNING` after successful recovery.
 
 You therefore do **not** need to click Start Gateway after every reboot. An explicit Stop remains authoritative until the user starts/reconfigures the gateway again.
 
-If the Linux Secret Service is temporarily unavailable during early boot, the Web service may fail and systemd will retry it (`Restart=on-failure`). Unattended Cloudflare recovery still requires the stored secret service to become accessible.
+If the Linux Secret Service is temporarily unavailable during early boot, the Web service remains locally reachable while persisted Gateway recovery reports a degraded state. The Web unit uses `Restart=always` plus a local-only readiness watchdog; downstream MCP/Cloudflare degradation alone does not fail that local readiness check. Exit status 78 remains restart-prevented for unrecoverable runtime-root configuration. Cloudflare reconciliation can resume once the stored secret service is accessible and the persisted restore is retriggered, for example by restarting the Web service.
 
 ## 6. Operations
 

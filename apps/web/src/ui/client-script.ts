@@ -1,5 +1,23 @@
+export type BackendConnectionState = 'unknown' | 'available' | 'unavailable';
+export type BackendConnectionEvent = 'unavailable' | 'recovered' | null;
+
+export function transitionBackendConnectionState(
+  current: BackendConnectionState,
+  next: 'available' | 'unavailable',
+): { readonly state: BackendConnectionState; readonly event: BackendConnectionEvent } {
+  if (next === 'unavailable') {
+    return current === 'unavailable'
+      ? { state: 'unavailable', event: null }
+      : { state: 'unavailable', event: 'unavailable' };
+  }
+  return current === 'unavailable'
+    ? { state: 'available', event: 'recovered' }
+    : { state: 'available', event: null };
+}
+
 export function getClientScriptJs(): string {
   return `
+    const transitionBackendConnectionState = ${transitionBackendConnectionState.toString()};
     (function () {
       let activeTab = 'dashboard';
       let currentLogs = [];
@@ -138,11 +156,37 @@ export function getClientScriptJs(): string {
         setTab(initialHash);
       }
 
+      let backendConnectionState = 'unknown';
+      let statusRefreshInFlight = false;
+
+      function isBackendTransportError(err) {
+        return err instanceof TypeError || err?.message === 'Failed to fetch';
+      }
+
+      function noteBackendUnavailable(err) {
+        const transition = transitionBackendConnectionState(backendConnectionState, 'unavailable');
+        backendConnectionState = transition.state;
+        if (transition.event === 'unavailable') {
+          logEvent('ERROR', 'Backend unavailable: ' + (err?.message || String(err)));
+        }
+      }
+
+      function noteBackendAvailable() {
+        const transition = transitionBackendConnectionState(backendConnectionState, 'available');
+        backendConnectionState = transition.state;
+        if (transition.event === 'recovered') {
+          logEvent('SUCCESS', 'Backend connection restored');
+        }
+      }
+
       async function loadStatus() {
+        if (statusRefreshInFlight) return;
+        statusRefreshInFlight = true;
         try {
           const res = await fetch('/api/status');
           if (!res.ok) throw new Error('Status request failed');
           const data = await res.json();
+          noteBackendAvailable();
           const identity = data.mcpIdentity;
           const buildCommit = document.getElementById('build-commit');
           if (buildCommit && identity) {
@@ -174,7 +218,10 @@ export function getClientScriptJs(): string {
           if (led) led.className = 'led offline';
           const tel = document.getElementById('servers-telemetry');
           if (tel) tel.textContent = 'Unable to reach backend: ' + err.message;
-          logEvent('ERROR', 'Failed to reach status endpoint: ' + err.message);
+          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          else logEvent('WARN', 'Status refresh failed: ' + err.message);
+        } finally {
+          statusRefreshInFlight = false;
         }
       }
 
@@ -497,7 +544,8 @@ export function getClientScriptJs(): string {
               error: err.message,
             });
             renderWorkspaces();
-            logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
+            if (isBackendTransportError(err)) noteBackendUnavailable(err);
+            else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
           }
         })();
         workspaceRuntimeRefreshes.set(workspaceId, refresh);
@@ -1301,7 +1349,8 @@ export function getClientScriptJs(): string {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
         } catch (err) {
-          console.error(err);
+          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          else console.error(err);
         }
       }
 

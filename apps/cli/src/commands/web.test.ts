@@ -1,6 +1,9 @@
-import type { GoalRecord } from '@unified-mpc/domain';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { describe, expect, it } from 'vitest';
-import { createGoalControl, runWeb, parseWebArgs } from './web.js';
+import { createGoalControl, createWebGoalRuntimeProjection, runWeb, parseWebArgs } from './web.js';
 
 describe('web CLI command', () => {
   describe('parseWebArgs', () => {
@@ -82,8 +85,83 @@ describe('web CLI command', () => {
   });
 
   describe('runWeb', () => {
+    it('projects persisted runtime as last-admitted when standalone Web has no serving-runtime proof', async () => {
+      const root = await mkdtemp(path.join(process.cwd(), '.web-admission-'));
+      try {
+        await writeFile(path.join(root, 'source.ts'), 'web snapshot source');
+        const workspaceId = '11111111-1111-4111-8111-111111111111';
+        const createdAt = '2026-09-22T00:00:00.000Z';
+        const baseRevision = 'snapshot-base-1';
+        const workspace = {
+          id: workspaceId,
+          displayName: 'Web snapshot',
+          rootPath: root,
+          realRootPath: root,
+          createdAt,
+          lifecycleKind: 'goal',
+          goalWorkspaceKind: 'snapshot',
+          goalId: 'goal-web',
+          parentWorkspaceId: 'project-web',
+          baseRevision,
+          writerLease: { leaseId: 'lease-web', ownerId: 'owner-web', generation: 3, expiresAt: '2099-01-01T00:00:00.000Z' },
+        };
+        let receipt: WorkspaceAdmissionReceipt | null = null;
+        const workspaceRepository = {
+          get: async (id: string): Promise<typeof workspace | null> => id === workspaceId ? workspace : null,
+          getAdmissionReceipt: async (): Promise<WorkspaceAdmissionReceipt | null> => receipt,
+          compareAndSwapAdmissionReceipt: async (): Promise<boolean> => { throw new Error('Web projection must not write admission'); },
+        };
+        const truth = new GoalWorkspaceTruthReader(workspaceRepository as never, {} as never);
+        const observed = await truth.readAdmission(workspaceId);
+        const generation = `${createdAt}:${baseRevision}`;
+        const runtime = {
+          runtimeDeploymentId: 'web-deployment',
+          runtimeGeneration: 'web-runtime-generation',
+          runtimeBuildVersion: '4.61.0+0123456789ab',
+          runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567',
+          runtimeBuildDirty: false,
+          runtimeProtocolGeneration: 1,
+          runtimeStartedAt: '2026-09-27T00:00:00.000Z',
+        };
+        receipt = {
+          admissionId: 'web-admission',
+          projectId: 'project-web',
+          workspaceId,
+          goalId: 'goal-web',
+          workspaceKind: 'non_git',
+          worktreeIdentity: generation,
+          expectedWorkspaceHead: generation,
+          observedWorkspaceHead: generation,
+          dirtyState: 'clean',
+          dirtyFingerprint: observed.sourceContentFingerprint!,
+          writeLeaseGeneration: 3,
+          ...runtime,
+          workflowVersion: 1,
+          admissionGeneration: 2,
+          createdAt,
+        };
+        const projection = createWebGoalRuntimeProjection(
+          {} as never,
+          {} as never,
+          {} as never,
+          workspaceRepository as never,
+        );
+        await expect(projection.readWorkspaceAdmissionProjection(workspaceId)).resolves.toMatchObject({
+          runtime: { source: 'last_admitted', generation: 'web-runtime-generation' },
+          workspace: { kind: 'non_git' },
+          admission: {
+            status: 'RECOVERY_REQUIRED',
+            blocker: 'runtime_provenance_missing',
+            remediation: 'recover_workspace',
+          },
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('starts control plane server and returns handle with bound url', async () => {
-      const result = await runWeb({ port: 0 });
+      const result = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never });
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.value.url).toContain('http://127.0.0.1:');

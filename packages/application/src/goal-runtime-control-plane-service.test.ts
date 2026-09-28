@@ -219,6 +219,85 @@ describe('GoalRuntimeControlPlaneService', () => {
     });
   });
 
+  it('captures non-Git admission from the durable snapshot generation and content fingerprint', async () => {
+    const nonGitObservation: GoalWorkspaceAdmissionObservation = {
+      workspaceId,
+      workspaceKind: 'non_git',
+      dirtyState: 'clean',
+      goalId: 'goal-1',
+      projectId: 'project-1',
+      checkpointId: 'snapshot-checkpoint',
+      writerLeaseGeneration: 3,
+      writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+      sourceSnapshotGeneration: 'snapshot-generation-1',
+      sourceContentFingerprint: 'snapshot-content-1',
+    };
+    let savedReceipt: WorkspaceAdmissionReceipt | null = null;
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => nonGitObservation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_id, expected, leaseGeneration, next): Promise<boolean> => {
+          if (expected !== 0 || leaseGeneration !== 3) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'ADMITTED', admissionGeneration: 1 },
+    });
+    expect(savedReceipt).toMatchObject({
+      workspaceKind: 'non_git',
+      expectedWorkspaceHead: 'snapshot-generation-1',
+      observedWorkspaceHead: 'snapshot-generation-1',
+      dirtyFingerprint: 'snapshot-content-1',
+      writeLeaseGeneration: 3,
+      admissionGeneration: 1,
+    });
+  });
+
+  it('reports non-Git runtime drift without writing through a read-only admission port', async () => {
+    const sourceSnapshotGeneration = 'snapshot-generation-1';
+    const snapshotReceipt: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      workspaceKind: 'non_git',
+      worktreeIdentity: sourceSnapshotGeneration,
+      expectedWorkspaceHead: sourceSnapshotGeneration,
+      observedWorkspaceHead: sourceSnapshotGeneration,
+      dirtyState: 'clean',
+      dirtyFingerprint: 'snapshot-content-1',
+      checkpointId: 'snapshot-checkpoint',
+      runtimeGeneration: 'old-runtime',
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => ({
+        workspaceId, workspaceKind: 'non_git', dirtyState: 'clean',
+        goalId: 'goal-1', projectId: 'project-1', checkpointId: 'snapshot-checkpoint',
+        writerLeaseGeneration: 3, writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+        sourceSnapshotGeneration, sourceContentFingerprint: 'snapshot-content-1',
+      }) },
+      workspaceAdmissionReceipt: { getAdmissionReceipt: async () => snapshotReceipt },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.readWorkspaceAdmissionProjection(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'RUNTIME_GENERATION_CHANGED', blocker: 'runtime_generation_changed' },
+    });
+  });
+
   it('fails closed rather than capturing an initially dirty workspace without checkpoint provenance', async () => {
     let compareAndSwapCalls = 0;
     const runtime = fixture({
@@ -280,6 +359,59 @@ describe('GoalRuntimeControlPlaneService', () => {
       expectedWorkspaceHead: 'd'.repeat(40), observedWorkspaceHead: 'd'.repeat(40),
       dirtyState: 'dirty', dirtyFingerprint: 'opaque-dirty-after-write',
       stagedFingerprint: 'opaque-staged-after-write', writeLeaseGeneration: 3, admissionGeneration: 3,
+    });
+  });
+
+  it('advances non-Git admission after an exact successful owner mutation', async () => {
+    const sourceSnapshotGeneration = 'snapshot-generation-1';
+    let savedReceipt: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      workspaceKind: 'non_git',
+      worktreeIdentity: sourceSnapshotGeneration,
+      expectedWorkspaceHead: sourceSnapshotGeneration,
+      observedWorkspaceHead: sourceSnapshotGeneration,
+      dirtyFingerprint: 'content-before',
+    };
+    const observation: GoalWorkspaceAdmissionObservation = {
+      workspaceId,
+      workspaceKind: 'non_git',
+      dirtyState: 'clean',
+      goalId: 'goal-1',
+      projectId: 'project-1',
+      checkpointId: 'checkpoint-1',
+      writerLeaseGeneration: 3,
+      writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+      sourceSnapshotGeneration,
+      sourceContentFingerprint: 'content-after',
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_id, expected, leaseGeneration, next): Promise<boolean> => {
+          if (savedReceipt.admissionGeneration !== expected || leaseGeneration !== 3) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId, runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion, runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false, runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.recordSuccessfulWorkspaceMutation({
+      callId: 'non-git-call-1', workspaceId, goalId: 'goal-1', leaseGeneration: 3, admissionGeneration: 2,
+    })).resolves.toBeUndefined();
+    expect(savedReceipt).toMatchObject({
+      workspaceKind: 'non_git',
+      expectedWorkspaceHead: sourceSnapshotGeneration,
+      observedWorkspaceHead: sourceSnapshotGeneration,
+      dirtyFingerprint: 'content-after',
+      writeLeaseGeneration: 3,
+      admissionGeneration: 3,
     });
   });
 

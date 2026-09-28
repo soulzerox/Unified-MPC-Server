@@ -134,34 +134,41 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       this.readWorkspaceAdmissionBestEffort(binding.workspaceId),
     ]);
     const now = this.now();
-    if (receipt === null || observed === null || observed.workspaceKind !== 'git' || observed.dirtyState === 'unknown'
-      || observed.workspaceHead === undefined || observed.dirtyFingerprint === undefined || observed.stagedFingerprint === undefined
+    const nonGit = observed?.workspaceKind === 'non_git';
+    if (receipt === null || observed === null || observed.dirtyState === 'unknown'
       || observed.writerLeaseGeneration !== binding.leaseGeneration
       || observed.writerLeaseExpiresAt === undefined || Date.parse(observed.writerLeaseExpiresAt) <= now.getTime()
       || observed.goalId !== binding.goalId || observed.projectId !== receipt.projectId
       || observed.checkpointId !== receipt.checkpointId || receipt.goalId !== binding.goalId
-      || receipt.workspaceId !== binding.workspaceId || receipt.workspaceKind !== 'git'
+      || receipt.workspaceId !== binding.workspaceId || receipt.workspaceKind !== observed.workspaceKind
       || receipt.writeLeaseGeneration !== binding.leaseGeneration
       || receipt.admissionGeneration !== binding.admissionGeneration || receipt.invalidatedAt !== undefined
       || (receipt.expiresAt !== undefined && Date.parse(receipt.expiresAt) <= now.getTime())
-      || observed.repositoryIdentity !== receipt.repositoryIdentity
-      || observed.gitCommonDirIdentity !== receipt.gitCommonDirIdentity
-      || observed.worktreeIdentity !== receipt.worktreeIdentity
-      || observed.branchName !== receipt.branchName
-      || observed.baseRef !== receipt.baseRef || observed.baseSha !== receipt.resolvedBaseSha
-      || observed.mergeBaseSha !== receipt.mergeBaseSha || (observed.remoteGoalSha ?? undefined) !== receipt.remoteGoalSha
+      || (nonGit
+        ? observed.sourceSnapshotGeneration === undefined || observed.sourceContentFingerprint === undefined
+          || receipt.expectedWorkspaceHead !== observed.sourceSnapshotGeneration
+          || receipt.observedWorkspaceHead !== observed.sourceSnapshotGeneration
+          || receipt.worktreeIdentity !== observed.sourceSnapshotGeneration
+        : observed.workspaceKind !== 'git' || observed.workspaceHead === undefined || observed.dirtyFingerprint === undefined
+          || observed.stagedFingerprint === undefined || observed.repositoryIdentity !== receipt.repositoryIdentity
+          || observed.gitCommonDirIdentity !== receipt.gitCommonDirIdentity
+          || observed.worktreeIdentity !== receipt.worktreeIdentity || observed.branchName !== receipt.branchName
+          || observed.baseRef !== receipt.baseRef || observed.baseSha !== receipt.resolvedBaseSha
+          || observed.mergeBaseSha !== receipt.mergeBaseSha || (observed.remoteGoalSha ?? undefined) !== receipt.remoteGoalSha)
       || runtimeAdmissionGeneration(runtime) !== runtimeAdmissionGeneration(receipt)) {
       throw new Error('Successful workspace mutation no longer matches its admitted source and writer proof');
     }
 
+    const workspaceHead = nonGit ? observed.sourceSnapshotGeneration! : observed.workspaceHead!;
+    const dirtyFingerprint = nonGit ? observed.sourceContentFingerprint! : observed.dirtyFingerprint!;
     const nextReceipt: WorkspaceAdmissionReceipt = {
       ...receipt,
       admissionId: createHash('sha256').update(`${receipt.admissionId}:${binding.callId}:${binding.admissionGeneration + 1}`).digest('hex'),
-      expectedWorkspaceHead: observed.workspaceHead,
-      observedWorkspaceHead: observed.workspaceHead,
+      expectedWorkspaceHead: workspaceHead,
+      observedWorkspaceHead: workspaceHead,
       dirtyState: observed.dirtyState,
-      dirtyFingerprint: observed.dirtyFingerprint,
-      stagedFingerprint: observed.stagedFingerprint,
+      dirtyFingerprint,
+      stagedFingerprint: nonGit ? '' : observed.stagedFingerprint!,
       admissionGeneration: receipt.admissionGeneration + 1,
       createdAt: now.toISOString(),
     };
@@ -333,8 +340,13 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     observed: GoalWorkspaceAdmissionObservation | null,
   ): Promise<GoalRuntimeBootstrapResult['admission'] | undefined> {
     if (this.workspaceAdmissionReceipts === undefined) return undefined;
-    if (observed === null || observed.workspaceKind !== 'git' || observed.dirtyState === 'unknown'
-      || observed.workspaceHead === undefined || observed.dirtyFingerprint === undefined
+    if (observed === null || observed.dirtyState === 'unknown') {
+      return { status: 'RECOVERY_REQUIRED', reason: 'required_workspace_or_lease_proof_missing' };
+    }
+    if (observed.workspaceKind === 'non_git') {
+      return this.classifyNonGitAdmissionBestEffort(workspaceId, observed);
+    }
+    if (observed.workspaceKind !== 'git' || observed.workspaceHead === undefined || observed.dirtyFingerprint === undefined
       || observed.stagedFingerprint === undefined || observed.repositoryIdentity === undefined
       || observed.gitCommonDirIdentity === undefined || observed.worktreeIdentity === undefined
       || observed.baseRef === undefined || observed.baseSha === undefined || observed.mergeBaseSha === undefined
@@ -469,6 +481,103 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
         receipt.admissionGeneration,
         observed.writerLeaseGeneration,
         refreshed,
+      );
+      return saved
+        ? { status: 'ADMITTED', admissionGeneration: refreshed.admissionGeneration, refreshedFromRuntimeGeneration: true }
+        : { status: 'RECOVERY_REQUIRED', reason: 'admission_refresh_raced', admissionGeneration: receipt.admissionGeneration };
+    } catch {
+      return { status: 'RECOVERY_REQUIRED', reason: 'admission_refresh_failed', admissionGeneration: receipt.admissionGeneration };
+    }
+  }
+
+  private async classifyNonGitAdmissionBestEffort(
+    workspaceId: string,
+    observed: GoalWorkspaceAdmissionObservation,
+  ): Promise<GoalRuntimeBootstrapResult['admission']> {
+    const receipts = this.workspaceAdmissionReceipts;
+    if (observed.sourceSnapshotGeneration === undefined || observed.sourceContentFingerprint === undefined
+      || observed.goalId === undefined || observed.projectId === undefined
+      || observed.writerLeaseGeneration === undefined || observed.writerLeaseExpiresAt === undefined
+      || Date.parse(observed.writerLeaseExpiresAt) <= this.now().getTime()) {
+      return { status: 'RECOVERY_REQUIRED', reason: 'non_git_snapshot_or_lease_proof_missing' };
+    }
+    const runtime = this.runtimeAdmissionIdentity;
+    if (runtime === undefined) return { status: 'RECOVERY_REQUIRED', reason: 'runtime_provenance_missing' };
+    if (runtime.runtimeBuildDirty) return { status: 'RECOVERY_REQUIRED', reason: 'runtime_build_provenance_dirty' };
+
+    let receipt: WorkspaceAdmissionReceipt | null;
+    try {
+      receipt = await receipts!.getAdmissionReceipt(workspaceId);
+    } catch {
+      return { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_unavailable' };
+    }
+
+    if (receipt === null) {
+      if (receipts!.compareAndSwapAdmissionReceipt === undefined) {
+        return { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_storage_unavailable' };
+      }
+      const now = this.now().toISOString();
+      const initialReceipt: WorkspaceAdmissionReceipt = {
+        admissionId: createHash('sha256')
+          .update([workspaceId, observed.sourceSnapshotGeneration, observed.sourceContentFingerprint, String(observed.writerLeaseGeneration), runtime.runtimeGeneration, now].join('\\0'))
+          .digest('hex'),
+        projectId: observed.projectId,
+        workspaceId,
+        goalId: observed.goalId,
+        workspaceKind: 'non_git',
+        worktreeIdentity: observed.sourceSnapshotGeneration,
+        expectedWorkspaceHead: observed.sourceSnapshotGeneration,
+        observedWorkspaceHead: observed.sourceSnapshotGeneration,
+        dirtyState: 'clean',
+        dirtyFingerprint: observed.sourceContentFingerprint,
+        ...(observed.checkpointId === undefined ? {} : { checkpointId: observed.checkpointId }),
+        writeLeaseGeneration: observed.writerLeaseGeneration,
+        ...runtime,
+        workflowVersion: INITIAL_ADMISSION_WORKFLOW_VERSION,
+        admissionGeneration: 1,
+        createdAt: now,
+      };
+      try {
+        if (!await receipts!.compareAndSwapAdmissionReceipt(
+          workspaceId, 0, observed.writerLeaseGeneration, initialReceipt,
+        )) return { status: 'RECOVERY_REQUIRED', reason: 'initial_admission_capture_raced' };
+      } catch {
+        return { status: 'RECOVERY_REQUIRED', reason: 'initial_admission_capture_failed' };
+      }
+      return { status: 'ADMITTED', admissionGeneration: initialReceipt.admissionGeneration };
+    }
+
+    if (receipt.invalidatedAt !== undefined || (receipt.expiresAt !== undefined && Date.parse(receipt.expiresAt) <= this.now().getTime())) {
+      return { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_invalid_or_expired', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (receipt.workspaceId !== workspaceId || receipt.workspaceKind !== 'non_git'
+      || receipt.projectId !== observed.projectId || receipt.goalId !== observed.goalId
+      || receipt.checkpointId !== observed.checkpointId) {
+      return { status: 'WORKSPACE_STATE_CHANGED', reason: 'workspace_or_checkpoint_identity_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (receipt.expectedWorkspaceHead !== observed.sourceSnapshotGeneration
+      || receipt.observedWorkspaceHead !== observed.sourceSnapshotGeneration
+      || receipt.dirtyFingerprint !== observed.sourceContentFingerprint
+      || receipt.writeLeaseGeneration !== observed.writerLeaseGeneration) {
+      return { status: 'WORKSPACE_STATE_CHANGED', reason: 'non_git_snapshot_content_or_lease_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (runtimeAdmissionGeneration(receipt) === runtimeAdmissionGeneration(runtime)) {
+      return { status: 'ADMITTED', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (receipts!.compareAndSwapAdmissionReceipt === undefined) {
+      return { status: 'RUNTIME_GENERATION_CHANGED', reason: 'runtime_generation_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+
+    const refreshed: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      admissionId: createHash('sha256').update(`${receipt.admissionId}:${runtime.runtimeGeneration}:${this.now().toISOString()}`).digest('hex'),
+      ...runtime,
+      admissionGeneration: receipt.admissionGeneration + 1,
+      createdAt: this.now().toISOString(),
+    };
+    try {
+      const saved = await receipts!.compareAndSwapAdmissionReceipt(
+        workspaceId, receipt.admissionGeneration, observed.writerLeaseGeneration, refreshed,
       );
       return saved
         ? { status: 'ADMITTED', admissionGeneration: refreshed.admissionGeneration, refreshedFromRuntimeGeneration: true }

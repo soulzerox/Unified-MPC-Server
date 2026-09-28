@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { Workspace } from '@unified-mpc/workspace';
@@ -153,19 +155,41 @@ describe('GoalWorkspaceTruthReader', () => {
     expect(git.refreshAdmissionRef).toHaveBeenCalledWith(expect.anything(), workspace.id, 'origin', 'refs/heads/main');
   });
 
-  it('keeps snapshot Goal Workspaces explicitly non-Git instead of observing the parent repository', async () => {
-    const observeWorkspace = vi.fn();
-    const git: GoalWorkspaceGitStatusPort = {
-      status: vi.fn(async () => ok({ entries: [] })),
-      observeWorkspace,
-    };
-    const { reader } = fixture({ git, workspace: { ...workspace, lifecycleKind: 'goal', goalWorkspaceKind: 'snapshot' } });
+  it('fingerprints bounded snapshot content as non-Git admission evidence', async () => {
+    const root = await mkdtemp(path.join(process.cwd(), '.goal-snapshot-'));
+    try {
+      await writeFile(path.join(root, 'source.ts'), 'snapshot source v1');
+      const observeWorkspace = vi.fn();
+      const git: GoalWorkspaceGitStatusPort = {
+        status: vi.fn(async () => ok({ entries: [] })),
+        observeWorkspace,
+      };
+      const snapshotWorkspace: Workspace = {
+        ...workspace,
+        realRootPath: root,
+        lifecycleKind: 'goal',
+        goalWorkspaceKind: 'snapshot',
+        goalId: 'goal-1',
+        parentWorkspaceId: 'project-1',
+        baseRevision: 'snapshot-base-1',
+        writerLease: { leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2099-01-01T00:00:00.000Z' },
+      };
+      const { reader } = fixture({ git, workspace: snapshotWorkspace });
+      const first = await reader.readAdmission(workspace.id);
+      expect(first).toMatchObject({
+        workspaceKind: 'non_git',
+        dirtyState: 'clean',
+        sourceSnapshotGeneration: '2026-09-22T00:00:00.000Z:snapshot-base-1',
+      });
+      expect(first.sourceContentFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+      expect(first).not.toHaveProperty('workspaceHead');
 
-    await expect(reader.readAdmission(workspace.id)).resolves.toMatchObject({
-      workspaceKind: 'non_git',
-      dirtyState: 'unknown',
-    });
-    await expect(reader.readAdmission(workspace.id)).resolves.not.toHaveProperty('workspaceHead');
-    expect(observeWorkspace).not.toHaveBeenCalled();
+      await writeFile(path.join(root, 'source.ts'), 'snapshot source v2');
+      const second = await reader.readAdmission(workspace.id);
+      expect(second.sourceContentFingerprint).not.toBe(first.sourceContentFingerprint);
+      expect(observeWorkspace).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

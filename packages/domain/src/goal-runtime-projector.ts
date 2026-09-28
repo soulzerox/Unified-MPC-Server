@@ -40,7 +40,11 @@ export function projectGoalRuntimeEvent(
     };
   }
 
-  const transitionFailure = validateProjectionTransitions(current, applied.projection);
+  const transitionFailure = validateProjectionTransitions(
+    current,
+    applied.projection,
+    event.type === 'integration_observed',
+  );
   if (transitionFailure !== undefined) {
     return {
       decision: { disposition: 'reject', reason: 'invalid_transition' },
@@ -103,6 +107,13 @@ function applyGoalScopedEvent(
     case 'workspace_observed':
       return {
         projection: applyWorkspaceObservation(current, event.workspaceState, event.occurredAt, event.detail),
+      };
+    case 'integration_observed':
+      return {
+        projection: withLastActivity(
+          applyIntegrationObservation(current, event.integrationState, event.occurredAt, event.detail),
+          event.occurredAt,
+        ),
       };
     case 'goal_blocker_observed':
       return {
@@ -335,6 +346,30 @@ function applyGoalBlockerObservation(
   };
 }
 
+function applyIntegrationObservation(
+  current: GoalRuntimeProjection,
+  integrationState: Extract<GoalRuntimeProjection['integrationState'], 'pending' | 'integrated' | 'conflict' | 'unknown'>,
+  observedAt: string,
+  detail: string | undefined,
+): GoalRuntimeProjection {
+  if (integrationState === 'conflict') {
+    return {
+      ...current,
+      integrationState,
+      blocker: {
+        kind: 'integration_conflict',
+        observedAt,
+        ...(detail === undefined ? {} : { detail }),
+      },
+    };
+  }
+
+  return clearBlocker({
+    ...current,
+    integrationState,
+  }, 'integration_conflict');
+}
+
 function applyWorkspaceObservation(
   current: GoalRuntimeProjection,
   workspaceState: GoalRuntimeProjection['workspaceState'],
@@ -396,6 +431,7 @@ function workspaceBlockerKind(
 function validateProjectionTransitions(
   current: GoalRuntimeProjection,
   next: GoalRuntimeProjection,
+  authoritativeIntegrationObservation = false,
 ): 'invalid_transition' | undefined {
   if (!validateGoalStateTransition({
     dimension: 'lifecycle',
@@ -410,7 +446,7 @@ function validateProjectionTransitions(
     executionGenerationChanged: current.executionGeneration !== next.executionGeneration,
   }).valid) return 'invalid_transition';
 
-  if (!validateGoalStateTransition({
+  if (!authoritativeIntegrationObservation && !validateGoalStateTransition({
     dimension: 'integration',
     from: current.integrationState,
     to: next.integrationState,

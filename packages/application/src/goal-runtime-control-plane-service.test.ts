@@ -10,7 +10,7 @@ import {
   type GoalRuntimeSnapshotRepository,
 } from '@unified-mpc/domain';
 import { GoalRuntimeControlPlaneError, GoalRuntimeControlPlaneService } from './goal-runtime-control-plane-service.js';
-import type { GoalWorkspaceAdmissionObservation, GoalWorkspaceTruthObservation } from './goal-workspace-truth-reader.js';
+import type { GoalWorkspaceAdmissionObservation, GoalWorkspaceIntegrationObservation, GoalWorkspaceTruthObservation } from './goal-workspace-truth-reader.js';
 
 const workspaceId = 'workspace-1';
 
@@ -46,7 +46,10 @@ function fixture(options: {
   snapshot?: GoalRuntimeSnapshotRecord;
   events?: readonly GoalRuntimeEventRecord[];
   replayWindowMissed?: boolean;
-  workspaceTruth?: { read(workspaceId: string): Promise<GoalWorkspaceTruthObservation> };
+  workspaceTruth?: {
+    read(workspaceId: string): Promise<GoalWorkspaceTruthObservation>;
+    readIntegration?(goalId: string): Promise<GoalWorkspaceIntegrationObservation>;
+  };
   workspaceAdmission?: { readAdmission(workspaceId: string): Promise<GoalWorkspaceAdmissionObservation> };
   workspaceAdmissionReceipt?: {
     getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null>;
@@ -875,6 +878,43 @@ describe('GoalRuntimeControlPlaneService', () => {
       integrationState: 'unknown',
       blocker: { kind: 'goal_blocked' },
     });
+  });
+
+  it('projects caller-verified Goal Workspace integration truth during snapshot bootstrap and deduplicates unchanged observations', async () => {
+    let integrationState: 'pending' | 'integrated' | 'conflict' | 'unknown' = 'pending';
+    const runtime = fixture({
+      workspaceTruth: {
+        read: async () => ({ state: 'clean', detail: 'Git workspace is clean' }),
+        readIntegration: async () => ({
+          state: integrationState,
+          detail: `Goal Workspace integration metadata is ${integrationState}`,
+        }),
+      },
+      now: (): Date => new Date('2026-09-22T00:00:30.000Z'),
+    });
+
+    const pending = await runtime.service.ensureGoalSnapshot('goal-1');
+    expect(pending.projection).toMatchObject({
+      workspaceState: 'clean',
+      integrationState: 'pending',
+    });
+    expect(runtime.records.map((entry) => entry.event.type)).toEqual([
+      'workspace_observed',
+      'integration_observed',
+    ]);
+
+    await runtime.service.ensureGoalSnapshot('goal-1');
+    expect(runtime.records.filter((entry) => entry.event.type === 'integration_observed')).toHaveLength(1);
+
+    integrationState = 'integrated';
+    const integrated = await runtime.service.refreshGoalWorkspaceTruth('goal-1');
+    expect(integrated.projection.integrationState).toBe('integrated');
+    expect(runtime.records.filter((entry) => entry.event.type === 'integration_observed')).toHaveLength(2);
+
+    integrationState = 'pending';
+    const reopened = await runtime.service.refreshGoalWorkspaceTruth('goal-1');
+    expect(reopened.projection.integrationState).toBe('pending');
+    expect(runtime.records.filter((entry) => entry.event.type === 'integration_observed')).toHaveLength(3);
   });
 
   it('projects conservative workspace truth without changing integration state', async () => {

@@ -12,6 +12,11 @@ export interface GoalWorkspaceTruthObservation {
   readonly detail?: string;
 }
 
+export interface GoalWorkspaceIntegrationObservation {
+  readonly state: 'pending' | 'integrated' | 'conflict' | 'unknown';
+  readonly detail?: string;
+}
+
 export interface GoalWorkspaceGitStatusPort {
   status(actor: FileActor, workspaceId: string, signal?: AbortSignal): Promise<Result<GitStatusResult>>;
   refreshAdmissionRef?(
@@ -64,11 +69,11 @@ export interface GoalWorkspaceTruthReaderOptions {
 }
 
 /**
- * Reads only registered-workspace + filesystem + Git evidence.
+ * Reads registered-workspace + filesystem + Git evidence, plus explicit
+ * caller-verified integration metadata persisted by the Goal Workspace owner.
  *
- * Runtime state, Goal Workspace isolation, integration state, cleanup
- * eligibility, UI selection, branch names, and leases are deliberately not
- * inferred here.
+ * Runtime state, cleanup eligibility, UI selection, branch names, leases, and
+ * integration outcomes are never inferred from surrounding repository state.
  */
 export class GoalWorkspaceTruthReader {
   private readonly probeRoot: WorkspaceRootProbe;
@@ -78,7 +83,7 @@ export class GoalWorkspaceTruthReader {
   };
 
   public constructor(
-    private readonly workspaces: Pick<WorkspaceRepository, 'get'>,
+    private readonly workspaces: Pick<WorkspaceRepository, 'get'> & Partial<Pick<WorkspaceRepository, 'list' | 'listAll'>>,
     private readonly git: GoalWorkspaceGitStatusPort,
     options: GoalWorkspaceTruthReaderOptions = {},
   ) {
@@ -125,6 +130,43 @@ export class GoalWorkspaceTruthReader {
       return { state: 'missing', detail: 'registered workspace disappeared during probe' };
     }
     return { state: 'unavailable', detail: 'Git status is unavailable' };
+  }
+
+  /**
+   * Reads only caller-verified integration metadata persisted by the Goal
+   * Workspace owner (#11). This never infers integration from Git/PR/runtime
+   * state and returns unknown when active ownership is absent or ambiguous.
+   */
+  public async readIntegration(goalId: string): Promise<GoalWorkspaceIntegrationObservation> {
+    const list = this.workspaces.listAll ?? this.workspaces.list;
+    if (list === undefined) {
+      return { state: 'unknown', detail: 'Goal Workspace integration metadata is unavailable' };
+    }
+
+    let workspaces;
+    try {
+      workspaces = await list.call(this.workspaces);
+    } catch {
+      return { state: 'unknown', detail: 'Goal Workspace integration metadata could not be read' };
+    }
+
+    const active = workspaces.filter((workspace) =>
+      workspace.archivedAt == null
+      && workspace.lifecycleKind === 'goal'
+      && workspace.goalId === goalId);
+
+    if (active.length === 0) {
+      return { state: 'unknown', detail: 'No active Goal Workspace integration metadata exists' };
+    }
+    if (active.length !== 1) {
+      return { state: 'unknown', detail: 'Active Goal Workspace integration ownership is ambiguous' };
+    }
+
+    const state = active[0]?.integrationState ?? 'unknown';
+    return {
+      state,
+      detail: `Goal Workspace integration metadata is ${state}`,
+    };
   }
 
   /** Reads bounded Git admission evidence without treating a snapshot's parent repo as its own. */

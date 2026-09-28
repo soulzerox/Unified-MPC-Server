@@ -1,6 +1,7 @@
 import {
   isExecutionScopedRuntimeEventType,
   isGoalBlockerKind,
+  isGoalIntegrationState,
   isGoalScopedRuntimeEvent,
   isGoalWorkspaceState,
   isGoalScopedRuntimeEventType,
@@ -49,6 +50,7 @@ interface GoalRuntimeEventRow {
   readonly checkpoint_id: string | null;
   readonly blocker_kind: string | null;
   readonly workspace_state: string | null;
+  readonly integration_state: string | null;
   readonly recorded_at: string;
 }
 
@@ -93,8 +95,8 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       INSERT OR IGNORE INTO goal_runtime_events (
         event_id, workspace_id, goal_id, event_type,
         execution_id, execution_generation,
-        occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, workspace_state, recorded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, workspace_state, integration_state, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       event.eventId,
       event.workspaceId,
@@ -109,6 +111,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       execution?.checkpointId ?? null,
       (event.type === 'goal_blocker_observed' ? event.blockerKind : execution?.blockerKind) ?? null,
       event.type === 'workspace_observed' ? event.workspaceState : null,
+      event.type === 'integration_observed' ? event.integrationState : null,
       request.recordedAt,
     );
 
@@ -270,8 +273,8 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         INSERT INTO goal_runtime_events (
           event_id, workspace_id, goal_id, event_type,
           execution_id, execution_generation,
-          occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, workspace_state, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          occurred_at, detail, phase, task_id, checkpoint_id, blocker_kind, workspace_state, integration_state, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         event.eventId,
         event.workspaceId,
@@ -285,6 +288,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         event.taskId ?? null,
         event.checkpointId ?? null,
         event.blockerKind ?? null,
+        null,
         null,
         request.recordedAt,
       );
@@ -446,16 +450,24 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
         throw new GoalRuntimeEventStoreError('corrupt', 'Goal-scoped runtime event contains execution-only fields');
       }
       if (row.event_type === 'workspace_observed') {
-        if (row.blocker_kind !== null) {
-          throw new GoalRuntimeEventStoreError('corrupt', 'Workspace observation event contains blocker state');
+        if (row.blocker_kind !== null || row.integration_state !== null) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Workspace observation event contains unrelated observation state');
         }
         if (!isGoalWorkspaceState(row.workspace_state)) {
           throw new GoalRuntimeEventStoreError('corrupt', 'Workspace observation event is missing a valid workspace state');
         }
         event = { ...common, type: 'workspace_observed', workspaceState: row.workspace_state };
+      } else if (row.event_type === 'integration_observed') {
+        if (row.blocker_kind !== null || row.workspace_state !== null) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Integration observation event contains unrelated observation state');
+        }
+        if (!isObservedIntegrationState(row.integration_state)) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Integration observation event is missing a valid integration state');
+        }
+        event = { ...common, type: 'integration_observed', integrationState: row.integration_state };
       } else if (row.event_type === 'goal_blocker_observed') {
-        if (row.workspace_state !== null) {
-          throw new GoalRuntimeEventStoreError('corrupt', 'Goal blocker observation contains workspace state');
+        if (row.workspace_state !== null || row.integration_state !== null) {
+          throw new GoalRuntimeEventStoreError('corrupt', 'Goal blocker observation contains unrelated observation state');
         }
         if (row.blocker_kind !== null && row.blocker_kind !== 'goal_blocked') {
           throw new GoalRuntimeEventStoreError('corrupt', 'Goal blocker observation contains an invalid blocker kind');
@@ -466,14 +478,14 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
           ...(row.blocker_kind === null ? {} : { blockerKind: 'goal_blocked' as const }),
         };
       } else {
-        if (row.workspace_state !== null || row.blocker_kind !== null) {
+        if (row.workspace_state !== null || row.integration_state !== null || row.blocker_kind !== null) {
           throw new GoalRuntimeEventStoreError('corrupt', 'Ordinary Goal event contains observation-only state');
         }
         event = { ...common, type: row.event_type };
       }
     } else if (isExecutionScopedRuntimeEventType(row.event_type)) {
-      if (row.workspace_state !== null) {
-        throw new GoalRuntimeEventStoreError('corrupt', 'Execution-scoped runtime event contains workspace state');
+      if (row.workspace_state !== null || row.integration_state !== null) {
+        throw new GoalRuntimeEventStoreError('corrupt', 'Execution-scoped runtime event contains goal-scoped observation state');
       }
       if (row.execution_id === null || row.execution_generation === null) {
         throw new GoalRuntimeEventStoreError('corrupt', 'Execution-scoped runtime event is missing execution identity');
@@ -512,7 +524,7 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
     if (!requiredStrings.every((key) => typeof value[key] === 'string')) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event required fields are invalid');
     }
-    const nullableStrings = ['execution_id', 'detail', 'phase', 'task_id', 'checkpoint_id', 'blocker_kind', 'workspace_state'];
+    const nullableStrings = ['execution_id', 'detail', 'phase', 'task_id', 'checkpoint_id', 'blocker_kind', 'workspace_state', 'integration_state'];
     if (!nullableStrings.every((key) => value[key] === null || typeof value[key] === 'string')) {
       throw new GoalRuntimeEventStoreError('corrupt', 'Goal runtime event optional fields are invalid');
     }
@@ -541,6 +553,9 @@ function validateEvent(event: GoalRuntimeEvent): void {
   if (isGoalScopedRuntimeEvent(event)) {
     if (event.type === 'workspace_observed' && !isGoalWorkspaceState(event.workspaceState)) {
       throw new GoalRuntimeEventStoreError('invalid_event', 'workspaceState is invalid');
+    }
+    if (event.type === 'integration_observed' && !isObservedIntegrationState(event.integrationState)) {
+      throw new GoalRuntimeEventStoreError('invalid_event', 'integrationState is invalid');
     }
     if (event.type === 'goal_blocker_observed'
       && event.blockerKind !== undefined
@@ -575,6 +590,11 @@ function sameEvent(left: GoalRuntimeEvent, right: GoalRuntimeEvent): boolean {
         && right.type === 'workspace_observed'
         && left.workspaceState === right.workspaceState;
     }
+    if (left.type === 'integration_observed' || right.type === 'integration_observed') {
+      return left.type === 'integration_observed'
+        && right.type === 'integration_observed'
+        && left.integrationState === right.integrationState;
+    }
     if (left.type === 'goal_blocker_observed' || right.type === 'goal_blocker_observed') {
       return left.type === 'goal_blocker_observed'
         && right.type === 'goal_blocker_observed'
@@ -589,6 +609,10 @@ function sameEvent(left: GoalRuntimeEvent, right: GoalRuntimeEvent): boolean {
     && left.taskId === right.taskId
     && left.checkpointId === right.checkpointId
     && left.blockerKind === right.blockerKind;
+}
+
+function isObservedIntegrationState(value: unknown): value is 'pending' | 'integrated' | 'conflict' | 'unknown' {
+  return isGoalIntegrationState(value) && value !== 'not_started' && value !== 'integrating';
 }
 
 function boundedLimit(value: number): number {

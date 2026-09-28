@@ -311,6 +311,77 @@ describe('projectGoalRuntimeEvent', () => {
     expect(clean.projection.blocker).toBeUndefined();
   });
 
+  it('projects caller-verified integration observations independently of execution identity', () => {
+    const pending = projectGoalRuntimeEvent(base({ integrationState: 'unknown' }), {
+      eventId: 'integration-observed-pending',
+      type: 'integration_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      integrationState: 'pending',
+      occurredAt: '2026-09-21T13:00:06.000Z',
+      detail: 'Goal Workspace integration metadata is pending',
+    } as GoalRuntimeEvent);
+    expect(pending.projection.integrationState).toBe('pending');
+
+    const conflict = projectGoalRuntimeEvent(pending.projection, {
+      eventId: 'integration-observed-conflict',
+      type: 'integration_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      integrationState: 'conflict',
+      occurredAt: '2026-09-21T13:00:07.000Z',
+      detail: 'Caller-verified integration conflict',
+    } as GoalRuntimeEvent);
+    expect(conflict.projection).toMatchObject({
+      integrationState: 'conflict',
+      blocker: { kind: 'integration_conflict' },
+    });
+
+    const integrated = projectGoalRuntimeEvent(conflict.projection, {
+      eventId: 'integration-observed-integrated',
+      type: 'integration_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      integrationState: 'integrated',
+      occurredAt: '2026-09-21T13:00:08.000Z',
+    } as GoalRuntimeEvent);
+    expect(integrated.projection.integrationState).toBe('integrated');
+    expect(integrated.projection.blocker).toBeUndefined();
+
+    const reopened = projectGoalRuntimeEvent(integrated.projection, {
+      eventId: 'integration-observed-reopened',
+      type: 'integration_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      integrationState: 'pending',
+      occurredAt: '2026-09-21T13:00:09.000Z',
+      detail: 'Caller verified that integration must run again',
+    });
+    expect(reopened.decision).toEqual({ disposition: 'apply' });
+    expect(reopened.projection.integrationState).toBe('pending');
+  });
+
+  it('restores a higher-priority workspace blocker when integration conflict clears', () => {
+    const dirtyConflict = base({
+      workspaceState: 'dirty',
+      integrationState: 'conflict',
+      blocker: { kind: 'integration_conflict', observedAt: '2026-09-21T13:00:07.000Z' },
+    });
+    const integrated = projectGoalRuntimeEvent(dirtyConflict, {
+      eventId: 'integration-observed-integrated-dirty',
+      type: 'integration_observed',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      integrationState: 'integrated',
+      occurredAt: '2026-09-21T13:00:08.000Z',
+    } as GoalRuntimeEvent);
+    expect(integrated.projection).toMatchObject({
+      integrationState: 'integrated',
+      workspaceState: 'dirty',
+      blocker: { kind: 'dirty_workspace' },
+    });
+  });
+
   it('completes one execution without fabricating Goal lifecycle or integration completion', () => {
     const running = base({
       runtimeState: 'running',

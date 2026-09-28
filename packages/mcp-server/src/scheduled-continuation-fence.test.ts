@@ -10,6 +10,31 @@ function activeFence(): ReturnType<typeof ok> {
   return ok({ goalId: 'goal-1', leaseGeneration: 2 });
 }
 
+const memoryMutationCases = [
+  {
+    name: 'rag_remember',
+    input: { workspaceId: 'workspace-1', content: 'remember this' },
+    providerTool: 'remember',
+    expectedArgs: { workspace_id: 'workspace-1', content: 'remember this' },
+  },
+  {
+    name: 'workspace_memory_record',
+    input: { workspaceId: 'workspace-1', name: 'decision', observations: ['keep the parent fence'] },
+    providerTool: 'record_event',
+    expectedArgs: {
+      workspace_id: 'workspace-1',
+      event_type: 'explicit_remember',
+      content: '[explicit_remember] decision\n- keep the parent fence',
+    },
+  },
+  {
+    name: 'rag_forget',
+    input: { workspaceId: 'workspace-1', memoryId: 'memory-1', userConfirmed: true },
+    providerTool: 'forget',
+    expectedArgs: { workspace_id: 'workspace-1', memory_id: 'memory-1' },
+  },
+] as const;
+
 describe('scheduled continuation mutation fence', () => {
   it('blocks file mutation without the current goalLease proof before the file handler executes', async (): Promise<void> => {
     const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
@@ -137,6 +162,109 @@ describe('scheduled continuation mutation fence', () => {
     expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
     expect(begin).toHaveBeenCalledTimes(1);
     expect(call).not.toHaveBeenCalled();
+  });
+
+  it.each(memoryMutationCases)('blocks $name without the current goalLease proof before provider dispatch', async ({ name, input }) => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const call = vi.fn().mockResolvedValue(ok({ status: 'ok' }));
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence },
+      thaiRag: { call },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+    });
+
+    const response = await registry.invoke(name, input);
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
+    expect(inspectWorkspaceFence).toHaveBeenCalledWith(actor, 'workspace-1');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it.each(memoryMutationCases)('rejects a stale lease for $name before provider dispatch', async ({ name, input }) => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(err(appError('CONFLICT', 'stale goalLease', true)));
+    const call = vi.fn().mockResolvedValue(ok({ status: 'ok' }));
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat: vi.fn(), end: vi.fn() },
+      thaiRag: { call },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+    });
+
+    const response = await registry.invoke(name, {
+      ...input,
+      goalLease: { goalId: 'goal-1', leaseToken: 'stale-token', leaseGeneration: 1 },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it.each(memoryMutationCases)('admits $name with the current lease and strips the proof before provider dispatch', async ({ name, input, providerTool, expectedArgs }) => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    const end = vi.fn().mockResolvedValue(undefined);
+    const call = vi.fn().mockImplementation(async (tool: string, args: Readonly<Record<string, unknown>>) => {
+      expect(tool).toBe(providerTool);
+      expect(args).toEqual(expectedArgs);
+      expect(args).not.toHaveProperty('goalLease');
+      expect(JSON.stringify(args)).not.toContain('current-token');
+      expect(JSON.stringify(args)).not.toContain('987654321');
+      expect(JSON.stringify(args)).not.toContain('leaseGeneration');
+      expect(JSON.stringify(args)).not.toContain('admissionGeneration');
+      return ok({ status: 'ok' });
+    });
+    const hostApproval = vi.fn().mockResolvedValue(true);
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat, end },
+      thaiRag: { call },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      hostMutationApprovalProvider: hostApproval,
+    });
+    const goalLease = { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2, admissionGeneration: 987654321 };
+
+    const response = await registry.invoke(name, { ...input, goalLease });
+
+    expect(response.isError).not.toBe(true);
+    expect(begin).toHaveBeenCalledWith(actor, 'workspace-1', expect.any(String), goalLease);
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(hostApproval).toHaveBeenCalledTimes(name === 'rag_forget' ? 1 : 0);
+  });
+
+  it.each(memoryMutationCases)('keeps unscheduled $name compatible without a goalLease', async ({ name, input, providerTool, expectedArgs }) => {
+    const call = vi.fn().mockImplementation(async (tool: string, args: Readonly<Record<string, unknown>>) => {
+      expect(tool).toBe(providerTool);
+      expect(args).toEqual(expectedArgs);
+      return ok({ status: 'ok' });
+    });
+    const services = {
+      thaiRag: { call },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+    });
+
+    const response = await registry.invoke(name, input);
+
+    expect(response.isError).not.toBe(true);
+    expect(call).toHaveBeenCalledTimes(1);
   });
 
   it('blocks Git mutation without the current goalLease proof before the Git handler executes', async (): Promise<void> => {
@@ -700,6 +828,29 @@ describe('scheduled continuation mutation fence', () => {
     expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
     expect(inspectWorkspaceFence).toHaveBeenCalledWith(actor, 'workspace-1');
     expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it('does not let Full Bypass skip rolling-goal ownership for rag_forget', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const call = vi.fn().mockResolvedValue(ok({ status: 'ok' }));
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence },
+      thaiRag: { call },
+    } as unknown as McpApplicationServices;
+
+    const response = await new ToolRegistry(services, actor, {
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+    }).invoke('rag_forget', {
+      workspaceId: 'workspace-1',
+      memoryId: 'memory-1',
+      userConfirmed: true,
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({ error: { code: 'CONFLICT' } });
+    expect(inspectWorkspaceFence).toHaveBeenCalledWith(actor, 'workspace-1');
+    expect(call).not.toHaveBeenCalled();
   });
 
   it('preserves ordinary Full Bypass mutation when no rolling goal fence exists', async (): Promise<void> => {

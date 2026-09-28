@@ -18,7 +18,7 @@ import {
   type Result,
 } from '@unified-mpc/domain';
 import { classifyWorkspaceAdmission } from '@unified-mpc/domain';
-import type { GoalWorkspaceAdmissionObservation, GoalWorkspaceTruthObservation, GoalWorkspaceTruthReader } from './goal-workspace-truth-reader.js';
+import type { GoalWorkspaceAdmissionObservation, GoalWorkspaceIntegrationObservation, GoalWorkspaceTruthObservation, GoalWorkspaceTruthReader } from './goal-workspace-truth-reader.js';
 
 const DEFAULT_BOOTSTRAP_LIMIT = 500;
 const EVENT_REPLAY_PAGE_SIZE = 500;
@@ -47,7 +47,7 @@ export interface GoalRuntimeBootstrapResult {
 }
 
 export interface GoalRuntimeControlPlaneOptions {
-  readonly workspaceTruth?: Pick<GoalWorkspaceTruthReader, 'read'>;
+  readonly workspaceTruth?: Pick<GoalWorkspaceTruthReader, 'read'> & Partial<Pick<GoalWorkspaceTruthReader, 'readIntegration'>>;
   readonly workspaceAdmission?: Pick<GoalWorkspaceTruthReader, 'readAdmission'>;
   readonly workspaceAdmissionReceipts?: {
     getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null>;
@@ -78,7 +78,7 @@ export class GoalRuntimeControlPlaneError extends Error {
  */
 export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher {
   private readonly goalChains = new Map<string, Promise<void>>();
-  private readonly workspaceTruth: Pick<GoalWorkspaceTruthReader, 'read'> | undefined;
+  private readonly workspaceTruth: (Pick<GoalWorkspaceTruthReader, 'read'> & Partial<Pick<GoalWorkspaceTruthReader, 'readIntegration'>>) | undefined;
   private readonly workspaceAdmission: Pick<GoalWorkspaceTruthReader, 'readAdmission'> | undefined;
   private readonly workspaceAdmissionReceipts: GoalRuntimeControlPlaneOptions['workspaceAdmissionReceipts'];
   private readonly runtimeAdmissionIdentity: GoalRuntimeAdmissionIdentity | undefined;
@@ -103,6 +103,7 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
       snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
       snapshot = await this.refreshWorkspaceTruthUnlocked(snapshot);
+      snapshot = await this.refreshIntegrationTruthUnlocked(snapshot);
       return this.reconcileDurableBlockerTruthUnlocked(snapshot);
     });
   }
@@ -184,6 +185,7 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       snapshot = await this.catchUpSnapshotUnlocked(snapshot);
       snapshot = await this.reconcileDurableTerminalStateUnlocked(snapshot);
       snapshot = await this.refreshWorkspaceTruthUnlocked(snapshot);
+      snapshot = await this.refreshIntegrationTruthUnlocked(snapshot);
       return this.reconcileDurableBlockerTruthUnlocked(snapshot);
     });
   }
@@ -638,6 +640,49 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     }
   }
 
+  private async readIntegrationTruthBestEffort(
+    goalId: string,
+  ): Promise<GoalWorkspaceIntegrationObservation | null> {
+    if (this.workspaceTruth?.readIntegration === undefined) return null;
+    try {
+      return await this.workspaceTruth.readIntegration(goalId);
+    } catch {
+      return { state: 'unknown', detail: 'Goal Workspace integration metadata could not be read' };
+    }
+  }
+
+  private async refreshIntegrationTruthUnlocked(
+    snapshot: GoalRuntimeSnapshotRecord,
+    suppliedObservation?: GoalWorkspaceIntegrationObservation | null,
+  ): Promise<GoalRuntimeSnapshotRecord> {
+    const observation = suppliedObservation === undefined
+      ? await this.readIntegrationTruthBestEffort(snapshot.projection.goalId)
+      : suppliedObservation;
+    if (observation === null || observation.state === snapshot.projection.integrationState) return snapshot;
+
+    const occurredAt = this.now().toISOString();
+    try {
+      return await this.appendAndReplayUnlocked(snapshot, {
+        eventId: integrationRuntimeEventId(
+          snapshot.projection.goalId,
+          observation.state,
+          snapshot.lastEventSequence,
+        ),
+        type: 'integration_observed',
+        workspaceId: snapshot.projection.workspaceId,
+        goalId: snapshot.projection.goalId,
+        integrationState: observation.state,
+        occurredAt,
+        ...(observation.detail === undefined ? {} : { detail: observation.detail }),
+      });
+    } catch {
+      // Integration truth is observational and parent-owned by the Goal
+      // Workspace service. Projection failure must not invent a replacement
+      // state or block runtime startup.
+      return snapshot;
+    }
+  }
+
   private async reconcileDurableBlockerTruthUnlocked(
     initial: GoalRuntimeSnapshotRecord,
   ): Promise<GoalRuntimeSnapshotRecord> {
@@ -1041,6 +1086,17 @@ function durableRuntimeEventId(goalId: string, type: GoalRuntimeEvent['type'], d
     .update([goalId, type, discriminator].join('\0'))
     .digest('hex');
   return `goal-runtime-reconcile-${digest}`;
+}
+
+function integrationRuntimeEventId(
+  goalId: string,
+  state: GoalWorkspaceIntegrationObservation['state'],
+  snapshotSequence: number,
+): string {
+  const digest = createHash('sha256')
+    .update([goalId, 'integration_observed', state, String(snapshotSequence)].join('\0'))
+    .digest('hex');
+  return `goal-runtime-integration-${digest}`;
 }
 
 function workspaceRuntimeEventId(

@@ -194,6 +194,39 @@ describe('SqliteGoalRuntimeEventRepository', () => {
     }
   });
 
+  it('round-trips structured integration observations without execution identity and fences event IDs by state', async () => {
+    const runtime = await fixture();
+    try {
+      const event = {
+        eventId: 'integration-observed-1',
+        type: 'integration_observed',
+        workspaceId: 'workspace-1',
+        goalId: 'goal-1',
+        integrationState: 'pending',
+        occurredAt: now,
+        detail: 'caller-verified Goal Workspace integration metadata',
+      } as GoalRuntimeEvent;
+      const appended = await runtime.events.appendGoalRuntimeEvent({ event, recordedAt: now });
+      expect(appended.record.event).toEqual(event);
+
+      const retry = await runtime.events.appendGoalRuntimeEvent({
+        event,
+        recordedAt: '2026-09-21T12:30:01.000Z',
+      });
+      expect(retry.appended).toBe(false);
+
+      await expect(runtime.events.appendGoalRuntimeEvent({
+        event: { ...event, integrationState: 'integrated' } as GoalRuntimeEvent,
+        recordedAt: now,
+      })).rejects.toMatchObject({ reason: 'event_id_conflict' });
+
+      const replay = await runtime.events.listGoalRuntimeEvents({ goalId: 'goal-1', limit: 10 });
+      expect(replay[0]?.event).toEqual(event);
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('round-trips durable Goal blocker observations without execution identity', async () => {
     const runtime = await fixture();
     try {

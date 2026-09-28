@@ -80,7 +80,7 @@ The runtime projection is exposed separately from the durable Goal summary so se
 - Event-driven refreshes are coalesced and projection catch-up retries are bounded. The UI keeps the last authoritative snapshot visible while projection coverage catches up; it does not fall back to full Projects polling or infer a newer state from the event type.
 - Projects renders Web context as **In Scope / Out of Scope** and **Default**, independently from runtime badges. **Set Default** and **Select Goal** change context only; several projects can display authoritative `running` snapshots simultaneously.
 
-`integrationState` remains `unknown` unless the parent runtime has authoritative integration evidence. Neither this API nor the WebUI may infer integration from Goal completion, worktree presence/cleanliness, PR state, selection/default state, or leases.
+`integrationState` remains `unknown` unless the parent runtime has authoritative integration evidence. The Goal Runtime control plane consumes caller-verified `integrationState` persisted by the active Goal Workspace owner and records changes as goal-scoped `integration_observed` events; it does not infer them from execution identity. Neither this API nor the WebUI may infer integration from Goal completion, worktree presence/cleanliness, PR state, selection/default state, or leases.
 
 ---
 

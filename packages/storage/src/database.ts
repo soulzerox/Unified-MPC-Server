@@ -29,6 +29,7 @@ import { GOAL_WORKSPACE_WRITER_LEASE_MIGRATION_SQL } from './migrations/goal-wor
 import { WORKSPACE_ADMISSION_MIGRATION_SQL } from './migrations/workspace-admission-migration.js';
 import { WORKSPACE_BASE_REF_MIGRATION_SQL } from './migrations/workspace-base-ref-migration.js';
 import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base-rebase-migration.js';
+import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-integration-observation-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -96,6 +97,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '026_workspace_admission', sql: WORKSPACE_ADMISSION_MIGRATION_SQL });
     this.applyMigration({ id: '027_workspace_base_ref', sql: WORKSPACE_BASE_REF_MIGRATION_SQL });
     this.applyMigration({ id: '028_workspace_base_rebase', sql: WORKSPACE_BASE_REBASE_MIGRATION_SQL });
+    this.applyMigration({ id: '029_goal_runtime_integration_observations', sql: GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

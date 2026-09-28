@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
-import type { Workspace } from '@unified-mpc/workspace';
+import type { Workspace, WorkspaceRepository } from '@unified-mpc/workspace';
 import {
   GoalWorkspaceTruthReader,
   type GoalWorkspaceGitStatusPort,
@@ -36,6 +36,51 @@ function fixture(options: {
 }
 
 describe('GoalWorkspaceTruthReader', () => {
+  it('reads caller-verified integration metadata from the single active Goal Workspace', async (): Promise<void> => {
+    const goalWorkspace: Workspace = {
+      ...workspace,
+      id: 'goal-workspace-1',
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      integrationState: 'integrated',
+    };
+    const repository: Pick<WorkspaceRepository, 'get' | 'listAll'> = {
+      get: vi.fn(async () => workspace),
+      listAll: vi.fn(async () => [
+        { ...goalWorkspace, archivedAt: '2026-09-21T00:00:00.000Z', integrationState: 'conflict' as const },
+        goalWorkspace,
+      ]),
+    };
+    const reader = new GoalWorkspaceTruthReader(
+      repository,
+      { status: vi.fn(async () => ok({ entries: [] })) },
+    );
+
+    await expect(reader.readIntegration('goal-1')).resolves.toEqual({
+      state: 'integrated',
+      detail: 'Goal Workspace integration metadata is integrated',
+    });
+  });
+
+  it('keeps integration truth unknown when active Goal Workspace ownership is ambiguous', async (): Promise<void> => {
+    const repository: Pick<WorkspaceRepository, 'get' | 'listAll'> = {
+      get: vi.fn(async () => workspace),
+      listAll: vi.fn(async () => [
+        { ...workspace, id: 'goal-workspace-a', lifecycleKind: 'goal' as const, goalId: 'goal-1', integrationState: 'pending' as const },
+        { ...workspace, id: 'goal-workspace-b', lifecycleKind: 'goal' as const, goalId: 'goal-1', integrationState: 'integrated' as const },
+      ]),
+    };
+    const reader = new GoalWorkspaceTruthReader(
+      repository,
+      { status: vi.fn(async () => ok({ entries: [] })) },
+    );
+
+    await expect(reader.readIntegration('goal-1')).resolves.toMatchObject({
+      state: 'unknown',
+      detail: expect.stringContaining('ambiguous'),
+    });
+  });
+
   it('reports clean only from a readable registered Git workspace with no status entries', async (): Promise<void> => {
     const { reader } = fixture();
     await expect(reader.read(workspace.id)).resolves.toEqual({

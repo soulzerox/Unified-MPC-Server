@@ -446,8 +446,19 @@ export class UpgradeRuntimeService {
         return ok({ ...planFor(readString(input, 'prompt') ?? readString(input, 'query') ?? ''), reason: 'deterministic rule plan; telemetry can refine cost estimates' });
       case 'recovery_status':
         return ok({ reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, staleContinuation: 'detected', indexRecovery: 'rebuildable', workerIsolation: true });
-      case 'tool_schema_list':
-        return ok({ schemas: this.listToolSchemas(), persistence: this.stateStore === undefined ? 'memory_only' : 'session_locked_state' });
+      case 'tool_schema_list': {
+        const schemas = this.listToolSchemas();
+        const catalogFingerprint = digest(schemas.map((schema) => ({
+          id: schema.id,
+          version: schema.version,
+          schemaFingerprint: schema.schemaFingerprint,
+        })));
+        return ok({
+          schemas,
+          catalogFingerprint,
+          persistence: this.stateStore === undefined ? 'memory_only' : 'session_locked_state',
+        });
+      }
       case 'tool_schema_register':
         return this.registerToolSchema(input);
       case 'mcp_discover':
@@ -1078,19 +1089,54 @@ export class UpgradeRuntimeService {
   }
 
   private listToolSchemas(): readonly Record<string, unknown>[] {
-    const baseline = UPGRADE_TOOL_CATALOG.map((entry) => ({
-      id: entry.name, version: '1.0.0', permissions: [entry.permission], streamable: entry.streamable === true,
-      parallelSafe: entry.parallelSafe === true,
-      source: 'built_in',
-      schema: upgradeToolInputJsonSchema(entry),
-      inputSchema: upgradeToolInputJsonSchema(entry),
-      outputSchema: upgradeToolOutputJsonSchema(),
-      annotations: upgradeToolAnnotations(entry),
-      execution: upgradeToolExecution(entry),
-    }));
+    const discovered = this.discoveryTools?.();
+    const baseline = discovered === undefined
+      ? UPGRADE_TOOL_CATALOG.map((entry) => ({
+          id: entry.name,
+          version: '1.0.0',
+          permissions: [entry.permission],
+          streamable: entry.streamable === true,
+          parallelSafe: entry.parallelSafe === true,
+          source: 'upgrade-catalog-fallback',
+          schema: upgradeToolInputJsonSchema(entry),
+          inputSchema: upgradeToolInputJsonSchema(entry),
+          outputSchema: upgradeToolOutputJsonSchema(),
+          annotations: upgradeToolAnnotations(entry),
+          execution: upgradeToolExecution(entry),
+        }))
+      : discovered
+          .filter((tool) => this.isToolExposed(tool.name))
+          .map((tool) => {
+            const inputSchema = zodToolInputJsonSchema(tool);
+            const outputSchema = zodSchemaToJsonSchema(tool.outputSchema);
+            return {
+              id: tool.name,
+              version: '1.0.0',
+              permissions: [tool.permission],
+              streamable: tool.execution.taskSupport !== 'forbidden',
+              parallelSafe: tool.permission === 'READ' && tool.annotations.readOnlyHint && !tool.annotations.destructiveHint,
+              source: 'canonical-tool-registry',
+              ...(inputSchema === undefined ? {} : { schema: inputSchema, inputSchema }),
+              ...(outputSchema === undefined ? {} : { outputSchema }),
+              annotations: tool.annotations,
+              execution: tool.execution,
+            };
+          });
     const stored = this.session.get('toolSchemas');
     const custom = Array.isArray(stored) ? stored.filter(isRegisteredToolSchema) : [];
-    return [...baseline, ...custom].sort((left, right) => String(left.id).localeCompare(String(right.id)) || String(left.version).localeCompare(String(right.version)));
+    const fingerprinted: Record<string, unknown>[] = [...baseline, ...custom].map((entry) => ({
+      ...entry,
+      schemaFingerprint: digest({
+        id: entry.id,
+        version: entry.version,
+        permissions: entry.permissions,
+        inputSchema: entry.inputSchema ?? entry.schema,
+        outputSchema: entry.outputSchema,
+        annotations: entry.annotations,
+        execution: entry.execution,
+      }),
+    }));
+    return fingerprinted.sort((left, right) => String(left.id).localeCompare(String(right.id)) || String(left.version).localeCompare(String(right.version)));
   }
 
   private async registerToolSchema(input: Record<string, unknown>): Promise<Result<unknown>> {

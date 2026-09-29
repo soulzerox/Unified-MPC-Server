@@ -219,6 +219,64 @@ describe('upgrade runtime', () => {
     }
   });
 
+  it('exports the effective canonical host schema catalog with drift fingerprints and standalone fallback', async () => {
+    const registry = new ToolRegistry({}, actor);
+    const listed = await registry.invoke('tool_schema_list', {});
+
+    expect(listed.isError).not.toBe(true);
+    const listedValue = listed.structuredContent as {
+      schemas: Array<Record<string, unknown>>;
+      catalogFingerprint: string;
+    };
+    const expectedNames = registry.listExposedDefinitions().map((tool) => tool.name).sort();
+    const canonicalSchemas = listedValue.schemas.filter((schema) => schema.source === 'canonical-tool-registry');
+    expect(canonicalSchemas.map((schema) => String(schema.id)).sort()).toEqual(expectedNames);
+    expect(listedValue.catalogFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(canonicalSchemas.every((schema) => /^[a-f0-9]{64}$/.test(String(schema.schemaFingerprint)))).toBe(true);
+
+    const byId = new Map(canonicalSchemas.map((schema) => [String(schema.id), schema]));
+    for (const name of ['workspace_bootstrap', 'prepare_code_change'] as const) {
+      const described = await registry.invoke('tool_describe', { name });
+      expect(described.isError, name).not.toBe(true);
+      const describedValue = described.structuredContent as {
+        inputSchema: unknown;
+        outputSchema: unknown;
+        annotations: unknown;
+        execution: unknown;
+      };
+      expect(byId.get(name), name).toMatchObject({
+        id: name,
+        version: '1.0.0',
+        permissions: ['READ'],
+        source: 'canonical-tool-registry',
+        inputSchema: describedValue.inputSchema,
+        outputSchema: describedValue.outputSchema,
+        annotations: describedValue.annotations,
+        execution: describedValue.execution,
+        schemaFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    }
+    expect(byId.get('workspace_bootstrap')?.inputSchema).toMatchObject({
+      type: 'object',
+      required: ['workspaceId'],
+      additionalProperties: false,
+    });
+    expect(byId.get('prepare_code_change')?.inputSchema).toMatchObject({
+      type: 'object',
+      required: ['workspaceId', 'filePath'],
+      additionalProperties: false,
+    });
+
+    const standalone = new UpgradeRuntimeService({}, actor);
+    const fallback = await standalone.execute('tool_schema_list', {});
+    expect(fallback).toMatchObject({ ok: true, value: { catalogFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+    if (fallback.ok) {
+      const schemas = (fallback.value as { schemas: Array<Record<string, unknown>> }).schemas;
+      expect(schemas).toHaveLength(UPGRADE_TOOL_CATALOG.length);
+      expect(schemas.every((schema) => schema.source === 'upgrade-catalog-fallback')).toBe(true);
+    }
+  });
+
   it('excludes user-disabled tools from dynamic discovery, ranking, describe, and category counts', async () => {
     const baseline = new UpgradeRuntimeService({}, actor);
     const beforeCategories = await baseline.execute('tool_categories', {});

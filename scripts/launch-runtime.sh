@@ -24,6 +24,45 @@ case "$service" in
     ;;
 esac
 
+configure_runtime_temp() {
+  local runtime_tmp_base=""
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    runtime_tmp_base="$XDG_RUNTIME_DIR"
+  elif [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    runtime_tmp_base="$XDG_CACHE_HOME"
+  elif [[ -n "${HOME:-}" ]]; then
+    runtime_tmp_base="$HOME/.cache"
+  else
+    fail "$unrecoverable_status" "RUNTIME_TMP_UNAVAILABLE: no XDG_RUNTIME_DIR, XDG_CACHE_HOME, or HOME is available"
+  fi
+
+  local runtime_tmp="$runtime_tmp_base/unified-mpc/runtime-tmp/$service"
+  local compile_cache="$runtime_tmp/node-compile-cache"
+  if [[ -L "$runtime_tmp" || -L "$compile_cache" ]]; then
+    fail "$unrecoverable_status" "RUNTIME_TMP_UNAVAILABLE: runtime temp path must not be a symlink: '$runtime_tmp'"
+  fi
+  if ! mkdir -p -- "$runtime_tmp" "$compile_cache"; then
+    fail "$unrecoverable_status" "RUNTIME_TMP_UNAVAILABLE: failed to create runtime temp path: '$runtime_tmp'"
+  fi
+  if ! chmod 700 -- "$runtime_tmp" "$compile_cache"; then
+    fail "$unrecoverable_status" "RUNTIME_TMP_UNAVAILABLE: failed to secure runtime temp path: '$runtime_tmp'"
+  fi
+
+  local probe=""
+  if ! probe="$(mktemp -d -- "$runtime_tmp/.probe.XXXXXX")"; then
+    fail "$unrecoverable_status" "RUNTIME_TMP_UNAVAILABLE: runtime temp path is not writable: '$runtime_tmp'"
+  fi
+  if ! rmdir -- "$probe"; then
+    fail "$unrecoverable_status" "RUNTIME_TMP_UNAVAILABLE: runtime temp probe cleanup failed: '$probe'"
+  fi
+
+  export TMPDIR="$runtime_tmp"
+  export NODE_COMPILE_CACHE="$compile_cache"
+  printf 'RUNTIME_TMP_OK: service=%s tmpdir=%s compile_cache=%s\n' "$service" "$TMPDIR" "$NODE_COMPILE_CACHE" >&2
+}
+
+configure_runtime_temp
+
 if [[ ! -f "$validator" ]]; then
   fail "$unrecoverable_status" "RUNTIME_RECOVERY_UNAVAILABLE: runtime validator is unavailable: '$validator'"
 fi

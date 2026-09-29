@@ -9,15 +9,18 @@ trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 export HOME="$TMP_ROOT/home"
 export XDG_DATA_HOME="$TMP_ROOT/data"
+export XDG_RUNTIME_DIR="$TMP_ROOT/run"
+export TMPDIR="$TMP_ROOT/stale-private-tmp"
+export NODE_COMPILE_CACHE="$TMP_ROOT/stale-node-compile-cache"
 export UNIFIED_MPC_RUNTIME_DIR="$XDG_DATA_HOME/unified-mpc/runtime"
 export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$VALIDATOR"
-mkdir -p "$HOME" "$UNIFIED_MPC_RUNTIME_DIR/releases"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$UNIFIED_MPC_RUNTIME_DIR/releases"
 
 NODE_LOG="$TMP_ROOT/node.log"
 FAKE_NODE="$TMP_ROOT/fake-node"
 cat >"$FAKE_NODE" <<'SH'
 #!/usr/bin/env bash
-printf '%s|%s\n' "$UNIFIED_MPC_ROOT" "$*" >>"$UNIFIED_MPC_TEST_NODE_LOG"
+printf '%s|%s|%s|%s\n' "$UNIFIED_MPC_ROOT" "$TMPDIR" "$NODE_COMPILE_CACHE" "$*" >>"$UNIFIED_MPC_TEST_NODE_LOG"
 SH
 chmod +x "$FAKE_NODE"
 export UNIFIED_MPC_NODE="$FAKE_NODE"
@@ -46,12 +49,39 @@ assert_last_root() {
   }
 }
 
+assert_last_temp_env() {
+  local service="$1"
+  local expected_tmp="$XDG_RUNTIME_DIR/unified-mpc/runtime-tmp/$service"
+  local expected_cache="$expected_tmp/node-compile-cache"
+  local line actual_root actual_tmp actual_cache actual_args
+  line="$(tail -n 1 "$NODE_LOG")"
+  IFS='|' read -r actual_root actual_tmp actual_cache actual_args <<<"$line"
+  [[ "$actual_tmp" == "$expected_tmp" ]] || {
+    printf 'expected TMPDIR %s, got %s\n' "$expected_tmp" "$actual_tmp" >&2
+    exit 1
+  }
+  [[ "$actual_cache" == "$expected_cache" ]] || {
+    printf 'expected NODE_COMPILE_CACHE %s, got %s\n' "$expected_cache" "$actual_cache" >&2
+    exit 1
+  }
+  [[ "$(stat -c '%a' "$expected_tmp")" == "700" ]] || {
+    printf 'expected private runtime temp mode 700: %s\n' "$expected_tmp" >&2
+    exit 1
+  }
+  [[ -d "$expected_cache" ]] || {
+    printf 'expected node compile cache directory: %s\n' "$expected_cache" >&2
+    exit 1
+  }
+}
+
 configured="$TMP_ROOT/canonical"
 make_runtime "$configured"
 reset_log
 output="$(bash "$LAUNCHER" mcp-http "$configured" 2>&1)"
 grep -Fq 'RUNTIME_ROOT_OK:' <<<"$output"
+grep -Fq 'RUNTIME_TMP_OK:' <<<"$output"
 assert_last_root "$(readlink -f -- "$configured")"
+assert_last_temp_env mcp-http
 
 release_current="$UNIFIED_MPC_RUNTIME_DIR/releases/current-release"
 make_runtime "$release_current"
@@ -81,6 +111,7 @@ reset_log
 output="$(bash "$LAUNCHER" web "$TMP_ROOT/missing-runtime" 2>&1)"
 grep -Fq 'source=last-known-good' <<<"$output"
 assert_last_root "$(readlink -f -- "$release_lkg")"
+assert_last_temp_env web
 grep -Fq ' web --port 3000' "$NODE_LOG"
 
 outside="$TMP_ROOT/outside-valid-runtime"
@@ -99,6 +130,25 @@ set -e
 grep -Fq 'RUNTIME_RECOVERY_UNAVAILABLE:' <<<"$output"
 [[ ! -s "$NODE_LOG" ]] || {
   printf 'node must not start without a safe deployment-owned fallback\n' >&2
+  exit 1
+}
+
+unsafe_tmp_target="$TMP_ROOT/unsafe-runtime-tmp-target"
+mkdir -p "$unsafe_tmp_target"
+rm -rf -- "$XDG_RUNTIME_DIR/unified-mpc/runtime-tmp/mcp-http"
+ln -s "$unsafe_tmp_target" "$XDG_RUNTIME_DIR/unified-mpc/runtime-tmp/mcp-http"
+reset_log
+set +e
+output="$(bash "$LAUNCHER" mcp-http "$configured" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 78 ]] || {
+  printf 'expected unsafe runtime temp status 78, got %s: %s\n' "$status" "$output" >&2
+  exit 1
+}
+grep -Fq 'RUNTIME_TMP_UNAVAILABLE:' <<<"$output"
+[[ ! -s "$NODE_LOG" ]] || {
+  printf 'node must not start with a symlinked runtime temp path\n' >&2
   exit 1
 }
 

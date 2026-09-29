@@ -64,7 +64,20 @@ describe('MCP server live tool availability', () => {
     try {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
+      expect(client.getServerCapabilities()?.tools?.listChanged).toBe(true);
+
       const listed = await client.listTools();
+      const schemaList = await client.callTool({ name: 'tool_schema_list', arguments: {} });
+      expect(schemaList.isError).not.toBe(true);
+      const schemaListValue = schemaList.structuredContent as {
+        schemas: Array<Record<string, unknown>>;
+        catalogFingerprint: string;
+      };
+      const canonicalSchemas = schemaListValue.schemas.filter((schema) => schema.source === 'canonical-tool-registry');
+      expect(canonicalSchemas.map((schema) => String(schema.id)).sort()).toEqual(listed.tools.map((tool) => tool.name).sort());
+      expect(schemaListValue.catalogFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(canonicalSchemas.every((schema) => /^[a-f0-9]{64}$/.test(String(schema.schemaFingerprint)))).toBe(true);
+
       for (const name of canonical.keys()) {
         const tool = listed.tools.find((candidate) => candidate.name === name);
         expect(tool, name).toBeDefined();

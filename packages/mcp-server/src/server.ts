@@ -139,8 +139,8 @@ export function createMcpServer(options: McpServerOptions): McpServer {
   const legacyTasksProtocol = options.legacyTasksProtocol === true;
   const server = new McpServer({ name: APP_NAME, version: APP_VERSION }, {
     capabilities: legacyTasksProtocol
-      ? { tools: {}, tasks: { list: {}, cancel: {} } }
-      : { tools: {}, extensions: { [MODERN_TASKS_EXTENSION_ID]: {} } },
+      ? { tools: { listChanged: true }, tasks: { list: {}, cancel: {} } }
+      : { tools: { listChanged: true }, extensions: { [MODERN_TASKS_EXTENSION_ID]: {} } },
     instructions: buildMcpInstructions(configuredPonytailMode),
     debouncedNotificationMethods: ['notifications/tools/list_changed'],
   });

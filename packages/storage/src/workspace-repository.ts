@@ -477,6 +477,56 @@ export class SqliteWorkspaceRepository {
     }
   }
 
+  public async synchronizeGoalWriterLease(
+    id: string,
+    goalId: string,
+    leaseId: string,
+    ownerId: string,
+    generation: number,
+    expiresAt: string,
+    now: string,
+  ): Promise<WorkspaceWriterLease | null> {
+    if (!Number.isSafeInteger(generation) || generation < 1 || expiresAt <= now) return null;
+    this.database.connection.exec('BEGIN IMMEDIATE;');
+    try {
+      const row = this.database.connection.prepare(
+        'SELECT goal_id, writer_lease_id, writer_lease_owner_id, writer_lease_generation FROM workspaces WHERE id = ? AND archived_at IS NULL',
+      ).get(id) as {
+        goal_id: string | null;
+        writer_lease_id: string | null;
+        writer_lease_owner_id: string | null;
+        writer_lease_generation: number | null;
+      } | undefined;
+      if (row === undefined || row.goal_id !== goalId) {
+        this.database.connection.exec('ROLLBACK;');
+        return null;
+      }
+      const currentGeneration = row.writer_lease_generation ?? 0;
+      if (currentGeneration > generation
+        || (currentGeneration === generation
+          && row.writer_lease_id !== null
+          && (row.writer_lease_id !== leaseId || row.writer_lease_owner_id !== ownerId))) {
+        this.database.connection.exec('ROLLBACK;');
+        return null;
+      }
+      const result = this.database.connection.prepare(
+        `UPDATE workspaces
+         SET writer_lease_id = ?, writer_lease_owner_id = ?, writer_lease_generation = ?, writer_lease_expires_at = ?
+         WHERE id = ? AND archived_at IS NULL AND goal_id = ?
+           AND (writer_lease_generation IS NULL OR writer_lease_generation <= ?)`,
+      ).run(leaseId, ownerId, generation, expiresAt, id, goalId, generation);
+      if (Number(result.changes) !== 1) {
+        this.database.connection.exec('ROLLBACK;');
+        return null;
+      }
+      this.database.connection.exec('COMMIT;');
+      return { leaseId, ownerId, generation, expiresAt };
+    } catch (error) {
+      this.database.connection.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
   public async renewGoalWriterLease(id: string, leaseId: string, generation: number, now: string, expiresAt: string): Promise<boolean> {
     const result = this.database.connection.prepare(
       'UPDATE workspaces SET writer_lease_expires_at = ? WHERE id = ? AND archived_at IS NULL AND writer_lease_id = ? AND writer_lease_generation = ? AND writer_lease_expires_at > ?',

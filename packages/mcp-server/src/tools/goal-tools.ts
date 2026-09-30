@@ -116,8 +116,18 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input) => {
         const goals = context.services.goals;
         if (goals === undefined) return missingService();
+        let runWorkspaceId = input.workspaceId;
+        const goalRunWorkspace = context.services.goalRunWorkspace;
+        if (goalRunWorkspace !== undefined) {
+          const resolved = await goalRunWorkspace.resolveRunWorkspace(context.actor, {
+            workspaceId: input.workspaceId,
+            goalKey: input.goalKey,
+          });
+          if (!resolved.ok) return resolved;
+          runWorkspaceId = resolved.value.workspaceId;
+        }
         const result = await goals.runGoal(context.actor, {
-          workspaceId: input.workspaceId,
+          workspaceId: runWorkspaceId,
           goalKey: input.goalKey,
           leaseSeconds: input.leaseSeconds,
           ...(input.objective === undefined ? {} : { objective: input.objective }),
@@ -125,6 +135,20 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.ponytailMode === undefined ? {} : { ponytailMode: input.ponytailMode }),
         });
         if (!result.ok) return result;
+        let admissionGeneration: number | undefined;
+        if (result.value.acquired && goalRunWorkspace !== undefined) {
+          if (result.value.leaseExpiresAt === undefined) {
+            return err(appError('CONFLICT', 'Acquired durable goal omitted lease expiry required for Goal Workspace admission', true));
+          }
+          const admitted = await goalRunWorkspace.admitRunWorkspace(context.actor, {
+            workspaceId: runWorkspaceId,
+            goalId: result.value.goalId,
+            leaseGeneration: result.value.leaseGeneration,
+            leaseExpiresAt: result.value.leaseExpiresAt,
+          });
+          if (!admitted.ok) return admitted;
+          admissionGeneration = admitted.value.admissionGeneration;
+        }
         const active = result.value.status === 'active';
         const scheduledContinuation = input.scheduledContinuation ?? 'auto';
         const auto = scheduledContinuation === 'auto';
@@ -148,6 +172,8 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
                   : 'not_confirmed';
         return ok({
           ...result.value,
+          workspaceId: runWorkspaceId,
+          ...(admissionGeneration === undefined ? {} : { admissionGeneration }),
           ...(!result.value.acquired && result.value.retryAfterSeconds !== undefined && result.value.retryAfterSeconds <= 60
             ? {
                 leaseGuidance: `Previous worker appears inactive. The bounded stale-recovery grace expires in ${result.value.retryAfterSeconds}s. Wait ${result.value.retryAfterSeconds}s and call run_goal again to take over the lease; do not yield or treat as occupied.`,

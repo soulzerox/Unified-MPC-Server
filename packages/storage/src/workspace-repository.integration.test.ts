@@ -130,6 +130,57 @@ describe('SqliteWorkspaceRepository', () => {
     }
   });
 
+  it('synchronizes Goal Workspace writer ownership to the durable goal lease generation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-writer-sync-db-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    try {
+      const repository = new SqliteWorkspaceRepository(database);
+      const workspace: Workspace = {
+        id: 'goal-workspace-sync-1',
+        displayName: 'Goal sync',
+        rootPath: root,
+        realRootPath: root,
+        createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal',
+        goalId: 'goal-sync-1',
+        parentWorkspaceId: 'project-1',
+        goalWorkspaceKind: 'git_worktree',
+        parentSource: 'committed_head',
+        baseRevision: 'a'.repeat(40),
+        branchName: 'goal/goal-sync-1',
+        integrationState: 'pending',
+      };
+      await repository.insert(workspace);
+
+      await expect(repository.synchronizeGoalWriterLease(
+        workspace.id, workspace.goalId!, 'lease-1', 'client-a:session-a', 1,
+        '2026-09-22T19:10:00.000Z', '2026-09-22T19:00:00.000Z',
+      )).resolves.toEqual({
+        leaseId: 'lease-1', ownerId: 'client-a:session-a', generation: 1, expiresAt: '2026-09-22T19:10:00.000Z',
+      });
+
+      await expect(repository.synchronizeGoalWriterLease(
+        workspace.id, workspace.goalId!, 'lease-2', 'client-b:session-b', 2,
+        '2026-09-22T19:20:00.000Z', '2026-09-22T19:01:00.000Z',
+      )).resolves.toMatchObject({ leaseId: 'lease-2', ownerId: 'client-b:session-b', generation: 2 });
+
+      await expect(repository.synchronizeGoalWriterLease(
+        workspace.id, workspace.goalId!, 'lease-stale', 'client-a:session-a', 1,
+        '2026-09-22T19:30:00.000Z', '2026-09-22T19:02:00.000Z',
+      )).resolves.toBeNull();
+      await expect(repository.synchronizeGoalWriterLease(
+        workspace.id, 'another-goal', 'lease-3', 'client-c:session-c', 3,
+        '2026-09-22T19:30:00.000Z', '2026-09-22T19:02:00.000Z',
+      )).resolves.toBeNull();
+      await expect(repository.get(workspace.id)).resolves.toMatchObject({
+        writerLease: { leaseId: 'lease-2', ownerId: 'client-b:session-b', generation: 2 },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('persists admission receipts and compare-and-swaps only with the expected admission and writer lease generations', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-admission-db-'));
     temporaryRoots.push(root);

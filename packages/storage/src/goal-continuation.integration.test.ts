@@ -104,6 +104,51 @@ describe('durable goal continuation persistence', () => {
     }
   });
 
+  it('binds a new durable goal to the pre-created Goal Workspace goal id', async () => {
+    const { filename, root } = await fixture();
+    const goalWorkspace: Workspace = {
+      id: 'goal-workspace-1',
+      displayName: 'Goal workspace',
+      rootPath: root,
+      realRootPath: root,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      lifecycleKind: 'goal',
+      goalId: 'goal-owner-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      parentSource: 'committed_head',
+      baseRevision: '622d02d6fa2d18c032dbd5bc876777dc58658573',
+      branchName: 'goal/goal-owner-1',
+      integrationState: 'pending',
+    };
+    const now = new Date('2026-08-26T00:00:00.000Z');
+    const runtime = await open(filename, goalWorkspace, () => now);
+    try {
+      const created = await runtime.service.runGoal(actor('session-a'), {
+        workspaceId: goalWorkspace.id,
+        goalKey: 'goal-workspace-binding',
+        objective: 'Bind durable goal ownership to its isolated Goal Workspace.',
+        plan: { steps: [{ id: 'implement', title: 'Implement safely' }] },
+        leaseSeconds: 60,
+      });
+
+      expect(created).toMatchObject({
+        ok: true,
+        value: {
+          acquired: true,
+          goalId: goalWorkspace.goalId,
+        },
+      });
+      await expect(runtime.repository.getById(goalWorkspace.goalId!)).resolves.toMatchObject({
+        id: goalWorkspace.goalId,
+        workspaceId: goalWorkspace.id,
+        goalKey: 'goal-workspace-binding',
+      });
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('creates once, is idempotent by workspace + goalKey, and resumes after a runtime/database restart', async () => {
     const { filename, workspace } = await fixture();
     let now = new Date('2026-08-26T00:00:00.000Z');

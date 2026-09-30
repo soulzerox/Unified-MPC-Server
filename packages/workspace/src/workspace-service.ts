@@ -19,6 +19,15 @@ export interface WorkspaceRepository {
   acquireGoalWriterLease?(id: WorkspaceId, leaseId: string, ownerId: string, now: string, expiresAt: string): Promise<WorkspaceWriterLease | null>;
   renewGoalWriterLease?(id: WorkspaceId, leaseId: string, generation: number, now: string, expiresAt: string): Promise<boolean>;
   releaseGoalWriterLease?(id: WorkspaceId, leaseId: string, generation: number): Promise<boolean>;
+  synchronizeGoalWriterLease?(
+    id: WorkspaceId,
+    goalId: string,
+    leaseId: string,
+    ownerId: string,
+    generation: number,
+    expiresAt: string,
+    now: string,
+  ): Promise<WorkspaceWriterLease | null>;
   getAdmissionReceipt?(workspaceId: WorkspaceId): Promise<WorkspaceAdmissionReceipt | null>;
   compareAndSwapAdmissionReceipt?(
     workspaceId: WorkspaceId,

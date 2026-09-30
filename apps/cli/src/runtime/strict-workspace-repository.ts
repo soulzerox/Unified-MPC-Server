@@ -1,4 +1,5 @@
 import { realpath, stat } from 'node:fs/promises';
+import path from 'node:path';
 import { isHostPathWithin, isPosixMountRoot, resolveHostPath, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
 
 export class StrictWorkspaceRepository implements WorkspaceRepository {
@@ -125,9 +126,14 @@ export class StrictWorkspaceRepository implements WorkspaceRepository {
   private isAllowed(workspace: Workspace): boolean {
     const realRoot = normalize(workspace.realRootPath, this.platform);
     const root = normalize(workspace.rootPath, this.platform);
-    return [...this.allowed].some((allowedRoot) =>
-      (realRoot !== null && isHostPathWithin(allowedRoot, realRoot, this.platform))
-      || (root !== null && isHostPathWithin(allowedRoot, root, this.platform)));
+    if ((realRoot !== null && this.allowed.has(realRoot)) || (root !== null && this.allowed.has(root))) return true;
+    if (workspace.lifecycleKind !== 'goal' || workspace.goalId === undefined) return false;
+    const pathApi = this.platform === 'win32' ? path.win32 : path.posix;
+    const managedDirectory = workspace.goalWorkspaceKind === 'snapshot' ? 'snapshots' : 'worktrees';
+    return [...this.allowed].some((allowedRoot) => {
+      const managedRoot = normalize(pathApi.join(allowedRoot, '.unified-mpc', managedDirectory, workspace.goalId!), this.platform);
+      return managedRoot !== null && (realRoot === managedRoot || root === managedRoot);
+    });
   }
 }
 

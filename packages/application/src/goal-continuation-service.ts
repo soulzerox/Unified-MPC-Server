@@ -279,7 +279,8 @@ export class GoalContinuationService {
   public async runGoal(actor: FileActor, request: RunGoalRequest): Promise<Result<RunGoalResult>> {
     try {
       const workspaceId = requiredBounded(request.workspaceId, 'workspaceId', 128);
-      if (await this.workspaces.get(workspaceId) === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
+      const workspace = await this.workspaces.get(workspaceId);
+      if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace was not found'));
       const goalKey = normalizeGoalKey(request.goalKey);
       const existing = await this.goals.getByKey(workspaceId, goalKey);
       const ownerClientId = stableOwnerClientId(actor);
@@ -327,8 +328,12 @@ export class GoalContinuationService {
       }
 
       const leaseToken = createLeaseToken();
+      const goalId = existing?.id ?? workspace.goalId ?? randomUUID();
+      if (workspace.goalId !== undefined && existing !== null && existing.id !== workspace.goalId) {
+        return err(appError('CONFLICT', 'Goal Workspace durable goal identity does not match the existing goal', true));
+      }
       const acquired = await this.goals.acquire({
-        goalId: randomUUID(),
+        goalId,
         workspaceId,
         goalKey,
         ownerClientId,

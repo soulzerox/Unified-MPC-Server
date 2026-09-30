@@ -4,7 +4,7 @@ import {
   MAX_GOAL_LEASE_SECONDS,
   MIN_GOAL_LEASE_SECONDS,
 } from '@unified-mpc/application';
-import { ok } from '@unified-mpc/domain';
+import { appError, err, ok } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 
 const goalKey = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);

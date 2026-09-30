@@ -66,6 +66,79 @@ describe('durable goal MCP tools', () => {
     expect(byName.get('get_goal')?.parse({ goalId: 'goal-1', workspaceId: 'workspace-1', goalKey: 'key' })).toMatchObject({ ok: false });
   });
 
+  it('routes a project run_goal through a Goal Workspace and returns its admission generation', async () => {
+    const orchestration: string[] = [];
+    let runRequest: unknown;
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        goalRunWorkspace: {
+          async resolveRunWorkspace(_actor: unknown, request: { workspaceId: string; goalKey: string }) {
+            orchestration.push(`resolve:${request.workspaceId}:${request.goalKey}`);
+            return ok({ workspaceId: 'goal-workspace-1' });
+          },
+          async admitRunWorkspace(_actor: unknown, request: {
+            workspaceId: string;
+            goalId: string;
+            leaseGeneration: number;
+            leaseExpiresAt: string;
+          }) {
+            orchestration.push(`admit:${request.workspaceId}:${request.goalId}:${request.leaseGeneration}`);
+            return ok({ admissionGeneration: 4 });
+          },
+        },
+        goals: {
+          async runGoal(_actor: unknown, request: unknown) {
+            runRequest = request;
+            return ok({
+              goalId: 'goal-1',
+              goalKey: 'stable-key',
+              status: 'active',
+              revision: 0,
+              acquired: true,
+              leaseToken: 'lease-secret',
+              leaseGeneration: 4,
+              leaseActivitySeq: 0,
+              leaseExpiresAt: '2026-08-26T00:10:00.000Z',
+              currentPhase: 'created',
+              plan: { steps: [] },
+              completedSteps: [],
+              pendingSteps: [],
+              nextAction: 'Start work.',
+              blockers: [],
+              activeTaskIds: [],
+              trackedTasks: [],
+              ponytailMode: 'inherit',
+              lastCheckpoint: null,
+            });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+
+    const result = await tool(context, 'run_goal').execute({
+      workspaceId: 'project-1',
+      goalKey: 'stable-key',
+      scheduledContinuation: 'off',
+    }, new AbortController().signal);
+
+    expect(runRequest).toMatchObject({ workspaceId: 'goal-workspace-1', goalKey: 'stable-key' });
+    expect(orchestration).toEqual([
+      'resolve:project-1:stable-key',
+      'admit:goal-workspace-1:goal-1:4',
+    ]);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        acquired: true,
+        goalId: 'goal-1',
+        workspaceId: 'goal-workspace-1',
+        admissionGeneration: 4,
+      },
+    });
+  });
+
   it('run_goal returns immediately and never invokes process/capability execution', async () => {
     let runs = 0;
     let runRequest: unknown;

@@ -144,6 +144,7 @@ describe('NativeThaiRagProviderDriver', () => {
   it('does not display a failed provider result as completed in the normal background monitor', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
+    let terminalFailureAllowed = false;
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
@@ -159,11 +160,16 @@ describe('NativeThaiRagProviderDriver', () => {
           });
           if (tool === 'index_status') return success('index_status', {
             status: 'ok',
-            data: {
-              status: 'done', job_id: 'idx_failure', workspace_id: workspaceId,
-              indexed_files: 1, skipped_files: 0, total_files: 2,
-              result: { status: 'failed', errors: { 'broken.ts': 'Chroma compaction failed' } },
-            },
+            data: terminalFailureAllowed
+              ? {
+                status: 'done', job_id: 'idx_failure', workspace_id: workspaceId,
+                indexed_files: 1, skipped_files: 0, total_files: 2,
+                result: { status: 'failed', errors: { 'broken.ts': 'Chroma compaction failed' } },
+              }
+              : {
+                status: 'running', job_id: 'idx_failure', workspace_id: workspaceId,
+                indexed_files: 0, skipped_files: 0, total_files: 2,
+              },
           });
           return success(tool);
         },
@@ -178,8 +184,11 @@ describe('NativeThaiRagProviderDriver', () => {
         workspace_path: workspaceRoot, workspace_id: workspaceId, background: true,
       });
       if (!created.ok || !isRecord(created.value) || typeof created.value.job_id !== 'string') {
-        throw new Error('Could not create background index job');
+        throw new Error('Could not create background index job: ' + JSON.stringify(created));
       }
+      // Startup admission can begin its own provider job. Release the mock
+      // terminal failure only after the explicit local job is durably known.
+      terminalFailureAllowed = true;
       let final: Awaited<ReturnType<typeof driver.call>> | undefined;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));

@@ -445,7 +445,23 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
       if (remoteStatus === 'done') {
-        await this.jobs.complete(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
+        const result = nestedValue(status.value, 'result') ?? status.value;
+        const resultStatus = nestedString(result, 'status');
+        const errors = nestedValue(result, 'errors');
+        const failedFiles = isRecord(errors) ? Object.keys(errors) : Array.isArray(errors) ? errors : [];
+        if (resultStatus === 'cancelled') {
+          await this.jobs.cancel(jobId, result, ownerId);
+          return;
+        }
+        if (failedFiles.length > 0 || (resultStatus !== undefined
+          && !['complete', 'completed', 'ok', 'done', 'success'].includes(resultStatus))) {
+          const reason = nestedString(result, 'error') ?? nestedString(result, 'message')
+            ?? (failedFiles.length > 0 ? 'one or more indexed files failed'
+              : `provider result status: ${resultStatus}`);
+          await this.jobs.fail(jobId, `Native Thai-RAG background index failed: ${reason}`, ownerId);
+          return;
+        }
+        await this.jobs.complete(jobId, result, ownerId);
         return;
       }
       if (remoteStatus === 'cancelled') {

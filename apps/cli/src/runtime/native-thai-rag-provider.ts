@@ -438,10 +438,30 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         await this.jobs.fail(jobId, status.error.message, ownerId);
         return;
       }
+      const progress = nativeIndexProgress(status.value);
+      if (progress !== undefined) {
+        await this.jobs.recordProgress(jobId, progress, ownerId);
+      }
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
       if (remoteStatus === 'done') {
-        await this.jobs.complete(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
+        const result = nestedValue(status.value, 'result') ?? status.value;
+        const resultStatus = nestedString(result, 'status');
+        const errors = nestedValue(result, 'errors');
+        const failedFiles = isRecord(errors) ? Object.keys(errors) : Array.isArray(errors) ? errors : [];
+        if (resultStatus === 'cancelled') {
+          await this.jobs.cancel(jobId, result, ownerId);
+          return;
+        }
+        if (failedFiles.length > 0 || (resultStatus !== undefined
+          && !['complete', 'completed', 'ok', 'done', 'success'].includes(resultStatus))) {
+          const reason = nestedString(result, 'error') ?? nestedString(result, 'message')
+            ?? (failedFiles.length > 0 ? 'one or more indexed files failed'
+              : `provider result status: ${resultStatus}`);
+          await this.jobs.fail(jobId, `Native Thai-RAG background index failed: ${reason}`, ownerId);
+          return;
+        }
+        await this.jobs.complete(jobId, result, ownerId);
         return;
       }
       if (remoteStatus === 'cancelled') {
@@ -711,6 +731,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         continue;
       }
       consecutiveStatusTimeouts = 0;
+      const progress = nativeIndexProgress(status.value);
+      if (progress !== undefined) {
+        await this.jobs.recordProgress(jobId, progress, ownerId);
+      }
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
       if (remoteStatus === 'done') {
@@ -1124,6 +1148,17 @@ function nestedValue(value: unknown, key: string, depth = 0): unknown {
     if (nested !== undefined) return nested;
   }
   return Object.hasOwn(current, key) ? current[key] : undefined;
+}
+
+function nativeIndexProgress(value: unknown): { readonly indexedFiles: number; readonly skippedFiles: number; readonly totalFiles: number } | undefined {
+  const indexedFiles = nestedValue(value, 'indexed_files');
+  const skippedFiles = nestedValue(value, 'skipped_files');
+  const totalFiles = nestedValue(value, 'total_files');
+  const valid = (number: unknown): number is number =>
+    typeof number === 'number' && Number.isSafeInteger(number) && number >= 0 && number <= 100_000_000;
+  if (!valid(indexedFiles) || !valid(skippedFiles) || !valid(totalFiles)
+    || indexedFiles + skippedFiles > totalFiles) return undefined;
+  return { indexedFiles, skippedFiles, totalFiles };
 }
 
 function nestedString(value: unknown, key: string): string | undefined {

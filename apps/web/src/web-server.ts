@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -385,6 +385,26 @@ export class ControlPlaneServer {
         mcpIdentity,
         ...(mcpIdentityError === undefined ? {} : { mcpIdentityError }),
       }));
+      return;
+    }
+
+    if (pathname === '/api/rag-index-jobs' && req.method === 'GET') {
+      // The web server and MCP runtime share the canonical data root. Read only
+      // the existing owner-written job ledger; no provider call or reindexing.
+      let available = false;
+      let jobs: readonly WebRagIndexProgress[] = [];
+      try {
+        const ledger = path.join(this.dataDir, 'thai-rag', 'index-jobs.json');
+        const metadata = await stat(ledger);
+        if (metadata.isFile() && metadata.size <= 2 * 1024 * 1024) {
+          jobs = parseRagIndexJobs(JSON.parse(await readFile(ledger, 'utf8')));
+          available = true;
+        }
+      } catch {
+        // Missing/unavailable ledger must not make dashboard status unhealthy.
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ available, jobs }));
       return;
     }
 
@@ -1367,6 +1387,64 @@ export class ControlPlaneServer {
       return false;
     }
   }
+}
+
+export interface WebRagIndexProgress {
+  readonly jobId: string;
+  readonly workspaceId: string;
+  readonly status: string;
+  readonly indexedFiles?: number;
+  readonly skippedFiles?: number;
+  readonly totalFiles?: number;
+  readonly progressPercent?: number;
+  readonly stage: 'scanning' | 'indexing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
+  readonly startedAt: string;
+  readonly finishedAt?: string;
+}
+
+export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[] {
+  if (value === null || typeof value !== 'object' || !('jobs' in value) || !Array.isArray(value.jobs)) return [];
+  const jobs: WebRagIndexProgress[] = [];
+  for (const row of value.jobs.slice(-200)) {
+    if (row === null || typeof row !== 'object') continue;
+    const job = row as Record<string, unknown>;
+    if (typeof job.jobId !== 'string' || !/^idx_umcp_[a-z0-9]{8,32}$/i.test(job.jobId)
+      || typeof job.workspaceId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.workspaceId)
+      || typeof job.startedAt !== 'string' || !Number.isFinite(Date.parse(job.startedAt))
+      || !['running', 'cancelling', 'completed', 'cancelled', 'failed', 'interrupted'].includes(String(job.status))) continue;
+    const counter = (value: unknown): number | undefined =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 100_000_000 ? value : undefined;
+    const indexedFiles = counter(job.indexedFiles);
+    const skippedFiles = counter(job.skippedFiles);
+    const totalFiles = counter(job.totalFiles);
+    const completed = indexedFiles !== undefined && skippedFiles !== undefined ? indexedFiles + skippedFiles : undefined;
+    const countsValid = completed !== undefined && totalFiles !== undefined && completed <= totalFiles;
+    const status = String(job.status);
+    const stage: WebRagIndexProgress['stage'] =
+      status === 'completed' ? 'completed'
+        : status === 'cancelled' ? 'cancelled'
+          : status === 'failed' || status === 'interrupted' ? 'failed'
+            : !countsValid || totalFiles === 0 ? 'scanning'
+              : completed === totalFiles ? 'finalizing' : 'indexing';
+    jobs.push({
+      jobId: job.jobId,
+      workspaceId: job.workspaceId,
+      status,
+      ...(indexedFiles === undefined ? {} : { indexedFiles }),
+      ...(skippedFiles === undefined ? {} : { skippedFiles }),
+      ...(totalFiles === undefined ? {} : { totalFiles }),
+      ...(countsValid && totalFiles > 0 ? { progressPercent: Math.floor(100 * completed / totalFiles) } : {}),
+      stage,
+      startedAt: job.startedAt,
+      ...(typeof job.finishedAt === 'string' && Number.isFinite(Date.parse(job.finishedAt)) ? { finishedAt: job.finishedAt } : {}),
+    });
+  }
+  const active = jobs.filter((job) => job.status === 'running' || job.status === 'cancelling');
+  const history = jobs.filter((job) => job.status !== 'running' && job.status !== 'cancelling');
+  active.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  history.sort((a, b) => (b.finishedAt ?? b.startedAt).localeCompare(a.finishedAt ?? a.startedAt));
+  return [...active.slice(0, 8), ...history.slice(0, 3)];
 }
 
 function parseGoalRuntimeEventCursor(

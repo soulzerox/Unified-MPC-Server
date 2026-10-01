@@ -14,6 +14,10 @@ export interface ThaiRagIndexJob {
   readonly ownerId?: string;
   readonly ownerProcessIdentity?: string;
   readonly providerJobId?: string;
+  /** Last owner-verified provider progress, persisted across reads/restarts. */
+  readonly indexedFiles?: number;
+  readonly skippedFiles?: number;
+  readonly totalFiles?: number;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
   readonly startedAt: string;
@@ -118,6 +122,29 @@ export class ThaiRagIndexJobStore {
     if (current === undefined || current.ownerId !== ownerId) return null;
     if (!ACTIVE_JOB_STATUSES.has(current.status)) return current;
     const next: ThaiRagIndexJob = { ...current, providerJobId };
+    this.jobs.set(jobId, next);
+    await this.persist();
+    return next;
+  }
+
+  public async recordProgress(
+    jobId: string,
+    progress: { readonly indexedFiles: number; readonly skippedFiles: number; readonly totalFiles: number },
+    ownerId: string,
+  ): Promise<ThaiRagIndexJob | null> {
+    await this.initialize();
+    const current = this.jobs.get(jobId);
+    if (current === undefined || current.ownerId !== ownerId || !ACTIVE_JOB_STATUSES.has(current.status)) return null;
+    const counters = [progress.indexedFiles, progress.skippedFiles, progress.totalFiles];
+    if (counters.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 100_000_000)
+      || progress.indexedFiles + progress.skippedFiles > progress.totalFiles) return null;
+    // Poll responses can arrive out of order: never move an already published
+    // counter backwards and never let the numerator exceed the persisted total.
+    const indexedFiles = Math.max(current.indexedFiles ?? 0, progress.indexedFiles);
+    const skippedFiles = Math.max(current.skippedFiles ?? 0, progress.skippedFiles);
+    const totalFiles = Math.max(current.totalFiles ?? 0, progress.totalFiles, indexedFiles + skippedFiles);
+    if (indexedFiles === current.indexedFiles && skippedFiles === current.skippedFiles && totalFiles === current.totalFiles) return current;
+    const next: ThaiRagIndexJob = { ...current, indexedFiles, skippedFiles, totalFiles };
     this.jobs.set(jobId, next);
     await this.persist();
     return next;
@@ -259,6 +286,9 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       ...(ownerId === undefined ? {} : { ownerId }),
       ...(typeof value.ownerProcessIdentity === 'string' && value.ownerProcessIdentity.trim().length > 0 ? { ownerProcessIdentity: value.ownerProcessIdentity } : {}),
       ...(typeof value.providerJobId === 'string' && value.providerJobId.trim().length > 0 ? { providerJobId: value.providerJobId } : {}),
+      ...(validCounter(value.indexedFiles) ? { indexedFiles: value.indexedFiles } : {}),
+      ...(validCounter(value.skippedFiles) ? { skippedFiles: value.skippedFiles } : {}),
+      ...(validCounter(value.totalFiles) ? { totalFiles: value.totalFiles } : {}),
       status,
       force: typeof value.force === 'boolean' ? value.force : false,
       startedAt: typeof value.startedAt === 'string' ? value.startedAt : now().toISOString(),
@@ -268,6 +298,10 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       ...(typeof value.error === 'string' ? { error: value.error } : {}),
     },
   };
+}
+
+function validCounter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 100_000_000;
 }
 
 function parseUnifiedRuntimeOwnerPid(ownerId: string | undefined): number | null {

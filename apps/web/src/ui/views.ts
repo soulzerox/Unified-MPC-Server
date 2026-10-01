@@ -49,6 +49,16 @@ export function renderDashboardViewsHtml(): string {
           </div>
         </div>
 
+        <div class="card" id="rag-index-card">
+          <div class="card-header">
+            <h2>Thai-RAG Index Progress</h2>
+            <button class="btn btn-secondary btn-sm" id="rag-index-refresh-btn" type="button">Refresh</button>
+          </div>
+          <div id="rag-index-jobs" aria-live="polite" style="font-size: 12px; color: var(--text-secondary);">
+            Reading native index jobs...
+          </div>
+        </div>
+
         <div class="card" id="servers-card">
           <div class="card-header">
             <h2>Installed MCP Servers</h2>

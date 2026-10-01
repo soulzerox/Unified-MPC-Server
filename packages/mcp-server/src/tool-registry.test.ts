@@ -1645,9 +1645,9 @@ describe('MCP tool registry', () => {
   it('advances a fenced Git admission only for a real successful local Git mutation', async () => {
     const end = vi.fn(async () => undefined);
     const run = vi.fn(async (_actor: unknown, request: { args: readonly string[] }) => ok({
-      exitCode: request.args[0] === 'add' ? 0 : 1,
+      exitCode: request.args.includes('fails') ? 1 : 0,
       stdout: '',
-      stderr: request.args[0] === 'commit' ? 'commit failed' : '',
+      stderr: request.args.includes('fails') ? 'commit failed' : '',
     }));
     const registry = new ToolRegistry({
       git: { run } as unknown as McpApplicationServices['git'],
@@ -1666,6 +1666,11 @@ describe('MCP tool registry', () => {
     const proof = { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 7, admissionGeneration: 4 };
     await expect(registry.invoke('git', {
       workspaceId: 'workspace-1', args: ['add', '--', 'src/file.ts'], userConfirmed: true, goalLease: proof,
+    })).resolves.not.toMatchObject({ isError: true });
+    expect(end).toHaveBeenLastCalledWith(expect.any(String), true);
+
+    await expect(registry.invoke('git', {
+      workspaceId: 'workspace-1', args: ['commit', '-m', 'succeeds'], userConfirmed: true, goalLease: proof,
     })).resolves.not.toMatchObject({ isError: true });
     expect(end).toHaveBeenLastCalledWith(expect.any(String), true);
 

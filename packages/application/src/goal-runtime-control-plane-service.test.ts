@@ -465,6 +465,52 @@ describe('GoalRuntimeControlPlaneService', () => {
     expect(savedReceipt).toMatchObject({ runtimeGeneration: 'generation-8', admissionGeneration: 3 });
   });
 
+  it('refreshes admission when only the Goal Workspace writer lease generation rotates', async () => {
+    let savedReceipt: WorkspaceAdmissionReceipt | null = receipt;
+    const nextWriterGeneration = receipt.writeLeaseGeneration + 1;
+    const runtime = fixture({
+      workspaceAdmission: {
+        readAdmission: async () => ({
+          ...observedAdmission,
+          writerLeaseGeneration: nextWriterGeneration,
+          writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+        }),
+      },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_workspaceId, expectedGeneration, leaseGeneration, next) => {
+          if (savedReceipt?.admissionGeneration !== expectedGeneration || leaseGeneration !== nextWriterGeneration) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: receipt.runtimeDeploymentId,
+        runtimeGeneration: receipt.runtimeGeneration,
+        runtimeBuildVersion: receipt.runtimeBuildVersion,
+        runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: receipt.runtimeBuildDirty,
+        runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: receipt.runtimeStartedAt,
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: {
+        status: 'ADMITTED',
+        admissionGeneration: receipt.admissionGeneration + 1,
+        refreshedFromWriterLeaseGeneration: true,
+      },
+    });
+    expect(savedReceipt).toMatchObject({
+      writeLeaseGeneration: nextWriterGeneration,
+      admissionGeneration: receipt.admissionGeneration + 1,
+      expectedWorkspaceHead: receipt.expectedWorkspaceHead,
+      dirtyFingerprint: receipt.dirtyFingerprint,
+      runtimeGeneration: receipt.runtimeGeneration,
+    });
+  });
+
   it('fails closed when a missing admission receipt cannot be persisted with compare-and-swap', async () => {
     const runtime = fixture({
       workspaceAdmission: { readAdmission: async () => observedAdmission },

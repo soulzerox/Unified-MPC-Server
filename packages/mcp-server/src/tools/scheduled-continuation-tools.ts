@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ok } from '@unified-mpc/domain';
 import {
   MAX_SUCCESSOR_DELAY_MINUTES,
   MIN_SUCCESSOR_DELAY_MINUTES,
@@ -195,7 +196,48 @@ export function scheduledContinuationTools(context: McpToolContext): McpToolDefi
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: claimSchema,
-      handler: async (input) => context.services.scheduledContinuations?.claimScheduledContinuation(context.actor, input) ?? missingService(),
+      handler: async (input) => {
+        const service = context.services.scheduledContinuations;
+        if (service === undefined) return missingService();
+        const claimed = await service.claimScheduledContinuation(context.actor, input);
+        if (!claimed.ok) return claimed;
+        if (claimed.value.outcome !== 'acquired' && claimed.value.outcome !== 'recurring_acquired') return claimed;
+        const workspace = context.services.goalRunWorkspace;
+        if (workspace === undefined) return claimed;
+        const goal = claimed.value.goal;
+        if (goal.leaseExpiresAt === undefined) {
+          return ok({
+            ...claimed.value,
+            outcome: 'admission_required' as const,
+            acquisitionOutcome: claimed.value.outcome,
+            admissionRequired: true,
+            currentWakeMayReturn: false,
+            nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const,
+          });
+        }
+        const admitted = await workspace.admitRunWorkspace(context.actor, {
+          workspaceId: goal.workspaceId,
+          goalId: goal.goalId,
+          leaseGeneration: claimed.value.leaseGeneration,
+          leaseExpiresAt: goal.leaseExpiresAt,
+        });
+        if (!admitted.ok) {
+          return ok({
+            ...claimed.value,
+            outcome: 'admission_required' as const,
+            acquisitionOutcome: claimed.value.outcome,
+            admissionRequired: true,
+            admissionError: { code: admitted.error.code, message: admitted.error.message },
+            currentWakeMayReturn: false,
+            nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const,
+          });
+        }
+        return ok({
+          ...claimed.value,
+          workspaceId: goal.workspaceId,
+          admissionGeneration: admitted.value.admissionGeneration,
+        });
+      },
     }),
     defineTool({
       name: 'get_scheduled_continuation',

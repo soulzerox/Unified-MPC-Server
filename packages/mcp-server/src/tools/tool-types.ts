@@ -68,6 +68,26 @@ export interface WorkspaceAdmissionProjectionPort {
   readWorkspaceAdmissionProjection(workspaceId: string): Promise<WorkspaceAdmissionProjection | undefined>;
 }
 
+export interface GoalRunWorkspacePort {
+  resolveRunWorkspace(actor: FileActor, request: {
+    readonly workspaceId: string;
+    readonly goalKey: string;
+  }): Promise<Result<{ readonly workspaceId: string }>>;
+  admitRunWorkspace(actor: FileActor, request: {
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseGeneration: number;
+    readonly leaseExpiresAt: string;
+  }): Promise<Result<{ readonly admissionGeneration: number }>>;
+  /** Retry a failed post-acquisition admission without rotating the durable lease. */
+  recoverRunWorkspace(actor: FileActor, request: {
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseToken: string;
+    readonly leaseGeneration: number;
+  }): Promise<Result<{ readonly admissionGeneration: number }>>;
+}
+
 export interface McpRuntimeTiming {
   readonly mcpPollWaitSeconds: number;
 }
@@ -135,6 +155,7 @@ export interface McpApplicationServices {
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;
   readonly workspaceInfo?: WorkspaceInfoPort;
   readonly workspaceAdmissionProjection?: WorkspaceAdmissionProjectionPort;
+  readonly goalRunWorkspace?: GoalRunWorkspacePort;
   readonly workspaceSelection?: WorkspaceSelectionPort;
   readonly preferredGoal?: PreferredGoalPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;

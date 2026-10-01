@@ -164,6 +164,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   session_handoff: service({ workspaceId }, 'file.readFile'),
   verify_incremental: service({ workspaceId, userConfirmed: true }, 'git.observeWorkspace'),
   run_goal: service({ workspaceId, goalKey: 'smoke-goal', objective: 'Smoke durable goal contract' }, 'goals.runGoal'),
+  retry_goal_workspace_admission: service({ workspaceId, goalId: 'goal-1', leaseToken: 'lease-token', leaseGeneration: 1 }, 'goalRunWorkspace.recoverRunWorkspace'),
   get_goal: service({ goalId: 'goal-1' }, 'goals.getGoal'),
   checkpoint_goal: service({
     goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',

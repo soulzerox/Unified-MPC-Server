@@ -1,5 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
-import { isHostPathWithin, isPosixMountRoot, resolveHostPath, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
+import path from 'node:path';
+import { isHostPathWithin, isPosixMountRoot, resolveHostPath, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
 
 export class StrictWorkspaceRepository implements WorkspaceRepository {
   private readonly allowed = new Set<string>();
@@ -82,10 +83,57 @@ export class StrictWorkspaceRepository implements WorkspaceRepository {
     return workspace !== null && this.isAllowed(workspace) ? workspace : null;
   }
 
+  public async acquireGoalWriterLease(
+    id: string,
+    leaseId: string,
+    ownerId: string,
+    now: string,
+    expiresAt: string,
+  ): Promise<WorkspaceWriterLease | null> {
+    if (await this.get(id) === null || this.inner.acquireGoalWriterLease === undefined) return null;
+    return this.inner.acquireGoalWriterLease(id, leaseId, ownerId, now, expiresAt);
+  }
+
+  public async renewGoalWriterLease(
+    id: string,
+    leaseId: string,
+    generation: number,
+    now: string,
+    expiresAt: string,
+  ): Promise<boolean> {
+    if (await this.get(id) === null || this.inner.renewGoalWriterLease === undefined) return false;
+    return this.inner.renewGoalWriterLease(id, leaseId, generation, now, expiresAt);
+  }
+
+  public async releaseGoalWriterLease(id: string, leaseId: string, generation: number): Promise<boolean> {
+    if (await this.get(id) === null || this.inner.releaseGoalWriterLease === undefined) return false;
+    return this.inner.releaseGoalWriterLease(id, leaseId, generation);
+  }
+
+  public async synchronizeGoalWriterLease(
+    id: string,
+    goalId: string,
+    leaseId: string,
+    ownerId: string,
+    generation: number,
+    expiresAt: string,
+    now: string,
+  ): Promise<WorkspaceWriterLease | null> {
+    if (await this.get(id) === null || this.inner.synchronizeGoalWriterLease === undefined) return null;
+    return this.inner.synchronizeGoalWriterLease(id, goalId, leaseId, ownerId, generation, expiresAt, now);
+  }
+
   private isAllowed(workspace: Workspace): boolean {
     const realRoot = normalize(workspace.realRootPath, this.platform);
     const root = normalize(workspace.rootPath, this.platform);
-    return (realRoot !== null && this.allowed.has(realRoot)) || (root !== null && this.allowed.has(root));
+    if ((realRoot !== null && this.allowed.has(realRoot)) || (root !== null && this.allowed.has(root))) return true;
+    if (workspace.lifecycleKind !== 'goal' || workspace.goalId === undefined) return false;
+    const pathApi = this.platform === 'win32' ? path.win32 : path.posix;
+    const managedDirectory = workspace.goalWorkspaceKind === 'snapshot' ? 'snapshots' : 'worktrees';
+    return [...this.allowed].some((allowedRoot) => {
+      const managedRoot = normalize(pathApi.join(allowedRoot, '.unified-mpc', managedDirectory, workspace.goalId!), this.platform);
+      return managedRoot !== null && (realRoot === managedRoot || root === managedRoot);
+    });
   }
 }
 

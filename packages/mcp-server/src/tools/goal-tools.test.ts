@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { appError, err, ok } from '@unified-mpc/domain';
 import { ContextEconomyRuntime } from '../context-economy.js';
 import { ActivityTracker, type ActivitySinkEvent } from '../activity-tracker.js';
 import { ToolRegistry } from '../tool-registry.js';
@@ -18,8 +18,9 @@ describe('durable goal MCP tools', () => {
   it('publishes typed schemas and safe permission annotations', () => {
     const context = { actor, contextEconomy: new ContextEconomyRuntime(), services: {} } as McpToolContext;
     const byName = new Map(goalTools(context).map((entry) => [entry.name, entry]));
-    expect([...byName.keys()]).toEqual(['run_goal', 'get_goal', 'checkpoint_goal', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'list_goals']);
+    expect([...byName.keys()]).toEqual(['run_goal', 'retry_goal_workspace_admission', 'get_goal', 'checkpoint_goal', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'list_goals']);
     expect(byName.get('run_goal')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
+    expect(byName.get('retry_goal_workspace_admission')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
     expect(byName.get('get_goal')).toMatchObject({ permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false } });
     expect(byName.get('list_goals')).toMatchObject({ permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false } });
     expect(byName.get('checkpoint_goal')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
@@ -64,6 +65,161 @@ describe('durable goal MCP tools', () => {
     expect(byName.get('cancel_goal')?.parse({ goalId: 'goal-1', leaseToken: 'old-token', expectedRevision: 1, summary: 'stop', evidence: [] })).toMatchObject({ ok: false });
     expect(byName.get('get_goal')?.parse({})).toMatchObject({ ok: false });
     expect(byName.get('get_goal')?.parse({ goalId: 'goal-1', workspaceId: 'workspace-1', goalKey: 'key' })).toMatchObject({ ok: false });
+  });
+
+  it('routes a project run_goal through a Goal Workspace and returns its admission generation', async () => {
+    const orchestration: string[] = [];
+    let runRequest: unknown;
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        goalRunWorkspace: {
+          async resolveRunWorkspace(_actor: unknown, request: { workspaceId: string; goalKey: string }) {
+            orchestration.push(`resolve:${request.workspaceId}:${request.goalKey}`);
+            return ok({ workspaceId: 'goal-workspace-1' });
+          },
+          async admitRunWorkspace(_actor: unknown, request: {
+            workspaceId: string;
+            goalId: string;
+            leaseGeneration: number;
+            leaseExpiresAt: string;
+          }) {
+            orchestration.push(`admit:${request.workspaceId}:${request.goalId}:${request.leaseGeneration}`);
+            return ok({ admissionGeneration: 4 });
+          },
+        },
+        goals: {
+          async runGoal(_actor: unknown, request: unknown) {
+            runRequest = request;
+            return ok({
+              goalId: 'goal-1',
+              goalKey: 'stable-key',
+              status: 'active',
+              revision: 0,
+              acquired: true,
+              leaseToken: 'lease-secret',
+              leaseGeneration: 4,
+              leaseActivitySeq: 0,
+              leaseExpiresAt: '2026-08-26T00:10:00.000Z',
+              currentPhase: 'created',
+              plan: { steps: [] },
+              completedSteps: [],
+              pendingSteps: [],
+              nextAction: 'Start work.',
+              blockers: [],
+              activeTaskIds: [],
+              trackedTasks: [],
+              ponytailMode: 'inherit',
+              lastCheckpoint: null,
+            });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+
+    const result = await tool(context, 'run_goal').execute({
+      workspaceId: 'project-1',
+      goalKey: 'stable-key',
+      scheduledContinuation: 'off',
+    }, new AbortController().signal);
+
+    expect(runRequest).toMatchObject({ workspaceId: 'goal-workspace-1', goalKey: 'stable-key' });
+    expect(orchestration).toEqual([
+      'resolve:project-1:stable-key',
+      'admit:goal-workspace-1:goal-1:4',
+    ]);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        acquired: true,
+        goalId: 'goal-1',
+        workspaceId: 'goal-workspace-1',
+        admissionGeneration: 4,
+      },
+    });
+  });
+
+  it('preserves a newly acquired goal lease when writer admission fails after acquisition', async () => {
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        goalRunWorkspace: {
+          async resolveRunWorkspace() { return ok({ workspaceId: 'goal-workspace-1' }); },
+          async admitRunWorkspace() { return err(appError('CONFLICT', 'writer admission temporarily unavailable', true)); },
+        },
+        goals: {
+          async runGoal() {
+            return ok({
+              goalId: 'goal-1', goalKey: 'stable-key', status: 'active', revision: 0,
+              acquired: true, leaseToken: 'must-not-be-lost', leaseGeneration: 8,
+              leaseExpiresAt: '2026-10-01T12:00:00.000Z', currentPhase: 'created',
+              plan: { steps: [] }, completedSteps: [], pendingSteps: [], nextAction: 'Retry admission.',
+              blockers: [], activeTaskIds: [], trackedTasks: [], lastCheckpoint: null,
+            });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+    const result = await tool(context, 'run_goal').execute({
+      workspaceId: 'parent-project', goalKey: 'stable-key', scheduledContinuation: 'off',
+    }, new AbortController().signal);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        outcome: 'admission_required',
+        acquired: true,
+        leaseToken: 'must-not-be-lost',
+        leaseGeneration: 8,
+        workspaceId: 'goal-workspace-1',
+        admissionRequired: true,
+        nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease',
+      },
+    });
+  });
+
+  it('recovers a pending admission using the exact existing lease without creating a new goal', async () => {
+    let received: unknown;
+    const services = {
+      goalRunWorkspace: {
+        async recoverRunWorkspace(_actor: unknown, request: unknown): Promise<unknown> {
+          received = request;
+          return ok({ admissionGeneration: 11 });
+        },
+      },
+    };
+    const registry = new ToolRegistry(services as unknown as McpToolContext['services'], actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ readonly workspaceId: string; readonly rootPath: string }> => ({ workspaceId: 'parent-project', rootPath: 'E:\\parent' }),
+    });
+    const response = await registry.invoke('retry_goal_workspace_admission', {
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 8,
+    });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      outcome: 'admitted', admissionRequired: false, admissionGeneration: 11,
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseGeneration: 8,
+    });
+    expect(received).toEqual({
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1',
+      leaseToken: 'current-token', leaseGeneration: 8,
+    });
+  });
+
+  it('rejects stale retry proofs without echoing the supplied token', async () => {
+    const services = {
+      goalRunWorkspace: {
+        async recoverRunWorkspace(): Promise<unknown> { return err(appError('PERMISSION_DENIED', 'Invalid lease proof')); },
+      },
+    };
+    const result = await tool({
+      actor, contextEconomy: new ContextEconomyRuntime(), services,
+    } as unknown as McpToolContext, 'retry_goal_workspace_admission').execute({
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1',
+      leaseToken: 'invalid-token', leaseGeneration: 8,
+    }, new AbortController().signal);
+    expect(result).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(JSON.stringify(result)).not.toContain('invalid-token');
   });
 
   it('run_goal returns immediately and never invokes process/capability execution', async () => {

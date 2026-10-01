@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -53,6 +54,54 @@ afterEach(async () => {
 });
 
 describe('stdio MCP runtime', () => {
+  it('pins an existing unmerged feature branch HEAD when resolving a new Goal Workspace', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-pr-head-data-'));
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-pr-head-source-'));
+    temporaryRoots.push(dataPath, rootPath);
+    const git = (...args: string[]): string => execFileSync('git', args, { cwd: rootPath, encoding: 'utf8' }).trim();
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.name', 'Unified Test');
+    git('config', 'user.email', 'test@example.invalid');
+    await writeFile(path.join(rootPath, 'README.md'), 'base\n');
+    git('add', 'README.md');
+    git('commit', '-qm', 'base');
+    git('checkout', '-qb', 'feature/unmerged-pr');
+    await writeFile(path.join(rootPath, 'feature-only.txt'), 'must survive\n');
+    git('add', 'feature-only.txt');
+    git('commit', '-qm', 'feature-only');
+    const pinnedHead = git('rev-parse', 'HEAD');
+    const project = { id: 'pr-head-project', displayName: 'PR source', rootPath, realRootPath: rootPath, createdAt: '2026-10-01T00:00:00.000Z' };
+    const db = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    await new SqliteWorkspaceRepository(db).insert(project);
+    const runtime = createStdioMcpRuntime(dataPath, project);
+    try {
+      const result = await runtime.services.goalRunWorkspace?.resolveRunWorkspace(runtime.actor, {
+        workspaceId: project.id, goalKey: 'feature-head-preservation',
+      });
+      expect(result?.ok).toBe(true);
+      if (result === undefined || !result.ok) return;
+      const registered = await new SqliteWorkspaceRepository(db).get(result.value.workspaceId);
+      expect(registered?.baseRevision).toBe(pinnedHead);
+      expect(await readFile(path.join(registered!.realRootPath, 'feature-only.txt'), 'utf8')).toBe('must survive\n');
+      const acquired = await runtime.services.goals?.runGoal(runtime.actor, {
+        workspaceId: registered!.id, goalKey: 'feature-head-preservation',
+        objective: 'Verify admission recovery refuses a false lease proof.',
+        plan: { steps: [] }, leaseSeconds: 600,
+      });
+      expect(acquired).toMatchObject({ ok: true, value: { acquired: true, leaseGeneration: 1 } });
+      if (acquired === undefined || !acquired.ok) return;
+      const invalid = await runtime.services.goalRunWorkspace?.recoverRunWorkspace(runtime.actor, {
+        workspaceId: registered!.id, goalId: acquired.value.goalId,
+        leaseToken: 'not-the-current-lease', leaseGeneration: acquired.value.leaseGeneration,
+      });
+      expect(invalid).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    } finally {
+      await runtime.close();
+      db.close();
+    }
+  });
+
+
   it('keeps runtime admission provenance attached to the parent-owned runtime', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-admission-identity-'));
     temporaryRoots.push(dataPath);

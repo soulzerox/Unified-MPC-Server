@@ -1,5 +1,5 @@
 import { copyFile, lstat, mkdir, readdir, rm, stat } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { appError, decideGuardedBaseRebase, err, ok, type GoalWorkspaceState, type Result, type WorkspaceAdmissionReceipt, type WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import { GitAdapter, type GitCommandResult, type GitGuardedRebaseRequest, type GitGuardedRebaseResult, type GitStatusResult, type GitWorkspaceSnapshotOptions } from '@unified-mpc/git';
@@ -159,6 +159,40 @@ export class GoalWorkspaceService {
     );
     if (lease === null) return err(appError('CONFLICT', 'Goal Workspace is already owned by another writer', true));
     return ok({ goalId, workspaceId: workspace.id, ...lease });
+  }
+
+  public async synchronizeWriterLease(
+    goalId: string,
+    ownerId: string,
+    generation: number,
+    expiresAt: string,
+  ): Promise<Result<GoalWorkspaceWriterLease>> {
+    if (!isGoalId(goalId) || ownerId.trim().length === 0
+      || !Number.isSafeInteger(generation) || generation < 1
+      || !Number.isFinite(Date.parse(expiresAt))) {
+      return err(appError('INVALID_INPUT', 'Goal writer lease synchronization request is invalid'));
+    }
+    const workspace = await this.findActiveGoal(goalId);
+    if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Goal Workspace was not found'));
+    if (this.repository.synchronizeGoalWriterLease === undefined) {
+      return err(appError('CONFLICT', 'Goal Workspace writer lease synchronization requires durable repository support', true));
+    }
+    const now = this.now().toISOString();
+    if (expiresAt <= now) return err(appError('CONFLICT', 'Durable goal lease already expired before writer synchronization', true));
+    const owner = ownerId.trim();
+    const leaseId = createHash('sha256').update([goalId, owner, String(generation)].join('\0')).digest('hex');
+    const lease = await this.repository.synchronizeGoalWriterLease(
+      workspace.id,
+      goalId,
+      leaseId,
+      owner,
+      generation,
+      expiresAt,
+      now,
+    );
+    return lease === null
+      ? err(appError('CONFLICT', 'Goal Workspace writer lease could not synchronize with the durable goal lease', true))
+      : ok({ goalId, workspaceId: workspace.id, ...lease });
   }
 
   public async renewWriterLease(goalId: string, leaseId: string, generation: number): Promise<Result<GoalWorkspaceWriterLease>> {

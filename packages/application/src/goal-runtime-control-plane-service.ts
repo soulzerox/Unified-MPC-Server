@@ -43,6 +43,7 @@ export interface GoalRuntimeBootstrapResult {
   readonly admission?: WorkspaceAdmissionDecision & {
     readonly admissionGeneration?: number;
     readonly refreshedFromRuntimeGeneration?: boolean;
+    readonly refreshedFromWriterLeaseGeneration?: boolean;
   };
 }
 
@@ -428,7 +429,7 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     const currentRuntimeGeneration = currentRuntime === undefined
       ? ''
       : runtimeAdmissionGeneration(currentRuntime);
-    const decision = classifyWorkspaceAdmission({
+    const expectedAdmissionObservation = {
       repositoryIdentity: receipt.repositoryIdentity ?? '',
       worktreeIdentity: receipt.worktreeIdentity,
       workspaceHead: receipt.expectedWorkspaceHead,
@@ -442,7 +443,8 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       leaseGeneration: receipt.writeLeaseGeneration,
       runtimeGeneration: runtimeAdmissionGeneration(receipt),
       workflowVersion: receipt.workflowVersion,
-    }, {
+    };
+    const observedAdmissionObservation = {
       repositoryIdentity: observed.repositoryIdentity,
       worktreeIdentity: observed.worktreeIdentity,
       workspaceHead: observed.workspaceHead,
@@ -456,12 +458,46 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
       leaseGeneration: observed.writerLeaseGeneration,
       runtimeGeneration: currentRuntimeGeneration,
       workflowVersion: receipt.workflowVersion,
-    });
+    };
+    const decision = classifyWorkspaceAdmission(expectedAdmissionObservation, observedAdmissionObservation);
     if (observed.branchName !== receipt.branchName) {
       return { status: 'WORKSPACE_STATE_CHANGED', reason: 'workspace_branch_changed', admissionGeneration: receipt.admissionGeneration };
     }
     if (observed.dirtyState !== receipt.dirtyState || observed.stagedFingerprint !== receipt.stagedFingerprint) {
       return { status: 'WORKSPACE_STATE_CHANGED', reason: 'workspace_dirty_state_changed', admissionGeneration: receipt.admissionGeneration };
+    }
+    if (decision.status === 'WORKSPACE_STATE_CHANGED'
+      && observed.writerLeaseGeneration !== receipt.writeLeaseGeneration
+      && this.workspaceAdmissionReceipts.compareAndSwapAdmissionReceipt !== undefined) {
+      const withoutLeaseChange = classifyWorkspaceAdmission(expectedAdmissionObservation, {
+        ...observedAdmissionObservation,
+        leaseGeneration: receipt.writeLeaseGeneration,
+      });
+      if (withoutLeaseChange.status === 'ADMITTED') {
+        const now = this.now().toISOString();
+        const refreshed: WorkspaceAdmissionReceipt = {
+          ...receipt,
+          admissionId: createHash('sha256')
+            .update([receipt.admissionId, 'writer-lease', String(observed.writerLeaseGeneration), now].join('\0'))
+            .digest('hex'),
+          writeLeaseGeneration: observed.writerLeaseGeneration,
+          admissionGeneration: receipt.admissionGeneration + 1,
+          createdAt: now,
+        };
+        try {
+          const saved = await this.workspaceAdmissionReceipts.compareAndSwapAdmissionReceipt(
+            workspaceId,
+            receipt.admissionGeneration,
+            observed.writerLeaseGeneration,
+            refreshed,
+          );
+          return saved
+            ? { status: 'ADMITTED', admissionGeneration: refreshed.admissionGeneration, refreshedFromWriterLeaseGeneration: true }
+            : { status: 'RECOVERY_REQUIRED', reason: 'writer_lease_admission_refresh_raced', admissionGeneration: receipt.admissionGeneration };
+        } catch {
+          return { status: 'RECOVERY_REQUIRED', reason: 'writer_lease_admission_refresh_failed', admissionGeneration: receipt.admissionGeneration };
+        }
+      }
     }
     if (decision.status !== 'RUNTIME_GENERATION_CHANGED') {
       return { ...decision, admissionGeneration: receipt.admissionGeneration };

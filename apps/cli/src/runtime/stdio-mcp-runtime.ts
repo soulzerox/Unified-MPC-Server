@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -14,6 +14,7 @@ import {
   GoalMutationFenceService,
   GoalRuntimeControlPlaneService,
   GoalRuntimeReconciliationService,
+  GoalWorkspaceService,
   GoalWorkspaceTruthReader,
   ManagedResourceRecoveryService,
   ScheduledContinuationService,
@@ -59,7 +60,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
-import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, err, ok, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import type { UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
@@ -275,6 +276,127 @@ export function createStdioMcpRuntime(
       ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
     },
   );
+  const goalWorkspaceService = new GoalWorkspaceService(workspaceRepository);
+  const goalRunWorkspace: NonNullable<McpApplicationServices['goalRunWorkspace']> = {
+    async resolveRunWorkspace(runActor, request) {
+      const parent = await workspaceRepository.get(request.workspaceId);
+      if (parent === null) return err(appError('WORKSPACE_NOT_FOUND', 'run_goal workspace was not found'));
+      if (parent.lifecycleKind === 'goal') {
+        if (parent.goalId === undefined) {
+          return err(appError('CONFLICT', 'Goal Workspace registration is missing its goal identity', true));
+        }
+        return ok({ workspaceId: parent.id });
+      }
+      if (parent.lifecycleKind !== undefined && parent.lifecycleKind !== 'project') {
+        return err(appError('INVALID_INPUT', 'run_goal requires a project or Goal Workspace'));
+      }
+      const legacy = await goalRepository.getByKey(parent.id, request.goalKey);
+      if (legacy !== null) {
+        return err(appError(
+          'CONFLICT',
+          'Existing durable goal is bound directly to the project workspace; reconcile or finish that legacy goal before starting a Goal Workspace run',
+          true,
+          { reason: 'legacy-project-goal-requires-reconciliation' },
+        ));
+      }
+      const goalId = `goal-${createHash('sha256')
+        .update([parent.id, request.goalKey].join('\0'))
+        .digest('hex')
+        .slice(0, 40)}`;
+      const existing = (await workspaceRepository.list())
+        .find((entry) => entry.lifecycleKind === 'goal'
+          && entry.goalId === goalId
+          && entry.parentWorkspaceId === parent.id);
+      if (existing !== undefined) return ok({ workspaceId: existing.id });
+
+      // A selected feature/detached worktree may contain commits not on origin/main.
+      // Pin its exact committed head; only new goals on main use fresh origin/main.
+      const currentBranch = await gitService.run(runActor, {
+        workspaceId: parent.id,
+        args: ['branch', '--show-current'],
+      });
+      if (!currentBranch.ok) return currentBranch;
+      if (currentBranch.value.exitCode !== 0) {
+        return err(appError('CONFLICT', 'Cannot identify project branch for Goal Workspace admission', true));
+      }
+      const branchName = currentBranch.value.stdout.trim();
+      let baseRevision: string | undefined;
+      if (branchName !== 'main' && branchName !== 'master') {
+        const history = await gitService.log(runActor, parent.id, { maxCommits: 1 });
+        if (!history.ok) return history;
+        const head = history.value.entries[0]?.hash;
+        if (head === undefined || !/^[0-9a-f]{40}$/.test(head)) {
+          return err(appError('CONFLICT', 'Cannot pin the selected feature branch commit', true));
+        }
+        baseRevision = head;
+      }
+      const created = await goalWorkspaceService.create({
+        goalId,
+        parentWorkspaceId: parent.id,
+        branchName: `goal/${goalId}`,
+        ...(baseRevision === undefined ? {} : { baseRevision }),
+        ...(runActor.sessionId === undefined ? {} : { ownerSessionId: runActor.sessionId }),
+      });
+      if (created.ok) return ok({ workspaceId: created.value.workspace.id });
+
+      const raced = (await workspaceRepository.list())
+        .find((entry) => entry.lifecycleKind === 'goal'
+          && entry.goalId === goalId
+          && entry.parentWorkspaceId === parent.id);
+      return raced === undefined ? created : ok({ workspaceId: raced.id });
+    },
+    async admitRunWorkspace(runActor, request) {
+      const goalWorkspace = await workspaceRepository.get(request.workspaceId);
+      if (goalWorkspace === null
+        || goalWorkspace.lifecycleKind !== 'goal'
+        || goalWorkspace.goalId !== request.goalId) {
+        return err(appError('WORKSPACE_ADMISSION_STALE', 'Durable goal does not own the requested Goal Workspace', true));
+      }
+      const ownerId = `${runActor.clientId}:${runActor.sessionId ?? 'sessionless'}`;
+      const writer = await goalWorkspaceService.synchronizeWriterLease(
+        request.goalId,
+        ownerId,
+        request.leaseGeneration,
+        request.leaseExpiresAt,
+      );
+      if (!writer.ok) return writer;
+
+      const bootstrapped = await goalRuntimeControlPlane.bootstrapWorkspace(request.workspaceId);
+      if (bootstrapped.admission?.status !== 'ADMITTED'
+        || bootstrapped.admission.admissionGeneration === undefined) {
+        return err(appError(
+          'WORKSPACE_ADMISSION_STALE',
+          `Goal Workspace admission could not be established: ${bootstrapped.admission?.reason ?? 'admission-unavailable'}`,
+          true,
+        ));
+      }
+      return ok({ admissionGeneration: bootstrapped.admission.admissionGeneration });
+    },
+    async recoverRunWorkspace(runActor, request) {
+      const goal = await goalRepository.getById(request.goalId);
+      const actualDigest = createHash('sha256').update(request.leaseToken).digest();
+      const expectedDigest = Buffer.from(goal?.leaseTokenHash ?? '', 'hex');
+      if (goal === null
+        || goal.status !== 'active'
+        || goal.workspaceId !== request.workspaceId
+        || goal.leaseGeneration !== request.leaseGeneration
+        || goal.leaseOwnerClientId !== runActor.clientId
+        || goal.leaseOwnerSessionId !== (runActor.sessionId?.trim() || runActor.clientId)
+        || goal.leaseExpiresAt === undefined
+        || Date.parse(goal.leaseExpiresAt) <= Date.now()
+        || expectedDigest.length !== actualDigest.length
+        || !timingSafeEqual(expectedDigest, actualDigest)) {
+        return err(appError('PERMISSION_DENIED', 'Stale or invalid goal lease proof; admission retry rejected'));
+      }
+      return goalRunWorkspace.admitRunWorkspace(runActor, {
+        workspaceId: request.workspaceId,
+        goalId: request.goalId,
+        leaseGeneration: request.leaseGeneration,
+        leaseExpiresAt: goal.leaseExpiresAt ?? '',
+      });
+    },
+  };
+
   const agentSwarmService = new AgentSwarmService(
     new SqliteAgentSwarmRepository(database),
     codexService,
@@ -397,6 +519,7 @@ export function createStdioMcpRuntime(
     },
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
     workspaceAdmissionProjection: goalRuntimeControlPlane,
+    goalRunWorkspace,
     workspaceSelection,
     preferredGoal: {
       get: async (workspaceId) => {

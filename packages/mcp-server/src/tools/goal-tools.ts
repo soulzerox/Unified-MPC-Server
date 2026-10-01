@@ -45,6 +45,13 @@ const runGoalSchema = z.object({
   scheduledContinuation: z.enum(['auto', 'off']).default('auto'),
 }).strict();
 
+const retryGoalAdmissionSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  goalId,
+  leaseToken,
+  leaseGeneration: z.number().int().min(1),
+}).strict();
+
 const getGoalSchema = z.union([
   z.object({ goalId }).strict(),
   z.object({ workspaceId: z.string().min(1).max(128), goalKey }).strict(),
@@ -116,8 +123,18 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input) => {
         const goals = context.services.goals;
         if (goals === undefined) return missingService();
+        let runWorkspaceId = input.workspaceId;
+        const goalRunWorkspace = context.services.goalRunWorkspace;
+        if (goalRunWorkspace !== undefined) {
+          const resolved = await goalRunWorkspace.resolveRunWorkspace(context.actor, {
+            workspaceId: input.workspaceId,
+            goalKey: input.goalKey,
+          });
+          if (!resolved.ok) return resolved;
+          runWorkspaceId = resolved.value.workspaceId;
+        }
         const result = await goals.runGoal(context.actor, {
-          workspaceId: input.workspaceId,
+          workspaceId: runWorkspaceId,
           goalKey: input.goalKey,
           leaseSeconds: input.leaseSeconds,
           ...(input.objective === undefined ? {} : { objective: input.objective }),
@@ -125,6 +142,37 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.ponytailMode === undefined ? {} : { ponytailMode: input.ponytailMode }),
         });
         if (!result.ok) return result;
+        let admissionGeneration: number | undefined;
+        if (result.value.acquired && goalRunWorkspace !== undefined) {
+          if (result.value.leaseExpiresAt === undefined) {
+            return ok({ ...result.value, outcome: 'admission_required' as const, workspaceId: runWorkspaceId,
+              admissionRequired: true, admissionError: { code: 'CONFLICT', message: 'Acquired durable goal omitted lease expiry' },
+              nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const });
+          }
+          const admitted = await goalRunWorkspace.admitRunWorkspace(context.actor, {
+            workspaceId: runWorkspaceId,
+            goalId: result.value.goalId,
+            leaseGeneration: result.value.leaseGeneration,
+            leaseExpiresAt: result.value.leaseExpiresAt,
+          });
+          if (!admitted.ok) {
+            // Acquisition already rotated the durable lease. Never erase its token
+            // behind an admission error: the caller must be able to recover safely
+            // without stealing the lease or starting a second Goal Workspace.
+            return ok({
+              ...result.value,
+              outcome: 'admission_required' as const,
+              workspaceId: runWorkspaceId,
+              admissionRequired: true as const,
+              admissionError: {
+                code: admitted.error.code,
+                message: admitted.error.message,
+              },
+              nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const,
+            });
+          }
+          admissionGeneration = admitted.value.admissionGeneration;
+        }
         const active = result.value.status === 'active';
         const scheduledContinuation = input.scheduledContinuation ?? 'auto';
         const auto = scheduledContinuation === 'auto';
@@ -148,6 +196,8 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
                   : 'not_confirmed';
         return ok({
           ...result.value,
+          workspaceId: runWorkspaceId,
+          ...(admissionGeneration === undefined ? {} : { admissionGeneration }),
           ...(!result.value.acquired && result.value.retryAfterSeconds !== undefined && result.value.retryAfterSeconds <= 60
             ? {
                 leaseGuidance: `Previous worker appears inactive. The bounded stale-recovery grace expires in ${result.value.retryAfterSeconds}s. Wait ${result.value.retryAfterSeconds}s and call run_goal again to take over the lease; do not yield or treat as occupied.`,
@@ -183,6 +233,39 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
                             : 'continue_current_run_and_prepare_cloud_successor_before_yield',
             stopOnlyWhen: 'goal_terminal_or_scheduling_explicitly_disabled',
           },
+        });
+      },
+    }),
+    defineTool({
+      name: 'retry_goal_workspace_admission',
+      description: 'Recover the current Goal Workspace admission after an acquired run_goal or scheduled claim returned admission_required. Requires the exact still-valid owner lease token and generation; stale and cross-session proofs are rejected. Does not create a goal, rotate a lease, or bypass the writer admission gate.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: retryGoalAdmissionSchema,
+      handler: async (input) => {
+        const workspace = context.services.goalRunWorkspace;
+        if (workspace === undefined) return missingService();
+        const recovered = await workspace.recoverRunWorkspace(context.actor, input);
+        if (!recovered.ok) {
+          if (recovered.error.code === 'PERMISSION_DENIED') return recovered;
+          return ok({
+            outcome: 'admission_required' as const,
+            admissionRequired: true,
+            workspaceId: input.workspaceId,
+            goalId: input.goalId,
+            leaseToken: input.leaseToken,
+            leaseGeneration: input.leaseGeneration,
+            admissionError: { code: recovered.error.code, message: recovered.error.message },
+            nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const,
+          });
+        }
+        return ok({
+          outcome: 'admitted' as const,
+          admissionRequired: false,
+          workspaceId: input.workspaceId,
+          goalId: input.goalId,
+          leaseGeneration: input.leaseGeneration,
+          admissionGeneration: recovered.value.admissionGeneration,
         });
       },
     }),

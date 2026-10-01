@@ -51,7 +51,7 @@ function response(tool: string, data: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: tool }], structuredContent: { result: tool, data } };
 }
 
-async function fixture(onStatus: (poll: number) => Promise<unknown>) {
+async function fixture(onStatus: (poll: number) => Promise<unknown>): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -65,7 +65,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>) {
           name, description: name, inputSchema: { type: 'object' },
         })),
         listResources: async () => [],
-        callTool: async (name) => {
+        callTool: async (name): Promise<unknown> => {
           if (name === 'health' || name === 'version') return response(name, handshake());
           if (name === 'code_index') {
             indexStarts += 1;
@@ -80,7 +80,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>) {
   };
   const driver = new NativeThaiRagProviderDriver({
     dataRoot, launchConfig: { command: '/mock/python' },
-    workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+    workspacesProvider: async (): Promise<Array<{ id: string; realRootPath: string }>> => [{ id: workspaceId, realRootPath: workspaceRoot }],
     clientFactory, indexJobPollMs: 10,
   });
   expect((await driver.start({
@@ -96,7 +96,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>) {
   const indexJob = persisted.jobs.find((job) => job.workspaceId === workspaceId
     && job.providerJobId === 'idx_provider_same');
   if (indexJob === undefined) throw new Error('Missing native admission job');
-  return { driver, jobId: indexJob.jobId, counts: () => ({ connects, indexStarts, statusPolls }) };
+  return { driver, jobId: indexJob.jobId, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
 }
 
 async function terminalJob(driver: NativeThaiRagProviderDriver, jobId: string): Promise<unknown> {

@@ -141,6 +141,61 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('does not display a failed provider result as completed in the normal background monitor', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      indexJobPollMs: 10,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') return success('code_index', {
+            status: 'ok',
+            data: { status: 'running', job_id: 'idx_failure', workspace_id: workspaceId },
+          });
+          if (tool === 'index_status') return success('index_status', {
+            status: 'ok',
+            data: {
+              status: 'done', job_id: 'idx_failure', workspace_id: workspaceId,
+              indexed_files: 1, skipped_files: 0, total_files: 2,
+              result: { status: 'failed', errors: { 'broken.ts': 'Chroma compaction failed' } },
+            },
+          });
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner',
+      providerVersion: '4.61.0', embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+    try {
+      const created = await driver.call('code_index', {
+        workspace_path: workspaceRoot, workspace_id: workspaceId, background: true,
+      });
+      if (!created.ok || !isRecord(created.value) || typeof created.value.job_id !== 'string') {
+        throw new Error('Could not create background index job');
+      }
+      let final: Awaited<ReturnType<typeof driver.call>> | undefined;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        final = await driver.call('index_status', {
+          workspace_id: workspaceId, job_id: created.value.job_id,
+        });
+        if (final.ok && isRecord(final.value) && final.value.status === 'failed') break;
+      }
+      expect(final).toMatchObject({ ok: true, value: {
+        status: 'failed', indexedFiles: 1, skippedFiles: 0, totalFiles: 2,
+      } });
+    } finally {
+      await driver.stop();
+    }
+  });
+
   it('forwards durable job cancellation to the provider and waits for terminal cancellation', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

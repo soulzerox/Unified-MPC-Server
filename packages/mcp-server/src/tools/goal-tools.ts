@@ -253,7 +253,13 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input) => {
         const workspace = context.services.goalRunWorkspace;
         if (workspace === undefined) return missingService();
-        const recovered = await workspace.recoverRunWorkspace(context.actor, input);
+        const recovered = await workspace.recoverRunWorkspace(context.actor, {
+          workspaceId: input.workspaceId,
+          goalId: input.goalId,
+          leaseToken: input.leaseToken,
+          leaseGeneration: input.leaseGeneration,
+          ...(input.stagedRecovery === undefined ? {} : { stagedRecovery: input.stagedRecovery }),
+        });
         if (!recovered.ok) {
           if (recovered.error.code === 'PERMISSION_DENIED') return recovered;
           return ok({

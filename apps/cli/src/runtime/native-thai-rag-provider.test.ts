@@ -154,7 +154,7 @@ describe('NativeThaiRagProviderDriver', () => {
         includeCancelIndex: true,
         async onCall(tool, args): Promise<unknown> {
           if (tool === 'code_index') {
-            const providerJobId = args.background === true ? 'idx_warmup' : 'idx_failure';
+            const providerJobId = args.force === true ? 'idx_warmup' : 'idx_failure';
             return success('code_index', {
               status: 'ok',
               data: { status: 'running', job_id: providerJobId, workspace_id: workspaceId },
@@ -178,6 +178,8 @@ describe('NativeThaiRagProviderDriver', () => {
       providerVersion: '4.61.0', embeddingIndexGeneration: 1,
     })).ok).toBe(true);
     try {
+      // Cold admission has force=true for a newly linked source alias; the
+      // explicit normal job below has force=false. Both use background=true.
       // Drain native cold-workspace admission with a distinct successful job,
       // then exercise a second provider-owned normal background failure.
       const admitted = await driver.call('pre_edit_context', {

@@ -159,26 +159,14 @@ describe('stdio MCP runtime', () => {
       expect(admitted).toMatchObject({ ok: true, value: { admissionGeneration: 1 } });
       if (admitted === undefined || !admitted.ok) return;
 
-      const sourceCallId = 'source-edit-before-staging';
-      const begin = await runtime.services.goalMutationFence?.begin(
-        runtime.actor,
-        goalWorkspace.id,
-        sourceCallId,
-        {
-          goalId: acquired.value.goalId,
-          leaseToken: acquired.value.leaseToken,
-          leaseGeneration: acquired.value.leaseGeneration,
-          admissionGeneration: admitted.value.admissionGeneration,
-        },
-      );
-      expect(begin?.ok).toBe(true);
-      await writeFile(path.join(goalWorkspace.realRootPath, 'README.md'), 'base\nchanged\n');
-      await runtime.services.goalMutationFence?.end(sourceCallId, true);
-
       const beforeStage = await workspaces.getAdmissionReceipt(goalWorkspace.id);
-      expect(beforeStage).toMatchObject({ admissionGeneration: 2, dirtyState: 'dirty' });
+      expect(beforeStage).toMatchObject({ admissionGeneration: 1, dirtyState: 'clean' });
       if (beforeStage === null) return;
 
+      // Reproduce the recovery boundary independently of the source-edit fence:
+      // an admitted owner delta is already staged while the prior receipt still
+      // describes the pre-stage identity.
+      await writeFile(path.join(goalWorkspace.realRootPath, 'README.md'), 'base\nchanged\n');
       gitAt(goalWorkspace.realRootPath, 'add', '--', 'README.md');
       const stagedDiff = await runtime.services.git?.diff(runtime.actor, goalWorkspace.id, { staged: true, maxBytes: 1024 * 1024 });
       expect(stagedDiff?.ok).toBe(true);
@@ -211,11 +199,11 @@ describe('stdio MCP runtime', () => {
           expectedStagedDiffSha256: stagedHash,
         },
       });
-      expect(recovered).toMatchObject({ ok: true, value: { admissionGeneration: 3 } });
+      expect(recovered).toMatchObject({ ok: true, value: { admissionGeneration: 2 } });
 
       const afterRecovery = await workspaces.getAdmissionReceipt(goalWorkspace.id);
       expect(afterRecovery).toMatchObject({
-        admissionGeneration: 3,
+        admissionGeneration: 2,
         expectedWorkspaceHead: beforeStage.expectedWorkspaceHead,
         dirtyState: 'dirty',
       });

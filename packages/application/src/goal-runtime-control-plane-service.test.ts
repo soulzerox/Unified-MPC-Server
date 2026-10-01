@@ -511,6 +511,122 @@ describe('GoalRuntimeControlPlaneService', () => {
     });
   });
 
+  it('atomically refreshes both writer lease and runtime identity after a process restart', async () => {
+    let savedReceipt: WorkspaceAdmissionReceipt | null = receipt;
+    const nextWriterGeneration = receipt.writeLeaseGeneration + 1;
+    let writes = 0;
+    const runtime = fixture({
+      workspaceAdmission: {
+        readAdmission: async () => ({
+          ...observedAdmission,
+          writerLeaseGeneration: nextWriterGeneration,
+          writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+        }),
+      },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_id, expected, lease, next) => {
+          writes += 1;
+          if (savedReceipt?.admissionGeneration !== expected
+            || lease !== nextWriterGeneration
+            || next.writeLeaseGeneration !== lease
+            || next.runtimeGeneration !== 'generation-after-restart') return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: 'deploy-after-restart',
+        runtimeGeneration: 'generation-after-restart',
+        runtimeBuildVersion: receipt.runtimeBuildVersion,
+        runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false,
+        runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: '2026-09-23T01:00:00.000Z',
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: {
+        status: 'ADMITTED',
+        admissionGeneration: receipt.admissionGeneration + 1,
+        refreshedFromWriterLeaseGeneration: true,
+        refreshedFromRuntimeGeneration: true,
+      },
+    });
+    expect(writes).toBe(1);
+    expect(savedReceipt).toMatchObject({
+      writeLeaseGeneration: nextWriterGeneration,
+      runtimeGeneration: 'generation-after-restart',
+      expectedWorkspaceHead: receipt.expectedWorkspaceHead,
+      dirtyFingerprint: receipt.dirtyFingerprint,
+      admissionGeneration: receipt.admissionGeneration + 1,
+    });
+  });
+
+  it('rejects simultaneous lease/runtime renewal if the Git workspace changed', async () => {
+    let writes = 0;
+    const runtime = fixture({
+      workspaceAdmission: {
+        readAdmission: async () => ({
+          ...observedAdmission,
+          writerLeaseGeneration: receipt.writeLeaseGeneration + 1,
+          writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+          workspaceHead: 'f'.repeat(40),
+        }),
+      },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => receipt,
+        compareAndSwapAdmissionReceipt: async () => { writes += 1; return true; },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: 'deploy-after-restart',
+        runtimeGeneration: 'generation-after-restart',
+        runtimeBuildVersion: receipt.runtimeBuildVersion,
+        runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false,
+        runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: '2026-09-23T01:00:00.000Z',
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'WORKSPACE_STATE_CHANGED', reason: 'expected_workspace_state_changed' },
+    });
+    expect(writes).toBe(0);
+  });
+
+  it('fails closed if the joint runtime and writer-lease refresh loses CAS', async () => {
+    let writes = 0;
+    const runtime = fixture({
+      workspaceAdmission: {
+        readAdmission: async () => ({
+          ...observedAdmission,
+          writerLeaseGeneration: receipt.writeLeaseGeneration + 1,
+          writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+        }),
+      },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => receipt,
+        compareAndSwapAdmissionReceipt: async () => { writes += 1; return false; },
+      },
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: 'deploy-after-restart',
+        runtimeGeneration: 'generation-after-restart',
+        runtimeBuildVersion: receipt.runtimeBuildVersion,
+        runtimeBuildCommit: receipt.runtimeBuildCommit!,
+        runtimeBuildDirty: false,
+        runtimeProtocolGeneration: receipt.runtimeProtocolGeneration,
+        runtimeStartedAt: '2026-09-23T01:00:00.000Z',
+      },
+    });
+
+    await expect(runtime.service.bootstrapWorkspace(workspaceId)).resolves.toMatchObject({
+      admission: { status: 'RECOVERY_REQUIRED', reason: 'writer_lease_admission_refresh_raced' },
+    });
+    expect(writes).toBe(1);
+  });
+
   it('fails closed when a missing admission receipt cannot be persisted with compare-and-swap', async () => {
     const runtime = fixture({
       workspaceAdmission: { readAdmission: async () => observedAdmission },

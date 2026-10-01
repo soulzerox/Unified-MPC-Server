@@ -278,8 +278,13 @@ export class GitAdapter {
   }
 
   private async resolveAdmissionRef(cwd: string, ref: string, signal?: AbortSignal): Promise<Result<string>> {
-    if (!/^refs\/(?:heads|unified-mpc\/admission)\/[A-Za-z0-9._/-]+$/.test(ref)
-      || ref.includes('..') || ref.includes('//') || ref.endsWith('/')) {
+    // Goal Workspaces forked from an existing feature branch pin their exact
+    // committed SHA instead of a moving named ref. Accept only a full commit
+    // object ID (never a rev expression or abbreviated SHA), then verify that
+    // it resolves to a real commit below just as named admission refs do.
+    const pinnedCommit = isCommitSha(ref);
+    if (!pinnedCommit && (!/^refs\/(?:heads|unified-mpc\/admission)\/[A-Za-z0-9._/-]+$/.test(ref)
+      || ref.includes('..') || ref.includes('//') || ref.endsWith('/'))) {
       return err(appError('INVALID_INPUT', 'Git admission ref is invalid'));
     }
     const result = await this.runner.run(['rev-parse', '--verify', `${ref}^{commit}`], cwd, this.signalOptions(signal));

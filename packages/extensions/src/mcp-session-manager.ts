@@ -22,6 +22,8 @@ export interface McpSessionManagerOptions {
   readonly idleTimeoutMs?: number;
   /** Native providers validate their versioned handshake instead of tool schemas. */
   readonly validateToolSchemas?: boolean;
+  /** Only the dedicated native index session may retain its provider after an idempotent index_status timeout. */
+  readonly preserveReadOnlyStatusSessionOnTimeout?: boolean;
 }
 
 interface ManagedSession {
@@ -53,6 +55,7 @@ export class McpSessionManager {
   private readonly callTimeoutMs: number;
   private readonly idleTimeoutMs: number;
   private readonly validateToolSchemas: boolean;
+  private readonly preserveReadOnlyStatusSessionOnTimeout: boolean;
   private idleTimer: NodeJS.Timeout | undefined;
   private closed = false;
 
@@ -61,6 +64,7 @@ export class McpSessionManager {
     this.callTimeoutMs = options.callTimeoutMs ?? 60_000;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60_000;
     this.validateToolSchemas = options.validateToolSchemas ?? true;
+    this.preserveReadOnlyStatusSessionOnTimeout = options.preserveReadOnlyStatusSessionOnTimeout ?? false;
   }
 
   public isConnected(server: string): boolean {
@@ -188,7 +192,19 @@ export class McpSessionManager {
       this.scheduleIdleSweep();
       return ok(result);
     } catch (error: unknown) {
-      if (managed !== undefined) await this.drop(server, managed);
+      const statusTimeout = error instanceof Error
+        && (error.message === `Timed out calling ${server}/${tool}`
+          || error.message === `Timed out refreshing tool catalog for ${server}`);
+      if (managed !== undefined && this.preserveReadOnlyStatusSessionOnTimeout
+        && tool === 'index_status' && statusTimeout && !isAborted(signal)) {
+        // Provider-owned indexing survives a cancelled status read only while
+        // its dedicated stdio session stays alive. An idempotent status request
+        // may ignore cancellation; do not strand subsequent polls on its queue.
+        managed.queue = Promise.resolve();
+        managed.lastUsedAt = Date.now();
+      } else if (managed !== undefined) {
+        await this.drop(server, managed);
+      }
       if (isAborted(signal)) return cancelledCall();
       return err(appError('INTERNAL_ERROR', sanitizeError(error), true));
     }

@@ -225,6 +225,68 @@ export function getClientScriptJs(): string {
         }
       }
 
+      let ragProgressInFlight = false;
+      async function loadRagIndexJobs() {
+        if (ragProgressInFlight) return;
+        const container = document.getElementById('rag-index-jobs');
+        if (!container) return;
+        ragProgressInFlight = true;
+        try {
+          const response = await fetch('/api/rag-index-jobs');
+          if (!response.ok) throw new Error('Index status unavailable');
+          const payload = await response.json();
+          container.replaceChildren();
+          if (!payload.available) {
+            container.textContent = 'Native index status not available';
+            return;
+          }
+          const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+          if (jobs.length === 0) {
+            container.textContent = 'No native index jobs';
+            return;
+          }
+          for (const job of jobs) {
+            const item = document.createElement('div');
+            item.style.cssText = 'padding: 12px 0; border-bottom: 1px solid var(--border-subtle);';
+            const heading = document.createElement('div');
+            heading.className = 'mono';
+            heading.textContent = 'Workspace ' + String(job.workspaceId || '').slice(0, 8)
+              + ' · ' + String(job.status || 'unknown');
+            item.appendChild(heading);
+            const description = document.createElement('div');
+            description.style.cssText = 'color: var(--text-secondary); margin: 6px 0;';
+            const completed = Number.isSafeInteger(job.indexedFiles) && Number.isSafeInteger(job.skippedFiles)
+              ? job.indexedFiles + job.skippedFiles : null;
+            const total = Number.isSafeInteger(job.totalFiles) ? job.totalFiles : null;
+            const active = job.status === 'running' || job.status === 'cancelling';
+            description.textContent = job.stage === 'finalizing'
+              ? 'Finalizing index · validating vectors and activating generation'
+              : job.stage === 'scanning' && active
+                ? 'Scanning source files...'
+                : total === null || completed === null
+                  ? String(job.status || 'unknown')
+                  : String(completed) + ' / ' + String(total) + ' files (' + String(job.indexedFiles)
+                    + ' indexed, ' + String(job.skippedFiles) + ' reused)';
+            item.appendChild(description);
+            const progress = document.createElement('progress');
+            progress.max = total !== null && total > 0 ? total : 1;
+            if (total !== null && total > 0 && completed !== null && completed <= total) {
+              progress.value = Math.min(total, completed);
+            } else if (job.status === 'completed') {
+              progress.value = 1;
+            }
+            progress.style.cssText = 'display: block; width: 100%; height: 12px; accent-color: var(--status-healthy);';
+            progress.setAttribute('aria-label', heading.textContent + ' index progress');
+            item.appendChild(progress);
+            container.appendChild(item);
+          }
+        } catch {
+          container.textContent = 'Unable to read native index progress';
+        } finally {
+          ragProgressInFlight = false;
+        }
+      }
+
       async function loadRuntimeDiagnostics() {
         try {
           const res = await fetch('/api/runtime-diagnostics');
@@ -1583,6 +1645,7 @@ export function getClientScriptJs(): string {
         fetchServerLogs();
         loadRuntimeDiagnostics();
       });
+      document.getElementById('rag-index-refresh-btn')?.addEventListener('click', loadRagIndexJobs);
       document.getElementById('refresh-servers-btn')?.addEventListener('click', loadInventory);
       document.getElementById('servers-view-refresh-btn')?.addEventListener('click', loadInventory);
       document.getElementById('refresh-skills-btn')?.addEventListener('click', loadInventory);
@@ -1622,6 +1685,7 @@ export function getClientScriptJs(): string {
       // Initial boot
       logEvent('INFO', 'Bootstrapping Obsidian Telemetry SPA runtime');
       loadStatus();
+      loadRagIndexJobs();
       loadWorkspaces();
       loadInventory();
       loadPolicies();
@@ -1631,6 +1695,7 @@ export function getClientScriptJs(): string {
       loadRuntimeDiagnostics();
 
       setInterval(loadStatus, 5000);
+      setInterval(loadRagIndexJobs, 5000);
       setInterval(loadGatewayStatus, 5000);
       setInterval(loadRuntimeDiagnostics, 5000);
       setInterval(fetchServerLogs, 6000);

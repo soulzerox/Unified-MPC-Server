@@ -89,6 +89,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
       callTimeoutMs: Math.max(options.callTimeoutMs ?? 60_000, INDEX_CALL_TIMEOUT_MS),
       validateToolSchemas: false,
+      preserveReadOnlyStatusSessionOnTimeout: true,
       idleTimeoutMs: 24 * 60 * 60_000,
     });
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
@@ -686,6 +687,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     workspaceId: string,
     ownerId: string,
   ): Promise<Result<unknown>> {
+    let consecutiveStatusTimeouts = 0;
     while (!this.shuttingDown) {
       await delay(this.indexJobPollMs);
       if (this.shuttingDown) break;
@@ -695,10 +697,40 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       }
 
       const status = await this.callAdmissionWorker('index_status', { job_id: providerJobId, workspace_id: workspaceId });
-      if (!status.ok) return status;
+      if (!status.ok) {
+        // A timed-out read is not evidence that the provider-owned background
+        // job failed. Keep the same providerJobId, dedicated stdio session, and
+        // local running job instead of starting another full index generation.
+        const timedOut = status.error.code === 'INTERNAL_ERROR'
+          && (status.error.message.startsWith('Timed out calling ')
+            && status.error.message.endsWith('/index_status')
+            || status.error.message.startsWith('Timed out refreshing tool catalog for '));
+        if (!timedOut) return status;
+        consecutiveStatusTimeouts += 1;
+        await delay(Math.min(5_000, 250 * (2 ** Math.min(consecutiveStatusTimeouts, 5))));
+        continue;
+      }
+      consecutiveStatusTimeouts = 0;
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
-      if (remoteStatus === 'done') return ok(nestedValue(status.value, 'result') ?? status.value);
+      if (remoteStatus === 'done') {
+        const result = nestedValue(status.value, 'result') ?? status.value;
+        const resultStatus = nestedString(result, 'status');
+        const reportedErrors = nestedValue(result, 'errors');
+        const failedPaths = isRecord(reportedErrors) ? Object.keys(reportedErrors) : [];
+        if (resultStatus === 'cancelled') {
+          await this.jobs.cancel(jobId, result, ownerId);
+          return err(appError('CONFLICT', `Native Thai-RAG provider background index was cancelled: ${providerJobId}`, true));
+        }
+        if (failedPaths.length > 0 || (resultStatus !== undefined
+          && !['complete', 'completed', 'ok', 'done', 'success'].includes(resultStatus))) {
+          const detail = nestedString(result, 'error') ?? nestedString(result, 'message')
+            ?? (failedPaths.length > 0 ? `files with errors: ${failedPaths.slice(0, 3).join(', ')}`
+              : `provider result status: ${resultStatus}`);
+          return err(appError('CONFLICT', `Native Thai-RAG provider background index failed: ${detail}`, true));
+        }
+        return ok(result);
+      }
       if (remoteStatus === 'cancelled') {
         await this.jobs.cancel(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
         return err(appError('CONFLICT', `Native Thai-RAG admission index job was cancelled: ${jobId}`, true));

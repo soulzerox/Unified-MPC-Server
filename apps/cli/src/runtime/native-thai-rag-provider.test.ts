@@ -97,8 +97,10 @@ describe('NativeThaiRagProviderDriver', () => {
             return success('index_status', {
               status: 'ok',
               data: statusPolls < 2
-                ? { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId }
-                : { status: 'done', job_id: 'idx_provider_1', workspace_id: workspaceId, result: { indexed: 3 } },
+                ? { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId,
+                    indexed_files: 2, skipped_files: 1, total_files: 5 }
+                : { status: 'done', job_id: 'idx_provider_1', workspace_id: workspaceId,
+                    indexed_files: 4, skipped_files: 1, total_files: 5, result: { indexed: 4 } },
             });
           }
           return success(tool);
@@ -128,7 +130,9 @@ describe('NativeThaiRagProviderDriver', () => {
       terminal = await driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId });
       if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
     }
-    expect(terminal).toMatchObject({ ok: true, value: { status: 'completed', result: { indexed: 3 } } });
+    expect(terminal).toMatchObject({ ok: true, value: {
+      status: 'completed', result: { indexed: 4 }, indexedFiles: 4, skippedFiles: 1, totalFiles: 5,
+    } });
     expect(calls.find(({ tool, args }) => tool === 'code_index' && args.background === true)?.args).toMatchObject({
       workspace_id: workspaceId,
       background: true,

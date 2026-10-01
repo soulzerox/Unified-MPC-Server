@@ -1642,6 +1642,66 @@ describe('MCP tool registry', () => {
     expect(end).toHaveBeenCalledWith(expect.any(String), true);
   });
 
+  it('advances a fenced Git admission only for a real successful local Git mutation', async () => {
+    const end = vi.fn(async () => undefined);
+    const run = vi.fn(async (_actor: unknown, request: { args: readonly string[] }) => ok({
+      exitCode: request.args.includes('fails') ? 1 : 0,
+      stdout: '',
+      stderr: request.args.includes('fails') ? 'commit failed' : '',
+    }));
+    const registry = new ToolRegistry({
+      git: { run } as unknown as McpApplicationServices['git'],
+      goalMutationFence: {
+        inspectWorkspaceFence: async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }),
+        begin: async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }),
+        heartbeat: async () => undefined,
+        end,
+        observe: async () => ({ trustworthy: true, observedAt: '2026-10-02T00:00:00.000Z', leaseGeneration: 7, leaseActivitySeq: 0, liveFencedCallCount: 0, blockingTaskStates: [], activeTaskStates: [] }),
+      } as unknown as McpApplicationServices['goalMutationFence'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+
+    const proof = { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 7, admissionGeneration: 4 };
+    await expect(registry.invoke('git', {
+      workspaceId: 'workspace-1', args: ['add', '--', 'src/file.ts'], userConfirmed: true, goalLease: proof,
+    })).resolves.not.toMatchObject({ isError: true });
+    expect(end).toHaveBeenLastCalledWith(expect.any(String), true);
+
+    await expect(registry.invoke('git', {
+      workspaceId: 'workspace-1', args: ['commit', '-m', 'succeeds'], userConfirmed: true, goalLease: proof,
+    })).resolves.not.toMatchObject({ isError: true });
+    expect(end).toHaveBeenLastCalledWith(expect.any(String), true);
+
+    await expect(registry.invoke('git', {
+      workspaceId: 'workspace-1', args: ['commit', '-m', 'fails'], userConfirmed: true, goalLease: proof,
+    })).resolves.not.toMatchObject({ isError: true });
+    expect(end).toHaveBeenLastCalledWith(expect.any(String), false);
+  });
+
+  it('does not route read-only Git queries through the workspace mutation fence', async () => {
+    const begin = vi.fn(async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }));
+    const end = vi.fn(async () => undefined);
+    const registry = new ToolRegistry({
+      git: { run: async () => ok({ exitCode: 0, stdout: '', stderr: '' }) } as unknown as McpApplicationServices['git'],
+      goalMutationFence: {
+        inspectWorkspaceFence: async () => ok({ goalId: 'goal-1', leaseGeneration: 7 }),
+        begin, heartbeat: async () => undefined, end,
+        observe: async () => ({ trustworthy: true, observedAt: '2026-10-02T00:00:00.000Z', leaseGeneration: 7, leaseActivitySeq: 0, liveFencedCallCount: 0, blockingTaskStates: [], activeTaskStates: [] }),
+      } as unknown as McpApplicationServices['goalMutationFence'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+    await expect(registry.invoke('git', {
+      workspaceId: 'workspace-1', args: ['status', '--short'],
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 7, admissionGeneration: 4 },
+    })).resolves.not.toMatchObject({ isError: true });
+    expect(begin).not.toHaveBeenCalled();
+    expect(end).not.toHaveBeenCalled();
+  });
+
   it('honors Custom ALLOW for ordinary replacement and opaque operations instead of silently converting it to ASK', async () => {
     const customAllow: PermissionProfile = {
       name: 'custom',

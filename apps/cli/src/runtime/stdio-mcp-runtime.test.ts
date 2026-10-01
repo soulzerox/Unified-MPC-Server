@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -101,6 +102,117 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+
+  it('recovers an exact already-staged owner delta without accepting hash drift', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-staged-recovery-data-'));
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-staged-recovery-source-'));
+    temporaryRoots.push(dataPath, rootPath);
+    const gitAt = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    gitAt(rootPath, 'init', '-q', '-b', 'main');
+    gitAt(rootPath, 'config', 'user.name', 'Unified Test');
+    gitAt(rootPath, 'config', 'user.email', 'test@example.invalid');
+    await writeFile(path.join(rootPath, 'README.md'), 'base\n');
+    gitAt(rootPath, 'add', 'README.md');
+    gitAt(rootPath, 'commit', '-qm', 'base');
+    gitAt(rootPath, 'checkout', '-qb', 'feature/staged-recovery');
+
+    const project = { id: 'staged-recovery-project', displayName: 'staged recovery', rootPath, realRootPath: rootPath, createdAt: '2026-10-02T00:00:00.000Z' };
+    const db = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(db);
+    await workspaces.insert(project);
+    const runtimeAdmissionIdentity = {
+      runtimeDeploymentId: 'deploy-staged-recovery',
+      runtimeGeneration: '19400000-0000-4000-8000-000000000001',
+      runtimeBuildVersion: '4.61.0+194000000001',
+      runtimeBuildCommit: '1'.repeat(40),
+      runtimeBuildDirty: false,
+      runtimeProtocolGeneration: 1,
+      runtimeStartedAt: '2026-10-02T00:00:00.000Z',
+    };
+    const runtime = createStdioMcpRuntime(dataPath, project, false, { runtimeAdmissionIdentity });
+    try {
+      const resolved = await runtime.services.goalRunWorkspace?.resolveRunWorkspace(runtime.actor, {
+        workspaceId: project.id, goalKey: 'staged-recovery-flow',
+      });
+      expect(resolved?.ok).toBe(true);
+      if (resolved === undefined || !resolved.ok) return;
+      const goalWorkspace = await workspaces.get(resolved.value.workspaceId);
+      expect(goalWorkspace).not.toBeNull();
+      if (goalWorkspace === null) return;
+
+      const acquired = await runtime.services.goals?.runGoal(runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalKey: 'staged-recovery-flow',
+        objective: 'Recover exact staged state.',
+        plan: { steps: [] },
+        leaseSeconds: 600,
+      });
+      expect(acquired?.ok).toBe(true);
+      if (acquired === undefined || !acquired.ok || acquired.value.leaseExpiresAt === undefined) return;
+
+      const admitted = await runtime.services.goalRunWorkspace?.admitRunWorkspace(runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalId: acquired.value.goalId,
+        leaseGeneration: acquired.value.leaseGeneration,
+        leaseExpiresAt: acquired.value.leaseExpiresAt,
+      });
+      expect(admitted).toMatchObject({ ok: true, value: { admissionGeneration: 1 } });
+      if (admitted === undefined || !admitted.ok) return;
+
+      const beforeStage = await workspaces.getAdmissionReceipt(goalWorkspace.id);
+      expect(beforeStage).toMatchObject({ admissionGeneration: 1, dirtyState: 'clean' });
+      if (beforeStage === null) return;
+
+      // Reproduce the recovery boundary independently of the source-edit fence:
+      // an admitted owner delta is already staged while the prior receipt still
+      // describes the pre-stage identity.
+      await writeFile(path.join(goalWorkspace.realRootPath, 'README.md'), 'base\nchanged\n');
+      gitAt(goalWorkspace.realRootPath, 'add', '--', 'README.md');
+      const stagedDiff = await runtime.services.git?.diff(runtime.actor, goalWorkspace.id, { staged: true, maxBytes: 1024 * 1024 });
+      expect(stagedDiff?.ok).toBe(true);
+      if (stagedDiff === undefined || !stagedDiff.ok) return;
+      const stagedHash = createHash('sha256').update(stagedDiff.value.patch).digest('hex');
+
+      const rejected = await runtime.services.goalRunWorkspace?.recoverRunWorkspace(runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalId: acquired.value.goalId,
+        leaseToken: acquired.value.leaseToken,
+        leaseGeneration: acquired.value.leaseGeneration,
+        stagedRecovery: {
+          expectedAdmissionGeneration: beforeStage.admissionGeneration,
+          expectedWorkspaceHead: beforeStage.expectedWorkspaceHead,
+          expectedStagedPaths: ['README.md'],
+          expectedStagedDiffSha256: '0'.repeat(64),
+        },
+      });
+      expect(rejected).toMatchObject({ ok: false, error: { code: 'WORKSPACE_ADMISSION_STALE' } });
+
+      const recovered = await runtime.services.goalRunWorkspace?.recoverRunWorkspace(runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalId: acquired.value.goalId,
+        leaseToken: acquired.value.leaseToken,
+        leaseGeneration: acquired.value.leaseGeneration,
+        stagedRecovery: {
+          expectedAdmissionGeneration: beforeStage.admissionGeneration,
+          expectedWorkspaceHead: beforeStage.expectedWorkspaceHead,
+          expectedStagedPaths: ['README.md'],
+          expectedStagedDiffSha256: stagedHash,
+        },
+      });
+      expect(recovered).toMatchObject({ ok: true, value: { admissionGeneration: 2 } });
+
+      const afterRecovery = await workspaces.getAdmissionReceipt(goalWorkspace.id);
+      expect(afterRecovery).toMatchObject({
+        admissionGeneration: 2,
+        expectedWorkspaceHead: beforeStage.expectedWorkspaceHead,
+        dirtyState: 'dirty',
+      });
+      expect(afterRecovery?.stagedFingerprint).not.toBe(beforeStage.stagedFingerprint);
+    } finally {
+      await runtime.close();
+      db.close();
+    }
+  });
 
   it('keeps runtime admission provenance attached to the parent-owned runtime', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-admission-identity-'));

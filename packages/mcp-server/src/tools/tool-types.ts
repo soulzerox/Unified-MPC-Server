@@ -85,6 +85,12 @@ export interface GoalRunWorkspacePort {
     readonly goalId: string;
     readonly leaseToken: string;
     readonly leaseGeneration: number;
+    readonly stagedRecovery?: {
+      readonly expectedAdmissionGeneration: number;
+      readonly expectedWorkspaceHead: string;
+      readonly expectedStagedPaths: readonly string[];
+      readonly expectedStagedDiffSha256: string;
+    };
   }): Promise<Result<{ readonly admissionGeneration: number }>>;
 }
 

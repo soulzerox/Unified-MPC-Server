@@ -365,6 +365,70 @@ describe('GoalRuntimeControlPlaneService', () => {
     });
   });
 
+  it('recovers exact staged admission while rotating an older writer/runtime receipt onto the current owner', async () => {
+    let savedReceipt: WorkspaceAdmissionReceipt | null = {
+      ...receipt,
+      dirtyState: 'dirty',
+      dirtyFingerprint: 'dirty-before-stage',
+      stagedFingerprint: 'staged-before-stage',
+      writeLeaseGeneration: 3,
+      admissionGeneration: 2,
+    };
+    const currentRuntime = {
+      runtimeDeploymentId: 'deploy-8',
+      runtimeGeneration: 'generation-8',
+      runtimeBuildVersion: '4.61.0+fedcba987654',
+      runtimeBuildCommit: 'fedcba9876543210fedcba9876543210fedcba98',
+      runtimeBuildDirty: false,
+      runtimeProtocolGeneration: 1,
+      runtimeStartedAt: '2026-10-02T00:00:00.000Z',
+    };
+    const observation: GoalWorkspaceAdmissionObservation = {
+      ...observedAdmission,
+      dirtyState: 'dirty',
+      dirtyFingerprint: 'dirty-after-stage',
+      stagedFingerprint: 'staged-after-stage',
+      writerLeaseGeneration: 4,
+      writerLeaseExpiresAt: '2099-01-01T00:00:00.000Z',
+    };
+    const runtime = fixture({
+      workspaceAdmission: { readAdmission: async () => observation },
+      workspaceAdmissionReceipt: {
+        getAdmissionReceipt: async () => savedReceipt,
+        compareAndSwapAdmissionReceipt: async (_id, expected, leaseGeneration, next): Promise<boolean> => {
+          if (savedReceipt?.admissionGeneration !== expected || leaseGeneration !== 4) return false;
+          savedReceipt = next;
+          return true;
+        },
+      },
+      runtimeAdmissionIdentity: currentRuntime,
+      now: () => new Date('2026-10-02T00:01:00.000Z'),
+    });
+
+    await expect(runtime.service.recoverStagedWorkspaceAdmission({
+      callId: 'staged-recovery:approved-hash',
+      workspaceId,
+      goalId: 'goal-1',
+      leaseGeneration: 4,
+      admissionGeneration: 2,
+      expectedWorkspaceHead: receipt.expectedWorkspaceHead,
+      expectedStagedFingerprint: 'staged-after-stage',
+    })).resolves.toBe(3);
+
+    expect(savedReceipt).toMatchObject({
+      writeLeaseGeneration: 4,
+      admissionGeneration: 3,
+      expectedWorkspaceHead: receipt.expectedWorkspaceHead,
+      observedWorkspaceHead: receipt.expectedWorkspaceHead,
+      dirtyState: 'dirty',
+      dirtyFingerprint: 'dirty-after-stage',
+      stagedFingerprint: 'staged-after-stage',
+      runtimeDeploymentId: currentRuntime.runtimeDeploymentId,
+      runtimeGeneration: currentRuntime.runtimeGeneration,
+      runtimeBuildCommit: currentRuntime.runtimeBuildCommit,
+    });
+  });
+
   it('advances non-Git admission after an exact successful owner mutation', async () => {
     const sourceSnapshotGeneration = 'snapshot-generation-1';
     let savedReceipt: WorkspaceAdmissionReceipt = {

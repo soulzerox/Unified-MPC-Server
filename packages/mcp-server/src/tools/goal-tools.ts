@@ -45,11 +45,19 @@ const runGoalSchema = z.object({
   scheduledContinuation: z.enum(['auto', 'off']).default('auto'),
 }).strict();
 
+const stagedRecoverySchema = z.object({
+  expectedAdmissionGeneration: z.number().int().min(1),
+  expectedWorkspaceHead: z.string().regex(/^[0-9a-f]{40,64}$/i),
+  expectedStagedPaths: z.array(z.string().min(1).max(4096)).min(1).max(100),
+  expectedStagedDiffSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+}).strict();
+
 const retryGoalAdmissionSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   goalId,
   leaseToken,
   leaseGeneration: z.number().int().min(1),
+  stagedRecovery: stagedRecoverySchema.optional(),
 }).strict();
 
 const getGoalSchema = z.union([
@@ -238,14 +246,20 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'retry_goal_workspace_admission',
-      description: 'Recover the current Goal Workspace admission after an acquired run_goal or scheduled claim returned admission_required. Requires the exact still-valid owner lease token and generation; stale and cross-session proofs are rejected. Does not create a goal, rotate a lease, or bypass the writer admission gate.',
+      description: 'Recover the current Goal Workspace admission after an acquired run_goal or scheduled claim returned admission_required. Requires the exact still-valid owner lease token and generation; stale and cross-session proofs are rejected. Optional stagedRecovery adopts an exact already-staged delta only when HEAD, staged paths, staged diff hash, repository identity, and prior admission generation match. Does not create a goal, rotate a lease, or bypass the writer admission gate.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: retryGoalAdmissionSchema,
       handler: async (input) => {
         const workspace = context.services.goalRunWorkspace;
         if (workspace === undefined) return missingService();
-        const recovered = await workspace.recoverRunWorkspace(context.actor, input);
+        const recovered = await workspace.recoverRunWorkspace(context.actor, {
+          workspaceId: input.workspaceId,
+          goalId: input.goalId,
+          leaseToken: input.leaseToken,
+          leaseGeneration: input.leaseGeneration,
+          ...(input.stagedRecovery === undefined ? {} : { stagedRecovery: input.stagedRecovery }),
+        });
         if (!recovered.ok) {
           if (recovered.error.code === 'PERMISSION_DENIED') return recovered;
           return ok({

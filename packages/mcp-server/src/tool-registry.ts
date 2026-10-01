@@ -38,6 +38,7 @@ import {
   parsePonytailModeOverride,
   prohibitedAgentCommandReason,
   prohibitedAgentGitInvocationReason,
+  parseGitInvocation,
   resolveEffectiveToolAvailability,
   resolvePonytailPolicy,
   workspacePonytailMode,
@@ -583,6 +584,8 @@ export class ToolRegistry {
         }
       }
       const codingMutation = mutationDecision.kind !== 'read' && isCodingMutation(tool.name, activeRoutedInput);
+      const admissionIdentityMutation = mutationDecision.kind !== 'read'
+        && isWorkspaceAdmissionIdentityMutation(tool.name, activeRoutedInput);
       if (codingMutation) {
         const harnessError = await this.validateHarnessMutation(
           mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId,
@@ -922,11 +925,11 @@ export class ToolRegistry {
         const endFence = fencedMutationEnd;
         fencedMutationEnd = undefined;
         void execution.deferredSettlement.then(async (settledResult) => {
-          await endFence?.(codingMutation && settledResult?.ok === true);
+          await endFence?.(workspaceAdmissionMutationSucceeded(codingMutation, admissionIdentityMutation, settledResult));
           await this.activity.end(callId, resultCode, Date.now() - started, resultMessage, resultDetail);
         });
       } else {
-        await fencedMutationEnd?.(codingMutation && response.isError !== true);
+        await fencedMutationEnd?.(workspaceAdmissionMutationSucceeded(codingMutation, admissionIdentityMutation, execution.settledResult));
         fencedMutationEnd = undefined;
         await this.activity.end(callId, resultCode, Date.now() - started, resultMessage, resultDetail);
       }
@@ -1948,6 +1951,30 @@ function normalizeActiveWorkspaceScopesProvider(options: ActiveWorkspaceScopeOpt
       return true;
     });
   };
+}
+
+const GIT_WORKSPACE_ADMISSION_MUTATION_SUBCOMMANDS = new Set([
+  'add', 'am', 'apply', 'bisect', 'checkout', 'cherry-pick', 'clean', 'commit',
+  'merge', 'mv', 'pull', 'rebase', 'reset', 'restore', 'revert', 'rm', 'stash',
+  'switch', 'symbolic-ref',
+]);
+
+function isWorkspaceAdmissionIdentityMutation(toolName: string, input: unknown): boolean {
+  if (toolName !== 'git' || !isRecord(input) || !Array.isArray(input.args)
+    || !input.args.every((arg) => typeof arg === 'string')) return false;
+  const subcommand = parseGitInvocation(input.args as string[]).subcommand;
+  return subcommand !== undefined && GIT_WORKSPACE_ADMISSION_MUTATION_SUBCOMMANDS.has(subcommand);
+}
+
+function workspaceAdmissionMutationSucceeded(
+  codingMutation: boolean,
+  admissionIdentityMutation: boolean,
+  result: Result<unknown> | undefined,
+): boolean {
+  if (result?.ok !== true) return false;
+  if (codingMutation) return true;
+  if (!admissionIdentityMutation || !isRecord(result.value)) return false;
+  return typeof result.value.exitCode === 'number' && result.value.exitCode === 0;
 }
 
 const NATIVE_ACTIVE_SCOPE_TOOLS = new Set(['office', 'audio', 'screen_record']);

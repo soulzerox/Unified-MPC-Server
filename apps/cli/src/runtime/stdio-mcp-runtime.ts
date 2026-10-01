@@ -418,7 +418,7 @@ export function createStdioMcpRuntime(
         || receipt.expectedWorkspaceHead !== recovery.expectedWorkspaceHead
         || receipt.observedWorkspaceHead !== recovery.expectedWorkspaceHead
         || receipt.goalId !== request.goalId
-        || receipt.writeLeaseGeneration !== request.leaseGeneration
+        || receipt.writeLeaseGeneration > request.leaseGeneration
         || receipt.invalidatedAt !== undefined) {
         return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery no longer matches the prior owner admission receipt', true));
       }
@@ -467,25 +467,31 @@ export function createStdioMcpRuntime(
         return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery diff hash does not match the approved delta', true));
       }
 
+      let recoveredGeneration: number;
       try {
-        await goalRuntimeControlPlane.recordSuccessfulWorkspaceMutation({
+        recoveredGeneration = await goalRuntimeControlPlane.recoverStagedWorkspaceAdmission({
           callId: `staged-recovery:${stagedDiffSha256}`,
           workspaceId: request.workspaceId,
           goalId: request.goalId,
           leaseGeneration: request.leaseGeneration,
           admissionGeneration: recovery.expectedAdmissionGeneration,
+          expectedWorkspaceHead: recovery.expectedWorkspaceHead,
+          expectedStagedFingerprint: observed.stagedFingerprint ?? '',
         });
       } catch {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery lost its durable admission compare-and-swap', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery lost its exact owner/source proof or durable compare-and-swap', true));
       }
       const recoveredReceipt = await rawWorkspaceRepository.getAdmissionReceipt(request.workspaceId);
       if (recoveredReceipt === null
-        || recoveredReceipt.admissionGeneration !== recovery.expectedAdmissionGeneration + 1
+        || recoveredReceipt.admissionGeneration !== recoveredGeneration
+        || recoveredGeneration !== recovery.expectedAdmissionGeneration + 1
         || recoveredReceipt.expectedWorkspaceHead !== recovery.expectedWorkspaceHead
-        || recoveredReceipt.stagedFingerprint !== observed.stagedFingerprint) {
+        || recoveredReceipt.stagedFingerprint !== observed.stagedFingerprint
+        || recoveredReceipt.writeLeaseGeneration !== request.leaseGeneration
+        || recoveredReceipt.runtimeGeneration !== runtimeAdmissionIdentity?.runtimeGeneration) {
         return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery receipt could not be verified after capture', true));
       }
-      return ok({ admissionGeneration: recoveredReceipt.admissionGeneration });
+      return ok({ admissionGeneration: recoveredGeneration });
     },
   };
 

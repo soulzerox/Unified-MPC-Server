@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -87,14 +87,16 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>) {
     providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner',
     providerVersion: '4.61.0', embeddingIndexGeneration: 1,
   })).ok).toBe(true);
-  const started = await driver.call('code_index', {
-    workspace_path: workspaceRoot, workspace_id: workspaceId, background: true, force: false,
-  });
-  if (!started.ok || typeof (started.value as { job_id?: unknown }).job_id !== 'string') {
-    throw new Error('Missing durable local job');
-  }
-  return { driver, jobId: (started.value as { job_id: string }).job_id,
-    counts: () => ({ connects, indexStarts, statusPolls }) };
+  // First guarded edit starts one native admission index. Do not call code_index
+  // again: that would start a second, unrelated public background job.
+  await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+  const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+    jobs: Array<{ jobId: string; workspaceId: string; providerJobId?: string }>;
+  };
+  const indexJob = persisted.jobs.find((job) => job.workspaceId === workspaceId
+    && job.providerJobId === 'idx_provider_same');
+  if (indexJob === undefined) throw new Error('Missing native admission job');
+  return { driver, jobId: indexJob.jobId, counts: () => ({ connects, indexStarts, statusPolls }) };
 }
 
 async function terminalJob(driver: NativeThaiRagProviderDriver, jobId: string): Promise<unknown> {

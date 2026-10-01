@@ -49,6 +49,11 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       primaryWorkspaceId: 'workspace-1',
       activeWorkspaceIds: ['workspace-1'],
     })),
+    goalRunWorkspace: {
+      async resolveRunWorkspace() { calls.push('goalRunWorkspace.resolveRunWorkspace'); return ok({ workspaceId: 'workspace-1' }); },
+      async admitRunWorkspace() { calls.push('goalRunWorkspace.admitRunWorkspace'); return ok({ admissionGeneration: 1 }); },
+      async recoverRunWorkspace() { calls.push('goalRunWorkspace.recoverRunWorkspace'); return ok({ admissionGeneration: 1 }); },
+    },
     thaiRag: {
       async health() {
         calls.push('thaiRag.health');

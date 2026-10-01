@@ -138,6 +138,67 @@ describe('scheduled continuation MCP tools', () => {
     expect(byName.get('cancel_scheduled_continuation')?.description).toContain('past first due time is not cleanup proof');
   });
 
+  it.each(['recurring_acquired', 'acquired'] as const)('rehydrates Goal Workspace writer admission for %s scheduled wake', async (outcome) => {
+    const admitRunWorkspace = vi.fn(async () => ok({ admissionGeneration: 7 }));
+    const services = {
+      scheduledContinuations: {
+        async claimScheduledContinuation() {
+          return ok({
+            outcome,
+            goal: {
+              goalId: 'goal-1', workspaceId: 'goal-workspace-1',
+              leaseExpiresAt: '2026-10-01T12:00:00.000Z',
+            },
+            leaseToken: 'current-token', leaseGeneration: 4,
+          });
+        },
+      },
+      goalRunWorkspace: { admitRunWorkspace },
+    } as unknown as McpApplicationServices;
+    const claim = scheduledContinuationTools(context(services)).find((entry) => entry.name === 'claim_scheduled_continuation');
+    if (claim === undefined) throw new Error('claim tool missing');
+    const result = await claim.execute({ continuationId: 'c-1', leaseSeconds: 600 }, new AbortController().signal);
+    expect(result).toMatchObject({
+      ok: true,
+      value: { outcome, workspaceId: 'goal-workspace-1', admissionGeneration: 7, leaseToken: 'current-token' },
+    });
+    expect(admitRunWorkspace).toHaveBeenCalledWith(actor, {
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1',
+      leaseGeneration: 4, leaseExpiresAt: '2026-10-01T12:00:00.000Z',
+    });
+  });
+
+  it('retains the acquired scheduled lease and fails closed when writer admission is unavailable', async () => {
+    const services = {
+      scheduledContinuations: {
+        async claimScheduledContinuation() {
+          return ok({
+            outcome: 'recurring_acquired',
+            goal: { goalId: 'goal-1', workspaceId: 'goal-workspace-1', leaseExpiresAt: '2026-10-01T12:00:00.000Z' },
+            leaseToken: 'current-token', leaseGeneration: 4,
+          });
+        },
+      },
+      goalRunWorkspace: {
+        async admitRunWorkspace() { return err(appError('WORKSPACE_ADMISSION_STALE', 'admission temporarily unavailable', true)); },
+      },
+    } as unknown as McpApplicationServices;
+    const claim = scheduledContinuationTools(context(services)).find((entry) => entry.name === 'claim_scheduled_continuation');
+    if (claim === undefined) throw new Error('claim tool missing');
+    const result = await claim.execute({ continuationId: 'c-1', leaseSeconds: 600 }, new AbortController().signal);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        outcome: 'admission_required',
+        admissionRequired: true,
+        leaseToken: 'current-token',
+        leaseGeneration: 4,
+        currentWakeMayReturn: false,
+        nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease',
+      },
+    });
+  });
+
   it('passes explicit user confirmation through for user-attested manual Scheduled Task deletion', async () => {
     const received: unknown[] = [];
     const services = {

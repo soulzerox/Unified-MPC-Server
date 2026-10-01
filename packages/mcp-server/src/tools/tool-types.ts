@@ -79,6 +79,13 @@ export interface GoalRunWorkspacePort {
     readonly leaseGeneration: number;
     readonly leaseExpiresAt: string;
   }): Promise<Result<{ readonly admissionGeneration: number }>>;
+  /** Retry a failed post-acquisition admission without rotating the durable lease. */
+  recoverRunWorkspace(actor: FileActor, request: {
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseToken: string;
+    readonly leaseGeneration: number;
+  }): Promise<Result<{ readonly admissionGeneration: number }>>;
 }
 
 export interface McpRuntimeTiming {

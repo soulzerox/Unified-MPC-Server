@@ -148,7 +148,7 @@ export type ClaimScheduledContinuationResult =
       readonly outcome: 'acquired';
       readonly continuation: ScheduledContinuationSnapshot;
       readonly successor: ScheduledContinuationSnapshot;
-      readonly goal: Omit<RunGoalResult, 'leaseToken'>;
+      readonly goal: Omit<RunGoalResult, 'leaseToken'> & { readonly workspaceId: string };
       readonly leaseToken: string;
       readonly leaseGeneration: number;
       readonly acquisition: 'normal' | 'expired_lease' | 'orphan_recovered';
@@ -160,7 +160,7 @@ export type ClaimScheduledContinuationResult =
   | {
       readonly outcome: 'recurring_acquired';
       readonly continuation: ScheduledContinuationSnapshot;
-      readonly goal: Omit<RunGoalResult, 'leaseToken'>;
+      readonly goal: Omit<RunGoalResult, 'leaseToken'> & { readonly workspaceId: string };
       readonly leaseToken: string;
       readonly leaseGeneration: number;
       readonly acquisition: 'normal' | 'expired_lease' | 'orphan_recovered';
@@ -615,7 +615,7 @@ export class ScheduledContinuationService {
           outcome: 'acquired',
           continuation,
           successor,
-          goal: { ...toRunSnapshot(goal), acquired: true },
+          goal: { ...toRunSnapshot(goal), workspaceId: goal.workspaceId, acquired: true },
           leaseToken,
           leaseGeneration: claimed.goal.leaseGeneration,
           acquisition: claimed.acquisition,
@@ -629,7 +629,7 @@ export class ScheduledContinuationService {
         return ok({
           outcome: 'recurring_acquired',
           continuation,
-          goal: { ...toRunSnapshot(goal), acquired: true },
+          goal: { ...toRunSnapshot(goal), workspaceId: goal.workspaceId, acquired: true },
           leaseToken,
           leaseGeneration: claimed.goal.leaseGeneration,
           acquisition: claimed.acquisition,

@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -309,10 +309,32 @@ export function createStdioMcpRuntime(
           && entry.parentWorkspaceId === parent.id);
       if (existing !== undefined) return ok({ workspaceId: existing.id });
 
+      // A selected feature/detached worktree may contain commits not on origin/main.
+      // Pin its exact committed head; only new goals on main use fresh origin/main.
+      const currentBranch = await gitService.run(runActor, {
+        workspaceId: parent.id,
+        args: ['branch', '--show-current'],
+      });
+      if (!currentBranch.ok) return currentBranch;
+      if (currentBranch.value.exitCode !== 0) {
+        return err(appError('CONFLICT', 'Cannot identify project branch for Goal Workspace admission', true));
+      }
+      const branchName = currentBranch.value.stdout.trim();
+      let baseRevision: string | undefined;
+      if (branchName !== 'main' && branchName !== 'master') {
+        const history = await gitService.log(runActor, parent.id, { maxCommits: 1 });
+        if (!history.ok) return history;
+        const head = history.value.entries[0]?.hash;
+        if (head === undefined || !/^[0-9a-f]{40}$/.test(head)) {
+          return err(appError('CONFLICT', 'Cannot pin the selected feature branch commit', true));
+        }
+        baseRevision = head;
+      }
       const created = await goalWorkspaceService.create({
         goalId,
         parentWorkspaceId: parent.id,
         branchName: `goal/${goalId}`,
+        ...(baseRevision === undefined ? {} : { baseRevision }),
         ...(runActor.sessionId === undefined ? {} : { ownerSessionId: runActor.sessionId }),
       });
       if (created.ok) return ok({ workspaceId: created.value.workspace.id });
@@ -349,6 +371,29 @@ export function createStdioMcpRuntime(
         ));
       }
       return ok({ admissionGeneration: bootstrapped.admission.admissionGeneration });
+    },
+    async recoverRunWorkspace(runActor, request) {
+      const goal = await goalRepository.getById(request.goalId);
+      const actualDigest = createHash('sha256').update(request.leaseToken).digest();
+      const expectedDigest = Buffer.from(goal?.leaseTokenHash ?? '', 'hex');
+      if (goal === null
+        || goal.status !== 'active'
+        || goal.workspaceId !== request.workspaceId
+        || goal.leaseGeneration !== request.leaseGeneration
+        || goal.leaseOwnerClientId !== runActor.clientId
+        || goal.leaseOwnerSessionId !== (runActor.sessionId?.trim() || runActor.clientId)
+        || goal.leaseExpiresAt === undefined
+        || Date.parse(goal.leaseExpiresAt) <= Date.now()
+        || expectedDigest.length !== actualDigest.length
+        || !timingSafeEqual(expectedDigest, actualDigest)) {
+        return err(appError('PERMISSION_DENIED', 'Stale or invalid goal lease proof; admission retry rejected'));
+      }
+      return goalRunWorkspace.admitRunWorkspace(runActor, {
+        workspaceId: request.workspaceId,
+        goalId: request.goalId,
+        leaseGeneration: request.leaseGeneration,
+        leaseExpiresAt: goal.leaseExpiresAt ?? '',
+      });
     },
   };
 

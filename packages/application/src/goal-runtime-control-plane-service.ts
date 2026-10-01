@@ -473,18 +473,27 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
         ...observedAdmissionObservation,
         leaseGeneration: receipt.writeLeaseGeneration,
       });
-      if (withoutLeaseChange.status === 'ADMITTED') {
+      // A restart may rotate the runtime identity at the same time that the
+      // durable goal reacquires its writer lease. Refresh both in one CAS only
+      // when all other Git, branch, content and checkpoint proof still matches.
+      const runtimeAlsoChanged = withoutLeaseChange.status === 'RUNTIME_GENERATION_CHANGED'
+        && currentRuntime !== undefined;
+      if (withoutLeaseChange.status === 'ADMITTED' || runtimeAlsoChanged) {
         const now = this.now().toISOString();
         const refreshed: WorkspaceAdmissionReceipt = {
           ...receipt,
+          ...(runtimeAlsoChanged && currentRuntime !== undefined ? currentRuntime : {}),
           admissionId: createHash('sha256')
-            .update([receipt.admissionId, 'writer-lease', String(observed.writerLeaseGeneration), now].join('\0'))
+            .update([receipt.admissionId, 'writer-lease', String(observed.writerLeaseGeneration),
+              ...(runtimeAlsoChanged && currentRuntime !== undefined ? [currentRuntime.runtimeGeneration] : []),
+              now].join('\0'))
             .digest('hex'),
           writeLeaseGeneration: observed.writerLeaseGeneration,
           admissionGeneration: receipt.admissionGeneration + 1,
           createdAt: now,
         };
         try {
+          // The repository also checks the exact live writer lease and expiry.
           const saved = await this.workspaceAdmissionReceipts.compareAndSwapAdmissionReceipt(
             workspaceId,
             receipt.admissionGeneration,
@@ -492,7 +501,12 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
             refreshed,
           );
           return saved
-            ? { status: 'ADMITTED', admissionGeneration: refreshed.admissionGeneration, refreshedFromWriterLeaseGeneration: true }
+            ? {
+              status: 'ADMITTED',
+              admissionGeneration: refreshed.admissionGeneration,
+              refreshedFromWriterLeaseGeneration: true,
+              ...(runtimeAlsoChanged ? { refreshedFromRuntimeGeneration: true } : {}),
+            }
             : { status: 'RECOVERY_REQUIRED', reason: 'writer_lease_admission_refresh_raced', admissionGeneration: receipt.admissionGeneration };
         } catch {
           return { status: 'RECOVERY_REQUIRED', reason: 'writer_lease_admission_refresh_failed', admissionGeneration: receipt.admissionGeneration };

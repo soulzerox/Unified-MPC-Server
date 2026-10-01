@@ -129,6 +129,30 @@ describe('GitAdapter integration', () => {
     expect(clean.value.head).not.toBe(clean.value.baseSha);
     expect(clean.value.mergeBaseSha).toBe(clean.value.baseSha);
 
+    // A dedicated goal created from a feature branch stores its immutable
+    // parent commit SHA, not necessarily an existing refs/heads/* name.
+    const pinned = await adapter.observeWorkspace(root, {
+      baseRef: clean.value.baseSha!,
+      excludedPathSegments: ['dist'],
+    });
+    expect(pinned).toMatchObject({
+      ok: true,
+      value: {
+        baseRef: clean.value.baseSha,
+        baseSha: clean.value.baseSha,
+        mergeBaseSha: clean.value.baseSha,
+        head: clean.value.head,
+      },
+    });
+    await expect(adapter.observeWorkspace(root, { baseRef: 'abc123' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    await expect(adapter.observeWorkspace(root, { baseRef: 'refs/heads/main..evil' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+
     await writeFile(path.join(root, 'src', 'tracked.ts'), 'export const value = 2;\n', 'utf8');
     const trackedDirty = await adapter.observeWorkspace(root, { excludedPathSegments: ['dist'] });
     expect(trackedDirty.ok && trackedDirty.value.dirtyFingerprint).not.toBe(clean.value.dirtyFingerprint);

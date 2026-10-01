@@ -488,7 +488,7 @@ export function createStdioMcpRuntime(
         || recoveredReceipt.expectedWorkspaceHead !== recovery.expectedWorkspaceHead
         || recoveredReceipt.stagedFingerprint !== observed.stagedFingerprint
         || recoveredReceipt.writeLeaseGeneration !== request.leaseGeneration
-        || recoveredReceipt.runtimeGeneration !== runtimeAdmissionIdentity?.runtimeGeneration) {
+        || recoveredReceipt.runtimeGeneration !== options.runtimeAdmissionIdentity?.runtimeGeneration) {
         return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery receipt could not be verified after capture', true));
       }
       return ok({ admissionGeneration: recoveredGeneration });

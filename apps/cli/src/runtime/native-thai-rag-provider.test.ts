@@ -184,17 +184,35 @@ describe('NativeThaiRagProviderDriver', () => {
         workspace_id: workspaceId, file_path: 'src/probe.ts',
       });
       expect(admitted.ok).toBe(true);
-      const created = await driver.call('code_index', {
-        workspace_path: workspaceRoot, workspace_id: workspaceId, force: false, background: true,
-      });
-      if (!created.ok || !isRecord(created.value) || typeof created.value.job_id !== 'string') {
-        throw new Error('Could not create background index job: ' + JSON.stringify(created));
+      // The cold admission monitor can expose its local job receipt for a
+      // short time after the provider reports done. Wait until that exact
+      // warmup job is terminal and a distinct normal job has been created.
+      let created: Awaited<ReturnType<typeof driver.call>> | undefined;
+      let normalJobId: string | undefined;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        created = await driver.call('code_index', {
+          workspace_path: workspaceRoot, workspace_id: workspaceId, force: false, background: true,
+        });
+        if (!created.ok || !isRecord(created.value) || typeof created.value.job_id !== 'string') {
+          throw new Error('Could not create background index job: ' + JSON.stringify(created));
+        }
+        const candidate = await driver.call('index_status', {
+          workspace_id: workspaceId, job_id: created.value.job_id,
+        });
+        if (candidate.ok && isRecord(candidate.value) && candidate.value.providerJobId === 'idx_failure') {
+          normalJobId = created.value.job_id;
+          break;
+        }
+        expect(candidate).toMatchObject({ ok: true, value: { providerJobId: 'idx_warmup' } });
+        await new Promise((resolve) => setTimeout(resolve, 20));
       }
+      expect(normalJobId).toBeDefined();
+      if (normalJobId === undefined) throw new Error('Normal background index never started after admission');
       let final: Awaited<ReturnType<typeof driver.call>> | undefined;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
         final = await driver.call('index_status', {
-          workspace_id: workspaceId, job_id: created.value.job_id,
+          workspace_id: workspaceId, job_id: normalJobId,
         });
         if (final.ok && isRecord(final.value) && final.value.status === 'failed') break;
       }

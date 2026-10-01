@@ -1,5 +1,5 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import { isMachineRootPath, isProjectWorkspace, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
+import { isHostPathWithin, isMachineRootPath, isProjectWorkspace, workspaceLifecycleKind, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 
 export interface WorkspaceSelectionSnapshot {
   readonly primaryWorkspaceId: string;
@@ -58,14 +58,34 @@ export class WorkspaceSelectionService {
   }
 
   private async state(): Promise<Result<ResolvedSelection>> {
-    const projects = (await this.repository.list()).filter((project) => isProjectWorkspace(project)
+    const registered = await this.repository.list();
+    const projects = registered.filter((project) => isProjectWorkspace(project)
+      && (project.archivedAt === undefined || project.archivedAt === null)
       && !isMachineRootPath(project.realRootPath)
       && !isMachineRootPath(project.rootPath));
     if (projects.length === 0) {
       this.persist({ primaryWorkspaceId: '', activeWorkspaceIds: [] });
       return err(appError('WORKSPACE_NOT_FOUND', 'No registered project workspace is available', true));
     }
-    const ids = new Set(projects.map((project) => project.id));
+
+    // Goal workspaces have a distinct lifecycle kind but are legitimate editable
+    // projects only when bound to an existing, non-archived parent project and
+    // contained within its canonical root. Never activate arbitrary goal records.
+    const parentProjects = new Map(projects.map((project) => [project.id, project]));
+    const goals = registered.filter((workspace) => {
+      if (workspaceLifecycleKind(workspace) !== 'goal'
+        || (workspace.archivedAt !== undefined && workspace.archivedAt !== null)
+        || !workspace.goalId?.trim()
+        || !workspace.parentWorkspaceId) return false;
+      const parent = parentProjects.get(workspace.parentWorkspaceId);
+      if (parent === undefined
+        || isMachineRootPath(workspace.realRootPath)
+        || isMachineRootPath(workspace.rootPath)) return false;
+      return workspace.realRootPath !== parent.realRootPath
+        && isHostPathWithin(parent.realRootPath, workspace.realRootPath);
+    });
+    const selectable = [...projects, ...goals];
+    const ids = new Set(selectable.map((workspace) => workspace.id));
     const fallback = ids.has(this.initialWorkspaceId) ? this.initialWorkspaceId : projects[0]!.id;
     const parsed = parseSelection(this.store?.get() ?? this.memory);
     const active = [...new Set(parsed?.activeWorkspaceIds ?? [])].filter((id) => ids.has(id));
@@ -73,7 +93,7 @@ export class WorkspaceSelectionService {
     const primary = parsed !== null && ids.has(parsed.primaryWorkspaceId) && active.includes(parsed.primaryWorkspaceId) ? parsed.primaryWorkspaceId : active[0]!;
     const snapshot = { primaryWorkspaceId: primary, activeWorkspaceIds: [primary, ...active.filter((id) => id !== primary)] };
     this.persist(snapshot);
-    return ok({ projects, ...snapshot });
+    return ok({ projects: selectable, ...snapshot });
   }
 
   private save(primaryWorkspaceId: string, activeWorkspaceIds: readonly string[]): Result<WorkspaceSelectionSnapshot> {

@@ -144,7 +144,6 @@ describe('NativeThaiRagProviderDriver', () => {
   it('does not display a failed provider result as completed in the normal background monitor', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
-    let terminalFailureAllowed = false;
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
@@ -153,23 +152,22 @@ describe('NativeThaiRagProviderDriver', () => {
       clientFactory: clientFactory({
         handshake: cancellableHandshake(),
         includeCancelIndex: true,
-        async onCall(tool): Promise<unknown> {
-          if (tool === 'code_index') return success('code_index', {
-            status: 'ok',
-            data: { status: 'running', job_id: 'idx_failure', workspace_id: workspaceId },
-          });
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') {
+            const providerJobId = args.background === true ? 'idx_warmup' : 'idx_failure';
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: providerJobId, workspace_id: workspaceId },
+            });
+          }
           if (tool === 'index_status') return success('index_status', {
             status: 'ok',
-            data: terminalFailureAllowed
-              ? {
-                status: 'done', job_id: 'idx_failure', workspace_id: workspaceId,
-                indexed_files: 1, skipped_files: 0, total_files: 2,
-                result: { status: 'failed', errors: { 'broken.ts': 'Chroma compaction failed' } },
-              }
-              : {
-                status: 'running', job_id: 'idx_failure', workspace_id: workspaceId,
-                indexed_files: 0, skipped_files: 0, total_files: 2,
-              },
+            data: args.job_id === 'idx_warmup'
+              ? { status: 'done', job_id: 'idx_warmup', workspace_id: workspaceId,
+                  result: { status: 'complete', indexed: 0, errors: {} } }
+              : { status: 'done', job_id: 'idx_failure', workspace_id: workspaceId,
+                  indexed_files: 1, skipped_files: 0, total_files: 2,
+                  result: { status: 'failed', errors: { 'broken.ts': 'Chroma compaction failed' } } },
           });
           return success(tool);
         },
@@ -180,15 +178,18 @@ describe('NativeThaiRagProviderDriver', () => {
       providerVersion: '4.61.0', embeddingIndexGeneration: 1,
     })).ok).toBe(true);
     try {
+      // Drain native cold-workspace admission with a distinct successful job,
+      // then exercise a second provider-owned normal background failure.
+      const admitted = await driver.call('pre_edit_context', {
+        workspace_id: workspaceId, file_path: 'src/probe.ts',
+      });
+      expect(admitted.ok).toBe(true);
       const created = await driver.call('code_index', {
-        workspace_path: workspaceRoot, workspace_id: workspaceId, background: true,
+        workspace_path: workspaceRoot, workspace_id: workspaceId, force: false, background: true,
       });
       if (!created.ok || !isRecord(created.value) || typeof created.value.job_id !== 'string') {
         throw new Error('Could not create background index job: ' + JSON.stringify(created));
       }
-      // Startup admission can begin its own provider job. Release the mock
-      // terminal failure only after the explicit local job is durably known.
-      terminalFailureAllowed = true;
       let final: Awaited<ReturnType<typeof driver.call>> | undefined;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -198,7 +199,7 @@ describe('NativeThaiRagProviderDriver', () => {
         if (final.ok && isRecord(final.value) && final.value.status === 'failed') break;
       }
       expect(final).toMatchObject({ ok: true, value: {
-        status: 'failed', indexedFiles: 1, skippedFiles: 0, totalFiles: 2,
+        status: 'failed', providerJobId: 'idx_failure', indexedFiles: 1, skippedFiles: 0, totalFiles: 2,
       } });
     } finally {
       await driver.stop();

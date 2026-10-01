@@ -9,7 +9,7 @@ function mockFactory(): { factory: McpClientFactory; counts: { connects: number;
       return {
         listTools: async () => [{ name: 'index_status', description: 'Read-only status' }],
         listResources: async () => [],
-        callTool: async (_name, _args, signal) => {
+        callTool: async (_name, _args, signal): Promise<unknown> => {
           counts.calls += 1;
           if (counts.calls === 1) {
             await new Promise<never>((_resolve, reject) => {
@@ -18,7 +18,7 @@ function mockFactory(): { factory: McpClientFactory; counts: { connects: number;
           }
           return { content: [] };
         },
-        close: async () => { counts.closes += 1; },
+        close: async (): Promise<void> => { counts.closes += 1; },
       };
     },
   };

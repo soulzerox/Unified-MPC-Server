@@ -61,7 +61,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly workspaceRoots = new Map<string, string>();
   private readonly workspaceRootIds = new Map<string, string>();
   private readonly pendingReindexIds = new Set<string>();
-  private readonly forceReindexIds = new Set<string>();
   private readonly workspaceIndexJobIds = new Map<string, string>();
   private readonly workspaceIndexMonitors = new Map<string, Promise<Result<void>>>();
   private indexingWorkspaceId: string | undefined;
@@ -556,16 +555,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!aliases.ok) return aliases;
     if (!this.refreshIsCurrent(generation)) return this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
     for (const workspaceId of aliases.value) {
+      // New or repaired aliases require source verification, not a forced rebuild.
       this.pendingReindexIds.add(workspaceId);
-      this.forceReindexIds.add(workspaceId);
     }
     const relinked = workspaces.filter((workspace) => {
       const previousRoot = this.workspaceRoots.get(workspace.id);
       return previousRoot !== undefined && previousRoot !== path.resolve(workspace.realRootPath);
     });
     for (const workspace of relinked) {
+      // The provider compares file hashes and fingerprints when a root changes.
       this.pendingReindexIds.add(workspace.id);
-      this.forceReindexIds.add(workspace.id);
     }
     if (generation === this.lifecycleGeneration && this.started && this.launchConfig !== undefined) {
       const pending = new Set(this.pendingReindexIds);
@@ -573,7 +572,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         && requestedWorkspaceId === entry.id)) {
         return this.startWorkspaceAdmissionIndex(
           workspace,
-          this.forceReindexIds.has(workspace.id),
+          false, // Preserve provider-side validated incremental reuse on admission.
           generation,
           sourcesRoot,
           workspaces,
@@ -674,7 +673,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           if (entry.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(entry.rootPath), entry.id);
         }
         this.pendingReindexIds.delete(workspace.id);
-        this.forceReindexIds.delete(workspace.id);
         return ok(undefined);
       } catch (error: unknown) {
         await this.jobs.fail(job.jobId, errorMessage(error), ownerId).catch(() => undefined);

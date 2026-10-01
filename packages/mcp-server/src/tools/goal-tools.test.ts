@@ -206,6 +206,34 @@ describe('durable goal MCP tools', () => {
     });
   });
 
+  it('passes an exact bounded staged-recovery proof without weakening lease ownership', async () => {
+    let received: unknown;
+    const registry = new ToolRegistry({
+      goalRunWorkspace: {
+        async recoverRunWorkspace(_actor: unknown, request: unknown): Promise<unknown> {
+          received = request;
+          return ok({ admissionGeneration: 12 });
+        },
+      },
+    } as unknown as McpToolContext['services'], actor, {
+      activeWorkspaceScopeProvider: async () => ({ workspaceId: 'parent-project', rootPath: 'E:\\parent' }),
+    });
+    const stagedRecovery = {
+      expectedAdmissionGeneration: 11,
+      expectedWorkspaceHead: 'a'.repeat(40),
+      expectedStagedPaths: ['src/a.ts', 'src/b.ts'],
+      expectedStagedDiffSha256: 'b'.repeat(64),
+    };
+    await expect(registry.invoke('retry_goal_workspace_admission', {
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseToken: 'current-token',
+      leaseGeneration: 8, stagedRecovery,
+    })).resolves.toMatchObject({ structuredContent: { outcome: 'admitted', admissionGeneration: 12 } });
+    expect(received).toEqual({
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseToken: 'current-token',
+      leaseGeneration: 8, stagedRecovery,
+    });
+  });
+
   it('rejects stale retry proofs without echoing the supplied token', async () => {
     const services = {
       goalRunWorkspace: {

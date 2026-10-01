@@ -64,6 +64,10 @@ describe('NativeThaiRagProviderDriver', () => {
       ['version', {}],
     ];
     for (const [tool, args] of probes) await driver.call(tool, args);
+    // Explicit user-requested rebuilds must still reach the provider unchanged.
+    await expect(driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId, force: true }))
+      .resolves.toMatchObject({ ok: true });
+    expect(calls.some(({ tool, args }) => tool === 'code_index' && args.force === true)).toBe(true);
     await expect(driver.call('record_event', { event: 'missing-scope' })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(calls.map(({ tool }) => tool)).toEqual(expect.arrayContaining(['remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius', 'code_index']));
     expect(calls.filter(({ tool }) => THAI_RAG_CONFORMANCE_FIXTURE.operations[tool as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations].scope === 'workspace_id').every(({ args }) => args.workspace_id === workspaceId)).toBe(true);
@@ -144,17 +148,18 @@ describe('NativeThaiRagProviderDriver', () => {
   it('does not display a failed provider result as completed in the normal background monitor', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
+    let indexCallCount = 0;
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
       launchConfig: { command: '/python' },
-      workspacesProvider: async () => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       indexJobPollMs: 10,
       clientFactory: clientFactory({
         handshake: cancellableHandshake(),
         includeCancelIndex: true,
         async onCall(tool, args): Promise<unknown> {
           if (tool === 'code_index') {
-            const providerJobId = args.force === true ? 'idx_warmup' : 'idx_failure';
+            const providerJobId = ++indexCallCount === 1 ? 'idx_warmup' : 'idx_failure';
             return success('code_index', {
               status: 'ok',
               data: { status: 'running', job_id: providerJobId, workspace_id: workspaceId },
@@ -178,8 +183,8 @@ describe('NativeThaiRagProviderDriver', () => {
       providerVersion: '4.61.0', embeddingIndexGeneration: 1,
     })).ok).toBe(true);
     try {
-      // Cold admission has force=true for a newly linked source alias; the
-      // explicit normal job below has force=false. Both use background=true.
+      // Cold admission and the explicit normal job both use force=false;
+      // identify them by job order, not by a forced first pass.
       // Drain native cold-workspace admission with a distinct successful job,
       // then exercise a second provider-owned normal background failure.
       const admitted = await driver.call('pre_edit_context', {
@@ -1662,7 +1667,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const result = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/index.ts' });
 
     expect(result.ok).toBe(true);
-    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === recoveredWorkspaceId && call.args.force === true)).toBe(true);
+    expect(calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === recoveredWorkspaceId && call.args.force === false)).toBe(true);
     expect(calls.at(-1)?.args).toMatchObject({ workspace_id: recoveredWorkspaceId, file_path: `${recoveredWorkspaceId}/src/index.ts` });
     await expect(access(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).rejects.toThrow();
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', recoveredWorkspaceId))).resolves.toBe(await realpath(recoveredRoot));
@@ -1693,7 +1698,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const second = createDriver(relinkedRoot);
     expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
     await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
-    await expect.poll(() => calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === workspaceId && call.args.force === true)).toBe(true);
+    await expect.poll(() => calls.some((call) => call.tool === 'code_index' && call.args.workspace_id === workspaceId && call.args.force === false)).toBe(true);
     await second.stop();
   });
 

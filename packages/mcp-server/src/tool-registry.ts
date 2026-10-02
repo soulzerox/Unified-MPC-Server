@@ -196,6 +196,7 @@ const TRUSTED_INTERNAL_MEMORY_RAG_TOOLS = new Set([
   'rag_code_search',
   'rag_code_context',
   'rag_code_blast_radius',
+  'rag_adopt_legacy_index',
   'rag_code_index',
   'rag_index_status',
   'rag_cancel_index',

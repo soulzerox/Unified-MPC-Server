@@ -121,6 +121,10 @@ export function inspectMutationOperation(
       return boundedWrite(`${toolName} records bounded selective workspace memory through the parent-owned native Thai-RAG provider`);
     case 'rag_remember':
       return boundedWrite('rag_remember commits one bounded selective long-term memory through the parent-owned native Thai-RAG provider');
+    case 'rag_adopt_legacy_index':
+      return value.dryRun === false
+        ? boundedWrite('rag_adopt_legacy_index activates only provider-validated legacy index data for one registered workspace and never embeds code')
+        : read('rag_adopt_legacy_index dry-run validates legacy ownership, snapshot, and profile compatibility without mutating index state');
     case 'rag_code_index':
       return boundedWrite('rag_code_index refreshes only the parent-owned native code index for one registered workspace');
     case 'rag_cancel_index':

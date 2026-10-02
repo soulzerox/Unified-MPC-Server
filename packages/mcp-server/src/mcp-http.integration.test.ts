@@ -7,6 +7,14 @@ import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
 import { DEFAULT_LEGACY_SESSION_TTL_MS, LEGACY_SESSION_EVICTION_REASONS, UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
 
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
+const TEST_BUILD_PROVENANCE = {
+  version: '4.61.0',
+  buildVersion: '4.61.0+0123456789ab',
+  buildCommit: '0123456789abcdef0123456789abcdef01234567',
+  buildShortCommit: '0123456789ab',
+  buildTime: '2026-10-02T00:00:00.000Z',
+  buildDirty: false,
+} as const;
 
 describe('MCP localhost HTTP transport', () => {
   let handle: McpHttpServerHandle;
@@ -45,6 +53,7 @@ describe('MCP localhost HTTP transport', () => {
         },
       } as unknown as McpApplicationServices,
       actor: { clientId: 'http-test', clientName: 'http-test' },
+      buildProvenance: TEST_BUILD_PROVENANCE,
       activeWorkspaceScopeProvider: async () => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' }),
       activityTracker,
     });
@@ -67,6 +76,7 @@ describe('MCP localhost HTTP transport', () => {
 
     try {
       await client.connect(transport);
+      expect(client.getServerVersion()).toMatchObject({ name: 'Unified-MPC-Server', version: TEST_BUILD_PROVENANCE.buildVersion });
       const first = await client.listTools();
       const second = await client.listTools();
 

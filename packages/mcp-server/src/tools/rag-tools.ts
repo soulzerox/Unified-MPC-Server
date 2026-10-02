@@ -1,5 +1,6 @@
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import {
+  ragAdoptLegacyIndexSchema,
   ragCancelIndexSchema,
   ragCodeBlastRadiusSchema,
   ragCodeContextSchema,
@@ -114,6 +115,23 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
         : context.nativeRagCall(input.workspaceId, 'code_blast_radius', {
             symbol_name: input.symbolName,
             ...(input.maxDepth === undefined ? {} : { max_depth: input.maxDepth }),
+          }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_adopt_legacy_index',
+      description: 'Validate and optionally adopt a complete legacy Thai-RAG index as the first active generation for one canonical workspace. Defaults to dry-run and never re-embeds code.',
+      ...safeWrite,
+      inputSchema: ragAdoptLegacyIndexSchema,
+      handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
+        ? missingService()
+        : context.nativeRagCall(input.workspaceId, 'adopt_legacy_index', {
+            dry_run: input.dryRun !== false,
+            ...(input.legacyEmbeddingProfileFingerprint === undefined ? {} : {
+              legacy_embedding_profile_fingerprint: input.legacyEmbeddingProfileFingerprint,
+            }),
+            ...(input.legacyChunkingFingerprint === undefined ? {} : {
+              legacy_chunking_fingerprint: input.legacyChunkingFingerprint,
+            }),
           }, signal, budget),
     }),
     defineTool({

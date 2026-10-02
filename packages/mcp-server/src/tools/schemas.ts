@@ -652,6 +652,13 @@ export const ragCodeIndexSchema = z.object({
   background: z.boolean().optional(),
 }).strict();
 
+export const ragAdoptLegacyIndexSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  dryRun: z.boolean().optional(),
+  legacyEmbeddingProfileFingerprint: z.string().trim().min(1).max(512).optional(),
+  legacyChunkingFingerprint: z.string().trim().min(1).max(512).optional(),
+}).strict();
+
 export const ragIndexStatusSchema = z.object({
   workspaceId: workspaceIdSchema,
   jobId: z.string().trim().min(1).max(256),

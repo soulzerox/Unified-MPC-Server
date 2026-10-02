@@ -13,6 +13,7 @@ import {
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
   THAI_RAG_CANCEL_CAPABILITY,
   THAI_RAG_EMBEDDING_COMPATIBILITY,
+  THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_PRODUCTION_BRIDGE,
   validateThaiRagHandshake,
   type ThaiRagProviderDriver,
@@ -168,6 +169,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         'Native Thai-RAG worker attests cancellable index jobs but does not expose cancel_index',
         true,
         { reason: 'missing-capability', missing: THAI_RAG_CANCEL_CAPABILITY },
+      ));
+    }
+    const versionSupportsLegacyAdoption = handshake.value.capabilities.includes(
+      THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+    );
+    if (versionSupportsLegacyAdoption && !toolNames.has(THAI_RAG_LEGACY_ADOPTION_CAPABILITY)) {
+      await this.sessions.close().catch(() => undefined);
+      return err(appError(
+        'CONFLICT',
+        'Native Thai-RAG worker attests legacy index adoption but does not expose adopt_legacy_index',
+        true,
+        { reason: 'missing-capability', missing: THAI_RAG_LEGACY_ADOPTION_CAPABILITY },
       ));
     }
     const healthProbe = await this.callWorker('health', {}, signal);

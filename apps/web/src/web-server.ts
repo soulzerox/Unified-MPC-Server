@@ -1397,6 +1397,8 @@ export interface WebRagIndexProgress {
   readonly jobId: string;
   readonly workspaceId: string;
   readonly status: string;
+  readonly force?: boolean;
+  readonly pendingFiles?: number;
   readonly indexedFiles?: number;
   readonly skippedFiles?: number;
   readonly totalFiles?: number;
@@ -1430,6 +1432,7 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
     const indexedFiles = counter(job.indexedFiles);
     const skippedFiles = counter(job.skippedFiles);
     const totalFiles = counter(job.totalFiles);
+    const force = typeof job.force === 'boolean' ? job.force : undefined;
     const cacheHitFiles = counter(job.cacheHitFiles);
     const cacheHitChunks = counter(job.cacheHitChunks);
     const cacheMissFiles = counter(job.cacheMissFiles);
@@ -1474,6 +1477,7 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
       && newEmbeddedChunks! <= cacheMissChunks!;
     const completed = indexedFiles !== undefined && skippedFiles !== undefined ? indexedFiles + skippedFiles : undefined;
     const countsValid = completed !== undefined && totalFiles !== undefined && completed <= totalFiles;
+    const pendingFiles = countsValid ? totalFiles - completed : undefined;
     const status = String(job.status);
     const stage: WebRagIndexProgress['stage'] =
       status === 'completed' ? 'completed'
@@ -1485,6 +1489,8 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
       jobId: job.jobId,
       workspaceId: job.workspaceId,
       status,
+      ...(force === undefined ? {} : { force }),
+      ...(pendingFiles === undefined ? {} : { pendingFiles }),
       ...(indexedFiles === undefined ? {} : { indexedFiles }),
       ...(skippedFiles === undefined ? {} : { skippedFiles }),
       ...(totalFiles === undefined ? {} : { totalFiles }),

@@ -499,6 +499,63 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('refreshes a relinked workspace for legacy adoption without starting code_index', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const relinkedRoot = await tempRoot();
+    let currentRoot = firstRoot;
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{
+        id: workspaceId,
+        realRootPath: currentRoot,
+      }],
+      clientFactory: clientFactory({
+        handshake: legacyAdoptionHandshake(),
+        includeCancelIndex: true,
+        includeAdoptLegacyIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'adopt_legacy_index') {
+            return success('adoptable', {
+              status: 'ok',
+              adoption_status: 'adoptable',
+              workspace_id: workspaceId,
+            });
+          }
+          return success(tool === 'code_index' ? 'indexed' : 'ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+
+    currentRoot = relinkedRoot;
+    const adopted = await driver.call('adopt_legacy_index', {
+      workspace_id: workspaceId,
+      dry_run: true,
+    });
+
+    expect(adopted.ok).toBe(true);
+    expect(calls.find(({ tool }) => tool === 'adopt_legacy_index')?.args).toMatchObject({
+      workspace_id: workspaceId,
+      workspace_path: relinkedRoot,
+      dry_run: true,
+    });
+    expect(calls.some(({ tool }) => tool === 'code_index')).toBe(false);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(
+      await realpath(relinkedRoot),
+    );
+    await driver.stop();
+  });
+
   it('fails startup when the legacy-adoption handshake advertises adopt_legacy_index but the worker tool is absent', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

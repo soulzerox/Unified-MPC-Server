@@ -252,6 +252,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
+    if (tool === 'adopt_legacy_index') return this.adoptLegacyIndex(args, signal, budget);
     if (tool === 'index_status') {
       const jobId = typeof args.job_id === 'string' ? args.job_id : '';
       const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
@@ -324,6 +325,33 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     await Promise.allSettled(this.workspaceIndexMonitors.values());
     this.stopped = true;
     return ok(undefined);
+  }
+
+  private async adoptLegacyIndex(
+    args: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+    budget?: ResultBudget,
+  ): Promise<Result<unknown>> {
+    const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
+    const workspace = this.resolveIndexWorkspace(workspaceValue);
+    if (!workspace.ok) return workspace;
+    const legacyEmbedding = typeof args.legacy_embedding_profile_fingerprint === 'string'
+      ? args.legacy_embedding_profile_fingerprint
+      : undefined;
+    const legacyChunking = typeof args.legacy_chunking_fingerprint === 'string'
+      ? args.legacy_chunking_fingerprint
+      : undefined;
+    return this.callWorker('adopt_legacy_index', {
+      workspace_path: workspace.value.rootPath,
+      workspace_id: workspace.value.workspaceId,
+      dry_run: args.dry_run !== false,
+      ...(legacyEmbedding === undefined ? {} : {
+        legacy_embedding_profile_fingerprint: legacyEmbedding,
+      }),
+      ...(legacyChunking === undefined ? {} : {
+        legacy_chunking_fingerprint: legacyChunking,
+      }),
+    }, signal, budget);
   }
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {

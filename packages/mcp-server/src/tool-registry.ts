@@ -197,6 +197,7 @@ const TRUSTED_INTERNAL_MEMORY_RAG_TOOLS = new Set([
   'rag_code_context',
   'rag_code_blast_radius',
   'rag_code_index',
+  'rag_adopt_legacy_index',
   'rag_index_status',
   'rag_cancel_index',
 ]);
@@ -1241,7 +1242,7 @@ export class ToolRegistry {
         event_type: eventType,
         content: `[${eventType}] ${name}\n${observations.map((value) => `- ${value}`).join('\n')}`,
       };
-    } else if (tool === 'code_index') {
+    } else if (tool === 'code_index' || tool === 'adopt_legacy_index') {
       providerArgs = { ...providerArgs, workspace_path: scope.rootPath };
     } else if (tool === 'code_search') {
       const requestedFilter = typeof args.path_filter === 'string' ? args.path_filter.trim().replace(/^\.\//, '') : '';
@@ -1988,7 +1989,7 @@ export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
   'restore_deleted_file', 'restore_checkpoint', 'git', 'shell', 'wsl_exec',
   'process_start', 'process_stop', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
   'verify_incremental', 'codex_run', 'codex_stop', 'agent_swarm_run', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply',
-  'mcp_call', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_code_index', 'rag_cancel_index', 'computer_use', 'dom_cdp', 'accessibility', 'input_event', 'ui_target_action', 'window',
+  'mcp_call', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_code_index', 'rag_adopt_legacy_index', 'rag_cancel_index', 'computer_use', 'dom_cdp', 'accessibility', 'input_event', 'ui_target_action', 'window',
   'clipboard', 'file_dialog', 'notification', 'web_fetch', 'scheduler',
   'office', 'audio', 'screen_record', 'docx_merge', 'office_ppt',
 ]);

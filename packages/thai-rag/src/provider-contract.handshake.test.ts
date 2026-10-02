@@ -5,6 +5,8 @@ import {
   THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
   THAI_RAG_CONTRACT_FINGERPRINT,
   THAI_RAG_CONTRACT_VERSION,
+  THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+  THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
   THAI_RAG_PRODUCTION_BRIDGE,
   THAI_RAG_REQUIRED_CAPABILITIES,
   validateThaiRagHandshake,
@@ -68,6 +70,41 @@ describe('Thai-RAG provider handshake', () => {
     };
 
     expect(validateThaiRagHandshake(cancellable)).toEqual({ ok: true, value: cancellable });
+  });
+
+  it('accepts the additive legacy-adoption contract during rolling upgrades', () => {
+    const adoption = {
+      ...baseHandshake,
+      contractFingerprint: THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+      capabilities: [
+        ...baseHandshake.capabilities,
+        THAI_RAG_CANCEL_CAPABILITY,
+        THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+      ],
+      generation: {
+        ...baseHandshake.generation,
+        contract: THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+      },
+    };
+
+    expect(validateThaiRagHandshake(adoption)).toEqual({ ok: true, value: adoption });
+  });
+
+  it('rejects the legacy-adoption fingerprint when adopt_legacy_index is missing', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      contractFingerprint: THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+      capabilities: [...baseHandshake.capabilities, THAI_RAG_CANCEL_CAPABILITY],
+      generation: {
+        ...baseHandshake.generation,
+        contract: THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('missing-capability');
   });
 
   it('rejects a cancellable fingerprint that omits the cancel capability', () => {

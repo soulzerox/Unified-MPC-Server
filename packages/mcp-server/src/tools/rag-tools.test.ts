@@ -15,6 +15,7 @@ const inputs: Readonly<Record<string, unknown>> = {
   rag_code_context: { workspaceId: 'workspace-1', filePath: 'src/index.ts', lineNumber: 1 },
   rag_code_blast_radius: { workspaceId: 'workspace-1', symbolName: 'run' },
   rag_code_index: { workspaceId: 'workspace-1' },
+  rag_adopt_legacy_index: { workspaceId: 'workspace-1' },
   rag_index_status: { workspaceId: 'workspace-1', jobId: 'job-1' },
   rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },
 };
@@ -45,5 +46,37 @@ describe('native RAG tool budgets', () => {
 
     expect(calls).toHaveLength(tools.length);
     expect(calls.every((call) => call.signal === signal && call.budget === budget)).toBe(true);
+  });
+
+  it('defaults legacy adoption to dry-run and forwards only explicit historical evidence', async () => {
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tools = ragTools({
+      nativeRagCall: async (_workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>) => {
+        calls.push({ tool, args });
+        return { ok: true, value: { adoption_status: 'reindex_required' } };
+      },
+    } as never);
+    const adoption = tools.find((tool) => tool.name === 'rag_adopt_legacy_index');
+    expect(adoption).toBeDefined();
+
+    await adoption!.execute({ workspaceId: 'workspace-1' }, signal, undefined, budget);
+    await adoption!.execute({
+      workspaceId: 'workspace-1',
+      dryRun: false,
+      legacyEmbeddingProfileFingerprint: 'sha256:legacy-embedding',
+      legacyChunkingFingerprint: 'sha256:legacy-chunking',
+    }, signal, undefined, budget);
+
+    expect(calls).toEqual([
+      { tool: 'adopt_legacy_index', args: { dry_run: true } },
+      {
+        tool: 'adopt_legacy_index',
+        args: {
+          dry_run: false,
+          legacy_embedding_profile_fingerprint: 'sha256:legacy-embedding',
+          legacy_chunking_fingerprint: 'sha256:legacy-chunking',
+        },
+      },
+    ]);
   });
 });

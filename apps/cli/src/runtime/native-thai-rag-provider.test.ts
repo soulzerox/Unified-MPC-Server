@@ -102,9 +102,23 @@ describe('NativeThaiRagProviderDriver', () => {
               status: 'ok',
               data: statusPolls < 2
                 ? { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId,
-                    indexed_files: 2, skipped_files: 1, total_files: 5 }
+                    indexed_files: 2, skipped_files: 1, total_files: 5,
+                    cache_hit_files: 1, cache_hit_chunks: 6,
+                    cache_miss_files: 1, cache_miss_chunks: 2,
+                    new_embedded_files: 1, new_embedded_chunks: 2,
+                    cache_miss_reasons: { artifact_missing: 2 } }
                 : { status: 'done', job_id: 'idx_provider_1', workspace_id: workspaceId,
-                    indexed_files: 4, skipped_files: 1, total_files: 5, result: { indexed: 4 } },
+                    indexed_files: 4, skipped_files: 1, total_files: 5,
+                    cache_hit_files: 3, cache_hit_chunks: 12,
+                    cache_miss_files: 1, cache_miss_chunks: 2,
+                    new_embedded_files: 1, new_embedded_chunks: 2,
+                    cache_miss_reasons: { artifact_missing: 2 },
+                    result: { indexed: 4, embedding_cache: {
+                      cache_hit_files: 3, cache_hit_chunks: 12,
+                      cache_miss_files: 1, cache_miss_chunks: 2,
+                      new_embedded_files: 1, new_embedded_chunks: 2,
+                      miss_reasons: { artifact_missing: 2 },
+                    } } },
             });
           }
           return success(tool);
@@ -135,7 +149,13 @@ describe('NativeThaiRagProviderDriver', () => {
       if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
     }
     expect(terminal).toMatchObject({ ok: true, value: {
-      status: 'completed', result: { indexed: 4 }, indexedFiles: 4, skippedFiles: 1, totalFiles: 5,
+      status: 'completed',
+      result: { indexed: 4, embedding_cache: expect.any(Object) },
+      indexedFiles: 4, skippedFiles: 1, totalFiles: 5,
+      cacheHitFiles: 3, cacheHitChunks: 12,
+      cacheMissFiles: 1, cacheMissChunks: 2,
+      newEmbeddedFiles: 1, newEmbeddedChunks: 2,
+      cacheMissReasons: { artifact_missing: 2 },
     } });
     expect(calls.find(({ tool, args }) => tool === 'code_index' && args.background === true)?.args).toMatchObject({
       workspace_id: workspaceId,

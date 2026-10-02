@@ -194,6 +194,113 @@ describe('ThaiRagIndexJobStore', () => {
     });
   });
 
+  it('persists monotonic embedding cache metrics and migrates schema v2 jobs', async () => {
+    const dataRoot = await root();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({
+      schemaVersion: 2,
+      jobs: [{
+        jobId: 'idx_umcp_cache_metrics',
+        workspaceId,
+        ownerId: 'owner-a',
+        status: 'running',
+        force: false,
+        startedAt: '2026-10-02T01:00:00.000Z',
+        indexedFiles: 1,
+        skippedFiles: 1,
+        totalFiles: 4,
+      }],
+    }));
+
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    await store.initialize();
+    await expect(store.recordProgress('idx_umcp_cache_metrics', {
+      indexedFiles: 2,
+      skippedFiles: 1,
+      totalFiles: 4,
+      cacheHitFiles: 1,
+      cacheHitChunks: 7,
+      cacheMissFiles: 1,
+      cacheMissChunks: 3,
+      newEmbeddedFiles: 1,
+      newEmbeddedChunks: 3,
+      cacheMissReasons: { artifact_missing: 2, corrupt_artifact: 1 },
+    }, 'owner-a')).resolves.toMatchObject({
+      cacheHitFiles: 1,
+      cacheHitChunks: 7,
+      cacheMissFiles: 1,
+      cacheMissChunks: 3,
+      newEmbeddedFiles: 1,
+      newEmbeddedChunks: 3,
+      cacheMissReasons: { artifact_missing: 2, corrupt_artifact: 1 },
+    });
+
+    // A late/out-of-order poll must not move any cache counter backwards.
+    await expect(store.recordProgress('idx_umcp_cache_metrics', {
+      indexedFiles: 1,
+      skippedFiles: 1,
+      totalFiles: 4,
+      cacheHitFiles: 0,
+      cacheHitChunks: 2,
+      cacheMissFiles: 0,
+      cacheMissChunks: 1,
+      newEmbeddedFiles: 0,
+      newEmbeddedChunks: 1,
+      cacheMissReasons: { artifact_missing: 1 },
+    }, 'owner-a')).resolves.toMatchObject({
+      indexedFiles: 2,
+      skippedFiles: 1,
+      totalFiles: 4,
+      cacheHitFiles: 1,
+      cacheHitChunks: 7,
+      cacheMissFiles: 1,
+      cacheMissChunks: 3,
+      newEmbeddedFiles: 1,
+      newEmbeddedChunks: 3,
+      cacheMissReasons: { artifact_missing: 2, corrupt_artifact: 1 },
+    });
+
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as {
+      schemaVersion: number;
+      jobs: Array<Record<string, unknown>>;
+    };
+    expect(persisted.schemaVersion).toBe(3);
+    expect(persisted.jobs[0]).toMatchObject({
+      cacheHitFiles: 1,
+      cacheHitChunks: 7,
+      newEmbeddedChunks: 3,
+    });
+  });
+
+  it('rejects malformed cache metrics without discarding valid file progress', async () => {
+    const dataRoot = await root();
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const job = await store.create(workspaceId, false, 'owner-a');
+
+    await expect(store.recordProgress(job.jobId, {
+      indexedFiles: 1,
+      skippedFiles: 0,
+      totalFiles: 2,
+      cacheHitFiles: -1,
+      cacheHitChunks: 4,
+      cacheMissFiles: 1,
+      cacheMissChunks: 2,
+      newEmbeddedFiles: 1,
+      newEmbeddedChunks: 2,
+      cacheMissReasons: { artifact_missing: 2 },
+    }, 'owner-a')).resolves.toMatchObject({
+      indexedFiles: 1,
+      skippedFiles: 0,
+      totalFiles: 2,
+    });
+    const restored = await store.get(job.jobId, 'owner-a', workspaceId);
+    expect(restored).not.toHaveProperty('cacheHitFiles');
+    expect(restored).not.toHaveProperty('cacheHitChunks');
+  });
+
   it('preserves legacy records without owner IDs as unavailable instead of dropping them', async () => {
     const dataRoot = await root();
     const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');

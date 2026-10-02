@@ -13,6 +13,7 @@ const mandatoryCases = [
   ['process_start', { workspaceId: 'workspace-1', executable: 'node', args: ['script.js'] }, 'EXECUTE', 'execute'],
   ['codex_run', { workspaceId: 'workspace-1', instruction: 'edit the project' }, 'EXECUTE', 'opaque_mutation'],
   ['mcp_call', { server: 'child', tool: 'write', arguments: { path: 'a.txt' } }, 'DANGEROUS', 'opaque_mutation'],
+  ['rag_adopt_legacy_index', { workspaceId: 'workspace-1', dryRun: false }, 'WRITE', 'bounded_write'],
   ['shell', { workspaceId: 'workspace-1', operation: 'run', executable: 'pnpm.cmd', arguments: ['test'] }, 'EXECUTE', 'execute'],
 ] as const satisfies readonly [string, Readonly<Record<string, unknown>>, McpPermissionLevel, string][];
 
@@ -27,6 +28,7 @@ const mixedOperationReadCases = [
   ['skills_read', { skillId: 'agents-skills/executing-plans' }, 'READ'],
   ['mcp_list', {}, 'READ'],
   ['mcp_describe', { server: 'child' }, 'READ'],
+  ['rag_adopt_legacy_index', { workspaceId: 'workspace-1', dryRun: true }, 'WRITE'],
   ['shell', { operation: 'status', task_id: 'task-1' }, 'EXECUTE'],
   ['wsl_exec', { operation: 'status', task_id: 'task-1' }, 'EXECUTE'],
   ['web_fetch', { method: 'GET', url: 'https://example.test' }, 'READ'],

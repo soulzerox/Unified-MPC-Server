@@ -56,6 +56,7 @@ const services = {
 };
 
 startMcpStdio({
+  implementationVersion: '4.61.0+stdiofixture',
   services,
   actor: { clientId: 'stdio-test', clientName: 'stdio-test' },
   activeWorkspaceScopeProvider: async () => ({ workspaceId: 'workspace-stdio', rootPath: '/tmp/workspace-stdio' }),

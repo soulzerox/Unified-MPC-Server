@@ -48,7 +48,7 @@ describe('headless-safe native Thai-RAG progress', () => {
     const gateway = new GatewayService({ localPort: 0 });
     const server = new ControlPlaneServer({
       port: 0, dataDir: root, gateway,
-      mcpIdentityProbe: async () => null,
+       mcpIdentityProbe: async (): Promise<null> => null,
     });
     try {
       await server.listen();

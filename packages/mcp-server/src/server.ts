@@ -37,6 +37,8 @@ export interface McpServerOptions {
   readonly services: McpApplicationServices;
   readonly actor: FileActor;
   readonly requestScope?: McpRequestScope;
+  /** Immutable build-specific MCP implementation identity; defaults to the semantic app version. */
+  readonly implementationVersion?: string;
   readonly diagnostic?: DiagnosticLogger;
   readonly activity?: ActivitySink;
   readonly activityTracker?: ActivityTracker;
@@ -137,7 +139,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
   // protocol mismatch. Keep the legacy bridge available only when the
   // transport has already identified a legacy client.
   const legacyTasksProtocol = options.legacyTasksProtocol === true;
-  const server = new McpServer({ name: APP_NAME, version: APP_VERSION }, {
+  const server = new McpServer({ name: APP_NAME, version: options.implementationVersion ?? APP_VERSION }, {
     capabilities: legacyTasksProtocol
       ? { tools: { listChanged: true }, tasks: { list: {}, cancel: {} } }
       : { tools: { listChanged: true }, extensions: { [MODERN_TASKS_EXTENSION_ID]: {} } },

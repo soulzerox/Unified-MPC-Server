@@ -15,6 +15,7 @@ import { MODERN_TASKS_EXTENSION_ID } from './modern-tasks-protocol.js';
 import { ToolRegistry } from './tool-registry.js';
 
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
+const TEST_IMPLEMENTATION_VERSION = '4.61.0+stdiofixture';
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
 const fixturePath = fileURLToPath(new URL('../tests/fixtures/stdio-server.mjs', import.meta.url));
 
@@ -131,6 +132,7 @@ describe('MCP stdio transport', () => {
         const detail = error instanceof Error ? error.message : String(error);
         throw new Error(`${detail}; child diagnostics: ${diagnostics().trim() || '[none]'}`, { cause: error });
       }
+      expect(client.getServerVersion()).toMatchObject({ name: 'Unified-MPC-Server', version: TEST_IMPLEMENTATION_VERSION });
       const first = await client.listTools();
       const second = await client.listTools();
 

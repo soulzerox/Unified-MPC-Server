@@ -248,6 +248,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   const endpointFallbackSessionId = randomUUID();
   const factory = (request?: Request): McpServer => createMcpServer({
     ...options,
+    ...(options.buildProvenance === undefined ? {} : { implementationVersion: options.buildProvenance.buildVersion }),
     runBudgetGuard,
     incrementalVerifier,
     setOfMarksStore,
@@ -321,6 +322,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     const requestScope = createProtocolHttpRequestScope(protocolSessionId);
     const server = createMcpServer({
       ...options,
+      ...(options.buildProvenance === undefined ? {} : { implementationVersion: options.buildProvenance.buildVersion }),
       runBudgetGuard,
       incrementalVerifier,
       setOfMarksStore,

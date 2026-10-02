@@ -1148,7 +1148,18 @@ function nestedValue(value: unknown, key: string, depth = 0): unknown {
   return Object.hasOwn(current, key) ? current[key] : undefined;
 }
 
-function nativeIndexProgress(value: unknown): { readonly indexedFiles: number; readonly skippedFiles: number; readonly totalFiles: number } | undefined {
+function nativeIndexProgress(value: unknown): {
+  readonly indexedFiles: number;
+  readonly skippedFiles: number;
+  readonly totalFiles: number;
+  readonly cacheHitFiles?: number;
+  readonly cacheHitChunks?: number;
+  readonly cacheMissFiles?: number;
+  readonly cacheMissChunks?: number;
+  readonly newEmbeddedFiles?: number;
+  readonly newEmbeddedChunks?: number;
+  readonly cacheMissReasons?: Readonly<Record<string, number>>;
+} | undefined {
   const indexedFiles = nestedValue(value, 'indexed_files');
   const skippedFiles = nestedValue(value, 'skipped_files');
   const totalFiles = nestedValue(value, 'total_files');
@@ -1156,7 +1167,42 @@ function nativeIndexProgress(value: unknown): { readonly indexedFiles: number; r
     typeof number === 'number' && Number.isSafeInteger(number) && number >= 0 && number <= 100_000_000;
   if (!valid(indexedFiles) || !valid(skippedFiles) || !valid(totalFiles)
     || indexedFiles + skippedFiles > totalFiles) return undefined;
-  return { indexedFiles, skippedFiles, totalFiles };
+  const base = { indexedFiles, skippedFiles, totalFiles };
+
+  const cacheHitFiles = nestedValue(value, 'cache_hit_files');
+  const cacheHitChunks = nestedValue(value, 'cache_hit_chunks');
+  const cacheMissFiles = nestedValue(value, 'cache_miss_files');
+  const cacheMissChunks = nestedValue(value, 'cache_miss_chunks');
+  const newEmbeddedFiles = nestedValue(value, 'new_embedded_files');
+  const newEmbeddedChunks = nestedValue(value, 'new_embedded_chunks');
+  const cacheMissReasonsValue = nestedValue(value, 'cache_miss_reasons');
+  const cacheValues = [
+    cacheHitFiles, cacheHitChunks, cacheMissFiles, cacheMissChunks,
+    newEmbeddedFiles, newEmbeddedChunks,
+  ];
+  const hasAnyCacheMetric = cacheValues.some((entry) => entry !== undefined)
+    || cacheMissReasonsValue !== undefined;
+  if (!hasAnyCacheMetric) return base;
+  if (cacheValues.some((entry) => !valid(entry))
+    || !isRecord(cacheMissReasonsValue)) return base;
+  const cacheMissReasons: Record<string, number> = {};
+  for (const [reason, count] of Object.entries(cacheMissReasonsValue)) {
+    if (reason.trim().length === 0 || !valid(count)) return base;
+    cacheMissReasons[reason] = count;
+  }
+  if ((cacheHitFiles as number) + (cacheMissFiles as number) > totalFiles
+    || (newEmbeddedFiles as number) > (cacheMissFiles as number)
+    || (newEmbeddedChunks as number) > (cacheMissChunks as number)) return base;
+  return {
+    ...base,
+    cacheHitFiles: cacheHitFiles as number,
+    cacheHitChunks: cacheHitChunks as number,
+    cacheMissFiles: cacheMissFiles as number,
+    cacheMissChunks: cacheMissChunks as number,
+    newEmbeddedFiles: newEmbeddedFiles as number,
+    newEmbeddedChunks: newEmbeddedChunks as number,
+    cacheMissReasons,
+  };
 }
 
 function nestedString(value: unknown, key: string): string | undefined {

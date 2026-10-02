@@ -332,6 +332,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     signal?: AbortSignal,
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
+    // Refresh aliases/roots without a requested workspace so a relink is
+    // observed but cannot trigger admission code_index ahead of adoption.
+    const refreshed = await this.refreshWorkspaceRoots(this.lifecycleGeneration);
+    if (!refreshed.ok) return refreshed;
     const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
     const workspace = this.resolveIndexWorkspace(workspaceValue);
     if (!workspace.ok) return workspace;

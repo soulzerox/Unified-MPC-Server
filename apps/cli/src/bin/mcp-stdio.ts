@@ -196,6 +196,7 @@ async function main(): Promise<void> {
   };
 
   const handle = startMcpStdio({
+    implementationVersion: buildProvenance.buildVersion,
     services: runtime.services,
     actor: runtime.actor,
     activityTracker: runtime.activityTracker,

@@ -14,6 +14,12 @@ const inputs: Readonly<Record<string, unknown>> = {
   rag_code_search: { workspaceId: 'workspace-1', query: 'needle' },
   rag_code_context: { workspaceId: 'workspace-1', filePath: 'src/index.ts', lineNumber: 1 },
   rag_code_blast_radius: { workspaceId: 'workspace-1', symbolName: 'run' },
+  rag_adopt_legacy_index: {
+    workspaceId: 'workspace-1',
+    dryRun: true,
+    legacyEmbeddingProfileFingerprint: 'embed-legacy',
+    legacyChunkingFingerprint: 'chunk-legacy',
+  },
   rag_code_index: { workspaceId: 'workspace-1' },
   rag_index_status: { workspaceId: 'workspace-1', jobId: 'job-1' },
   rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },

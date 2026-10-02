@@ -328,7 +328,7 @@ describe('ThaiRagIndexJobStore', () => {
 
     await expect(store.get('idx_umcp_legacy', 'owner-a', '11111111-1111-4111-8111-111111111111')).resolves.toBeNull();
     const persisted = JSON.parse(await readFile(filePath, 'utf8')) as { schemaVersion: number; jobs: Array<Record<string, unknown>> };
-    expect(persisted.schemaVersion).toBe(2);
+    expect(persisted.schemaVersion).toBe(3);
     expect(persisted.jobs).toHaveLength(2);
     expect(persisted.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({ jobId: 'idx_umcp_legacy', status: 'legacy-unavailable' }),

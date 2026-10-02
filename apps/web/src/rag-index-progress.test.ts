@@ -11,7 +11,7 @@ const example = {
   schemaVersion: 3,
   jobs: [
     {
-      jobId: 'idx_umcp_1234567890abcdef', workspaceId: ws, status: 'running',
+      jobId: 'idx_umcp_1234567890abcdef', workspaceId: ws, status: 'running', force: false,
       indexedFiles: 3, skippedFiles: 2, totalFiles: 5,
       cacheHitFiles: 2, cacheHitChunks: 8,
       cacheMissFiles: 1, cacheMissChunks: 2,
@@ -36,6 +36,7 @@ describe('headless-safe native Thai-RAG progress', () => {
     expect(jobs).toHaveLength(2);
     expect(jobs[0]).toMatchObject({
       jobId: 'idx_umcp_1234567890abcdef', stage: 'finalizing', progressPercent: 100,
+      force: false, pendingFiles: 0,
       indexedFiles: 3, skippedFiles: 2, totalFiles: 5,
       cacheHitFiles: 2, cacheHitChunks: 8,
       cacheMissFiles: 1, cacheMissChunks: 2,
@@ -86,6 +87,9 @@ describe('headless-safe native Thai-RAG progress', () => {
     expect(html).toContain('Finalizing index');
     expect(html).toContain('cache-hit');
     expect(html).toContain('Reason: ');
+    expect(html).toContain('jobId=');
+    expect(html).toContain('force=');
+    expect(html).toContain('pending ');
     expect(html).not.toContain(" + ' reused)'");
   });
 });

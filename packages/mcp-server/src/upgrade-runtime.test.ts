@@ -26,6 +26,19 @@ describe('upgrade runtime', () => {
     expect(UPGRADE_TOOL_CATALOG.some((entry) => entry.name === 'context_economy_stats')).toBe(true);
   });
 
+  it('does not claim a stale continuation without durable rollover evidence', async () => {
+    const runtime = new UpgradeRuntimeService({}, actor);
+    const result = await runtime.execute('recovery_status', {});
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        reconnect: 'enabled-at-transport-boundary',
+        staleContinuation: 'unverified',
+      },
+    });
+  });
+
   it('reports process memory and bounded runtime retention diagnostics', async () => {
     const runtime = new UpgradeRuntimeService({
       runtimeDiagnostics: (): { readonly toolAvailabilitySubscriptions: number } => ({ toolAvailabilitySubscriptions: 3 }),

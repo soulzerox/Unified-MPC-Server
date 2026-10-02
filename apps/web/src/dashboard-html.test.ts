@@ -28,6 +28,10 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('if (statusRefreshInFlight) return');
     expect(html).toContain("logEvent('ERROR', 'Backend unavailable: '");
     expect(html).toContain("logEvent('SUCCESS', 'Backend connection restored')");
+    expect(html).toContain('Connector Recovery');
+    expect(html).toContain('connectorRegistration.recoveryState');
+    expect(html).toContain('connectorRegistration.reason');
+    expect(html).toContain('connectorRegistration.action');
     expect(html).toContain('if (isBackendTransportError(err)) noteBackendUnavailable(err)');
   });
 

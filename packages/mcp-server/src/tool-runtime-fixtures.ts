@@ -333,7 +333,7 @@ export const PHASE_19_TO_33_TOOL_RUNTIME_FIXTURES = {
   execution_plan: deterministic({ prompt: 'test smoke' }, { expected: { route: 'test', operations: ['workspace_context', 'discover_tests', 'test_context'], reason: 'deterministic rule plan; telemetry can refine cost estimates' } }),
   repo_map: service({ workspaceId }, 'workspaceIndex.status'),
   context_expand: service({ workspaceId, path: 'src/smoke.ts' }, 'workspaceIndex.status'),
-  recovery_status: deterministic({}, { expected: { reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, workerIsolation: true } }),
+  recovery_status: deterministic({}, { expected: { reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, staleContinuation: 'unverified', workerIsolation: true } }),
   tool_schema_list: deterministic({}, { expected: {}, requiredKeys: ['schemas'] }),
   tool_schema_register: deterministic({ id: 'smoke-schema', version: '1.0.0', schema: { type: 'object', properties: {} } }, { expected: { status: 'ready', available: true, ready: true, executed: true, registered: true }, requiredKeys: ['schema'] }),
   capabilities: deterministic({}, { expected: { primitiveToolsRemainAvailable: true }, requiredKeys: ['categories', 'totalUpgradeTools'] }),

@@ -81,6 +81,7 @@ describe('Issue #42 restart recovery', () => {
       sessionState: 'leased',
       connectorRegistration: {
         state: 'unverified',
+        recoveryState: 'connector_rehydrate_required',
         reason: 'host_projection_unavailable',
         action: 'reconnect_chatgpt_session',
       },
@@ -96,6 +97,7 @@ describe('Issue #42 restart recovery', () => {
       state: 'ERROR',
       connectorRegistration: {
         state: 'stale',
+        recoveryState: 'connector_rehydrate_required',
         reason: 'backend_restart',
         action: 'reconnect_chatgpt_session',
       },
@@ -118,6 +120,7 @@ describe('Issue #42 restart recovery', () => {
       sessionState: 'leased',
       connectorRegistration: {
         state: 'stale',
+        recoveryState: 'connector_rehydrate_required',
         reason: 'backend_restart',
         action: 'reconnect_chatgpt_session',
       },
@@ -138,6 +141,7 @@ describe('Issue #42 restart recovery', () => {
       state: 'SESSION_CONNECTED',
       connectorRegistration: {
         state: 'unverified',
+        recoveryState: 'connector_rehydrate_required',
         reason: 'host_projection_unavailable',
         action: 'reconnect_chatgpt_session',
       },

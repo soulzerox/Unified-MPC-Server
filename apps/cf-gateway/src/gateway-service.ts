@@ -17,6 +17,7 @@ export type ConnectorRecoveryAction = 'none' | 'reconnect_chatgpt_session';
 export interface ConnectorRegistrationStatus {
   readonly state: ConnectorRegistrationState;
   readonly action: ConnectorRecoveryAction;
+  readonly recoveryState?: 'none' | 'connector_rehydrate_required';
   readonly reason?: ConnectorRegistrationReason;
 }
 
@@ -385,8 +386,8 @@ export class GatewayService {
 
     this.desiredSessionConnected = true;
     this.connectorRegistration = this.connectorRecoveryRequired
-      ? { state: 'stale', reason: 'backend_restart', action: 'reconnect_chatgpt_session' }
-      : { state: 'unverified', reason: 'host_projection_unavailable', action: 'reconnect_chatgpt_session' };
+      ? { state: 'stale', recoveryState: 'connector_rehydrate_required', reason: 'backend_restart', action: 'reconnect_chatgpt_session' }
+      : { state: 'unverified', recoveryState: 'connector_rehydrate_required', reason: 'host_projection_unavailable', action: 'reconnect_chatgpt_session' };
     this.leaseToken = `lease_${randomUUID().replaceAll('-', '')}`;
     this.state = 'SESSION_CONNECTED';
     this.clearSessionLeaseTimer();
@@ -451,7 +452,7 @@ export class GatewayService {
     this.leaseToken = undefined;
     this.connectorRecoveryRequired = this.desiredSessionConnected;
     this.connectorRegistration = this.desiredSessionConnected
-      ? { state: 'stale', reason: 'backend_restart', action: 'reconnect_chatgpt_session' }
+      ? { state: 'stale', recoveryState: 'connector_rehydrate_required', reason: 'backend_restart', action: 'reconnect_chatgpt_session' }
       : { state: 'unverified', action: 'none' };
     this.lastError = message;
     this.state = 'ERROR';

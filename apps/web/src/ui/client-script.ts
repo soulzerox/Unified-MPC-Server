@@ -204,10 +204,16 @@ export function getClientScriptJs(): string {
           if (led) led.className = 'led';
           const tel = document.getElementById('servers-telemetry');
           if (tel) {
+            const connectorRegistration = data.gateway?.connectorRegistration || {};
             tel.innerHTML =
               '<div style="line-height: 1.8;">' +
               '<div>Status: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
               '<div>Gateway State: ' + (data.gateway?.state || 'STOPPED') + '</div>' +
+              '<div>Connector Registration: ' + (connectorRegistration.state || 'unverified') + '</div>' +
+              '<div>Connector Recovery: ' + (connectorRegistration.recoveryState || 'none') + '</div>' +
+              '<div>Connector Reason: ' + (connectorRegistration.reason || 'none') + '</div>' +
+              '<div>Connector Action: ' + (connectorRegistration.action || 'none') + '</div>' +
+              '<div>End-to-End: ' + (data.gateway?.endToEndState || 'unverified') + '</div>' +
               '<div>Local Loopback Port: ' + (data.gateway?.localPort || 18765) + '</div>' +
               '</div>';
           }

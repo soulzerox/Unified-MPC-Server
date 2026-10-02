@@ -125,6 +125,30 @@ describe('ThaiRagIndexJobStore', () => {
     expect(await replacement.active('owner-b')).toEqual([]);
   });
 
+
+  it('persists a bounded reindex reason across restarts', async () => {
+    const dataRoot = await root();
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    const job = await store.create(
+      workspaceId,
+      false,
+      'owner-a',
+      'startup_verification',
+    );
+    expect(job).toMatchObject({ reindexReason: 'startup_verification' });
+
+    const replacement = new ThaiRagIndexJobStore(dataRoot);
+    await expect(replacement.get(job.jobId, 'owner-b', workspaceId)).resolves.toBeNull();
+    await store.complete(job.jobId, { indexed: 0 }, 'owner-a');
+    const terminalReplacement = new ThaiRagIndexJobStore(dataRoot);
+    await expect(terminalReplacement.get(job.jobId, 'owner-b', workspaceId)).resolves.toMatchObject({
+      status: 'completed',
+      reindexReason: 'startup_verification',
+    });
+  });
+
+
   it('rejects unscoped jobs and foreign owners', async () => {
     const dataRoot = await root();
     const store = new ThaiRagIndexJobStore(dataRoot);

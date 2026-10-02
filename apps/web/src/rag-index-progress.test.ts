@@ -8,11 +8,16 @@ import { ControlPlaneServer, parseRagIndexJobs } from './web-server.js';
 
 const ws = '11111111-1111-4111-8111-111111111111';
 const example = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   jobs: [
     {
       jobId: 'idx_umcp_1234567890abcdef', workspaceId: ws, status: 'running',
       indexedFiles: 3, skippedFiles: 2, totalFiles: 5,
+      cacheHitFiles: 2, cacheHitChunks: 8,
+      cacheMissFiles: 1, cacheMissChunks: 2,
+      newEmbeddedFiles: 1, newEmbeddedChunks: 2,
+      cacheMissReasons: { artifact_missing: 2 },
+      reindexReason: 'startup_verification',
       startedAt: '2026-10-01T15:00:00Z', providerJobId: 'secret-provider',
       result: { workspace: '/private/location' },
     },
@@ -32,6 +37,11 @@ describe('headless-safe native Thai-RAG progress', () => {
     expect(jobs[0]).toMatchObject({
       jobId: 'idx_umcp_1234567890abcdef', stage: 'finalizing', progressPercent: 100,
       indexedFiles: 3, skippedFiles: 2, totalFiles: 5,
+      cacheHitFiles: 2, cacheHitChunks: 8,
+      cacheMissFiles: 1, cacheMissChunks: 2,
+      newEmbeddedFiles: 1, newEmbeddedChunks: 2,
+      cacheMissReasons: { artifact_missing: 2 },
+      reindexReason: 'startup_verification',
     });
     expect(JSON.stringify(jobs)).not.toContain('secret-provider');
     expect(JSON.stringify(jobs)).not.toContain('/private/location');
@@ -74,5 +84,8 @@ describe('headless-safe native Thai-RAG progress', () => {
     expect(html).toContain('aria-label');
     expect(html).toContain('setInterval(loadRagIndexJobs, 5000)');
     expect(html).toContain('Finalizing index');
+    expect(html).toContain('cache-hit');
+    expect(html).toContain('Reason: ');
+    expect(html).not.toContain(" + ' reused)'");
   });
 });

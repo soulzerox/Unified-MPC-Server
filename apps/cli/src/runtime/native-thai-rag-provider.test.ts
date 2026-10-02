@@ -807,11 +807,17 @@ describe('NativeThaiRagProviderDriver', () => {
       error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing' } },
     });
     const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
-      jobs: Array<{ jobId: string; providerJobId?: string; workspaceId: string; status: string }>;
+      jobs: Array<{ jobId: string; providerJobId?: string; workspaceId: string; status: string; reindexReason?: string }>;
     };
     const indexingJob = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running');
-    expect(indexingJob).toMatchObject({ providerJobId: 'idx_provider_admission' });
-    expect(calls.find(({ tool }) => tool === 'code_index')?.args.background).toBe(true);
+    expect(indexingJob).toMatchObject({
+      providerJobId: 'idx_provider_admission',
+      reindexReason: 'alias_created_or_repaired',
+    });
+    expect(calls.find(({ tool }) => tool === 'code_index')?.args).toMatchObject({
+      background: true,
+      force: false,
+    });
 
     completeIndex = true;
     await expect.poll(async () => {

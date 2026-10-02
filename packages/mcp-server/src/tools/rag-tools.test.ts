@@ -25,6 +25,35 @@ const inputs: Readonly<Record<string, unknown>> = {
   rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },
 };
 
+describe('legacy adoption tool', () => {
+  it('defaults to dry-run, forwards explicit fingerprints, and never calls code_index', async () => {
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tool = ragTools({
+      nativeRagCall: async (_workspaceId: string, name: string, args: Readonly<Record<string, unknown>>) => {
+        calls.push({ tool: name, args });
+        return { ok: true, value: {} };
+      },
+    } as never).find((candidate) => candidate.name === 'rag_adopt_legacy_index');
+    expect(tool).toBeDefined();
+
+    await tool?.execute({
+      workspaceId: 'workspace-1',
+      legacyEmbeddingProfileFingerprint: 'embed-legacy',
+      legacyChunkingFingerprint: 'chunk-legacy',
+    }, signal);
+
+    expect(calls).toEqual([{
+      tool: 'adopt_legacy_index',
+      args: {
+        dry_run: true,
+        legacy_embedding_profile_fingerprint: 'embed-legacy',
+        legacy_chunking_fingerprint: 'chunk-legacy',
+      },
+    }]);
+    expect(calls.some((call) => call.tool === 'code_index')).toBe(false);
+  });
+});
+
 describe('native RAG tool budgets', () => {
   it('passes signal and result budget to every native producer', async () => {
     const calls: Array<{ tool: string; signal: AbortSignal; budget?: ResultBudget }> = [];

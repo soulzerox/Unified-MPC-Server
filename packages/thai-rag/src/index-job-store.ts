@@ -354,21 +354,28 @@ interface NormalizedCacheProgress {
 }
 
 function normalizeCacheProgress(progress: ThaiRagIndexJobProgress, totalFiles: number): NormalizedCacheProgress | null {
-  const values = [
-    progress.cacheHitFiles,
-    progress.cacheHitChunks,
-    progress.cacheMissFiles,
-    progress.cacheMissChunks,
-    progress.newEmbeddedFiles,
-    progress.newEmbeddedChunks,
-  ];
-  const hasAny = values.some((value) => value !== undefined) || progress.cacheMissReasons !== undefined;
+  const hasAny = progress.cacheHitFiles !== undefined
+    || progress.cacheHitChunks !== undefined
+    || progress.cacheMissFiles !== undefined
+    || progress.cacheMissChunks !== undefined
+    || progress.newEmbeddedFiles !== undefined
+    || progress.newEmbeddedChunks !== undefined
+    || progress.cacheMissReasons !== undefined;
   if (!hasAny) return null;
-  if (values.some((value) => !validCounter(value))) return null;
-  const [
-    cacheHitFiles, cacheHitChunks, cacheMissFiles, cacheMissChunks,
-    newEmbeddedFiles, newEmbeddedChunks,
-  ] = values as number[];
+
+  const cacheHitFiles = progress.cacheHitFiles;
+  const cacheHitChunks = progress.cacheHitChunks;
+  const cacheMissFiles = progress.cacheMissFiles;
+  const cacheMissChunks = progress.cacheMissChunks;
+  const newEmbeddedFiles = progress.newEmbeddedFiles;
+  const newEmbeddedChunks = progress.newEmbeddedChunks;
+  if (!validCounter(cacheHitFiles)
+    || !validCounter(cacheHitChunks)
+    || !validCounter(cacheMissFiles)
+    || !validCounter(cacheMissChunks)
+    || !validCounter(newEmbeddedFiles)
+    || !validCounter(newEmbeddedChunks)) return null;
+
   const cacheMissReasons = validReasonCounters(progress.cacheMissReasons);
   if (cacheMissReasons === null
     || cacheHitFiles + cacheMissFiles > totalFiles

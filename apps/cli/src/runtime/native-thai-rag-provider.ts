@@ -19,6 +19,7 @@ import {
   type ThaiRagProviderDriverHealth,
   type ThaiRagProviderDriverStartOptions,
   type ThaiRagProviderHandshake,
+  type ThaiRagReindexReason,
 } from '@unified-mpc/thai-rag';
 
 const SERVER_NAME = 'thai-rag-native';
@@ -61,6 +62,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly workspaceRoots = new Map<string, string>();
   private readonly workspaceRootIds = new Map<string, string>();
   private readonly pendingReindexIds = new Set<string>();
+  private readonly pendingReindexReasons = new Map<string, ThaiRagReindexReason>();
   private readonly workspaceIndexJobIds = new Map<string, string>();
   private readonly workspaceIndexMonitors = new Map<string, Promise<Result<void>>>();
   private indexingWorkspaceId: string | undefined;
@@ -194,7 +196,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       && healthHandshake.value.capabilities.includes(THAI_RAG_CANCEL_CAPABILITY);
     this.sessions.pin(SERVER_NAME);
     this.started = true;
-    for (const workspaceId of this.workspaceRoots.keys()) this.pendingReindexIds.add(workspaceId);
+    for (const workspaceId of this.workspaceRoots.keys()) {
+      this.pendingReindexIds.add(workspaceId);
+      if (!this.pendingReindexReasons.has(workspaceId)) {
+        this.pendingReindexReasons.set(workspaceId, 'startup_verification');
+      }
+    }
     const health = await this.refreshHealth(signal);
     if (!health.ok) return health;
     if (this.stopRequested) {
@@ -329,7 +336,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     force: boolean,
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
-    const job = await this.jobs.create(workspaceId, force, this.ownerId ?? '');
+    const job = await this.jobs.create(
+      workspaceId,
+      force,
+      this.ownerId ?? '',
+      force ? 'explicit_force_reindex' : 'explicit_request',
+    );
     const operation = this.enqueueWorker(async () => {
       const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
       const result = normalizeWorkerCallResult('code_index', raw);
@@ -350,7 +362,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const ownerId = this.ownerId ?? '';
-    const job = await this.jobs.create(workspaceId, force, ownerId);
+    const job = await this.jobs.create(
+      workspaceId,
+      force,
+      ownerId,
+      force ? 'explicit_force_reindex' : 'explicit_request',
+    );
     const started = await this.callWorker('code_index', { ...childArgs, background: true }, undefined, budget);
     if (!started.ok) {
       await this.jobs.fail(job.jobId, started.error.message, ownerId);
@@ -557,6 +574,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     for (const workspaceId of aliases.value) {
       // New or repaired aliases require source verification, not a forced rebuild.
       this.pendingReindexIds.add(workspaceId);
+      this.pendingReindexReasons.set(workspaceId, 'alias_created_or_repaired');
     }
     const relinked = workspaces.filter((workspace) => {
       const previousRoot = this.workspaceRoots.get(workspace.id);
@@ -565,6 +583,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     for (const workspace of relinked) {
       // The provider compares file hashes and fingerprints when a root changes.
       this.pendingReindexIds.add(workspace.id);
+      this.pendingReindexReasons.set(workspace.id, 'workspace_relinked');
     }
     if (generation === this.lifecycleGeneration && this.started && this.launchConfig !== undefined) {
       const pending = new Set(this.pendingReindexIds);
@@ -573,6 +592,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         return this.startWorkspaceAdmissionIndex(
           workspace,
           false, // Preserve provider-side validated incremental reuse on admission.
+          this.pendingReindexReasons.get(workspace.id) ?? 'startup_verification',
           generation,
           sourcesRoot,
           workspaces,
@@ -603,6 +623,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private async startWorkspaceAdmissionIndex(
     workspace: NativeThaiRagWorkspace,
     force: boolean,
+    reindexReason: ThaiRagReindexReason,
     generation: number,
     sourcesRoot: string,
     workspaces: readonly NativeThaiRagWorkspace[],
@@ -611,7 +632,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     previousRootIds: ReadonlyMap<string, string>,
   ): Promise<Result<void>> {
     const ownerId = this.ownerId ?? '';
-    const job = await this.jobs.create(workspace.id, force, ownerId);
+    const job = await this.jobs.create(workspace.id, force, ownerId, reindexReason);
     this.indexingWorkspaceId = workspace.id;
     this.workspaceIndexJobIds.set(workspace.id, job.jobId);
     const monitor = (async (): Promise<Result<void>> => {
@@ -673,6 +694,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           if (entry.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(entry.rootPath), entry.id);
         }
         this.pendingReindexIds.delete(workspace.id);
+        this.pendingReindexReasons.delete(workspace.id);
         return ok(undefined);
       } catch (error: unknown) {
         await this.jobs.fail(job.jobId, errorMessage(error), ownerId).catch(() => undefined);

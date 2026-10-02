@@ -265,14 +265,30 @@ export function getClientScriptJs(): string {
               ? job.indexedFiles + job.skippedFiles : null;
             const total = Number.isSafeInteger(job.totalFiles) ? job.totalFiles : null;
             const active = job.status === 'running' || job.status === 'cancelling';
-            description.textContent = job.stage === 'finalizing'
+            const baseDescription = job.stage === 'finalizing'
               ? 'Finalizing index · validating vectors and activating generation'
               : job.stage === 'scanning' && active
                 ? 'Scanning source files...'
                 : total === null || completed === null
                   ? String(job.status || 'unknown')
                   : String(completed) + ' / ' + String(total) + ' files (' + String(job.indexedFiles)
-                    + ' indexed, ' + String(job.skippedFiles) + ' reused)';
+                    + ' indexed, ' + String(job.skippedFiles) + ' generation-copied/skipped)';
+            const cacheDescription = Number.isSafeInteger(job.cacheHitFiles)
+              && Number.isSafeInteger(job.cacheHitChunks)
+              && Number.isSafeInteger(job.newEmbeddedFiles)
+              && Number.isSafeInteger(job.newEmbeddedChunks)
+              ? ' · ' + String(job.cacheHitFiles) + ' cache-hit files / ' + String(job.cacheHitChunks)
+                + ' chunks · ' + String(job.newEmbeddedFiles) + ' new-embedded files / '
+                + String(job.newEmbeddedChunks) + ' chunks'
+              : '';
+            const reasonDescription = typeof job.reindexReason === 'string'
+              ? ' · Reason: ' + job.reindexReason
+              : '';
+            const missReasons = job.cacheMissReasons && typeof job.cacheMissReasons === 'object'
+              ? Object.entries(job.cacheMissReasons).map(([reason, count]) => reason + '=' + String(count)).join(', ')
+              : '';
+            description.textContent = baseDescription + cacheDescription + reasonDescription
+              + (missReasons ? ' · Cache misses: ' + missReasons : '');
             item.appendChild(description);
             const progress = document.createElement('progress');
             progress.max = total !== null && total > 0 ? total : 1;

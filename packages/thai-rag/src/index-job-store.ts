@@ -5,8 +5,21 @@ import { createPosixProcessIdentityProbe, type PosixProcessIdentityProbe } from 
 import { parseCanonicalWorkspaceId, resolveThaiRagProviderRoot } from './canonical-workspace.js';
 
 export type ThaiRagIndexJobStatus = 'running' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'interrupted' | 'legacy-unavailable';
+export type ThaiRagReindexReason =
+  | 'startup_verification'
+  | 'alias_created_or_repaired'
+  | 'workspace_relinked'
+  | 'explicit_request'
+  | 'explicit_force_reindex';
 
 const ACTIVE_JOB_STATUSES = new Set<ThaiRagIndexJobStatus>(['running', 'cancelling']);
+const REINDEX_REASONS = new Set<ThaiRagReindexReason>([
+  'startup_verification',
+  'alias_created_or_repaired',
+  'workspace_relinked',
+  'explicit_request',
+  'explicit_force_reindex',
+]);
 
 export interface ThaiRagIndexJob {
   readonly jobId: string;
@@ -27,6 +40,7 @@ export interface ThaiRagIndexJob {
   readonly cacheMissReasons?: Readonly<Record<string, number>>;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
+  readonly reindexReason?: ThaiRagReindexReason;
   readonly startedAt: string;
   readonly finishedAt?: string;
   readonly result?: unknown;
@@ -111,10 +125,16 @@ export class ThaiRagIndexJobStore {
     if (changed) await this.persist();
   }
 
-  public async create(workspaceId: string, force: boolean, ownerId: string): Promise<ThaiRagIndexJob> {
+  public async create(
+    workspaceId: string,
+    force: boolean,
+    ownerId: string,
+    reindexReason: ThaiRagReindexReason = force ? 'explicit_force_reindex' : 'explicit_request',
+  ): Promise<ThaiRagIndexJob> {
     const parsedWorkspaceId = parseCanonicalWorkspaceId(workspaceId);
     if (!parsedWorkspaceId.ok) throw new Error(parsedWorkspaceId.error.message);
     if (ownerId.trim().length === 0) throw new Error('Thai-RAG index job owner is required');
+    if (!REINDEX_REASONS.has(reindexReason)) throw new Error('Thai-RAG index reindex reason is invalid');
     await this.initialize();
     const ownerProcessIdentity = await this.readOwnerProcessIdentity(ownerId);
     const job: ThaiRagIndexJob = {
@@ -124,6 +144,7 @@ export class ThaiRagIndexJobStore {
       ...(ownerProcessIdentity === null ? {} : { ownerProcessIdentity }),
       status: 'running',
       force,
+      reindexReason,
       startedAt: this.now().toISOString(),
     };
     this.jobs.set(job.jobId, job);
@@ -334,6 +355,7 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       ...(validReasonCounters(value.cacheMissReasons) === null ? {} : { cacheMissReasons: validReasonCounters(value.cacheMissReasons)! }),
       status,
       force: typeof value.force === 'boolean' ? value.force : false,
+      ...(validReindexReason(value.reindexReason) ? { reindexReason: value.reindexReason } : {}),
       startedAt: typeof value.startedAt === 'string' ? value.startedAt : now().toISOString(),
       ...(legacy ? { finishedAt: typeof value.finishedAt === 'string' ? value.finishedAt : now().toISOString(), error: 'Legacy index job is unavailable', legacyData: value } : {}),
       ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),
@@ -424,6 +446,10 @@ function jobsEqualProgress(left: ThaiRagIndexJob, right: ThaiRagIndexJob): boole
     && left.newEmbeddedFiles === right.newEmbeddedFiles
     && left.newEmbeddedChunks === right.newEmbeddedChunks
     && JSON.stringify(left.cacheMissReasons ?? {}) === JSON.stringify(right.cacheMissReasons ?? {});
+}
+
+function validReindexReason(value: unknown): value is ThaiRagReindexReason {
+  return typeof value === 'string' && REINDEX_REASONS.has(value as ThaiRagReindexReason);
 }
 
 function validCounter(value: unknown): value is number {

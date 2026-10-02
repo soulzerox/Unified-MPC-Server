@@ -257,7 +257,9 @@ export function getClientScriptJs(): string {
             const heading = document.createElement('div');
             heading.className = 'mono';
             heading.textContent = 'Workspace ' + String(job.workspaceId || '').slice(0, 8)
-              + ' · ' + String(job.status || 'unknown');
+              + ' · ' + String(job.status || 'unknown')
+              + ' · jobId=' + String(job.jobId || 'unknown')
+              + ' · force=' + (typeof job.force === 'boolean' ? String(job.force) : 'unknown');
             item.appendChild(heading);
             const description = document.createElement('div');
             description.style.cssText = 'color: var(--text-secondary); margin: 6px 0;';
@@ -265,14 +267,33 @@ export function getClientScriptJs(): string {
               ? job.indexedFiles + job.skippedFiles : null;
             const total = Number.isSafeInteger(job.totalFiles) ? job.totalFiles : null;
             const active = job.status === 'running' || job.status === 'cancelling';
-            description.textContent = job.stage === 'finalizing'
+            const baseDescription = job.stage === 'finalizing'
               ? 'Finalizing index · validating vectors and activating generation'
               : job.stage === 'scanning' && active
                 ? 'Scanning source files...'
                 : total === null || completed === null
                   ? String(job.status || 'unknown')
                   : String(completed) + ' / ' + String(total) + ' files (' + String(job.indexedFiles)
-                    + ' indexed, ' + String(job.skippedFiles) + ' reused)';
+                    + ' indexed, ' + String(job.skippedFiles) + ' generation-copied/skipped)';
+            const cacheDescription = Number.isSafeInteger(job.cacheHitFiles)
+              && Number.isSafeInteger(job.cacheHitChunks)
+              && Number.isSafeInteger(job.newEmbeddedFiles)
+              && Number.isSafeInteger(job.newEmbeddedChunks)
+              ? ' · ' + String(job.cacheHitFiles) + ' cache-hit files / ' + String(job.cacheHitChunks)
+                + ' chunks · ' + String(job.newEmbeddedFiles) + ' new-embedded files / '
+                + String(job.newEmbeddedChunks) + ' chunks'
+              : '';
+            const pendingDescription = Number.isSafeInteger(job.pendingFiles)
+              ? ' · pending ' + String(job.pendingFiles) + ' files'
+              : '';
+            const reasonDescription = typeof job.reindexReason === 'string'
+              ? ' · Reason: ' + job.reindexReason
+              : '';
+            const missReasons = job.cacheMissReasons && typeof job.cacheMissReasons === 'object'
+              ? Object.entries(job.cacheMissReasons).map(([reason, count]) => reason + '=' + String(count)).join(', ')
+              : '';
+            description.textContent = baseDescription + cacheDescription + pendingDescription + reasonDescription
+              + (missReasons ? ' · Cache misses: ' + missReasons : '');
             item.appendChild(description);
             const progress = document.createElement('progress');
             progress.max = total !== null && total > 0 ? total : 1;

@@ -1397,9 +1397,19 @@ export interface WebRagIndexProgress {
   readonly jobId: string;
   readonly workspaceId: string;
   readonly status: string;
+  readonly force?: boolean;
+  readonly pendingFiles?: number;
   readonly indexedFiles?: number;
   readonly skippedFiles?: number;
   readonly totalFiles?: number;
+  readonly cacheHitFiles?: number;
+  readonly cacheHitChunks?: number;
+  readonly cacheMissFiles?: number;
+  readonly cacheMissChunks?: number;
+  readonly newEmbeddedFiles?: number;
+  readonly newEmbeddedChunks?: number;
+  readonly cacheMissReasons?: Readonly<Record<string, number>>;
+  readonly reindexReason?: 'startup_verification' | 'alias_created_or_repaired' | 'workspace_relinked' | 'explicit_request' | 'explicit_force_reindex';
   readonly progressPercent?: number;
   readonly stage: 'scanning' | 'indexing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
   readonly startedAt: string;
@@ -1422,8 +1432,52 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
     const indexedFiles = counter(job.indexedFiles);
     const skippedFiles = counter(job.skippedFiles);
     const totalFiles = counter(job.totalFiles);
+    const force = typeof job.force === 'boolean' ? job.force : undefined;
+    const cacheHitFiles = counter(job.cacheHitFiles);
+    const cacheHitChunks = counter(job.cacheHitChunks);
+    const cacheMissFiles = counter(job.cacheMissFiles);
+    const cacheMissChunks = counter(job.cacheMissChunks);
+    const newEmbeddedFiles = counter(job.newEmbeddedFiles);
+    const newEmbeddedChunks = counter(job.newEmbeddedChunks);
+    const rawCacheReasons = job.cacheMissReasons;
+    let cacheMissReasons: Readonly<Record<string, number>> | undefined;
+    if (rawCacheReasons !== null && typeof rawCacheReasons === 'object' && !Array.isArray(rawCacheReasons)) {
+      const normalized: Record<string, number> = {};
+      let valid = true;
+      for (const [reason, count] of Object.entries(rawCacheReasons)) {
+        const normalizedCount = counter(count);
+        if (!/^[a-z0-9_-]{1,64}$/i.test(reason) || normalizedCount === undefined) {
+          valid = false;
+          break;
+        }
+        normalized[reason] = normalizedCount;
+      }
+      if (valid) cacheMissReasons = normalized;
+    }
+    const rawReindexReason = typeof job.reindexReason === 'string' ? job.reindexReason : undefined;
+    const reindexReason = rawReindexReason !== undefined && [
+      'startup_verification',
+      'alias_created_or_repaired',
+      'workspace_relinked',
+      'explicit_request',
+      'explicit_force_reindex',
+    ].includes(rawReindexReason)
+      ? rawReindexReason as WebRagIndexProgress['reindexReason']
+      : undefined;
+    const cacheFields = [
+      cacheHitFiles, cacheHitChunks, cacheMissFiles, cacheMissChunks,
+      newEmbeddedFiles, newEmbeddedChunks,
+    ];
+    const hasAnyCacheField = cacheFields.some((entry) => entry !== undefined) || rawCacheReasons !== undefined;
+    const cacheValid = hasAnyCacheField
+      && cacheFields.every((entry) => entry !== undefined)
+      && cacheMissReasons !== undefined
+      && cacheHitFiles! + cacheMissFiles! <= (totalFiles ?? Number.MAX_SAFE_INTEGER)
+      && newEmbeddedFiles! <= cacheMissFiles!
+      && newEmbeddedChunks! <= cacheMissChunks!;
     const completed = indexedFiles !== undefined && skippedFiles !== undefined ? indexedFiles + skippedFiles : undefined;
     const countsValid = completed !== undefined && totalFiles !== undefined && completed <= totalFiles;
+    const pendingFiles = countsValid ? totalFiles - completed : undefined;
     const status = String(job.status);
     const stage: WebRagIndexProgress['stage'] =
       status === 'completed' ? 'completed'
@@ -1435,9 +1489,21 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
       jobId: job.jobId,
       workspaceId: job.workspaceId,
       status,
+      ...(force === undefined ? {} : { force }),
+      ...(pendingFiles === undefined ? {} : { pendingFiles }),
       ...(indexedFiles === undefined ? {} : { indexedFiles }),
       ...(skippedFiles === undefined ? {} : { skippedFiles }),
       ...(totalFiles === undefined ? {} : { totalFiles }),
+      ...(cacheValid ? {
+        cacheHitFiles: cacheHitFiles!,
+        cacheHitChunks: cacheHitChunks!,
+        cacheMissFiles: cacheMissFiles!,
+        cacheMissChunks: cacheMissChunks!,
+        newEmbeddedFiles: newEmbeddedFiles!,
+        newEmbeddedChunks: newEmbeddedChunks!,
+        cacheMissReasons: cacheMissReasons!,
+      } : {}),
+      ...(reindexReason === undefined ? {} : { reindexReason }),
       ...(countsValid && totalFiles > 0 ? { progressPercent: Math.floor(100 * completed / totalFiles) } : {}),
       stage,
       startedAt: job.startedAt,

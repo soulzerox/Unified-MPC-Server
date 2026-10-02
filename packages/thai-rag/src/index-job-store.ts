@@ -5,8 +5,21 @@ import { createPosixProcessIdentityProbe, type PosixProcessIdentityProbe } from 
 import { parseCanonicalWorkspaceId, resolveThaiRagProviderRoot } from './canonical-workspace.js';
 
 export type ThaiRagIndexJobStatus = 'running' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'interrupted' | 'legacy-unavailable';
+export type ThaiRagReindexReason =
+  | 'startup_verification'
+  | 'alias_created_or_repaired'
+  | 'workspace_relinked'
+  | 'explicit_request'
+  | 'explicit_force_reindex';
 
 const ACTIVE_JOB_STATUSES = new Set<ThaiRagIndexJobStatus>(['running', 'cancelling']);
+const REINDEX_REASONS = new Set<ThaiRagReindexReason>([
+  'startup_verification',
+  'alias_created_or_repaired',
+  'workspace_relinked',
+  'explicit_request',
+  'explicit_force_reindex',
+]);
 
 export interface ThaiRagIndexJob {
   readonly jobId: string;
@@ -18,8 +31,16 @@ export interface ThaiRagIndexJob {
   readonly indexedFiles?: number;
   readonly skippedFiles?: number;
   readonly totalFiles?: number;
+  readonly cacheHitFiles?: number;
+  readonly cacheHitChunks?: number;
+  readonly cacheMissFiles?: number;
+  readonly cacheMissChunks?: number;
+  readonly newEmbeddedFiles?: number;
+  readonly newEmbeddedChunks?: number;
+  readonly cacheMissReasons?: Readonly<Record<string, number>>;
   readonly status: ThaiRagIndexJobStatus;
   readonly force: boolean;
+  readonly reindexReason?: ThaiRagReindexReason;
   readonly startedAt: string;
   readonly finishedAt?: string;
   readonly result?: unknown;
@@ -28,8 +49,21 @@ export interface ThaiRagIndexJob {
 }
 
 interface JobFile {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly jobs: readonly ThaiRagIndexJob[];
+}
+
+export interface ThaiRagIndexJobProgress {
+  readonly indexedFiles: number;
+  readonly skippedFiles: number;
+  readonly totalFiles: number;
+  readonly cacheHitFiles?: number;
+  readonly cacheHitChunks?: number;
+  readonly cacheMissFiles?: number;
+  readonly cacheMissChunks?: number;
+  readonly newEmbeddedFiles?: number;
+  readonly newEmbeddedChunks?: number;
+  readonly cacheMissReasons?: Readonly<Record<string, number>>;
 }
 
 export interface ThaiRagIndexJobStoreOptions {
@@ -63,8 +97,8 @@ export class ThaiRagIndexJobStore {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     try {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'));
-      if (isRecord(parsed) && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2) && Array.isArray(parsed.jobs)) {
-        this.migrated = parsed.schemaVersion === 1;
+      if (isRecord(parsed) && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2 || parsed.schemaVersion === 3) && Array.isArray(parsed.jobs)) {
+        this.migrated = parsed.schemaVersion !== 3;
         for (const value of parsed.jobs) {
           const parsedJob = parseJob(value, this.now);
           if (parsedJob !== null) {
@@ -91,10 +125,16 @@ export class ThaiRagIndexJobStore {
     if (changed) await this.persist();
   }
 
-  public async create(workspaceId: string, force: boolean, ownerId: string): Promise<ThaiRagIndexJob> {
+  public async create(
+    workspaceId: string,
+    force: boolean,
+    ownerId: string,
+    reindexReason: ThaiRagReindexReason = force ? 'explicit_force_reindex' : 'explicit_request',
+  ): Promise<ThaiRagIndexJob> {
     const parsedWorkspaceId = parseCanonicalWorkspaceId(workspaceId);
     if (!parsedWorkspaceId.ok) throw new Error(parsedWorkspaceId.error.message);
     if (ownerId.trim().length === 0) throw new Error('Thai-RAG index job owner is required');
+    if (!REINDEX_REASONS.has(reindexReason)) throw new Error('Thai-RAG index reindex reason is invalid');
     await this.initialize();
     const ownerProcessIdentity = await this.readOwnerProcessIdentity(ownerId);
     const job: ThaiRagIndexJob = {
@@ -104,6 +144,7 @@ export class ThaiRagIndexJobStore {
       ...(ownerProcessIdentity === null ? {} : { ownerProcessIdentity }),
       status: 'running',
       force,
+      reindexReason,
       startedAt: this.now().toISOString(),
     };
     this.jobs.set(job.jobId, job);
@@ -129,22 +170,38 @@ export class ThaiRagIndexJobStore {
 
   public async recordProgress(
     jobId: string,
-    progress: { readonly indexedFiles: number; readonly skippedFiles: number; readonly totalFiles: number },
+    progress: ThaiRagIndexJobProgress,
     ownerId: string,
   ): Promise<ThaiRagIndexJob | null> {
     await this.initialize();
     const current = this.jobs.get(jobId);
     if (current === undefined || current.ownerId !== ownerId || !ACTIVE_JOB_STATUSES.has(current.status)) return null;
     const counters = [progress.indexedFiles, progress.skippedFiles, progress.totalFiles];
-    if (counters.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 100_000_000)
+    if (counters.some((value) => !validCounter(value))
       || progress.indexedFiles + progress.skippedFiles > progress.totalFiles) return null;
     // Poll responses can arrive out of order: never move an already published
     // counter backwards and never let the numerator exceed the persisted total.
     const indexedFiles = Math.max(current.indexedFiles ?? 0, progress.indexedFiles);
     const skippedFiles = Math.max(current.skippedFiles ?? 0, progress.skippedFiles);
     const totalFiles = Math.max(current.totalFiles ?? 0, progress.totalFiles, indexedFiles + skippedFiles);
-    if (indexedFiles === current.indexedFiles && skippedFiles === current.skippedFiles && totalFiles === current.totalFiles) return current;
-    const next: ThaiRagIndexJob = { ...current, indexedFiles, skippedFiles, totalFiles };
+    const cache = normalizeCacheProgress(progress, totalFiles);
+    const mergedCache = cache === null ? {} : {
+      cacheHitFiles: Math.max(current.cacheHitFiles ?? 0, cache.cacheHitFiles),
+      cacheHitChunks: Math.max(current.cacheHitChunks ?? 0, cache.cacheHitChunks),
+      cacheMissFiles: Math.max(current.cacheMissFiles ?? 0, cache.cacheMissFiles),
+      cacheMissChunks: Math.max(current.cacheMissChunks ?? 0, cache.cacheMissChunks),
+      newEmbeddedFiles: Math.max(current.newEmbeddedFiles ?? 0, cache.newEmbeddedFiles),
+      newEmbeddedChunks: Math.max(current.newEmbeddedChunks ?? 0, cache.newEmbeddedChunks),
+      cacheMissReasons: mergeReasonCounters(current.cacheMissReasons, cache.cacheMissReasons),
+    };
+    const next: ThaiRagIndexJob = {
+      ...current,
+      indexedFiles,
+      skippedFiles,
+      totalFiles,
+      ...mergedCache,
+    };
+    if (jobsEqualProgress(current, next)) return current;
     this.jobs.set(jobId, next);
     await this.persist();
     return next;
@@ -258,7 +315,7 @@ export class ThaiRagIndexJobStore {
   }
 
   private async persist(): Promise<void> {
-    const payload: JobFile = { schemaVersion: 2, jobs: [...this.jobs.values()] };
+    const payload: JobFile = { schemaVersion: 3, jobs: [...this.jobs.values()] };
     const temporary = `${this.filePath}.tmp-${process.pid}-${randomUUID()}`;
     await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, this.filePath);
@@ -289,8 +346,16 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       ...(validCounter(value.indexedFiles) ? { indexedFiles: value.indexedFiles } : {}),
       ...(validCounter(value.skippedFiles) ? { skippedFiles: value.skippedFiles } : {}),
       ...(validCounter(value.totalFiles) ? { totalFiles: value.totalFiles } : {}),
+      ...(validCounter(value.cacheHitFiles) ? { cacheHitFiles: value.cacheHitFiles } : {}),
+      ...(validCounter(value.cacheHitChunks) ? { cacheHitChunks: value.cacheHitChunks } : {}),
+      ...(validCounter(value.cacheMissFiles) ? { cacheMissFiles: value.cacheMissFiles } : {}),
+      ...(validCounter(value.cacheMissChunks) ? { cacheMissChunks: value.cacheMissChunks } : {}),
+      ...(validCounter(value.newEmbeddedFiles) ? { newEmbeddedFiles: value.newEmbeddedFiles } : {}),
+      ...(validCounter(value.newEmbeddedChunks) ? { newEmbeddedChunks: value.newEmbeddedChunks } : {}),
+      ...(validReasonCounters(value.cacheMissReasons) === null ? {} : { cacheMissReasons: validReasonCounters(value.cacheMissReasons)! }),
       status,
       force: typeof value.force === 'boolean' ? value.force : false,
+      ...(validReindexReason(value.reindexReason) ? { reindexReason: value.reindexReason } : {}),
       startedAt: typeof value.startedAt === 'string' ? value.startedAt : now().toISOString(),
       ...(legacy ? { finishedAt: typeof value.finishedAt === 'string' ? value.finishedAt : now().toISOString(), error: 'Legacy index job is unavailable', legacyData: value } : {}),
       ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),
@@ -298,6 +363,93 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       ...(typeof value.error === 'string' ? { error: value.error } : {}),
     },
   };
+}
+
+interface NormalizedCacheProgress {
+  readonly cacheHitFiles: number;
+  readonly cacheHitChunks: number;
+  readonly cacheMissFiles: number;
+  readonly cacheMissChunks: number;
+  readonly newEmbeddedFiles: number;
+  readonly newEmbeddedChunks: number;
+  readonly cacheMissReasons: Readonly<Record<string, number>>;
+}
+
+function normalizeCacheProgress(progress: ThaiRagIndexJobProgress, totalFiles: number): NormalizedCacheProgress | null {
+  const hasAny = progress.cacheHitFiles !== undefined
+    || progress.cacheHitChunks !== undefined
+    || progress.cacheMissFiles !== undefined
+    || progress.cacheMissChunks !== undefined
+    || progress.newEmbeddedFiles !== undefined
+    || progress.newEmbeddedChunks !== undefined
+    || progress.cacheMissReasons !== undefined;
+  if (!hasAny) return null;
+
+  const cacheHitFiles = progress.cacheHitFiles;
+  const cacheHitChunks = progress.cacheHitChunks;
+  const cacheMissFiles = progress.cacheMissFiles;
+  const cacheMissChunks = progress.cacheMissChunks;
+  const newEmbeddedFiles = progress.newEmbeddedFiles;
+  const newEmbeddedChunks = progress.newEmbeddedChunks;
+  if (!validCounter(cacheHitFiles)
+    || !validCounter(cacheHitChunks)
+    || !validCounter(cacheMissFiles)
+    || !validCounter(cacheMissChunks)
+    || !validCounter(newEmbeddedFiles)
+    || !validCounter(newEmbeddedChunks)) return null;
+
+  const cacheMissReasons = validReasonCounters(progress.cacheMissReasons);
+  if (cacheMissReasons === null
+    || cacheHitFiles + cacheMissFiles > totalFiles
+    || newEmbeddedFiles > cacheMissFiles
+    || newEmbeddedChunks > cacheMissChunks) return null;
+  return {
+    cacheHitFiles,
+    cacheHitChunks,
+    cacheMissFiles,
+    cacheMissChunks,
+    newEmbeddedFiles,
+    newEmbeddedChunks,
+    cacheMissReasons,
+  };
+}
+
+function validReasonCounters(value: unknown): Readonly<Record<string, number>> | null {
+  if (!isRecord(value)) return null;
+  const normalized: Record<string, number> = {};
+  for (const [reason, count] of Object.entries(value)) {
+    if (reason.trim().length === 0 || !validCounter(count)) return null;
+    normalized[reason] = count;
+  }
+  return normalized;
+}
+
+function mergeReasonCounters(
+  current: Readonly<Record<string, number>> | undefined,
+  incoming: Readonly<Record<string, number>>,
+): Readonly<Record<string, number>> {
+  const merged: Record<string, number> = { ...(current ?? {}) };
+  for (const [reason, count] of Object.entries(incoming)) {
+    merged[reason] = Math.max(merged[reason] ?? 0, count);
+  }
+  return merged;
+}
+
+function jobsEqualProgress(left: ThaiRagIndexJob, right: ThaiRagIndexJob): boolean {
+  return left.indexedFiles === right.indexedFiles
+    && left.skippedFiles === right.skippedFiles
+    && left.totalFiles === right.totalFiles
+    && left.cacheHitFiles === right.cacheHitFiles
+    && left.cacheHitChunks === right.cacheHitChunks
+    && left.cacheMissFiles === right.cacheMissFiles
+    && left.cacheMissChunks === right.cacheMissChunks
+    && left.newEmbeddedFiles === right.newEmbeddedFiles
+    && left.newEmbeddedChunks === right.newEmbeddedChunks
+    && JSON.stringify(left.cacheMissReasons ?? {}) === JSON.stringify(right.cacheMissReasons ?? {});
+}
+
+function validReindexReason(value: unknown): value is ThaiRagReindexReason {
+  return typeof value === 'string' && REINDEX_REASONS.has(value as ThaiRagReindexReason);
 }
 
 function validCounter(value: unknown): value is number {

@@ -102,9 +102,23 @@ describe('NativeThaiRagProviderDriver', () => {
               status: 'ok',
               data: statusPolls < 2
                 ? { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId,
-                    indexed_files: 2, skipped_files: 1, total_files: 5 }
+                    indexed_files: 2, skipped_files: 1, total_files: 5,
+                    cache_hit_files: 1, cache_hit_chunks: 6,
+                    cache_miss_files: 1, cache_miss_chunks: 2,
+                    new_embedded_files: 1, new_embedded_chunks: 2,
+                    cache_miss_reasons: { artifact_missing: 2 } }
                 : { status: 'done', job_id: 'idx_provider_1', workspace_id: workspaceId,
-                    indexed_files: 4, skipped_files: 1, total_files: 5, result: { indexed: 4 } },
+                    indexed_files: 4, skipped_files: 1, total_files: 5,
+                    cache_hit_files: 3, cache_hit_chunks: 12,
+                    cache_miss_files: 1, cache_miss_chunks: 2,
+                    new_embedded_files: 1, new_embedded_chunks: 2,
+                    cache_miss_reasons: { artifact_missing: 2 },
+                    result: { indexed: 4, embedding_cache: {
+                      cache_hit_files: 3, cache_hit_chunks: 12,
+                      cache_miss_files: 1, cache_miss_chunks: 2,
+                      new_embedded_files: 1, new_embedded_chunks: 2,
+                      miss_reasons: { artifact_missing: 2 },
+                    } } },
             });
           }
           return success(tool);
@@ -135,7 +149,13 @@ describe('NativeThaiRagProviderDriver', () => {
       if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
     }
     expect(terminal).toMatchObject({ ok: true, value: {
-      status: 'completed', result: { indexed: 4 }, indexedFiles: 4, skippedFiles: 1, totalFiles: 5,
+      status: 'completed',
+      result: { indexed: 4, embedding_cache: expect.any(Object) },
+      indexedFiles: 4, skippedFiles: 1, totalFiles: 5,
+      cacheHitFiles: 3, cacheHitChunks: 12,
+      cacheMissFiles: 1, cacheMissChunks: 2,
+      newEmbeddedFiles: 1, newEmbeddedChunks: 2,
+      cacheMissReasons: { artifact_missing: 2 },
     } });
     expect(calls.find(({ tool, args }) => tool === 'code_index' && args.background === true)?.args).toMatchObject({
       workspace_id: workspaceId,
@@ -144,6 +164,107 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(calls.filter(({ tool }) => tool === 'index_status').length).toBeGreaterThan(0);
     await driver.stop();
   });
+
+
+  it('drops malformed provider cache metrics while preserving valid file progress', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let statusPolls = 0;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      indexJobPollMs: 10,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_malformed_cache', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'index_status') {
+            statusPolls += 1;
+            return success('index_status', {
+              status: 'ok',
+              data: statusPolls < 2
+                ? {
+                    status: 'running',
+                    job_id: 'idx_provider_malformed_cache',
+                    workspace_id: workspaceId,
+                    indexed_files: 1,
+                    skipped_files: 0,
+                    total_files: 2,
+                    cache_hit_files: -1,
+                    cache_hit_chunks: 5,
+                    cache_miss_files: 1,
+                    cache_miss_chunks: 2,
+                    new_embedded_files: 1,
+                    new_embedded_chunks: 2,
+                    cache_miss_reasons: { artifact_missing: 2 },
+                  }
+                : {
+                    status: 'done',
+                    job_id: 'idx_provider_malformed_cache',
+                    workspace_id: workspaceId,
+                    indexed_files: 2,
+                    skipped_files: 0,
+                    total_files: 2,
+                    result: { indexed: 2 },
+                  },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+    try {
+      const started = await driver.call('code_index', {
+        workspace_path: workspaceRoot,
+        workspace_id: workspaceId,
+        force: false,
+        background: true,
+      });
+      expect(started).toMatchObject({ ok: true, value: { status: 'running', workspace_id: workspaceId } });
+      if (!started.ok || !isRecord(started.value) || typeof started.value.job_id !== 'string') {
+        throw new Error('missing local job id');
+      }
+      const localJobId = started.value.job_id;
+
+      let terminal: Awaited<ReturnType<typeof driver.call>> | undefined;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        terminal = await driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId });
+        if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
+      }
+      expect(terminal).toMatchObject({
+        ok: true,
+        value: {
+          status: 'completed',
+          indexedFiles: 2,
+          skippedFiles: 0,
+          totalFiles: 2,
+          result: { indexed: 2 },
+        },
+      });
+      if (!terminal?.ok || !isRecord(terminal.value)) throw new Error('terminal job missing');
+      expect(terminal.value).not.toHaveProperty('cacheHitFiles');
+      expect(terminal.value).not.toHaveProperty('cacheHitChunks');
+      expect(terminal.value).not.toHaveProperty('cacheMissReasons');
+    } finally {
+      await driver.stop();
+    }
+  });
+
 
   it('does not display a failed provider result as completed in the normal background monitor', async () => {
     const dataRoot = await tempRoot();
@@ -686,11 +807,17 @@ describe('NativeThaiRagProviderDriver', () => {
       error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing' } },
     });
     const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
-      jobs: Array<{ jobId: string; providerJobId?: string; workspaceId: string; status: string }>;
+      jobs: Array<{ jobId: string; providerJobId?: string; workspaceId: string; status: string; reindexReason?: string }>;
     };
     const indexingJob = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running');
-    expect(indexingJob).toMatchObject({ providerJobId: 'idx_provider_admission' });
-    expect(calls.find(({ tool }) => tool === 'code_index')?.args.background).toBe(true);
+    expect(indexingJob).toMatchObject({
+      providerJobId: 'idx_provider_admission',
+      reindexReason: 'alias_created_or_repaired',
+    });
+    expect(calls.find(({ tool }) => tool === 'code_index')?.args).toMatchObject({
+      background: true,
+      force: false,
+    });
 
     completeIndex = true;
     await expect.poll(async () => {

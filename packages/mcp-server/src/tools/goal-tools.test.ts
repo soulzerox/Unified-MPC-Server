@@ -216,7 +216,7 @@ describe('durable goal MCP tools', () => {
         },
       },
     } as unknown as McpToolContext['services'], actor, {
-      activeWorkspaceScopeProvider: async () => ({ workspaceId: 'parent-project', rootPath: 'E:\\parent' }),
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'parent-project', rootPath: 'E:\\parent' }),
     });
     const stagedRecovery = {
       expectedAdmissionGeneration: 11,

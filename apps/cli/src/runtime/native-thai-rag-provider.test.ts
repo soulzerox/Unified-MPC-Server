@@ -8,6 +8,8 @@ import {
   THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
   THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_CONTRACT_FINGERPRINT,
+  THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+  THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
 } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 
@@ -431,6 +433,151 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({
       ok: false,
       error: { details: { reason: 'missing-capability', missing: 'cancel_index' } },
+    });
+    await driver.stop();
+  });
+
+  it('accepts the Thai-RAG legacy-adoption contract and routes dry-run adoption without starting code_index', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        handshake: legacyAdoptionHandshake(),
+        includeCancelIndex: true,
+        includeAdoptLegacyIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'adopt_legacy_index') {
+            return success('adoptable', {
+              status: 'ok',
+              adoption_status: 'adoptable',
+              workspace_id: workspaceId,
+            });
+          }
+          return success(tool === 'code_index' ? 'indexed' : 'ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+
+    const adopted = await driver.call('adopt_legacy_index', {
+      workspace_id: workspaceId,
+      dry_run: true,
+      legacy_embedding_profile_fingerprint: 'embed-legacy',
+      legacy_chunking_fingerprint: 'chunk-legacy',
+    });
+
+    expect(adopted).toMatchObject({
+      ok: true,
+      value: {
+        structuredContent: {
+          data: {
+            adoption_status: 'adoptable',
+            workspace_id: workspaceId,
+          },
+        },
+      },
+    });
+    expect(calls.find(({ tool }) => tool === 'adopt_legacy_index')?.args).toMatchObject({
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+      dry_run: true,
+      legacy_embedding_profile_fingerprint: 'embed-legacy',
+      legacy_chunking_fingerprint: 'chunk-legacy',
+    });
+    expect(calls.some(({ tool }) => tool === 'code_index')).toBe(false);
+    await driver.stop();
+  });
+
+  it('refreshes a relinked workspace for legacy adoption without starting code_index', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const relinkedRoot = await tempRoot();
+    let currentRoot = firstRoot;
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{
+        id: workspaceId,
+        realRootPath: currentRoot,
+      }],
+      clientFactory: clientFactory({
+        handshake: legacyAdoptionHandshake(),
+        includeCancelIndex: true,
+        includeAdoptLegacyIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'adopt_legacy_index') {
+            return success('adoptable', {
+              status: 'ok',
+              adoption_status: 'adoptable',
+              workspace_id: workspaceId,
+            });
+          }
+          return success(tool === 'code_index' ? 'indexed' : 'ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+
+    currentRoot = relinkedRoot;
+    const adopted = await driver.call('adopt_legacy_index', {
+      workspace_id: workspaceId,
+      dry_run: true,
+    });
+
+    expect(adopted.ok).toBe(true);
+    expect(calls.find(({ tool }) => tool === 'adopt_legacy_index')?.args).toMatchObject({
+      workspace_id: workspaceId,
+      workspace_path: relinkedRoot,
+      dry_run: true,
+    });
+    expect(calls.some(({ tool }) => tool === 'code_index')).toBe(false);
+    await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(
+      await realpath(relinkedRoot),
+    );
+    await driver.stop();
+  });
+
+  it('fails startup when the legacy-adoption handshake advertises adopt_legacy_index but the worker tool is absent', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        handshake: legacyAdoptionHandshake(),
+        includeCancelIndex: true,
+        includeAdoptLegacyIndex: false,
+      }),
+    });
+
+    await expect(driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { details: { reason: 'missing-capability', missing: 'adopt_legacy_index' } },
     });
     await driver.stop();
   });
@@ -1900,6 +2047,7 @@ function clientFactory(options: {
   readonly oldProviderSchema?: boolean;
   readonly jsonTextResponses?: boolean;
   readonly includeCancelIndex?: boolean;
+  readonly includeAdoptLegacyIndex?: boolean;
 } = {}): McpClientFactory {
   let connections = 0;
   return {
@@ -1908,7 +2056,11 @@ function clientFactory(options: {
       options.onConnect?.(config);
       return {
         async listTools(): Promise<Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>> {
-          const advertisedTools = options.includeCancelIndex ? [...productionToolNames, 'cancel_index'] : [...productionToolNames];
+          const advertisedTools = [
+            ...productionToolNames,
+            ...(options.includeCancelIndex ? ['cancel_index'] : []),
+            ...(options.includeAdoptLegacyIndex ? ['adopt_legacy_index'] : []),
+          ];
           return advertisedTools.map((name) => ({
             name,
             description: name,
@@ -1998,6 +2150,24 @@ function cancellableHandshake(): Record<string, unknown> {
     generation: {
       ...(base.generation as Record<string, unknown>),
       contract: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
+    },
+  };
+}
+
+function legacyAdoptionHandshake(): Record<string, unknown> {
+  const base = defaultHandshake();
+  return {
+    ...base,
+    contract_fingerprint: THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+    index_job_contract_version: '1.1',
+    capabilities: [
+      ...productionToolNames,
+      THAI_RAG_CANCEL_CAPABILITY,
+      THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+    ],
+    generation: {
+      ...(base.generation as Record<string, unknown>),
+      contract: THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
     },
   };
 }

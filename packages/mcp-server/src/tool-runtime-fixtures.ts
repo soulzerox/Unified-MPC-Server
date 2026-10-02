@@ -139,6 +139,12 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   rag_code_search: service({ workspaceId, query: 'smoke', topK: 3 }, 'thaiRag.call:code_search'),
   rag_code_context: service({ workspaceId, filePath: 'src/smoke.ts', lineNumber: 1, window: 5 }, 'thaiRag.call:code_context'),
   rag_code_blast_radius: service({ workspaceId, symbolName: 'smoke', maxDepth: 2 }, 'thaiRag.call:code_blast_radius'),
+  rag_adopt_legacy_index: service({
+    workspaceId,
+    dryRun: true,
+    legacyEmbeddingProfileFingerprint: 'embed-legacy',
+    legacyChunkingFingerprint: 'chunk-legacy',
+  }, 'thaiRag.call:adopt_legacy_index'),
   rag_code_index: service({ workspaceId, force: false, background: false }, 'thaiRag.call:code_index'),
   rag_index_status: service({ workspaceId, jobId: 'job-1' }, 'thaiRag.call:index_status'),
   rag_cancel_index: service({ workspaceId, jobId: 'job-1' }, 'thaiRag.call:cancel_index'),

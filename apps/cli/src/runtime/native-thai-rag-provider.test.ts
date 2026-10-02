@@ -165,6 +165,107 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+
+  it('drops malformed provider cache metrics while preserving valid file progress', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let statusPolls = 0;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      indexJobPollMs: 10,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') {
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_malformed_cache', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'index_status') {
+            statusPolls += 1;
+            return success('index_status', {
+              status: 'ok',
+              data: statusPolls < 2
+                ? {
+                    status: 'running',
+                    job_id: 'idx_provider_malformed_cache',
+                    workspace_id: workspaceId,
+                    indexed_files: 1,
+                    skipped_files: 0,
+                    total_files: 2,
+                    cache_hit_files: -1,
+                    cache_hit_chunks: 5,
+                    cache_miss_files: 1,
+                    cache_miss_chunks: 2,
+                    new_embedded_files: 1,
+                    new_embedded_chunks: 2,
+                    cache_miss_reasons: { artifact_missing: 2 },
+                  }
+                : {
+                    status: 'done',
+                    job_id: 'idx_provider_malformed_cache',
+                    workspace_id: workspaceId,
+                    indexed_files: 2,
+                    skipped_files: 0,
+                    total_files: 2,
+                    result: { indexed: 2 },
+                  },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+    try {
+      const started = await driver.call('code_index', {
+        workspace_path: workspaceRoot,
+        workspace_id: workspaceId,
+        force: false,
+        background: true,
+      });
+      expect(started).toMatchObject({ ok: true, value: { status: 'running', workspace_id: workspaceId } });
+      if (!started.ok || !isRecord(started.value) || typeof started.value.job_id !== 'string') {
+        throw new Error('missing local job id');
+      }
+      const localJobId = started.value.job_id;
+
+      let terminal: Awaited<ReturnType<typeof driver.call>> | undefined;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        terminal = await driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId });
+        if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
+      }
+      expect(terminal).toMatchObject({
+        ok: true,
+        value: {
+          status: 'completed',
+          indexedFiles: 2,
+          skippedFiles: 0,
+          totalFiles: 2,
+          result: { indexed: 2 },
+        },
+      });
+      if (!terminal?.ok || !isRecord(terminal.value)) throw new Error('terminal job missing');
+      expect(terminal.value).not.toHaveProperty('cacheHitFiles');
+      expect(terminal.value).not.toHaveProperty('cacheHitChunks');
+      expect(terminal.value).not.toHaveProperty('cacheMissReasons');
+    } finally {
+      await driver.stop();
+    }
+  });
+
+
   it('does not display a failed provider result as completed in the normal background monitor', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

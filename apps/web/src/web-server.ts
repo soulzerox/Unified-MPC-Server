@@ -350,6 +350,10 @@ export class ControlPlaneServer {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.boundPort}`);
     const pathname = url.pathname;
 
+    if (pathname.startsWith('/api/')) {
+      res.setHeader('Cache-Control', 'no-store');
+    }
+
     // 2. Static Dashboard HTML
     if (pathname === '/' && req.method === 'GET') {
       res.writeHead(200, {

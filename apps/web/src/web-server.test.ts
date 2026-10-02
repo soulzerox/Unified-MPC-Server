@@ -59,6 +59,12 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(html).toContain('Policies');
   });
 
+  it('marks every API response as non-cacheable for live dashboard data', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/status`);
+
+    expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
   it('requires startup capability for mutations and does not expose it in status or logs', async () => {
     const denied = await fetch(`http://127.0.0.1:${port}/api/chatgpt-gateway/start`, {
       method: 'POST', headers: { Origin: `http://127.0.0.1:${port}` },
@@ -1256,4 +1262,3 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(data.logs[0]).toHaveProperty('msg');
   });
 });
-

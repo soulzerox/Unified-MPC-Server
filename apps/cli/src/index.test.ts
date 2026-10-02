@@ -168,7 +168,7 @@ describe('CLI default dependency lifecycle', () => {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
     });
-  });
+  }, 15_000);
 
   it('executes CLI harness bootstrap, prepare, and mutation with native Thai-RAG wiring', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-harness-'));

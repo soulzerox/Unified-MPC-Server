@@ -81,6 +81,7 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
       sessionState: 'leased',
       connectorRegistration: {
         state: 'unverified',
+        recoveryState: 'connector_rehydrate_required',
         reason: 'host_projection_unavailable',
         action: 'reconnect_chatgpt_session',
       },
@@ -587,6 +588,7 @@ describe('GatewayService - ChatGPT Web Bridge State Machine', () => {
       sessionState: 'leased',
       connectorRegistration: {
         state: 'stale',
+        recoveryState: 'connector_rehydrate_required',
         reason: 'backend_restart',
         action: 'reconnect_chatgpt_session',
       },

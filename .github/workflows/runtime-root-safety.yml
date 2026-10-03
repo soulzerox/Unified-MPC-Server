@@ -51,6 +51,9 @@ jobs:
       - name: Runtime startup reconciliation regression
         run: bash scripts/launch-runtime.test.sh
 
+      - name: User-service boot persistence regression
+        run: bash scripts/install-user-services.test.sh
+
       - name: Verify systemd units
         run: |
           systemd-analyze verify \

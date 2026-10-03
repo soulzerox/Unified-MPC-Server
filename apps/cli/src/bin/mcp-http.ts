@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createCrossClientHostMutationApprovalProvider, createMcpRuntimeDiagnosticsProvider, hostApprovalBrokerDirectory, IncrementalVerifier, startMcpHttp } from '@unified-mpc/mcp-server';
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, desktopFullBypassAllEnabled, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
@@ -33,6 +33,7 @@ async function selectWorkspace(service: WorkspaceService): Promise<Workspace> {
 
 async function main(): Promise<void> {
   const dataPath = resolveDataPathFromShared();
+  assertStorageIdentitySafe(dataPath);
   fs.mkdirSync(dataPath, { recursive: true });
   const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
   const settings = new SqliteSettingsRepository(database);

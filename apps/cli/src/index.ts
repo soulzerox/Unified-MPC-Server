@@ -8,7 +8,7 @@ import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSn
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -406,6 +406,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
   const getWorkspaceState = (): NonNullable<typeof workspaceState> => {
     if (workspaceState !== undefined) return workspaceState;
     const dataPath = resolveDataPathFromShared();
+    assertStorageIdentitySafe(dataPath);
     fs.mkdirSync(dataPath, { recursive: true });
     const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const repository = new SqliteWorkspaceRepository(database);

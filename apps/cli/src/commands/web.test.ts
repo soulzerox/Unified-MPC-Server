@@ -1,5 +1,7 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { describe, expect, it } from 'vitest';
@@ -164,7 +166,11 @@ describe('web CLI command', () => {
       const root = await mkdtemp(path.join(process.cwd(), '.web-storage-diagnostics-'));
       const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
       const previousPublicUrl = process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL;
+      const previousHome = process.env.HOME;
+      const previousXdgDataHome = process.env.XDG_DATA_HOME;
       process.env.UNIFIED_MPC_DATA_PATH = root;
+      process.env.HOME = root;
+      process.env.XDG_DATA_HOME = path.join(root, 'xdg');
       process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL = 'https://storage.example.test';
       const secretValues = new Map<string, string>([
         ['cloudflare_api_token', 'super-secret-api-token'],
@@ -226,6 +232,10 @@ describe('web CLI command', () => {
       } finally {
         if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
         else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgDataHome;
         if (previousPublicUrl === undefined) delete process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL;
         else process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL = previousPublicUrl;
         await rm(root, { recursive: true, force: true });
@@ -235,7 +245,11 @@ describe('web CLI command', () => {
     it('keeps successful secret presence truth when another Secret Service lookup fails', async () => {
       const root = await mkdtemp(path.join(process.cwd(), '.web-storage-diagnostics-partial-'));
       const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      const previousHome = process.env.HOME;
+      const previousXdgDataHome = process.env.XDG_DATA_HOME;
       process.env.UNIFIED_MPC_DATA_PATH = root;
+      process.env.HOME = root;
+      process.env.XDG_DATA_HOME = path.join(root, 'xdg');
       const secretStore = {
         describe: (): { provider: string; service: string } => ({
           provider: 'linux-secret-service',
@@ -279,6 +293,56 @@ describe('web CLI command', () => {
       } finally {
         if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
         else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgDataHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('fails visibly before creating a fresh canonical DB when a historical HOME DB contains gateway settings', async () => {
+      const root = await mkdtemp(path.join(process.cwd(), '.web-storage-drift-'));
+      const canonical = path.join(root, 'canonical');
+      const home = path.join(root, 'home');
+      const historicalRoot = path.join(home, '.local', 'share', 'unified-mpc');
+      await mkdir(historicalRoot, { recursive: true });
+      const historicalPath = path.join(historicalRoot, 'unified-mpc.sqlite');
+      const historical = new DatabaseSync(historicalPath);
+      try {
+        historical.exec('CREATE TABLE settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);');
+        historical.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(
+          'cloudflare_public_url',
+          'https://historical.example.test',
+        );
+      } finally {
+        historical.close();
+      }
+
+      const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      const previousHome = process.env.HOME;
+      const previousXdgDataHome = process.env.XDG_DATA_HOME;
+      process.env.UNIFIED_MPC_DATA_PATH = canonical;
+      process.env.HOME = home;
+      process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+
+      try {
+        const result = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never });
+        expect(result.ok).toBe(false);
+        if (result.ok) {
+          await result.value.handle.close();
+          return;
+        }
+        expect(result.error.message).toContain('STORAGE_IDENTITY_DRIFT:');
+        expect(result.error.message).toContain(historicalPath);
+        expect(existsSync(path.join(canonical, 'unified-mpc.sqlite'))).toBe(false);
+      } finally {
+        if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+        else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgDataHome;
         await rm(root, { recursive: true, force: true });
       }
     });

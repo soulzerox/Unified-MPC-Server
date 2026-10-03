@@ -1,6 +1,8 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { ok, err } from '@unified-mpc/domain';
 import type { ExtensionsService } from '@unified-mpc/extensions';
@@ -153,6 +155,74 @@ describe('CLI default dependency lifecycle', () => {
     }
   });
 
+  it('fails visibly before creating a fresh canonical DB when a historical HOME DB contains gateway settings', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-storage-drift-'));
+    const canonical = path.join(root, 'canonical');
+    const home = path.join(root, 'home');
+    const historicalRoot = path.join(home, '.local', 'share', 'unified-mpc');
+    await mkdir(historicalRoot, { recursive: true });
+    const historicalPath = path.join(historicalRoot, 'unified-mpc.sqlite');
+    const historical = new DatabaseSync(historicalPath);
+    try {
+      historical.exec('CREATE TABLE settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);');
+      historical.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(
+        'cloudflare_public_url',
+        'https://historical.example.test',
+      );
+    } finally {
+      historical.close();
+    }
+
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = canonical;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+
+    try {
+      const dependencies = createDefaultCliDependencies();
+      await expect(dependencies.workspaceList()).rejects.toThrow(/STORAGE_IDENTITY_DRIFT:/u);
+      expect(existsSync(path.join(canonical, 'unified-mpc.sqlite'))).toBe(false);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails visibly when the canonical SQLite file exists but cannot be inspected', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-storage-corrupt-'));
+    const canonical = path.join(root, 'canonical');
+    const home = path.join(root, 'home');
+    await mkdir(canonical, { recursive: true });
+    await writeFile(path.join(canonical, 'unified-mpc.sqlite'), 'not sqlite', 'utf8');
+
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = canonical;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+
+    try {
+      const dependencies = createDefaultCliDependencies();
+      await expect(dependencies.workspaceList()).rejects.toThrow(/STORAGE_IDENTITY_UNAVAILABLE:/u);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('projects canonical harness contracts through CLI tools list', async () => {
     const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
     const tools = await dependencies.toolsList?.();
@@ -174,7 +244,11 @@ describe('CLI default dependency lifecycle', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-harness-'));
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-data-'));
     const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
     process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = dataPath;
+    process.env.XDG_DATA_HOME = path.join(dataPath, 'xdg');
     const components = {
       workerReachable: true,
       sqliteAvailable: true,
@@ -226,6 +300,10 @@ describe('CLI default dependency lifecycle', () => {
     } finally {
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
       await rm(root, { recursive: true, force: true });
       await rm(dataPath, { recursive: true, force: true });
     }

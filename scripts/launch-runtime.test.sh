@@ -12,7 +12,8 @@ export XDG_DATA_HOME="$TMP_ROOT/data"
 export XDG_RUNTIME_DIR="$TMP_ROOT/run"
 export TMPDIR="$TMP_ROOT/stale-private-tmp"
 export NODE_COMPILE_CACHE="$TMP_ROOT/stale-node-compile-cache"
-export UNIFIED_MPC_RUNTIME_DIR="$XDG_DATA_HOME/unified-mpc/runtime"
+export UNIFIED_MPC_DATA_PATH="$XDG_DATA_HOME/unified-mpc"
+export UNIFIED_MPC_RUNTIME_DIR="$UNIFIED_MPC_DATA_PATH/runtime"
 export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$VALIDATOR"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$UNIFIED_MPC_RUNTIME_DIR/releases"
 
@@ -76,6 +77,41 @@ assert_last_temp_env() {
 
 configured="$TMP_ROOT/canonical"
 make_runtime "$configured"
+
+saved_data_path="$UNIFIED_MPC_DATA_PATH"
+unset UNIFIED_MPC_DATA_PATH
+reset_log
+set +e
+output="$(bash "$LAUNCHER" mcp-http "$configured" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 78 ]] || {
+  printf 'expected missing data-path status 78, got %s: %s\n' "$status" "$output" >&2
+  exit 1
+}
+grep -Fq 'DATA_PATH_IDENTITY_UNAVAILABLE:' <<<"$output"
+[[ ! -s "$NODE_LOG" ]] || {
+  printf 'node must not start without a pinned managed data path\n' >&2
+  exit 1
+}
+
+export UNIFIED_MPC_DATA_PATH="relative-data"
+reset_log
+set +e
+output="$(bash "$LAUNCHER" mcp-http "$configured" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 78 ]] || {
+  printf 'expected relative data-path status 78, got %s: %s\n' "$status" "$output" >&2
+  exit 1
+}
+grep -Fq 'DATA_PATH_IDENTITY_UNAVAILABLE:' <<<"$output"
+[[ ! -s "$NODE_LOG" ]] || {
+  printf 'node must not start with a relative managed data path\n' >&2
+  exit 1
+}
+export UNIFIED_MPC_DATA_PATH="$saved_data_path"
+
 reset_log
 output="$(bash "$LAUNCHER" mcp-http "$configured" 2>&1)"
 grep -Fq 'RUNTIME_ROOT_OK:' <<<"$output"

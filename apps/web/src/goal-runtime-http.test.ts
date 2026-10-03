@@ -1,3 +1,4 @@
+import { connect } from 'node:net';
 import {
   GOAL_RUNTIME_CONTRACT_VERSION,
   type GoalRuntimeEventRecord,
@@ -687,6 +688,30 @@ describe('Goal runtime Web API and SSE boundary', () => {
     expect(streamed.body).toContain('"workspaceId":"workspace-ok"');
     expect(streamed.body).toContain('"workspaceId":"workspace-stalled"');
     expect(streamed.body).toContain('preserving bounded realtime for other projects');
+  });
+
+  it('bounds shutdown when a browser leaves a lingering HTTP connection open', async () => {
+    server = new ControlPlaneServer({
+      port: 0,
+      workspaceControl: workspaceControl(),
+      goalRuntimeRead: runtimeRead(),
+      serverShutdownGraceMs: 25,
+    });
+    await server.listen();
+
+    const socket = connect(server.port, '127.0.0.1');
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n');
+
+    const startedAt = Date.now();
+    await server.close();
+    server = undefined;
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(socket.destroyed).toBe(true);
   });
 
   it('rejects malformed SSE replay cursors before opening a stream', async () => {

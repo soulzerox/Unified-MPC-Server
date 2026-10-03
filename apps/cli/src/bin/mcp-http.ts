@@ -5,7 +5,7 @@ import { createCrossClientHostMutationApprovalProvider, createMcpRuntimeDiagnost
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
-import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
+import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, desktopFullBypassAllEnabled, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
 
@@ -37,12 +37,14 @@ async function main(): Promise<void> {
   const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
   const settings = new SqliteSettingsRepository(database);
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
+  const desktopFullBypassAllProvider = (): boolean => desktopFullBypassAllEnabled(settings);
 
   const buildProvenance = loadBuildProvenance();
   const runtimeAdmissionIdentity = createRuntimeAdmissionIdentity(buildProvenance);
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), {
     persistWorkspaceSelection: true,
     runtimeAdmissionIdentity,
+    fullBypassAllProvider: desktopFullBypassAllProvider,
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
@@ -67,7 +69,7 @@ async function main(): Promise<void> {
       codexToolsEnabled: runtime.codexToolsEnabled,
       ponytailModeProvider: () => runtime.ponytailMode,
       profileProvider: runtime.profileProvider,
-      authorizationModeProvider: () => 'standard',
+      authorizationModeProvider: runtime.authorizationModeProvider,
       allowAiDeleteProvider: runtime.allowAiDeleteProvider,
       destructivePolicyProvider: runtime.destructivePolicyProvider,
       activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,

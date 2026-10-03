@@ -1,7 +1,7 @@
 import { appError, ok } from '@unified-mpc/domain';
 import type { McpServerOptions } from '@unified-mpc/mcp-server';
 import { describe, expect, it } from 'vitest';
-import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, runMcpHttpCommand, startMcpHttpBeforeProvider, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
+import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, desktopFullBypassAllEnabled, runMcpHttpCommand, startMcpHttpBeforeProvider, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
 
 const workspace = {
   id: 'workspace-http-1',
@@ -12,6 +12,16 @@ const workspace = {
 };
 
 describe('mcp http command', () => {
+  it('resolves Web Trusted Full Bypass live from persisted settings with an environment override', () => {
+    let persisted: string | null = null;
+    const settings = { get: (): string | null => persisted };
+    expect(desktopFullBypassAllEnabled(settings, {})).toBe(false);
+    persisted = 'true';
+    expect(desktopFullBypassAllEnabled(settings, {})).toBe(true);
+    expect(desktopFullBypassAllEnabled(settings, { UNIFIED_MPC_DESKTOP_FULL_BYPASS_ALL: 'false' })).toBe(false);
+    expect(desktopFullBypassAllEnabled(settings, { UNIFIED_MPC_DESKTOP_FULL_BYPASS_ALL: 'true' })).toBe(true);
+  });
+
   it('defaults Web legacy session retention to one hour and accepts an environment override', () => {
     expect(configuredLegacySessionTtlMs({})).toBe(3_600_000);
     expect(configuredLegacySessionTtlMs({ UNIFIED_MPC_LEGACY_SESSION_TTL_MS: '7200000' })).toBe(7_200_000);

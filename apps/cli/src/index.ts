@@ -472,6 +472,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
           activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,
           profileProvider: mcpRuntime.profileProvider,
+          authorizationModeProvider: mcpRuntime.authorizationModeProvider,
           allowAiDeleteProvider: mcpRuntime.allowAiDeleteProvider,
           destructivePolicyProvider: mcpRuntime.destructivePolicyProvider,
           codexToolsEnabled: mcpRuntime.codexToolsEnabled,

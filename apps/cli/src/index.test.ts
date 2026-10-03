@@ -46,6 +46,8 @@ describe('CLI argument parser', () => {
     });
     expect(parseCliArgs(['doctor'])).toEqual({ ok: true, value: { kind: 'doctor' } });
     expect(parseCliArgs(['codex', 'doctor'])).toEqual({ ok: true, value: { kind: 'codex-doctor' } });
+    expect(parseCliArgs(['storage', 'recover'])).toEqual({ ok: true, value: { kind: 'storage-recover' } });
+    expect(parseCliArgs(['storage', 'recover', 'extra'])).toMatchObject({ ok: false });
   });
 
   it('parses bifurcated install commands', () => {
@@ -212,6 +214,68 @@ describe('CLI default dependency lifecycle', () => {
     try {
       const dependencies = createDefaultCliDependencies();
       await expect(dependencies.workspaceList()).rejects.toThrow(/STORAGE_IDENTITY_UNAVAILABLE:/u);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers historical storage through the default CLI dependency without opening the guarded workspace DB first', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-storage-recover-'));
+    const canonical = path.join(root, 'canonical');
+    const home = path.join(root, 'home');
+    const historicalRoot = path.join(home, '.local', 'share', 'unified-mpc');
+    await mkdir(historicalRoot, { recursive: true });
+    const historicalPath = path.join(historicalRoot, 'unified-mpc.sqlite');
+    const historical = new DatabaseSync(historicalPath);
+    try {
+      historical.exec(`
+        CREATE TABLE workspaces (
+          id TEXT PRIMARY KEY NOT NULL,
+          display_name TEXT NOT NULL,
+          root_path TEXT NOT NULL UNIQUE,
+          real_root_path TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE settings (
+          key TEXT PRIMARY KEY NOT NULL,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE schema_migrations (
+          id TEXT PRIMARY KEY NOT NULL
+        );
+      `);
+      historical.prepare('INSERT INTO schema_migrations (id) VALUES (?)').run('001_initial');
+      historical.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(
+        'cloudflare_public_url',
+        'https://historical.example.test',
+      );
+    } finally {
+      historical.close();
+    }
+
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = canonical;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+
+    try {
+      const dependencies = createDefaultCliDependencies();
+      const result = await dependencies.storageRecover?.();
+      expect(result).toMatchObject({
+        status: 'recovered',
+        sourcePath: historicalPath,
+        destinationPath: path.join(canonical, 'unified-mpc.sqlite'),
+        provenancePath: expect.any(String),
+      });
+      await expect(dependencies.workspaceList()).resolves.toEqual([]);
     } finally {
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
@@ -430,6 +494,43 @@ describe('CLI execution dispatcher', () => {
     expect(code).toBe(0);
     expect(capturedTargets).toEqual(['cline']);
     expect(capturedWorkspace).toBe('/custom/workspace');
+  });
+
+  it('executes storage recover command and prints provenance', async () => {
+    const output: string[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      storageRecover: async () => ({
+        status: 'recovered',
+        sourcePath: '/home/user/.local/share/unified-mpc/unified-mpc.sqlite',
+        destinationPath: '/srv/unified-mpc/unified-mpc.sqlite',
+        canonicalBackupId: null,
+        sourceBackupId: 'backup-source',
+        migratedBackupId: 'backup-migrated',
+        provenancePath: '/srv/unified-mpc/storage-recovery.json',
+      }),
+      write: (text) => output.push(text),
+    };
+
+    const code = await runCli(['storage', 'recover'], deps);
+    expect(code).toBe(0);
+    expect(output).toEqual([
+      'storage recovered: /home/user/.local/share/unified-mpc/unified-mpc.sqlite -> /srv/unified-mpc/unified-mpc.sqlite',
+      'provenance: /srv/unified-mpc/storage-recovery.json',
+    ]);
+  });
+
+  it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
+    const errors: string[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      storageRecover: async () => { throw new Error('STORAGE_RECOVERY_AMBIGUOUS: choose a source'); },
+      writeError: (text) => errors.push(text),
+    };
+
+    const code = await runCli(['storage', 'recover'], deps);
+    expect(code).toBe(1);
+    expect(errors).toEqual(['STORAGE_RECOVERY_AMBIGUOUS: choose a source']);
   });
 
   it('executes web command', async () => {

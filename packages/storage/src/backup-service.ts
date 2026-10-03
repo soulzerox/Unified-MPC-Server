@@ -77,6 +77,11 @@ export interface SqliteRestoreOptions {
   readonly now?: () => Date;
   /** Exact application-owned secret/provider files to quarantine after a cross-host restore. */
   readonly hostBoundPaths?: readonly string[];
+  /**
+   * Final synchronous safety gate immediately before the live database path is
+   * replaced. A thrown error fails the restore marker and is rethrown unchanged.
+   */
+  readonly beforeReplace?: () => void;
 }
 
 const RETENTION_ARCHIVE_DIRECTORY = 'retention-archive';
@@ -234,6 +239,7 @@ export function applyPendingSqliteRestoreSync(
     return isMissingFile(error) ? { applied: false } : { applied: false, error: errorMessage(error) };
   }
 
+  let beforeReplaceFailure: { readonly error: unknown } | undefined;
   try {
     const marker = parseRestoreMarker(readFileSync(claimPath, 'utf8'));
     const stored = readStoredManifestByIdSync(directory, marker.backupId);
@@ -261,6 +267,15 @@ export function applyPendingSqliteRestoreSync(
     if (existsSync(dbPath)) createEmergencyBackup(dbPath, directory, platform, arch);
     const oldPath = dbPath + '.pre-restore';
     rmSync(oldPath, { force: true });
+    if (options.beforeReplace !== undefined) {
+      try {
+        options.beforeReplace();
+      } catch (error) {
+        beforeReplaceFailure = { error };
+        rmSync(temporary, { force: true });
+        throw error;
+      }
+    }
     if (existsSync(dbPath)) renameSync(dbPath, oldPath);
     try {
       renameSync(temporary, dbPath);
@@ -288,6 +303,7 @@ export function applyPendingSqliteRestoreSync(
   } catch (error) {
     const failedPath = markerPath + '.failed-' + Date.now();
     try { renameSync(claimPath, failedPath); } catch { /* best effort */ }
+    if (beforeReplaceFailure !== undefined) throw beforeReplaceFailure.error;
     return { applied: false, error: errorMessage(error) };
   }
 }

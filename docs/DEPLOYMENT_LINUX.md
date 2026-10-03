@@ -43,18 +43,13 @@ The repository contains three unit files:
 - `scripts/unified-mpc-web.service` — Web Control Plane, `127.0.0.1:3000`; it requires the MCP HTTP unit and starts only after the MCP identity endpoint passes its readiness probe.
 - `scripts/unified-mpc.service` — compatibility aggregate that starts/stops both child units together.
 
-Copy the units and environment template:
+Install the units and stable helper scripts with the boot-persistence helper:
 
 ```bash
-mkdir -p ~/.config/systemd/user ~/.config/unified-mpc
-cp scripts/unified-mpc-mcp-http.service ~/.config/systemd/user/
-cp scripts/unified-mpc-web.service ~/.config/systemd/user/
-cp scripts/unified-mpc.service ~/.config/systemd/user/
-cp scripts/validate-runtime-root.sh ~/.config/unified-mpc/validate-runtime-root.sh
-cp scripts/launch-runtime.sh ~/.config/unified-mpc/launch-runtime.sh
-cp scripts/promote-runtime.sh ~/.config/unified-mpc/promote-runtime.sh
-cp scripts/unified-mpc.service.env.example ~/.config/unified-mpc/service.env
+bash scripts/install-user-services.sh
 ```
+
+On first run, if `~/.config/unified-mpc/service.env` does not exist, the helper installs the template and exits with `CONFIG_REQUIRED` before enabling the service. Edit the generated file, then run the helper again. The second run verifies or enables systemd user linger, reloads the user manager, enables and starts `unified-mpc.service`, and confirms both MCP HTTP and Web child services are active. If linger cannot be enabled, it fails with `BOOT_PERSISTENCE_UNAVAILABLE` instead of claiming reboot persistence.
 
 Edit `~/.config/unified-mpc/service.env` and set **absolute paths**:
 
@@ -169,21 +164,15 @@ systemd-analyze verify \
 
 ## 4. Enable boot persistence
 
-Enable lingering once so the user manager can start at boot without an interactive login:
+The installation helper enforces boot persistence after `service.env` is configured:
 
 ```bash
-loginctl enable-linger "$USER"
-loginctl show-user "$USER" | grep Linger
-# Linger=yes
+bash scripts/install-user-services.sh
+systemctl --user status unified-mpc.service unified-mpc-mcp-http.service unified-mpc-web.service
+loginctl show-user "$USER" -p Linger
 ```
 
-Then reload and enable the aggregate service:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now unified-mpc.service
-systemctl --user status unified-mpc-mcp-http.service unified-mpc-web.service
-```
+A successful run prints `BOOT_PERSISTENCE_READY`. This means `Linger=yes`, the aggregate service is enabled for the user manager, and both child services are active. If your host policy prevents `loginctl enable-linger`, the helper exits non-zero with `BOOT_PERSISTENCE_UNAVAILABLE`; resolve that host policy before relying on automatic startup after reboot.
 
 The MCP unit waits for `http://127.0.0.1:18765/_unified-mpc/identity` before systemd considers its startup sequence complete. The Web unit is ordered after it, so the dashboard does not race a not-yet-listening MCP origin during normal boot.
 

@@ -697,6 +697,25 @@ describe('stdio MCP runtime', () => {
     expect((await readdir(leaseDirectory)).filter((name) => name.endsWith('.json'))).toEqual([]);
   });
 
+  it('exposes a live authorization mode provider for Trusted Full Bypass', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-auth-mode-data-'));
+    temporaryRoots.push(dataPath);
+    let fullBypass = false;
+    const runtime = createStdioMcpRuntime(dataPath, workspace, true, {
+      permissionProfile: 'full',
+      fullBypassAllProvider: () => fullBypass,
+    });
+    try {
+      expect(runtime.authorizationModeProvider()).toBe('standard');
+      fullBypass = true;
+      expect(runtime.authorizationModeProvider()).toBe('full_bypass');
+      fullBypass = false;
+      expect(runtime.authorizationModeProvider()).toBe('standard');
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('uses the selected stdio profile and hides broad workspaces when strict roots are enabled', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-strict-data-'));
     const allowedRaw = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-strict-allowed-'));

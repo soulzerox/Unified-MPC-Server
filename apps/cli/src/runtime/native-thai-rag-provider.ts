@@ -64,6 +64,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly workspaceRootIds = new Map<string, string>();
   private readonly pendingReindexIds = new Set<string>();
   private readonly pendingReindexReasons = new Map<string, ThaiRagReindexReason>();
+  private readonly queuedAdmissionWorkspaceIds = new Set<string>();
   private readonly workspaceIndexJobIds = new Map<string, string>();
   private readonly workspaceIndexMonitors = new Map<string, Promise<Result<void>>>();
   private indexingWorkspaceId: string | undefined;
@@ -315,6 +316,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.started = false;
     this.shuttingDown = true;
     this.lifecycleGeneration += 1;
+    this.queuedAdmissionWorkspaceIds.clear();
     if (this.cancellableIndexJobs) await this.cancelActiveProviderIndexJobs();
     await this.jobs.interruptRunning(this.ownerId ?? '');
     await this.waitForOperations();
@@ -595,10 +597,33 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
 
     if (this.indexingWorkspaceId !== undefined) {
-      const jobId = this.workspaceIndexJobIds.get(this.indexingWorkspaceId);
-      return err(appError('CONFLICT', `Native Thai-RAG workspace indexing is still running for ${this.indexingWorkspaceId}`, true, {
+      const activeWorkspaceId = this.indexingWorkspaceId;
+      if (requestedWorkspaceId !== undefined && requestedWorkspaceId !== activeWorkspaceId) {
+        const requestedWorkspace = workspaces.find((workspace) => workspace.id === requestedWorkspaceId);
+        if (requestedWorkspace === undefined) {
+          return err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${requestedWorkspaceId}`));
+        }
+        this.pendingReindexIds.add(requestedWorkspaceId);
+        if (!this.pendingReindexReasons.has(requestedWorkspaceId)) {
+          this.pendingReindexReasons.set(requestedWorkspaceId, 'startup_verification');
+        }
+        this.queuedAdmissionWorkspaceIds.add(requestedWorkspaceId);
+        return err(appError(
+          'CONFLICT',
+          `Native Thai-RAG workspace ${requestedWorkspaceId} is queued behind active indexing for ${activeWorkspaceId}`,
+          true,
+          {
+            reason: 'workspace-indexing',
+            workspaceId: requestedWorkspaceId,
+            blockedByWorkspaceId: activeWorkspaceId,
+            queueState: 'queued',
+          },
+        ));
+      }
+      const jobId = this.workspaceIndexJobIds.get(activeWorkspaceId);
+      return err(appError('CONFLICT', `Native Thai-RAG workspace indexing is still running for ${activeWorkspaceId}`, true, {
         reason: 'workspace-indexing',
-        workspaceId: this.indexingWorkspaceId,
+        workspaceId: activeWorkspaceId,
         ...(jobId === undefined ? {} : { jobId }),
       }));
     }
@@ -663,6 +688,23 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     for (const [id, root] of nextRoots) this.workspaceRoots.set(id, root);
     for (const [root, id] of nextRootIds) this.workspaceRootIds.set(root, id);
     return ok(undefined);
+  }
+
+  private scheduleNextQueuedWorkspaceAdmission(generation: number): void {
+    if (!this.refreshIsCurrent(generation) || !this.started || this.shuttingDown || this.indexingWorkspaceId !== undefined) return;
+    const nextWorkspaceId = this.queuedAdmissionWorkspaceIds.values().next().value as string | undefined;
+    if (nextWorkspaceId === undefined) return;
+    this.queuedAdmissionWorkspaceIds.delete(nextWorkspaceId);
+    void this.refreshWorkspaceRoots(generation, nextWorkspaceId).then((result) => {
+      if (!result.ok && result.error.details?.queueState === 'queued'
+        && this.refreshIsCurrent(generation) && this.started && !this.shuttingDown) {
+        this.queuedAdmissionWorkspaceIds.add(nextWorkspaceId);
+      }
+    }, () => {
+      if (this.refreshIsCurrent(generation) && this.started && !this.shuttingDown) {
+        this.queuedAdmissionWorkspaceIds.add(nextWorkspaceId);
+      }
+    });
   }
 
   private async startWorkspaceAdmissionIndex(
@@ -747,8 +789,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${errorMessage(error)}`, true));
       } finally {
         this.workspaceIndexJobIds.delete(workspace.id);
-        if (this.indexingWorkspaceId === workspace.id) this.indexingWorkspaceId = undefined;
+        const releasedAdmissionSlot = this.indexingWorkspaceId === workspace.id;
+        if (releasedAdmissionSlot) this.indexingWorkspaceId = undefined;
         this.workspaceIndexMonitors.delete(job.jobId);
+        if (releasedAdmissionSlot) this.scheduleNextQueuedWorkspaceAdmission(generation);
       }
     })();
     this.workspaceIndexMonitors.set(job.jobId, monitor);

@@ -89,7 +89,7 @@ export class ThaiRagProviderCoordinator {
   }
 
   public async health(signal?: AbortSignal): Promise<Result<ThaiRagProviderHealth>> {
-    if (this.role === 'owner') return ok(this.runtime.health());
+    if (this.role === 'owner') return this.runtime.refresh(signal);
     if (this.role === 'follower') {
       const response = await this.request({
         id: this.requestId(),
@@ -181,7 +181,10 @@ export class ThaiRagProviderCoordinator {
     const parsed = parseRequest(line);
     if (!parsed.ok) return { id: 'unknown', ok: false, error: parsed.error.message };
     if (parsed.value.method === 'health') {
-      return { id: parsed.value.id, ok: true, value: this.runtime.health() };
+      const health = await this.runtime.refresh(signal);
+      return health.ok
+        ? { id: parsed.value.id, ok: true, value: health.value }
+        : { id: parsed.value.id, ok: false, error: health.error.message };
     }
     const result = await this.runtime.call(parsed.value.tool, parsed.value.args, signal, parsed.value.budget);
     return result.ok

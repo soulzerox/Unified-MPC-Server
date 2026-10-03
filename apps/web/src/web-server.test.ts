@@ -1245,6 +1245,34 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
+  it('uses the shared canonical data path when no explicit Web dataDir is supplied', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-data-path-'));
+    const dataDir = path.join(root, 'managed-data');
+    const skillDir = path.join(dataDir, 'extensions', 'skills', 'canonical-path-skill');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: canonical-path-skill\ndescription: Canonical data-path skill\n---\n# Canonical\n', 'utf8');
+    const previous = process.env.UNIFIED_MPC_DATA_PATH;
+    process.env.UNIFIED_MPC_DATA_PATH = dataDir;
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+    });
+    await dynamic.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${dynamic.port}/api/skills`);
+      expect(response.status).toBe(200);
+      expect((await response.json()).skills).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'canonical-path-skill', source: 'unified-mpc-skills' }),
+      ]));
+    } finally {
+      await dynamic.close();
+      if (previous === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('returns 500 for a route dependency rejection and remains available', async () => {
     const failingCatalog = { discover: async () => { throw new Error('synthetic catalog failure'); } } as unknown as McpConfigLoader;
     const failingServer = new ControlPlaneServer({ port: 0, gateway, serverCatalog: failingCatalog, capabilityToken });

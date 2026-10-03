@@ -5,7 +5,6 @@ service="${1:-}"
 configured_root="${2:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 validator="${UNIFIED_MPC_VALIDATE_RUNTIME_ROOT:-$script_dir/validate-runtime-root.sh}"
-runtime_dir="${UNIFIED_MPC_RUNTIME_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/unified-mpc/runtime}"
 node_bin="${UNIFIED_MPC_NODE:-node}"
 unrecoverable_status=78
 
@@ -23,6 +22,17 @@ case "$service" in
     fail "$unrecoverable_status" "RUNTIME_RECOVERY_UNAVAILABLE: unsupported Unified service '$service'"
     ;;
 esac
+
+data_path="${UNIFIED_MPC_DATA_PATH:-}"
+if [[ -z "$data_path" || "$data_path" != /* ]]; then
+  fail "$unrecoverable_status" "DATA_PATH_IDENTITY_UNAVAILABLE: UNIFIED_MPC_DATA_PATH must be an absolute path for managed services"
+fi
+data_path="$(realpath -m -- "$data_path" 2>/dev/null || true)"
+if [[ -z "$data_path" || "$data_path" != /* ]]; then
+  fail "$unrecoverable_status" "DATA_PATH_IDENTITY_UNAVAILABLE: UNIFIED_MPC_DATA_PATH could not be normalized"
+fi
+export UNIFIED_MPC_DATA_PATH="$data_path"
+runtime_dir="${UNIFIED_MPC_RUNTIME_DIR:-$UNIFIED_MPC_DATA_PATH/runtime}"
 
 configure_runtime_temp() {
   local runtime_tmp_base=""

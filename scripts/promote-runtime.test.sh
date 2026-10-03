@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eEuo pipefail
+trap 'status=$?; printf "promotion regression failed at line %s: %s (status=%s)\n" "$LINENO" "$BASH_COMMAND" "$status" >&2; exit "$status"' ERR
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROMOTER="$SCRIPT_DIR/promote-runtime.sh"

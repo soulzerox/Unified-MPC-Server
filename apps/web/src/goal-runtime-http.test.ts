@@ -131,6 +131,26 @@ function workspaceControl(): WorkspaceControlPort {
   };
 }
 
+function workspaceControlFor(workspaceIds: readonly string[]): WorkspaceControlPort {
+  const selection: WebWorkspaceSelectionSnapshot = {
+    primaryWorkspaceId: workspaceIds[0] ?? '',
+    activeWorkspaceIds: [...workspaceIds],
+  };
+  return {
+    list: async () => workspaceIds.map((id, index) => ({
+      id,
+      displayName: `Project ${index + 1}`,
+      rootPath: `/projects/${index + 1}`,
+      realRootPath: `/projects/${index + 1}`,
+    })),
+    selection: async () => selection,
+    activate: async () => selection,
+    deactivate: async () => selection,
+    setPrimary: async () => selection,
+    remove: async () => selection,
+  };
+}
+
 function runtimeRead(): GoalRuntimeReadPort {
   return {
     listWorkspaceGoalRuntimeSnapshots: async () => [snapshot],
@@ -431,6 +451,126 @@ describe('Goal runtime Web API and SSE boundary', () => {
 
     expect(replayCalls).toBe(1);
     expect(snapshotCalls).toBe(0);
+  });
+
+  it('multiplexes 50 workspaces through one shared replay loop', async () => {
+    const workspaceIds = Array.from({ length: 50 }, (_, index) => `workspace-${index + 1}`);
+    let replayCalls = 0;
+    let delivered = false;
+    const liveEvent: GoalRuntimeEventRecord = {
+      ...event13,
+      sequence: 13,
+      event: {
+        ...event13.event,
+        eventId: 'runtime-event-multiplexed',
+        workspaceId: workspaceIds[49]!,
+        goalId: 'goal-50',
+      },
+    };
+    const multiplexedRuntime: GoalRuntimeReadPort = {
+      listWorkspaceGoalRuntimeSnapshots: async (request) => [{
+        ...snapshot,
+        projection: {
+          ...snapshot.projection,
+          workspaceId: request.workspaceId,
+          goalId: 'goal-' + request.workspaceId.split('-').at(-1),
+        },
+      }],
+      replayWorkspaceGoalRuntimeEvents: runtimeRead().replayWorkspaceGoalRuntimeEvents,
+      replayGoalRuntimeEvents: async (request) => {
+        replayCalls += 1;
+        const latest = delivered ? 13 : 12;
+        const workspaceBounds = request.workspaceIds.map((id) => ({
+          workspaceId: id,
+          oldestAvailableSequence: 10,
+          latestSequence: id === workspaceIds[49] && delivered ? 13 : 12,
+        }));
+        if (request.afterSequence === 12 && !delivered) {
+          delivered = true;
+          return {
+            events: [liveEvent],
+            oldestAvailableSequence: 10,
+            latestSequence: 13,
+            replayWindowMissed: false,
+            workspaceBounds: workspaceBounds.map((bound) => bound.workspaceId === workspaceIds[49]
+              ? { ...bound, latestSequence: 13 }
+              : bound),
+          };
+        }
+        return {
+          events: [],
+          oldestAvailableSequence: 10,
+          latestSequence: latest,
+          replayWindowMissed: false,
+          workspaceBounds,
+        };
+      },
+    };
+
+    server = new ControlPlaneServer({
+      port: 0,
+      workspaceControl: workspaceControlFor(workspaceIds),
+      goalRuntimeRead: multiplexedRuntime,
+      goalRuntimeStreamPollMs: 10,
+    });
+    await server.listen();
+
+    const streamed = await readSse(
+      `http://127.0.0.1:${server.port}/api/goal-runtime/events`,
+      {},
+      (body) => body.includes('runtime-event-multiplexed'),
+    );
+    expect((streamed.body.match(/event: goal-runtime-snapshot/g) ?? []).length).toBe(50);
+    expect(streamed.body).toContain('"workspaceId":"workspace-50"');
+    expect(streamed.body).toContain('event: goal-runtime-event');
+    expect(replayCalls).toBeLessThan(6);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const callsAfterDisconnect = replayCalls;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(replayCalls).toBe(callsAfterDisconnect);
+  });
+
+  it('times out one stalled workspace snapshot without freezing multiplexed realtime', async () => {
+    const workspaceIds = ['workspace-ok', 'workspace-stalled', 'workspace-ok-2'];
+    const stalled = new Promise<readonly GoalRuntimeSnapshotRecord[]>(() => undefined);
+    const multiplexedRuntime: GoalRuntimeReadPort = {
+      listWorkspaceGoalRuntimeSnapshots: async (request) => {
+        if (request.workspaceId === 'workspace-stalled') return stalled;
+        return [{
+          ...snapshot,
+          projection: {
+            ...snapshot.projection,
+            workspaceId: request.workspaceId,
+            goalId: 'goal-' + request.workspaceId,
+          },
+        }];
+      },
+      replayWorkspaceGoalRuntimeEvents: runtimeRead().replayWorkspaceGoalRuntimeEvents,
+      replayGoalRuntimeEvents: async (request) => ({
+        events: [],
+        replayWindowMissed: false,
+        workspaceBounds: request.workspaceIds.map((id) => ({ workspaceId: id })),
+      }),
+    };
+
+    server = new ControlPlaneServer({
+      port: 0,
+      workspaceControl: workspaceControlFor(workspaceIds),
+      goalRuntimeRead: multiplexedRuntime,
+      goalRuntimeStreamPollMs: 20,
+      goalRuntimeStreamReadTimeoutMs: 25,
+    });
+    await server.listen();
+
+    const streamed = await readSse(
+      `http://127.0.0.1:${server.port}/api/goal-runtime/events`,
+      {},
+      (body) => body.includes('goal-runtime-stream-error') && body.includes('workspace-ok-2'),
+    );
+    expect(streamed.body).toContain('"workspaceId":"workspace-ok"');
+    expect(streamed.body).toContain('"workspaceId":"workspace-stalled"');
+    expect(streamed.body).toContain('preserving bounded realtime for other projects');
   });
 
   it('rejects malformed SSE replay cursors before opening a stream', async () => {

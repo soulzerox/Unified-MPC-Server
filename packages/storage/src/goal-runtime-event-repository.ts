@@ -15,7 +15,9 @@ import {
   type GoalRuntimeEventReplayPage,
   type GoalRuntimeEventRepository,
   type GoalRuntimeReconciliationEventRepository,
+  type MultiplexedGoalRuntimeEventReplayPage,
   type ListGoalRuntimeEventsRequest,
+  type ReplayGoalRuntimeEventsRequest,
   type ReplayWorkspaceGoalRuntimeEventsRequest,
 } from '@unified-mpc/domain';
 import type { SqliteDatabase } from './database.js';
@@ -340,6 +342,77 @@ export class SqliteGoalRuntimeEventRepository implements GoalRuntimeEventReposit
       ...(oldestAvailableSequence === undefined ? {} : { oldestAvailableSequence }),
       ...(latestSequence === undefined ? {} : { latestSequence }),
       replayWindowMissed,
+    };
+  }
+
+  public async replayGoalRuntimeEvents(
+    request: ReplayGoalRuntimeEventsRequest,
+  ): Promise<MultiplexedGoalRuntimeEventReplayPage> {
+    const workspaceIds = [...new Set(request.workspaceIds.map((workspaceId) => {
+      requireIdentifier(workspaceId, 'workspaceId');
+      return workspaceId;
+    }))];
+    const limit = boundedLimit(request.limit);
+    const afterSequence = request.afterSequence === undefined
+      ? undefined
+      : nonNegativeInteger(request.afterSequence, 'afterSequence');
+
+    if (workspaceIds.length === 0) {
+      return { events: [], replayWindowMissed: false, workspaceBounds: [] };
+    }
+
+    const placeholders = workspaceIds.map(() => '?').join(', ');
+    const boundRows = this.database.connection.prepare(`
+      SELECT workspace_id, MIN(sequence) AS oldest, MAX(sequence) AS latest
+      FROM goal_runtime_events
+      WHERE workspace_id IN (${placeholders})
+      GROUP BY workspace_id
+    `).all(...workspaceIds) as Array<{
+      workspace_id?: string;
+      oldest?: number | null;
+      latest?: number | null;
+    }>;
+    const boundsByWorkspace = new Map(boundRows.map((row) => [row.workspace_id, row]));
+    const workspaceBounds = workspaceIds.map((workspaceId) => {
+      const row = boundsByWorkspace.get(workspaceId);
+      const oldestAvailableSequence = numericOrUndefined(row?.oldest);
+      const latestSequence = numericOrUndefined(row?.latest);
+      return {
+        workspaceId,
+        ...(oldestAvailableSequence === undefined ? {} : { oldestAvailableSequence }),
+        ...(latestSequence === undefined ? {} : { latestSequence }),
+      };
+    });
+    const retainedBounds = workspaceBounds.filter((bound) => bound.latestSequence !== undefined);
+    const oldestAvailableSequence = retainedBounds.length === 0
+      ? undefined
+      : Math.min(...retainedBounds.map((bound) => bound.oldestAvailableSequence!));
+    const latestSequence = retainedBounds.length === 0
+      ? undefined
+      : Math.max(...retainedBounds.map((bound) => bound.latestSequence!));
+    const replayWindowMissed = afterSequence !== undefined && workspaceBounds.some((bound) =>
+      bound.oldestAvailableSequence !== undefined && afterSequence < bound.oldestAvailableSequence - 1);
+
+    const rows = afterSequence === undefined
+      ? this.database.connection.prepare(`
+          SELECT * FROM goal_runtime_events
+          WHERE workspace_id IN (${placeholders})
+          ORDER BY sequence ASC
+          LIMIT ?
+        `).all(...workspaceIds, limit)
+      : this.database.connection.prepare(`
+          SELECT * FROM goal_runtime_events
+          WHERE workspace_id IN (${placeholders}) AND sequence > ?
+          ORDER BY sequence ASC
+          LIMIT ?
+        `).all(...workspaceIds, afterSequence, limit);
+
+    return {
+      events: rows.map((row) => this.toRecord(this.requireRow(row))),
+      ...(oldestAvailableSequence === undefined ? {} : { oldestAvailableSequence }),
+      ...(latestSequence === undefined ? {} : { latestSequence }),
+      replayWindowMissed,
+      workspaceBounds,
     };
   }
 

@@ -152,6 +152,76 @@ describe('SqliteGoalRuntimeEventRepository', () => {
     }
   });
 
+  it('replays one global cursor across selected workspaces in durable sequence order', async () => {
+    const runtime = await fixture();
+    try {
+      const workspaces = new SqliteWorkspaceRepository(runtime.database);
+      await workspaces.insert({
+        id: 'workspace-2',
+        displayName: 'Runtime events 2',
+        rootPath: '/tmp/unified-runtime-events-2',
+        realRootPath: '/tmp/unified-runtime-events-2',
+        createdAt: now,
+      });
+      const goals = new SqliteGoalRepository(runtime.database);
+      const acquired = await goals.acquire({
+        goalId: 'goal-2',
+        workspaceId: 'workspace-2',
+        goalKey: 'runtime-events-2',
+        ownerClientId: 'client-2',
+        ownerSessionId: 'session-2',
+        objective: 'Persist a second workspace runtime stream.',
+        plan: { steps: [] },
+        leaseTokenHash: 'lease-hash-2',
+        leaseSeconds: 60,
+        now,
+      });
+      if (!acquired.acquired || acquired.goal.executionId === undefined) {
+        throw new Error('second goal execution fixture was not acquired');
+      }
+
+      await runtime.events.appendGoalRuntimeEvent({
+        event: executionEvent('global-1', runtime.executionId, 'execution_started'),
+        recordedAt: now,
+      });
+      await runtime.events.appendGoalRuntimeEvent({
+        event: {
+          ...executionEvent('global-2', acquired.goal.executionId, 'execution_started'),
+          workspaceId: 'workspace-2',
+          goalId: 'goal-2',
+        },
+        recordedAt: '2026-09-21T12:30:01.000Z',
+      });
+      await runtime.events.appendGoalRuntimeEvent({
+        event: executionEvent('global-3', runtime.executionId, 'execution_heartbeat'),
+        recordedAt: '2026-09-21T12:30:02.000Z',
+      });
+
+      const page = await runtime.events.replayGoalRuntimeEvents({
+        workspaceIds: ['workspace-1', 'workspace-2'],
+        afterSequence: 1,
+        limit: 20,
+      });
+      expect(page.events.map((entry) => entry.sequence)).toEqual([2, 3]);
+      expect(page.events.map((entry) => entry.event.workspaceId)).toEqual(['workspace-2', 'workspace-1']);
+      expect(page.latestSequence).toBe(3);
+      expect(page.replayWindowMissed).toBe(false);
+      expect(page.workspaceBounds).toEqual([
+        { workspaceId: 'workspace-1', oldestAvailableSequence: 1, latestSequence: 3 },
+        { workspaceId: 'workspace-2', oldestAvailableSequence: 2, latestSequence: 2 },
+      ]);
+
+      const filtered = await runtime.events.replayGoalRuntimeEvents({
+        workspaceIds: ['workspace-2'],
+        afterSequence: 0,
+        limit: 20,
+      });
+      expect(filtered.events.map((entry) => entry.sequence)).toEqual([2]);
+    } finally {
+      runtime.database.close();
+    }
+  });
+
   it('round-trips goal-scoped events without execution-only fields', async () => {
     const runtime = await fixture();
     try {

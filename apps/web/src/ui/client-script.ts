@@ -27,13 +27,19 @@ export function getClientScriptJs(): string {
       let cachedWorkspaces = [];
       let workspaceSelection = null;
       const workspaceRuntime = new Map();
-      const workspaceRuntimeStreams = new Map();
+      let workspaceRuntimeStream = null;
+      let workspaceRuntimeStreamWorkspaceKey = '';
+      let workspaceRuntimeFallbackTimer = null;
+      let workspaceRuntimeFallbackIndex = 0;
       const workspaceRuntimeRefreshes = new Map();
       const workspaceRuntimeRefreshPending = new Set();
       const workspaceRuntimeRefreshControllers = new Map();
       const workspaceRuntimeTargets = new Map();
       const workspaceRuntimeCatchupTimers = new Map();
       const workspaceRuntimeCatchupAttempts = new Map();
+      const WORKSPACE_RUNTIME_REFRESH_CONCURRENCY = 2;
+      const workspaceRuntimeRefreshQueue = [];
+      let workspaceRuntimeRefreshActive = 0;
       const workspaceGoals = new Map();
       const expandedWorkspaceGoals = new Set();
       const loadingWorkspaceGoals = new Set();
@@ -101,8 +107,42 @@ export function getClientScriptJs(): string {
         }
       }
 
+      const REQUEST_TIMEOUT_MS = 8000;
+
+      function isRequestTimeout(err) {
+        return err?.code === 'request_timeout';
+      }
+
+      async function fetchWithTimeout(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const upstreamSignal = init?.signal;
+        let timedOut = false;
+        const forwardAbort = () => controller.abort(upstreamSignal?.reason);
+        if (upstreamSignal) {
+          if (upstreamSignal.aborted) forwardAbort();
+          else upstreamSignal.addEventListener('abort', forwardAbort, { once: true });
+        }
+        const timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs);
+        try {
+          return await fetch(url, { ...init, signal: controller.signal });
+        } catch (err) {
+          if (timedOut) {
+            const timeoutError = new Error('Request timed out after ' + timeoutMs + 'ms');
+            timeoutError.code = 'request_timeout';
+            throw timeoutError;
+          }
+          throw err;
+        } finally {
+          clearTimeout(timer);
+          upstreamSignal?.removeEventListener?.('abort', forwardAbort);
+        }
+      }
+
       async function mutationJson(url, init) {
-        const res = await fetch(url, init);
+        const res = await fetchWithTimeout(url, init);
         if (res.status === 401) {
           showToast('Dashboard session expired; reloading...', true);
           logEvent('WARN', 'Capability expired; reloading dashboard');
@@ -607,49 +647,66 @@ export function getClientScriptJs(): string {
         renderWorkspaces();
       }
 
-      async function refreshWorkspaceRuntime(workspaceId) {
+      async function runWorkspaceRuntimeRefresh(workspaceId) {
+        if (!cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) return;
+        const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goal-runtime';
+        const controller = new AbortController();
+        workspaceRuntimeRefreshControllers.set(workspaceId, controller);
+        try {
+          const res = await fetchWithTimeout(endpoint, { signal: controller.signal });
+          const data = await res.json();
+          if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
+          if (controller.signal.aborted) return;
+          applyWorkspaceRuntimeSnapshot(workspaceId, data);
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          const current = workspaceRuntime.get(workspaceId);
+          workspaceRuntime.set(workspaceId, {
+            snapshots: Array.isArray(current?.snapshots) ? current.snapshots : [],
+            cursor: current?.cursor ?? null,
+            error: err.message,
+          });
+          renderWorkspaces();
+          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
+        } finally {
+          if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
+            workspaceRuntimeRefreshControllers.delete(workspaceId);
+          }
+        }
+      }
+
+      function drainWorkspaceRuntimeRefreshQueue() {
+        while (workspaceRuntimeRefreshActive < WORKSPACE_RUNTIME_REFRESH_CONCURRENCY
+          && workspaceRuntimeRefreshQueue.length > 0) {
+          const item = workspaceRuntimeRefreshQueue.shift();
+          if (!item) return;
+          workspaceRuntimeRefreshActive += 1;
+          void runWorkspaceRuntimeRefresh(item.workspaceId).finally(() => {
+            workspaceRuntimeRefreshActive -= 1;
+            workspaceRuntimeRefreshes.delete(item.workspaceId);
+            item.resolve();
+            if (workspaceRuntimeRefreshPending.delete(item.workspaceId)
+              && cachedWorkspaces.some((workspace) => workspace.id === item.workspaceId)) {
+              void refreshWorkspaceRuntime(item.workspaceId);
+            }
+            drainWorkspaceRuntimeRefreshQueue();
+          });
+        }
+      }
+
+      function refreshWorkspaceRuntime(workspaceId) {
         const currentRefresh = workspaceRuntimeRefreshes.get(workspaceId);
         if (currentRefresh) {
           workspaceRuntimeRefreshPending.add(workspaceId);
           return currentRefresh;
         }
-
-        const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goal-runtime';
-        const controller = new AbortController();
-        workspaceRuntimeRefreshControllers.set(workspaceId, controller);
-        const refresh = (async () => {
-          try {
-            const res = await fetch(endpoint, { signal: controller.signal });
-            const data = await res.json();
-            if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
-            if (controller.signal.aborted) return;
-            applyWorkspaceRuntimeSnapshot(workspaceId, data);
-          } catch (err) {
-            if (controller.signal.aborted) return;
-            const current = workspaceRuntime.get(workspaceId);
-            workspaceRuntime.set(workspaceId, {
-              snapshots: Array.isArray(current?.snapshots) ? current.snapshots : [],
-              cursor: current?.cursor ?? null,
-              error: err.message,
-            });
-            renderWorkspaces();
-            if (isBackendTransportError(err)) noteBackendUnavailable(err);
-            else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
-          }
-        })();
+        const refresh = new Promise((resolve) => {
+          workspaceRuntimeRefreshQueue.push({ workspaceId, resolve });
+          drainWorkspaceRuntimeRefreshQueue();
+        });
         workspaceRuntimeRefreshes.set(workspaceId, refresh);
-        try {
-          await refresh;
-        } finally {
-          workspaceRuntimeRefreshes.delete(workspaceId);
-          if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
-            workspaceRuntimeRefreshControllers.delete(workspaceId);
-          }
-          if (workspaceRuntimeRefreshPending.delete(workspaceId)
-            && cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) {
-            void refreshWorkspaceRuntime(workspaceId);
-          }
-        }
+        return refresh;
       }
 
       function noteWorkspaceRuntimeEvent(workspaceId, record) {
@@ -688,10 +745,7 @@ export function getClientScriptJs(): string {
         workspaceRuntimeCatchupTimers.set(workspaceId, timer);
       }
 
-      function closeWorkspaceRuntimeStream(workspaceId) {
-        const stream = workspaceRuntimeStreams.get(workspaceId);
-        if (stream) stream.close();
-        workspaceRuntimeStreams.delete(workspaceId);
+      function clearWorkspaceRuntimeState(workspaceId) {
         const controller = workspaceRuntimeRefreshControllers.get(workspaceId);
         if (controller) controller.abort();
         workspaceRuntimeRefreshControllers.delete(workspaceId);
@@ -703,45 +757,92 @@ export function getClientScriptJs(): string {
         workspaceRuntimeCatchupTimers.delete(workspaceId);
       }
 
+      function stopWorkspaceRuntimeFallback() {
+        if (workspaceRuntimeFallbackTimer) clearTimeout(workspaceRuntimeFallbackTimer);
+        workspaceRuntimeFallbackTimer = null;
+      }
+
+      function scheduleWorkspaceRuntimeFallback() {
+        if (workspaceRuntimeFallbackTimer || cachedWorkspaces.length === 0) return;
+        workspaceRuntimeFallbackTimer = setTimeout(async () => {
+          workspaceRuntimeFallbackTimer = null;
+          if (cachedWorkspaces.length === 0) return;
+          const workspace = cachedWorkspaces[workspaceRuntimeFallbackIndex % cachedWorkspaces.length];
+          workspaceRuntimeFallbackIndex += 1;
+          if (workspace) await refreshWorkspaceRuntime(workspace.id);
+          if (!workspaceRuntimeStream || workspaceRuntimeStream.readyState !== 1) {
+            scheduleWorkspaceRuntimeFallback();
+          }
+        }, 1000);
+      }
+
+      function closeWorkspaceRuntimeStream() {
+        if (workspaceRuntimeStream) workspaceRuntimeStream.close();
+        workspaceRuntimeStream = null;
+        workspaceRuntimeStreamWorkspaceKey = '';
+        stopWorkspaceRuntimeFallback();
+      }
+
       function syncWorkspaceRuntimeStreams() {
         const registeredIds = new Set(cachedWorkspaces.map((workspace) => workspace.id));
-        const trackedIds = new Set([
-          ...workspaceRuntimeStreams.keys(),
-          ...workspaceRuntimeRefreshControllers.keys(),
-        ]);
-        for (const workspaceId of trackedIds) {
-          if (!registeredIds.has(workspaceId)) closeWorkspaceRuntimeStream(workspaceId);
+        for (const workspaceId of [...workspaceRuntimeRefreshControllers.keys()]) {
+          if (!registeredIds.has(workspaceId)) clearWorkspaceRuntimeState(workspaceId);
         }
         for (const workspaceId of [...workspaceRuntime.keys()]) {
           if (!registeredIds.has(workspaceId)) workspaceRuntime.delete(workspaceId);
         }
 
-        for (const workspace of cachedWorkspaces) {
-          if (!workspaceRuntime.has(workspace.id)) void refreshWorkspaceRuntime(workspace.id);
-          if (workspaceRuntimeStreams.has(workspace.id) || typeof EventSource !== 'function') continue;
+        const workspaceKey = [...registeredIds].sort().join('|');
+        if (workspaceRuntimeStream && workspaceRuntimeStreamWorkspaceKey === workspaceKey) return;
+        closeWorkspaceRuntimeStream();
+        workspaceRuntimeStreamWorkspaceKey = workspaceKey;
 
-          const endpoint = '/api/workspaces/' + encodeURIComponent(workspace.id) + '/goal-runtime/events';
-          const stream = new EventSource(endpoint);
-          stream.addEventListener('goal-runtime-snapshot', (event) => {
-            try {
-              const data = JSON.parse(event.data);
-              if (data?.workspaceId === workspace.id) applyWorkspaceRuntimeSnapshot(workspace.id, data);
-            } catch {
-              void refreshWorkspaceRuntime(workspace.id);
-            }
-          });
-          stream.addEventListener('goal-runtime-event', (event) => {
-            try {
-              noteWorkspaceRuntimeEvent(workspace.id, JSON.parse(event.data));
-            } catch {
-              void refreshWorkspaceRuntime(workspace.id);
-            }
-          });
-          stream.addEventListener('goal-runtime-stream-error', () => {
-            void refreshWorkspaceRuntime(workspace.id);
-          });
-          workspaceRuntimeStreams.set(workspace.id, stream);
+        if (typeof EventSource !== 'function') {
+          scheduleWorkspaceRuntimeFallback();
+          return;
         }
+
+        const stream = new EventSource('/api/goal-runtime/events');
+        workspaceRuntimeStream = stream;
+        stream.addEventListener('open', () => {
+          stopWorkspaceRuntimeFallback();
+        });
+        stream.addEventListener('goal-runtime-snapshot', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const workspaceId = data?.workspaceId;
+            if (typeof workspaceId === 'string' && registeredIds.has(workspaceId)) {
+              applyWorkspaceRuntimeSnapshot(workspaceId, data);
+            }
+          } catch {
+            scheduleWorkspaceRuntimeFallback();
+          }
+        });
+        stream.addEventListener('goal-runtime-event', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const workspaceId = data?.event?.workspaceId;
+            if (typeof workspaceId === 'string' && registeredIds.has(workspaceId)) {
+              noteWorkspaceRuntimeEvent(workspaceId, data);
+            }
+          } catch {
+            scheduleWorkspaceRuntimeFallback();
+          }
+        });
+        stream.addEventListener('goal-runtime-stream-error', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const workspaceId = data?.workspaceId;
+            if (typeof workspaceId === 'string' && registeredIds.has(workspaceId)) {
+              void refreshWorkspaceRuntime(workspaceId);
+              return;
+            }
+          } catch {}
+          scheduleWorkspaceRuntimeFallback();
+        });
+        stream.onerror = () => {
+          scheduleWorkspaceRuntimeFallback();
+        };
       }
 
       function runtimeBadgeClass(runtimeState) {
@@ -808,20 +909,31 @@ export function getClientScriptJs(): string {
         return runtime.snapshots.find((record) => record?.projection?.goalId === goalId) || null;
       }
 
-      async function loadWorkspaces() {
-        const body = document.getElementById('projects-table-body');
-        try {
-          const res = await fetch('/api/workspaces');
-          if (!res.ok) throw new Error('Workspace request failed');
-          const data = await res.json();
-          cachedWorkspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
-          workspaceSelection = data.selection || null;
+      async function fetchWorkspaceState() {
+        const res = await fetchWithTimeout('/api/workspaces');
+        const data = await res.json();
+        if (!res.ok) throw new Error(errorMessage(data, 'Workspace request failed'));
+        return data;
+      }
+
+      function applyWorkspaceState(data, resetGoalState = false) {
+        cachedWorkspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
+        workspaceSelection = data.selection || null;
+        if (resetGoalState) {
           workspaceGoals.clear();
           expandedWorkspaceGoals.clear();
           loadingWorkspaceGoals.clear();
           openGoalDetails.clear();
-          renderWorkspaces();
-          syncWorkspaceRuntimeStreams();
+        }
+        renderWorkspaces();
+        syncWorkspaceRuntimeStreams();
+      }
+
+      async function loadWorkspaces() {
+        const body = document.getElementById('projects-table-body');
+        try {
+          const data = await fetchWorkspaceState();
+          applyWorkspaceState(data, true);
         } catch (err) {
           if (body) body.replaceChildren(emptyRow(7, 'Failed to load projects: ' + err.message));
           logEvent('ERROR', 'Project refresh failed: ' + err.message);
@@ -1085,7 +1197,7 @@ export function getClientScriptJs(): string {
         renderWorkspaces();
         const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goals';
         try {
-          const res = await fetch(endpoint);
+          const res = await fetchWithTimeout(endpoint);
           const data = await res.json();
           if (!res.ok) throw new Error(errorMessage(data, 'Goal request failed'));
           workspaceGoals.set(workspaceId, {
@@ -1135,6 +1247,30 @@ export function getClientScriptJs(): string {
           showToast(operation === 'primary' ? 'Default Project updated' : 'Project scope updated');
           logEvent('SUCCESS', 'Workspace selection updated for ' + workspaceId + ' (' + operation + ')');
         } catch (err) {
+          if (isRequestTimeout(err)) {
+            try {
+              const reconciled = await fetchWorkspaceState();
+              applyWorkspaceState(reconciled, false);
+              const activeIds = new Set(reconciled.selection?.activeWorkspaceIds || []);
+              const applied = operation === 'primary'
+                ? reconciled.selection?.primaryWorkspaceId === workspaceId
+                : operation === 'deactivate'
+                  ? !activeIds.has(workspaceId)
+                  : activeIds.has(workspaceId);
+              if (applied) {
+                showToast(operation === 'primary' ? 'Default Project updated' : 'Project scope updated');
+                logEvent('SUCCESS', 'Workspace selection reconciled after response timeout for ' + workspaceId + ' (' + operation + ')');
+                return;
+              }
+              showToast('Project update timed out; current state was refreshed. Retry if needed.', true);
+              logEvent('WARN', 'Workspace selection timed out without observed commit for ' + workspaceId + ' (' + operation + ')');
+              return;
+            } catch (reconcileErr) {
+              showToast('Project update timed out; outcome is unknown. Refresh before retrying.', true);
+              logEvent('ERROR', 'Workspace selection reconciliation failed: ' + reconcileErr.message);
+              return;
+            }
+          }
           showToast('Project update failed: ' + err.message, true);
           logEvent('ERROR', 'Workspace selection update failed: ' + err.message);
         }
@@ -1152,6 +1288,24 @@ export function getClientScriptJs(): string {
           showToast('Project removed from Unified-MPC');
           logEvent('SUCCESS', 'Workspace registration removed for ' + workspaceId + '; source files were not deleted');
         } catch (err) {
+          if (isRequestTimeout(err)) {
+            try {
+              const reconciled = await fetchWorkspaceState();
+              applyWorkspaceState(reconciled, false);
+              if (!cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) {
+                showToast('Project removed from Unified-MPC');
+                logEvent('SUCCESS', 'Workspace removal reconciled after response timeout for ' + workspaceId);
+                return;
+              }
+              showToast('Project removal timed out; project is still registered. Retry if needed.', true);
+              logEvent('WARN', 'Workspace removal timed out without observed removal for ' + workspaceId);
+              return;
+            } catch (reconcileErr) {
+              showToast('Project removal timed out; outcome is unknown. Refresh before retrying.', true);
+              logEvent('ERROR', 'Workspace removal reconciliation failed: ' + reconcileErr.message);
+              return;
+            }
+          }
           showToast('Project removal failed: ' + err.message, true);
           logEvent('ERROR', 'Workspace removal failed: ' + err.message);
         }
@@ -1702,11 +1856,10 @@ export function getClientScriptJs(): string {
       document.getElementById('logs-filter-text')?.addEventListener('input', renderLogs);
 
       window.addEventListener('pagehide', () => {
-        const trackedIds = new Set([
-          ...workspaceRuntimeStreams.keys(),
-          ...workspaceRuntimeRefreshControllers.keys(),
-        ]);
-        for (const workspaceId of trackedIds) closeWorkspaceRuntimeStream(workspaceId);
+        closeWorkspaceRuntimeStream();
+        for (const workspaceId of [...workspaceRuntimeRefreshControllers.keys()]) {
+          clearWorkspaceRuntimeState(workspaceId);
+        }
       });
 
       // Initial boot

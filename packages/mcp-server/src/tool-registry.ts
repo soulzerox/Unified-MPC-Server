@@ -584,6 +584,14 @@ export class ToolRegistry {
           }
         }
       }
+      if (tool.name === 'retry_goal_workspace_admission') {
+        const recoveryHarnessError = await this.validateUnstagedRecoveryPreparedPaths(activeRoutedInput, parentSignal);
+        if (recoveryHarnessError !== undefined && !recoveryHarnessError.ok) {
+          const response = mapError(recoveryHarnessError.error);
+          await this.activity.end(callId, recoveryHarnessError.error.code, Date.now() - started, recoveryHarnessError.error.message);
+          return response;
+        }
+      }
       const codingMutation = mutationDecision.kind !== 'read' && isCodingMutation(tool.name, activeRoutedInput);
       const admissionIdentityMutation = mutationDecision.kind !== 'read'
         && isWorkspaceAdmissionIdentityMutation(tool.name, activeRoutedInput);
@@ -915,6 +923,17 @@ export class ToolRegistry {
         if (harnessWorkspaceId !== undefined) {
           const harnessContext = this.harnessContext(harnessWorkspaceId);
           for (const path of codeMutationPaths(name, activeRoutedInput)) this.harnessActivation.consumePath(harnessContext, path);
+        }
+      }
+      if (response.isError !== true
+        && name === 'retry_goal_workspace_admission'
+        && isRecord(response.structuredContent)
+        && response.structuredContent.outcome === 'admitted'
+        && isRecord(activeRoutedInput)) {
+        const recoveryWorkspaceId = readTrimmedString(activeRoutedInput.workspaceId);
+        if (recoveryWorkspaceId !== undefined) {
+          const harnessContext = this.harnessContext(recoveryWorkspaceId);
+          for (const path of unstagedRecoveryPaths(activeRoutedInput)) this.harnessActivation.consumePath(harnessContext, path);
         }
       }
       await this.recordPonytailOutcome(name, activeRoutedInput, response, activityWorkspaceId, ponytailInvocation);
@@ -1353,6 +1372,46 @@ export class ToolRegistry {
       initialStatus: result.value,
       readStatus: () => thaiRag.call('index_status', { workspace_id: workspaceId, job_id: jobId }),
     });
+  }
+
+  private async validateUnstagedRecoveryPreparedPaths(
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<ReturnType<typeof err> | undefined> {
+    if (!isRecord(input)) return undefined;
+    const paths = unstagedRecoveryPaths(input);
+    if (paths.length === 0) return undefined;
+    const workspaceId = readTrimmedString(input.workspaceId);
+    if (workspaceId === undefined) return err(appError('INVALID_INPUT', 'Unstaged admission recovery requires workspaceId'));
+
+    const context = this.harnessContext(workspaceId);
+    const state = this.harnessActivation.state(context);
+    if (state === undefined) {
+      return err(appError('CONFLICT',
+        'Run workspace_bootstrap and prepare_code_change for every unstaged recovery path before retrying admission', true));
+    }
+    const currentHash = await this.currentAgentsMdHash(workspaceId);
+    if (!currentHash.ok) {
+      this.harnessActivation.invalidate(context);
+      return currentHash;
+    }
+    if (currentHash.value !== state.agentsMdHash) {
+      this.harnessActivation.invalidate(context);
+      return err(appError('CONFLICT',
+        'Workspace harness changed; run workspace_bootstrap and prepare_code_change again before unstaged recovery', true));
+    }
+    const operationSignal = signal ?? new AbortController().signal;
+    const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, operationSignal);
+    if (!sourceIdentity.ok) return sourceIdentity;
+    if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);
+
+    for (const path of paths) {
+      if (!this.harnessActivation.isPathPrepared(context, path)) {
+        return err(appError('CONFLICT',
+          `Run prepare_code_change for ${path} against the current workspace state before unstaged admission recovery`, true));
+      }
+    }
+    return undefined;
   }
 
   private async validateHarnessMutation(
@@ -2068,6 +2127,14 @@ function withGoalLeaseEnvelope(tool: McpToolDefinition): McpToolDefinition {
       return ok({ ...parsed.value, goalLease: parsedGoalLease.data });
     },
   };
+}
+
+function unstagedRecoveryPaths(input: unknown): readonly string[] {
+  if (!isRecord(input) || !isRecord(input.unstagedRecovery)) return [];
+  const raw = input.unstagedRecovery.expectedUnstagedPaths;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    .map((entry) => entry.trim());
 }
 
 const NATIVE_AUTOMATION_APPROVAL_TOOLS = new Set([

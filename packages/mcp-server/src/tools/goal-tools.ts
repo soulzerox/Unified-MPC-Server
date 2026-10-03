@@ -52,13 +52,23 @@ const stagedRecoverySchema = z.object({
   expectedStagedDiffSha256: z.string().regex(/^[0-9a-f]{64}$/i),
 }).strict();
 
+const unstagedRecoverySchema = z.object({
+  expectedAdmissionGeneration: z.number().int().min(1),
+  expectedWorkspaceHead: z.string().regex(/^[0-9a-f]{40,64}$/i),
+  expectedUnstagedPaths: z.array(z.string().min(1).max(4096)).min(1).max(100),
+  expectedUnstagedDiffSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+}).strict();
+
 const retryGoalAdmissionSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   goalId,
   leaseToken,
   leaseGeneration: z.number().int().min(1),
   stagedRecovery: stagedRecoverySchema.optional(),
-}).strict();
+  unstagedRecovery: unstagedRecoverySchema.optional(),
+}).strict().refine((value) => value.stagedRecovery === undefined || value.unstagedRecovery === undefined, {
+  message: 'Use stagedRecovery or unstagedRecovery, not both',
+});
 
 const getGoalSchema = z.union([
   z.object({ goalId }).strict(),
@@ -246,7 +256,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'retry_goal_workspace_admission',
-      description: 'Recover the current Goal Workspace admission after an acquired run_goal or scheduled claim returned admission_required. Requires the exact still-valid owner lease token and generation; stale and cross-session proofs are rejected. Optional stagedRecovery adopts an exact already-staged delta only when HEAD, staged paths, staged diff hash, repository identity, and prior admission generation match. Does not create a goal, rotate a lease, or bypass the writer admission gate.',
+      description: 'Recover the current Goal Workspace admission after an acquired run_goal or scheduled claim returned admission_required. Requires the exact still-valid owner lease token and generation; stale and cross-session proofs are rejected. Optional stagedRecovery or unstagedRecovery adopts only an exact bounded owner delta when HEAD, exact paths, diff hash, repository identity, and prior admission generation match. Does not create a goal, rotate a lease, or bypass the writer admission gate.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: retryGoalAdmissionSchema,
@@ -259,6 +269,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
           leaseToken: input.leaseToken,
           leaseGeneration: input.leaseGeneration,
           ...(input.stagedRecovery === undefined ? {} : { stagedRecovery: input.stagedRecovery }),
+          ...(input.unstagedRecovery === undefined ? {} : { unstagedRecovery: input.unstagedRecovery }),
         });
         if (!recovered.ok) {
           if (recovered.error.code === 'PERMISSION_DENIED') return recovered;

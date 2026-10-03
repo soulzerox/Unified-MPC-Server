@@ -254,6 +254,83 @@ export class GoalRuntimeControlPlaneService implements GoalRuntimeEventPublisher
     return recovered.admissionGeneration;
   }
 
+  public async recoverUnstagedWorkspaceAdmission(binding: {
+    readonly callId: string;
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseGeneration: number;
+    readonly admissionGeneration: number;
+    readonly expectedWorkspaceHead: string;
+    readonly expectedDirtyFingerprint: string;
+    readonly expectedStagedFingerprint: string;
+  }): Promise<number> {
+    const receipts = this.workspaceAdmissionReceipts;
+    const runtime = this.runtimeAdmissionIdentity;
+    if (receipts?.compareAndSwapAdmissionReceipt === undefined || runtime === undefined || runtime.runtimeBuildDirty) {
+      throw new Error('Unstaged workspace admission recovery cannot be recorded safely');
+    }
+    const [receipt, observed] = await Promise.all([
+      receipts.getAdmissionReceipt(binding.workspaceId),
+      this.readWorkspaceAdmissionBestEffort(binding.workspaceId),
+    ]);
+    const now = this.now();
+    if (receipt === null || observed === null || observed.workspaceKind !== 'git'
+      || observed.dirtyState !== 'dirty' || observed.workspaceHead === undefined
+      || observed.dirtyFingerprint === undefined || observed.stagedFingerprint === undefined
+      || observed.dirtyFingerprint !== binding.expectedDirtyFingerprint
+      || observed.stagedFingerprint !== binding.expectedStagedFingerprint
+      || observed.stagedFingerprint !== receipt.stagedFingerprint
+      || observed.dirtyFingerprint === receipt.dirtyFingerprint
+      || observed.workspaceHead !== binding.expectedWorkspaceHead
+      || receipt.expectedWorkspaceHead !== binding.expectedWorkspaceHead
+      || receipt.observedWorkspaceHead !== binding.expectedWorkspaceHead
+      || observed.writerLeaseGeneration !== binding.leaseGeneration
+      || observed.writerLeaseExpiresAt === undefined || Date.parse(observed.writerLeaseExpiresAt) <= now.getTime()
+      || observed.goalId !== binding.goalId || receipt.goalId !== binding.goalId
+      || observed.projectId !== receipt.projectId || receipt.workspaceId !== binding.workspaceId
+      || observed.checkpointId !== receipt.checkpointId
+      || receipt.workspaceKind !== 'git'
+      || receipt.admissionGeneration !== binding.admissionGeneration
+      || receipt.writeLeaseGeneration > binding.leaseGeneration
+      || receipt.invalidatedAt !== undefined
+      || (receipt.expiresAt !== undefined && Date.parse(receipt.expiresAt) <= now.getTime())
+      || observed.repositoryIdentity !== receipt.repositoryIdentity
+      || observed.gitCommonDirIdentity !== receipt.gitCommonDirIdentity
+      || observed.worktreeIdentity !== receipt.worktreeIdentity
+      || observed.branchName !== receipt.branchName
+      || observed.baseRef !== receipt.baseRef
+      || observed.baseSha !== receipt.resolvedBaseSha
+      || observed.mergeBaseSha !== receipt.mergeBaseSha
+      || (observed.remoteGoalSha ?? undefined) !== receipt.remoteGoalSha) {
+      throw new Error('Unstaged workspace admission recovery no longer matches its exact owner, source, and prior admission proof');
+    }
+
+    const recovered: WorkspaceAdmissionReceipt = {
+      ...receipt,
+      ...runtime,
+      admissionId: createHash('sha256')
+        .update([receipt.admissionId, binding.callId, 'unstaged-recovery', String(binding.leaseGeneration),
+          String(binding.admissionGeneration + 1), now.toISOString()].join('\0'))
+        .digest('hex'),
+      expectedWorkspaceHead: observed.workspaceHead,
+      observedWorkspaceHead: observed.workspaceHead,
+      dirtyState: observed.dirtyState,
+      dirtyFingerprint: observed.dirtyFingerprint,
+      stagedFingerprint: observed.stagedFingerprint,
+      writeLeaseGeneration: binding.leaseGeneration,
+      admissionGeneration: binding.admissionGeneration + 1,
+      createdAt: now.toISOString(),
+    };
+    const saved = await receipts.compareAndSwapAdmissionReceipt(
+      binding.workspaceId,
+      binding.admissionGeneration,
+      binding.leaseGeneration,
+      recovered,
+    );
+    if (!saved) throw new Error('Unstaged workspace admission recovery lost its generation compare-and-swap');
+    return recovered.admissionGeneration;
+  }
+
   public async refreshGoalWorkspaceTruth(goalId: string): Promise<GoalRuntimeSnapshotRecord> {
     return this.withGoalLock(goalId, async () => {
       let snapshot = await this.ensureGoalSnapshotUnlocked(goalId);

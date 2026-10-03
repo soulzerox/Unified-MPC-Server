@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ControlPlaneServer, type WebGoalSummary, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
+import { ControlPlaneServer, type StorageDiagnosticsSnapshot, type WebGoalSummary, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
   InstallerService,
@@ -63,6 +63,73 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/status`);
 
     expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('exposes bounded storage identity diagnostics without secret values', async () => {
+    const diagnosticServer = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      storageDiagnosticsProbe: async (): Promise<StorageDiagnosticsSnapshot> => ({
+        dataRoot: '/srv/unified-mpc',
+        sqlite: {
+          path: '/srv/unified-mpc/unified-mpc.sqlite',
+          exists: true,
+          schemaVersion: '029_goal_runtime_integration_observations',
+          settingsRowCount: 5,
+          keyPresence: {
+            cloudflare_public_url: true,
+            cloudflare_tunnel_token_configured: true,
+            cloudflare_api_token_configured: false,
+          },
+        },
+        secretService: {
+          provider: 'linux-secret-service',
+          service: 'unified-mpc',
+          available: true,
+          secretPresence: {
+            cloudflare_tunnel_token: true,
+            cloudflare_api_token: false,
+          },
+        },
+      }),
+    });
+    await diagnosticServer.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${diagnosticServer.port}/api/storage-diagnostics`);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toEqual({
+        available: true,
+        scope: 'control-plane-storage',
+        diagnostics: {
+          dataRoot: '/srv/unified-mpc',
+          sqlite: {
+            path: '/srv/unified-mpc/unified-mpc.sqlite',
+            exists: true,
+            schemaVersion: '029_goal_runtime_integration_observations',
+            settingsRowCount: 5,
+            keyPresence: {
+              cloudflare_public_url: true,
+              cloudflare_tunnel_token_configured: true,
+              cloudflare_api_token_configured: false,
+            },
+          },
+          secretService: {
+            provider: 'linux-secret-service',
+            service: 'unified-mpc',
+            available: true,
+            secretPresence: {
+              cloudflare_tunnel_token: true,
+              cloudflare_api_token: false,
+            },
+          },
+        },
+      });
+      expect(JSON.stringify(body)).not.toContain('token-value');
+    } finally {
+      await diagnosticServer.close();
+    }
   });
 
   it('requires startup capability for mutations and does not expose it in status or logs', async () => {

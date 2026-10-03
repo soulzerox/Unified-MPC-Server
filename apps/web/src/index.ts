@@ -5,6 +5,8 @@ export {
   type GoalRuntimeReadPort,
   type McpIdentityProbe,
   type McpRuntimeDiagnosticsProbe,
+  type StorageDiagnosticsProbe,
+  type StorageDiagnosticsSnapshot,
   type WebMcpRuntimeIdentity,
   type WebGoalSummary,
   type WebWorkspaceSummary,

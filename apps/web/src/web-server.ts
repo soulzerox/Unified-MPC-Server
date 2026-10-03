@@ -109,6 +109,26 @@ export interface WebMcpRuntimeIdentity {
 export type McpIdentityProbe = (localPort: number) => Promise<WebMcpRuntimeIdentity | null>;
 export type McpRuntimeDiagnosticsProbe = (localPort: number) => Promise<McpRuntimeDiagnosticsSnapshot | null>;
 
+export interface StorageDiagnosticsSnapshot {
+  readonly dataRoot: string;
+  readonly sqlite: {
+    readonly path: string;
+    readonly exists: boolean;
+    readonly schemaVersion: string | null;
+    readonly settingsRowCount: number;
+    readonly keyPresence: Readonly<Record<string, boolean>>;
+  };
+  readonly secretService: {
+    readonly provider: string;
+    readonly service: string | null;
+    readonly available: boolean;
+    readonly secretPresence: Readonly<Record<string, boolean | null>>;
+    readonly error?: 'lookup_failed';
+  };
+}
+
+export type StorageDiagnosticsProbe = () => Promise<StorageDiagnosticsSnapshot>;
+
 export type GatewayRestoreState = 'idle' | 'restoring' | 'degraded' | 'connected' | 'stopped';
 export interface GatewayRestoreStatus {
   readonly state: GatewayRestoreState;
@@ -143,6 +163,7 @@ export interface ControlPlaneServerOptions {
   readonly serverShutdownGraceMs?: number;
   readonly mcpIdentityProbe?: McpIdentityProbe;
   readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
+  readonly storageDiagnosticsProbe?: StorageDiagnosticsProbe;
   /** Test-only override for persisted Gateway restore retry cadence. */
   readonly gatewayRestoreRetryBaseMs?: number;
   /** Test-only override for persisted Gateway restore retry ceiling. */
@@ -215,6 +236,7 @@ export class ControlPlaneServer {
   private readonly goalRuntimeStreamClosers = new Set<() => void>();
   private readonly mcpIdentityProbe: McpIdentityProbe;
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
+  private readonly storageDiagnosticsProbe: StorageDiagnosticsProbe | undefined;
   private readonly gatewayRestoreRetryBaseMs: number;
   private readonly gatewayRestoreRetryMaxMs: number;
   private readonly gatewayRestoreStallMs: number;
@@ -271,6 +293,7 @@ export class ControlPlaneServer {
     this.serverShutdownGraceMs = options.serverShutdownGraceMs ?? DEFAULT_SERVER_SHUTDOWN_GRACE_MS;
     this.mcpIdentityProbe = options.mcpIdentityProbe ?? probeMcpRuntimeIdentity;
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
+    this.storageDiagnosticsProbe = options.storageDiagnosticsProbe;
     this.gatewayRestoreRetryBaseMs = options.gatewayRestoreRetryBaseMs ?? 1_000;
     this.gatewayRestoreRetryMaxMs = options.gatewayRestoreRetryMaxMs ?? 30_000;
     this.gatewayRestoreStallMs = options.gatewayRestoreStallMs ?? DEFAULT_GATEWAY_RESTORE_STALL_MS;
@@ -490,6 +513,37 @@ export class ControlPlaneServer {
       }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ available, jobs }));
+      return;
+    }
+
+    if (pathname === '/api/storage-diagnostics' && req.method === 'GET') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      if (this.storageDiagnosticsProbe === undefined) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'control-plane-storage',
+          error: 'Storage diagnostics unavailable',
+        }));
+        return;
+      }
+      try {
+        const diagnostics = await this.storageDiagnosticsProbe();
+        res.statusCode = 200;
+        res.end(JSON.stringify({
+          available: true,
+          scope: 'control-plane-storage',
+          diagnostics,
+        }));
+      } catch {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'control-plane-storage',
+          error: 'Storage diagnostics unavailable',
+        }));
+      }
       return;
     }
 

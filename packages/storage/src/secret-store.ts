@@ -1,9 +1,15 @@
 import { spawn } from 'node:child_process';
 
+export interface SecretStoreIdentity {
+  readonly provider: string;
+  readonly service: string | null;
+}
+
 export interface SecretStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
   delete(key: string): Promise<void>;
+  describe?(): SecretStoreIdentity;
 }
 
 export interface SecretToolSecretStoreOptions {
@@ -24,6 +30,13 @@ export class SecretToolSecretStore implements SecretStore {
     this.service = options.service?.trim() || 'unified-mpc';
     this.command = options.command?.trim() || 'secret-tool';
     this.run = options.run ?? ((args, input): Promise<string> => runSecretTool(this.command, args, input));
+  }
+
+  public describe(): SecretStoreIdentity {
+    return {
+      provider: 'linux-secret-service',
+      service: this.service,
+    };
   }
 
   public async get(key: string): Promise<string | null> {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
+import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
 
@@ -270,8 +271,8 @@ describe('workspace engineering harness enforcement', () => {
     const registry = new ToolRegistry(services, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       sessionId: 'full-bypass-pre-edit-session',
-      profileProvider: () => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
-      authorizationModeProvider: () => 'full_bypass',
+      profileProvider: (): PermissionProfile => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
       activeWorkspaceScopeProvider,
     });
 
@@ -300,11 +301,11 @@ describe('workspace engineering harness enforcement', () => {
     const registry = new ToolRegistry(services, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       sessionId: 'full-bypass-auto-pre-edit-session',
-      profileProvider: () => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
-      authorizationModeProvider: () => 'full_bypass',
+      profileProvider: (): PermissionProfile => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
       activeWorkspaceScopeProvider,
       activity: {
-        async record(event) {
+        async record(event): Promise<void> {
           events.push(event as unknown as Record<string, unknown>);
         },
       },
@@ -340,8 +341,8 @@ describe('workspace engineering harness enforcement', () => {
     const registry = new ToolRegistry(services, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       sessionId: 'full-bypass-unavailable-session',
-      profileProvider: () => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
-      authorizationModeProvider: () => authorizationMode,
+      profileProvider: (): PermissionProfile => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
+      authorizationModeProvider: (): 'standard' | 'full_bypass' => authorizationMode,
       activeWorkspaceScopeProvider,
     });
 

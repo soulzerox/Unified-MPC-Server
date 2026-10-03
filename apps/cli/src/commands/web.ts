@@ -28,6 +28,7 @@ import {
 import {
   SecretToolSecretStore,
   type SecretStore,
+  assertStorageIdentitySafe,
   SqliteDatabase,
   SqliteGoalRepository,
   SqliteGoalRuntimeEventRepository,
@@ -79,6 +80,7 @@ export async function runWeb(
 ): Promise<Result<WebRunResult>> {
   try {
     const dataPath = resolveDataPath();
+    assertStorageIdentitySafe(dataPath);
     const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const settings = new SqliteSettingsRepository(database);
     const secretStore = serverOptions?.secretStore ?? new SecretToolSecretStore();

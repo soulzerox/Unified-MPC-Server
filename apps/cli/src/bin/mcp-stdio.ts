@@ -13,7 +13,7 @@ import {
   parseStdioPermissionProfile,
   resolveDataPath as resolveDataPathFromShared,
 } from '@unified-mpc/shared';
-import { applyPendingSqliteRestoreSync, SqliteBackupService, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { applyPendingSqliteRestoreSync, assertStorageIdentitySafe, SqliteBackupService, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceRoot, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/stdio-mcp-runtime.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
@@ -56,6 +56,7 @@ async function main(): Promise<void> {
   const restore = applyPendingSqliteRestoreSync(path.join(dataPath, 'unified-mpc.sqlite'), path.join(dataPath, 'backups'), { platform: process.platform, arch: process.arch });
   if (restore.error !== undefined) process.stderr.write(`Unified-MPC stdio: scheduled restore failed: ${restore.error}\n`);
   if (restore.applied) process.stderr.write(`Unified-MPC stdio: restored database from ${restore.backupId ?? 'scheduled backup'}\n`);
+  assertStorageIdentitySafe(dataPath);
 
   const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'), { backupDirectory: path.join(dataPath, 'backups'), platform: process.platform, arch: process.arch });
   const rawWorkspaceRepository = new SqliteWorkspaceRepository(database);

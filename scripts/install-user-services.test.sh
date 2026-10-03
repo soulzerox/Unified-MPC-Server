@@ -81,6 +81,7 @@ test -f "$tmp/home/.config/systemd/user/unified-mpc.service"
 test -f "$tmp/home/.config/systemd/user/unified-mpc-mcp-http.service"
 test -f "$tmp/home/.config/systemd/user/unified-mpc-web.service"
 test -x "$tmp/home/.config/unified-mpc/launch-runtime.sh"
+grep -Fq "UNIFIED_MPC_DATA_PATH=$tmp/home/.local/share/unified-mpc" "$tmp/home/.config/unified-mpc/service.env"
 
 rm -rf "$tmp/home/.config/unified-mpc" "$tmp/home/.config/systemd"
 : > "$log"

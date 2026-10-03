@@ -1153,14 +1153,15 @@ export class ControlPlaneServer {
   ): number {
     const snapshotsByWorkspace = new Map(snapshotReads.map((read) => [read.workspaceId, read]));
     const boundsByWorkspace = new Map(page.workspaceBounds.map((bound) => [bound.workspaceId, bound]));
-    const cursors: number[] = [];
+    let cursor = page.latestSequence ?? 0;
     for (const workspaceId of workspaceIds) {
       const bounds = boundsByWorkspace.get(workspaceId);
       if (bounds?.latestSequence === undefined) continue;
       const read = snapshotsByWorkspace.get(workspaceId);
-      cursors.push(goalRuntimeSnapshotCursor(read?.snapshots ?? [], bounds));
+      const workspaceCursor = goalRuntimeSnapshotCursor(read?.snapshots ?? [], bounds);
+      if (workspaceCursor < bounds.latestSequence) cursor = Math.min(cursor, workspaceCursor);
     }
-    return cursors.length === 0 ? 0 : Math.min(...cursors);
+    return cursor;
   }
 
   private async openMultiplexedGoalRuntimeEventStream(
@@ -1293,14 +1294,41 @@ export class ControlPlaneServer {
       try {
         const page = await replayPage(cursor);
         if (closed || res.writableEnded || res.destroyed) return;
-        const replayWindowMissed = page.replayWindowMissed
-          || (page.latestSequence !== undefined && cursor > page.latestSequence);
-        if (replayWindowMissed) {
+        const cursorAhead = page.latestSequence !== undefined && cursor > page.latestSequence;
+        if (cursorAhead) {
           await refreshSnapshots(page, true);
           if (closed || res.writableEnded || res.destroyed) return;
           const hasMoreAfterSnapshot = page.latestSequence !== undefined && cursor < page.latestSequence;
           schedule(hasMoreAfterSnapshot ? 0 : this.goalRuntimeStreamPollMs);
           return;
+        }
+
+        if (page.replayWindowMissed) {
+          const missedWorkspaceIds = page.workspaceBounds
+            .filter((bound) => bound.oldestAvailableSequence !== undefined
+              && cursor < bound.oldestAvailableSequence - 1)
+            .map((bound) => bound.workspaceId);
+          if (missedWorkspaceIds.length > 0) {
+            const reads = await this.readMultiplexedGoalRuntimeSnapshots(missedWorkspaceIds);
+            if (closed || res.writableEnded || res.destroyed) return;
+            for (const read of reads) {
+              if (read.snapshots !== undefined) {
+                if (!writeGoalRuntimeSseEvent(res, 'goal-runtime-snapshot', cursor, {
+                  workspaceId: read.workspaceId,
+                  snapshots: read.snapshots,
+                  cursor,
+                  replayWindowMissed: true,
+                })) {
+                  await waitForGoalRuntimeSseDrain(res);
+                }
+              } else {
+                writeGoalRuntimeSseEvent(res, 'goal-runtime-stream-error', undefined, {
+                  workspaceId: read.workspaceId,
+                  error: read.error,
+                });
+              }
+            }
+          }
         }
 
         for (const record of page.events) {

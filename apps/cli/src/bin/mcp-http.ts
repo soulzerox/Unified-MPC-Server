@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createCrossClientHostMutationApprovalProvider, createMcpRuntimeDiagnosticsProvider, hostApprovalBrokerDirectory, IncrementalVerifier, startMcpHttp } from '@unified-mpc/mcp-server';
-import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
+import { USER_SETTING_KEYS, isUnrestricted, parseBooleanSetting, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
@@ -37,12 +37,19 @@ async function main(): Promise<void> {
   const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
   const settings = new SqliteSettingsRepository(database);
   const workspace = await selectWorkspace(new WorkspaceService(new SqliteWorkspaceRepository(database)));
+  const desktopFullBypassAllProvider = (): boolean => {
+    const environment = process.env.UNIFIED_MPC_DESKTOP_FULL_BYPASS_ALL;
+    return environment !== undefined
+      ? parseBooleanSetting(environment, false)
+      : parseBooleanSetting(settings.get(USER_SETTING_KEYS.desktopFullBypassAll), false);
+  };
 
   const buildProvenance = loadBuildProvenance();
   const runtimeAdmissionIdentity = createRuntimeAdmissionIdentity(buildProvenance);
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), {
     persistWorkspaceSelection: true,
     runtimeAdmissionIdentity,
+    fullBypassAllProvider: desktopFullBypassAllProvider,
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
@@ -67,7 +74,7 @@ async function main(): Promise<void> {
       codexToolsEnabled: runtime.codexToolsEnabled,
       ponytailModeProvider: () => runtime.ponytailMode,
       profileProvider: runtime.profileProvider,
-      authorizationModeProvider: () => 'standard',
+      authorizationModeProvider: runtime.authorizationModeProvider,
       allowAiDeleteProvider: runtime.allowAiDeleteProvider,
       destructivePolicyProvider: runtime.destructivePolicyProvider,
       activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,

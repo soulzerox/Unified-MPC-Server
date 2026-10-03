@@ -219,6 +219,21 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).not.toContain('Project memory pressure');
   });
 
+
+  it('implements the responsive design contract for tablet and mobile viewports', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('@media (max-width: 1024px)');
+    expect(html).toContain('@media (max-width: 640px)');
+    expect(html).toContain('@media (max-width: 420px)');
+    expect(html).toContain('.dashboard-grid > *');
+    expect(html).toContain('.table-responsive th:first-child');
+    expect(html).toContain('min-height: 44px');
+    expect(html).toContain('#gateway-stepper');
+    expect(html).toContain('max-height: calc(100vh - 32px)');
+    expect(html).toContain('#server-search-input');
+    expect(html).toContain('#logs-filter-text');
+  });
+
   it('wires real-time telemetry log terminal and /api/logs', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('terminal-box');

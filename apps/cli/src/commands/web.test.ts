@@ -160,6 +160,129 @@ describe('web CLI command', () => {
       }
     });
 
+    it('reports canonical storage identity and credential presence without secret values', async () => {
+      const root = await mkdtemp(path.join(process.cwd(), '.web-storage-diagnostics-'));
+      const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      const previousPublicUrl = process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL;
+      process.env.UNIFIED_MPC_DATA_PATH = root;
+      process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL = 'https://storage.example.test';
+      const secretValues = new Map<string, string>([
+        ['cloudflare_api_token', 'super-secret-api-token'],
+        ['cloudflare_tunnel_token', 'super-secret-tunnel-token'],
+      ]);
+      const secretStore = {
+        describe: (): { provider: string; service: string } => ({
+          provider: 'linux-secret-service',
+          service: 'fixture-unified-mpc',
+        }),
+        get: async (key: string): Promise<string | null> => secretValues.get(key) ?? null,
+        set: async (key: string, value: string): Promise<void> => { secretValues.set(key, value); },
+        delete: async (key: string): Promise<void> => { secretValues.delete(key); },
+      };
+
+      try {
+        const result = await runWeb({ port: 0 }, {
+          goalRuntimeRead: {} as never,
+          secretStore: secretStore as never,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        try {
+          const response = await fetch(`${result.value.url}/api/storage-diagnostics`);
+          expect(response.status).toBe(200);
+          const text = await response.text();
+          expect(text).not.toContain('super-secret-api-token');
+          expect(text).not.toContain('super-secret-tunnel-token');
+          expect(JSON.parse(text)).toMatchObject({
+            available: true,
+            scope: 'control-plane-storage',
+            diagnostics: {
+              dataRoot: root,
+              sqlite: {
+                path: path.join(root, 'unified-mpc.sqlite'),
+                exists: true,
+                schemaVersion: '029_goal_runtime_integration_observations',
+                settingsRowCount: expect.any(Number),
+                keyPresence: {
+                  cloudflare_public_url: true,
+                  cloudflare_tunnel_token_configured: false,
+                  cloudflare_api_token_configured: false,
+                },
+              },
+              secretService: {
+                provider: 'linux-secret-service',
+                service: 'fixture-unified-mpc',
+                available: true,
+                secretPresence: {
+                  cloudflare_tunnel_token: true,
+                  cloudflare_api_token: true,
+                },
+              },
+            },
+          });
+        } finally {
+          await result.value.handle.close();
+        }
+      } finally {
+        if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+        else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousPublicUrl === undefined) delete process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL;
+        else process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL = previousPublicUrl;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps successful secret presence truth when another Secret Service lookup fails', async () => {
+      const root = await mkdtemp(path.join(process.cwd(), '.web-storage-diagnostics-partial-'));
+      const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      process.env.UNIFIED_MPC_DATA_PATH = root;
+      const secretStore = {
+        describe: (): { provider: string; service: string } => ({
+          provider: 'linux-secret-service',
+          service: 'fixture-unified-mpc',
+        }),
+        get: async (key: string): Promise<string | null> => {
+          if (key === 'cloudflare_api_token') throw new Error('fixture lookup failure');
+          return key === 'cloudflare_tunnel_token' ? 'not-returned-secret' : null;
+        },
+        set: async (): Promise<void> => {},
+        delete: async (): Promise<void> => {},
+      };
+
+      try {
+        const result = await runWeb({ port: 0 }, {
+          goalRuntimeRead: {} as never,
+          secretStore: secretStore as never,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        try {
+          const response = await fetch(`${result.value.url}/api/storage-diagnostics`);
+          expect(response.status).toBe(200);
+          const text = await response.text();
+          expect(text).not.toContain('not-returned-secret');
+          expect(JSON.parse(text)).toMatchObject({
+            diagnostics: {
+              secretService: {
+                available: false,
+                error: 'lookup_failed',
+                secretPresence: {
+                  cloudflare_tunnel_token: true,
+                  cloudflare_api_token: null,
+                },
+              },
+            },
+          });
+        } finally {
+          await result.value.handle.close();
+        }
+      } finally {
+        if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+        else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('starts control plane server and returns handle with bound url', async () => {
       const result = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never });
       expect(result.ok).toBe(true);

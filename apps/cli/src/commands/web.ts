@@ -13,6 +13,7 @@ import {
   type ControlPlaneServerOptions,
   type GoalControlPort,
   type GoalRuntimeReadPort,
+  type StorageDiagnosticsProbe,
   type WebGoalSummary,
   type WebWorkspaceSelectionSnapshot,
   type WebWorkspaceSummary,
@@ -26,6 +27,7 @@ import {
 } from '@unified-mpc/shared';
 import {
   SecretToolSecretStore,
+  type SecretStore,
   SqliteDatabase,
   SqliteGoalRepository,
   SqliteGoalRuntimeEventRepository,
@@ -34,6 +36,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { WorkspaceService, isMachineRootPath, isProjectWorkspace } from '@unified-mpc/workspace';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
 
@@ -78,6 +81,7 @@ export async function runWeb(
     const dataPath = resolveDataPath();
     const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const settings = new SqliteSettingsRepository(database);
+    const secretStore = serverOptions?.secretStore ?? new SecretToolSecretStore();
     const workspaceRepository = new SqliteWorkspaceRepository(database);
     const workspaceService = new WorkspaceService(workspaceRepository);
     const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
@@ -118,7 +122,9 @@ export async function runWeb(
       port: options.port ?? 3000,
       dataDir: serverOptions?.dataDir ?? dataPath,
       settingsRepository: serverOptions?.settingsRepository ?? settings,
-      secretStore: serverOptions?.secretStore ?? new SecretToolSecretStore(),
+      secretStore,
+      storageDiagnosticsProbe: serverOptions?.storageDiagnosticsProbe
+        ?? createStorageDiagnosticsProbe(dataPath, database, settings, secretStore),
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       goalControl: serverOptions?.goalControl ?? goalControl,
       goalRuntimeRead,
@@ -270,6 +276,86 @@ function toWebGoalSummary(goal: GoalRecord): WebGoalSummary {
     steps: goal.plan.steps.map((step) => ({ id: step.id, title: step.title, status: step.status })),
     updatedAt: goal.updatedAt,
   };
+}
+
+const STORAGE_DIAGNOSTIC_SETTING_KEYS = [
+  'cloudflare_tunnel_name',
+  'cloudflare_public_url',
+  'mcp_allowed_hostnames',
+  'mcp_allowed_origins',
+  'cloudflare_tunnel_token_configured',
+  'cloudflare_account_id',
+  'cloudflare_zone_name',
+  'cloudflare_origin_url',
+  'cloudflare_remote_tunnel_id',
+  'cloudflare_api_token_configured',
+  'cloudflare_gateway_desired_state',
+] as const;
+
+const STORAGE_DIAGNOSTIC_SECRET_KEYS = [
+  'cloudflare_tunnel_token',
+  'cloudflare_api_token',
+] as const;
+
+function createStorageDiagnosticsProbe(
+  dataPath: string,
+  database: SqliteDatabase,
+  settings: SqliteSettingsRepository,
+  secretStore: SecretStore,
+): StorageDiagnosticsProbe {
+  const sqlitePath = path.join(dataPath, 'unified-mpc.sqlite');
+  return async () => {
+    const schemaRow = database.connection.prepare(
+      'SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 1',
+    ).get();
+    const schemaField = objectField(schemaRow, 'id');
+    const schemaVersion = typeof schemaField === 'string' ? schemaField : null;
+    const settingsCountRow = database.connection.prepare('SELECT COUNT(*) AS count FROM settings').get();
+    const settingsCountField = objectField(settingsCountRow, 'count');
+    const settingsRowCount = typeof settingsCountField === 'number'
+      ? settingsCountField
+      : typeof settingsCountField === 'bigint' ? Number(settingsCountField) : 0;
+    const keyPresence = Object.fromEntries(
+      STORAGE_DIAGNOSTIC_SETTING_KEYS.map((key) => [key, settings.get(key) !== null]),
+    ) as Readonly<Record<string, boolean>>;
+    const identity = secretStore.describe?.() ?? { provider: 'unknown', service: null };
+    const secretPresence: Record<string, boolean | null> = Object.fromEntries(
+      STORAGE_DIAGNOSTIC_SECRET_KEYS.map((key) => [key, null]),
+    );
+    let secretServiceAvailable = true;
+    let secretServiceError: 'lookup_failed' | undefined;
+    for (const key of STORAGE_DIAGNOSTIC_SECRET_KEYS) {
+      try {
+        secretPresence[key] = await secretStore.get(key) !== null;
+      } catch {
+        secretServiceAvailable = false;
+        secretServiceError = 'lookup_failed';
+      }
+    }
+    return {
+      dataRoot: dataPath,
+      sqlite: {
+        path: sqlitePath,
+        exists: existsSync(sqlitePath),
+        schemaVersion,
+        settingsRowCount,
+        keyPresence,
+      },
+      secretService: {
+        provider: identity.provider,
+        service: identity.service,
+        available: secretServiceAvailable,
+        secretPresence,
+        ...(secretServiceError === undefined ? {} : { error: secretServiceError }),
+      },
+    };
+  };
+}
+
+function objectField(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null && key in value
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
 }
 
 function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {

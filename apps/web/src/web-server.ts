@@ -148,6 +148,8 @@ export interface ControlPlaneServerOptions {
   readonly gatewayRestoreRetryBaseMs?: number;
   /** Test-only override for persisted Gateway restore retry ceiling. */
   readonly gatewayRestoreRetryMaxMs?: number;
+  /** Test-only override for stalled persisted Gateway supervision deadline. */
+  readonly gatewayRestoreStallMs?: number;
   readonly closeSettings?: () => void;
 }
 
@@ -156,6 +158,7 @@ const GOAL_RUNTIME_REPLAY_LIMIT = 100;
 const DEFAULT_GOAL_RUNTIME_STREAM_POLL_MS = 500;
 const DEFAULT_GOAL_RUNTIME_STREAM_READ_TIMEOUT_MS = 5_000;
 const DEFAULT_SERVER_SHUTDOWN_GRACE_MS = 1_000;
+const DEFAULT_GATEWAY_RESTORE_STALL_MS = 120_000;
 const GOAL_RUNTIME_STREAM_KEEPALIVE_MS = 15_000;
 const GOAL_RUNTIME_SNAPSHOT_CONCURRENCY = 8;
 
@@ -215,11 +218,15 @@ export class ControlPlaneServer {
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly gatewayRestoreRetryBaseMs: number;
   private readonly gatewayRestoreRetryMaxMs: number;
+  private readonly gatewayRestoreStallMs: number;
   private readonly closeSettings: (() => void) | undefined;
   private gatewayRestoreGeneration = 0;
   private gatewayRestoreRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private gatewayRestoreStatus: GatewayRestoreStatus = { state: 'idle', attempt: 0 };
   private gatewayRestoreOwnsLifecycle = false;
+  private gatewayRestoreProgressPhase = 'idle';
+  private gatewayRestoreLastProgressAt = Date.now();
+  private gatewaySupervisionLastGatewayState: string | undefined;
   private closing = false;
 
   private recordLog(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', msg: string): void {
@@ -267,11 +274,15 @@ export class ControlPlaneServer {
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.gatewayRestoreRetryBaseMs = options.gatewayRestoreRetryBaseMs ?? 1_000;
     this.gatewayRestoreRetryMaxMs = options.gatewayRestoreRetryMaxMs ?? 30_000;
+    this.gatewayRestoreStallMs = options.gatewayRestoreStallMs ?? DEFAULT_GATEWAY_RESTORE_STALL_MS;
     if (!Number.isInteger(this.gatewayRestoreRetryBaseMs) || this.gatewayRestoreRetryBaseMs <= 0) {
       throw new Error('Gateway restore retry base must be a positive integer');
     }
     if (!Number.isInteger(this.gatewayRestoreRetryMaxMs) || this.gatewayRestoreRetryMaxMs < this.gatewayRestoreRetryBaseMs) {
       throw new Error('Gateway restore retry max must be greater than or equal to retry base');
+    }
+    if (!Number.isInteger(this.gatewayRestoreStallMs) || this.gatewayRestoreStallMs <= 0) {
+      throw new Error('Gateway restore stall deadline must be a positive integer');
     }
     this.closeSettings = options.closeSettings;
 
@@ -311,7 +322,7 @@ export class ControlPlaneServer {
 
   public async close(): Promise<void> {
     this.closing = true;
-    this.cancelPersistedGatewayRestore();
+    this.cancelPersistedGatewayRestore('idle', false);
     for (const closeStream of [...this.goalRuntimeStreamClosers]) closeStream();
     this.goalRuntimeStreamClosers.clear();
 
@@ -406,6 +417,40 @@ export class ControlPlaneServer {
     if (pathname === '/_unified-mpc/ready' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ status: 'ready', service: 'web', port: this.boundPort }));
+      return;
+    }
+
+    if (pathname === '/_unified-mpc/gateway-supervision' && req.method === 'GET') {
+      const desiredState = this.settingsRepository?.get(SETTING_KEYS.gatewayDesiredState);
+      const gatewayState = this.gateway.status().state;
+      const supervised = this.gatewayRestoreOwnsLifecycle && desiredState !== 'STOPPED';
+      if (!supervised) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({
+          status: desiredState === 'STOPPED' ? 'stopped' : 'idle',
+          supervised: false,
+          gatewayState,
+          gatewayRestore: this.gatewayRestoreStatus,
+        }));
+        return;
+      }
+
+      if (this.gatewaySupervisionLastGatewayState !== gatewayState) {
+        this.gatewaySupervisionLastGatewayState = gatewayState;
+        this.gatewayRestoreLastProgressAt = Date.now();
+      }
+      const stalledForMs = Math.max(0, Date.now() - this.gatewayRestoreLastProgressAt);
+      const connected = gatewayState === 'SESSION_CONNECTED' && this.gatewayRestoreStatus.state === 'connected';
+      const stalled = !connected && stalledForMs >= this.gatewayRestoreStallMs;
+      res.writeHead(stalled ? 503 : 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        status: connected ? 'connected' : stalled ? 'stalled' : 'recovering',
+        supervised: true,
+        gatewayState,
+        gatewayRestore: this.gatewayRestoreStatus,
+        stalledForMs,
+        stallAfterMs: this.gatewayRestoreStallMs,
+      }));
       return;
     }
 
@@ -1536,13 +1581,22 @@ export class ControlPlaneServer {
     schedule(hasMoreInitialEvents ? 0 : this.goalRuntimeStreamPollMs);
   }
 
-  private cancelPersistedGatewayRestore(nextState: GatewayRestoreState = 'idle'): void {
+  private markGatewayRestoreProgress(phase: string): void {
+    if (this.gatewayRestoreProgressPhase === phase) return;
+    this.gatewayRestoreProgressPhase = phase;
+    this.gatewayRestoreLastProgressAt = Date.now();
+  }
+
+  private cancelPersistedGatewayRestore(nextState: GatewayRestoreState = 'idle', releaseLifecycle = true): void {
     this.gatewayRestoreGeneration += 1;
     if (this.gatewayRestoreRetryTimer !== undefined) {
       clearTimeout(this.gatewayRestoreRetryTimer);
       this.gatewayRestoreRetryTimer = undefined;
     }
+    if (releaseLifecycle) this.gatewayRestoreOwnsLifecycle = false;
     this.gatewayRestoreStatus = { state: nextState, attempt: 0 };
+    this.gatewaySupervisionLastGatewayState = this.gateway.status().state;
+    this.markGatewayRestoreProgress(nextState === 'stopped' ? 'stopped' : 'idle');
   }
 
   private isGatewayRestoreActive(generation: number): boolean {
@@ -1550,27 +1604,27 @@ export class ControlPlaneServer {
   }
 
   private async loadPersistedGatewayConfiguration(generation: number): Promise<void> {
-    if (this.settingsRepository === undefined || !this.isGatewayRestoreActive(generation)) {
+    const settings = this.settingsRepository;
+    if (settings === undefined || !this.isGatewayRestoreActive(generation)) {
+      this.gatewayRestoreOwnsLifecycle = false;
       this.gatewayRestoreStatus = { state: 'idle', attempt: 0 };
+      this.markGatewayRestoreProgress('idle');
       return;
     }
-    const configuration = await this.readGatewayConfiguration();
-    if (!this.isGatewayRestoreActive(generation)) return;
-    if (configuration.tunnelName === undefined && configuration.tunnelToken === undefined && configuration.publicUrl === undefined) {
+
+    const hasPersistedConfiguration = settings.get(SETTING_KEYS.tunnelName) !== null
+      || settings.get(SETTING_KEYS.publicUrl) !== null
+      || settings.get(SETTING_KEYS.tokenConfigured) === 'true';
+    if (!hasPersistedConfiguration) {
+      this.gatewayRestoreOwnsLifecycle = false;
       this.gatewayRestoreStatus = { state: 'idle', attempt: 0 };
+      this.markGatewayRestoreProgress('idle');
       return;
     }
 
     this.gatewayRestoreOwnsLifecycle = true;
-    this.gatewayRestoreStatus = { state: 'restoring', attempt: 0 };
-    const applied = await this.gateway.applyConfiguration(configuration);
-    if (!this.isGatewayRestoreActive(generation)) return;
-    if (!applied.ok) throw new Error(`Persisted gateway settings rejected: ${applied.error.message}`);
-    if (this.settingsRepository.get(SETTING_KEYS.gatewayDesiredState) === 'STOPPED') {
-      this.gatewayRestoreStatus = { state: 'stopped', attempt: 0 };
-      this.recordLog('INFO', 'Persisted ChatGPT Gateway desired state is STOPPED');
-      return;
-    }
+    this.gatewaySupervisionLastGatewayState = this.gateway.status().state;
+    this.markGatewayRestoreProgress('configuration');
 
     let attempt = 0;
     const scheduleRetry = (message: string): void => {
@@ -1591,14 +1645,55 @@ export class ControlPlaneServer {
       if (!this.isGatewayRestoreActive(generation)) return;
       attempt += 1;
       this.gatewayRestoreStatus = { state: 'restoring', attempt };
+
+      let configuration: GatewayTunnelConfiguration & { readonly tunnelToken?: string };
+      try {
+        configuration = await this.readGatewayConfiguration();
+      } catch (error) {
+        scheduleRetry(`Persisted ChatGPT Gateway configuration restore failed: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      if (!this.isGatewayRestoreActive(generation)) return;
+
+      const configurationMissing = configuration.tunnelName === undefined
+        && configuration.tunnelToken === undefined
+        && configuration.publicUrl === undefined;
+      if (configurationMissing) {
+        if (settings.get(SETTING_KEYS.tokenConfigured) === 'true') {
+          scheduleRetry('Persisted ChatGPT Gateway credential is configured but unavailable');
+          return;
+        }
+        this.gatewayRestoreOwnsLifecycle = false;
+        this.gatewayRestoreStatus = { state: 'idle', attempt: 0 };
+        this.markGatewayRestoreProgress('idle');
+        return;
+      }
+
+      this.markGatewayRestoreProgress('configured');
+      const applied = await this.gateway.applyConfiguration(configuration);
+      if (!this.isGatewayRestoreActive(generation)) return;
+      if (!applied.ok) {
+        scheduleRetry(`Persisted gateway settings rejected: ${applied.error.message}`);
+        return;
+      }
+
+      if (settings.get(SETTING_KEYS.gatewayDesiredState) === 'STOPPED') {
+        this.gatewayRestoreStatus = { state: 'stopped', attempt };
+        this.markGatewayRestoreProgress('stopped');
+        this.recordLog('INFO', 'Persisted ChatGPT Gateway desired state is STOPPED');
+        return;
+      }
+
       const started = await this.gateway.start();
       if (!this.isGatewayRestoreActive(generation)) return;
       if (!started.ok) {
         scheduleRetry(`Persisted ChatGPT Gateway auto-start failed: ${started.error.message}`);
         return;
       }
+      this.markGatewayRestoreProgress('bridge');
+      this.gatewaySupervisionLastGatewayState = this.gateway.status().state;
 
-      this.settingsRepository?.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
+      settings.set(SETTING_KEYS.gatewayDesiredState, 'RUNNING');
       const connected = await this.gateway.connectSession();
       if (!this.isGatewayRestoreActive(generation)) return;
       if (!connected.ok) {
@@ -1607,6 +1702,8 @@ export class ControlPlaneServer {
       }
 
       this.gatewayRestoreStatus = { state: 'connected', attempt };
+      this.markGatewayRestoreProgress('session');
+      this.gatewaySupervisionLastGatewayState = this.gateway.status().state;
       this.recordLog('SUCCESS', 'Persisted ChatGPT Gateway and ChatGPT Web session restored automatically');
     };
     await restore();

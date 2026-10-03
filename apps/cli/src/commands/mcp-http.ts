@@ -1,3 +1,4 @@
+import { USER_SETTING_KEYS, parseBooleanSetting } from '@unified-mpc/shared';
 import { appError, err, type Result } from '@unified-mpc/domain';
 import { DEFAULT_LEGACY_SESSION_TTL_MS, startMcpHttp, type McpHttpServerHandle, type McpHttpServerOptions } from '@unified-mpc/mcp-server';
 import type { Workspace } from '@unified-mpc/workspace';
@@ -41,6 +42,20 @@ export interface McpHttpProviderStartupOptions {
 const defaultStarter: McpHttpServerStarter = {
   start: startMcpHttp,
 };
+
+export interface HttpFullBypassSettings {
+  get(key: string): string | null;
+}
+
+export function desktopFullBypassAllEnabled(
+  settings: HttpFullBypassSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const configured = environment.UNIFIED_MPC_DESKTOP_FULL_BYPASS_ALL;
+  return configured !== undefined
+    ? parseBooleanSetting(configured, false)
+    : parseBooleanSetting(settings.get(USER_SETTING_KEYS.desktopFullBypassAll), false);
+}
 
 export function configuredLegacySessionTtlMs(environment: NodeJS.ProcessEnv = process.env): number {
   const configured = environment.UNIFIED_MPC_LEGACY_SESSION_TTL_MS?.trim();

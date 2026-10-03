@@ -269,6 +269,61 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     });
   });
 
+  it('marks a persisted restore as stalled only after the supervision grace window', async () => {
+    const settings = new Map<string, string>([
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+      ['cloudflare_gateway_desired_state', 'RUNNING'],
+    ]);
+    const never = new Promise<string | null>(() => {});
+    const stalledGateway = new GatewayService({
+      localPort: 18765,
+      tunnelProviderFactory: (configuration) => async (): Promise<{ url: string; stop: () => Promise<void> }> => ({
+        url: configuration.publicUrl ?? 'https://missing.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const stalledServer = new ControlPlaneServer({
+      port: 0,
+      gateway: stalledGateway,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+      secretStore: {
+        get: async (): Promise<string | null> => never,
+        set: async (): Promise<void> => {},
+        delete: async (): Promise<void> => {},
+      },
+      gatewayRestoreStallMs: 25,
+    });
+
+    await stalledServer.listen();
+    try {
+      const recovering = await fetch(`http://127.0.0.1:${stalledServer.port}/_unified-mpc/gateway-supervision`);
+      expect(recovering.status).toBe(200);
+      expect(await recovering.json()).toMatchObject({
+        status: 'recovering',
+        supervised: true,
+        gatewayState: 'STOPPED',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const stalled = await fetch(`http://127.0.0.1:${stalledServer.port}/_unified-mpc/gateway-supervision`);
+      expect(stalled.status).toBe(503);
+      expect(await stalled.json()).toMatchObject({
+        status: 'stalled',
+        supervised: true,
+        gatewayState: 'STOPPED',
+        stallAfterMs: 25,
+      });
+    } finally {
+      await stalledServer.close();
+    }
+  });
+
   it('keeps /api/status locally healthy when the downstream MCP identity probe is unavailable', async () => {
     const statusServer = new ControlPlaneServer({
       port: 0,

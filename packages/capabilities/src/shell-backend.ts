@@ -66,6 +66,7 @@ export interface ShellCapabilityOptions {
 interface ShellTaskRecord {
   readonly taskId: string;
   readonly child: ChildProcess;
+  readonly cwd: string;
   readonly includeStdout: boolean;
   readonly includeStderr: boolean;
   readonly maxOutputBytes: number;
@@ -194,7 +195,13 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     if (!cwd.ok) return cwd;
     if (signal?.aborted) return err(appError('PROCESS_TIMEOUT', 'Shell request was cancelled before launch', true));
     if (request.dryRun) {
-      return ok({ dry_run: true, executable: request.executable, arguments: [...request.arguments], cwd: cwd.value });
+      return ok({
+        dry_run: true,
+        executable: request.executable,
+        arguments: [...request.arguments],
+        cwd: cwd.value,
+        ...(request.owner.workspaceId === undefined ? {} : { workspace_id: request.owner.workspaceId }),
+      });
     }
     const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.arguments);
     if (unscopedGitPush !== undefined) return err(appError('PERMISSION_DENIED', unscopedGitPush));
@@ -238,6 +245,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     const record: ShellTaskRecord = {
       taskId: randomUUID(),
       child,
+      cwd: cwd.value,
       includeStdout: request.includeStdout,
       includeStderr: request.includeStderr,
       maxOutputBytes: request.maxOutputBytes,
@@ -535,6 +543,8 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     return {
       task_id: record.taskId,
       state: record.state,
+      ...(record.owner.workspaceId === undefined ? {} : { workspace_id: record.owner.workspaceId }),
+      cwd: record.cwd,
       ...(record.exitCode === undefined ? {} : { exit_code: record.exitCode }),
       ...(stdout === undefined ? {} : { stdout }),
       ...(stderr === undefined ? {} : { stderr }),

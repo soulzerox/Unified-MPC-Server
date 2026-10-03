@@ -468,7 +468,27 @@ export class ToolRegistry {
       }
       const goalLease = readGoalLeaseProof(parsed.value);
       const parsedInput = stripGoalLeaseEnvelope(parsed.value);
-      const activeRoutedInput = await this.routeInputToActiveWorkspace(tool.name, parsedInput);
+      let activeRoutedInput = await this.routeInputToActiveWorkspace(tool.name, parsedInput);
+      const explicitCommandWorkspaceScope = await this.resolveExplicitCommandWorkspaceScope(tool.name, activeRoutedInput);
+      if (!explicitCommandWorkspaceScope.ok) {
+        const response = mapError(explicitCommandWorkspaceScope.error);
+        await this.activity.end(callId, explicitCommandWorkspaceScope.error.code, Date.now() - started, explicitCommandWorkspaceScope.error.message);
+        return response;
+      }
+      if (explicitCommandWorkspaceScope.value !== null) {
+        const identityBoundInput = bindCommandExecutionToActiveWorkspace(
+          tool.name,
+          activeRoutedInput,
+          explicitCommandWorkspaceScope.value,
+          true,
+        );
+        if (!identityBoundInput.ok) {
+          const response = mapError(appError('PERMISSION_DENIED', identityBoundInput.message));
+          await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, identityBoundInput.message);
+          return response;
+        }
+        activeRoutedInput = identityBoundInput.value;
+      }
       const prohibitedReason = fullBypass ? undefined : prohibitedInvocationReason(tool.name, activeRoutedInput);
       if (prohibitedReason !== undefined) {
         const response = mapError(appError('PERMISSION_DENIED', prohibitedReason));
@@ -482,18 +502,7 @@ export class ToolRegistry {
       const activeWorkspaceScope = !this.enforceActiveWorkspaceScope
         || (mutationDecision.kind === 'read' && !nativePathScopeRequired)
         ? null
-        : await this.resolveActiveWorkspaceScope(mutationWorkspaceId);
-      const explicitCommandWorkspaceScope = isCommandExecutionStart(tool.name, activeRoutedInput) && mutationWorkspaceId !== undefined
-        ? await this.resolveExplicitCommandWorkspaceScope(mutationWorkspaceId, activeWorkspaceScope)
-        : undefined;
-      if (explicitCommandWorkspaceScope !== undefined && !explicitCommandWorkspaceScope.ok) {
-        const response = mapError(explicitCommandWorkspaceScope.error);
-        await this.activity.end(callId, explicitCommandWorkspaceScope.error.code, Date.now() - started, explicitCommandWorkspaceScope.error.message);
-        return response;
-      }
-      const resolvedCommandWorkspaceScope = explicitCommandWorkspaceScope?.ok === true
-        ? explicitCommandWorkspaceScope.value
-        : undefined;
+        : (explicitCommandWorkspaceScope.value ?? await this.resolveActiveWorkspaceScope(mutationWorkspaceId));
       if (!fullBypass && mutationDecision.kind === 'execute' && commandExecutionLeavesActiveWorkspace(tool.name, activeRoutedInput, activeWorkspaceScope)) {
         mutationDecision = { kind: 'opaque_mutation', reason: 'Command execution explicitly targets a working directory outside the host Active Project' };
       }
@@ -631,14 +640,9 @@ export class ToolRegistry {
           return response;
         }
       }
-      const scopedExecutionInput = fullBypass && resolvedCommandWorkspaceScope === undefined
+      const scopedExecutionInput = fullBypass || explicitCommandWorkspaceScope.value !== null
         ? { ok: true as const, value: activeRoutedInput }
-        : bindCommandExecutionToActiveWorkspace(
-          tool.name,
-          activeRoutedInput,
-          resolvedCommandWorkspaceScope ?? activeWorkspaceScope,
-          resolvedCommandWorkspaceScope !== undefined,
-        );
+        : bindCommandExecutionToActiveWorkspace(tool.name, activeRoutedInput, activeWorkspaceScope);
       if (!scopedExecutionInput.ok) {
         const response = mapError(appError('PERMISSION_DENIED', scopedExecutionInput.message));
         await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, scopedExecutionInput.message);
@@ -1728,6 +1732,8 @@ export class ToolRegistry {
         if (remembered !== undefined) return remembered;
       }
     }
+    const explicitWorkspaceId = readExplicitWorkspaceId(input);
+    if (COMMAND_EXECUTION_TOOLS.has(name) && explicitWorkspaceId !== undefined) return explicitWorkspaceId;
     const candidatePath = firstAbsoluteActivityPath(input);
     if (candidatePath !== undefined && this.activeWorkspaceScopesProvider !== undefined) {
       try {
@@ -1737,7 +1743,6 @@ export class ToolRegistry {
         // Fall through to the existing activity resolver / explicit workspace fallback.
       }
     }
-    const explicitWorkspaceId = readExplicitWorkspaceId(input);
     if (explicitWorkspaceId !== undefined) return explicitWorkspaceId;
     return candidatePath === undefined ? undefined : this.activityWorkspaceResolver(candidatePath);
   }
@@ -1780,39 +1785,67 @@ export class ToolRegistry {
 
   private async routeInputToActiveWorkspace(toolName: string, input: unknown): Promise<unknown> {
     if (!isRecord(input) || this.activeWorkspaceScopesProvider === undefined) return input;
-    const explicitWorkspaceId = readExplicitWorkspaceId(input);
-    if (explicitWorkspaceId !== undefined && COMMAND_EXECUTION_TOOLS.has(toolName)) return input;
+    if (COMMAND_EXECUTION_TOOLS.has(toolName) && readExplicitWorkspaceId(input) !== undefined) return input;
     const absolutePaths = absoluteWorkspaceScopePaths(input);
     if (absolutePaths.length === 0) return input;
     try {
       const scopes = await this.activeWorkspaceScopesProvider();
       const matched = commonActiveWorkspaceScope(scopes, absolutePaths);
-      if (matched === null || explicitWorkspaceId === matched.workspaceId) return input;
+      if (matched === null || readExplicitWorkspaceId(input) === matched.workspaceId) return input;
       return { ...input, workspaceId: matched.workspaceId };
     } catch {
       return input;
     }
   }
 
-  private async resolveExplicitCommandWorkspaceScope(
-    workspaceId: string,
-    activeWorkspaceScope: WorkspaceScope | null,
-  ): Promise<Result<WorkspaceScope>> {
+  private async resolveExplicitCommandWorkspaceScope(toolName: string, input: unknown): Promise<Result<WorkspaceScope | null>> {
+    if (!commandExecutionRequiresWorkspaceIdentityFence(toolName, input)) return ok(null);
+    const workspaceId = readExplicitWorkspaceId(input);
+    if (workspaceId === undefined) return ok(null);
+
+    // An explicit workspaceId is a hard execution identity only when the host
+    // can resolve it from canonical registered workspace truth. Active/recent
+    // project state is deliberately not a substitute: that was the #214
+    // cross-project rerouting failure mode.
     const workspaceInfo = this.services.workspaceInfo;
-    if (workspaceInfo?.info !== undefined) {
-      const resolved = await workspaceInfo.info(this.actor, workspaceId);
-      if (!resolved.ok) return resolved;
-      if (resolved.value.id !== workspaceId) {
-        return err(appError('PERMISSION_DENIED', 'Explicit command workspaceId resolved to a different registered workspace'));
-      }
-      const rootPath = readTrimmedString(resolved.value.realRootPath) ?? readTrimmedString(resolved.value.rootPath);
-      if (rootPath === undefined) {
-        return err(appError('CONFLICT', 'Explicit command workspace root is unavailable', true));
-      }
-      return ok({ workspaceId, rootPath });
+    if (workspaceInfo === undefined) {
+      const activeScope = await this.resolveActiveWorkspaceScope(workspaceId);
+      return activeScope?.workspaceId === workspaceId
+        ? ok(activeScope)
+        : err(appError('WORKSPACE_NOT_FOUND', 'Explicit command workspaceId is not available in canonical workspace truth', true));
     }
-    if (activeWorkspaceScope?.workspaceId === workspaceId) return ok(activeWorkspaceScope);
-    return err(appError('WORKSPACE_NOT_FOUND', 'Explicit command workspaceId is not available in canonical workspace truth', true));
+
+    const info = await workspaceInfo.info(this.actor, workspaceId);
+    if (!info.ok) return err(info.error);
+    if (!isRecord(info.value)) {
+      return err(appError('PERMISSION_DENIED', `Explicit command workspaceId ${workspaceId} did not resolve to a canonical workspace`));
+    }
+    const returnedWorkspaceId = readTrimmedString(info.value.id);
+    if (returnedWorkspaceId !== undefined && returnedWorkspaceId !== workspaceId) {
+      return err(appError('PERMISSION_DENIED', `Explicit command workspaceId ${workspaceId} resolved to a different workspace`));
+    }
+    const rootPath = readTrimmedString(info.value.realRootPath) ?? readTrimmedString(info.value.rootPath);
+    if (rootPath === undefined) {
+      return err(appError('PERMISSION_DENIED', `Explicit command workspaceId ${workspaceId} has no canonical workspace root`));
+    }
+
+    const requestedCwd = isRecord(input) ? readTrimmedString(input.cwd) : undefined;
+    const pathApi = workspacePathApi(rootPath);
+    const candidateCwd = requestedCwd === undefined
+      ? pathApi.resolve(rootPath)
+      : (isAbsoluteActivityPath(requestedCwd) ? pathApi.resolve(requestedCwd) : pathApi.resolve(rootPath, requestedCwd));
+    if (workspaceInfo.list !== undefined) {
+      const listed = await workspaceInfo.list(this.actor);
+      if (!listed.ok) return err(listed.error);
+      const mostSpecific = mostSpecificActiveWorkspaceScope(registeredWorkspaceScopes(listed.value), candidateCwd);
+      if (mostSpecific !== null && mostSpecific.workspaceId !== workspaceId) {
+        return err(appError(
+          'PERMISSION_DENIED',
+          `Explicit command workspaceId ${workspaceId} conflicts with canonical workspace ${mostSpecific.workspaceId} for the requested working directory`,
+        ));
+      }
+    }
+    return ok({ workspaceId, rootPath });
   }
 
   private async resolveActiveWorkspaceScope(workspaceId?: string): Promise<WorkspaceScope | null> {
@@ -1822,7 +1855,8 @@ export class ToolRegistry {
         if (workspaceId === undefined) return scopes[0] ?? null;
         return scopes.find((scope) => scope.workspaceId === workspaceId) ?? null;
       }
-      return await this.activeWorkspaceScopeProvider();
+      const activeScope = await this.activeWorkspaceScopeProvider();
+      return workspaceId !== undefined && activeScope !== null && activeScope.workspaceId !== workspaceId ? null : activeScope;
     } catch { return null; }
   }
 
@@ -2119,6 +2153,18 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
   return matches[0] ?? null;
 }
 
+function registeredWorkspaceScopes(value: unknown): WorkspaceScope[] {
+  if (!Array.isArray(value)) return [];
+  const scopes: WorkspaceScope[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const workspaceId = readTrimmedString(entry.id);
+    const rootPath = readTrimmedString(entry.realRootPath) ?? readTrimmedString(entry.rootPath);
+    if (workspaceId !== undefined && rootPath !== undefined) scopes.push({ workspaceId, rootPath });
+  }
+  return scopes;
+}
+
 type TrustedPreEditBypassState = 'running' | 'unavailable' | 'stale' | 'unknown';
 
 interface NativeThaiRagHarnessHealth {
@@ -2195,10 +2241,13 @@ function workspaceAdmissionMutationSucceeded(
 
 const NATIVE_ACTIVE_SCOPE_TOOLS = new Set(['office', 'audio', 'screen_record']);
 const COMMAND_EXECUTION_TOOLS = new Set(['shell', 'wsl_exec', 'process_start']);
-function isCommandExecutionStart(toolName: string, input: unknown): boolean {
+
+function commandExecutionRequiresWorkspaceIdentityFence(toolName: string, input: unknown): boolean {
   if (toolName === 'process_start') return true;
   if ((toolName !== 'shell' && toolName !== 'wsl_exec') || !isRecord(input)) return false;
-  return (readTrimmedString(input.operation) ?? 'run') === 'run';
+  const operation = readTrimmedString(input.operation);
+  if (operation !== undefined) return operation === 'run';
+  return readTrimmedString(input.executable) !== undefined;
 }
 const ACTIVE_PROJECT_SELECTION_TOOLS = new Set(['workspace_activate', 'workspace_deactivate', 'workspace_set_primary']);
 // Admission recovery is not a workspace file mutation. Its service independently
@@ -2389,16 +2438,11 @@ function bindCommandExecutionToActiveWorkspace(
   toolName: string,
   input: unknown,
   activeWorkspaceScope: WorkspaceScope | null,
-  enforceExplicitWorkspaceIdentity = false,
+  strictWorkspaceIdentity = false,
 ): CommandScopeBinding {
   const commandTool = toolName === 'shell' || toolName === 'wsl_exec' || toolName === 'process_start';
   const nativePathTool = NATIVE_ACTIVE_SCOPE_TOOLS.has(toolName);
-  if ((!commandTool && !nativePathTool) || !isRecord(input)) return { ok: true, value: input };
-  if (activeWorkspaceScope === null) {
-    return enforceExplicitWorkspaceIdentity
-      ? { ok: false, message: 'Explicit command workspaceId could not be resolved to its canonical workspace root' }
-      : { ok: true, value: input };
-  }
+  if ((!commandTool && !nativePathTool) || activeWorkspaceScope === null || !isRecord(input)) return { ok: true, value: input };
   if (commandTool && toolName !== 'process_start') {
     const operation = readTrimmedString(input.operation) ?? 'run';
     if (operation !== 'run') return { ok: true, value: input };
@@ -2416,8 +2460,11 @@ function bindCommandExecutionToActiveWorkspace(
   if (input.cwd !== undefined && requestedCwd === undefined) return { ok: false, message: 'Command working directory is invalid' };
   const normalizedCwd = requestedCwd === undefined ? normalizedRoot : pathApi.resolve(normalizedRoot, requestedCwd);
   const insideActiveWorkspace = scopePathContains(pathApi, normalizedRoot, normalizedCwd);
-  if (enforceExplicitWorkspaceIdentity && !insideActiveWorkspace) {
-    return { ok: false, message: 'Command cwd does not match the explicit workspaceId canonical root' };
+  if (strictWorkspaceIdentity && !insideActiveWorkspace) {
+    return {
+      ok: false,
+      message: `Explicit command workspaceId ${activeWorkspaceScope.workspaceId} does not contain the requested working directory`,
+    };
   }
   if (toolName === 'process_start') return { ok: true, value: { ...input, cwd: normalizedCwd } };
   const metadata = isRecord(input.metadata) ? input.metadata : {};

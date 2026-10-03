@@ -25,6 +25,28 @@ if [[ ! -f "$config_dir/service.env" ]]; then
   exit 2
 fi
 
+data_path_lines="$(grep -c '^UNIFIED_MPC_DATA_PATH=' "$config_dir/service.env" || true)"
+if [[ "$data_path_lines" -gt 1 ]]; then
+  printf '%s\n' "CONFIG_REQUIRED: service.env contains multiple UNIFIED_MPC_DATA_PATH entries" >&2
+  exit 2
+fi
+if [[ "$data_path_lines" -eq 0 ]]; then
+  canonical_data_path="${UNIFIED_MPC_DATA_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/unified-mpc}"
+  if [[ "$canonical_data_path" != /* ]]; then
+    printf '%s\n' "CONFIG_REQUIRED: resolved UNIFIED_MPC_DATA_PATH is not absolute: $canonical_data_path" >&2
+    exit 2
+  fi
+  printf '\nUNIFIED_MPC_DATA_PATH=%s\n' "$canonical_data_path" >> "$config_dir/service.env"
+  chmod 0600 "$config_dir/service.env"
+  printf '%s\n' "DATA_PATH_PINNED: $canonical_data_path"
+else
+  configured_data_path="$(sed -n 's/^UNIFIED_MPC_DATA_PATH=//p' "$config_dir/service.env")"
+  if [[ -z "$configured_data_path" || "$configured_data_path" != /* ]]; then
+    printf '%s\n' "CONFIG_REQUIRED: UNIFIED_MPC_DATA_PATH in service.env must be absolute" >&2
+    exit 2
+  fi
+fi
+
 read_linger() {
   "$loginctl_bin" show-user "$user_name" -p Linger --value 2>/dev/null || true
 }

@@ -98,6 +98,11 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("stream.addEventListener('goal-runtime-snapshot'");
     expect(html).toContain("stream.addEventListener('goal-runtime-event', (event) => {");
     expect(html).toContain('noteWorkspaceRuntimeEvent(workspaceId, data)');
+    expect(html).toContain('const WORKSPACE_RUNTIME_REFRESH_CONCURRENCY = 2');
+    expect(html).toContain('workspaceRuntimeRefreshActive < WORKSPACE_RUNTIME_REFRESH_CONCURRENCY');
+    expect(html).toContain("err?.code === 'request_timeout'");
+    expect(html).toContain('Workspace selection reconciled after response timeout');
+    expect(html).toContain('Workspace removal reconciled after response timeout');
     expect(html).toContain('Number(record.lastEventSequence) >= sequence');
     expect(html).toContain('Projection catching up');
     expect(html).toContain("'Integration: ' + runtimeProjection.integrationState");

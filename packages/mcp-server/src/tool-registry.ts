@@ -2082,26 +2082,24 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
 
 type TrustedPreEditBypassState = 'running' | 'unavailable' | 'stale' | 'unknown';
 
-function nativeThaiRagBypassState(health: {
-  readonly state: string;
-  readonly components?: {
-    readonly activeJobs?: readonly unknown[];
-  };
-} | undefined): TrustedPreEditBypassState {
-  if (health === undefined) return 'unknown';
-  if (health.components?.activeJobs !== undefined && health.components.activeJobs.length > 0) return 'running';
-  return nativeThaiRagReadyForHarness(health) ? 'unknown' : 'stale';
-}
-
-function nativeThaiRagReadyForHarness(health: {
+interface NativeThaiRagHarnessHealth {
   readonly state: string;
   readonly components?: {
     readonly workerReachable: boolean;
     readonly sqliteAvailable: boolean;
     readonly ftsAvailable: boolean;
     readonly lexicalRetrievalAvailable: boolean;
+    readonly activeJobs?: readonly unknown[];
   };
-} | undefined): boolean {
+}
+
+function nativeThaiRagBypassState(health: NativeThaiRagHarnessHealth | undefined): TrustedPreEditBypassState {
+  if (health === undefined) return 'unknown';
+  if (health.components?.activeJobs !== undefined && health.components.activeJobs.length > 0) return 'running';
+  return nativeThaiRagReadyForHarness(health) ? 'unknown' : 'stale';
+}
+
+function nativeThaiRagReadyForHarness(health: NativeThaiRagHarnessHealth | undefined): boolean {
   if (health === undefined || (health.state !== 'ready' && health.state !== 'degraded')) return false;
   const components = health.components;
   return components !== undefined

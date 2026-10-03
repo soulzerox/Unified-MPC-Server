@@ -388,7 +388,9 @@ export function createStdioMcpRuntime(
         || !timingSafeEqual(expectedDigest, actualDigest)) {
         return err(appError('PERMISSION_DENIED', 'Stale or invalid goal lease proof; admission retry rejected'));
       }
-      if (request.stagedRecovery === undefined) {
+      const stagedRecovery = request.stagedRecovery;
+      const unstagedRecovery = request.unstagedRecovery;
+      if (stagedRecovery === undefined && unstagedRecovery === undefined) {
         return goalRunWorkspace.admitRunWorkspace(runActor, {
           workspaceId: request.workspaceId,
           goalId: request.goalId,
@@ -396,12 +398,16 @@ export function createStdioMcpRuntime(
           leaseExpiresAt: goal.leaseExpiresAt ?? '',
         });
       }
+      if (stagedRecovery !== undefined && unstagedRecovery !== undefined) {
+        return err(appError('INVALID_INPUT', 'Use stagedRecovery or unstagedRecovery, not both'));
+      }
 
-      const recovery = request.stagedRecovery;
+      const recoveryKind = stagedRecovery !== undefined ? 'staged' : 'unstaged';
+      const recovery = stagedRecovery ?? unstagedRecovery!;
       const goalWorkspace = await workspaceRepository.get(request.workspaceId);
       if (goalWorkspace === null || goalWorkspace.lifecycleKind !== 'goal'
         || goalWorkspace.goalId !== request.goalId || goalWorkspace.goalWorkspaceKind !== 'git_worktree') {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery requires the exact owned Git Goal Workspace', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE', `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery requires the exact owned Git Goal Workspace`, true));
       }
       const ownerId = `${runActor.clientId}:${runActor.sessionId ?? 'sessionless'}`;
       const writer = await goalWorkspaceService.synchronizeWriterLease(
@@ -420,7 +426,7 @@ export function createStdioMcpRuntime(
         || receipt.goalId !== request.goalId
         || receipt.writeLeaseGeneration > request.leaseGeneration
         || receipt.invalidatedAt !== undefined) {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery no longer matches the prior owner admission receipt', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE', `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery no longer matches the prior owner admission receipt`, true));
       }
 
       const observed = await goalWorkspaceTruth.readAdmission(request.workspaceId);
@@ -437,59 +443,92 @@ export function createStdioMcpRuntime(
         || observed.mergeBaseSha !== receipt.mergeBaseSha
         || (observed.remoteGoalSha ?? undefined) !== receipt.remoteGoalSha
         || observed.writerLeaseGeneration !== request.leaseGeneration) {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery detected repository, branch, HEAD, base, or lease drift', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE', `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery detected repository, branch, HEAD, base, or lease drift`, true));
       }
 
       const status = await gitService.status(runActor, request.workspaceId);
       if (!status.ok) return status;
-      const stagedEntries = status.value.entries.filter((entry) => entry.indexStatus !== ' ' && entry.indexStatus !== '?' && entry.indexStatus !== '!');
-      const stagedOnly = stagedEntries.length === status.value.entries.length
-        && stagedEntries.length > 0
-        && stagedEntries.every((entry) => entry.worktreeStatus === ' ');
-      const expectedPaths = [...new Set(recovery.expectedStagedPaths.map((entry) => entry.replaceAll('\\', '/')))].sort();
-      const observedPaths = stagedEntries.map((entry) => entry.path.replaceAll('\\', '/')).sort();
-      if (!stagedOnly || expectedPaths.length !== recovery.expectedStagedPaths.length
+      const changedEntries = recoveryKind === 'staged'
+        ? status.value.entries.filter((entry) => entry.indexStatus !== ' ' && entry.indexStatus !== '?' && entry.indexStatus !== '!')
+        : status.value.entries.filter((entry) => entry.worktreeStatus !== ' ' && entry.worktreeStatus !== '?' && entry.worktreeStatus !== '!');
+      const expectedPathInput = recoveryKind === 'staged'
+        ? stagedRecovery!.expectedStagedPaths
+        : unstagedRecovery!.expectedUnstagedPaths;
+      const exactModeOnly = changedEntries.length === status.value.entries.length
+        && changedEntries.length > 0
+        && changedEntries.every((entry) => recoveryKind === 'staged'
+          ? entry.worktreeStatus === ' '
+          : entry.indexStatus === ' ');
+      const expectedPaths = [...new Set(expectedPathInput.map((entry) => entry.replaceAll('\\', '/')))].sort();
+      const observedPaths = changedEntries.map((entry) => entry.path.replaceAll('\\', '/')).sort();
+      if (!exactModeOnly || expectedPaths.length !== expectedPathInput.length
         || expectedPaths.length !== observedPaths.length
         || expectedPaths.some((entry, index) => entry !== observedPaths[index])) {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery paths do not exactly match the approved staged-only delta', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE',
+          `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery paths do not exactly match the approved ${recoveryKind}-only delta`, true));
       }
 
-      const stagedDiff = await gitService.diff(runActor, request.workspaceId, { staged: true, maxBytes: 1024 * 1024 });
-      if (!stagedDiff.ok) return stagedDiff;
-      if (stagedDiff.value.truncated) {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery diff exceeded the bounded verification budget', true));
+      const diff = await gitService.diff(runActor, request.workspaceId, {
+        ...(recoveryKind === 'staged' ? { staged: true } : {}),
+        maxBytes: 1024 * 1024,
+      });
+      if (!diff.ok) return diff;
+      if (diff.value.truncated) {
+        return err(appError('WORKSPACE_ADMISSION_STALE',
+          `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery diff exceeded the bounded verification budget`, true));
       }
-      const stagedDiffSha256 = createHash('sha256').update(stagedDiff.value.patch).digest('hex');
+      const diffSha256 = createHash('sha256').update(diff.value.patch).digest('hex');
+      const expectedDiffSha256 = recoveryKind === 'staged'
+        ? stagedRecovery!.expectedStagedDiffSha256
+        : unstagedRecovery!.expectedUnstagedDiffSha256;
       if (!timingSafeEqual(
-        Buffer.from(stagedDiffSha256, 'hex'),
-        Buffer.from(recovery.expectedStagedDiffSha256.toLowerCase(), 'hex'),
+        Buffer.from(diffSha256, 'hex'),
+        Buffer.from(expectedDiffSha256.toLowerCase(), 'hex'),
       )) {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery diff hash does not match the approved delta', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE',
+          `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery diff hash does not match the approved delta`, true));
       }
 
       let recoveredGeneration: number;
       try {
-        recoveredGeneration = await goalRuntimeControlPlane.recoverStagedWorkspaceAdmission({
-          callId: `staged-recovery:${stagedDiffSha256}`,
-          workspaceId: request.workspaceId,
-          goalId: request.goalId,
-          leaseGeneration: request.leaseGeneration,
-          admissionGeneration: recovery.expectedAdmissionGeneration,
-          expectedWorkspaceHead: recovery.expectedWorkspaceHead,
-          expectedStagedFingerprint: observed.stagedFingerprint ?? '',
-        });
+        recoveredGeneration = recoveryKind === 'staged'
+          ? await goalRuntimeControlPlane.recoverStagedWorkspaceAdmission({
+              callId: `staged-recovery:${diffSha256}`,
+              workspaceId: request.workspaceId,
+              goalId: request.goalId,
+              leaseGeneration: request.leaseGeneration,
+              admissionGeneration: recovery.expectedAdmissionGeneration,
+              expectedWorkspaceHead: recovery.expectedWorkspaceHead,
+              expectedStagedFingerprint: observed.stagedFingerprint ?? '',
+            })
+          : await goalRuntimeControlPlane.recoverUnstagedWorkspaceAdmission({
+              callId: `unstaged-recovery:${diffSha256}`,
+              workspaceId: request.workspaceId,
+              goalId: request.goalId,
+              leaseGeneration: request.leaseGeneration,
+              admissionGeneration: recovery.expectedAdmissionGeneration,
+              expectedWorkspaceHead: recovery.expectedWorkspaceHead,
+              expectedDirtyFingerprint: observed.dirtyFingerprint ?? '',
+              expectedStagedFingerprint: observed.stagedFingerprint ?? '',
+            });
       } catch {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery lost its exact owner/source proof or durable compare-and-swap', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE',
+          `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery lost its exact owner/source proof or durable compare-and-swap`, true));
       }
       const recoveredReceipt = await rawWorkspaceRepository.getAdmissionReceipt(request.workspaceId);
+      const recoveredFingerprintMatches = recoveryKind === 'staged'
+        ? recoveredReceipt?.stagedFingerprint === observed.stagedFingerprint
+        : recoveredReceipt?.dirtyFingerprint === observed.dirtyFingerprint
+          && recoveredReceipt?.stagedFingerprint === observed.stagedFingerprint;
       if (recoveredReceipt === null
         || recoveredReceipt.admissionGeneration !== recoveredGeneration
         || recoveredGeneration !== recovery.expectedAdmissionGeneration + 1
         || recoveredReceipt.expectedWorkspaceHead !== recovery.expectedWorkspaceHead
-        || recoveredReceipt.stagedFingerprint !== observed.stagedFingerprint
+        || !recoveredFingerprintMatches
         || recoveredReceipt.writeLeaseGeneration !== request.leaseGeneration
         || recoveredReceipt.runtimeGeneration !== options.runtimeAdmissionIdentity?.runtimeGeneration) {
-        return err(appError('WORKSPACE_ADMISSION_STALE', 'Staged admission recovery receipt could not be verified after capture', true));
+        return err(appError('WORKSPACE_ADMISSION_STALE',
+          `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery receipt could not be verified after capture`, true));
       }
       return ok({ admissionGeneration: recoveredGeneration });
     },

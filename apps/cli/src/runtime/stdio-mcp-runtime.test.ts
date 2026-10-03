@@ -280,21 +280,9 @@ describe('stdio MCP runtime', () => {
       if (unstagedDiff === undefined || !unstagedDiff.ok) return;
       const unstagedHash = createHash('sha256').update(unstagedDiff.value.patch).digest('hex');
 
-      type UnstagedRecoveryPort = {
-        recoverRunWorkspace(actor: unknown, request: {
-          workspaceId: string;
-          goalId: string;
-          leaseToken: string;
-          leaseGeneration: number;
-          unstagedRecovery: {
-            expectedAdmissionGeneration: number;
-            expectedWorkspaceHead: string;
-            expectedUnstagedPaths: readonly string[];
-            expectedUnstagedDiffSha256: string;
-          };
-        }): Promise<unknown>;
-      };
-      const recoveryPort = runtime.services.goalRunWorkspace as unknown as UnstagedRecoveryPort;
+      const recoveryPort = runtime.services.goalRunWorkspace;
+      expect(recoveryPort).toBeDefined();
+      if (recoveryPort === undefined) return;
 
       const rejected = await recoveryPort.recoverRunWorkspace(runtime.actor, {
         workspaceId: goalWorkspace.id,
@@ -309,6 +297,22 @@ describe('stdio MCP runtime', () => {
         },
       });
       expect(rejected).toMatchObject({ ok: false, error: { code: 'WORKSPACE_ADMISSION_STALE' } });
+
+      gitAt(goalWorkspace.realRootPath, 'add', '--', 'README.md');
+      const stagedInstead = await recoveryPort.recoverRunWorkspace(runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalId: acquired.value.goalId,
+        leaseToken: acquired.value.leaseToken,
+        leaseGeneration: acquired.value.leaseGeneration,
+        unstagedRecovery: {
+          expectedAdmissionGeneration: beforeEdit.admissionGeneration,
+          expectedWorkspaceHead: beforeEdit.expectedWorkspaceHead,
+          expectedUnstagedPaths: ['README.md'],
+          expectedUnstagedDiffSha256: unstagedHash,
+        },
+      });
+      expect(stagedInstead).toMatchObject({ ok: false, error: { code: 'WORKSPACE_ADMISSION_STALE' } });
+      gitAt(goalWorkspace.realRootPath, 'restore', '--staged', '--', 'README.md');
 
       const recovered = await recoveryPort.recoverRunWorkspace(runtime.actor, {
         workspaceId: goalWorkspace.id,

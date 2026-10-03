@@ -91,6 +91,12 @@ export interface GoalRunWorkspacePort {
       readonly expectedStagedPaths: readonly string[];
       readonly expectedStagedDiffSha256: string;
     };
+    readonly unstagedRecovery?: {
+      readonly expectedAdmissionGeneration: number;
+      readonly expectedWorkspaceHead: string;
+      readonly expectedUnstagedPaths: readonly string[];
+      readonly expectedUnstagedDiffSha256: string;
+    };
   }): Promise<Result<{ readonly admissionGeneration: number }>>;
 }
 

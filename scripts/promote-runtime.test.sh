@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -eEuo pipefail
-trap 'status=$?; printf "promotion regression failed at line %s: %s (status=%s)\n" "$LINENO" "$BASH_COMMAND" "$status" >&2; exit "$status"' ERR
+unexpected_err() {
+  local status=$?
+  printf 'promotion regression failed at line %s: %s (status=%s)\n' "$LINENO" "$BASH_COMMAND" "$status" >&2
+  exit "$status"
+}
+trap unexpected_err ERR
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROMOTER="$SCRIPT_DIR/promote-runtime.sh"
@@ -116,10 +121,12 @@ expect_fail() {
   local expected_code="$1"
   shift
   local output status
+  trap - ERR
   set +e
   output="$("$@" 2>&1)"
   status=$?
   set -e
+  trap unexpected_err ERR
   [[ "$status" -ne 0 ]] || {
     printf 'expected failure, got success: %s\n' "$output" >&2
     exit 1

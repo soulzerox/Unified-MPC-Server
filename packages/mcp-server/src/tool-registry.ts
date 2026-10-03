@@ -469,26 +469,6 @@ export class ToolRegistry {
       const goalLease = readGoalLeaseProof(parsed.value);
       const parsedInput = stripGoalLeaseEnvelope(parsed.value);
       let activeRoutedInput = await this.routeInputToActiveWorkspace(tool.name, parsedInput);
-      const explicitCommandWorkspaceScope = await this.resolveExplicitCommandWorkspaceScope(tool.name, activeRoutedInput);
-      if (!explicitCommandWorkspaceScope.ok) {
-        const response = mapError(explicitCommandWorkspaceScope.error);
-        await this.activity.end(callId, explicitCommandWorkspaceScope.error.code, Date.now() - started, explicitCommandWorkspaceScope.error.message);
-        return response;
-      }
-      if (explicitCommandWorkspaceScope.value !== null) {
-        const identityBoundInput = bindCommandExecutionToActiveWorkspace(
-          tool.name,
-          activeRoutedInput,
-          explicitCommandWorkspaceScope.value,
-          true,
-        );
-        if (!identityBoundInput.ok) {
-          const response = mapError(appError('PERMISSION_DENIED', identityBoundInput.message));
-          await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, identityBoundInput.message);
-          return response;
-        }
-        activeRoutedInput = identityBoundInput.value;
-      }
       const prohibitedReason = fullBypass ? undefined : prohibitedInvocationReason(tool.name, activeRoutedInput);
       if (prohibitedReason !== undefined) {
         const response = mapError(appError('PERMISSION_DENIED', prohibitedReason));
@@ -499,10 +479,10 @@ export class ToolRegistry {
       const policy = this.destructivePolicyProvider();
       const mutationWorkspaceId = readExplicitWorkspaceId(activeRoutedInput);
       const nativePathScopeRequired = requiresNativePathScope(tool.name, activeRoutedInput);
-      const activeWorkspaceScope = !this.enforceActiveWorkspaceScope
+      let activeWorkspaceScope = !this.enforceActiveWorkspaceScope
         || (mutationDecision.kind === 'read' && !nativePathScopeRequired)
         ? null
-        : (explicitCommandWorkspaceScope.value ?? await this.resolveActiveWorkspaceScope(mutationWorkspaceId));
+        : await this.resolveActiveWorkspaceScope(mutationWorkspaceId);
       if (!fullBypass && mutationDecision.kind === 'execute' && commandExecutionLeavesActiveWorkspace(tool.name, activeRoutedInput, activeWorkspaceScope)) {
         mutationDecision = { kind: 'opaque_mutation', reason: 'Command execution explicitly targets a working directory outside the host Active Project' };
       }
@@ -546,6 +526,28 @@ export class ToolRegistry {
           mutationFenceProof = goalLease;
         }
       }
+      const explicitCommandWorkspaceScope = await this.resolveExplicitCommandWorkspaceScope(tool.name, activeRoutedInput);
+      if (!explicitCommandWorkspaceScope.ok) {
+        const response = mapError(explicitCommandWorkspaceScope.error);
+        await this.activity.end(callId, explicitCommandWorkspaceScope.error.code, Date.now() - started, explicitCommandWorkspaceScope.error.message);
+        return response;
+      }
+      if (explicitCommandWorkspaceScope.value !== null) {
+        const identityBoundInput = bindCommandExecutionToActiveWorkspace(
+          tool.name,
+          activeRoutedInput,
+          explicitCommandWorkspaceScope.value,
+          true,
+        );
+        if (!identityBoundInput.ok) {
+          const response = mapError(appError('PERMISSION_DENIED', identityBoundInput.message));
+          await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, identityBoundInput.message);
+          return response;
+        }
+        activeRoutedInput = identityBoundInput.value;
+        activeWorkspaceScope = explicitCommandWorkspaceScope.value;
+      }
+
       const policyAllowsScopedDestructive = !fullBypass && mutationWorkspaceId !== undefined
         && isScopedAutoApprovalAllowed(tool.name, activeRoutedInput, mutationDecision, policy, activeWorkspaceScope);
       const trustedInternalMemoryRag = TRUSTED_INTERNAL_MEMORY_RAG_TOOLS.has(tool.name);

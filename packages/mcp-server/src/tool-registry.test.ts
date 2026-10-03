@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -1403,7 +1403,17 @@ describe('MCP tool registry', () => {
 
   it('fails closed when an explicit command workspaceId disagrees with an absolute cwd even after approval', async () => {
     const capabilityCalls: unknown[] = [];
-    const registry = new ToolRegistry({ capabilities: { async execute(tool, input): Promise<ReturnType<typeof ok>> { capabilityCalls.push({ tool, input }); return ok({ accepted: true }); } } }, actor, {
+    const registry = new ToolRegistry({
+      workspaceInfo: {
+        async info(_actor: unknown, workspaceId: string) {
+          if (workspaceId === 'workspace-a') {
+            return ok({ id: workspaceId, rootPath: 'E:\\project-a', realRootPath: 'E:\\project-a' });
+          }
+          return err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'));
+        },
+      },
+      capabilities: { async execute(tool, input): Promise<ReturnType<typeof ok>> { capabilityCalls.push({ tool, input }); return ok({ accepted: true }); } },
+    }, actor, {
       activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: 'E:\\project-a' }),
       hostMutationApprovalProvider: approveMutation,
     });
@@ -1473,6 +1483,69 @@ describe('MCP tool registry', () => {
       });
     } finally {
       await Promise.all([rm(rootA, { recursive: true, force: true }), rm(rootB, { recursive: true, force: true })]);
+    }
+  });
+
+
+  it('rejects a nested same-basename Goal Workspace when explicit workspaceId names its parent workspace', async () => {
+    const container = await mkdtemp(path.join(tmpdir(), 'unified-mpc-shell-nested-'));
+    const rootAPath = path.join(container, 'project');
+    const rootBPath = path.join(rootAPath, '.unified-mpc', 'worktrees', 'project');
+    await mkdir(rootBPath, { recursive: true });
+    const rootA = await realpath(rootAPath);
+    const rootB = await realpath(rootBPath);
+    try {
+      const capabilityCalls: Array<Record<string, unknown>> = [];
+      const workspaces = [
+        { id: 'workspace-a', rootPath: rootA, realRootPath: rootA },
+        { id: 'workspace-b', rootPath: rootB, realRootPath: rootB },
+      ];
+      const registry = new ToolRegistry({
+        workspaceInfo: {
+          async info(_actor: unknown, workspaceId: string) {
+            const found = workspaces.find((workspace) => workspace.id === workspaceId);
+            return found === undefined ? err(appError('WORKSPACE_NOT_FOUND', 'missing workspace')) : ok(found);
+          },
+          async list() { return ok(workspaces); },
+        },
+        capabilities: {
+          async execute(_tool: string, input: unknown): Promise<ReturnType<typeof ok>> {
+            capabilityCalls.push(input as Record<string, unknown>);
+            return ok({ accepted: true });
+          },
+        },
+      } as unknown as McpApplicationServices, actor);
+
+      await expect(registry.invoke('shell', {
+        workspaceId: 'workspace-a',
+        operation: 'run',
+        executable: 'node',
+        arguments: ['--version'],
+        cwd: rootB,
+      })).resolves.toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspace-b') } },
+      });
+      expect(capabilityCalls).toHaveLength(0);
+
+      await expect(registry.invoke('shell', {
+        workspaceId: 'workspace-b',
+        operation: 'run',
+        executable: 'node',
+        arguments: ['--version'],
+        cwd: rootB,
+      })).resolves.not.toMatchObject({ isError: true });
+      expect(capabilityCalls).toHaveLength(1);
+      expect(capabilityCalls[0]).toMatchObject({
+        workspaceId: 'workspace-b',
+        cwd: rootB,
+        metadata: {
+          'unified-mpc.activeWorkspaceRoot.v1': rootB,
+          'unified-mpc.taskOwner.v1': { workspaceId: 'workspace-b' },
+        },
+      });
+    } finally {
+      await rm(container, { recursive: true, force: true });
     }
   });
 

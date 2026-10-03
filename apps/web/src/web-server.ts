@@ -140,6 +140,8 @@ export interface ControlPlaneServerOptions {
   readonly goalRuntimeStreamPollMs?: number;
   /** Test-only override for one runtime read before the stream degrades/reconnects. */
   readonly goalRuntimeStreamReadTimeoutMs?: number;
+  /** Test-only override for graceful HTTP shutdown before lingering browser sockets are closed. */
+  readonly serverShutdownGraceMs?: number;
   readonly mcpIdentityProbe?: McpIdentityProbe;
   readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
   /** Test-only override for persisted Gateway restore retry cadence. */
@@ -153,6 +155,7 @@ const GOAL_RUNTIME_SNAPSHOT_LIMIT = 500;
 const GOAL_RUNTIME_REPLAY_LIMIT = 100;
 const DEFAULT_GOAL_RUNTIME_STREAM_POLL_MS = 500;
 const DEFAULT_GOAL_RUNTIME_STREAM_READ_TIMEOUT_MS = 5_000;
+const DEFAULT_SERVER_SHUTDOWN_GRACE_MS = 1_000;
 const GOAL_RUNTIME_STREAM_KEEPALIVE_MS = 15_000;
 const GOAL_RUNTIME_SNAPSHOT_CONCURRENCY = 8;
 
@@ -206,6 +209,7 @@ export class ControlPlaneServer {
   private readonly goalRuntimeRead: GoalRuntimeReadPort | undefined;
   private readonly goalRuntimeStreamPollMs: number;
   private readonly goalRuntimeStreamReadTimeoutMs: number;
+  private readonly serverShutdownGraceMs: number;
   private readonly goalRuntimeStreamClosers = new Set<() => void>();
   private readonly mcpIdentityProbe: McpIdentityProbe;
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
@@ -254,6 +258,11 @@ export class ControlPlaneServer {
       throw new Error('Goal runtime SSE read timeout must be a positive integer');
     }
     this.goalRuntimeStreamReadTimeoutMs = options.goalRuntimeStreamReadTimeoutMs ?? DEFAULT_GOAL_RUNTIME_STREAM_READ_TIMEOUT_MS;
+    if (options.serverShutdownGraceMs !== undefined
+      && (!Number.isInteger(options.serverShutdownGraceMs) || options.serverShutdownGraceMs <= 0)) {
+      throw new Error('Web server shutdown grace must be a positive integer');
+    }
+    this.serverShutdownGraceMs = options.serverShutdownGraceMs ?? DEFAULT_SERVER_SHUTDOWN_GRACE_MS;
     this.mcpIdentityProbe = options.mcpIdentityProbe ?? probeMcpRuntimeIdentity;
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.gatewayRestoreRetryBaseMs = options.gatewayRestoreRetryBaseMs ?? 1_000;
@@ -305,9 +314,22 @@ export class ControlPlaneServer {
     this.cancelPersistedGatewayRestore();
     for (const closeStream of [...this.goalRuntimeStreamClosers]) closeStream();
     this.goalRuntimeStreamClosers.clear();
-    await new Promise<void>((resolve, reject) => {
+
+    const serverClosed = new Promise<void>((resolve, reject) => {
       this.server.close((err) => (err ? reject(err) : resolve()));
     });
+    this.server.closeIdleConnections();
+    const forceCloseTimer = setTimeout(() => {
+      this.recordLog('WARN', 'Web server graceful shutdown timed out; closing remaining HTTP connections');
+      this.server.closeAllConnections();
+    }, this.serverShutdownGraceMs);
+    forceCloseTimer.unref?.();
+    try {
+      await serverClosed;
+    } finally {
+      clearTimeout(forceCloseTimer);
+    }
+
     if (this.ownsGateway || this.gatewayRestoreOwnsLifecycle) await this.gateway.stop();
     this.closeSettings?.();
   }

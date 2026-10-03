@@ -321,7 +321,7 @@ export class ToolRegistry {
       setPonytailSessionSuppressed: (workspaceId, goalId, suppressed) => this.setPonytailSessionSuppressed(workspaceId, goalId, suppressed),
       bootstrapTaskContext: (signal) => this.bootstrapTaskContext(signal),
       bootstrapWorkspaceHarness: (workspaceId, signal) => this.bootstrapWorkspaceHarness(workspaceId, signal),
-      prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal),
+      prepareCodeChange: (workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal) => this.prepareCodeChange(workspaceId, filePath, proposedSymbol, runGodkillerSafetyCheck, signal, false),
       workingMemorySearch: (workspaceId, query, signal) => this.workingMemorySearch(workspaceId, query, signal),
       workingMemoryRecord: (workspaceId, name, entityType, observations, signal) => this.workingMemoryRecord(workspaceId, name, entityType, observations, signal),
       ragRecall: (workspaceId, query, category, limit, signal) => this.ragRecall(workspaceId, query, category, limit, signal),
@@ -1028,6 +1028,52 @@ export class ToolRegistry {
     return { sessionId: this.sessionId ?? this.actor.sessionId ?? this.actor.clientId, workspaceId };
   }
 
+  private trustedFullBypassActive(): boolean {
+    try {
+      return this.profileProvider().name === 'full' && this.authorizationModeProvider() === 'full_bypass';
+    } catch {
+      return false;
+    }
+  }
+
+  private async observeThaiRagBypassState(signal: AbortSignal): Promise<TrustedPreEditBypassState> {
+    const thaiRag = this.services.thaiRag;
+    if (thaiRag === undefined) return 'unavailable';
+    try {
+      const health = await thaiRag.health(signal);
+      return health.ok ? nativeThaiRagBypassState(health.value) : 'unavailable';
+    } catch {
+      return 'unavailable';
+    }
+  }
+
+  private async recordAutomaticPreEditBypass(
+    workspaceId: string,
+    filePath: string,
+    thaiRagState: TrustedPreEditBypassState,
+  ): Promise<void> {
+    const started = Date.now();
+    const callId = await this.activity.begin(
+      'prepare_code_change',
+      {
+        workspaceId,
+        filePath,
+        automaticPreflight: true,
+        bypassed: true,
+        bypassReason: 'trusted-full-bypass',
+        thaiRagState,
+      },
+      { ...(this.sessionId === undefined ? {} : { sessionId: this.sessionId }) },
+      'full_bypass',
+    );
+    await this.activity.end(
+      callId,
+      'SUCCESS',
+      Date.now() - started,
+      'Trusted Full Bypass skipped native Thai-RAG pre-edit/index wait',
+    );
+  }
+
   private async currentAgentsMdHash(workspaceId: string): Promise<Result<string>> {
     if (this.services.file?.readFile === undefined) {
       return err(appError('INTERNAL_ERROR', 'Workspace AGENTS.md cannot be loaded because the file service is unavailable', true));
@@ -1087,12 +1133,31 @@ export class ToolRegistry {
         return err(appError('CONFLICT', `Mandatory child MCP ${server.name} is missing required capability: ${missing.join(', ')}`, true));
       }
     }
+    const trustedFullBypass = this.trustedFullBypassActive();
     const thaiRag = this.services.thaiRag;
-    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    const thaiRagHealth = await thaiRag.health(signal);
-    if (!thaiRagHealth.ok) return err(appError('CONFLICT', `Native Thai-RAG provider health check failed: ${thaiRagHealth.error.message}`, true));
-    if (!nativeThaiRagReadyForHarness(thaiRagHealth.value)) {
-      return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for repository diagnostics: ${thaiRagHealth.value.state}`, true));
+    let thaiRagSnapshot: unknown = null;
+    let thaiRagBypassed = false;
+    let thaiRagState: TrustedPreEditBypassState = 'unavailable';
+    if (thaiRag === undefined) {
+      if (!trustedFullBypass) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+      thaiRagBypassed = true;
+    } else {
+      const thaiRagHealth = await thaiRag.health(signal);
+      if (!thaiRagHealth.ok) {
+        if (!trustedFullBypass) {
+          return err(appError('CONFLICT', `Native Thai-RAG provider health check failed: ${thaiRagHealth.error.message}`, true));
+        }
+        thaiRagBypassed = true;
+      } else {
+        thaiRagSnapshot = thaiRagHealth.value;
+        thaiRagState = nativeThaiRagBypassState(thaiRagHealth.value);
+        if (!nativeThaiRagReadyForHarness(thaiRagHealth.value)) {
+          if (!trustedFullBypass) {
+            return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for repository diagnostics: ${thaiRagHealth.value.state}`, true));
+          }
+          thaiRagBypassed = true;
+        }
+      }
     }
     const agentsMdHash = await this.currentAgentsMdHash(workspaceId);
     if (!agentsMdHash.ok) return agentsMdHash;
@@ -1117,12 +1182,28 @@ export class ToolRegistry {
       harnessFingerprint: state.harnessFingerprint,
       sessionStartSkill: taskContext.value.sessionStartSkill,
       mandatoryMcp: mandatoryMcp.value,
-      thaiRag: thaiRagHealth.value,
+      thaiRag: thaiRagSnapshot,
+      ...(thaiRagBypassed
+        ? {
+            thaiRagBypassed: true,
+            bypassReason: 'trusted-full-bypass',
+            thaiRagState,
+            authorizationMode: 'full_bypass',
+            permissionProfile: 'full',
+          }
+        : {}),
       preferredGoal,
     });
   }
 
-  private async prepareCodeChange(workspaceId: string, filePath: string, proposedSymbol: string | undefined, runGodkillerSafetyCheck: boolean, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+  private async prepareCodeChange(
+    workspaceId: string,
+    filePath: string,
+    proposedSymbol: string | undefined,
+    runGodkillerSafetyCheck: boolean,
+    signal: AbortSignal,
+    automaticPreflight: boolean,
+  ): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const context = this.harnessContext(workspaceId);
     const state = this.harnessActivation.state(context);
     if (state === undefined) return err(appError('CONFLICT', 'Run workspace_bootstrap before prepare_code_change', true));
@@ -1138,19 +1219,26 @@ export class ToolRegistry {
     const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
     if (!sourceIdentity.ok) return sourceIdentity;
     if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);
-    const thaiRag = this.services.thaiRag;
-    if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
-    const thaiHealth = await thaiRag.health(signal);
-    if (!thaiHealth.ok || !nativeThaiRagReadyForHarness(thaiHealth.ok ? thaiHealth.value : undefined)) {
-      return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for pre-edit diagnostics${thaiHealth.ok ? '' : `: ${thaiHealth.error.message}`}`, true));
+    const trustedFullBypass = this.trustedFullBypassActive();
+    const checks: string[] = [];
+    let thaiRagState: TrustedPreEditBypassState | undefined;
+    if (trustedFullBypass) {
+      thaiRagState = await this.observeThaiRagBypassState(signal);
+      checks.push('thai-rag/pre_edit_context:bypassed');
+    } else {
+      const thaiRag = this.services.thaiRag;
+      if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
+      const thaiHealth = await thaiRag.health(signal);
+      if (!thaiHealth.ok || !nativeThaiRagReadyForHarness(thaiHealth.ok ? thaiHealth.value : undefined)) {
+        return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for pre-edit diagnostics${thaiHealth.ok ? '' : `: ${thaiHealth.error.message}`}`, true));
+      }
+      const thaiCheck = await this.nativeRagCall(workspaceId, 'pre_edit_context', {
+        file_path: filePath,
+        ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
+      }, signal);
+      if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
+      checks.push('thai-rag/pre_edit_context');
     }
-    const thaiCheck = await this.nativeRagCall(workspaceId, 'pre_edit_context', {
-      file_path: filePath,
-      ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
-    }, signal);
-    if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
-
-    const checks = ['thai-rag/pre_edit_context'];
     if (runGodkillerSafetyCheck) {
       const extensions = this.services.extensions;
       if (extensions === undefined) return err(appError('INTERNAL_ERROR', 'External MCP bridge is unavailable for optional Godkiller analysis', true));
@@ -1174,6 +1262,24 @@ export class ToolRegistry {
     }
 
     this.harnessActivation.preparePath(context, filePath);
+    if (trustedFullBypass) {
+      const resolvedThaiRagState = thaiRagState ?? 'unknown';
+      if (automaticPreflight) {
+        await this.recordAutomaticPreEditBypass(workspaceId, filePath, resolvedThaiRagState);
+      }
+      return ok({
+        ready: true,
+        authorized: true,
+        bypassed: true,
+        bypassReason: 'trusted-full-bypass',
+        authorizationMode: 'full_bypass',
+        permissionProfile: 'full',
+        thaiRagState: resolvedThaiRagState,
+        workspaceId,
+        filePath,
+        checks,
+      });
+    }
     return ok({ ready: true, filePath, checks });
   }
 
@@ -1457,7 +1563,7 @@ export class ToolRegistry {
 
     for (const path of paths) {
       if (this.harnessActivation.isPathPrepared(context, path)) continue;
-      const prepared = await this.prepareCodeChange(workspaceId, path, undefined, false, operationSignal);
+      const prepared = await this.prepareCodeChange(workspaceId, path, undefined, false, operationSignal, true);
       if (!prepared.ok) return prepared;
     }
     return undefined;
@@ -1972,6 +2078,19 @@ function mostSpecificActiveWorkspaceScope(scopes: readonly WorkspaceScope[], can
     .filter((scope) => isAbsoluteActivityPath(scope.rootPath) && activityPathContains(scope.rootPath, candidate))
     .sort((left, right) => normalizedActivityPath(right.rootPath).length - normalizedActivityPath(left.rootPath).length);
   return matches[0] ?? null;
+}
+
+type TrustedPreEditBypassState = 'running' | 'unavailable' | 'stale' | 'unknown';
+
+function nativeThaiRagBypassState(health: {
+  readonly state: string;
+  readonly components?: {
+    readonly activeJobs?: readonly unknown[];
+  };
+} | undefined): TrustedPreEditBypassState {
+  if (health === undefined) return 'unknown';
+  if (health.components?.activeJobs !== undefined && health.components.activeJobs.length > 0) return 'running';
+  return nativeThaiRagReadyForHarness(health) ? 'unknown' : 'stale';
 }
 
 function nativeThaiRagReadyForHarness(health: {

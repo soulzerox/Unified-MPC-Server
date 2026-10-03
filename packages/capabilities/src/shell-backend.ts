@@ -424,6 +424,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       executable: invocation.executable,
       arguments: invocation.args,
       cwd,
+      environment: createSafeEnvironment(process.env, this.unrestricted),
       ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
       timeoutSeconds: request.timeoutSeconds,
       maxOutputBytes: request.maxOutputBytes,

@@ -63,7 +63,7 @@ import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResour
 import { appError, err, ok, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
-import type { UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
+import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
 
 export interface StdioMcpRuntime {
   readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
@@ -74,6 +74,7 @@ export interface StdioMcpRuntime {
   readonly activityReady: Promise<void>;
   readonly recoveryReady: Promise<void>;
   readonly profileProvider: () => PermissionProfile;
+  readonly authorizationModeProvider: () => AuthorizationMode;
   readonly allowAiDeleteProvider: () => boolean;
   readonly destructivePolicyProvider: () => DestructiveAutoApprovalPolicy;
   readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
@@ -91,6 +92,8 @@ export interface StdioMcpRuntimeOptions {
   readonly permissionProfile?: PermissionProfileName;
   readonly strictAllowedRoots?: readonly string[];
   readonly fullBypassAll?: boolean;
+  /** Live host setting for Trusted Full Bypass. When present it supersedes the static startup flag. */
+  readonly fullBypassAllProvider?: () => boolean;
   /** Persist the HTTP active-project profile so WebUI/CLI changes are visible without restart. */
   readonly persistWorkspaceSelection?: boolean;
   /** Unified-owned Thai-RAG install root; repository MCP configs never supply this path. */
@@ -199,15 +202,18 @@ export function createStdioMcpRuntime(
   const workspaceService = new WorkspaceService(workspaceRepository);
   const profileName = options.permissionProfile ?? 'full';
   const activeProfile = profileName === 'custom' ? customPermissionProfile(settingsRepository) : permissionProfiles[profileName];
-  const fullBypassAll = profileName === 'full' && options.fullBypassAll === true;
-  const strictRoots = options.strictAllowedRoots !== undefined && !fullBypassAll;
-  const effectiveUnrestricted = strictRoots ? false : unrestricted || fullBypassAll;
+  const fullBypassAllProvider = (): boolean => profileName === 'full'
+    && (options.fullBypassAllProvider?.() ?? options.fullBypassAll === true);
+  const fullBypassAllAtStartup = fullBypassAllProvider();
+  const strictRoots = options.strictAllowedRoots !== undefined && !fullBypassAllAtStartup;
+  const effectiveUnrestricted = strictRoots ? false : unrestricted || fullBypassAllAtStartup;
   const profileProvider = (): PermissionProfile => activeProfile;
+  const authorizationModeProvider = (): AuthorizationMode => fullBypassAllProvider() ? 'full_bypass' : 'standard';
   const destructivePolicyProvider = (): DestructiveAutoApprovalPolicy => parseDestructiveAutoApprovalPolicy(
     settingsRepository.get(DESTRUCTIVE_AUTO_APPROVAL_SETTING_KEY),
     parseBooleanSetting(settingsRepository.get(ALLOW_AI_DELETE_SETTING_KEY), false),
   );
-  const allowAiDeleteProvider = (): boolean => fullBypassAll || destructivePolicyProvider().approvals.delete_file;
+  const allowAiDeleteProvider = (): boolean => fullBypassAllProvider() || destructivePolicyProvider().approvals.delete_file;
 
   const projectService = new ProjectService(workspaceRepository);
   const processService = new ProcessService(workspaceRepository, {
@@ -215,7 +221,7 @@ export function createStdioMcpRuntime(
     profileProvider,
     defaultTimeoutMsProvider: (): number => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.processTimeoutMs), DEFAULT_PROCESS_TIMEOUT_MS, 1_000, 4 * 60 * 60_000),
     unrestricted: effectiveUnrestricted,
-    authorizationBypassProvider: (): boolean => fullBypassAll,
+    authorizationBypassProvider: fullBypassAllProvider,
   });
   const checkpointService = new CheckpointService(workspaceRepository, checkpointRepository, {
     profile: activeProfile,
@@ -228,7 +234,7 @@ export function createStdioMcpRuntime(
     unrestricted: effectiveUnrestricted,
     trustedWorkspaceAccess: !strictRoots,
     allowDeleteWithoutConfirmation: allowAiDeleteProvider,
-    protectCriticalFiles: (): boolean => !fullBypassAll && destructivePolicyProvider().protectCriticalFiles,
+    protectCriticalFiles: (): boolean => !fullBypassAllProvider() && destructivePolicyProvider().protectCriticalFiles,
     recoverableDelete: (): boolean => destructivePolicyProvider().recoverableDelete,
     recoveryTrashRoot: path.join(dataPath, 'recovery-trash'),
   });
@@ -705,6 +711,7 @@ export function createStdioMcpRuntime(
     activityReady,
     recoveryReady,
     profileProvider,
+    authorizationModeProvider,
     allowAiDeleteProvider,
     destructivePolicyProvider,
     activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => {

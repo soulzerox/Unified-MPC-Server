@@ -468,7 +468,7 @@ export class ToolRegistry {
       }
       const goalLease = readGoalLeaseProof(parsed.value);
       const parsedInput = stripGoalLeaseEnvelope(parsed.value);
-      const activeRoutedInput = await this.routeInputToActiveWorkspace(parsedInput);
+      const activeRoutedInput = await this.routeInputToActiveWorkspace(tool.name, parsedInput);
       const prohibitedReason = fullBypass ? undefined : prohibitedInvocationReason(tool.name, activeRoutedInput);
       if (prohibitedReason !== undefined) {
         const response = mapError(appError('PERMISSION_DENIED', prohibitedReason));
@@ -483,6 +483,17 @@ export class ToolRegistry {
         || (mutationDecision.kind === 'read' && !nativePathScopeRequired)
         ? null
         : await this.resolveActiveWorkspaceScope(mutationWorkspaceId);
+      const explicitCommandWorkspaceScope = isCommandExecutionStart(tool.name, activeRoutedInput) && mutationWorkspaceId !== undefined
+        ? await this.resolveExplicitCommandWorkspaceScope(mutationWorkspaceId, activeWorkspaceScope)
+        : undefined;
+      if (explicitCommandWorkspaceScope !== undefined && !explicitCommandWorkspaceScope.ok) {
+        const response = mapError(explicitCommandWorkspaceScope.error);
+        await this.activity.end(callId, explicitCommandWorkspaceScope.error.code, Date.now() - started, explicitCommandWorkspaceScope.error.message);
+        return response;
+      }
+      const resolvedCommandWorkspaceScope = explicitCommandWorkspaceScope?.ok === true
+        ? explicitCommandWorkspaceScope.value
+        : undefined;
       if (!fullBypass && mutationDecision.kind === 'execute' && commandExecutionLeavesActiveWorkspace(tool.name, activeRoutedInput, activeWorkspaceScope)) {
         mutationDecision = { kind: 'opaque_mutation', reason: 'Command execution explicitly targets a working directory outside the host Active Project' };
       }
@@ -620,9 +631,14 @@ export class ToolRegistry {
           return response;
         }
       }
-      const scopedExecutionInput = fullBypass
+      const scopedExecutionInput = fullBypass && resolvedCommandWorkspaceScope === undefined
         ? { ok: true as const, value: activeRoutedInput }
-        : bindCommandExecutionToActiveWorkspace(tool.name, activeRoutedInput, activeWorkspaceScope);
+        : bindCommandExecutionToActiveWorkspace(
+          tool.name,
+          activeRoutedInput,
+          resolvedCommandWorkspaceScope ?? activeWorkspaceScope,
+          resolvedCommandWorkspaceScope !== undefined,
+        );
       if (!scopedExecutionInput.ok) {
         const response = mapError(appError('PERMISSION_DENIED', scopedExecutionInput.message));
         await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, scopedExecutionInput.message);
@@ -1762,18 +1778,41 @@ export class ToolRegistry {
     }
   }
 
-  private async routeInputToActiveWorkspace(input: unknown): Promise<unknown> {
+  private async routeInputToActiveWorkspace(toolName: string, input: unknown): Promise<unknown> {
     if (!isRecord(input) || this.activeWorkspaceScopesProvider === undefined) return input;
+    const explicitWorkspaceId = readExplicitWorkspaceId(input);
+    if (explicitWorkspaceId !== undefined && COMMAND_EXECUTION_TOOLS.has(toolName)) return input;
     const absolutePaths = absoluteWorkspaceScopePaths(input);
     if (absolutePaths.length === 0) return input;
     try {
       const scopes = await this.activeWorkspaceScopesProvider();
       const matched = commonActiveWorkspaceScope(scopes, absolutePaths);
-      if (matched === null || readExplicitWorkspaceId(input) === matched.workspaceId) return input;
+      if (matched === null || explicitWorkspaceId === matched.workspaceId) return input;
       return { ...input, workspaceId: matched.workspaceId };
     } catch {
       return input;
     }
+  }
+
+  private async resolveExplicitCommandWorkspaceScope(
+    workspaceId: string,
+    activeWorkspaceScope: WorkspaceScope | null,
+  ): Promise<Result<WorkspaceScope>> {
+    const workspaceInfo = this.services.workspaceInfo;
+    if (workspaceInfo?.info !== undefined) {
+      const resolved = await workspaceInfo.info(this.actor, workspaceId);
+      if (!resolved.ok) return resolved;
+      if (resolved.value.id !== workspaceId) {
+        return err(appError('PERMISSION_DENIED', 'Explicit command workspaceId resolved to a different registered workspace'));
+      }
+      const rootPath = readTrimmedString(resolved.value.realRootPath) ?? readTrimmedString(resolved.value.rootPath);
+      if (rootPath === undefined) {
+        return err(appError('CONFLICT', 'Explicit command workspace root is unavailable', true));
+      }
+      return ok({ workspaceId, rootPath });
+    }
+    if (activeWorkspaceScope?.workspaceId === workspaceId) return ok(activeWorkspaceScope);
+    return err(appError('WORKSPACE_NOT_FOUND', 'Explicit command workspaceId is not available in canonical workspace truth', true));
   }
 
   private async resolveActiveWorkspaceScope(workspaceId?: string): Promise<WorkspaceScope | null> {
@@ -2156,6 +2195,11 @@ function workspaceAdmissionMutationSucceeded(
 
 const NATIVE_ACTIVE_SCOPE_TOOLS = new Set(['office', 'audio', 'screen_record']);
 const COMMAND_EXECUTION_TOOLS = new Set(['shell', 'wsl_exec', 'process_start']);
+function isCommandExecutionStart(toolName: string, input: unknown): boolean {
+  if (toolName === 'process_start') return true;
+  if ((toolName !== 'shell' && toolName !== 'wsl_exec') || !isRecord(input)) return false;
+  return (readTrimmedString(input.operation) ?? 'run') === 'run';
+}
 const ACTIVE_PROJECT_SELECTION_TOOLS = new Set(['workspace_activate', 'workspace_deactivate', 'workspace_set_primary']);
 // Admission recovery is not a workspace file mutation. Its service independently
 // verifies the exact live owner lease before refreshing the writer/admission receipt.
@@ -2341,10 +2385,20 @@ function startGoalMutationFenceHeartbeat(
 }
 
 type CommandScopeBinding = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly message: string };
-function bindCommandExecutionToActiveWorkspace(toolName: string, input: unknown, activeWorkspaceScope: WorkspaceScope | null): CommandScopeBinding {
+function bindCommandExecutionToActiveWorkspace(
+  toolName: string,
+  input: unknown,
+  activeWorkspaceScope: WorkspaceScope | null,
+  enforceExplicitWorkspaceIdentity = false,
+): CommandScopeBinding {
   const commandTool = toolName === 'shell' || toolName === 'wsl_exec' || toolName === 'process_start';
   const nativePathTool = NATIVE_ACTIVE_SCOPE_TOOLS.has(toolName);
-  if ((!commandTool && !nativePathTool) || activeWorkspaceScope === null || !isRecord(input)) return { ok: true, value: input };
+  if ((!commandTool && !nativePathTool) || !isRecord(input)) return { ok: true, value: input };
+  if (activeWorkspaceScope === null) {
+    return enforceExplicitWorkspaceIdentity
+      ? { ok: false, message: 'Explicit command workspaceId could not be resolved to its canonical workspace root' }
+      : { ok: true, value: input };
+  }
   if (commandTool && toolName !== 'process_start') {
     const operation = readTrimmedString(input.operation) ?? 'run';
     if (operation !== 'run') return { ok: true, value: input };
@@ -2362,6 +2416,9 @@ function bindCommandExecutionToActiveWorkspace(toolName: string, input: unknown,
   if (input.cwd !== undefined && requestedCwd === undefined) return { ok: false, message: 'Command working directory is invalid' };
   const normalizedCwd = requestedCwd === undefined ? normalizedRoot : pathApi.resolve(normalizedRoot, requestedCwd);
   const insideActiveWorkspace = scopePathContains(pathApi, normalizedRoot, normalizedCwd);
+  if (enforceExplicitWorkspaceIdentity && !insideActiveWorkspace) {
+    return { ok: false, message: 'Command cwd does not match the explicit workspaceId canonical root' };
+  }
   if (toolName === 'process_start') return { ok: true, value: { ...input, cwd: normalizedCwd } };
   const metadata = isRecord(input.metadata) ? input.metadata : {};
   if (!insideActiveWorkspace) {

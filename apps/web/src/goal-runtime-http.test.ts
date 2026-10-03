@@ -711,6 +711,16 @@ describe('Goal runtime Web API and SSE boundary', () => {
     server = undefined;
 
     expect(Date.now() - startedAt).toBeLessThan(500);
+    if (!socket.destroyed) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('lingering HTTP socket did not close')), 250);
+        timeout.unref?.();
+        socket.once('close', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    }
     expect(socket.destroyed).toBe(true);
   });
 

@@ -37,6 +37,9 @@ export function getClientScriptJs(): string {
       const workspaceRuntimeTargets = new Map();
       const workspaceRuntimeCatchupTimers = new Map();
       const workspaceRuntimeCatchupAttempts = new Map();
+      const WORKSPACE_RUNTIME_REFRESH_CONCURRENCY = 2;
+      const workspaceRuntimeRefreshQueue = [];
+      let workspaceRuntimeRefreshActive = 0;
       const workspaceGoals = new Map();
       const expandedWorkspaceGoals = new Set();
       const loadingWorkspaceGoals = new Set();
@@ -644,49 +647,66 @@ export function getClientScriptJs(): string {
         renderWorkspaces();
       }
 
-      async function refreshWorkspaceRuntime(workspaceId) {
+      async function runWorkspaceRuntimeRefresh(workspaceId) {
+        if (!cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) return;
+        const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goal-runtime';
+        const controller = new AbortController();
+        workspaceRuntimeRefreshControllers.set(workspaceId, controller);
+        try {
+          const res = await fetchWithTimeout(endpoint, { signal: controller.signal });
+          const data = await res.json();
+          if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
+          if (controller.signal.aborted) return;
+          applyWorkspaceRuntimeSnapshot(workspaceId, data);
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          const current = workspaceRuntime.get(workspaceId);
+          workspaceRuntime.set(workspaceId, {
+            snapshots: Array.isArray(current?.snapshots) ? current.snapshots : [],
+            cursor: current?.cursor ?? null,
+            error: err.message,
+          });
+          renderWorkspaces();
+          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
+        } finally {
+          if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
+            workspaceRuntimeRefreshControllers.delete(workspaceId);
+          }
+        }
+      }
+
+      function drainWorkspaceRuntimeRefreshQueue() {
+        while (workspaceRuntimeRefreshActive < WORKSPACE_RUNTIME_REFRESH_CONCURRENCY
+          && workspaceRuntimeRefreshQueue.length > 0) {
+          const item = workspaceRuntimeRefreshQueue.shift();
+          if (!item) return;
+          workspaceRuntimeRefreshActive += 1;
+          void runWorkspaceRuntimeRefresh(item.workspaceId).finally(() => {
+            workspaceRuntimeRefreshActive -= 1;
+            workspaceRuntimeRefreshes.delete(item.workspaceId);
+            item.resolve();
+            if (workspaceRuntimeRefreshPending.delete(item.workspaceId)
+              && cachedWorkspaces.some((workspace) => workspace.id === item.workspaceId)) {
+              void refreshWorkspaceRuntime(item.workspaceId);
+            }
+            drainWorkspaceRuntimeRefreshQueue();
+          });
+        }
+      }
+
+      function refreshWorkspaceRuntime(workspaceId) {
         const currentRefresh = workspaceRuntimeRefreshes.get(workspaceId);
         if (currentRefresh) {
           workspaceRuntimeRefreshPending.add(workspaceId);
           return currentRefresh;
         }
-
-        const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goal-runtime';
-        const controller = new AbortController();
-        workspaceRuntimeRefreshControllers.set(workspaceId, controller);
-        const refresh = (async () => {
-          try {
-            const res = await fetchWithTimeout(endpoint, { signal: controller.signal });
-            const data = await res.json();
-            if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
-            if (controller.signal.aborted) return;
-            applyWorkspaceRuntimeSnapshot(workspaceId, data);
-          } catch (err) {
-            if (controller.signal.aborted) return;
-            const current = workspaceRuntime.get(workspaceId);
-            workspaceRuntime.set(workspaceId, {
-              snapshots: Array.isArray(current?.snapshots) ? current.snapshots : [],
-              cursor: current?.cursor ?? null,
-              error: err.message,
-            });
-            renderWorkspaces();
-            if (isBackendTransportError(err)) noteBackendUnavailable(err);
-            else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
-          }
-        })();
+        const refresh = new Promise((resolve) => {
+          workspaceRuntimeRefreshQueue.push({ workspaceId, resolve });
+          drainWorkspaceRuntimeRefreshQueue();
+        });
         workspaceRuntimeRefreshes.set(workspaceId, refresh);
-        try {
-          await refresh;
-        } finally {
-          workspaceRuntimeRefreshes.delete(workspaceId);
-          if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
-            workspaceRuntimeRefreshControllers.delete(workspaceId);
-          }
-          if (workspaceRuntimeRefreshPending.delete(workspaceId)
-            && cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) {
-            void refreshWorkspaceRuntime(workspaceId);
-          }
-        }
+        return refresh;
       }
 
       function noteWorkspaceRuntimeEvent(workspaceId, record) {

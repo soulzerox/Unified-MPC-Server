@@ -6,7 +6,19 @@ import { HarnessActivationLedger } from './harness-runtime.js';
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 const activeWorkspaceScopeProvider = async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' });
 
-function createHarnessServices(): { services: McpApplicationServices; writes: string[]; childCalls: string[]; nativeRagCalls: string[]; nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>; bootstrapEvents: string[]; setAgentsMd(content: string): void; setHead(value: string): void } {
+function createHarnessServices(): {
+  services: McpApplicationServices;
+  writes: string[];
+  childCalls: string[];
+  nativeRagCalls: string[];
+  nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>;
+  bootstrapEvents: string[];
+  setAgentsMd(content: string): void;
+  setHead(value: string): void;
+  setThaiRagHealthError(message: string | undefined): void;
+  setThaiRagActiveJobs(jobIds: readonly string[]): void;
+  setThaiRagPreEditError(message: string | undefined): void;
+} {
   const writes: string[] = [];
   const childCalls: string[] = [];
   const nativeRagCalls: string[] = [];
@@ -14,6 +26,9 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
   const bootstrapEvents: string[] = [];
   let agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
   let head = 'a'.repeat(40);
+  let thaiRagHealthError: string | undefined;
+  let thaiRagActiveJobs: readonly string[] = [];
+  let thaiRagPreEditError: string | undefined;
   const services = {
     file: {
       async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
@@ -35,6 +50,7 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
     },
     thaiRag: {
       async health() {
+        if (thaiRagHealthError !== undefined) return err(appError('CONFLICT', thaiRagHealthError, true));
         return ok({
           providerId: 'thai-rag' as const,
           state: 'ready',
@@ -47,13 +63,16 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
             embedderAvailable: true,
             lexicalRetrievalAvailable: true,
             semanticRetrievalAvailable: true,
-            activeJobs: [],
+            activeJobs: [...thaiRagActiveJobs],
           },
         });
       },
       async call(tool: string, args: Readonly<Record<string, unknown>>) {
         nativeRagCalls.push(tool);
         nativeRagArguments.push({ tool, args });
+        if (tool === 'pre_edit_context' && thaiRagPreEditError !== undefined) {
+          return err(appError('CONFLICT', thaiRagPreEditError, true));
+        }
         return ok({ content: [{ type: 'text', text: 'ok' }] });
       },
     },
@@ -97,7 +116,19 @@ function createHarnessServices(): { services: McpApplicationServices; writes: st
       },
     },
   } as unknown as McpApplicationServices;
-  return { services, writes, childCalls, nativeRagCalls, nativeRagArguments, bootstrapEvents, setAgentsMd(content: string): void { agentsMd = content; }, setHead(value: string): void { head = value; } };
+  return {
+    services,
+    writes,
+    childCalls,
+    nativeRagCalls,
+    nativeRagArguments,
+    bootstrapEvents,
+    setAgentsMd(content: string): void { agentsMd = content; },
+    setHead(value: string): void { head = value; },
+    setThaiRagHealthError(message: string | undefined): void { thaiRagHealthError = message; },
+    setThaiRagActiveJobs(jobIds: readonly string[]): void { thaiRagActiveJobs = [...jobIds]; },
+    setThaiRagPreEditError(message: string | undefined): void { thaiRagPreEditError = message; },
+  };
 }
 
 describe('workspace engineering harness enforcement', () => {
@@ -210,6 +241,140 @@ describe('workspace engineering harness enforcement', () => {
       structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } },
     });
     expect(recoveries).toBe(1);
+  });
+
+  it('keeps standard mode fail-closed when native pre-edit is queued behind another workspace', async () => {
+    const { services, nativeRagCalls, setThaiRagPreEditError } = createHarnessServices();
+    setThaiRagPreEditError('workspace-a is queued behind active indexing for workspace-b');
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'standard-pre-edit-session',
+      activeWorkspaceScopeProvider,
+    });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/standard.ts',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('queued behind active indexing') } },
+    });
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+  });
+
+  it('lets Trusted Full Bypass skip a queued native pre-edit without touching the unrelated index', async () => {
+    const { services, nativeRagCalls, setThaiRagActiveJobs, setThaiRagPreEditError } = createHarnessServices();
+    setThaiRagActiveJobs(['idx_other_workspace']);
+    setThaiRagPreEditError('workspace-a is queued behind active indexing for workspace-b');
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'full-bypass-pre-edit-session',
+      profileProvider: () => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
+      authorizationModeProvider: () => 'full_bypass',
+      activeWorkspaceScopeProvider,
+    });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/bypass.ts',
+    })).resolves.toMatchObject({
+      structuredContent: {
+        ready: true,
+        authorized: true,
+        bypassed: true,
+        bypassReason: 'trusted-full-bypass',
+        thaiRagState: 'running',
+        workspaceId: 'workspace-1',
+        filePath: 'src/bypass.ts',
+      },
+    });
+    expect(nativeRagCalls).toEqual([]);
+  });
+
+  it('uses the same Trusted Full Bypass semantics for automatic mutation preflight and audits it', async () => {
+    const { services, writes, nativeRagCalls, setThaiRagActiveJobs } = createHarnessServices();
+    setThaiRagActiveJobs(['idx_other_workspace']);
+    const events: Array<Record<string, unknown>> = [];
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'full-bypass-auto-pre-edit-session',
+      profileProvider: () => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
+      authorizationModeProvider: () => 'full_bypass',
+      activeWorkspaceScopeProvider,
+      activity: {
+        async record(event) {
+          events.push(event as unknown as Record<string, unknown>);
+        },
+      },
+    });
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1',
+      path: 'src/automatic-bypass.ts',
+      content: 'export const automaticBypass = true;\n',
+    })).resolves.not.toMatchObject({ isError: true });
+
+    expect(nativeRagCalls).toEqual([]);
+    expect(writes).toEqual(['src/automatic-bypass.ts']);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phase: 'completed',
+        toolName: 'prepare_code_change',
+        authorizationMode: 'full_bypass',
+        resultCode: 'SUCCESS',
+      }),
+    ]));
+  });
+
+  it('allows Trusted Full Bypass when Thai-RAG is unavailable and restores fail-closed behavior immediately', async () => {
+    const {
+      services,
+      nativeRagCalls,
+      setThaiRagHealthError,
+      setThaiRagPreEditError,
+    } = createHarnessServices();
+    let authorizationMode: 'standard' | 'full_bypass' = 'full_bypass';
+    setThaiRagHealthError('provider unavailable');
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'full-bypass-unavailable-session',
+      profileProvider: () => ({ name: 'full', defaults: { READ: 'ALLOW', WRITE: 'ALLOW', EXECUTE: 'ALLOW', DANGEROUS: 'ALLOW' }, allowedProjectExecutables: [] }),
+      authorizationModeProvider: () => authorizationMode,
+      activeWorkspaceScopeProvider,
+    });
+
+    await expect(registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).resolves.toMatchObject({
+      structuredContent: {
+        ready: true,
+        thaiRagBypassed: true,
+        bypassReason: 'trusted-full-bypass',
+        thaiRagState: 'unavailable',
+      },
+    });
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/unavailable-bypass.ts',
+    })).resolves.toMatchObject({
+      structuredContent: {
+        bypassed: true,
+        thaiRagState: 'unavailable',
+      },
+    });
+    expect(nativeRagCalls).toEqual([]);
+
+    authorizationMode = 'standard';
+    setThaiRagHealthError(undefined);
+    setThaiRagPreEditError('standard mode restored');
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/standard-restored.ts',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('standard mode restored') } },
+    });
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
   });
 
   it('reruns mandatory pre-edit diagnostics when HEAD changes after a path was prepared', async () => {

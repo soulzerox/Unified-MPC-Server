@@ -196,6 +196,7 @@ describe('ShellCapabilityBackend', () => {
     temporaryRoots.push(root);
     const backend = new ShellCapabilityBackend({ allowedRoots: [root] });
 
+    const canonicalRoot = await realpath(root);
     const result = await backend.execute({
       operation: 'run',
       executable: process.execPath,
@@ -204,9 +205,25 @@ describe('ShellCapabilityBackend', () => {
       execution: 'foreground',
       userConfirmed: true,
       timeout_seconds: 10,
+      metadata: {
+        [CAPABILITY_TASK_OWNER_METADATA_KEY]: {
+          clientId: 'client-a',
+          sessionId: 'session-a',
+          workspaceId: 'workspace-a',
+        },
+      },
     });
 
-    expect(result).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0, stdout: 'hello' } });
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        state: 'completed',
+        exit_code: 0,
+        stdout: 'hello',
+        workspace_id: 'workspace-a',
+        cwd: canonicalRoot,
+      },
+    });
   });
 
   it('keeps the backend foreground wait independent from the MCP 5-second poll policy', async () => {

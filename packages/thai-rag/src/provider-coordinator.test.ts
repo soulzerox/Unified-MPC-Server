@@ -66,6 +66,48 @@ describe('ThaiRagProviderCoordinator', () => {
     await owner.close();
   });
 
+  it('refreshes live active-job health for both owner and follower projections', async () => {
+    const dataRoot = await root();
+    let activeJobs: readonly string[] = [];
+    let healthCalls = 0;
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({
+        health: async () => {
+          healthCalls += 1;
+          return ok({ ...healthy, activeJobs });
+        },
+      }),
+    });
+
+    expect((await owner.start()).ok).toBe(true);
+    activeJobs = ['idx-live'];
+
+    const ownerHealth = await owner.health();
+    expect(ownerHealth).toMatchObject({ ok: true, value: { components: { activeJobs: ['idx-live'] } } });
+    expect(healthCalls).toBe(1);
+
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    const followerStart = await follower.start();
+    expect(followerStart).toMatchObject({ ok: true, value: { role: 'follower', health: { components: { activeJobs: ['idx-live'] } } } });
+
+    const followerHealth = await follower.health();
+    expect(followerHealth).toMatchObject({ ok: true, value: { components: { activeJobs: ['idx-live'] } } });
+    expect(healthCalls).toBeGreaterThanOrEqual(3);
+
+    await follower.close();
+    await owner.close();
+  });
+
   it('serializes owner and follower calls through one writer queue', async () => {
     const dataRoot = await root();
     let inFlight = 0;

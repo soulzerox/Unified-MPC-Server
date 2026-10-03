@@ -860,8 +860,17 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     expect(otherIndex).toMatchObject({
       ok: false,
-      error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing', workspaceId } },
+      error: {
+        code: 'CONFLICT',
+        details: {
+          reason: 'workspace-indexing',
+          workspaceId: recoveredWorkspaceId,
+          blockedByWorkspaceId: workspaceId,
+          queueState: 'queued',
+        },
+      },
     });
+    if (!otherIndex.ok) expect(otherIndex.error.details).not.toHaveProperty('jobId');
 
     releaseBlockedIndex?.();
     await driver.stop();
@@ -974,6 +983,111 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
     expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(1);
     expect(calls.some(({ tool }) => tool === 'index_status')).toBe(true);
+    await driver.stop();
+  });
+
+  it('queues a cold workspace behind an unrelated provider-owned admission index without oversubscription', async () => {
+    const dataRoot = await tempRoot();
+    const rootWorkspace = { id: workspaceId, realRootPath: await tempRoot() };
+    const goalWorkspace = { id: recoveredWorkspaceId, realRootPath: await tempRoot() };
+    let rootComplete = false;
+    let goalComplete = false;
+    const activeProviderWorkspaces = new Set<string>();
+    let maxActiveProviderWorkspaces = 0;
+    const calls: Array<{ tool: string; workspaceId: unknown }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 20,
+      indexJobPollMs: 10,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [rootWorkspace, goalWorkspace],
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          const requestedWorkspaceId = args.workspace_id;
+          calls.push({ tool, workspaceId: requestedWorkspaceId });
+          if (tool === 'code_index') {
+            if (args.background !== true) return structuredFailure('background_required');
+            const id = String(requestedWorkspaceId);
+            activeProviderWorkspaces.add(id);
+            maxActiveProviderWorkspaces = Math.max(maxActiveProviderWorkspaces, activeProviderWorkspaces.size);
+            const providerJobId = id === workspaceId ? 'idx_provider_root' : 'idx_provider_goal';
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: providerJobId, workspace_id: id },
+            });
+          }
+          if (tool === 'index_status') {
+            const id = String(requestedWorkspaceId);
+            const complete = id === workspaceId ? rootComplete : goalComplete;
+            const providerJobId = id === workspaceId ? 'idx_provider_root' : 'idx_provider_goal';
+            if (complete) activeProviderWorkspaces.delete(id);
+            return success('index_status', {
+              status: 'ok',
+              data: complete
+                ? { status: 'done', job_id: providerJobId, workspace_id: id, result: { indexed: 1 } }
+                : { status: 'running', job_id: providerJobId, workspace_id: id },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    const rootAdmission = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/root.ts' });
+    expect(rootAdmission).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { workspaceId, jobId: expect.any(String), reason: 'workspace-indexing' } },
+    });
+
+    const firstGoalAdmission = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/goal.ts' });
+    const secondGoalAdmission = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/goal.ts' });
+    for (const admission of [firstGoalAdmission, secondGoalAdmission]) {
+      expect(admission).toMatchObject({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          details: {
+            reason: 'workspace-indexing',
+            workspaceId: recoveredWorkspaceId,
+            blockedByWorkspaceId: workspaceId,
+            queueState: 'queued',
+          },
+        },
+      });
+      if (!admission.ok) expect(admission.error.details).not.toHaveProperty('jobId');
+    }
+    expect(calls.filter((call) => call.tool === 'code_index').map((call) => call.workspaceId)).toEqual([workspaceId]);
+
+    rootComplete = true;
+    await expect.poll(() => calls.filter((call) => call.tool === 'code_index' && call.workspaceId === recoveredWorkspaceId).length)
+      .toBe(1);
+    expect(maxActiveProviderWorkspaces).toBe(1);
+
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; workspaceId: string; status: string }>;
+    };
+    const goalJob = persisted.jobs.find((job) => job.workspaceId === recoveredWorkspaceId && job.status === 'running');
+    expect(goalJob).toBeDefined();
+
+    const whileGoalIndexes = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/goal.ts' });
+    expect(whileGoalIndexes).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { workspaceId: recoveredWorkspaceId, jobId: goalJob!.jobId, reason: 'workspace-indexing' } },
+    });
+    expect(calls.filter((call) => call.tool === 'code_index' && call.workspaceId === recoveredWorkspaceId)).toHaveLength(1);
+
+    goalComplete = true;
+    await expect.poll(async () => {
+      const status = await driver.call('index_status', { workspace_id: recoveredWorkspaceId, job_id: goalJob!.jobId });
+      return status.ok && isRecord(status.value) ? status.value.status : 'unavailable';
+    }).toBe('completed');
+    await expect(driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/goal.ts' }))
+      .resolves.toMatchObject({ ok: true });
+    expect(maxActiveProviderWorkspaces).toBe(1);
     await driver.stop();
   });
 

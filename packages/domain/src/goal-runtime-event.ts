@@ -156,6 +156,19 @@ export interface ReplayWorkspaceGoalRuntimeEventsRequest {
   readonly limit: number;
 }
 
+export interface ReplayGoalRuntimeEventsRequest {
+  readonly workspaceIds: readonly string[];
+  /** Exclusive global durable cursor. Omit for the oldest currently retained event. */
+  readonly afterSequence?: number;
+  readonly limit: number;
+}
+
+export interface GoalRuntimeWorkspaceSequenceBounds {
+  readonly workspaceId: string;
+  readonly oldestAvailableSequence?: number;
+  readonly latestSequence?: number;
+}
+
 export interface ListGoalRuntimeEventsRequest {
   readonly goalId: string;
   readonly limit: number;
@@ -168,9 +181,14 @@ export interface GoalRuntimeEventReplayPage {
   readonly replayWindowMissed: boolean;
 }
 
+export interface MultiplexedGoalRuntimeEventReplayPage extends GoalRuntimeEventReplayPage {
+  readonly workspaceBounds: readonly GoalRuntimeWorkspaceSequenceBounds[];
+}
+
 export interface GoalRuntimeEventRepository {
   appendGoalRuntimeEvent(request: AppendGoalRuntimeEventRequest): Promise<AppendGoalRuntimeEventResult>;
   replayWorkspaceGoalRuntimeEvents(request: ReplayWorkspaceGoalRuntimeEventsRequest): Promise<GoalRuntimeEventReplayPage>;
+  replayGoalRuntimeEvents?(request: ReplayGoalRuntimeEventsRequest): Promise<MultiplexedGoalRuntimeEventReplayPage>;
   listGoalRuntimeEvents(request: ListGoalRuntimeEventsRequest): Promise<readonly GoalRuntimeEventRecord[]>;
 }
 

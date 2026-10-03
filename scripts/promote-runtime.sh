@@ -273,7 +273,9 @@ probe_release_health_once() {
   }
   remaining=$((deadline_ms - now))
   if (( remaining <= 0 )); then
-    last_health_failure="readiness_deadline_exceeded"
+    if [[ "$last_health_failure" == "not_ready" ]]; then
+      last_health_failure="readiness_deadline_exceeded"
+    fi
     return 1
   fi
   timeout_ms="$health_timeout_ms"
@@ -289,7 +291,9 @@ probe_release_health_once() {
   }
   remaining=$((deadline_ms - now))
   if (( remaining <= 0 )); then
-    last_health_failure="readiness_deadline_exceeded"
+    if [[ "$last_health_failure" == "not_ready" ]]; then
+      last_health_failure="readiness_deadline_exceeded"
+    fi
     return 1
   fi
   timeout_ms="$health_timeout_ms"

@@ -180,7 +180,13 @@ async function main(): Promise<void> {
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
-  await runtime.initializeThaiRag();
+  if (runtime.authorizationModeProvider() === 'full_bypass') {
+    await runtime.initializeThaiRag().catch((error: unknown) => {
+      process.stderr.write(`Unified-MPC Thai-RAG startup state=degraded bypass=1 error=${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  } else {
+    await runtime.initializeThaiRag();
+  }
   process.stderr.write(
     `Unified-MPC MCP stdio ready primary=${workspace.id} root=${workspace.realRootPath} profile=${profileName}`
       + `${stdioFullBypassAll ? ' full_bypass=1' : ''}${unrestricted ? ' unrestricted=1' : ''}${strictAllowedRoots === undefined ? '' : ` strict_roots=${strictAllowedRoots.length}`}\n`,
@@ -203,7 +209,7 @@ async function main(): Promise<void> {
     codexToolsEnabled: runtime.codexToolsEnabled,
     ponytailModeProvider: () => runtime.ponytailMode,
     profileProvider: runtime.profileProvider,
-    authorizationModeProvider: (): 'standard' | 'full_bypass' => stdioFullBypassAll ? 'full_bypass' : 'standard',
+    authorizationModeProvider: runtime.authorizationModeProvider,
     allowAiDeleteProvider: runtime.allowAiDeleteProvider,
     destructivePolicyProvider: runtime.destructivePolicyProvider,
     activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,

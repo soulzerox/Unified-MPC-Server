@@ -66,6 +66,69 @@ describe('durable shell background tasks', () => {
     }
   }, 15000);
 
+  it.skipIf(process.platform === 'win32')('sanitizes the durable task temp environment before IPC child startup', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-env-'));
+    temporaryRoots.push(root);
+    const backend = new ShellCapabilityBackend({
+      allowedRoots: [root],
+      taskStateDirectory: path.join(root, '.tasks'),
+    });
+    const previousTmpdir = process.env.TMPDIR;
+    const poisonedTmpdir = path.join(root, 'missing-parent', 'poisoned-tmp');
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { accessSync } = require('node:fs');",
+      "const os = require('node:os');",
+      "accessSync(os.tmpdir());",
+      "const child = spawn(process.execPath, ['-e', \"process.send?.('ipc-ready', () => process.exit(0));\"],",
+      "{ stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
+      "let ready = false;",
+      "child.on('message', (message) => { if (message === 'ipc-ready') ready = true; });",
+      "child.on('exit', (code) => {",
+      "if (ready && code === 0) process.stdout.write('ipc-ready', () => process.exit(0));",
+      "else process.exit(2);",
+      "});",
+    ].join('');
+
+    process.env.TMPDIR = poisonedTmpdir;
+    try {
+      const foreground = await backend.execute({
+        operation: 'run',
+        executable: process.execPath,
+        arguments: ['-e', script],
+        cwd: root,
+        execution: 'foreground',
+        timeout_seconds: 10,
+        userConfirmed: true,
+      });
+      expect(foreground).toMatchObject({
+        ok: true,
+        value: { state: 'completed', exit_code: 0, stdout: 'ipc-ready' },
+      });
+
+      const started = await backend.execute({
+        operation: 'run',
+        executable: process.execPath,
+        arguments: ['-e', script],
+        cwd: root,
+        execution: 'background',
+        timeout_seconds: 10,
+        userConfirmed: true,
+      });
+      expect(started).toMatchObject({ ok: true, value: { task_id: expect.any(String), durable: true } });
+      if (!started.ok) return;
+      const taskId = String((started.value as Record<string, unknown>).task_id);
+      const durable = await backend.execute({ operation: 'wait', task_id: taskId, timeout_seconds: 5 });
+      expect(durable).toMatchObject({
+        ok: true,
+        value: { state: 'completed', exit_code: 0, stdout: 'ipc-ready', durable: true },
+      });
+    } finally {
+      if (previousTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmpdir;
+    }
+  }, 20_000);
+
   it('survives a backend/runtime replacement and returns logs and result by task id', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-shell-'));
     temporaryRoots.push(root);
@@ -255,6 +318,7 @@ describe('durable shell background tasks', () => {
       executable: process.execPath,
       arguments: ['-e', 'setTimeout(() => {}, 10000)'],
       cwd: root,
+      environment: process.env,
       timeoutSeconds: 30,
       maxOutputBytes: 1024,
       includeStdout: true,

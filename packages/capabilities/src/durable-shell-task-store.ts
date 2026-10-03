@@ -13,6 +13,7 @@ export interface DurableShellLaunchRequest {
   readonly executable: string;
   readonly arguments: readonly string[];
   readonly cwd: string;
+  readonly environment: NodeJS.ProcessEnv;
   readonly windowsVerbatimArguments?: boolean;
   readonly timeoutSeconds: number;
   readonly maxOutputBytes: number;
@@ -153,7 +154,7 @@ export class DurableShellTaskStore {
         stdio: 'ignore',
         shell: false,
         windowsHide: true,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        env: { ...request.environment, ELECTRON_RUN_AS_NODE: '1' },
       });
       await waitForSpawn(worker);
       if (worker.pid === undefined) return err(appError('INTERNAL_ERROR', 'Durable task worker did not return a process ID', true));

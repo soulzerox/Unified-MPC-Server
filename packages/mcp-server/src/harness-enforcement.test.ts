@@ -160,6 +160,58 @@ describe('workspace engineering harness enforcement', () => {
     expect(writes).toEqual(['src/shared.ts', 'src/shared.ts']);
   });
 
+  it('requires current single-use prepared-path evidence before unstaged admission recovery', async () => {
+    const { services, nativeRagCalls } = createHarnessServices();
+    let recoveries = 0;
+    (services as { goalRunWorkspace?: McpApplicationServices['goalRunWorkspace'] }).goalRunWorkspace = {
+      async recoverRunWorkspace() {
+        recoveries += 1;
+        return ok({ admissionGeneration: 2 });
+      },
+    } as McpApplicationServices['goalRunWorkspace'];
+    const ledger = new HarnessActivationLedger();
+    const options = { harnessActivationLedger: ledger, sessionId: 'unstaged-recovery-session', activeWorkspaceScopeProvider };
+    const registry = new ToolRegistry(services, actor, options);
+    const recovery = {
+      expectedAdmissionGeneration: 1,
+      expectedWorkspaceHead: 'a'.repeat(40),
+      expectedUnstagedPaths: ['docs/generated.md'],
+      expectedUnstagedDiffSha256: 'b'.repeat(64),
+    };
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('retry_goal_workspace_admission', {
+      workspaceId: 'workspace-1', goalId: 'goal-1', leaseToken: 'lease-1', leaseGeneration: 1,
+      unstagedRecovery: recovery,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } },
+    });
+    expect(recoveries).toBe(0);
+
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'docs/generated.md',
+    })).isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+
+    await expect(registry.invoke('retry_goal_workspace_admission', {
+      workspaceId: 'workspace-1', goalId: 'goal-1', leaseToken: 'lease-1', leaseGeneration: 1,
+      unstagedRecovery: recovery,
+    })).resolves.toMatchObject({
+      structuredContent: { outcome: 'admitted', admissionGeneration: 2 },
+    });
+    expect(recoveries).toBe(1);
+
+    await expect(registry.invoke('retry_goal_workspace_admission', {
+      workspaceId: 'workspace-1', goalId: 'goal-1', leaseToken: 'lease-1', leaseGeneration: 1,
+      unstagedRecovery: recovery,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } },
+    });
+    expect(recoveries).toBe(1);
+  });
+
   it('reruns mandatory pre-edit diagnostics when HEAD changes after a path was prepared', async () => {
     const { services, writes, nativeRagCalls, setHead } = createHarnessServices();
     const ledger = new HarnessActivationLedger();

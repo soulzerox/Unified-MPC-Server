@@ -3,6 +3,7 @@ import { appError, err, ok } from '@unified-mpc/domain';
 import { ContextEconomyRuntime } from '../context-economy.js';
 import { ActivityTracker, type ActivitySinkEvent } from '../activity-tracker.js';
 import { ToolRegistry } from '../tool-registry.js';
+import { HarnessActivationLedger } from '../harness-runtime.js';
 import { goalTools } from './goal-tools.js';
 import type { McpToolContext, McpToolDefinition } from './tool-types.js';
 
@@ -236,15 +237,75 @@ describe('durable goal MCP tools', () => {
 
   it('passes an exact bounded unstaged-recovery proof without weakening lease ownership', async () => {
     let received: unknown;
-    const registry = new ToolRegistry({
+    let recoveries = 0;
+    const nativeRagCalls: string[] = [];
+    const services = {
+      file: {
+        async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
+          if (request.path === 'AGENTS.md') return ok({ path: request.path, content: '# Rules\nUse mandatory native pre-edit checks.\n', startLine: 1, endLine: 2 });
+          return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
+        },
+      },
+      git: {
+        async observeWorkspace() {
+          return ok({
+            repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+            branch: 'goal/one', head: 'c'.repeat(40), statusEntries: [], dirtyFingerprint: 'dirty-1', stagedFingerprint: 'staged-1',
+          });
+        },
+      },
+      thaiRag: {
+        async health() {
+          return ok({
+            providerId: 'thai-rag' as const,
+            state: 'ready',
+            embeddingIndexGeneration: 1,
+            components: {
+              workerReachable: true,
+              sqliteAvailable: true,
+              ftsAvailable: true,
+              vectorStoreAvailable: true,
+              embedderAvailable: true,
+              lexicalRetrievalAvailable: true,
+              semanticRetrievalAvailable: true,
+              activeJobs: [],
+            },
+          });
+        },
+        async call(toolName: string) {
+          nativeRagCalls.push(toolName);
+          return ok({ content: [{ type: 'text', text: 'ok' }] });
+        },
+      },
+      extensions: {
+        async runtimePolicySnapshot() {
+          return ok({ ready: true, policies: [{
+            priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt',
+            resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true,
+          }] });
+        },
+        async readSkill(input: { skillId: string }) {
+          return ok({ id: input.skillId, name: 'ask-matt', description: 'Router', source: 'agents-skills', path: '/skills/ask-matt/SKILL.md', content: '# Ask Matt' });
+        },
+        async bootstrapMandatoryMcpServers() {
+          return ok({ ready: true, servers: [] });
+        },
+      },
       goalRunWorkspace: {
         async recoverRunWorkspace(_actor: unknown, request: unknown): Promise<unknown> {
+          recoveries += 1;
           received = request;
           return ok({ admissionGeneration: 13 });
         },
       },
-    } as unknown as McpToolContext['services'], actor, {
-      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'parent-project', rootPath: 'E:\\parent' }),
+    } as unknown as McpToolContext['services'];
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'unstaged-recovery-session',
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({
+        workspaceId: 'goal-workspace-1',
+        rootPath: '/tmp/goal-workspace-1',
+      }),
     });
     const unstagedRecovery = {
       expectedAdmissionGeneration: 12,
@@ -252,6 +313,23 @@ describe('durable goal MCP tools', () => {
       expectedUnstagedPaths: ['docs/generated.md'],
       expectedUnstagedDiffSha256: 'd'.repeat(64),
     };
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'goal-workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('retry_goal_workspace_admission', {
+      workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseToken: 'current-token',
+      leaseGeneration: 8, unstagedRecovery,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change') } },
+    });
+    expect(recoveries).toBe(0);
+
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'goal-workspace-1',
+      filePath: 'docs/generated.md',
+    })).isError).not.toBe(true);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+
     await expect(registry.invoke('retry_goal_workspace_admission', {
       workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseToken: 'current-token',
       leaseGeneration: 8, unstagedRecovery,
@@ -260,6 +338,7 @@ describe('durable goal MCP tools', () => {
       workspaceId: 'goal-workspace-1', goalId: 'goal-1', leaseToken: 'current-token',
       leaseGeneration: 8, unstagedRecovery,
     });
+    expect(recoveries).toBe(1);
   });
 
   it('rejects stale retry proofs without echoing the supplied token', async () => {

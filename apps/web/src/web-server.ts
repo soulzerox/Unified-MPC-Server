@@ -1,7 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
@@ -17,7 +16,7 @@ import type {
   WorkspaceAdmissionProjection,
 } from '@unified-mpc/domain';
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
-import { isMcpRuntimeDiagnosticsSnapshot, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
+import { isMcpRuntimeDiagnosticsSnapshot, resolveDataPath, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import {
   DEFAULT_EXTENSIONS_SETTINGS,
   EXTENSIONS_SETTINGS_KEY,
@@ -243,7 +242,7 @@ export class ControlPlaneServer {
     this.workspaceRoots = new Set((options.workspaceRoots ?? [process.cwd()]).map((root) => path.resolve(root.trim())).filter((root) => root.length > 0));
     this.ownsGateway = options.gateway === undefined;
     this.gateway = options.gateway ?? new GatewayService({ localPort: options.gatewayLocalPort ?? configuredPort('UNIFIED_MPC_PORT', 18765) });
-    this.dataDir = options.dataDir?.trim() || path.join(os.homedir(), '.local', 'share', 'unified-mpc');
+    this.dataDir = options.dataDir?.trim() || resolveDataPath();
     this.prunerOverride = options.pruner;
     this.ideSync = options.ideSync ?? new IdeSyncService();
     this.skillCatalogOverride = options.skillCatalog;

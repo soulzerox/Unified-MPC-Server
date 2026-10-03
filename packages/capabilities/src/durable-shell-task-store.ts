@@ -898,3 +898,6 @@ try {
 
 function normalizeMaxConcurrentTasks(value: number | undefined): number {
   if (value === undefined) return DEFAULT_MAX_CONCURRENT_DURABLE_TASKS;
+  if (!Number.isInteger(value) || value < 1 || value > 128) throw new Error('maxConcurrentTasks must be between 1 and 128');
+  return value;
+}

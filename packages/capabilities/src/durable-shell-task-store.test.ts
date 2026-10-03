@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ShellCapabilityBackend } from './shell-backend.js';
 import { DurableShellTaskStore, parsePosixProcessProbe } from './durable-shell-task-store.js';
+import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -135,6 +136,7 @@ describe('durable shell background tasks', () => {
     const taskStateDirectory = path.join(root, '.tasks');
     const firstRuntime = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
 
+    const canonicalRoot = await realpath(root);
     const started = await firstRuntime.execute({
       operation: 'run',
       executable: process.execPath,
@@ -143,22 +145,82 @@ describe('durable shell background tasks', () => {
       execution: 'background',
       timeout_seconds: 30,
       userConfirmed: true,
+      metadata: {
+        [CAPABILITY_TASK_OWNER_METADATA_KEY]: {
+          clientId: 'client-a',
+          sessionId: 'session-a',
+          workspaceId: 'workspace-a',
+        },
+      },
     });
 
-    expect(started).toMatchObject({ ok: true, value: { task_id: expect.any(String), durable: true } });
+    expect(started).toMatchObject({
+      ok: true,
+      value: { task_id: expect.any(String), durable: true, workspace_id: 'workspace-a', cwd: canonicalRoot },
+    });
     if (!started.ok) return;
     const taskId = String((started.value as Record<string, unknown>).task_id);
 
     const replacementRuntime = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
-    const waited = await replacementRuntime.execute({ operation: 'wait', task_id: taskId, timeout_seconds: 5 });
+    const waited = await replacementRuntime.execute({
+      operation: 'wait',
+      task_id: taskId,
+      timeout_seconds: 5,
+      metadata: {
+        [CAPABILITY_TASK_OWNER_METADATA_KEY]: {
+          clientId: 'client-a',
+          sessionId: 'replacement-session',
+          workspaceId: 'workspace-a',
+        },
+      },
+    });
     expect(waited).toMatchObject({
       ok: true,
-      value: { task_id: taskId, state: 'completed', exit_code: 0, stdout: 'durable-done', durable: true },
+      value: {
+        task_id: taskId,
+        state: 'completed',
+        exit_code: 0,
+        stdout: 'durable-done',
+        durable: true,
+        workspace_id: 'workspace-a',
+        cwd: canonicalRoot,
+      },
     });
-    await expect(replacementRuntime.execute({ operation: 'list' })).resolves.toMatchObject({
+    await expect(replacementRuntime.execute({
+      operation: 'list',
+      metadata: {
+        [CAPABILITY_TASK_OWNER_METADATA_KEY]: {
+          clientId: 'client-a',
+          sessionId: 'replacement-session',
+          workspaceId: 'workspace-a',
+        },
+      },
+    })).resolves.toMatchObject({
       ok: true,
-      value: { tasks: expect.arrayContaining([expect.objectContaining({ task_id: taskId, state: 'completed', durable: true })]) },
+      value: {
+        tasks: expect.arrayContaining([
+          expect.objectContaining({
+            task_id: taskId,
+            state: 'completed',
+            durable: true,
+            workspace_id: 'workspace-a',
+            cwd: canonicalRoot,
+          }),
+        ]),
+      },
     });
+
+    await expect(replacementRuntime.execute({
+      operation: 'status',
+      task_id: taskId,
+      metadata: {
+        [CAPABILITY_TASK_OWNER_METADATA_KEY]: {
+          clientId: 'client-b',
+          sessionId: 'session-b',
+          workspaceId: 'workspace-b',
+        },
+      },
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
   });
 
   it('does not overwrite a very fast durable completion back to running', async () => {

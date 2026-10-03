@@ -735,6 +735,13 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         tunnelToken: 'persisted-runtime-token',
       });
       expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
+      const supervision = await fetch(`http://127.0.0.1:${restarted.port}/_unified-mpc/gateway-supervision`);
+      expect(supervision.status).toBe(200);
+      expect(await supervision.json()).toMatchObject({
+        status: 'connected',
+        supervised: true,
+        gatewayState: 'SESSION_CONNECTED',
+      });
     } finally {
       await restarted.close();
     }
@@ -789,6 +796,13 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         tunnelToken: 'persisted-runtime-token',
       });
       expect(secondGateway.status().state).toBe('STOPPED');
+      const supervision = await fetch(`http://127.0.0.1:${second.port}/_unified-mpc/gateway-supervision`);
+      expect(supervision.status).toBe(200);
+      expect(await supervision.json()).toMatchObject({
+        status: 'stopped',
+        supervised: false,
+        gatewayState: 'STOPPED',
+      });
     } finally {
       await second.close();
     }

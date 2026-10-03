@@ -244,17 +244,29 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   });
 
 
-  it('keeps systemd Web readiness and watchdog recovery scoped to local HTTP health', async () => {
+  it('keeps local startup readiness separate from gateway-aware systemd watchdog recovery', async () => {
     const unit = await readFile(new URL('../../../scripts/unified-mpc-web.service', import.meta.url), 'utf8');
     expect(unit).toContain('Restart=always');
     expect(unit).toContain('RestartPreventExitStatus=78');
+    expect(unit).toContain('StartLimitIntervalSec=10min');
+    expect(unit).toContain('StartLimitBurst=5');
     expect(unit).toContain('WatchdogSec=30');
     expect(unit).toContain('NotifyAccess=all');
     expect(unit).toContain('http://127.0.0.1:3000/_unified-mpc/ready');
+    expect(unit).toContain('http://127.0.0.1:3000/_unified-mpc/gateway-supervision');
     expect(unit).toContain('&& /usr/bin/systemd-notify WATCHDOG=1');
     expect(unit).not.toContain('/api/status');
     expect(unit.indexOf('http://127.0.0.1:3000/_unified-mpc/ready'))
       .toBeLessThan(unit.indexOf('ExecStartPost=/usr/bin/systemd-notify WATCHDOG=1'));
+  });
+
+  it('keeps gateway supervision healthy when no persisted restore lifecycle exists', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/_unified-mpc/gateway-supervision`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: 'idle',
+      supervised: false,
+    });
   });
 
   it('keeps /api/status locally healthy when the downstream MCP identity probe is unavailable', async () => {
@@ -819,6 +831,56 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     try {
       await expect.poll(() => retryGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
       expect(probes).toBeGreaterThanOrEqual(2);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('retries an early-boot secret-store read failure in the same Web process', async () => {
+    const settings = new Map<string, string>([
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+      ['cloudflare_gateway_desired_state', 'RUNNING'],
+    ]);
+    let secretReads = 0;
+    const retryGateway = new GatewayService({
+      localPort: 18765,
+      tunnelProviderFactory: (configuration) => async (): Promise<{ url: string; stop: () => Promise<void> }> => ({
+        url: configuration.publicUrl ?? 'https://missing.example.com',
+        stop: async (): Promise<void> => {},
+      }),
+      healthProbe: async (): Promise<number> => 200,
+    });
+    const restarted = new ControlPlaneServer({
+      port: 0,
+      gateway: retryGateway,
+      capabilityToken,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+      secretStore: {
+        get: async (key: string): Promise<string | null> => {
+          secretReads += 1;
+          if (secretReads === 1) throw new Error('Secret Service unavailable during early boot');
+          return key === 'cloudflare_tunnel_token' ? 'persisted-runtime-token' : null;
+        },
+        set: async (): Promise<void> => {},
+        delete: async (): Promise<void> => {},
+      },
+      gatewayRestoreRetryBaseMs: 5,
+      gatewayRestoreRetryMaxMs: 10,
+    });
+
+    await restarted.listen();
+    try {
+      await expect.poll(() => retryGateway.status().state, { timeout: 1_500 }).toBe('SESSION_CONNECTED');
+      expect(secretReads).toBeGreaterThanOrEqual(2);
+      const status = await fetch(`http://127.0.0.1:${restarted.port}/api/status`);
+      expect(await status.json()).toMatchObject({
+        gatewayRestore: { state: 'connected' },
+      });
     } finally {
       await restarted.close();
     }

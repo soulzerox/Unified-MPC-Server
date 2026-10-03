@@ -1391,13 +1391,84 @@ describe('MCP tool registry', () => {
         arguments: ['--version'],
         cwd: rootB,
       });
-      expect(command.isError).not.toBe(true);
-      expect(capabilityCalls.at(-1)).toMatchObject({
+      expect(command).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+      });
+      expect(capabilityCalls).toHaveLength(0);
+    } finally {
+      await Promise.all([rm(rootA, { recursive: true, force: true }), rm(rootB, { recursive: true, force: true })]);
+    }
+  });
+
+  it('fails closed when an explicit command workspaceId disagrees with an absolute cwd even after approval', async () => {
+    const capabilityCalls: unknown[] = [];
+    const registry = new ToolRegistry({ capabilities: { async execute(tool, input): Promise<ReturnType<typeof ok>> { capabilityCalls.push({ tool, input }); return ok({ accepted: true }); } } }, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: 'E:\\project-a' }),
+      hostMutationApprovalProvider: approveMutation,
+    });
+    await expect(registry.invoke('shell', { workspaceId: 'workspace-a', operation: 'run', executable: 'node.exe', arguments: ['script.js'], cwd: 'E:\\project-b', userConfirmed: true })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+    });
+    await expect(registry.invoke('wsl_exec', { workspaceId: 'workspace-a', operation: 'run', executable: 'node', arguments: ['script.js'], cwd: 'E:\\project-b', userConfirmed: true })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+    });
+    expect(capabilityCalls).toHaveLength(0);
+  });
+
+  it('routes an explicit shell workspaceId through canonical registry truth even when another workspace is primary', async () => {
+    const rawRootA = await mkdtemp(path.join(tmpdir(), 'unified-mpc-shell-explicit-a-'));
+    const rawRootB = await mkdtemp(path.join(tmpdir(), 'unified-mpc-shell-explicit-b-'));
+    const rootA = await realpath(rawRootA);
+    const rootB = await realpath(rawRootB);
+    try {
+      const capabilityCalls: Array<{ tool: string; input: Record<string, unknown> }> = [];
+      const services = {
+        workspaceInfo: {
+          async info(_actor: unknown, workspaceId: string) {
+            if (workspaceId === 'workspace-a') return ok({
+              id: workspaceId, displayName: 'A', rootPath: rootA, realRootPath: rootA,
+              createdAt: new Date(0).toISOString(), kind: 'goal',
+            });
+            if (workspaceId === 'workspace-b') return ok({
+              id: workspaceId, displayName: 'B', rootPath: rootB, realRootPath: rootB,
+              createdAt: new Date(0).toISOString(), kind: 'goal',
+            });
+            return err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'));
+          },
+        },
+        capabilities: {
+          async execute(tool: string, input: unknown): Promise<ReturnType<typeof ok>> {
+            capabilityCalls.push({ tool, input: input as Record<string, unknown> });
+            return ok({ accepted: true });
+          },
+        },
+      } as unknown as McpApplicationServices;
+      const registry = new ToolRegistry(services, actor, {
+        activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => [
+          { workspaceId: 'workspace-b', rootPath: rootB },
+        ],
+      });
+
+      const result = await registry.invoke('shell', {
+        workspaceId: 'workspace-a',
+        operation: 'run',
+        executable: 'node.exe',
+        arguments: ['--version'],
+      });
+      expect(result.isError).not.toBe(true);
+      expect(capabilityCalls).toHaveLength(1);
+      expect(capabilityCalls[0]).toMatchObject({
         tool: 'shell',
         input: {
-          workspaceId: 'workspace-b',
-          cwd: rootB,
-          metadata: { 'unified-mpc.activeWorkspaceRoot.v1': rootB },
+          workspaceId: 'workspace-a',
+          cwd: rootA,
+          metadata: {
+            'unified-mpc.activeWorkspaceRoot.v1': rootA,
+            'unified-mpc.taskOwner.v1': { workspaceId: 'workspace-a' },
+          },
         },
       });
     } finally {
@@ -1405,19 +1476,51 @@ describe('MCP tool registry', () => {
     }
   });
 
-  it('allows explicitly absolute Shell and WSL working directories outside the host active workspace root after approval', async () => {
-    const capabilityCalls: unknown[] = [];
-    const registry = new ToolRegistry({ capabilities: { async execute(tool, input): Promise<ReturnType<typeof ok>> { capabilityCalls.push({ tool, input }); return ok({ accepted: true }); } } }, actor, {
-      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: 'E:\\project-a' }),
-      hostMutationApprovalProvider: approveMutation,
-    });
-    await expect(registry.invoke('shell', { workspaceId: 'workspace-a', operation: 'run', executable: 'node.exe', arguments: ['script.js'], cwd: 'E:\\project-b', userConfirmed: true })).resolves.not.toMatchObject({ isError: true });
-    await expect(registry.invoke('wsl_exec', { workspaceId: 'workspace-a', operation: 'run', executable: 'node', arguments: ['script.js'], cwd: 'E:\\project-b', userConfirmed: true })).resolves.not.toMatchObject({ isError: true });
-    expect(capabilityCalls).toHaveLength(2);
-    expect(capabilityCalls[0]).toMatchObject({ tool: 'shell', input: { cwd: 'E:\\project-b' } });
-    expect(capabilityCalls[1]).toMatchObject({ tool: 'wsl_exec', input: { cwd: 'E:\\project-b' } });
-    expect((capabilityCalls[0] as { input: { metadata?: Record<string, unknown> } }).input.metadata).not.toHaveProperty('unified-mpc.activeWorkspaceRoot.v1');
-    expect((capabilityCalls[1] as { input: { metadata?: Record<string, unknown> } }).input.metadata).not.toHaveProperty('unified-mpc.activeWorkspaceRoot.v1');
+  it('does not let Trusted Full Bypass override explicit shell workspace identity', async () => {
+    const rawRootA = await mkdtemp(path.join(tmpdir(), 'unified-mpc-shell-bypass-a-'));
+    const rawRootB = await mkdtemp(path.join(tmpdir(), 'unified-mpc-shell-bypass-b-'));
+    const rootA = await realpath(rawRootA);
+    const rootB = await realpath(rawRootB);
+    try {
+      let executions = 0;
+      const services = {
+        workspaceInfo: {
+          async info(_actor: unknown, workspaceId: string) {
+            const selectedRoot = workspaceId === 'workspace-a' ? rootA : workspaceId === 'workspace-b' ? rootB : undefined;
+            return selectedRoot === undefined
+              ? err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'))
+              : ok({ id: workspaceId, displayName: workspaceId, rootPath: selectedRoot, realRootPath: selectedRoot, createdAt: new Date(0).toISOString(), kind: 'goal' });
+          },
+        },
+        capabilities: {
+          async execute(): Promise<ReturnType<typeof ok>> {
+            executions += 1;
+            return ok({ accepted: true });
+          },
+        },
+      } as unknown as McpApplicationServices;
+      const registry = new ToolRegistry(services, actor, {
+        profileProvider: (): PermissionProfile => permissionProfiles.full,
+        authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+        activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => [
+          { workspaceId: 'workspace-b', rootPath: rootB },
+        ],
+      });
+
+      await expect(registry.invoke('shell', {
+        workspaceId: 'workspace-a',
+        operation: 'run',
+        executable: 'node.exe',
+        arguments: ['--version'],
+        cwd: rootB,
+      })).resolves.toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+      });
+      expect(executions).toBe(0);
+    } finally {
+      await Promise.all([rm(rootA, { recursive: true, force: true }), rm(rootB, { recursive: true, force: true })]);
+    }
   });
 
   it('anchors missing and relative Shell or WSL cwd values to the host active workspace root', async () => {

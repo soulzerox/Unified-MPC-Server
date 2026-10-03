@@ -1376,7 +1376,7 @@ export class ToolRegistry {
 
   private async validateUnstagedRecoveryPreparedPaths(
     input: unknown,
-    signal: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<ReturnType<typeof err> | undefined> {
     if (!isRecord(input)) return undefined;
     const paths = unstagedRecoveryPaths(input);
@@ -1400,7 +1400,8 @@ export class ToolRegistry {
       return err(appError('CONFLICT',
         'Workspace harness changed; run workspace_bootstrap and prepare_code_change again before unstaged recovery', true));
     }
-    const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
+    const operationSignal = signal ?? new AbortController().signal;
+    const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, operationSignal);
     if (!sourceIdentity.ok) return sourceIdentity;
     if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);
 

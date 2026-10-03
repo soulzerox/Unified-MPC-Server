@@ -43,6 +43,7 @@ interface DurableTaskMetadata {
   readonly owner_client_id?: string;
   readonly owner_session_id?: string;
   readonly owner_workspace_id?: string;
+  readonly cwd?: string;
 }
 
 interface DurableWorkerSpec {
@@ -123,6 +124,7 @@ export class DurableShellTaskStore {
       owner_client_id: request.owner.clientId,
       owner_session_id: request.owner.sessionId,
       ...(request.owner.workspaceId === undefined ? {} : { owner_workspace_id: request.owner.workspaceId }),
+      cwd: request.cwd,
     };
     const spec: DurableWorkerSpec = {
       version: 1,
@@ -378,6 +380,8 @@ export class DurableShellTaskStore {
     return {
       task_id: metadata.task_id,
       state: metadata.state,
+      ...(metadata.owner_workspace_id === undefined ? {} : { workspace_id: metadata.owner_workspace_id }),
+      ...(metadata.cwd === undefined ? {} : { cwd: metadata.cwd }),
       ...(metadata.exit_code === undefined ? {} : { exit_code: metadata.exit_code }),
       ...(stdout === undefined ? {} : { stdout }),
       ...(stderr === undefined ? {} : { stderr }),
@@ -477,6 +481,10 @@ function isMetadata(value: unknown): value is DurableTaskMetadata {
     && typeof record.include_stderr === 'boolean'
     && typeof record.max_output_bytes === 'number'
     && typeof record.deadline_at === 'string'
+    && (record.owner_client_id === undefined || typeof record.owner_client_id === 'string')
+    && (record.owner_session_id === undefined || typeof record.owner_session_id === 'string')
+    && (record.owner_workspace_id === undefined || typeof record.owner_workspace_id === 'string')
+    && (record.cwd === undefined || typeof record.cwd === 'string')
     && (record.worker_started_at === undefined || typeof record.worker_started_at === 'string')
     && (record.child_started_at === undefined || typeof record.child_started_at === 'string');
 }
@@ -890,6 +898,3 @@ try {
 
 function normalizeMaxConcurrentTasks(value: number | undefined): number {
   if (value === undefined) return DEFAULT_MAX_CONCURRENT_DURABLE_TASKS;
-  if (!Number.isInteger(value) || value < 1 || value > 128) throw new Error('maxConcurrentTasks must be between 1 and 128');
-  return value;
-}

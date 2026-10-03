@@ -94,6 +94,7 @@ export async function runWeb(
       return {
         listWorkspaceGoalRuntimeSnapshots: async (request) => goalRuntimeSnapshots.listWorkspaceGoalRuntimeSnapshots(request),
         replayWorkspaceGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayWorkspaceGoalRuntimeEvents(request),
+        replayGoalRuntimeEvents: async (request) => goalRuntimeEvents.replayGoalRuntimeEvents(request),
         readWorkspaceAdmissionProjection: async (workspaceId) => goalRuntimeProjection.readWorkspaceAdmissionProjection(workspaceId),
       };
     })();

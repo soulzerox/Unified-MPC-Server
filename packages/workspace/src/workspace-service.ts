@@ -101,10 +101,8 @@ export interface WorkspaceLifecycleCleanupEvaluation {
   readonly durableReferenceState: WorkspaceDurableReferenceState;
 }
 
-export interface WorkspaceLifecycleReconcileOptions {
+export interface WorkspaceCleanupEvaluationOptions {
   readonly protectedWorkspaceIds?: readonly WorkspaceId[];
-  readonly endedOwnerSessionIds?: readonly string[];
-  readonly endedOwnerJobIds?: readonly string[];
   /** Authoritative #82 projection keyed by durable Goal identity. Missing truth fails cleanup classification closed. */
   readonly goalRuntimeProjections?: ReadonlyMap<string, GoalRuntimeProjection>;
   /**
@@ -112,6 +110,11 @@ export interface WorkspaceLifecycleReconcileOptions {
    * Until that contract is supplied, Goal cleanup classification remains blocked.
    */
   readonly goalDurableReferenceStates?: ReadonlyMap<string, WorkspaceDurableReferenceState>;
+}
+
+export interface WorkspaceLifecycleReconcileOptions extends WorkspaceCleanupEvaluationOptions {
+  readonly endedOwnerSessionIds?: readonly string[];
+  readonly endedOwnerJobIds?: readonly string[];
 }
 
 export interface WorkspaceLifecycleReconciliation {
@@ -289,6 +292,37 @@ export class WorkspaceService {
       if (!result.ok) return result;
     }
     return ok(undefined);
+  }
+
+  /**
+   * Read-only lifecycle evaluation for Goal Workspaces.
+   *
+   * This method never archives registrations, mutates unavailable markers, removes
+   * Git worktrees, or authorizes physical cleanup. Unknown durable-reference truth
+   * remains an explicit fail-closed blocker.
+   */
+  public async evaluateGoalWorkspaceCleanup(
+    options: WorkspaceCleanupEvaluationOptions = {},
+  ): Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>> {
+    const protectedIds = new Set(options.protectedWorkspaceIds ?? []);
+    const now = this.options.now?.() ?? new Date();
+    const workspaces = await this.repository.list();
+    const evaluations: WorkspaceLifecycleCleanupEvaluation[] = [];
+
+    for (const workspace of workspaces) {
+      if (workspaceLifecycleKind(workspace) !== 'goal') continue;
+      const available = await this.isWorkspaceAvailable(workspace);
+      evaluations.push(classifyGoalWorkspaceCleanup(
+        workspace,
+        available,
+        protectedIds.has(workspace.id),
+        options.goalRuntimeProjections?.get(workspace.goalId ?? ''),
+        options.goalDurableReferenceStates?.get(workspace.goalId ?? '') ?? 'unknown',
+        now,
+      ));
+    }
+
+    return ok(evaluations);
   }
 
   public async reconcileLifecycle(

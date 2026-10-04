@@ -940,6 +940,41 @@ export function getClientScriptJs(): string {
         }
       }
 
+      async function loadCleanupEvaluations() {
+        const body = document.getElementById('cleanup-evaluations-body');
+        if (!body) return;
+        try {
+          const res = await fetchWithTimeout('/api/workspaces/cleanup-evaluations');
+          const data = await res.json();
+          if (!res.ok) throw new Error(errorMessage(data, 'Cleanup evaluation request failed'));
+          const evaluations = Array.isArray(data.evaluations) ? data.evaluations : [];
+          body.replaceChildren();
+          if (evaluations.length === 0) {
+            body.appendChild(emptyRow(5, 'No Goal Workspace cleanup evaluations'));
+            return;
+          }
+          for (const evaluation of evaluations) {
+            const row = document.createElement('tr');
+            addCell(row, evaluation.workspaceId || '—', 'mono');
+            addCell(row, evaluation.goalId || '—', 'mono');
+            addCell(row, evaluation.disposition === 'retention_candidate' ? 'Retention candidate' : 'Blocked');
+            addCell(row, Array.isArray(evaluation.blockers) && evaluation.blockers.length > 0
+              ? evaluation.blockers.join(', ')
+              : '—', 'mono');
+            const durableRefs = evaluation.durableReferenceState === 'clear'
+              ? 'Clear'
+              : evaluation.durableReferenceState === 'present'
+                ? 'Present'
+                : 'Unknown (fail-closed)';
+            addCell(row, durableRefs);
+            body.appendChild(row);
+          }
+        } catch (err) {
+          body.replaceChildren(emptyRow(5, 'Failed to load cleanup evaluations: ' + err.message));
+          logEvent('WARN', 'Cleanup evaluation refresh failed: ' + err.message);
+        }
+      }
+
       function renderWorkspaces() {
         const body = document.getElementById('projects-table-body');
         if (!body) return;
@@ -1853,6 +1888,7 @@ export function getClientScriptJs(): string {
       document.getElementById('skills-view-refresh-btn')?.addEventListener('click', loadInventory);
       document.getElementById('chatgpt-view-refresh-btn')?.addEventListener('click', loadGatewayStatus);
       document.getElementById('projects-refresh-btn')?.addEventListener('click', loadWorkspaces);
+      document.getElementById('cleanup-evaluations-refresh-btn')?.addEventListener('click', loadCleanupEvaluations);
       document.getElementById('runtime-diagnostics-refresh-btn')?.addEventListener('click', loadRuntimeDiagnostics);
 
       // Search Inputs
@@ -1887,6 +1923,7 @@ export function getClientScriptJs(): string {
       loadStatus();
       loadRagIndexJobs();
       loadWorkspaces();
+      loadCleanupEvaluations();
       loadInventory();
       loadPolicies();
       loadGatewayStatus();

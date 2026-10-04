@@ -352,6 +352,10 @@ describe('web CLI command', () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.value.url).toContain('http://127.0.0.1:');
+        const cleanup = await fetch(`${result.value.url}/api/workspaces/cleanup-evaluations`);
+        expect(cleanup.status).toBe(200);
+        expect(cleanup.headers.get('cache-control')).toBe('no-store');
+        expect(await cleanup.json()).toMatchObject({ evaluations: expect.any(Array) });
         await result.value.handle.close();
       }
     });

@@ -130,7 +130,13 @@ export async function runWeb(
       goalRuntimeProjections,
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
-    const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings, workspaceIndex);
+    const workspaceControl = createWorkspaceControl(
+      workspaceRepository,
+      workspaceService,
+      settings,
+      workspaceIndex,
+      goalRuntimeSnapshots,
+    );
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const server = new ControlPlaneServer({
       ...serverOptions,
@@ -190,6 +196,7 @@ function createWorkspaceControl(
   workspaceService: WorkspaceService,
   settings: SqliteSettingsRepository,
   workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
+  goalRuntimeSnapshots: Pick<SqliteGoalRuntimeSnapshotRepository, 'getGoalRuntimeSnapshot'>,
 ): WorkspaceControlPort {
   const projectList = async (): Promise<readonly WebWorkspaceSummary[]> => (await workspaceService.list())
     .filter((workspace) => isProjectWorkspace(workspace)
@@ -217,6 +224,15 @@ function createWorkspaceControl(
 
   return {
     list: projectList,
+    cleanupEvaluations: async () => {
+      const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
+      for (const workspace of await workspaceService.list()) {
+        if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;
+        const snapshot = await goalRuntimeSnapshots.getGoalRuntimeSnapshot(workspace.goalId);
+        if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
+      }
+      return unwrap(workspaceService.evaluateGoalWorkspaceCleanup({ goalRuntimeProjections }));
+    },
     selection: async (): Promise<WebWorkspaceSelectionSnapshot | null> => {
       const service = await selection();
       return service === null ? null : unwrap(service.list());

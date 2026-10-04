@@ -200,6 +200,31 @@ export function renderDashboardViewsHtml(): string {
         </table>
       </div>
     </div>
+    <div class="card">
+      <div class="filter-bar">
+        <div>
+          <h2 style="margin-bottom: 4px;">Goal Workspace Cleanup</h2>
+          <p style="font-size: 12px; color: var(--text-secondary);">Read-only lifecycle evaluation. This view does not archive or delete workspaces. Unknown durable references remain fail-closed blockers.</p>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="cleanup-evaluations-refresh-btn" type="button">Refresh</button>
+      </div>
+      <div class="table-responsive">
+        <table id="cleanup-evaluations-table">
+          <thead>
+            <tr>
+              <th>Goal Workspace</th>
+              <th>Goal</th>
+              <th>Disposition</th>
+              <th>Blockers</th>
+              <th>Durable refs</th>
+            </tr>
+          </thead>
+          <tbody id="cleanup-evaluations-body">
+            <tr><td colspan="5" style="color: var(--text-muted); text-align: center;">Loading cleanup evaluations...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <!-- VIEW: SERVERS VIEW -->

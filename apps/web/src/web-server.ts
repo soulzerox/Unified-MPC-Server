@@ -65,8 +65,20 @@ export interface WebGoalSummary {
   readonly updatedAt: string;
 }
 
+export interface WebWorkspaceCleanupEvaluation {
+  readonly workspaceId: string;
+  readonly goalId?: string;
+  readonly disposition: 'blocked' | 'retention_candidate';
+  readonly blockers: readonly string[];
+  readonly workspaceAvailable: boolean;
+  readonly writerLeaseActive: boolean;
+  readonly durableReferenceState: 'clear' | 'present' | 'unknown';
+}
+
 export interface WorkspaceControlPort {
   list(): Promise<readonly WebWorkspaceSummary[]>;
+  /** Optional for embedders; production Web composition supplies the read-only #80 evaluator. */
+  cleanupEvaluations?(): Promise<readonly WebWorkspaceCleanupEvaluation[]>;
   selection(): Promise<WebWorkspaceSelectionSnapshot | null>;
   activate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
   deactivate(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot>;
@@ -594,6 +606,17 @@ export class ControlPlaneServer {
       })));
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ workspaces, selection }));
+      return;
+    }
+
+    if (pathname === '/api/workspaces/cleanup-evaluations' && req.method === 'GET') {
+      if (this.workspaceControl?.cleanupEvaluations === undefined) {
+        sendJsonError(res, 503, 'Workspace cleanup evaluation service is unavailable');
+        return;
+      }
+      const evaluations = await this.workspaceControl.cleanupEvaluations();
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ evaluations }));
       return;
     }
 

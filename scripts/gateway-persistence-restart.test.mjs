@@ -206,6 +206,12 @@ function assertSnapshot(snapshot) {
       remoteTunnelId: 'restart-remote-id',
       cloudflareApiTokenConfigured: true,
     },
+    persistence: {
+      state: 'loaded',
+      nonSecretConfigured: true,
+      tunnelToken: { configured: true, present: true },
+      apiToken: { configured: true, present: true },
+    },
   });
 
   assert.equal(snapshot.diagnostics.available, true);

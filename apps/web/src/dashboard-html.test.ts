@@ -158,6 +158,19 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('connect-btn');
   });
 
+  it('shows persisted gateway configuration state separately from write-only credentials', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('id="settings-persistence-status"');
+    expect(html).toContain('Loading persisted configuration');
+    expect(html).toContain('Never configured');
+    expect(html).toContain('Loaded from persisted storage');
+    expect(html).toContain('Partial persisted configuration');
+    expect(html).toContain('Persisted configuration load failed');
+    expect(html).toContain('data.persistence');
+    expect(html).toContain('settings-api-token');
+    expect(html).toContain('(write-only)');
+  });
+
   it('shows top-level API errors and reloads after stale capability expiry', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('const error = data?.error ?? data?.message;');

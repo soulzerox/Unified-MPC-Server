@@ -321,7 +321,10 @@ export function renderDashboardViewsHtml(): string {
         <div class="form-group"><label for="settings-allowed-hostnames">Allowed MCP Hostnames</label><input class="form-control mono" id="settings-allowed-hostnames" type="text" required placeholder="Enter allowed hostname(s)"></div>
         <div class="form-group"><label for="settings-allowed-origins">Allowed MCP Origins</label><input class="form-control mono" id="settings-allowed-origins" type="text" required placeholder="https://your-hostname"></div>
         <button class="btn" type="submit">Validate, Configure & Start</button>
-        <span id="settings-token-status" class="badge badge-state mono">Credentials not configured</span>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;">
+          <span id="settings-persistence-status" class="badge badge-state mono">Loading persisted configuration</span>
+          <span id="settings-token-status" class="badge badge-state mono">Credentials not configured</span>
+        </div>
       </form>
     </div>
     <div class="card">

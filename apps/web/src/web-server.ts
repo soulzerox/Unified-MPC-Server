@@ -129,6 +129,20 @@ export interface StorageDiagnosticsSnapshot {
 
 export type StorageDiagnosticsProbe = () => Promise<StorageDiagnosticsSnapshot>;
 
+export type GatewayPersistenceLoadState = 'never_configured' | 'loaded' | 'partial' | 'load_failed';
+export interface GatewayPersistenceStatus {
+  readonly state: GatewayPersistenceLoadState;
+  readonly nonSecretConfigured: boolean;
+  readonly tunnelToken: {
+    readonly configured: boolean;
+    readonly present: boolean | null;
+  };
+  readonly apiToken: {
+    readonly configured: boolean;
+    readonly present: boolean | null;
+  };
+}
+
 export type GatewayRestoreState = 'idle' | 'restoring' | 'degraded' | 'connected' | 'stopped';
 export interface GatewayRestoreStatus {
   readonly state: GatewayRestoreState;
@@ -844,8 +858,12 @@ export class ControlPlaneServer {
         sendJsonError(res, 503, 'Settings persistence is unavailable');
         return;
       }
+      const [settings, persistence] = await Promise.all([
+        this.publicSettings(),
+        this.gatewayPersistenceState(),
+      ]);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ settings: await this.publicSettings() }));
+      res.end(JSON.stringify({ settings, persistence }));
       return;
     }
 
@@ -991,6 +1009,79 @@ export class ControlPlaneServer {
       originUrl: settings.get(SETTING_KEYS.originUrl),
       remoteTunnelId: settings.get(SETTING_KEYS.remoteTunnelId),
       cloudflareApiTokenConfigured: settings.get(SETTING_KEYS.apiTokenConfigured) === 'true',
+    };
+  }
+
+  private async gatewayPersistenceState(): Promise<GatewayPersistenceStatus> {
+    const settings = this.settingsRepository!;
+    const requiredNonSecretValues = [
+      settings.get(SETTING_KEYS.accountId),
+      settings.get(SETTING_KEYS.zoneName),
+      settings.get(SETTING_KEYS.tunnelName),
+      settings.get(SETTING_KEYS.publicUrl),
+      settings.get(SETTING_KEYS.originUrl),
+      settings.get(SETTING_KEYS.allowedHostnames),
+      settings.get(SETTING_KEYS.allowedOrigins),
+    ];
+    const hasValue = (value: string | null): boolean => value !== null && value.trim().length > 0;
+    const nonSecretConfigured = requiredNonSecretValues.every(hasValue);
+    const anyNonSecretConfigured = requiredNonSecretValues.some(hasValue);
+    const tunnelConfigured = settings.get(SETTING_KEYS.tokenConfigured) === 'true';
+    const apiConfigured = settings.get(SETTING_KEYS.apiTokenConfigured) === 'true';
+
+    let tunnelPresent: boolean | null = false;
+    let apiPresent: boolean | null = false;
+    let loadFailed = false;
+
+    if (this.secretStore === undefined) {
+      if (anyNonSecretConfigured || tunnelConfigured || apiConfigured) {
+        tunnelPresent = null;
+        apiPresent = null;
+        loadFailed = true;
+      }
+    } else {
+      try {
+        tunnelPresent = await this.secretStore.get('cloudflare_tunnel_token') !== null;
+      } catch {
+        tunnelPresent = null;
+        loadFailed = true;
+      }
+      try {
+        apiPresent = await this.secretStore.get('cloudflare_api_token') !== null;
+      } catch {
+        apiPresent = null;
+        loadFailed = true;
+      }
+    }
+
+    let state: GatewayPersistenceLoadState;
+    if (loadFailed) {
+      state = 'load_failed';
+    } else if (
+      !anyNonSecretConfigured
+      && !tunnelConfigured
+      && !apiConfigured
+      && tunnelPresent === false
+      && apiPresent === false
+    ) {
+      state = 'never_configured';
+    } else if (
+      nonSecretConfigured
+      && tunnelConfigured
+      && apiConfigured
+      && tunnelPresent === true
+      && apiPresent === true
+    ) {
+      state = 'loaded';
+    } else {
+      state = 'partial';
+    }
+
+    return {
+      state,
+      nonSecretConfigured,
+      tunnelToken: { configured: tunnelConfigured, present: tunnelPresent },
+      apiToken: { configured: apiConfigured, present: apiPresent },
     };
   }
 

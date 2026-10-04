@@ -24,10 +24,12 @@ import {
   parseRuntimeVersion,
   prepareDependencyBootstrap,
   runtimeDeploymentCleanupBlocker,
+  WorkspacePathGuard,
   type DependencyBootstrapPlan,
   type RuntimeDeploymentCleanupBlocker,
   type DependencyInstallCommand,
   type ResourceAdmissionController,
+  type Workspace,
 } from '@unified-mpc/workspace';
 import { z } from 'zod';
 import type { McpApplicationServices, McpToolDefinition } from './tools/tool-types.js';
@@ -1481,6 +1483,8 @@ export class UpgradeRuntimeService {
     const dryRun = input.dryRun !== false && input.dry_run !== false;
     if (dryRun) return ok({ ...plan, dryRun: true });
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Creating a Git worktree requires explicit user confirmation'));
+    const containment = await this.assertManagedWorktreeContainment(workspaceId, normalizedPath);
+    if (!containment.ok) return containment;
     await this.refreshSharedState();
     if (this.worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath)) {
       return err(appError('INVALID_INPUT', 'Git worktree path is already present in the shared ownership ledger'));
@@ -1539,6 +1543,27 @@ export class UpgradeRuntimeService {
       ownershipLedger: true,
       dependencyPolicy: dependencyBootstrap.value,
     });
+  }
+
+  private async assertManagedWorktreeContainment(
+    workspaceId: string,
+    worktreePath: string,
+  ): Promise<Result<void>> {
+    if (this.services.workspaceInfo === undefined) return ok(undefined);
+
+    const workspaceInfo = await this.services.workspaceInfo.info(this.actor, workspaceId);
+    if (!workspaceInfo.ok) return err(workspaceInfo.error);
+    const workspace = workspaceFromInfo(workspaceInfo.value, workspaceId);
+    if (workspace === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Workspace metadata did not include a canonical workspace identity and root', true));
+    }
+
+    const guard = new WorkspacePathGuard(undefined, {
+      platform: this.diagnostics.platform,
+      trustedWorkspaceAccess: true,
+    });
+    const resolved = await guard.resolveForWrite(workspace, worktreePath);
+    return resolved.ok ? ok(undefined) : err(resolved.error);
   }
 
   private async bootstrapNewWorktreeDependencies(
@@ -2416,6 +2441,28 @@ function failedDependencyPolicy(
     lastBootstrapResult: 'failed',
     migrationPhase: 'migration_blocked',
     blockingReasons: [...(base?.blockingReasons ?? []), reason],
+  };
+}
+
+function workspaceFromInfo(value: unknown, expectedWorkspaceId: string): Workspace | undefined {
+  if (!isRecord(value)
+    || value.id !== expectedWorkspaceId
+    || typeof value.displayName !== 'string'
+    || value.displayName.trim().length === 0
+    || typeof value.rootPath !== 'string'
+    || value.rootPath.trim().length === 0
+    || typeof value.realRootPath !== 'string'
+    || value.realRootPath.trim().length === 0
+    || typeof value.createdAt !== 'string'
+    || value.createdAt.trim().length === 0) {
+    return undefined;
+  }
+  return {
+    id: expectedWorkspaceId,
+    displayName: value.displayName,
+    rootPath: value.rootPath,
+    realRootPath: value.realRootPath,
+    createdAt: value.createdAt,
   };
 }
 

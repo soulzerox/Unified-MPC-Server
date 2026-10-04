@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ok } from '@unified-mpc/domain';
@@ -563,6 +563,102 @@ describe('upgrade runtime', () => {
     await expect(runtime.execute('git_worktree_remove', {
       workspaceId: 'ws-linux', worktreePath: '.worktrees\\agent-1', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('keeps Full Bypass usable after canonical managed-worktree containment validation', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-canonical-'));
+    const calls: unknown[] = [];
+    try {
+      await mkdir(path.join(workspaceRoot, '.worktrees'), { recursive: true });
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-canonical',
+              displayName: 'canonical containment fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request);
+            return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+          },
+        },
+      }, actor);
+
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-canonical',
+        worktreePath: '.worktrees/full-bypass-agent',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dependencyEmergencyOverride: true,
+        dryRun: false,
+      }, undefined, fullBypassAuthorization)).resolves.toMatchObject({
+        ok: true,
+        value: { status: 'completed', worktreePath: '.worktrees/full-bypass-agent' },
+      });
+      expect(calls).toEqual([{
+        workspaceId: 'ws-canonical',
+        args: ['worktree', 'add', '--detach', '.worktrees/full-bypass-agent', 'main'],
+      }]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects managed worktree paths whose canonical ancestor escapes through a symlink', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-root-'));
+    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-outside-'));
+    const calls: unknown[] = [];
+    try {
+      await symlink(outsideRoot, path.join(workspaceRoot, '.worktrees'), 'dir');
+      await mkdir(path.join(workspaceRoot, '.unified-mpc'), { recursive: true });
+      await symlink(outsideRoot, path.join(workspaceRoot, '.unified-mpc', 'worktrees'), 'dir');
+
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-symlink',
+              displayName: 'symlink containment fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request);
+            return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+          },
+        },
+      }, actor);
+
+      for (const worktreePath of ['.worktrees/escape', '.unified-mpc/worktrees/escape']) {
+        await expect(runtime.execute('git_worktree_spawn', {
+          workspaceId: 'ws-symlink',
+          worktreePath,
+          ref: 'main',
+          bootstrapDependencies: false,
+          dependencyEmergencyOverride: true,
+          dryRun: false,
+        }, undefined, fullBypassAuthorization)).resolves.toMatchObject({
+          ok: false,
+          error: { code: 'PATH_OUTSIDE_WORKSPACE' },
+        });
+      }
+      expect(calls).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   it('validates Ponytail workspace overrides before project profile persistence', async () => {

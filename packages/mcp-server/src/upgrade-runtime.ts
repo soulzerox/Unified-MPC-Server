@@ -2445,24 +2445,24 @@ function failedDependencyPolicy(
 }
 
 function workspaceFromInfo(value: unknown, expectedWorkspaceId: string): Workspace | undefined {
-  if (!isRecord(value)
-    || value.id !== expectedWorkspaceId
-    || typeof value.displayName !== 'string'
-    || value.displayName.trim().length === 0
-    || typeof value.rootPath !== 'string'
-    || value.rootPath.trim().length === 0
-    || typeof value.realRootPath !== 'string'
-    || value.realRootPath.trim().length === 0
-    || typeof value.createdAt !== 'string'
-    || value.createdAt.trim().length === 0) {
+  if (!isRecord(value) || typeof value.rootPath !== 'string' || value.rootPath.trim().length === 0) {
     return undefined;
   }
+  const realRootPath = typeof value.realRootPath === 'string' && value.realRootPath.trim().length > 0
+    ? value.realRootPath
+    : value.rootPath;
+  const displayName = typeof value.displayName === 'string' && value.displayName.trim().length > 0
+    ? value.displayName
+    : expectedWorkspaceId;
+  const createdAt = typeof value.createdAt === 'string' && value.createdAt.trim().length > 0
+    ? value.createdAt
+    : '1970-01-01T00:00:00.000Z';
   return {
     id: expectedWorkspaceId,
-    displayName: value.displayName,
+    displayName,
     rootPath: value.rootPath,
-    realRootPath: value.realRootPath,
-    createdAt: value.createdAt,
+    realRootPath,
+    createdAt,
   };
 }
 

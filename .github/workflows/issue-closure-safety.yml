@@ -1,0 +1,42 @@
+name: Issue closure safety gate
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/check-issue-closing-keywords.mjs"
+      - "scripts/check-issue-closing-keywords.test.mjs"
+      - ".github/workflows/issue-closure-safety.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Closing-keyword regression
+        run: node --test scripts/check-issue-closing-keywords.test.mjs
+
+      - name: Reject negated native closing keywords
+        if: github.event_name == 'pull_request_target'
+        run: node scripts/check-issue-closing-keywords.mjs "$GITHUB_EVENT_PATH"

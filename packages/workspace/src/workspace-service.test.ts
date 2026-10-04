@@ -323,7 +323,7 @@ describe('WorkspaceService', () => {
 
     const result = await service.reconcileLifecycle({
       goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
-      goalDurableReferenceStates: new Map([['goal-1', 'clear']]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
     });
 
     expect(result).toMatchObject({
@@ -400,7 +400,7 @@ describe('WorkspaceService', () => {
 
     const result = await new WorkspaceService(repository).reconcileLifecycle({
       goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
-      goalDurableReferenceStates: new Map([['goal-1', 'clear']]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
     });
 
     expect(result).toMatchObject({

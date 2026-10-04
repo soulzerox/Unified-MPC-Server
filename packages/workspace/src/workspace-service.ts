@@ -1,6 +1,15 @@
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { appError, err, ok, type Result, type WorkspaceAdmissionReceipt, type WorkspaceBaseRebaseReceipt, type WorkspaceId } from '@unified-mpc/domain';
+import {
+  appError,
+  err,
+  ok,
+  type GoalRuntimeProjection,
+  type Result,
+  type WorkspaceAdmissionReceipt,
+  type WorkspaceBaseRebaseReceipt,
+  type WorkspaceId,
+} from '@unified-mpc/domain';
 import { workspaceLifecycleKind, type GoalWorkspaceIntegrationState, type GoalWorkspaceKind, type GoalWorkspaceParentSource, type Workspace, type WorkspaceLifecycleKind, type WorkspaceWriterLease } from './workspace-types.js';
 import { isPosixMountRoot, resolveHostPath } from './filesystem-root.js';
 
@@ -63,10 +72,45 @@ export interface WorkspaceRegistrationOptions {
   readonly integrationState?: GoalWorkspaceIntegrationState;
 }
 
+export type WorkspaceDurableReferenceState = 'clear' | 'present' | 'unknown';
+
+export type WorkspaceCleanupDisposition = 'blocked' | 'retention_candidate';
+
+export type WorkspaceCleanupBlockerReason =
+  | 'protected_workspace'
+  | 'workspace_unavailable'
+  | 'goal_identity_missing'
+  | 'goal_runtime_unknown'
+  | 'goal_runtime_scope_mismatch'
+  | 'goal_lifecycle_not_retention_ready'
+  | 'goal_runtime_not_idle'
+  | 'goal_integration_not_integrated'
+  | 'goal_workspace_not_clean'
+  | 'active_writer_lease'
+  | 'durable_references_unknown'
+  | 'durable_references_present';
+
+export interface WorkspaceLifecycleCleanupEvaluation {
+  readonly workspaceId: WorkspaceId;
+  readonly goalId?: string;
+  readonly disposition: WorkspaceCleanupDisposition;
+  readonly blockers: readonly WorkspaceCleanupBlockerReason[];
+  readonly workspaceAvailable: boolean;
+  readonly writerLeaseActive: boolean;
+  readonly durableReferenceState: WorkspaceDurableReferenceState;
+}
+
 export interface WorkspaceLifecycleReconcileOptions {
   readonly protectedWorkspaceIds?: readonly WorkspaceId[];
   readonly endedOwnerSessionIds?: readonly string[];
   readonly endedOwnerJobIds?: readonly string[];
+  /** Authoritative #82 projection keyed by durable Goal identity. Missing truth fails cleanup classification closed. */
+  readonly goalRuntimeProjections?: ReadonlyMap<string, GoalRuntimeProjection>;
+  /**
+   * Authoritative durable-reference truth from the #170-family journal/reference owner.
+   * Until that contract is supplied, Goal cleanup classification remains blocked.
+   */
+  readonly goalDurableReferenceStates?: ReadonlyMap<string, WorkspaceDurableReferenceState>;
 }
 
 export interface WorkspaceLifecycleReconciliation {
@@ -74,6 +118,8 @@ export interface WorkspaceLifecycleReconciliation {
   readonly archivedWorkspaceIds: readonly WorkspaceId[];
   readonly unavailableWorkspaceIds: readonly WorkspaceId[];
   readonly skippedProtectedWorkspaceIds: readonly WorkspaceId[];
+  /** Read-only #80 classification. This receipt never authorizes archival or filesystem deletion. */
+  readonly goalCleanupEvaluations: readonly WorkspaceLifecycleCleanupEvaluation[];
 }
 
 export interface WorkspaceServiceOptions {
@@ -256,10 +302,21 @@ export class WorkspaceService {
     const archivedWorkspaceIds: WorkspaceId[] = [];
     const unavailableWorkspaceIds: WorkspaceId[] = [];
     const skippedProtectedWorkspaceIds: WorkspaceId[] = [];
+    const goalCleanupEvaluations: WorkspaceLifecycleCleanupEvaluation[] = [];
 
     for (const workspace of workspaces) {
       const available = await this.isWorkspaceAvailable(workspace);
       const lifecycleKind = workspaceLifecycleKind(workspace);
+      if (lifecycleKind === 'goal') {
+        goalCleanupEvaluations.push(classifyGoalWorkspaceCleanup(
+          workspace,
+          available,
+          protectedIds.has(workspace.id),
+          options.goalRuntimeProjections?.get(workspace.goalId ?? ''),
+          options.goalDurableReferenceStates?.get(workspace.goalId ?? '') ?? 'unknown',
+          now,
+        ));
+      }
       const expired = workspace.expiresAt !== undefined
         && workspace.expiresAt !== null
         && Number.isFinite(Date.parse(workspace.expiresAt))
@@ -270,7 +327,7 @@ export class WorkspaceService {
         || (workspace.ownerJobId !== undefined
           && workspace.ownerJobId !== null
           && endedJobs.has(workspace.ownerJobId));
-      const autoCleanupEligible = lifecycleKind !== 'project'
+      const autoCleanupEligible = (lifecycleKind === 'temporary' || lifecycleKind === 'inspection')
         && workspace.autoCleanup === true
         && (!available || expired || ownerEnded);
 
@@ -303,6 +360,7 @@ export class WorkspaceService {
       archivedWorkspaceIds,
       unavailableWorkspaceIds,
       skippedProtectedWorkspaceIds,
+      goalCleanupEvaluations,
     });
   }
 
@@ -322,6 +380,66 @@ export class WorkspaceService {
       return false;
     }
   }
+}
+
+function classifyGoalWorkspaceCleanup(
+  workspace: Workspace,
+  workspaceAvailable: boolean,
+  protectedWorkspace: boolean,
+  projection: GoalRuntimeProjection | undefined,
+  durableReferenceState: WorkspaceDurableReferenceState,
+  now: Date,
+): WorkspaceLifecycleCleanupEvaluation {
+  const blockers: WorkspaceCleanupBlockerReason[] = [];
+  const goalId = workspace.goalId?.trim();
+  const writerLeaseActive = workspace.writerLease !== undefined
+    && (() => {
+      const expiresAt = Date.parse(workspace.writerLease.expiresAt);
+      return !Number.isFinite(expiresAt) || expiresAt > now.getTime();
+    })();
+
+  if (protectedWorkspace) blockers.push('protected_workspace');
+  if (!workspaceAvailable) blockers.push('workspace_unavailable');
+  if (goalId === undefined || goalId.length === 0) blockers.push('goal_identity_missing');
+
+  const validProjection = goalId !== undefined
+    && goalId.length > 0
+    && projection?.goalId === goalId
+    ? projection
+    : undefined;
+  if (projection !== undefined && validProjection === undefined) {
+    blockers.push('goal_runtime_scope_mismatch');
+  } else if (validProjection === undefined) {
+    blockers.push('goal_runtime_unknown');
+  } else {
+    if (workspace.parentWorkspaceId !== undefined && validProjection.workspaceId !== workspace.parentWorkspaceId) {
+      blockers.push('goal_runtime_scope_mismatch');
+    }
+    if (
+      validProjection.lifecycleState !== 'completed'
+      && validProjection.lifecycleState !== 'archived'
+      && validProjection.lifecycleState !== 'cleaned'
+    ) {
+      blockers.push('goal_lifecycle_not_retention_ready');
+    }
+    if (validProjection.runtimeState !== 'idle') blockers.push('goal_runtime_not_idle');
+    if (validProjection.integrationState !== 'integrated') blockers.push('goal_integration_not_integrated');
+    if (validProjection.workspaceState !== 'clean') blockers.push('goal_workspace_not_clean');
+  }
+
+  if (writerLeaseActive) blockers.push('active_writer_lease');
+  if (durableReferenceState === 'unknown') blockers.push('durable_references_unknown');
+  if (durableReferenceState === 'present') blockers.push('durable_references_present');
+
+  return {
+    workspaceId: workspace.id,
+    ...(goalId === undefined || goalId.length === 0 ? {} : { goalId }),
+    disposition: blockers.length === 0 ? 'retention_candidate' : 'blocked',
+    blockers,
+    workspaceAvailable,
+    writerLeaseActive,
+    durableReferenceState,
+  };
 }
 
 function samePath(left: string, right: string, platform: NodeJS.Platform): boolean {

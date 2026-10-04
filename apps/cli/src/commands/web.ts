@@ -1,4 +1,12 @@
-import { ok, err, appError, type GoalRecord, type Result, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import {
+  ok,
+  err,
+  appError,
+  type GoalRecord,
+  type GoalRuntimeProjection,
+  type Result,
+  type WorkspaceAdmissionReceipt,
+} from '@unified-mpc/domain';
 import {
   GitService,
   GoalRuntimeControlPlaneService,
@@ -36,7 +44,7 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { WorkspaceService, isMachineRootPath, isProjectWorkspace } from '@unified-mpc/workspace';
+import { WorkspaceService, isMachineRootPath, isProjectWorkspace, workspaceLifecycleKind } from '@unified-mpc/workspace';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
@@ -107,14 +115,19 @@ export async function runWeb(
     bootstrapNonSecretSettings(settings);
     const lifecycleCandidates = await workspaceService.list();
     const protectedByOpenGoal: string[] = [];
+    const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
     for (const workspace of lifecycleCandidates) {
       if (await goalRepository.countWorkspaceGoalsForHost(workspace.id) > 0) protectedByOpenGoal.push(workspace.id);
+      if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;
+      const snapshot = await goalRuntimeSnapshots.getGoalRuntimeSnapshot(workspace.goalId);
+      if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
     }
     const lifecycle = await workspaceService.reconcileLifecycle({
       protectedWorkspaceIds: [
         ...workspaceSelectionReferences(settings.get(USER_SETTING_KEYS.httpWorkspaceSelection)),
         ...protectedByOpenGoal,
       ],
+      goalRuntimeProjections,
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
     const workspaceControl = createWorkspaceControl(workspaceRepository, workspaceService, settings, workspaceIndex);

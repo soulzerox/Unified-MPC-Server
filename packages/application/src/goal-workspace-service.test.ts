@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -234,6 +234,36 @@ describe('GoalWorkspaceService', () => {
         baseRef: 'origin/main',
         baseRevision: git.refreshedBaseSha,
       });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects Goal Workspace creation when the managed worktree root canonicalizes elsewhere', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-symlink-'));
+    const nonManagedRoot = path.join(parentRoot, 'non-managed');
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    git.runResults = [
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc'), { recursive: true });
+      await mkdir(nonManagedRoot, { recursive: true });
+      await symlink(nonManagedRoot, path.join(parentRoot, '.unified-mpc', 'worktrees'), 'dir');
+
+      const result = await new GoalWorkspaceService(repository, git).create({
+        goalId: 'goal-escape', parentWorkspaceId: 'project-1', branchName: 'goal/escape',
+      });
+
+      expect(result).toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+      expect(git.commands.some((command) => command[0] === 'worktree')).toBe(false);
+      expect(repository.workspaces).toHaveLength(1);
     } finally {
       await rm(parentRoot, { recursive: true, force: true });
     }

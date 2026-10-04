@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { appError, decideGuardedBaseRebase, err, ok, type GoalWorkspaceState, type Result, type WorkspaceAdmissionReceipt, type WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import { GitAdapter, type GitCommandResult, type GitGuardedRebaseRequest, type GitGuardedRebaseResult, type GitStatusResult, type GitWorkspaceSnapshotOptions } from '@unified-mpc/git';
-import { WorkspaceService, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
+import { resolveManagedWorktreePath, WorkspaceService, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
 
 export interface GoalWorkspaceGitPort {
   status(cwd: string, signal?: AbortSignal): Promise<Result<GitStatusResult>>;
@@ -337,7 +337,9 @@ export class GoalWorkspaceService {
     const resolvedBase = base.value.stdout.trim();
     if (!isCommitSha(resolvedBase)) return err(appError('INTERNAL_ERROR', 'Resolved Goal Workspace base is invalid', true));
 
-    const worktreePath = path.join(parent.realRootPath, '.unified-mpc', 'worktrees', request.goalId);
+    const managedPath = await resolveManagedWorktreePath(parent, `.unified-mpc/worktrees/${request.goalId}`);
+    if (!managedPath.ok) return managedPath;
+    const worktreePath = managedPath.value.absolutePath;
     await mkdir(path.dirname(worktreePath), { recursive: true });
     const add = await this.git.run(parent.realRootPath, [
       'worktree', 'add', '-b', request.branchName!, worktreePath, resolvedBase,

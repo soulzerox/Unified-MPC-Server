@@ -23,8 +23,8 @@ import {
   normalizeHostPath,
   parseRuntimeVersion,
   prepareDependencyBootstrap,
+  resolveManagedWorktreePath,
   runtimeDeploymentCleanupBlocker,
-  WorkspacePathGuard,
   type DependencyBootstrapPlan,
   type RuntimeDeploymentCleanupBlocker,
   type DependencyInstallCommand,
@@ -1562,37 +1562,8 @@ export class UpgradeRuntimeService {
       return err(appError('INTERNAL_ERROR', 'Workspace metadata did not include a canonical workspace identity and root', true));
     }
 
-    const platform = this.diagnostics.platform;
-    const pathApi = hostPathApi(platform);
-    const guard = new WorkspacePathGuard(undefined, {
-      platform,
-      trustedWorkspaceAccess: true,
-    });
-    const segments = worktreePath.split('/').filter((segment) => segment.length > 0);
-    let resolvedManagedPath = worktreePath;
-
-    for (let index = 1; index <= segments.length; index += 1) {
-      const prefix = segments.slice(0, index).join('/');
-      const resolved = await guard.resolveForWrite(workspace, prefix);
-      if (!resolved.ok) return err(resolved.error);
-      if (resolved.value.outsideWorkspace === true) {
-        return err(appError('PATH_OUTSIDE_WORKSPACE', 'Managed worktree path is outside the owning workspace'));
-      }
-
-      const normalizedRelativePath = normalizeHostPath(resolved.value.relativePath, platform);
-      if (normalizedRelativePath === null) {
-        return err(appError('INVALID_INPUT', 'Managed worktree path could not be canonicalized'));
-      }
-      const canonicalPrefix = normalizedRelativePath.split(pathApi.sep).join('/');
-      if (!sameManagedWorktreePath(prefix, canonicalPrefix, platform)) {
-        return err(appError('PATH_OUTSIDE_WORKSPACE', 'Managed worktree path canonicalizes outside its managed root'));
-      }
-
-      if (index === segments.length) resolvedManagedPath = canonicalPrefix;
-      if (!resolved.value.exists) break;
-    }
-
-    return ok(resolvedManagedPath);
+    const resolved = await resolveManagedWorktreePath(workspace, worktreePath, this.diagnostics.platform);
+    return resolved.ok ? ok(resolved.value.relativePath) : err(resolved.error);
   }
 
   private async bootstrapNewWorktreeDependencies(
@@ -2471,11 +2442,6 @@ function failedDependencyPolicy(
     migrationPhase: 'migration_blocked',
     blockingReasons: [...(base?.blockingReasons ?? []), reason],
   };
-}
-
-function sameManagedWorktreePath(left: string, right: string, platform: NodeJS.Platform): boolean {
-  const normalize = (value: string): string => platform === 'win32' ? value.toLowerCase() : value;
-  return normalize(left) === normalize(right);
 }
 
 function workspaceFromInfo(value: unknown, expectedWorkspaceId: string): Workspace | undefined {

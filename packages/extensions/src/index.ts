@@ -26,6 +26,21 @@ export {
 } from './mcp-session-manager.js';
 export { LocalExtensionsService, type LocalExtensionsServiceOptions } from './extensions-service.js';
 export {
+  CanonicalExtensionRegistry,
+  canonicalExtensionRegistryPath,
+  reconcileCanonicalExtensionCandidates,
+  type CanonicalExtensionCandidate,
+  type CanonicalExtensionCompatibility,
+  type CanonicalExtensionCompatibilityState,
+  type CanonicalExtensionEntry,
+  type CanonicalExtensionHostProfile,
+  type CanonicalExtensionKind,
+  type CanonicalExtensionOriginType,
+  type CanonicalExtensionProvenance,
+  type CanonicalExtensionRegistryOptions,
+  type CanonicalExtensionRegistrySnapshot,
+} from './canonical-extension-registry.js';
+export {
   EXTENSIONS_SETTINGS_KEY,
   createLocalExtensionsService,
   type CreateLocalExtensionsOptions,

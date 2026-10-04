@@ -10,6 +10,7 @@ export * from './workspace-admission.js';
 export * from './structural-evidence.js';
 export * from './invocation-authorization.js';
 export * from './issue-closure-evidence.js';
+export * from './issue-closure-reconciliation.js';
 export * from './scheduled-continuation.js';
 export * from './limits.js';
 export * from './merge-verification.js';

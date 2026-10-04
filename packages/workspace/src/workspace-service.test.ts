@@ -350,10 +350,9 @@ describe('WorkspaceService', () => {
       }],
     });
     expect(repository.entries.find((workspace) => workspace.id === 'goal-workspace-readonly')?.archivedAt).toBeUndefined();
-    expect(repository.entries.find((workspace) => workspace.id === 'inspection-missing')).toMatchObject({
-      archivedAt: undefined,
-      unavailableSince: undefined,
-    });
+    const unrelatedInspection = repository.entries.find((workspace) => workspace.id === 'inspection-missing');
+    expect(unrelatedInspection?.archivedAt).toBeUndefined();
+    expect(unrelatedInspection?.unavailableSince).toBeUndefined();
   });
 
   it('classifies a completed integrated clean Goal Workspace as a retention candidate without archiving it', async () => {

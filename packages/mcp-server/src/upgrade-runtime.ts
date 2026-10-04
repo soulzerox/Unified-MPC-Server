@@ -158,6 +158,27 @@ interface WorktreeLedgerEntry {
   readonly dependencyPolicy: WorktreeDependencyPolicyState;
 }
 
+type WorktreeTopologyClassification = 'canonical' | 'noncanonical' | 'unresolved';
+
+interface WorktreeTopologyAnomaly {
+  readonly workspaceId: string;
+  readonly worktreePath: string;
+  readonly classification: Exclude<WorktreeTopologyClassification, 'canonical'>;
+  readonly reason: string;
+}
+
+interface WorktreeTopologyDiagnostics {
+  readonly totalEntries: number;
+  readonly scannedEntries: number;
+  readonly canonicalEntries: number;
+  readonly noncanonicalEntries: number;
+  readonly unresolvedEntries: number;
+  readonly truncated: boolean;
+  readonly anomalies: readonly WorktreeTopologyAnomaly[];
+  readonly mutationPolicy: 'diagnostic-only-preserve-existing-work';
+  readonly remediationOwner: 'lifecycle-janitor';
+}
+
 interface SelfHealFix {
   readonly id: string;
   readonly kind: 'reindex_workspace' | 'cancel_stale_task';
@@ -870,6 +891,111 @@ export class UpgradeRuntimeService {
     });
   }
 
+  private async worktreeTopologyDiagnostics(): Promise<WorktreeTopologyDiagnostics> {
+    const maxEntries = 100;
+    const sampled = this.worktrees.slice(0, maxEntries);
+    let canonicalEntries = 0;
+    let noncanonicalEntries = 0;
+    let unresolvedEntries = 0;
+    const anomalies: WorktreeTopologyAnomaly[] = [];
+    const platform = this.diagnostics.platform;
+
+    for (const entry of sampled) {
+      const syntaxReason = noncanonicalManagedWorktreeSyntaxReason(entry.worktreePath, platform);
+      if (syntaxReason !== undefined) {
+        noncanonicalEntries += 1;
+        anomalies.push({
+          workspaceId: entry.workspaceId,
+          worktreePath: entry.worktreePath,
+          classification: 'noncanonical',
+          reason: syntaxReason,
+        });
+        continue;
+      }
+
+      if (this.services.workspaceInfo === undefined) {
+        unresolvedEntries += 1;
+        anomalies.push({
+          workspaceId: entry.workspaceId,
+          worktreePath: entry.worktreePath,
+          classification: 'unresolved',
+          reason: 'workspace_metadata_unavailable',
+        });
+        continue;
+      }
+
+      try {
+        const info = await this.services.workspaceInfo.info(this.actor, entry.workspaceId);
+        if (!info.ok) {
+          unresolvedEntries += 1;
+          anomalies.push({
+            workspaceId: entry.workspaceId,
+            worktreePath: entry.worktreePath,
+            classification: 'unresolved',
+            reason: info.error.code,
+          });
+          continue;
+        }
+
+        const workspace = workspaceFromInfo(info.value, entry.workspaceId);
+        if (workspace === undefined) {
+          unresolvedEntries += 1;
+          anomalies.push({
+            workspaceId: entry.workspaceId,
+            worktreePath: entry.worktreePath,
+            classification: 'unresolved',
+            reason: 'workspace_metadata_invalid',
+          });
+          continue;
+        }
+
+        const resolved = await resolveManagedWorktreePath(workspace, entry.worktreePath, platform);
+        if (resolved.ok) {
+          canonicalEntries += 1;
+          continue;
+        }
+        if (resolved.error.code === 'PATH_OUTSIDE_WORKSPACE') {
+          noncanonicalEntries += 1;
+          anomalies.push({
+            workspaceId: entry.workspaceId,
+            worktreePath: entry.worktreePath,
+            classification: 'noncanonical',
+            reason: resolved.error.code,
+          });
+          continue;
+        }
+
+        unresolvedEntries += 1;
+        anomalies.push({
+          workspaceId: entry.workspaceId,
+          worktreePath: entry.worktreePath,
+          classification: 'unresolved',
+          reason: resolved.error.code,
+        });
+      } catch {
+        unresolvedEntries += 1;
+        anomalies.push({
+          workspaceId: entry.workspaceId,
+          worktreePath: entry.worktreePath,
+          classification: 'unresolved',
+          reason: 'workspace_topology_probe_failed',
+        });
+      }
+    }
+
+    return {
+      totalEntries: this.worktrees.length,
+      scannedEntries: sampled.length,
+      canonicalEntries,
+      noncanonicalEntries,
+      unresolvedEntries,
+      truncated: this.worktrees.length > sampled.length,
+      anomalies,
+      mutationPolicy: 'diagnostic-only-preserve-existing-work',
+      remediationOwner: 'lifecycle-janitor',
+    };
+  }
+
   private async telemetryDashboard(): Promise<Result<unknown>> {
     const contextEconomy = this.contextEconomy.snapshot();
     const verification = this.incrementalVerifier.stats();
@@ -886,6 +1012,7 @@ export class UpgradeRuntimeService {
       arrayBuffersBytes: memory.arrayBuffers,
     };
     const runtimeDiagnostics = this.services.runtimeDiagnostics?.();
+    const worktreeTopology = await this.worktreeTopologyDiagnostics();
     const runtimeRetention = {
       tasks: this.tasks.size,
       checkpoints: this.checkpoints.length,
@@ -920,6 +1047,7 @@ export class UpgradeRuntimeService {
         recentErrorClasses: runtimeTelemetry.recentErrorClasses,
         processMemory,
         runtimeRetention,
+        worktreeTopology,
         cache: { hits: cacheHits, misses: cacheMisses, hitRate: cacheHitRate, entries: verification.entries + contextEconomy.ledgerEntries, bytesSaved: verification.bytesSaved + contextEconomy.previouslySeenBytesAvoided },
         cacheHitRate,
         contextBytes: contextEconomy.contextSentBytes,
@@ -933,7 +1061,7 @@ export class UpgradeRuntimeService {
       return ok({
         tool: 'telemetry_dashboard', status: 'ready', available: true, ready: true, executed: true,
         source: 'runtime-counters', mcpCalls: 0, completedCalls: 0, errors: 0, averageLatencyMs: 0, p95LatencyMs: 0,
-        processMemory, runtimeRetention,
+        processMemory, runtimeRetention, worktreeTopology,
         cacheHitRate: hitRate(this.cache), contextBytes: contextEconomy.contextSentBytes,
         filesScanned: contextEconomy.filesDiscovered, filesDelivered: contextEconomy.filesDelivered,
         contextEconomy,
@@ -965,7 +1093,7 @@ export class UpgradeRuntimeService {
       mcpCalls: Math.max(started, completed.length), completedCalls: completed.length, errors,
       averageLatencyMs: completed.length === 0 ? 0 : Number((totalDuration / completed.length).toFixed(2)),
       p95LatencyMs: p95Index < 0 ? 0 : durations[p95Index],
-      processMemory, runtimeRetention,
+      processMemory, runtimeRetention, worktreeTopology,
       cacheHitRate: hitRate(this.cache), contextBytes: contextEconomy.contextSentBytes,
       filesScanned: contextEconomy.filesDiscovered, filesDelivered: contextEconomy.filesDelivered,
       contextEconomy,
@@ -2442,6 +2570,24 @@ function failedDependencyPolicy(
     migrationPhase: 'migration_blocked',
     blockingReasons: [...(base?.blockingReasons ?? []), reason],
   };
+}
+
+function noncanonicalManagedWorktreeSyntaxReason(
+  worktreePath: string,
+  platform: NodeJS.Platform,
+): string | undefined {
+  if (platform !== 'win32' && worktreePath.includes('\\')) return 'foreign_host_path_syntax';
+  const normalizedHostPath = normalizeHostPath(worktreePath, platform);
+  if (normalizedHostPath === null) return 'foreign_host_path_syntax';
+  if (isAbsoluteHostPath(worktreePath, platform)) return 'absolute_path_outside_managed_roots';
+
+  const pathApi = hostPathApi(platform);
+  const normalizedPath = normalizedHostPath.split(pathApi.sep).join('/');
+  if (normalizedPath.split('/').some((part) => part === '..')) return 'parent_traversal_outside_managed_roots';
+  if (!normalizedPath.startsWith('.worktrees/') && !normalizedPath.startsWith('.unified-mpc/worktrees/')) {
+    return 'path_outside_managed_roots';
+  }
+  return undefined;
 }
 
 function workspaceFromInfo(value: unknown, expectedWorkspaceId: string): Workspace | undefined {

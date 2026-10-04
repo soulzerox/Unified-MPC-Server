@@ -7,6 +7,7 @@ export * from './goal-runtime-liveness.js';
 export * from './goal-runtime-projector.js';
 export * from './goal-workspace.js';
 export * from './workspace-admission.js';
+export * from './structural-evidence.js';
 export * from './invocation-authorization.js';
 export * from './scheduled-continuation.js';
 export * from './limits.js';

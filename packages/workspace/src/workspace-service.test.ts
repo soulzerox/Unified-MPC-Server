@@ -344,6 +344,39 @@ describe('WorkspaceService', () => {
     expect(repository.entries[0]?.archivedAt).toBeUndefined();
   });
 
+
+  it('blocks legacy Goal rows that lack managed Goal Workspace identity even when runtime truth is otherwise safe', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-incomplete-identity-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'legacy-goal-incomplete',
+      displayName: 'Legacy Goal',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+    }]);
+
+    const result = await new WorkspaceService(repository).reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        goalCleanupEvaluations: [{
+          workspaceId: 'legacy-goal-incomplete',
+          disposition: 'blocked',
+          blockers: ['goal_workspace_identity_incomplete'],
+        }],
+      },
+    });
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
+  });
+
   it('fails Goal Workspace cleanup classification closed when durable reference truth is unavailable', async () => {
     const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-unknown-refs-'));
     temporaryRoots.push(rootPath);

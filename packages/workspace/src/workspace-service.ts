@@ -80,6 +80,7 @@ export type WorkspaceCleanupBlockerReason =
   | 'protected_workspace'
   | 'workspace_unavailable'
   | 'goal_identity_missing'
+  | 'goal_workspace_identity_incomplete'
   | 'goal_runtime_unknown'
   | 'goal_runtime_scope_mismatch'
   | 'goal_lifecycle_not_retention_ready'
@@ -401,6 +402,11 @@ function classifyGoalWorkspaceCleanup(
   if (protectedWorkspace) blockers.push('protected_workspace');
   if (!workspaceAvailable) blockers.push('workspace_unavailable');
   if (goalId === undefined || goalId.length === 0) blockers.push('goal_identity_missing');
+  const managedIdentityComplete = workspace.parentWorkspaceId?.trim()
+    && workspace.goalWorkspaceKind !== undefined
+    && workspace.baseRevision?.trim()
+    && (workspace.goalWorkspaceKind !== 'git_worktree' || Boolean(workspace.branchName?.trim()));
+  if (!managedIdentityComplete) blockers.push('goal_workspace_identity_incomplete');
 
   const validProjection = goalId !== undefined
     && goalId.length > 0

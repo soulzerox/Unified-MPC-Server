@@ -5,6 +5,7 @@ export * from './codex-service.js';
 export * from './doctor-service.js';
 export * from './error-sanitizer.js';
 export * from './git-service.js';
+export * from './issue-closure-github-collection-service.js';
 export * from './goal-continuation-service.js';
 export * from './goal-task-cancellation-service.js';
 export * from './goal-request-cancellation-service.js';

@@ -479,8 +479,15 @@ describe('upgrade runtime', () => {
 
     await expect(runtime.execute('git_worktree_spawn', {
       workspaceId: 'ws-1', worktreePath: 'E:\\outside\\agent-1', ref: 'main', dryRun: false,
-    }, undefined, fullBypassAuthorization)).resolves.toMatchObject({ ok: true, value: { status: 'completed', worktreePath: 'E:/outside/agent-1' } });
-    expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'add', '--detach', 'E:/outside/agent-1', 'main'] });
+    }, undefined, fullBypassAuthorization)).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+    expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'remove', '.worktrees/agent-1'] });
+    await expect(runtime.execute('git_worktree_spawn', {
+      workspaceId: 'ws-1', worktreePath: '.worktrees/full-bypass-agent', ref: 'main', dryRun: false,
+    }, undefined, fullBypassAuthorization)).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'completed', worktreePath: '.worktrees/full-bypass-agent' },
+    });
+    expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'add', '--detach', '.worktrees/full-bypass-agent', 'main'] });
   });
 
   it('requires an explicit recovery override before dependency bootstrap can be skipped', async () => {
@@ -546,6 +553,9 @@ describe('upgrade runtime', () => {
     await expect(runtime.execute('git_worktree_spawn', {
       workspaceId: 'ws-linux', worktreePath: '../outside', ref: 'main', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+    await expect(runtime.execute('git_worktree_spawn', {
+      workspaceId: 'ws-linux', worktreePath: '/mnt/workspace_data/thai-rag-issue6-foo', ref: 'main', dryRun: false,
+    }, undefined, fullBypassAuthorization)).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
     await expect(runtime.execute('git_worktree_spawn', {
       workspaceId: 'ws-linux', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: true, value: { status: 'completed', worktreePath: '.worktrees/agent-1' } });

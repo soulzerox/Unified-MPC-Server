@@ -87,6 +87,22 @@ test('flags negated closing keywords when bounded qualifiers separate the negati
   );
 });
 
+test('flags negated prefixed closing tokens that GitHub still interprets as close intent', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'feat(#99): trusted lifecycle mutation',
+    body: 'Parent #99 remains open for final acceptance. This PR intentionally does not auto-close #99.',
+  });
+
+  assert.deepEqual(hazards, [
+    {
+      source: 'body',
+      keyword: 'close',
+      issueRef: '#99',
+      excerpt: 'does not auto-close #99',
+    },
+  ]);
+});
+
 test('extracts pull request title/body from the GitHub event payload conservatively', () => {
   assert.deepEqual(
     pullRequestMetadataFromEvent({

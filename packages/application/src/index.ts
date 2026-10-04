@@ -9,6 +9,7 @@ export * from './issue-closure-github-collection-service.js';
 export * from './issue-closure-successor-owner-discovery-service.js';
 export * from './issue-closure-successor-owner-creation-service.js';
 export * from './issue-closure-successor-link-service.js';
+export * from './issue-closure-lifecycle-mutation-service.js';
 export * from './goal-continuation-service.js';
 export * from './goal-task-cancellation-service.js';
 export * from './goal-request-cancellation-service.js';

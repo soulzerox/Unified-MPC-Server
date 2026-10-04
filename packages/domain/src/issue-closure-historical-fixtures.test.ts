@@ -117,6 +117,55 @@ describe('historical issue closure acceptance fixtures', () => {
     });
   });
 
+  it('rejects Unified #82 / PR #103 after restart reconciliation because parent scope still remained open', () => {
+    const receipt = evaluateIssueClosureEvidence({
+      issue: 'soulzerox/Unified-MPC-Server#82',
+      implementationPRs: ['soulzerox/Unified-MPC-Server#103'],
+      closeIntent: 'reference_only',
+      antiCloseMarkers: [
+        'does not close #82',
+        'Parent #82 remains open',
+        'Remaining #82 scope includes SSE/API, WebUI, janitor, and final restart/OOM evidence',
+      ],
+      criteria: [
+        {
+          criterion: 'restart reconciliation projects proven worker loss to recovery_required',
+          source: { kind: 'issue_body', ref: 'Unified#82' },
+          disposition: {
+            kind: 'satisfied',
+            evidence: ['Unified#103@373532aaa5ee9b554e503e4794d219edc310b498'],
+          },
+        },
+        {
+          criterion: 'authoritative SSE/API, downstream WebUI, janitor integration, and final cross-project restart/OOM evidence',
+          source: { kind: 'other', ref: 'Unified#103:remaining-scope' },
+          disposition: { kind: 'unresolved' },
+        },
+      ],
+      mergeVerifications: [
+        verification(
+          'soulzerox/Unified-MPC-Server#103',
+          'historical-merge:Unified#103@373532aaa5ee9b554e503e4794d219edc310b498',
+        ),
+      ],
+    });
+
+    expect(receipt).toMatchObject({
+      closeAllowed: false,
+      blockers: expect.arrayContaining([
+        expect.objectContaining({ code: 'explicit_close_intent_missing' }),
+        expect.objectContaining({
+          code: 'anti_close_fence',
+          evidence: 'does not close #82',
+        }),
+        expect.objectContaining({
+          code: 'unresolved_criterion',
+          criterion: 'authoritative SSE/API, downstream WebUI, janitor integration, and final cross-project restart/OOM evidence',
+        }),
+      ]),
+    });
+  });
+
   it('allows Webtrans #114 / PR #116 to close while the separate #86 umbrella remains open', () => {
     const receipt = evaluateIssueClosureEvidence({
       issue: 'soulzerox/Webtrans#114',

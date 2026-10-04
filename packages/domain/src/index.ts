@@ -11,4 +11,5 @@ export * from './structural-evidence.js';
 export * from './invocation-authorization.js';
 export * from './scheduled-continuation.js';
 export * from './limits.js';
+export * from './merge-verification.js';
 export * from './types.js';

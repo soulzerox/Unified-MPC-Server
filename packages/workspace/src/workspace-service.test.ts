@@ -2,10 +2,26 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { GOAL_RUNTIME_CONTRACT_VERSION, type GoalRuntimeProjection } from '@unified-mpc/domain';
 import { WorkspaceService, type WorkspaceRepository } from './workspace-service.js';
 import type { Workspace } from './workspace-types.js';
 
 const temporaryRoots: string[] = [];
+
+function goalRuntimeProjection(overrides: Partial<GoalRuntimeProjection> = {}): GoalRuntimeProjection {
+  return {
+    contractVersion: GOAL_RUNTIME_CONTRACT_VERSION,
+    goalId: 'goal-1',
+    workspaceId: 'project-1',
+    lifecycleState: 'completed',
+    runtimeState: 'idle',
+    desiredRuntimeState: 'idle',
+    integrationState: 'integrated',
+    workspaceState: 'clean',
+    lastActivityAt: '2026-09-22T11:00:00.000Z',
+    ...overrides,
+  };
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -217,6 +233,7 @@ describe('WorkspaceService', () => {
         archivedWorkspaceIds: [],
         unavailableWorkspaceIds: ['persistent'],
         skippedProtectedWorkspaceIds: [],
+        goalCleanupEvaluations: [],
       },
     });
     expect(repository.entries[0]).toMatchObject({ id: 'persistent', unavailableSince: now.toISOString() });
@@ -282,6 +299,157 @@ describe('WorkspaceService', () => {
 
     expect(result).toMatchObject({ ok: true, value: { archivedWorkspaceIds: ['inspection'] } });
     await expect(readFile(path.join(rootPath, 'keep.txt'), 'utf8')).resolves.toBe('keep');
+  });
+
+
+  it('classifies a completed integrated clean Goal Workspace as a retention candidate without archiving it', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-candidate-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-1',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') });
+
+    const result = await service.reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        goalCleanupEvaluations: [{
+          workspaceId: 'goal-workspace-1',
+          goalId: 'goal-1',
+          disposition: 'retention_candidate',
+          blockers: [],
+          workspaceAvailable: true,
+          writerLeaseActive: false,
+          durableReferenceState: 'clear',
+        }],
+      },
+    });
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
+  });
+
+
+  it('blocks legacy Goal rows that lack managed Goal Workspace identity even when runtime truth is otherwise safe', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-incomplete-identity-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'legacy-goal-incomplete',
+      displayName: 'Legacy Goal',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+    }]);
+
+    const result = await new WorkspaceService(repository).reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        goalCleanupEvaluations: [{
+          workspaceId: 'legacy-goal-incomplete',
+          disposition: 'blocked',
+          blockers: ['goal_workspace_identity_incomplete'],
+        }],
+      },
+    });
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
+  });
+
+  it('fails Goal Workspace cleanup classification closed when durable reference truth is unavailable', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-unknown-refs-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-unknown-refs',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+
+    const result = await new WorkspaceService(repository).reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        goalCleanupEvaluations: [{
+          workspaceId: 'goal-workspace-unknown-refs',
+          disposition: 'blocked',
+          blockers: ['durable_references_unknown'],
+          durableReferenceState: 'unknown',
+        }],
+      },
+    });
+  });
+
+  it('never auto-archives legacy Goal Workspace rows and reports unavailable source as a cleanup blocker', async () => {
+    const missingRoot = path.join(os.tmpdir(), 'unified-mpc-legacy-goal-autocleanup-missing');
+    const repository = lifecycleRepository([{
+      id: 'legacy-goal-workspace',
+      displayName: 'Legacy Goal workspace',
+      rootPath: missingRoot,
+      realRootPath: missingRoot,
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+      autoCleanup: true,
+    }]);
+
+    const result = await new WorkspaceService(repository).reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        unavailableWorkspaceIds: ['legacy-goal-workspace'],
+        goalCleanupEvaluations: [{
+          workspaceId: 'legacy-goal-workspace',
+          disposition: 'blocked',
+          blockers: ['workspace_unavailable'],
+          workspaceAvailable: false,
+        }],
+      },
+    });
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
   });
 
   it('relinks an archived transient identity as a persistent project by default', async () => {

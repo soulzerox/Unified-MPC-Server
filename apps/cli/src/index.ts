@@ -8,7 +8,7 @@ import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSn
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { assertStorageIdentitySafe, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -46,6 +46,7 @@ import {
 import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
 import { parseWebArgs, runWeb, type WebCommand, type WebRunResult } from './commands/web.js';
 import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/tools.js';
+import { parseStorageArgs, type StorageRecoverCommand } from './commands/storage.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from './build-provenance.js';
 
 export { formatDoctorReport } from './commands/doctor.js';
@@ -55,6 +56,7 @@ export * from './commands/prune.js';
 export * from './commands/sync.js';
 export * from './commands/web.js';
 export * from './commands/tools.js';
+export * from './commands/storage.js';
 
 export type CliCommand =
   | { readonly kind: 'help' }
@@ -74,6 +76,7 @@ export type CliCommand =
   | PruneSkillCommand
   | PruneServerCommand
   | SyncCommand
+  | StorageRecoverCommand
   | WebCommand
   | ToolsCommand;
 
@@ -102,6 +105,7 @@ export interface CliDependencies {
   pruneSkill?(input: PruneSkillInput): Promise<Result<PruneSkillResult>>;
   pruneServer?(input: PruneServerInput): Promise<Result<PruneServerResult>>;
   sync?(targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
+  storageRecover?(): Promise<StorageRecoveryResult>;
   web?(options?: { port?: number }): Promise<Result<WebRunResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
@@ -119,6 +123,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'install') return parseInstallArgs(args.slice(1));
   if (args[0] === 'prune') return parsePruneArgs(args.slice(1));
   if (args[0] === 'sync') return parseSyncArgs(args.slice(1));
+  if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
   return err(appError('INVALID_INPUT', 'Unknown unified-mpc command'));
@@ -144,6 +149,7 @@ Commands:
   install server --name <n> ...          Install an executable MCP server
   prune skill --name <n>                 Prune an installed skill
   prune server --name <n>                Prune an installed MCP server
+  storage recover                        Recover one unambiguous historical SQLite database safely
   web [--port <p>]                       Start the Local Web Control Plane
   tools list                             List available downstream MCP tools
   tools call <tool> <args-json>          Call a downstream MCP tool headlessly
@@ -202,6 +208,25 @@ Commands:
       }
       write(result.value.status.installed ? 'Codex available' : 'Codex not installed (optional)');
       return 0;
+    }
+    case 'storage-recover': {
+      if (dependencies.storageRecover === undefined) {
+        writeError('Storage recovery service is not available');
+        return 1;
+      }
+      try {
+        const result = await dependencies.storageRecover();
+        if (result.status === 'not_needed') {
+          write('storage recovery not needed');
+          return 0;
+        }
+        write(`storage recovered: ${result.sourcePath ?? 'unknown'} -> ${result.destinationPath}`);
+        if (result.provenancePath !== null) write(`provenance: ${result.provenancePath}`);
+        return 0;
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
     }
     case 'install-skill': {
       const installer = dependencies.installSkill !== undefined
@@ -541,6 +566,8 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult>> => new PrunerService().pruneServer(input),
     sync: async (targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>> =>
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
+    storageRecover: async (): Promise<StorageRecoveryResult> =>
+      recoverHistoricalStorageIdentity(resolveDataPathFromShared()),
     web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
       const registry = await getToolRegistry();

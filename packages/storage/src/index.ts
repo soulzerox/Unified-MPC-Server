@@ -18,5 +18,6 @@ export * from './agent-swarm-repository.js';
 export * from './migrations/agent-swarm-migration.js';
 export * from './secret-store.js';
 export * from './storage-identity.js';
+export * from './storage-recovery.js';
 export * from './managed-resource-binding-repository.js';
 export * from './migrations/managed-resource-binding-migration.js';

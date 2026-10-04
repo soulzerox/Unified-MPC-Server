@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const NEGATED_CLOSING_PATTERN = new RegExp(
-  String.raw`(?:\b(?:do|does|did|will|would|should|must|can)\s+not\b|\b(?:don['’]t|doesn['’]t|didn['’]t|won['’]t|wouldn['’]t|shouldn['’]t|mustn['’]t|can['’]t)\b|\bcannot\b|\bnot\b)[\s,:;()[\]{}-]+(?:(?:fully|completely|entirely|actually|intentionally|automatically|yet|directly|formally|currently|permanently|really|necessarily|safely)\s+){0,2}(close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)\b`,
+  String.raw`(?:\b(?:do|does|did|will|would|should|must|can)\s+not\b|\b(?:don['’]t|doesn['’]t|didn['’]t|won['’]t|wouldn['’]t|shouldn['’]t|mustn['’]t|can['’]t)\b|\bcannot\b|\bnot\b)[\s,:;()[\]{}-]+(?:(?:fully|completely|entirely|actually|intentionally|automatically|yet|directly|formally|currently|permanently|really|necessarily|safely)\s+){0,2}(?:[A-Za-z0-9]+-){0,2}(close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)\b`,
   'gi',
 );
 

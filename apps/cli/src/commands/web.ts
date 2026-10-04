@@ -23,6 +23,7 @@ import {
   type GoalRuntimeReadPort,
   type StorageDiagnosticsProbe,
   type WebGoalSummary,
+  type WebWorkspaceCleanupEvaluation,
   type WebWorkspaceSelectionSnapshot,
   type WebWorkspaceSummary,
   type WorkspaceControlPort,
@@ -224,7 +225,7 @@ function createWorkspaceControl(
 
   return {
     list: projectList,
-    cleanupEvaluations: async () => {
+    cleanupEvaluations: async (): Promise<readonly WebWorkspaceCleanupEvaluation[]> => {
       const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
       for (const workspace of await workspaceService.list()) {
         if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;

@@ -467,75 +467,129 @@ describe('upgrade runtime', () => {
     await expect(runtime.execute('git_worktree_spawn', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', ref: 'main' })).resolves.toMatchObject({ ok: true, value: { dryRun: true, sideEffectsStarted: false } });
     await expect(runtime.execute('git_worktree_spawn', { workspaceId: 'ws-1', worktreePath: '..\\outside', ref: 'main', dryRun: false, userConfirmed: true })).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
     await expect(runtime.execute('git_worktree_spawn', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
-    await expect(runtime.execute('git_worktree_spawn', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false, userConfirmed: true })).resolves.toMatchObject({ ok: true, value: { status: 'completed', sideEffectsStarted: true } });
-    expect(calls).toEqual([{ workspaceId: 'ws-1', args: ['worktree', 'add', '--detach', '.worktrees/agent-1', 'main'] }]);
-
-    await expect(runtime.execute('git_worktree_remove', { workspaceId: 'ws-1', worktreePath: '.worktrees/unknown' })).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_NOT_FOUND' } });
-    await expect(runtime.execute('git_worktree_remove', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1' })).resolves.toMatchObject({ ok: true, value: { dryRun: true } });
-    await expect(runtime.execute('git_worktree_remove', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', dryRun: false })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_REQUIRED' } });
-    await expect(runtime.execute('git_worktree_remove', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', dryRun: false, userConfirmed: true })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
-    expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'remove', '.worktrees/agent-1'] });
-    await expect(runtime.execute('git_worktree_remove', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', dryRun: false, userConfirmed: true })).resolves.toMatchObject({ ok: false, error: { code: 'PROCESS_NOT_FOUND' } });
+    await expect(runtime.execute('git_worktree_spawn', { workspaceId: 'ws-1', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false, userConfirmed: true })).resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    expect(calls).toEqual([]);
 
     await expect(runtime.execute('git_worktree_spawn', {
       workspaceId: 'ws-1', worktreePath: 'E:\\outside\\agent-1', ref: 'main', dryRun: false,
     }, undefined, fullBypassAuthorization)).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
-    expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'remove', '.worktrees/agent-1'] });
     await expect(runtime.execute('git_worktree_spawn', {
       workspaceId: 'ws-1', worktreePath: '.worktrees/full-bypass-agent', ref: 'main', dryRun: false,
     }, undefined, fullBypassAuthorization)).resolves.toMatchObject({
-      ok: true,
-      value: { status: 'completed', worktreePath: '.worktrees/full-bypass-agent' },
+      ok: false,
+      error: { code: 'INTERNAL_ERROR' },
     });
-    expect(calls.at(-1)).toMatchObject({ args: ['worktree', 'add', '--detach', '.worktrees/full-bypass-agent', 'main'] });
+    expect(calls).toEqual([]);
   });
 
   it('requires an explicit recovery override before dependency bootstrap can be skipped', async () => {
-    const runtime = new UpgradeRuntimeService({
-      platform: 'linux',
-      git: {
-        async run(): Promise<ReturnType<typeof ok>> {
-          return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-recovery-'));
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-1',
+              displayName: 'recovery fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
         },
-      },
-    }, actor);
+        git: {
+          async run(): Promise<ReturnType<typeof ok>> {
+            return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+          },
+        },
+      }, actor);
 
-    await expect(runtime.execute('git_worktree_spawn', {
-      workspaceId: 'ws-1',
-      worktreePath: '.worktrees/no-deps',
-      ref: 'main',
-      bootstrapDependencies: false,
-      dryRun: false,
-      userConfirmed: true,
-    })).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'INVALID_INPUT' },
-    });
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-1',
+        worktreePath: '.worktrees/no-deps',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'INVALID_INPUT' },
+      });
 
-    await expect(runtime.execute('git_worktree_spawn', {
-      workspaceId: 'ws-1',
-      worktreePath: '.worktrees/emergency-no-deps',
-      ref: 'main',
-      bootstrapDependencies: false,
-      dependencyEmergencyOverride: true,
-      dryRun: false,
-      userConfirmed: true,
-    })).resolves.toMatchObject({
-      ok: true,
-      value: {
-        status: 'completed',
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-1',
+        worktreePath: '.worktrees/emergency-no-deps',
+        ref: 'main',
+        bootstrapDependencies: false,
         dependencyEmergencyOverride: true,
-        dependencyPolicy: {
-          status: 'skipped',
-          emergencyOverride: true,
-          migrationPhase: 'migration_pending',
-          integration: 'dependency_resource_manager_v1',
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          status: 'completed',
+          dependencyEmergencyOverride: true,
+          dependencyPolicy: {
+            status: 'skipped',
+            emergencyOverride: true,
+            migrationPhase: 'migration_pending',
+            integration: 'dependency_resource_manager_v1',
+          },
         },
-      },
-    });
+      });
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it('uses POSIX worktree syntax without rewriting foreign Windows paths', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-posix-'));
+    const calls: unknown[] = [];
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-linux',
+              displayName: 'posix fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request);
+            return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+          },
+        },
+      }, actor);
+
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-linux', worktreePath: '..\\outside', ref: 'main', dryRun: false, userConfirmed: true,
+      })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-linux', worktreePath: '../outside', ref: 'main', dryRun: false, userConfirmed: true,
+      })).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-linux', worktreePath: '/mnt/workspace_data/thai-rag-issue6-foo', ref: 'main', dryRun: false,
+      }, undefined, fullBypassAuthorization)).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-linux', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false, userConfirmed: true,
+      })).resolves.toMatchObject({ ok: true, value: { status: 'completed', worktreePath: '.worktrees/agent-1' } });
+      expect(calls).toEqual([{ workspaceId: 'ws-linux', args: ['worktree', 'add', '--detach', '.worktrees/agent-1', 'main'] }]);
+      await expect(runtime.execute('git_worktree_remove', {
+        workspaceId: 'ws-linux', worktreePath: '.worktrees\\agent-1', dryRun: false, userConfirmed: true,
+      })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when actual managed worktree creation cannot resolve its owning workspace', async () => {
     const calls: unknown[] = [];
     const runtime = new UpgradeRuntimeService({
       platform: 'linux',
@@ -548,21 +602,18 @@ describe('upgrade runtime', () => {
     }, actor);
 
     await expect(runtime.execute('git_worktree_spawn', {
-      workspaceId: 'ws-linux', worktreePath: '..\\outside', ref: 'main', dryRun: false, userConfirmed: true,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
-    await expect(runtime.execute('git_worktree_spawn', {
-      workspaceId: 'ws-linux', worktreePath: '../outside', ref: 'main', dryRun: false, userConfirmed: true,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
-    await expect(runtime.execute('git_worktree_spawn', {
-      workspaceId: 'ws-linux', worktreePath: '/mnt/workspace_data/thai-rag-issue6-foo', ref: 'main', dryRun: false,
-    }, undefined, fullBypassAuthorization)).resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
-    await expect(runtime.execute('git_worktree_spawn', {
-      workspaceId: 'ws-linux', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false, userConfirmed: true,
-    })).resolves.toMatchObject({ ok: true, value: { status: 'completed', worktreePath: '.worktrees/agent-1' } });
-    expect(calls).toEqual([{ workspaceId: 'ws-linux', args: ['worktree', 'add', '--detach', '.worktrees/agent-1', 'main'] }]);
-    await expect(runtime.execute('git_worktree_remove', {
-      workspaceId: 'ws-linux', worktreePath: '.worktrees\\agent-1', dryRun: false, userConfirmed: true,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+      workspaceId: 'ws-missing-owner',
+      worktreePath: '.worktrees/agent-1',
+      ref: 'main',
+      bootstrapDependencies: false,
+      dependencyEmergencyOverride: true,
+      dryRun: false,
+      userConfirmed: true,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR' },
+    });
+    expect(calls).toEqual([]);
   });
 
   it('keeps Full Bypass usable after canonical managed-worktree containment validation', async () => {
@@ -606,6 +657,53 @@ describe('upgrade runtime', () => {
         workspaceId: 'ws-canonical',
         args: ['worktree', 'add', '--detach', '.worktrees/full-bypass-agent', 'main'],
       }]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects managed prefixes that canonicalize elsewhere inside the owning workspace', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-internal-root-'));
+    const nonManagedRoot = path.join(workspaceRoot, 'non-managed');
+    const calls: unknown[] = [];
+    try {
+      await mkdir(nonManagedRoot, { recursive: true });
+      await symlink(nonManagedRoot, path.join(workspaceRoot, '.worktrees'), 'dir');
+
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-internal-escape',
+              displayName: 'internal managed-root escape fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request);
+            return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+          },
+        },
+      }, actor);
+
+      await expect(runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-internal-escape',
+        worktreePath: '.worktrees/escape',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dependencyEmergencyOverride: true,
+        dryRun: false,
+        userConfirmed: true,
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'PATH_OUTSIDE_WORKSPACE' },
+      });
+      expect(calls).toEqual([]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }

@@ -1483,23 +1483,24 @@ export class UpgradeRuntimeService {
     const dryRun = input.dryRun !== false && input.dry_run !== false;
     if (dryRun) return ok({ ...plan, dryRun: true });
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Creating a Git worktree requires explicit user confirmation'));
-    const containment = await this.assertManagedWorktreeContainment(workspaceId, normalizedPath);
-    if (!containment.ok) return containment;
+    const resolvedWorktreePath = await this.resolveManagedWorktreePath(workspaceId, normalizedPath);
+    if (!resolvedWorktreePath.ok) return resolvedWorktreePath;
+    const managedWorktreePath = resolvedWorktreePath.value;
     await this.refreshSharedState();
-    if (this.worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath)) {
+    if (this.worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === managedWorktreePath)) {
       return err(appError('INVALID_INPUT', 'Git worktree path is already present in the shared ownership ledger'));
     }
-    if (this.services.git === undefined) return ok({ ...plan, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
+    if (this.services.git === undefined) return ok({ ...plan, worktreePath: managedWorktreePath, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
     const result = await this.services.git.run(this.actor, {
       workspaceId,
-      args: ['worktree', 'add', '--detach', normalizedPath, ref],
+      args: ['worktree', 'add', '--detach', managedWorktreePath, ref],
       ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
     }, undefined, authorization);
     if (!result.ok) return result;
 
     const ledgerEntry: WorktreeLedgerEntry = {
       workspaceId,
-      worktreePath: normalizedPath,
+      worktreePath: managedWorktreePath,
       ref,
       owner: this.actor.clientId,
       ownerSessionId: actorSessionId(this.actor),
@@ -1507,13 +1508,13 @@ export class UpgradeRuntimeService {
       dependencyPolicy,
     };
     await this.mutateSharedState((_plugins, worktrees) => {
-      if (!worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath)) {
+      if (!worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === managedWorktreePath)) {
         worktrees.push(ledgerEntry);
       }
     });
 
     const dependencyBootstrap = bootstrapDependencies
-      ? await this.bootstrapNewWorktreeDependencies(workspaceId, normalizedPath, installMode, input, signal)
+      ? await this.bootstrapNewWorktreeDependencies(workspaceId, managedWorktreePath, installMode, input, signal)
       : ok(skippedDependencyPolicy(
         installMode,
         'Dependency bootstrap was disabled under the explicit emergency recovery override; migration remains pending.',
@@ -1522,7 +1523,7 @@ export class UpgradeRuntimeService {
     if (!dependencyBootstrap.ok) return dependencyBootstrap;
 
     await this.mutateSharedState((_plugins, worktrees) => {
-      const index = worktrees.findIndex((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === normalizedPath);
+      const index = worktrees.findIndex((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === managedWorktreePath);
       if (index !== -1) worktrees[index] = { ...worktrees[index]!, dependencyPolicy: dependencyBootstrap.value };
     });
 
@@ -1536,6 +1537,7 @@ export class UpgradeRuntimeService {
 
     return ok({
       ...plan,
+      worktreePath: managedWorktreePath,
       dryRun: false,
       sideEffectsStarted: true,
       status: 'completed',
@@ -1545,11 +1547,13 @@ export class UpgradeRuntimeService {
     });
   }
 
-  private async assertManagedWorktreeContainment(
+  private async resolveManagedWorktreePath(
     workspaceId: string,
     worktreePath: string,
-  ): Promise<Result<void>> {
-    if (this.services.workspaceInfo === undefined) return ok(undefined);
+  ): Promise<Result<string>> {
+    if (this.services.workspaceInfo === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Managed worktree creation requires workspace metadata to resolve the owning root', true));
+    }
 
     const workspaceInfo = await this.services.workspaceInfo.info(this.actor, workspaceId);
     if (!workspaceInfo.ok) return err(workspaceInfo.error);
@@ -1558,12 +1562,37 @@ export class UpgradeRuntimeService {
       return err(appError('INTERNAL_ERROR', 'Workspace metadata did not include a canonical workspace identity and root', true));
     }
 
+    const platform = this.diagnostics.platform;
+    const pathApi = hostPathApi(platform);
     const guard = new WorkspacePathGuard(undefined, {
-      platform: this.diagnostics.platform,
+      platform,
       trustedWorkspaceAccess: true,
     });
-    const resolved = await guard.resolveForWrite(workspace, worktreePath);
-    return resolved.ok ? ok(undefined) : err(resolved.error);
+    const segments = worktreePath.split('/').filter((segment) => segment.length > 0);
+    let resolvedManagedPath = worktreePath;
+
+    for (let index = 1; index <= segments.length; index += 1) {
+      const prefix = segments.slice(0, index).join('/');
+      const resolved = await guard.resolveForWrite(workspace, prefix);
+      if (!resolved.ok) return err(resolved.error);
+      if (resolved.value.outsideWorkspace === true) {
+        return err(appError('PATH_OUTSIDE_WORKSPACE', 'Managed worktree path is outside the owning workspace'));
+      }
+
+      const normalizedRelativePath = normalizeHostPath(resolved.value.relativePath, platform);
+      if (normalizedRelativePath === null) {
+        return err(appError('INVALID_INPUT', 'Managed worktree path could not be canonicalized'));
+      }
+      const canonicalPrefix = normalizedRelativePath.split(pathApi.sep).join('/');
+      if (!sameManagedWorktreePath(prefix, canonicalPrefix, platform)) {
+        return err(appError('PATH_OUTSIDE_WORKSPACE', 'Managed worktree path canonicalizes outside its managed root'));
+      }
+
+      if (index === segments.length) resolvedManagedPath = canonicalPrefix;
+      if (!resolved.value.exists) break;
+    }
+
+    return ok(resolvedManagedPath);
   }
 
   private async bootstrapNewWorktreeDependencies(
@@ -2442,6 +2471,11 @@ function failedDependencyPolicy(
     migrationPhase: 'migration_blocked',
     blockingReasons: [...(base?.blockingReasons ?? []), reason],
   };
+}
+
+function sameManagedWorktreePath(left: string, right: string, platform: NodeJS.Platform): boolean {
+  const normalize = (value: string): string => platform === 'win32' ? value.toLowerCase() : value;
+  return normalize(left) === normalize(right);
 }
 
 function workspaceFromInfo(value: unknown, expectedWorkspaceId: string): Workspace | undefined {

@@ -67,6 +67,26 @@ test('does not treat prose containing not only as a negation hazard', () => {
   assert.deepEqual(hazards, []);
 });
 
+test('flags negated closing keywords when bounded qualifiers separate the negation from the native token', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'docs',
+    body: [
+      'This PR does not fully close #80.',
+      "This won't automatically fix owner/repo#63.",
+      'The issue is not yet completely resolved #82.',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    hazards.map(({ keyword, issueRef }) => ({ keyword, issueRef })),
+    [
+      { keyword: 'close', issueRef: '#80' },
+      { keyword: 'fix', issueRef: 'owner/repo#63' },
+      { keyword: 'resolve', issueRef: '#82' },
+    ],
+  );
+});
+
 test('extracts pull request title/body from the GitHub event payload conservatively', () => {
   assert.deepEqual(
     pullRequestMetadataFromEvent({

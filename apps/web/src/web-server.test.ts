@@ -1040,7 +1040,17 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(await saved.text()).not.toContain('not-returned');
       expect(secrets.get('cloudflare_tunnel_token')).toBe('not-returned');
       const read = await fetch(`http://127.0.0.1:${configured.port}/api/settings`);
-      expect(await read.json()).toMatchObject({ settings: { tunnelTokenConfigured: true, allowedHostnames: ['mcp.example.com'] } });
+      const readBody = await read.json();
+      expect(readBody).toMatchObject({
+        settings: { tunnelTokenConfigured: true, allowedHostnames: ['mcp.example.com'] },
+        persistence: {
+          state: 'partial',
+          nonSecretConfigured: false,
+          tunnelToken: { configured: true, present: true },
+          apiToken: { configured: false, present: false },
+        },
+      });
+      expect(JSON.stringify(readBody)).not.toContain('not-returned');
       const invalid = await fetch(`http://127.0.0.1:${configured.port}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ allowedHostnames: ['*'] }) });
       expect(invalid.status).toBe(400);
     } finally { await configured.close(); }
@@ -1091,7 +1101,94 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(settings.get('cloudflare_remote_tunnel_id')).toBe('remote-id');
       expect(settings.get('cloudflare_gateway_desired_state')).toBe('RUNNING');
       expect(gateway.status().state).toBe('BRIDGE_HEALTHY');
+
+      const persisted = await fetch(`http://127.0.0.1:${configured.port}/api/settings`);
+      const persistedText = await persisted.text();
+      expect(persistedText).not.toContain('user-api-token');
+      expect(persistedText).not.toContain('runtime-token');
+      expect(JSON.parse(persistedText)).toMatchObject({
+        persistence: {
+          state: 'loaded',
+          nonSecretConfigured: true,
+          tunnelToken: { configured: true, present: true },
+          apiToken: { configured: true, present: true },
+        },
+      });
     } finally { await configured.close(); }
+  });
+
+  it('reports never-configured and secret-load-failed persistence states without exposing secret values', async () => {
+    const empty = new Map<string, string>();
+    const neverConfigured = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      settingsRepository: { get: (key: string): string | null => empty.get(key) ?? null, set: (key: string, value: string): void => { empty.set(key, value); }, delete: (key: string): void => { empty.delete(key); } },
+      secretStore: { get: async (): Promise<string | null> => null, set: async (): Promise<void> => {}, delete: async (): Promise<void> => {} },
+    });
+    await neverConfigured.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${neverConfigured.port}/api/settings`);
+      expect(await response.json()).toMatchObject({
+        persistence: {
+          state: 'never_configured',
+          nonSecretConfigured: false,
+          tunnelToken: { configured: false, present: false },
+          apiToken: { configured: false, present: false },
+        },
+      });
+    } finally {
+      await neverConfigured.close();
+    }
+
+    const persistedSettings = new Map<string, string>([
+      ['cloudflare_account_id', '0123456789abcdef0123456789abcdef'],
+      ['cloudflare_zone_name', 'example.com'],
+      ['cloudflare_tunnel_name', 'user-tunnel'],
+      ['cloudflare_public_url', 'https://mcp.example.com'],
+      ['cloudflare_origin_url', 'http://127.0.0.1:18765'],
+      ['mcp_allowed_hostnames', 'mcp.example.com'],
+      ['mcp_allowed_origins', 'https://mcp.example.com'],
+      ['cloudflare_tunnel_token_configured', 'true'],
+      ['cloudflare_api_token_configured', 'true'],
+    ]);
+    const loadFailed = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      settingsRepository: { get: (key: string): string | null => persistedSettings.get(key) ?? null, set: (key: string, value: string): void => { persistedSettings.set(key, value); }, delete: (key: string): void => { persistedSettings.delete(key); } },
+      secretStore: {
+        get: async (key: string): Promise<string | null> => {
+          if (key === 'cloudflare_api_token') throw new Error('fixture secret service unavailable: secret-value');
+          return key === 'cloudflare_tunnel_token' ? 'not-returned-secret' : null;
+        },
+        set: async (): Promise<void> => {},
+        delete: async (): Promise<void> => {},
+      },
+    });
+    await loadFailed.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${loadFailed.port}/api/settings`);
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain('not-returned-secret');
+      expect(text).not.toContain('secret-value');
+      expect(JSON.parse(text)).toMatchObject({
+        settings: {
+          accountId: '0123456789abcdef0123456789abcdef',
+          cloudflareApiTokenConfigured: true,
+          tunnelTokenConfigured: true,
+        },
+        persistence: {
+          state: 'load_failed',
+          nonSecretConfigured: true,
+          tunnelToken: { configured: true, present: true },
+          apiToken: { configured: true, present: null },
+        },
+      });
+    } finally {
+      await loadFailed.close();
+    }
   });
 
   it('keeps user-submitted Cloudflare settings when reconcile fails so the form stays prefilled', async () => {

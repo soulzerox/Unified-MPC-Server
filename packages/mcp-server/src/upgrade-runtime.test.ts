@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ok } from '@unified-mpc/domain';
+import { appError, err, ok } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
 import { UpgradeRuntimeService } from './upgrade-runtime.js';
+import { UpgradeRuntimeStateStore } from './upgrade-runtime-state-store.js';
 import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
 import { ToolRegistry } from './tool-registry.js';
 import type { McpApplicationServices } from './tools/tool-types.js';
@@ -72,6 +73,104 @@ describe('upgrade runtime', () => {
       },
     });
     if (result.ok) expect(result.value.processMemory.rssBytes).toBeGreaterThan(0);
+  });
+
+  it('reports legacy noncanonical worktree ledger entries without mutating them', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-topology-'));
+    const workspaceRoot = path.join(directory, 'repo');
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
+    const gitCalls: unknown[] = [];
+    try {
+      await mkdir(workspaceRoot, { recursive: true });
+      const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+      await store.updateShared(() => ({
+        plugins: [],
+        worktrees: [
+          {
+            workspaceId: 'ws-1',
+            worktreePath: '.worktrees/canonical',
+            ref: 'main',
+            owner: 'fixture',
+            createdAt: '2026-10-05T00:00:00.000Z',
+          },
+          {
+            workspaceId: 'ws-1',
+            worktreePath: '/mnt/workspace_data/legacy-sibling',
+            ref: 'main',
+            owner: 'fixture',
+            createdAt: '2026-10-05T00:00:01.000Z',
+          },
+          {
+            workspaceId: 'missing-workspace',
+            worktreePath: '.worktrees/unresolved',
+            ref: 'main',
+            owner: 'fixture',
+            createdAt: '2026-10-05T00:00:02.000Z',
+          },
+        ],
+      }));
+
+      const runtime = new UpgradeRuntimeService({
+        runtimeStatePath,
+        platform: 'linux',
+        workspaceInfo: {
+          async info(_actor, workspaceId): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+            if (workspaceId !== 'ws-1') return err(appError('WORKSPACE_NOT_FOUND', 'fixture workspace missing'));
+            return ok({
+              id: 'ws-1',
+              displayName: 'fixture workspace',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            gitCalls.push(request);
+            return ok({ exitCode: 0, stdout: '', stderr: '' });
+          },
+        },
+      }, actor);
+
+      const result = await runtime.execute('telemetry_dashboard', {});
+      expect(result).toMatchObject({
+        ok: true,
+        value: {
+          worktreeTopology: {
+            totalEntries: 3,
+            scannedEntries: 3,
+            canonicalEntries: 1,
+            noncanonicalEntries: 1,
+            unresolvedEntries: 1,
+            truncated: false,
+            mutationPolicy: 'diagnostic-only-preserve-existing-work',
+            remediationOwner: 'lifecycle-janitor',
+            anomalies: expect.arrayContaining([
+              expect.objectContaining({
+                workspaceId: 'ws-1',
+                worktreePath: '/mnt/workspace_data/legacy-sibling',
+                classification: 'noncanonical',
+              }),
+              expect.objectContaining({
+                workspaceId: 'missing-workspace',
+                worktreePath: '.worktrees/unresolved',
+                classification: 'unresolved',
+              }),
+            ]),
+          },
+        },
+      });
+      expect(gitCalls).toEqual([]);
+
+      const persisted = await store.readShared();
+      expect(persisted.worktrees).toHaveLength(3);
+      expect(persisted.worktrees).toEqual(expect.arrayContaining([
+        expect.objectContaining({ worktreePath: '/mnt/workspace_data/legacy-sibling' }),
+      ]));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   // The registry smoke invokes the complete phase catalog through every normal

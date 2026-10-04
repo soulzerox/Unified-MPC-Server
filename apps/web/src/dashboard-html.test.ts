@@ -166,7 +166,7 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('Loaded from persisted storage');
     expect(html).toContain('Partial persisted configuration');
     expect(html).toContain('Persisted configuration load failed');
-    expect(html).toContain('settings.persistence');
+    expect(html).toContain('data.persistence');
     expect(html).toContain('settings-api-token');
     expect(html).toContain('(write-only)');
   });

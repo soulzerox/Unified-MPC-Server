@@ -1603,6 +1603,7 @@ export function getClientScriptJs(): string {
           if (!res.ok) throw new Error('Settings request failed');
           const data = await res.json();
           const settings = data.settings || {};
+          const persistence = data.persistence || {};
           for (const [id, value] of [
             ['settings-account-id', settings.accountId || ''],
             ['settings-zone-name', settings.zoneName || ''],
@@ -1619,9 +1620,28 @@ export function getClientScriptJs(): string {
           if (tokenField) {
             tokenField.placeholder = settings.cloudflareApiTokenConfigured ? 'Saved in Linux Secret Service — leave blank to reuse' : 'Paste Cloudflare API token (stored in Linux Secret Service)';
           }
+          const persistenceStatus = document.getElementById('settings-persistence-status');
+          if (persistenceStatus) {
+            const labels = {
+              never_configured: 'Never configured',
+              loaded: 'Loaded from persisted storage',
+              partial: 'Partial persisted configuration',
+              load_failed: 'Persisted configuration load failed',
+              loading: 'Loading persisted configuration',
+            };
+            persistenceStatus.textContent = labels[persistence.state] || labels.loading;
+            persistenceStatus.dataset.state = persistence.state || 'loading';
+          }
           const tokenStatus = document.getElementById('settings-token-status');
           if (tokenStatus) tokenStatus.textContent = settings.cloudflareApiTokenConfigured && settings.tunnelTokenConfigured ? 'Credentials saved — leave token blank to reuse' : 'Credentials not configured';
-        } catch (err) { logEvent('WARN', 'Settings unavailable: ' + err.message); }
+        } catch (err) {
+          const persistenceStatus = document.getElementById('settings-persistence-status');
+          if (persistenceStatus) {
+            persistenceStatus.textContent = 'Persisted configuration load failed';
+            persistenceStatus.dataset.state = 'load_failed';
+          }
+          logEvent('WARN', 'Settings unavailable: ' + err.message);
+        }
       }
 
       async function saveSettings(event) {

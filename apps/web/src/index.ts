@@ -11,6 +11,7 @@ export {
   type WebGoalSummary,
   type WebWorkspaceSummary,
   type WebWorkspaceSelectionSnapshot,
+  type WebWorkspaceCleanupEvaluation,
   type WorkspaceControlPort,
 } from './web-server.js';
 export { renderDashboardHtml } from './dashboard-html.js';

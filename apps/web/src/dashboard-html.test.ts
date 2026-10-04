@@ -111,6 +111,20 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).not.toContain("addCell(row, primary ? 'Primary' : '—')");
   });
 
+
+  it('renders read-only Goal Workspace cleanup diagnostics without destructive controls', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('Goal Workspace Cleanup');
+    expect(html).toContain('Read-only lifecycle evaluation');
+    expect(html).toContain('id="cleanup-evaluations-refresh-btn"');
+    expect(html).toContain('id="cleanup-evaluations-body"');
+    expect(html).toContain('/api/workspaces/cleanup-evaluations');
+    expect(html).toContain('Durable refs');
+    expect(html).toContain('Unknown (fail-closed)');
+    expect(html).not.toContain('id="cleanup-workspace-delete-btn"');
+    expect(html).not.toContain('id="cleanup-workspace-run-btn"');
+  });
+
   it('renders a user-editable P1-Pn policy editor with reorder and save controls', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('policy-add-btn');

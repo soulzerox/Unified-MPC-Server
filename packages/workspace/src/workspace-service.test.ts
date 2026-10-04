@@ -302,6 +302,59 @@ describe('WorkspaceService', () => {
   });
 
 
+
+  it('evaluates Goal Workspace cleanup without mutating unrelated lifecycle rows', async () => {
+    const goalRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-readonly-'));
+    temporaryRoots.push(goalRoot);
+    const missingInspectionRoot = path.join(os.tmpdir(), 'unified-mpc-cleanup-observability-missing-inspection');
+    const repository = lifecycleRepository([
+      {
+        id: 'goal-workspace-readonly',
+        displayName: 'Goal workspace',
+        rootPath: goalRoot,
+        realRootPath: await realpath(goalRoot),
+        createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal',
+        goalId: 'goal-1',
+        parentWorkspaceId: 'project-1',
+        goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'abc123',
+        branchName: 'goal/goal-1',
+        integrationState: 'integrated',
+      },
+      {
+        id: 'inspection-missing',
+        displayName: 'Expired inspection',
+        rootPath: missingInspectionRoot,
+        realRootPath: missingInspectionRoot,
+        createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'inspection',
+        autoCleanup: true,
+        expiresAt: '2026-09-22T11:00:00.000Z',
+      },
+    ]);
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') });
+
+    const result = await service.evaluateGoalWorkspaceCleanup({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: [{
+        workspaceId: 'goal-workspace-readonly',
+        goalId: 'goal-1',
+        disposition: 'retention_candidate',
+        blockers: [],
+      }],
+    });
+    expect(repository.entries.find((workspace) => workspace.id === 'goal-workspace-readonly')?.archivedAt).toBeUndefined();
+    const unrelatedInspection = repository.entries.find((workspace) => workspace.id === 'inspection-missing');
+    expect(unrelatedInspection?.archivedAt).toBeUndefined();
+    expect(unrelatedInspection?.unavailableSince).toBeUndefined();
+  });
+
   it('classifies a completed integrated clean Goal Workspace as a retention candidate without archiving it', async () => {
     const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-candidate-'));
     temporaryRoots.push(rootPath);

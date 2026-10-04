@@ -655,6 +655,42 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
+
+  it('exposes bounded read-only Goal Workspace cleanup evaluations with no-store semantics', async () => {
+    const evaluation = {
+      workspaceId: 'goal-workspace-a',
+      goalId: 'goal-a',
+      disposition: 'blocked' as const,
+      blockers: ['durable_references_unknown'],
+      workspaceAvailable: true,
+      writerLeaseActive: false,
+      durableReferenceState: 'unknown' as const,
+    };
+    const workspaceControl = {
+      list: async (): Promise<readonly WebWorkspaceSummary[]> => [],
+      selection: async (): Promise<null> => null,
+      activate: async (): Promise<WebWorkspaceSelectionSnapshot> => ({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }),
+      deactivate: async (): Promise<WebWorkspaceSelectionSnapshot> => ({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }),
+      setPrimary: async (): Promise<WebWorkspaceSelectionSnapshot> => ({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }),
+      remove: async (): Promise<null> => null,
+      cleanupEvaluations: async () => [evaluation],
+    };
+    const projectsServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, workspaceControl });
+    await projectsServer.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${projectsServer.port}/api/workspaces/cleanup-evaluations`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ evaluations: [evaluation] });
+    } finally {
+      await projectsServer.close();
+    }
+
+    const unavailable = await fetch(`http://127.0.0.1:${port}/api/workspaces/cleanup-evaluations`);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({ error: 'Workspace cleanup evaluation service is unavailable' });
+  });
+
   it('summarizes open goals per project without eagerly loading goal details, then lazy-loads and continues one goal', async () => {
     let selection = { primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] as string[] };
     let listOpenCalls = 0;

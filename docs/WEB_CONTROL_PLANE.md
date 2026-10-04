@@ -60,6 +60,7 @@ Returns general operational health and gateway status.
 The **Projects** view keeps durable work visible without eagerly loading every goal. `GET /api/workspaces` returns each registered project with `openGoalCount` and the validated `preferredGoalId`; the dashboard remains collapsed by default and requests goal details only after the user expands that project.
 
 - `GET /api/workspaces/:workspaceId/goals` returns active goal summaries for that registered project, including objective, current phase, completed/total plan steps, blockers, next action, steps, and `updatedAt`.
+- `GET /api/workspaces/cleanup-evaluations` returns bounded read-only Goal Workspace cleanup classification from the #80 lifecycle policy. It never performs archival or physical deletion. Missing #170 durable-reference truth is reported as `durable_references_unknown` and keeps cleanup fail-closed.
 - `PUT /api/workspaces/:workspaceId/goals/:goalId/continue` marks one active goal as the preferred continuation target and activates its workspace. It **does not acquire, renew, or steal the durable goal execution lease**.
 - The preferred mapping is persisted in non-secret settings. `workspace_bootstrap` exposes the validated preferred goal as a continuation hint to MCP clients; stale or terminal selections are ignored.
 - Goals with terminal durable status (`completed`, `failed`, `blocked`, or `cancelled`) are excluded from the open-goal count and list.

@@ -12,6 +12,7 @@ on:
       - "scripts/materialize-runtime-release.test.sh"
       - "scripts/materialization-source-fence.test.sh"
       - "scripts/smoke-materialized-runtime.mjs"
+      - "scripts/gateway-persistence-restart.test.mjs"
       - "scripts/validate-runtime-root.sh"
       - "docs/DEPLOYMENT_LINUX.md"
       - ".github/workflows/runtime-release-portability.yml"
@@ -28,6 +29,7 @@ on:
       - "scripts/materialize-runtime-release.test.sh"
       - "scripts/materialization-source-fence.test.sh"
       - "scripts/smoke-materialized-runtime.mjs"
+      - "scripts/gateway-persistence-restart.test.mjs"
       - "scripts/validate-runtime-root.sh"
       - "docs/DEPLOYMENT_LINUX.md"
       - ".github/workflows/runtime-release-portability.yml"
@@ -59,6 +61,9 @@ jobs:
 
       - name: Build production CLI dependency graph
         run: corepack pnpm --filter @unified-mpc/cli build
+
+      - name: Prove gateway settings survive process restart and rebuild
+        run: node scripts/gateway-persistence-restart.test.mjs
 
       - name: Cloudflare gateway regression gates
         run: |

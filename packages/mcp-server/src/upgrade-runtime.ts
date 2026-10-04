@@ -1449,7 +1449,7 @@ export class UpgradeRuntimeService {
     const scopedRelativePath = !absolutePath
       && !normalizedPath.split('/').some((part) => part === '..')
       && (normalizedPath.startsWith('.worktrees/') || normalizedPath.startsWith('.unified-mpc/worktrees/'));
-    if (!scopedRelativePath && !(absolutePath && isFullBypassAuthorization(authorization))) {
+    if (!scopedRelativePath) {
       return err(appError('PATH_OUTSIDE_WORKSPACE', 'Git worktree path must remain under .worktrees or .unified-mpc/worktrees'));
     }
     const ref = readString(input, 'ref') ?? 'HEAD';

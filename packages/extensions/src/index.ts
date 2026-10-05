@@ -72,6 +72,7 @@ export {
   type CanonicalSkillMigrationCutoverActivation,
   type CanonicalSkillMigrationCutoverRollback,
   type CanonicalSkillMigrationCutoverState,
+  type CanonicalSkillMigrationRollbackTarget,
   type CanonicalSkillMigrationCutoverStateStoreOptions,
 } from './canonical-skill-migration-cutover-state.js';
 export {

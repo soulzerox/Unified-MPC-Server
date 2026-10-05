@@ -323,6 +323,77 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     }
   });
 
+  it('reports legacy as the rollback target after the first canonical cutover without mutating state', async () => {
+    const root = await fixtureRoot('canonical-cutover-target-legacy-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'alpha', '# Alpha');
+    const manifest = manifestFor([
+      candidate({ id: 'skill:alpha', name: 'alpha', fingerprint: source.fingerprint, sourcePath: source.sourcePath }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+
+    const target = await store.resolveRollbackTarget();
+    expect(target.ok).toBe(true);
+    if (!target.ok) return;
+    expect(target.value).toEqual({
+      target: 'legacy',
+      fromGenerationId: staged.generationId,
+    });
+
+    const loaded = await store.load();
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.value).toEqual(activated.value.state);
+  });
+
+  it('verifies the previous canonical generation as a rollback target without changing the active pointer', async () => {
+    const root = await fixtureRoot('canonical-cutover-target-canonical-');
+    const dataDir = path.join(root, 'data');
+    const firstSource = await createSkill(root, 'source-a', 'alpha', '# Alpha');
+    const firstManifest = manifestFor([
+      candidate({ id: 'skill:alpha', name: 'alpha', fingerprint: firstSource.fingerprint, sourcePath: firstSource.sourcePath }),
+    ]);
+    const firstStage = await stage(dataDir, firstManifest);
+    const secondSource = await createSkill(root, 'source-b', 'beta', '# Beta');
+    const secondManifest = manifestFor([
+      candidate({ id: 'skill:beta', name: 'beta', fingerprint: secondSource.fingerprint, sourcePath: secondSource.sourcePath }),
+    ]);
+    const secondStage = await stage(dataDir, secondManifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    expect((await store.activate(firstManifest, firstStage)).ok).toBe(true);
+    const second = await store.activate(secondManifest, secondStage);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+
+    const target = await store.resolveRollbackTarget();
+    expect(target.ok).toBe(true);
+    if (!target.ok) return;
+    expect(target.value).toMatchObject({
+      target: 'canonical',
+      fromGenerationId: secondStage.generationId,
+      toGenerationId: firstStage.generationId,
+      generation: {
+        state: {
+          schemaVersion: 1,
+          activeGenerationId: firstStage.generationId,
+          previousGenerationId: secondStage.generationId,
+        },
+        generationPath: firstStage.generationPath,
+        managedRoot: path.join(firstStage.generationPath, 'skills'),
+        stagedSkills: firstStage.stagedSkills,
+      },
+    });
+
+    const loaded = await store.load();
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.value).toEqual(second.value.state);
+  });
+
   it('rolls back atomically to a verified previous generation and swaps rollback history', async () => {
     const root = await fixtureRoot('canonical-cutover-rollback-');
     const dataDir = path.join(root, 'data');
@@ -465,6 +536,13 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
       'corrupt rollback target\n',
       'utf8',
     );
+
+    const target = await store.resolveRollbackTarget();
+    expect(target.ok).toBe(false);
+    if (!target.ok) {
+      expect(target.error.code).toBe('INVALID_INPUT');
+      expect(target.error.message).toContain('fingerprint');
+    }
 
     const rolledBack = await store.rollback(secondStage.generationId);
     expect(rolledBack.ok).toBe(false);

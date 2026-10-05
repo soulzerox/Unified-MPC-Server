@@ -69,12 +69,18 @@ describe('LocalExtensionsService MCP bridge', () => {
     try {
       const dataDir = path.join(root, 'data');
       const home = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      const bundledRoot = path.join(root, 'bundled-skills');
       const legacyManaged = path.join(dataDir, 'extensions', 'skills', 'legacy-managed');
       const legacyGlobal = path.join(home, '.agents', 'skills', 'legacy-global');
+      const legacyWorkspace = path.join(workspace, '.agents', 'skills', 'legacy-workspace');
+      const legacyBundled = path.join(bundledRoot, 'legacy-bundled');
       const sourcePath = path.join(root, 'migration-source');
       for (const [skillRoot, name] of [
         [legacyManaged, 'legacy-managed'],
         [legacyGlobal, 'legacy-global'],
+        [legacyWorkspace, 'legacy-workspace'],
+        [legacyBundled, 'legacy-bundled'],
         [sourcePath, 'canonical-active'],
       ] as const) {
         await mkdir(skillRoot, { recursive: true });
@@ -123,6 +129,8 @@ describe('LocalExtensionsService MCP bridge', () => {
         settings: DEFAULT_EXTENSIONS_SETTINGS,
         homeDir: home,
         dataDir,
+        workspaceRootProvider: async (): Promise<string> => workspace,
+        bundledSkillRoots: [bundledRoot],
       } as never);
       const listed = await service.listSkills({});
       expect(listed.ok).toBe(true);
@@ -133,7 +141,24 @@ describe('LocalExtensionsService MCP bridge', () => {
           source: 'unified-mpc-skills',
         }),
       ]);
+      expect(listed.value.skills).toHaveLength(staged.value.stagedSkills.length);
       expect(listed.value.skills.some((skill) => skill.name.startsWith('legacy-'))).toBe(false);
+
+      const runtimeSkill = listed.value.skills[0]!;
+      const stagedSkill = staged.value.stagedSkills[0]!;
+      expect(runtimeSkill.rootPath).toBe(path.join(staged.value.generationPath, 'skills'));
+      expect(runtimeSkill.canonicalSkillPath).toEqual(expect.any(String));
+      const runtimeFingerprint = await fingerprintCanonicalSkillDirectory(
+        path.dirname(runtimeSkill.canonicalSkillPath!),
+      );
+      expect(runtimeFingerprint.ok).toBe(true);
+      if (!runtimeFingerprint.ok) return;
+      expect(runtimeFingerprint.value).toBe(stagedSkill.fingerprint);
+
+      const read = await service.readSkill({ skillId: runtimeSkill.id });
+      expect(read.ok).toBe(true);
+      if (!read.ok) return;
+      expect(read.value.canonicalPath).toBe(runtimeSkill.canonicalSkillPath);
       await service.close();
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -43,6 +43,18 @@ export interface CanonicalSkillMigrationActiveGeneration {
   readonly skipped: readonly CanonicalSkillMigrationSkippedEntry[];
 }
 
+export type CanonicalSkillMigrationRollbackTarget =
+  | {
+    readonly target: 'legacy';
+    readonly fromGenerationId: string;
+  }
+  | {
+    readonly target: 'canonical';
+    readonly fromGenerationId: string;
+    readonly toGenerationId: string;
+    readonly generation: CanonicalSkillMigrationActiveGeneration;
+  };
+
 export interface CanonicalSkillMigrationCutoverStateStoreOptions {
   readonly dataDir: string;
 }
@@ -77,6 +89,35 @@ export class CanonicalSkillMigrationCutoverStateStore {
       this.generationsRoot,
       state.value,
     );
+  }
+
+  public async resolveRollbackTarget(): Promise<Result<CanonicalSkillMigrationRollbackTarget | undefined>> {
+    const current = await this.load();
+    if (!current.ok) return err(current.error);
+    if (current.value === undefined) return ok(undefined);
+
+    const previousGenerationId = current.value.previousGenerationId;
+    if (previousGenerationId === undefined) {
+      return ok({
+        target: 'legacy',
+        fromGenerationId: current.value.activeGenerationId,
+      });
+    }
+
+    const rollbackState: CanonicalSkillMigrationCutoverState = {
+      schemaVersion: CUTOVER_STATE_SCHEMA_VERSION,
+      activeGenerationId: previousGenerationId,
+      previousGenerationId: current.value.activeGenerationId,
+    };
+    const generation = await verifyPersistedGeneration(this.generationsRoot, rollbackState);
+    if (!generation.ok) return err(generation.error);
+
+    return ok({
+      target: 'canonical',
+      fromGenerationId: current.value.activeGenerationId,
+      toGenerationId: previousGenerationId,
+      generation: generation.value,
+    });
   }
 
   public async rollback(

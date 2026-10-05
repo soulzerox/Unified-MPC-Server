@@ -192,7 +192,7 @@ function reconcileGroup(
   }
 
   const compatibility = normalizeCompatibility(first.compatibility);
-  const evaluated = evaluateCompatibility(compatibility, host);
+  const evaluated = evaluateCanonicalExtensionCompatibility(compatibility, host);
   return {
     kind: first.kind,
     id: first.id,
@@ -208,7 +208,7 @@ function reconcileGroup(
   };
 }
 
-function evaluateCompatibility(
+export function evaluateCanonicalExtensionCompatibility(
   compatibility: CanonicalExtensionCompatibility | undefined,
   host: CanonicalExtensionHostProfile,
 ): { readonly state: CanonicalExtensionCompatibilityState; readonly missingCommands: readonly string[] } {

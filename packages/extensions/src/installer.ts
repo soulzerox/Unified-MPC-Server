@@ -1,9 +1,15 @@
 import { createHash } from 'node:crypto';
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { DirectGitRunner, type GitRunner } from '@unified-mpc/git';
+import {
+  evaluateCanonicalExtensionCompatibility,
+  type CanonicalExtensionCompatibility,
+  type CanonicalExtensionCompatibilityState,
+} from './canonical-extension-registry.js';
 import { parseSkillMarkdown } from './skill-catalog.js';
 import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
 import { writeAtomic } from './ide-sync.js';
@@ -55,6 +61,9 @@ export interface InstallerServiceOptions {
   readonly workspaceRoot?: string;
   readonly dataDir?: string;
   readonly gitRunner?: GitRunner;
+  readonly platform?: NodeJS.Platform;
+  readonly architecture?: string;
+  readonly availableCommands?: ReadonlySet<string>;
 }
 
 const MANAGED_MCP_VERSION_RETENTION = 3;
@@ -88,6 +97,9 @@ export class InstallerService {
   private readonly workspace: string | undefined;
   private readonly dataDir: string;
   private readonly gitRunner: GitRunner;
+  private readonly platform: NodeJS.Platform;
+  private readonly architecture: string;
+  private readonly availableCommands: ReadonlySet<string> | undefined;
 
   public constructor(options: InstallerServiceOptions = {}) {
     this.home = options.homeDir ?? os.homedir();
@@ -95,6 +107,9 @@ export class InstallerService {
     this.workspace = options.workspaceRoot?.trim();
     this.dataDir = options.dataDir?.trim() ?? path.join(this.home, '.local', 'share', 'unified-mpc');
     this.gitRunner = options.gitRunner ?? new DirectGitRunner();
+    this.platform = options.platform ?? process.platform;
+    this.architecture = options.architecture?.trim() || process.arch;
+    this.availableCommands = options.availableCommands;
   }
 
   public async installSkill(input: InstallSkillInput): Promise<Result<InstallSkillResult>> {
@@ -190,6 +205,9 @@ export class InstallerService {
       return err(appError('INVALID_INPUT', `Failed to parse skill markdown: ${error instanceof Error ? error.message : String(error)}`));
     }
 
+    const compatibility = await this.validateDeclaredCompatibility(sourceSkillDir);
+    if (!compatibility.ok) return err(compatibility.error);
+
     const scope: InstallScope = input.scope ?? 'global';
     const workspaceRoot = input.workspaceRoot?.trim() ?? this.workspace;
     if (scope === 'workspace' && (workspaceRoot === undefined || workspaceRoot.length === 0)) {
@@ -205,6 +223,58 @@ export class InstallerService {
       installedPaths.push(path.join(targetDir, 'SKILL.md'));
     }
     return ok({ name: skillName, installedPaths, targets: input.targets });
+  }
+
+  private async validateDeclaredCompatibility(
+    sourceRoot: string,
+  ): Promise<Result<CanonicalExtensionCompatibilityState>> {
+    const declared = await readDeclaredCompatibility(sourceRoot);
+    if (!declared.ok) return err(declared.error);
+    if (declared.value === undefined) return ok('unknown');
+
+    const requiredCommands = declared.value.requiresCommands ?? [];
+    const availableCommands = this.availableCommands
+      ?? await detectAvailableCommands(requiredCommands, this.platform);
+    const evaluated = evaluateCanonicalExtensionCompatibility(declared.value, {
+      platform: this.platform,
+      architecture: this.architecture,
+      availableCommands,
+    });
+
+    if (evaluated.state === 'incompatible_platform') {
+      return err(appError(
+        'UNSUPPORTED_PLATFORM',
+        `Extension compatibility does not include current platform ${this.platform}; declared platforms: ${(declared.value.platforms ?? []).join(', ') || '<none>'}`,
+        false,
+        {
+          platform: this.platform,
+          declaredPlatforms: (declared.value.platforms ?? []).join(','),
+        },
+      ));
+    }
+    if (evaluated.state === 'incompatible_architecture') {
+      return err(appError(
+        'UNSUPPORTED_PLATFORM',
+        `Extension compatibility does not include current architecture ${this.architecture}; declared architectures: ${(declared.value.architectures ?? []).join(', ') || '<none>'}`,
+        false,
+        {
+          architecture: this.architecture,
+          declaredArchitectures: (declared.value.architectures ?? []).join(','),
+        },
+      ));
+    }
+    if (evaluated.state === 'missing_dependency') {
+      return err(appError(
+        'EXECUTABLE_NOT_FOUND',
+        `Extension requires unavailable command(s): ${evaluated.missingCommands.join(', ')}`,
+        false,
+        { missingCommands: evaluated.missingCommands.join(',') },
+      ));
+    }
+    if (evaluated.state === 'conflict') {
+      return err(appError('INVALID_INPUT', 'Extension compatibility metadata is conflicting'));
+    }
+    return ok(evaluated.state);
   }
 
   private expandTargets(targets: readonly InstallTarget[]): readonly InstallTarget[] {
@@ -302,6 +372,11 @@ export class InstallerService {
         managedProvenanceJson = materialized.value.provenanceJson;
         sourceRevision = materialized.value.revision;
         sourceContentSha256 = materialized.value.contentSha256;
+        const compatibility = await this.validateDeclaredCompatibility(managedSourcePath);
+        if (!compatibility.ok) {
+          await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
+          return err(compatibility.error);
+        }
         const launch = await resolveNodePackageLaunch(managedSourcePath, serverName);
         if (!launch.ok) {
           await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -574,6 +649,126 @@ function looksLikeRemoteSource(source: string): boolean {
 function boundedGitError(stderr: string): string {
   const message = stderr.trim().replace(/\s+/g, ' ');
   return message.length === 0 ? 'git clone failed' : message.slice(0, 512);
+}
+
+const SUPPORTED_EXTENSION_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
+
+async function readDeclaredCompatibility(
+  sourceRoot: string,
+): Promise<Result<CanonicalExtensionCompatibility | undefined>> {
+  const manifestPath = path.join(sourceRoot, 'manifest.json');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown;
+  } catch (error: unknown) {
+    if (isMissingPath(error)) return ok(undefined);
+    if (error instanceof SyntaxError) {
+      return err(appError('INVALID_INPUT', `Extension compatibility manifest is invalid JSON: ${manifestPath}`));
+    }
+    return err(appError(
+      'INTERNAL_ERROR',
+      `Failed to read extension compatibility manifest: ${error instanceof Error ? error.message : String(error)}`,
+      true,
+    ));
+  }
+  if (!isRecord(parsed)) {
+    return err(appError('INVALID_INPUT', `Extension compatibility manifest must contain an object: ${manifestPath}`));
+  }
+  if (parsed.compatibility === undefined) return ok(undefined);
+  if (!isRecord(parsed.compatibility)) {
+    return err(appError('INVALID_INPUT', 'Extension compatibility metadata must contain an object'));
+  }
+
+  const compatibility = parsed.compatibility;
+  const allowedKeys = new Set(['platforms', 'architectures', 'requiresCommands', 'optionalCommands']);
+  const unknownKeys = Object.keys(compatibility).filter((key) => !allowedKeys.has(key));
+  if (unknownKeys.length > 0) {
+    return err(appError(
+      'INVALID_INPUT',
+      `Extension compatibility metadata contains unknown field(s): ${unknownKeys.sort().join(', ')}`,
+    ));
+  }
+
+  const platforms = decodeCompatibilityList(compatibility.platforms, 'platforms', (value) => (
+    SUPPORTED_EXTENSION_PLATFORMS.has(value as NodeJS.Platform)
+  ));
+  if (!platforms.ok) return err(platforms.error);
+  const architectures = decodeCompatibilityList(
+    compatibility.architectures,
+    'architectures',
+    (value) => /^[A-Za-z0-9._-]+$/.test(value),
+  );
+  if (!architectures.ok) return err(architectures.error);
+  const requiresCommands = decodeCompatibilityList(
+    compatibility.requiresCommands,
+    'requiresCommands',
+    isSafeCommandName,
+  );
+  if (!requiresCommands.ok) return err(requiresCommands.error);
+  const optionalCommands = decodeCompatibilityList(
+    compatibility.optionalCommands,
+    'optionalCommands',
+    isSafeCommandName,
+  );
+  if (!optionalCommands.ok) return err(optionalCommands.error);
+
+  return ok({
+    ...(platforms.value === undefined ? {} : { platforms: platforms.value as readonly NodeJS.Platform[] }),
+    ...(architectures.value === undefined ? {} : { architectures: architectures.value }),
+    ...(requiresCommands.value === undefined ? {} : { requiresCommands: requiresCommands.value }),
+    ...(optionalCommands.value === undefined ? {} : { optionalCommands: optionalCommands.value }),
+  });
+}
+
+function decodeCompatibilityList(
+  value: unknown,
+  field: string,
+  validate: (entry: string) => boolean,
+): Result<readonly string[] | undefined> {
+  if (value === undefined) return ok(undefined);
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    return err(appError('INVALID_INPUT', `Extension compatibility ${field} must be an array of strings`));
+  }
+  const normalized = [...new Set(value.map((entry) => entry.trim()))].sort((left, right) => left.localeCompare(right));
+  if (normalized.some((entry) => entry.length === 0 || !validate(entry))) {
+    return err(appError('INVALID_INPUT', `Extension compatibility ${field} contains an invalid value`));
+  }
+  return ok(normalized);
+}
+
+function isSafeCommandName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(value);
+}
+
+async function detectAvailableCommands(
+  commands: readonly string[],
+  platform: NodeJS.Platform,
+): Promise<ReadonlySet<string>> {
+  const available = new Set<string>();
+  for (const command of commands) {
+    if (await commandExistsOnPath(command, platform)) available.add(command);
+  }
+  return available;
+}
+
+async function commandExistsOnPath(command: string, platform: NodeJS.Platform): Promise<boolean> {
+  const searchPath = process.env.PATH ?? '';
+  if (searchPath.length === 0) return false;
+  const extensions = platform === 'win32'
+    ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((entry) => entry.length > 0)
+    : [''];
+  for (const directory of searchPath.split(path.delimiter).filter((entry) => entry.length > 0)) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, platform === 'win32' ? `${command}${extension}` : command);
+      try {
+        await access(candidate, platform === 'win32' ? constants.F_OK : constants.X_OK);
+        return true;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return false;
 }
 
 async function hashManagedSourceContent(repositoryPath: string): Promise<string> {

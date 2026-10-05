@@ -4,6 +4,8 @@ import {
   type CanonicalExtensionMigrationCandidate,
   type CanonicalExtensionMigrationManifest,
 } from './canonical-extension-migration-manifest.js';
+import { fingerprintExternalMcpValue } from './mcp-session-manager.js';
+import type { McpServerLaunchConfig } from './types.js';
 
 const fingerprintA = 'a'.repeat(64);
 const fingerprintB = 'b'.repeat(64);
@@ -39,6 +41,20 @@ function manifestFor(candidates: readonly CanonicalExtensionMigrationCandidate[]
   });
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
+}
+
+function mcpCandidate(name: string, launchConfig: McpServerLaunchConfig | undefined): CanonicalExtensionMigrationCandidate {
+  const fingerprint = launchConfig === undefined ? fingerprintA : fingerprintExternalMcpValue(launchConfig);
+  return {
+    kind: 'mcp_server',
+    id: 'mcp:' + name,
+    name,
+    fingerprint,
+    enabled: true,
+    provenance: { originType: 'client-import', origin: '/fixture/' + name, sourceClient: 'cursor' },
+    compatibility: { platforms: ['linux'] },
+    ...(launchConfig === undefined ? {} : { launchConfig }),
+  } as CanonicalExtensionMigrationCandidate;
 }
 
 describe('canonical extension migration manifest', () => {
@@ -279,6 +295,58 @@ describe('canonical extension migration manifest', () => {
       'skill:code-review',
       'skill:zeta',
     ]);
+  });
+
+  it('preserves a normalized MCP launch config for canonical materialization', () => {
+    const launchConfig: McpServerLaunchConfig = {
+      command: 'node',
+      args: ['server.js'],
+      env: { ZETA: 'z', ALPHA: 'a' },
+      cwd: '/srv/context7',
+      type: 'stdio',
+    };
+    const manifest = manifestFor([mcpCandidate('context7', launchConfig)]);
+
+    expect(manifest.cutover).toEqual({ allowed: true, reasons: [] });
+    expect(manifest.entries[0]).toMatchObject({
+      kind: 'mcp_server',
+      id: 'mcp:context7',
+      selectedFingerprint: fingerprintExternalMcpValue(launchConfig),
+      sources: [{
+        launchConfig: {
+          command: 'node',
+          args: ['server.js'],
+          env: { ALPHA: 'a', ZETA: 'z' },
+          cwd: '/srv/context7',
+          type: 'stdio',
+        },
+      }],
+    });
+  });
+
+  it('blocks MCP cutover when an active canonical server has no launch config payload', () => {
+    const manifest = manifestFor([mcpCandidate('context7', undefined)]);
+
+    expect(manifest.summary.activeCanonicalCount).toBe(1);
+    expect(manifest.cutover).toEqual({
+      allowed: false,
+      reasons: ['mcp_launch_config_missing'],
+    });
+  });
+
+  it('treats MCP launch-config drift as a conflict even if a caller reuses the same fingerprint', () => {
+    const first = mcpCandidate('context7', { command: 'node', args: ['first.js'] });
+    const second = {
+      ...mcpCandidate('context7', { command: 'node', args: ['second.js'] }),
+      fingerprint: first.fingerprint,
+    };
+    const manifest = manifestFor([first, second]);
+
+    expect(manifest.entries[0]).toMatchObject({
+      classification: 'conflict',
+      conflictReasons: ['launch_config_drift'],
+    });
+    expect(manifest.cutover.allowed).toBe(false);
   });
 
   it('keeps incompatible-only active inventory blocked but allows an intentionally disabled inventory', () => {

@@ -53,6 +53,14 @@ export {
   type CanonicalExtensionMigrationSummary,
 } from './canonical-extension-migration-manifest.js';
 export {
+  CanonicalMcpMigrationStager,
+  type CanonicalMcpMigrationSkipReason,
+  type CanonicalMcpMigrationSkippedEntry,
+  type CanonicalMcpMigrationStagedServer,
+  type CanonicalMcpMigrationStageResult,
+  type CanonicalMcpMigrationStagerOptions,
+} from './canonical-mcp-migration-stager.js';
+export {
   CanonicalSkillMigrationStager,
   fingerprintCanonicalSkillDirectory,
   type CanonicalSkillMigrationSkipReason,

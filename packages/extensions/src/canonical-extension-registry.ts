@@ -157,6 +157,57 @@ export class CanonicalExtensionRegistry {
       ));
     }
   }
+
+  public async upsertAtomically(
+    candidate: CanonicalExtensionCandidate,
+    host: CanonicalExtensionHostProfile,
+    siblingFiles: readonly string[],
+    operation: () => Promise<void>,
+  ): Promise<Result<CanonicalExtensionRegistrySnapshot>> {
+    const reconciled = reconcileCanonicalExtensionCandidates([candidate], host);
+    if (!reconciled.ok) return err(reconciled.error);
+    const entry = reconciled.value.entries[0];
+    if (entry === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Canonical extension reconciliation produced no entry', true));
+    }
+
+    try {
+      return await withConfigMutationTransaction(
+        [this.registryPath, ...siblingFiles],
+        async () => {
+          const current = await this.load();
+          if (!current.ok) return current;
+
+          const entries = [
+            ...current.value.entries.filter((existing) => (
+              existing.kind !== entry.kind || existing.id !== entry.id
+            )),
+            entry,
+          ].sort(compareEntries);
+          const currentEntries = [...current.value.entries].sort(compareEntries);
+          const changed = JSON.stringify(entries) !== JSON.stringify(currentEntries);
+
+          await operation();
+          if (!changed) return current;
+
+          const next: CanonicalExtensionRegistrySnapshot = {
+            schemaVersion: REGISTRY_SCHEMA_VERSION,
+            generation: current.value.generation + 1,
+            entries,
+          };
+          await writeAtomic(this.registryPath, JSON.stringify(next, null, 2) + '\n');
+          return ok(next);
+        },
+      );
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        'Failed to atomically update canonical extension registry: '
+          + (error instanceof Error ? error.message : String(error)),
+        true,
+      ));
+    }
+  }
 }
 
 export function canonicalExtensionRegistryPath(dataDir: string): string {

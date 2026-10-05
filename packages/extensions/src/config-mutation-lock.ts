@@ -24,11 +24,13 @@ export async function withConfigMutationTransaction<T>(
   });
 
   await previous;
-  const lockPath = mutationLockPath(files);
-  let releaseFileLock: (() => Promise<void>) | undefined;
+  const transactionFiles = [...new Set(files.map((file) => path.resolve(file)))].sort();
+  const releaseFileLocks: Array<() => Promise<void>> = [];
   try {
-    releaseFileLock = await acquireFileLock(lockPath);
-    const snapshots = await Promise.all(files.map(captureFile));
+    for (const file of transactionFiles) {
+      releaseFileLocks.push(await acquireFileLock(mutationLockPath(file)));
+    }
+    const snapshots = await Promise.all(transactionFiles.map(captureFile));
     try {
       return await operation();
     } catch (error: unknown) {
@@ -36,13 +38,15 @@ export async function withConfigMutationTransaction<T>(
       throw error;
     }
   } finally {
-    await releaseFileLock?.();
+    for (let index = releaseFileLocks.length - 1; index >= 0; index -= 1) {
+      await releaseFileLocks[index]!();
+    }
     release();
   }
 }
 
-function mutationLockPath(files: readonly string[]): string {
-  const key = createHash('sha256').update([...files].sort().join('\0')).digest('hex');
+function mutationLockPath(file: string): string {
+  const key = createHash('sha256').update(file).digest('hex');
   return path.join(os.tmpdir(), `unified-mpc-config-${key}.lock`);
 }
 

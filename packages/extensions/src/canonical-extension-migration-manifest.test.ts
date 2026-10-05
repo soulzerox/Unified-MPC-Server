@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCanonicalExtensionMigrationManifest,
+  type CanonicalExtensionMigrationCandidate,
   type CanonicalExtensionMigrationManifest,
 } from './canonical-extension-migration-manifest.js';
-import type { CanonicalExtensionCandidate } from './canonical-extension-registry.js';
 
 const fingerprintA = 'a'.repeat(64);
 const fingerprintB = 'b'.repeat(64);
 
-function candidate(overrides: Partial<CanonicalExtensionCandidate> = {}): CanonicalExtensionCandidate {
-  return {
+function candidate(
+  overrides: Partial<CanonicalExtensionMigrationCandidate> = {},
+): CanonicalExtensionMigrationCandidate {
+  const merged: CanonicalExtensionMigrationCandidate = {
     kind: 'skill',
     id: 'skill:code-review',
     name: 'code-review',
@@ -23,9 +25,13 @@ function candidate(overrides: Partial<CanonicalExtensionCandidate> = {}): Canoni
     compatibility: { platforms: ['linux'] },
     ...overrides,
   };
+  return {
+    ...merged,
+    sourcePath: overrides.sourcePath ?? merged.provenance.origin,
+  };
 }
 
-function manifestFor(candidates: readonly CanonicalExtensionCandidate[]): CanonicalExtensionMigrationManifest {
+function manifestFor(candidates: readonly CanonicalExtensionMigrationCandidate[]): CanonicalExtensionMigrationManifest {
   const result = buildCanonicalExtensionMigrationManifest(candidates, {
     platform: 'linux',
     architecture: 'x64',
@@ -107,6 +113,7 @@ describe('canonical extension migration manifest', () => {
           enabled: true,
           compatibility: { platforms: ['linux'] },
           compatibilityState: 'compatible',
+          sourcePath: '/home/test/.cline/skills/code-review',
           provenance: expect.objectContaining({ sourceClient: 'cline' }),
         },
         {
@@ -115,6 +122,7 @@ describe('canonical extension migration manifest', () => {
           enabled: true,
           compatibility: { platforms: ['linux'] },
           compatibilityState: 'compatible',
+          sourcePath: '/home/test/.codex/skills/code-review',
           provenance: expect.objectContaining({ sourceClient: 'codex' }),
         },
       ],

@@ -344,6 +344,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     expect(rolledBack.ok).toBe(true);
     if (!rolledBack.ok) return;
     expect(rolledBack.value).toEqual({
+      target: 'canonical',
       fromGenerationId: secondStage.generationId,
       toGenerationId: firstStage.generationId,
       state: {
@@ -360,8 +361,8 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     expect(resolved.value?.generationPath).toBe(firstStage.generationPath);
   });
 
-  it('rejects rollback when there is no previous generation and preserves state', async () => {
-    const root = await fixtureRoot('canonical-cutover-rollback-none-');
+  it('rolls the first canonical cutover back to legacy mode without touching staged or live roots', async () => {
+    const root = await fixtureRoot('canonical-cutover-rollback-legacy-');
     const dataDir = path.join(root, 'data');
     const source = await createSkill(root, 'source', 'alpha', '# Alpha');
     const manifest = manifestFor([
@@ -372,17 +373,72 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     const activated = await store.activate(manifest, staged);
     expect(activated.ok).toBe(true);
 
+    const stagedSkillPath = path.join(
+      staged.generationPath,
+      staged.stagedSkills[0]!.relativePath,
+      'SKILL.md',
+    );
+    const stagedSkillBeforeRollback = await readFile(stagedSkillPath, 'utf8');
+
     const rolledBack = await store.rollback(staged.generationId);
-    expect(rolledBack.ok).toBe(false);
-    if (!rolledBack.ok) {
-      expect(rolledBack.error.code).toBe('CONFLICT');
-      expect(rolledBack.error.message).toContain('previous generation');
-    }
+    expect(rolledBack.ok).toBe(true);
+    if (!rolledBack.ok) return;
+    expect(rolledBack.value).toEqual({
+      target: 'legacy',
+      fromGenerationId: staged.generationId,
+    });
 
     const loaded = await store.load();
     expect(loaded.ok).toBe(true);
-    if (!loaded.ok || !activated.ok) return;
-    expect(loaded.value).toEqual(activated.value.state);
+    if (!loaded.ok) return;
+    expect(loaded.value).toBeUndefined();
+    expect((await stat(staged.generationPath)).isDirectory()).toBe(true);
+    expect(await readFile(stagedSkillPath, 'utf8')).toBe(stagedSkillBeforeRollback);
+    await expect(stat(path.join(dataDir, 'extensions', 'skills'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('makes concurrent first-cutover rollback retry-safe and leaves legacy mode active', async () => {
+    const root = await fixtureRoot('canonical-cutover-rollback-legacy-concurrent-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'alpha', '# Alpha');
+    const manifest = manifestFor([
+      candidate({ id: 'skill:alpha', name: 'alpha', fingerprint: source.fingerprint, sourcePath: source.sourcePath }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const firstStore = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const secondStore = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    expect((await firstStore.activate(manifest, staged)).ok).toBe(true);
+
+    const stagedSkillPath = path.join(
+      staged.generationPath,
+      staged.stagedSkills[0]!.relativePath,
+      'SKILL.md',
+    );
+    const stagedSkillBeforeRollback = await readFile(stagedSkillPath, 'utf8');
+
+    const results = await Promise.all([
+      firstStore.rollback(staged.generationId),
+      secondStore.rollback(staged.generationId),
+    ]);
+    const successful = results.filter((result) => result.ok);
+    expect(successful).toHaveLength(1);
+    expect(successful[0]?.ok && successful[0].value).toEqual({
+      target: 'legacy',
+      fromGenerationId: staged.generationId,
+    });
+    const rejected = results.find((result) => !result.ok);
+    expect(rejected?.ok).toBe(false);
+    if (rejected !== undefined && !rejected.ok) {
+      expect(rejected.error.code).toBe('CONFLICT');
+    }
+
+    const loaded = await firstStore.load();
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.value).toBeUndefined();
+    expect((await stat(staged.generationPath)).isDirectory()).toBe(true);
+    expect(await readFile(stagedSkillPath, 'utf8')).toBe(stagedSkillBeforeRollback);
+    await expect(stat(path.join(dataDir, 'extensions', 'skills'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('fails closed when the previous generation is corrupt and preserves the active pointer', async () => {

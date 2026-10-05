@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
@@ -23,11 +23,17 @@ export interface CanonicalSkillMigrationCutoverActivation {
   readonly state: CanonicalSkillMigrationCutoverState;
 }
 
-export interface CanonicalSkillMigrationCutoverRollback {
-  readonly fromGenerationId: string;
-  readonly toGenerationId: string;
-  readonly state: CanonicalSkillMigrationCutoverState;
-}
+export type CanonicalSkillMigrationCutoverRollback =
+  | {
+    readonly target: 'canonical';
+    readonly fromGenerationId: string;
+    readonly toGenerationId: string;
+    readonly state: CanonicalSkillMigrationCutoverState;
+  }
+  | {
+    readonly target: 'legacy';
+    readonly fromGenerationId: string;
+  };
 
 export interface CanonicalSkillMigrationActiveGeneration {
   readonly state: CanonicalSkillMigrationCutoverState;
@@ -96,7 +102,11 @@ export class CanonicalSkillMigrationCutoverStateStore {
         }
         const previousGenerationId = current.value.previousGenerationId;
         if (previousGenerationId === undefined) {
-          return err(appError('CONFLICT', 'Canonical Skill rollback has no previous generation available'));
+          await unlink(this.statePath);
+          return ok({
+            target: 'legacy',
+            fromGenerationId: current.value.activeGenerationId,
+          });
         }
 
         const nextState: CanonicalSkillMigrationCutoverState = {
@@ -109,6 +119,7 @@ export class CanonicalSkillMigrationCutoverStateStore {
 
         await writeAtomic(this.statePath, JSON.stringify(nextState, null, 2) + '\n');
         return ok({
+          target: 'canonical',
           fromGenerationId: current.value.activeGenerationId,
           toGenerationId: previousGenerationId,
           state: nextState,

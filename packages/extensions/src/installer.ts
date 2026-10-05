@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat } from 'node:fs/promises';
+import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -12,6 +12,7 @@ import {
   type CanonicalExtensionCompatibility,
   type CanonicalExtensionCompatibilityState,
 } from './canonical-extension-registry.js';
+import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
 import { parseSkillMarkdown } from './skill-catalog.js';
 import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue } from './mcp-session-manager.js';
@@ -224,7 +225,19 @@ export class InstallerService {
     }
 
     const installedPaths: string[] = [];
-    for (const target of this.expandTargets(input.targets)) {
+    const targets = this.expandTargets(input.targets);
+    if (targets.includes('unified-mpc')) {
+      const canonical = await this.installCanonicalSkill(
+        skillName,
+        input.source,
+        sourceSkillDir,
+      );
+      if (!canonical.ok) return err(canonical.error);
+      installedPaths.push(canonical.value);
+    }
+
+    for (const target of targets) {
+      if (target === 'unified-mpc') continue;
       const targetDir = this.skillTargetDirectory(target, scope, skillName, workspaceRoot);
       if (targetDir === undefined) continue;
       await mkdir(targetDir, { recursive: true });
@@ -232,6 +245,153 @@ export class InstallerService {
       installedPaths.push(path.join(targetDir, 'SKILL.md'));
     }
     return ok({ name: skillName, installedPaths, targets: input.targets });
+  }
+
+  private async installCanonicalSkill(
+    skillName: string,
+    inputSource: string,
+    sourceSkillDir: string,
+  ): Promise<Result<string>> {
+    const stagingRoot = path.join(
+      this.dataDir,
+      'extensions',
+      'state',
+      'skill-install-staging',
+    );
+    let stagingContainer: string;
+    try {
+      await mkdir(stagingRoot, { recursive: true });
+      stagingContainer = await mkdtemp(path.join(stagingRoot, `${skillName}-`));
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to create canonical Skill staging directory: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ));
+    }
+
+    const stagedSkillDir = path.join(stagingContainer, 'skill');
+    try {
+      const sourceGitPath = path.join(path.resolve(sourceSkillDir), '.git');
+      await cp(sourceSkillDir, stagedSkillDir, {
+        recursive: true,
+        filter: (sourcePath) => path.resolve(sourcePath) !== sourceGitPath,
+      });
+
+      const stagedFingerprint = await fingerprintCanonicalSkillDirectory(stagedSkillDir);
+      if (!stagedFingerprint.ok) return err(stagedFingerprint.error);
+
+      try {
+        parseSkillMarkdown(
+          await readFile(path.join(stagedSkillDir, 'SKILL.md'), 'utf8'),
+          skillName,
+        );
+      } catch (error: unknown) {
+        return err(appError(
+          'INVALID_INPUT',
+          `Failed to validate staged canonical Skill markdown: ${error instanceof Error ? error.message : String(error)}`,
+        ));
+      }
+
+      const compatibility = await this.validateDeclaredCompatibility(stagedSkillDir);
+      if (!compatibility.ok) return err(compatibility.error);
+
+      const remoteSource = parseHttpsGitSource(inputSource);
+      const candidate: CanonicalExtensionCandidate = {
+        kind: 'skill',
+        id: `skill:${skillName}`,
+        name: skillName,
+        fingerprint: stagedFingerprint.value,
+        enabled: true,
+        provenance: {
+          originType: remoteSource === undefined ? 'local-import' : 'github',
+          origin: remoteSource?.href ?? path.resolve(inputSource),
+          contentSha256: stagedFingerprint.value,
+        },
+        ...(compatibility.value.compatibility === undefined
+          ? {}
+          : { compatibility: compatibility.value.compatibility }),
+      };
+
+      const activeSkillDir = path.join(this.dataDir, 'extensions', 'skills', skillName);
+      const backupRoot = path.join(
+        this.dataDir,
+        'extensions',
+        'state',
+        'skill-install-backups',
+      );
+      let backupPath: string | undefined;
+      let previousMoved = false;
+      let stagedActivated = false;
+
+      const persisted = await new CanonicalExtensionRegistry({ dataDir: this.dataDir }).upsertAtomically(
+        candidate,
+        {
+          platform: this.platform,
+          architecture: this.architecture,
+          availableCommands: compatibility.value.availableCommands,
+        },
+        [],
+        async () => {
+          const currentFingerprint = await fingerprintCanonicalSkillDirectory(activeSkillDir);
+          if (currentFingerprint.ok && currentFingerprint.value === stagedFingerprint.value) {
+            return;
+          }
+          if (!currentFingerprint.ok && currentFingerprint.error.code !== 'FILE_NOT_FOUND') {
+            throw new Error(
+              `Existing canonical Skill copy is not safe to replace: ${currentFingerprint.error.message}`,
+            );
+          }
+
+          await mkdir(path.dirname(activeSkillDir), { recursive: true });
+          if (currentFingerprint.ok) {
+            await mkdir(backupRoot, { recursive: true });
+            backupPath = path.join(backupRoot, `${skillName}-${randomUUID()}`);
+            await rename(activeSkillDir, backupPath);
+            previousMoved = true;
+          }
+
+          await rename(stagedSkillDir, activeSkillDir);
+          stagedActivated = true;
+
+          const activatedFingerprint = await fingerprintCanonicalSkillDirectory(activeSkillDir);
+          if (
+            !activatedFingerprint.ok
+            || activatedFingerprint.value !== stagedFingerprint.value
+          ) {
+            throw new Error(
+              activatedFingerprint.ok
+                ? 'Activated canonical Skill fingerprint does not match staged content'
+                : `Failed to verify activated canonical Skill: ${activatedFingerprint.error.message}`,
+            );
+          }
+        },
+        async () => {
+          if (stagedActivated) {
+            await rm(activeSkillDir, { recursive: true, force: true });
+            stagedActivated = false;
+          }
+          if (previousMoved && backupPath !== undefined) {
+            await rename(backupPath, activeSkillDir);
+            previousMoved = false;
+          }
+        },
+      );
+      if (!persisted.ok) return err(persisted.error);
+
+      if (previousMoved && backupPath !== undefined) {
+        await rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
+      }
+      return ok(path.join(activeSkillDir, 'SKILL.md'));
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to install canonical Skill: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ));
+    } finally {
+      await rm(stagingContainer, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   private async validateDeclaredCompatibility(

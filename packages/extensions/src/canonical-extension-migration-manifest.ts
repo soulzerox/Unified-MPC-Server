@@ -27,6 +27,16 @@ export type CanonicalExtensionCutoverBlocker =
   | 'unknown_compatibility_present'
   | 'canonical_active_set_empty';
 
+export interface CanonicalExtensionMigrationSource {
+  readonly name: string;
+  readonly fingerprint: string;
+  readonly enabled: boolean;
+  readonly compatibility?: CanonicalExtensionCompatibility;
+  readonly compatibilityState: CanonicalExtensionCompatibilityState;
+  readonly missingCommands?: readonly string[];
+  readonly provenance: CanonicalExtensionProvenance;
+}
+
 export interface CanonicalExtensionMigrationManifestEntry {
   readonly kind: CanonicalExtensionKind;
   readonly id: string;
@@ -35,6 +45,7 @@ export interface CanonicalExtensionMigrationManifestEntry {
   readonly selectedFingerprint?: string;
   readonly variantFingerprints: readonly string[];
   readonly sourceCount: number;
+  readonly sources: readonly CanonicalExtensionMigrationSource[];
   readonly enabledStates: readonly boolean[];
   readonly compatibilityState: CanonicalExtensionCompatibilityState;
   readonly provenance: readonly CanonicalExtensionProvenance[];
@@ -72,8 +83,12 @@ export function buildCanonicalExtensionMigrationManifest(
   if (!reconciled.ok) return err(reconciled.error);
 
   const grouped = groupCandidates(candidates);
+  const sourceInventory = buildMigrationSourceInventory(grouped, host);
+  if (!sourceInventory.ok) return err(sourceInventory.error);
+
   const entries = reconciled.value.entries.map((canonical) => {
     const sourceCandidates = grouped.get(candidateKey(canonical.kind, canonical.id)) ?? [];
+    const sources = sourceInventory.value.get(candidateKey(canonical.kind, canonical.id)) ?? [];
     const conflictReasons = conflictReasonsFor(sourceCandidates);
     const hasConflict = canonical.conflict || conflictReasons.length > 0;
     const compatibilityState: CanonicalExtensionCompatibilityState = hasConflict
@@ -94,7 +109,8 @@ export function buildCanonicalExtensionMigrationManifest(
         ? {}
         : { selectedFingerprint: canonical.fingerprint }),
       variantFingerprints: canonical.variantFingerprints,
-      sourceCount: sourceCandidates.length,
+      sourceCount: sources.length,
+      sources,
       enabledStates: uniqueEnabledStates(sourceCandidates),
       compatibilityState,
       provenance: canonical.provenance,
@@ -151,6 +167,61 @@ function groupCandidates(
     else current.push(candidate);
   }
   return groups;
+}
+
+function buildMigrationSourceInventory(
+  grouped: ReadonlyMap<string, readonly CanonicalExtensionCandidate[]>,
+  host: CanonicalExtensionHostProfile,
+): Result<ReadonlyMap<string, readonly CanonicalExtensionMigrationSource[]>> {
+  const inventory = new Map<string, readonly CanonicalExtensionMigrationSource[]>();
+  for (const [key, candidates] of grouped) {
+    const sources: CanonicalExtensionMigrationSource[] = [];
+    for (const candidate of candidates) {
+      const reconciled = reconcileCanonicalExtensionCandidates([candidate], host);
+      if (!reconciled.ok) return err(reconciled.error);
+      const canonical = reconciled.value.entries[0]!;
+      sources.push({
+        name: candidate.name,
+        fingerprint: candidate.fingerprint,
+        enabled: candidate.enabled,
+        ...(canonical.compatibility === undefined ? {} : { compatibility: canonical.compatibility }),
+        compatibilityState: canonical.compatibilityState,
+        ...(canonical.missingCommands === undefined ? {} : { missingCommands: canonical.missingCommands }),
+        provenance: candidate.provenance,
+      });
+    }
+    inventory.set(key, sources.sort(compareMigrationSources));
+  }
+  return ok(inventory);
+}
+
+function compareMigrationSources(
+  left: CanonicalExtensionMigrationSource,
+  right: CanonicalExtensionMigrationSource,
+): number {
+  return migrationSourceKey(left).localeCompare(migrationSourceKey(right));
+}
+
+function migrationSourceKey(source: CanonicalExtensionMigrationSource): string {
+  return [
+    source.fingerprint,
+    source.enabled ? '1' : '0',
+    source.name,
+    stableCompatibility(source.compatibility),
+    provenanceKey(source.provenance),
+  ].join('\u0000');
+}
+
+function provenanceKey(value: CanonicalExtensionProvenance): string {
+  return [
+    value.originType,
+    value.origin,
+    value.sourceClient ?? '',
+    value.version ?? '',
+    value.revision ?? '',
+    value.contentSha256 ?? '',
+    value.importedAt ?? '',
+  ].join('\u0000');
 }
 
 function conflictReasonsFor(

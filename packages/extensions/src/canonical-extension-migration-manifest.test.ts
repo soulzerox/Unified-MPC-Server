@@ -100,6 +100,24 @@ describe('canonical extension migration manifest', () => {
       classification: 'conflict',
       conflictReasons: ['variant_fingerprint'],
       variantFingerprints: [fingerprintA, fingerprintB],
+      sources: [
+        {
+          name: 'code-review',
+          fingerprint: fingerprintA,
+          enabled: true,
+          compatibility: { platforms: ['linux'] },
+          compatibilityState: 'compatible',
+          provenance: expect.objectContaining({ sourceClient: 'cline' }),
+        },
+        {
+          name: 'code-review',
+          fingerprint: fingerprintB,
+          enabled: true,
+          compatibility: { platforms: ['linux'] },
+          compatibilityState: 'compatible',
+          provenance: expect.objectContaining({ sourceClient: 'codex' }),
+        },
+      ],
     });
     expect(manifest.cutover).toEqual({
       allowed: false,
@@ -124,6 +142,18 @@ describe('canonical extension migration manifest', () => {
       classification: 'conflict',
       conflictReasons: ['enabled_drift'],
       enabledStates: [false, true],
+      sources: [
+        expect.objectContaining({
+          fingerprint: fingerprintA,
+          enabled: false,
+          provenance: expect.objectContaining({ sourceClient: 'codex' }),
+        }),
+        expect.objectContaining({
+          fingerprint: fingerprintA,
+          enabled: true,
+          provenance: expect.objectContaining({ sourceClient: 'cline' }),
+        }),
+      ],
     });
     expect(manifest.cutover.allowed).toBe(false);
   });

@@ -173,4 +173,39 @@ describe('canonical extension registry', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('serializes concurrent registry replacements through the shared config mutation lock', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-lock-'));
+    try {
+      const snapshots = Array.from({ length: 20 }, (_, index) => {
+        const reconciled = reconcileCanonicalExtensionCandidates([
+          skillCandidate({ id: `skill:concurrent-${index}`, name: `concurrent-${index}` }),
+        ], {
+          platform: 'linux',
+          architecture: 'x64',
+          availableCommands: new Set(),
+        });
+        if (!reconciled.ok) throw new Error(reconciled.error.message);
+        return reconciled.value;
+      });
+
+      const results = await Promise.all(snapshots.map(async (snapshot) => {
+        const registry = new CanonicalExtensionRegistry({ dataDir: root });
+        return registry.save(snapshot);
+      }));
+      expect(results.every((result) => result.ok)).toBe(true);
+
+      const loaded = await new CanonicalExtensionRegistry({ dataDir: root }).load();
+      expect(loaded).toMatchObject({
+        ok: true,
+        value: {
+          schemaVersion: 1,
+          generation: 20,
+          entries: [{ conflict: false }],
+        },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { writeAtomic } from './ide-sync.js';
 
 export type CanonicalExtensionKind = 'skill' | 'mcp_server';
@@ -131,21 +132,23 @@ export class CanonicalExtensionRegistry {
   public async save(
     snapshot: Pick<CanonicalExtensionRegistrySnapshot, 'entries'>,
   ): Promise<Result<CanonicalExtensionRegistrySnapshot>> {
-    const current = await this.load();
-    if (!current.ok) return current;
-
-    const entries = [...snapshot.entries].sort(compareEntries);
-    const currentEntries = [...current.value.entries].sort(compareEntries);
-    if (JSON.stringify(entries) === JSON.stringify(currentEntries)) return current;
-
-    const next: CanonicalExtensionRegistrySnapshot = {
-      schemaVersion: REGISTRY_SCHEMA_VERSION,
-      generation: current.value.generation + 1,
-      entries,
-    };
     try {
-      await writeAtomic(this.registryPath, JSON.stringify(next, null, 2) + '\n');
-      return ok(next);
+      return await withConfigMutationTransaction([this.registryPath], async () => {
+        const current = await this.load();
+        if (!current.ok) return current;
+
+        const entries = [...snapshot.entries].sort(compareEntries);
+        const currentEntries = [...current.value.entries].sort(compareEntries);
+        if (JSON.stringify(entries) === JSON.stringify(currentEntries)) return current;
+
+        const next: CanonicalExtensionRegistrySnapshot = {
+          schemaVersion: REGISTRY_SCHEMA_VERSION,
+          generation: current.value.generation + 1,
+          entries,
+        };
+        await writeAtomic(this.registryPath, JSON.stringify(next, null, 2) + '\n');
+        return ok(next);
+      });
     } catch (error: unknown) {
       return err(appError(
         'INTERNAL_ERROR',

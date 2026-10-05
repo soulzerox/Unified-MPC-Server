@@ -214,4 +214,56 @@ describe('canonical extension migration manifest', () => {
     expect(onlyConflict.cutover.allowed).toBe(false);
     expect(onlyConflict.cutover.reasons).toContain('canonical_active_set_empty');
   });
+
+  it('is byte-for-byte deterministic when inventory discovery order changes', () => {
+    const inventory = [
+      candidate({
+        id: 'skill:zeta',
+        name: 'zeta',
+        fingerprint: fingerprintB,
+        provenance: {
+          originType: 'bundled',
+          origin: '/app/bundled/zeta',
+        },
+      }),
+      candidate(),
+      candidate({
+        provenance: {
+          originType: 'client-import',
+          origin: '/home/test/.codex/skills/code-review',
+          sourceClient: 'codex',
+        },
+      }),
+    ];
+
+    expect(manifestFor([...inventory].reverse())).toEqual(manifestFor(inventory));
+    expect(manifestFor(inventory).entries.map((entry) => entry.id)).toEqual([
+      'skill:code-review',
+      'skill:zeta',
+    ]);
+  });
+
+  it('keeps incompatible-only active inventory blocked but allows an intentionally disabled inventory', () => {
+    const incompatibleOnly = manifestFor([
+      candidate({ compatibility: { platforms: ['win32'] } }),
+    ]);
+    expect(incompatibleOnly.summary).toMatchObject({
+      activeInventoryCount: 1,
+      activeCanonicalCount: 0,
+      incompatibleCount: 1,
+    });
+    expect(incompatibleOnly.cutover).toEqual({
+      allowed: false,
+      reasons: ['canonical_active_set_empty'],
+    });
+
+    const disabledOnly = manifestFor([
+      candidate({ enabled: false }),
+    ]);
+    expect(disabledOnly.summary).toMatchObject({
+      activeInventoryCount: 0,
+      activeCanonicalCount: 0,
+    });
+    expect(disabledOnly.cutover).toEqual({ allowed: true, reasons: [] });
+  });
 });

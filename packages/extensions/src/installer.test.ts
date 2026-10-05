@@ -366,8 +366,71 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     expect(result.value.updatedConfigFiles).toEqual([registryFile]);
     const registry = JSON.parse(await readFile(registryFile, 'utf8'));
     expect(registry.mcpServers['parent-child']).toEqual({ command: 'node', args: ['server.js'] });
+    const canonicalState = JSON.parse(await readFile(path.join(dataDir, 'extensions', 'state', 'registry.json'), 'utf8'));
+    expect(canonicalState).toMatchObject({
+      schemaVersion: 1,
+      generation: 1,
+      entries: [{
+        kind: 'mcp_server',
+        id: 'mcp:parent-child',
+        name: 'parent-child',
+        enabled: true,
+        compatibilityState: 'unknown',
+        conflict: false,
+        provenance: [{
+          originType: 'managed',
+          origin: 'unified-mpc:mcp_install',
+        }],
+      }],
+    });
+    const canonicalEntry = canonicalState.entries[0];
+    expect(canonicalEntry.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(canonicalEntry.variantFingerprints).toEqual([canonicalEntry.fingerprint]);
+
+    const repeated = await new InstallerService({ homeDir: home, dataDir }).installServer({
+      name: 'parent-child',
+      transport: 'stdio',
+      command: 'node',
+      args: ['server.js'],
+      targets: ['unified-mpc'],
+    });
+    expect(repeated.ok).toBe(true);
+    const repeatedState = JSON.parse(await readFile(path.join(dataDir, 'extensions', 'state', 'registry.json'), 'utf8'));
+    expect(repeatedState.generation).toBe(1);
+    expect(repeatedState.entries).toEqual(canonicalState.entries);
+
     await expect(readFile(path.join(home, '.cursor', 'mcp.json'), 'utf8')).rejects.toThrow();
     await expect(readFile(path.join(home, '.cline', 'mcp.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('fails closed before MCP config writes when canonical installed-state registry is invalid', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-invalid-canonical-registry-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const canonicalRegistryFile = path.join(dataDir, 'extensions', 'state', 'registry.json');
+    await mkdir(path.dirname(canonicalRegistryFile), { recursive: true });
+    const invalidRegistry = JSON.stringify({
+      schemaVersion: 1,
+      generation: 1,
+      entries: [{ kind: 'mcp_server' }],
+    });
+    await writeFile(canonicalRegistryFile, invalidRegistry, 'utf8');
+
+    const result = await new InstallerService({ homeDir: home, dataDir }).installServer({
+      name: 'blocked-child',
+      transport: 'stdio',
+      command: 'node',
+      args: ['server.js'],
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('INVALID_INPUT');
+    expect(await readFile(canonicalRegistryFile, 'utf8')).toBe(invalidRegistry);
+    await expect(
+      readFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), 'utf8'),
+    ).rejects.toThrow();
   });
 
   it('rejects a declared incompatible managed MCP source before registering it', async () => {
@@ -409,11 +472,12 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     temporaryRoots.push(root);
     const fixture = path.join(root, 'fixture');
     const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
     await mkdir(fixture, { recursive: true });
     await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ name: 'remote-mcp', bin: 'server.js' }), 'utf8');
     await writeFile(path.join(fixture, 'server.js'), '#!/usr/bin/env node\n', 'utf8');
 
-    const installer = new InstallerService({ homeDir: home, gitRunner: fixtureGitRunner(fixture) });
+    const installer = new InstallerService({ homeDir: home, dataDir, gitRunner: fixtureGitRunner(fixture) });
     const result = await installer.installServer({
       name: 'remote-mcp',
       transport: 'stdio',
@@ -430,6 +494,9 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
       args: [path.join(result.value.managedSourcePath, 'server.js')],
       cwd: result.value.managedSourcePath,
     });
+    await expect(
+      readFile(path.join(dataDir, 'extensions', 'state', 'registry.json'), 'utf8'),
+    ).rejects.toThrow();
   });
 
   it('records immutable Git provenance and an atomic current-version marker for managed child MCP source', async () => {
@@ -441,8 +508,23 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     await mkdir(fixture, { recursive: true });
     await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ name: 'remote-mcp', bin: 'server.js' }), 'utf8');
     await writeFile(path.join(fixture, 'server.js'), '#!/usr/bin/env node\nconsole.log("v1")\n', 'utf8');
+    await writeFile(path.join(fixture, 'manifest.json'), JSON.stringify({
+      compatibility: {
+        platforms: ['linux'],
+        architectures: ['x64'],
+        requiresCommands: ['node'],
+        optionalCommands: ['rg'],
+      },
+    }), 'utf8');
 
-    const result = await new InstallerService({ homeDir: home, dataDir, gitRunner: fixtureGitRunner(fixture) }).installServer({
+    const result = await new InstallerService({
+      homeDir: home,
+      dataDir,
+      gitRunner: fixtureGitRunner(fixture),
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['node']),
+    }).installServer({
       name: 'remote-mcp',
       transport: 'stdio',
       source: 'https://github.com/example/remote-mcp.git',
@@ -464,6 +546,32 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     });
     const current = JSON.parse(await readFile(path.join(dataDir, 'extensions', 'mcp', 'remote-mcp', 'current.json'), 'utf8'));
     expect(current).toEqual(provenance);
+
+    const canonicalState = JSON.parse(await readFile(path.join(dataDir, 'extensions', 'state', 'registry.json'), 'utf8'));
+    expect(canonicalState).toMatchObject({
+      schemaVersion: 1,
+      generation: 1,
+      entries: [{
+        kind: 'mcp_server',
+        id: 'mcp:remote-mcp',
+        name: 'remote-mcp',
+        enabled: true,
+        compatibility: {
+          platforms: ['linux'],
+          architectures: ['x64'],
+          requiresCommands: ['node'],
+          optionalCommands: ['rg'],
+        },
+        compatibilityState: 'compatible',
+        conflict: false,
+        provenance: [{
+          originType: 'github',
+          origin: 'https://github.com/example/remote-mcp.git',
+          revision: FIXTURE_REVISION,
+          contentSha256: result.value.sourceContentSha256,
+        }],
+      }],
+    });
   });
 
   it('retains referenced managed versions while collecting only excess unreferenced versions', async () => {

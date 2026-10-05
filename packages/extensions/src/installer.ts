@@ -6,12 +6,15 @@ import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { DirectGitRunner, type GitRunner } from '@unified-mpc/git';
 import {
+  CanonicalExtensionRegistry,
   evaluateCanonicalExtensionCompatibility,
+  type CanonicalExtensionCandidate,
   type CanonicalExtensionCompatibility,
   type CanonicalExtensionCompatibilityState,
 } from './canonical-extension-registry.js';
 import { parseSkillMarkdown } from './skill-catalog.js';
 import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
+import { fingerprintExternalMcpValue } from './mcp-session-manager.js';
 import { writeAtomic } from './ide-sync.js';
 import { withConfigMutationTransaction } from './config-mutation-lock.js';
 
@@ -64,6 +67,12 @@ export interface InstallerServiceOptions {
   readonly platform?: NodeJS.Platform;
   readonly architecture?: string;
   readonly availableCommands?: ReadonlySet<string>;
+}
+
+interface DeclaredCompatibilityEvaluation {
+  readonly state: CanonicalExtensionCompatibilityState;
+  readonly compatibility?: CanonicalExtensionCompatibility;
+  readonly availableCommands: ReadonlySet<string>;
 }
 
 const MANAGED_MCP_VERSION_RETENTION = 3;
@@ -227,10 +236,15 @@ export class InstallerService {
 
   private async validateDeclaredCompatibility(
     sourceRoot: string,
-  ): Promise<Result<CanonicalExtensionCompatibilityState>> {
+  ): Promise<Result<DeclaredCompatibilityEvaluation>> {
     const declared = await readDeclaredCompatibility(sourceRoot);
     if (!declared.ok) return err(declared.error);
-    if (declared.value === undefined) return ok('unknown');
+    if (declared.value === undefined) {
+      return ok({
+        state: 'unknown',
+        availableCommands: this.availableCommands ?? new Set<string>(),
+      });
+    }
 
     const requiredCommands = declared.value.requiresCommands ?? [];
     const availableCommands = this.availableCommands
@@ -274,7 +288,11 @@ export class InstallerService {
     if (evaluated.state === 'conflict') {
       return err(appError('INVALID_INPUT', 'Extension compatibility metadata is conflicting'));
     }
-    return ok(evaluated.state);
+    return ok({
+      state: evaluated.state,
+      compatibility: declared.value,
+      availableCommands,
+    });
   }
 
   private expandTargets(targets: readonly InstallTarget[]): readonly InstallTarget[] {
@@ -356,6 +374,8 @@ export class InstallerService {
     let managedProvenanceJson: string | undefined;
     let sourceRevision: string | undefined;
     let sourceContentSha256: string | undefined;
+    let declaredCompatibility: CanonicalExtensionCompatibility | undefined;
+    let compatibilityCommands = this.availableCommands ?? new Set<string>();
     let effectiveCommand = input.command?.trim();
     let effectiveArgs = input.args;
     let effectiveCwd = input.cwd;
@@ -377,6 +397,8 @@ export class InstallerService {
           await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
           return err(compatibility.error);
         }
+        declaredCompatibility = compatibility.value.compatibility;
+        compatibilityCommands = compatibility.value.availableCommands;
         const launch = await resolveNodePackageLaunch(managedSourcePath, serverName);
         if (!launch.ok) {
           await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -435,7 +457,8 @@ export class InstallerService {
       serverEntry.type = input.transport;
     }
 
-    const configFiles = this.expandTargets(input.targets)
+    const expandedTargets = this.expandTargets(input.targets);
+    const configFiles = expandedTargets
       .map((target) => this.serverTargetConfigFile(target, scope, workspaceRoot))
       .filter((configFile): configFile is string => configFile !== undefined);
     const currentMarkerFile = managedVersionRoot === undefined
@@ -450,19 +473,70 @@ export class InstallerService {
     }
     const transactionFiles = currentMarkerFile === undefined ? configFiles : [...configFiles, currentMarkerFile];
     const updatedConfigFiles: string[] = [];
-    try {
-      await withConfigMutationTransaction(transactionFiles, async () => {
-        for (const configFile of configFiles) {
-          await injectServerIntoConfigFile(configFile, serverName, serverEntry);
-          updatedConfigFiles.push(configFile);
+    const writeInstallationFiles = async (): Promise<void> => {
+      for (const configFile of configFiles) {
+        await injectServerIntoConfigFile(configFile, serverName, serverEntry);
+        updatedConfigFiles.push(configFile);
+      }
+      if (currentMarkerFile !== undefined && managedProvenanceJson !== undefined) {
+        await writeAtomic(currentMarkerFile, managedProvenanceJson);
+      }
+    };
+
+    if (expandedTargets.includes('unified-mpc')) {
+      const provenance = input.source !== undefined
+        ? {
+            originType: 'github' as const,
+            origin: parseHttpsGitSource(input.source)?.href ?? input.source.trim(),
+            ...(sourceRevision === undefined ? {} : { revision: sourceRevision }),
+            ...(sourceContentSha256 === undefined ? {} : { contentSha256: sourceContentSha256 }),
+          }
+        : input.transport === 'stdio'
+          ? {
+              originType: 'managed' as const,
+              origin: 'unified-mpc:mcp_install',
+            }
+          : {
+              originType: 'url' as const,
+              origin: new URL(input.url!).href,
+            };
+      const candidate: CanonicalExtensionCandidate = {
+        kind: 'mcp_server',
+        id: `mcp:${serverName}`,
+        name: serverName,
+        fingerprint: fingerprintExternalMcpValue(serverEntry),
+        enabled: true,
+        provenance,
+        ...(declaredCompatibility === undefined ? {} : { compatibility: declaredCompatibility }),
+      };
+      const persisted = await new CanonicalExtensionRegistry({ dataDir: this.dataDir }).upsertAtomically(
+        candidate,
+        {
+          platform: this.platform,
+          architecture: this.architecture,
+          availableCommands: compatibilityCommands,
+        },
+        transactionFiles,
+        writeInstallationFiles,
+      );
+      if (!persisted.ok) {
+        if (managedVersionRoot !== undefined) {
+          await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
         }
-        if (currentMarkerFile !== undefined && managedProvenanceJson !== undefined) {
-          await writeAtomic(currentMarkerFile, managedProvenanceJson);
+        return err(persisted.error);
+      }
+    } else {
+      try {
+        await withConfigMutationTransaction(transactionFiles, writeInstallationFiles);
+      } catch (error: unknown) {
+        if (managedVersionRoot !== undefined) {
+          await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
         }
-      });
-    } catch (error: unknown) {
-      if (managedVersionRoot !== undefined) await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
-      return err(appError('INTERNAL_ERROR', `Failed to update server config: ${error instanceof Error ? error.message : String(error)}`));
+        return err(appError(
+          'INTERNAL_ERROR',
+          `Failed to update server config: ${error instanceof Error ? error.message : String(error)}`,
+        ));
+      }
     }
 
     if (managedVersionRoot !== undefined) {

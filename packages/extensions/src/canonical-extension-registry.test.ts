@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -169,6 +169,68 @@ describe('canonical extension registry', () => {
       if (!changed.ok) throw new Error(changed.error.message);
       const savedChanged = await registry.save(changed.value);
       expect(savedChanged).toMatchObject({ ok: true, value: { schemaVersion: 1, generation: 2 } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('atomically upserts one entry with sibling writes and keeps idempotent generation stable', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-upsert-'));
+    try {
+      const registry = new CanonicalExtensionRegistry({ dataDir: root });
+      const siblingFile = path.join(root, 'extensions', 'mcp', 'registry.json');
+      await mkdir(path.dirname(siblingFile), { recursive: true });
+      await writeFile(siblingFile, 'before\n', 'utf8');
+      const host = {
+        platform: 'linux' as const,
+        architecture: 'x64',
+        availableCommands: new Set<string>(),
+      };
+      const candidate: CanonicalExtensionCandidate = {
+        kind: 'mcp_server',
+        id: 'mcp:parent-child',
+        name: 'parent-child',
+        fingerprint: fingerprintA,
+        enabled: true,
+        provenance: {
+          originType: 'managed',
+          origin: 'unified-mpc:mcp_install',
+        },
+      };
+
+      const first = await registry.upsertAtomically(candidate, host, [siblingFile], async () => {
+        await writeFile(siblingFile, 'after\n', 'utf8');
+      });
+      expect(first).toMatchObject({
+        ok: true,
+        value: {
+          schemaVersion: 1,
+          generation: 1,
+          entries: [{
+            kind: 'mcp_server',
+            id: 'mcp:parent-child',
+            name: 'parent-child',
+            fingerprint: fingerprintA,
+            compatibilityState: 'unknown',
+            provenance: [{ originType: 'managed', origin: 'unified-mpc:mcp_install' }],
+          }],
+        },
+      });
+      expect(await readFile(siblingFile, 'utf8')).toBe('after\n');
+
+      const second = await registry.upsertAtomically(candidate, host, [siblingFile], async () => undefined);
+      expect(second).toEqual(first);
+
+      const failed = await registry.upsertAtomically({
+        ...candidate,
+        fingerprint: fingerprintB,
+      }, host, [siblingFile], async () => {
+        await writeFile(siblingFile, 'broken\n', 'utf8');
+        throw new Error('simulated sibling write failure');
+      });
+      expect(failed.ok).toBe(false);
+      expect(await readFile(siblingFile, 'utf8')).toBe('after\n');
+      expect(await registry.load()).toEqual(first);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

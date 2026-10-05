@@ -8,6 +8,10 @@ import {
   type CanonicalExtensionMigrationCandidate,
   type CanonicalExtensionMigrationManifest,
 } from './canonical-extension-migration-manifest.js';
+import {
+  CanonicalExtensionRegistry,
+  reconcileCanonicalExtensionCandidates,
+} from './canonical-extension-registry.js';
 import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
 import {
   CanonicalMcpMigrationStager,
@@ -74,6 +78,94 @@ async function stage(
   return result.value;
 }
 
+async function seedInstalledSkill(dataDir: string): Promise<void> {
+  const snapshot = reconcileCanonicalExtensionCandidates([{
+    kind: 'skill',
+    id: 'skill:keep-me',
+    name: 'keep-me',
+    fingerprint: 'd'.repeat(64),
+    enabled: true,
+    provenance: {
+      originType: 'managed',
+      origin: 'unified-mpc:skill-test',
+    },
+    compatibility: { platforms: ['linux'] },
+  }], {
+    platform: 'linux',
+    architecture: 'x64',
+    availableCommands: new Set(['node']),
+  });
+  if (!snapshot.ok) throw new Error(snapshot.error.message);
+  const saved = await new CanonicalExtensionRegistry({ dataDir }).save(snapshot.value);
+  if (!saved.ok) throw new Error(saved.error.message);
+}
+
+async function installedEntries(dataDir: string): Promise<readonly unknown[]> {
+  const loaded = await new CanonicalExtensionRegistry({ dataDir }).load();
+  if (!loaded.ok) throw new Error(loaded.error.message);
+  return loaded.value.entries;
+}
+
+async function writeSchemaV1Generation(
+  dataDir: string,
+  name: string,
+): Promise<{
+  readonly generationId: string;
+  readonly generationPath: string;
+  readonly stagedServers: readonly [{
+    readonly id: string;
+    readonly name: string;
+    readonly fingerprint: string;
+    readonly config: McpServerLaunchConfig;
+    readonly provenance: readonly [{
+      readonly originType: 'client-import';
+      readonly origin: string;
+      readonly sourceClient: string;
+    }];
+  }];
+}> {
+  const config: McpServerLaunchConfig = { command: 'node', args: [`${name}.js`] };
+  const stagedServers = [{
+    id: `mcp:${name}`,
+    name,
+    fingerprint: fingerprintExternalMcpValue(config),
+    config,
+    provenance: [{
+      originType: 'client-import' as const,
+      origin: `/fixture/cursor/${name}`,
+      sourceClient: 'cursor',
+    }],
+  }] as const;
+  const projection = {
+    schemaVersion: 1 as const,
+    stagedServers,
+    skipped: [],
+  };
+  const generationId = createHash('sha256')
+    .update(JSON.stringify(projection))
+    .digest('hex');
+  const generationPath = path.join(
+    dataDir,
+    'extensions',
+    'state',
+    'migration',
+    'staged-mcp-generations',
+    generationId,
+  );
+  await mkdir(generationPath, { recursive: true });
+  await writeFile(
+    path.join(generationPath, 'stage.json'),
+    JSON.stringify({ ...projection, generationId }, null, 2) + '\n',
+    'utf8',
+  );
+  await writeFile(
+    path.join(generationPath, 'registry.json'),
+    JSON.stringify({ mcpServers: { [name]: config } }, null, 2) + '\n',
+    'utf8',
+  );
+  return { generationId, generationPath, stagedServers };
+}
+
 describe('CanonicalMcpMigrationCutoverStateStore', () => {
   it('activates a verified staged generation without touching the live MCP registry', async () => {
     const root = await fixtureRoot('canonical-mcp-cutover-first-');
@@ -82,6 +174,7 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     await mkdir(path.dirname(liveRegistry), { recursive: true });
     const liveBefore = JSON.stringify({ mcpServers: { legacy: { command: 'legacy' } } }) + '\n';
     await writeFile(liveRegistry, liveBefore, 'utf8');
+    await seedInstalledSkill(dataDir);
 
     const manifest = manifestFor([
       candidate({ name: 'alpha', config: { command: 'node', args: ['alpha.js'] } }),
@@ -103,6 +196,10 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     const statePath = path.join(dataDir, 'extensions', 'state', 'migration', 'mcp-cutover-state.json');
     expect(JSON.parse(await readFile(statePath, 'utf8'))).toEqual(activated.value.state);
     expect(await readFile(liveRegistry, 'utf8')).toBe(liveBefore);
+    expect(await installedEntries(dataDir)).toEqual([
+      staged.stagedServers[0]?.canonicalEntry,
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-me' }),
+    ]);
 
     const resolved = await store.resolveActiveGeneration();
     expect(resolved.ok).toBe(true);
@@ -120,6 +217,7 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
   it('keeps verified schema-v1 active generations runtime-compatible without inventing canonical metadata', async () => {
     const root = await fixtureRoot('canonical-mcp-cutover-v1-compat-');
     const dataDir = path.join(root, 'data');
+    await seedInstalledSkill(dataDir);
     const config: McpServerLaunchConfig = { command: 'node', args: ['legacy.js'] };
     const stagedServers = [{
       id: 'mcp:legacy',
@@ -175,6 +273,54 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     expect(resolved.value.stagedServers).toEqual(stagedServers);
     expect(resolved.value.stagedServers[0]?.canonicalEntry).toBeUndefined();
     expect(await readFile(stagePath, 'utf8')).toBe(stageBefore);
+    expect(await installedEntries(dataDir)).toEqual([
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-me' }),
+    ]);
+  });
+
+  it('rolls back to schema-v1 runtime state without seeding incomplete MCP installed metadata', async () => {
+    const root = await fixtureRoot('canonical-mcp-cutover-v1-rollback-');
+    const dataDir = path.join(root, 'data');
+    await seedInstalledSkill(dataDir);
+    const legacy = await writeSchemaV1Generation(dataDir, 'legacy-v1');
+    const statePath = path.join(dataDir, 'extensions', 'state', 'migration', 'mcp-cutover-state.json');
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        activeGenerationId: legacy.generationId,
+      }, null, 2) + '\n',
+      'utf8',
+    );
+
+    const nextManifest = manifestFor([
+      candidate({ name: 'next', config: { command: 'node', args: ['next.js'] } }),
+    ]);
+    const nextStage = await stage(dataDir, nextManifest);
+    const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    expect((await store.activate(nextManifest, nextStage)).ok).toBe(true);
+    expect(await installedEntries(dataDir)).toEqual([
+      nextStage.stagedServers[0]?.canonicalEntry,
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-me' }),
+    ]);
+
+    const rolledBack = await store.rollback(nextStage.generationId);
+    expect(rolledBack.ok).toBe(true);
+    if (!rolledBack.ok) return;
+    expect(rolledBack.value).toMatchObject({
+      target: 'canonical',
+      toGenerationId: legacy.generationId,
+    });
+    expect(await installedEntries(dataDir)).toEqual([
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-me' }),
+    ]);
+
+    const resolved = await store.resolveActiveGeneration();
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok || resolved.value === undefined) return;
+    expect(resolved.value.stageSchemaVersion).toBe(1);
+    expect(resolved.value.stagedServers).toEqual(legacy.stagedServers);
+    expect(resolved.value.stagedServers[0]?.canonicalEntry).toBeUndefined();
   });
 
   it('reuses the same generation idempotently without inventing rollback history', async () => {
@@ -187,14 +333,23 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
 
     const first = await store.activate(manifest, staged);
-    const second = await store.activate(manifest, staged);
     expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const drifted = await new CanonicalExtensionRegistry({ dataDir }).save({ entries: [] });
+    expect(drifted.ok).toBe(true);
+    expect(await installedEntries(dataDir)).toEqual([]);
+
+    const second = await store.activate(manifest, staged);
     expect(second.ok).toBe(true);
-    if (!first.ok || !second.ok) return;
+    if (!second.ok) return;
     expect(first.value.changed).toBe(true);
     expect(second.value.changed).toBe(false);
     expect(second.value.state).toEqual(first.value.state);
     expect(second.value.state.previousGenerationId).toBeUndefined();
+    expect(await installedEntries(dataDir)).toEqual([
+      staged.stagedServers[0]?.canonicalEntry,
+    ]);
   });
 
   it('preserves the previous canonical generation and verifies it as a rollback target', async () => {
@@ -219,6 +374,9 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
       activeGenerationId: secondStage.generationId,
       previousGenerationId: firstStage.generationId,
     });
+    expect(await installedEntries(dataDir)).toEqual([
+      secondStage.stagedServers[0]?.canonicalEntry,
+    ]);
 
     const target = await store.resolveRollbackTarget();
     expect(target.ok).toBe(true);
@@ -320,6 +478,7 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     await mkdir(path.dirname(liveRegistry), { recursive: true });
     const liveBefore = JSON.stringify({ mcpServers: { legacy: { command: 'legacy' } } }) + '\n';
     await writeFile(liveRegistry, liveBefore, 'utf8');
+    await seedInstalledSkill(dataDir);
 
     const manifest = manifestFor([
       candidate({ name: 'alpha', config: { command: 'node', args: ['alpha.js'] } }),
@@ -352,6 +511,9 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     expect((await stat(staged.generationPath)).isDirectory()).toBe(true);
     expect(await readFile(staged.registryPath, 'utf8')).toBe(stagedBefore);
     expect(await readFile(liveRegistry, 'utf8')).toBe(liveBefore);
+    expect(await installedEntries(dataDir)).toEqual([
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-me' }),
+    ]);
   });
 
   it('rolls back to a verified previous canonical MCP generation and swaps rollback history', async () => {
@@ -388,6 +550,9 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     if (!resolved.ok) return;
     expect(resolved.value?.generationPath).toBe(firstStage.generationPath);
     expect(resolved.value?.state).toEqual(rolledBack.value.state);
+    expect(await installedEntries(dataDir)).toEqual([
+      firstStage.stagedServers[0]?.canonicalEntry,
+    ]);
   });
 
   it('fails closed on corrupt previous generation and preserves the active pointer', async () => {

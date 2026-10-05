@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -6,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer, type StorageDiagnosticsSnapshot, type WebGoalSummary, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
+  CanonicalMcpMigrationCutoverStateStore,
+  CanonicalMcpMigrationStager,
   CanonicalSkillMigrationCutoverStateStore,
   CanonicalSkillMigrationStager,
   InstallerService,
@@ -17,6 +20,18 @@ import {
   buildCanonicalExtensionMigrationManifest,
   fingerprintCanonicalSkillDirectory,
 } from '@unified-mpc/extensions';
+
+function fingerprintMcpFixture(value: unknown): string {
+  const stableJson = (entry: unknown): string => {
+    if (entry === null || typeof entry !== 'object') return JSON.stringify(entry) ?? 'undefined';
+    if (Array.isArray(entry)) return `[${entry.map((item) => stableJson(item)).join(',')}]`;
+    return `{${Object.entries(entry as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(',')}}`;
+  };
+  return createHash('sha256').update(stableJson(value), 'utf8').digest('hex');
+}
 
 describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   const capabilityToken = 'test-capability-token';
@@ -677,7 +692,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       deactivate: async (): Promise<WebWorkspaceSelectionSnapshot> => ({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }),
       setPrimary: async (): Promise<WebWorkspaceSelectionSnapshot> => ({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }),
       remove: async (): Promise<null> => null,
-      cleanupEvaluations: async () => [evaluation],
+      cleanupEvaluations: async (): Promise<readonly (typeof evaluation)[]> => [evaluation],
     };
     const projectsServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, workspaceControl });
     await projectsServer.listen();
@@ -1602,6 +1617,211 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       const legacyPolicy = policiesBody.policies.find((policy) => policy.id === 'legacy-skill-policy');
       expect(legacyPolicy).toEqual(expect.objectContaining({
         id: 'legacy-skill-policy',
+        available: false,
+      }));
+      expect(legacyPolicy).not.toHaveProperty('resolvedResourceId');
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('serves only the active canonical MCP generation after cutover', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-active-canonical-mcp-'));
+    const dataDir = path.join(root, 'data');
+    const registryDir = path.join(dataDir, 'extensions', 'mcp');
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(path.join(registryDir, 'registry.json'), JSON.stringify({
+      mcpServers: { 'legacy-web-mcp': { command: 'node', args: ['legacy.js'] } },
+    }), 'utf8');
+
+    const canonicalConfig = { command: 'node', args: ['canonical-web.js'] };
+    const manifest = buildCanonicalExtensionMigrationManifest([{
+      kind: 'mcp_server',
+      id: 'mcp:canonical-web-mcp',
+      name: 'canonical-web-mcp',
+      fingerprint: fingerprintMcpFixture(canonicalConfig),
+      enabled: true,
+      launchConfig: canonicalConfig,
+      provenance: {
+        originType: 'client-import',
+        origin: path.join(root, 'source', 'canonical-web-mcp'),
+        sourceClient: 'cline',
+      },
+      compatibility: { platforms: ['linux'] },
+    }], {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['node']),
+    });
+    expect(manifest.ok).toBe(true);
+    if (!manifest.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const staged = await new CanonicalMcpMigrationStager({ dataDir }).stage(manifest.value);
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const activated = await new CanonicalMcpMigrationCutoverStateStore({ dataDir })
+      .activate(manifest.value, staged.value);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+
+    const settings = new Map<string, string>([
+      ['extensions', JSON.stringify({
+        mode: 'enable_all',
+        disabledServers: [],
+        enabledServers: [],
+        disabledSkillRoots: [],
+        extraSkillRoots: [],
+        extraMcpServers: {
+          'legacy-settings-mcp': { command: 'node', args: ['legacy-settings.js'] },
+        },
+        mandatoryMcpServers: [],
+        policies: [],
+      })],
+    ]);
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await dynamic.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${dynamic.port}/api/servers`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { servers: readonly { name: string; source: string; enabled: boolean }[] };
+      expect(body.servers).toEqual([
+        expect.objectContaining({
+          name: 'canonical-web-mcp',
+          source: 'unified-mpc-registry',
+          enabled: true,
+        }),
+      ]);
+      expect(body.servers.some((server) => server.name.startsWith('legacy-'))).toBe(false);
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed in Web MCP discovery when the active canonical generation is corrupt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-corrupt-canonical-mcp-'));
+    const dataDir = path.join(root, 'data');
+    const registryDir = path.join(dataDir, 'extensions', 'mcp');
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(path.join(registryDir, 'registry.json'), JSON.stringify({
+      mcpServers: { 'legacy-web-mcp': { command: 'node', args: ['legacy.js'] } },
+    }), 'utf8');
+
+    const canonicalConfig = { command: 'node', args: ['canonical-web.js'] };
+    const manifest = buildCanonicalExtensionMigrationManifest([{
+      kind: 'mcp_server',
+      id: 'mcp:canonical-web-mcp',
+      name: 'canonical-web-mcp',
+      fingerprint: fingerprintMcpFixture(canonicalConfig),
+      enabled: true,
+      launchConfig: canonicalConfig,
+      provenance: {
+        originType: 'client-import',
+        origin: path.join(root, 'source', 'canonical-web-mcp'),
+        sourceClient: 'cline',
+      },
+      compatibility: { platforms: ['linux'] },
+    }], {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['node']),
+    });
+    expect(manifest.ok).toBe(true);
+    if (!manifest.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const staged = await new CanonicalMcpMigrationStager({ dataDir }).stage(manifest.value);
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest.value, staged.value);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    await writeFile(staged.value.registryPath, JSON.stringify({
+      mcpServers: { 'legacy-tamper': { command: 'node', args: ['tampered.js'] } },
+    }) + '\n', 'utf8');
+
+    const settings = new Map<string, string>([
+      ['extensions', JSON.stringify({
+        mode: 'enable_all',
+        disabledServers: [],
+        enabledServers: [],
+        disabledSkillRoots: [],
+        extraSkillRoots: [],
+        extraMcpServers: {
+          'legacy-fallback-mcp': { command: 'node', args: ['legacy-fallback.js'] },
+        },
+        mandatoryMcpServers: [],
+        policies: [{
+          id: 'legacy-mcp-policy',
+          resourceId: 'legacy-fallback-mcp',
+          resourceType: 'server',
+          mandatory: true,
+          enforcement: 'EVERY_SESSION',
+          directive: 'Legacy MCP must not satisfy policy after canonical cutover.',
+        }],
+      })],
+    ]);
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await dynamic.listen();
+    try {
+      const serversResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/servers`);
+      expect(serversResponse.status).toBe(500);
+      const serversBody = await serversResponse.json() as { ok: boolean; error?: { code?: string; message?: string } };
+      expect(serversBody).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: expect.stringContaining('registry'),
+        },
+      });
+
+      const policiesResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/policies`);
+      expect(policiesResponse.status).toBe(200);
+      const policiesBody = await policiesResponse.json() as {
+        ready: boolean;
+        policies: readonly { id: string; available: boolean; resolvedResourceId?: string }[];
+      };
+      expect(policiesBody.ready).toBe(true);
+      const legacyPolicy = policiesBody.policies.find((policy) => policy.id === 'legacy-mcp-policy');
+      expect(legacyPolicy).toEqual(expect.objectContaining({
+        id: 'legacy-mcp-policy',
         available: false,
       }));
       expect(legacyPolicy).not.toHaveProperty('resolvedResourceId');

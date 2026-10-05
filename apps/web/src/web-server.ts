@@ -19,6 +19,7 @@ import type {
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import { isMcpRuntimeDiagnosticsSnapshot, resolveDataPath, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import {
+  CanonicalMcpMigrationCutoverStateStore,
   CanonicalSkillMigrationCutoverStateStore,
   DEFAULT_EXTENSIONS_SETTINGS,
   EXTENSIONS_SETTINGS_KEY,
@@ -818,8 +819,13 @@ export class ControlPlaneServer {
 
     if (pathname === '/api/servers' && req.method === 'GET') {
       const servers = await this.listRegisteredServers();
+      if (!servers.ok) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(servers));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ servers }));
+      res.end(JSON.stringify({ servers: servers.value }));
       return;
     }
 
@@ -1309,11 +1315,24 @@ export class ControlPlaneServer {
     }));
   }
 
-  private currentServerCatalog(): McpConfigLoader {
-    return this.serverCatalogOverride ?? new McpConfigLoader({
+  private async currentServerCatalog(): Promise<Result<McpConfigLoader>> {
+    if (this.serverCatalogOverride !== undefined) return ok(this.serverCatalogOverride);
+
+    const active = await new CanonicalMcpMigrationCutoverStateStore({ dataDir: this.dataDir })
+      .resolveActiveGeneration();
+    if (!active.ok) return err(active.error);
+
+    return ok(new McpConfigLoader({
       settings: this.extensionsSettings(),
       dataDir: this.dataDir,
-    });
+      ...(active.value === undefined ? {} : {
+        managedRegistryMode: 'exclusive' as const,
+        managedServers: active.value.stagedServers.map((server) => ({
+          name: server.name,
+          config: server.config,
+        })),
+      }),
+    }));
   }
 
   private currentPruner(): PrunerService {
@@ -1322,10 +1341,11 @@ export class ControlPlaneServer {
 
   private async policySnapshot(): Promise<RuntimePolicySnapshot> {
     const settings = this.extensionsSettings();
-    const [servers, catalog] = await Promise.all([
-      this.currentServerCatalog().discover(),
+    const [serverCatalog, catalog] = await Promise.all([
+      this.currentServerCatalog(),
       this.currentSkillCatalog(),
     ]);
+    const servers = serverCatalog.ok ? await serverCatalog.value.discover() : [];
     if (!catalog.ok) {
       return reconcileRuntimePolicies(settings, servers, []);
     }
@@ -1895,8 +1915,10 @@ export class ControlPlaneServer {
     await restore();
   }
 
-  private async listRegisteredServers(): Promise<readonly (RegisteredServer & { readonly enabled: boolean; readonly excluded: boolean; readonly exclusionReason?: string; readonly command: string })[]> {
-    const discovered = await this.currentServerCatalog().discover();
+  private async listRegisteredServers(): Promise<Result<readonly (RegisteredServer & { readonly enabled: boolean; readonly excluded: boolean; readonly exclusionReason?: string; readonly command: string })[]>> {
+    const catalog = await this.currentServerCatalog();
+    if (!catalog.ok) return err(catalog.error);
+    const discovered = await catalog.value.discover();
     const activeKeys = new Set<string>();
     const servers = discovered.map((server) => {
       const key = `${server.source}\0${server.name}`;
@@ -1917,7 +1939,7 @@ export class ControlPlaneServer {
     for (const [id, registered] of this.serverRegistry) {
       if (!activeKeys.has(`${registered.source}\0${registered.name}`)) this.serverRegistry.delete(id);
     }
-    return servers;
+    return ok(servers);
   }
 
   private handleRequestFailure(res: ServerResponse, error: unknown): void {

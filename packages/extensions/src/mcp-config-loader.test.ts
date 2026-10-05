@@ -208,6 +208,82 @@ describe('McpConfigLoader', () => {
     ]);
   });
 
+  it('uses only the verified managed MCP snapshot in exclusive mode', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-exclusive-mcp-'));
+    temporaryRoots.push(home);
+    const dataDir = path.join(home, 'data');
+    await mkdir(path.join(home, '.cursor'), { recursive: true });
+    await mkdir(path.join(dataDir, 'extensions', 'mcp'), { recursive: true });
+    await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
+      mcpServers: {
+        'legacy-cursor': { command: 'node', args: ['legacy-cursor.js'] },
+        collision: { command: 'node', args: ['legacy-collision.js'] },
+      },
+    }), 'utf8');
+    await writeFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), JSON.stringify({
+      mcpServers: { 'legacy-managed': { command: 'node', args: ['legacy-managed.js'] } },
+    }), 'utf8');
+
+    const settings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      extraMcpServers: {
+        'legacy-settings': { command: 'node', args: ['legacy-settings.js'] },
+      },
+    };
+    const servers = await new McpConfigLoader({
+      homeDir: home,
+      appDataDir: path.join(home, 'appdata'),
+      dataDir,
+      settings,
+      managedRegistryMode: 'exclusive',
+      managedServers: [
+        { name: 'canonical-only', config: { command: 'node', args: ['canonical.js'] } },
+        { name: 'collision', config: { command: 'node', args: ['canonical-collision.js'] } },
+      ],
+    } as never).discover();
+
+    expect(servers).toEqual([
+      expect.objectContaining({
+        name: 'canonical-only',
+        source: 'unified-mpc-registry',
+        enabled: true,
+        excluded: false,
+        config: { command: 'node', args: ['canonical.js'] },
+      }),
+      expect.objectContaining({
+        name: 'collision',
+        source: 'unified-mpc-registry',
+        enabled: true,
+        excluded: false,
+        config: { command: 'node', args: ['canonical-collision.js'] },
+      }),
+    ]);
+    expect(servers.some((server) => server.name.startsWith('legacy-'))).toBe(false);
+  });
+
+  it('applies the live allowlist to verified managed MCP servers in exclusive mode', async () => {
+    const settings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      disabledServers: ['canonical-disabled'],
+    };
+    const servers = await new McpConfigLoader({
+      settings,
+      managedRegistryMode: 'exclusive',
+      managedServers: [
+        { name: 'canonical-disabled', config: { command: 'node', args: ['disabled.js'] } },
+      ],
+    } as never).discover();
+
+    expect(servers).toEqual([
+      expect.objectContaining({
+        name: 'canonical-disabled',
+        source: 'unified-mpc-registry',
+        enabled: false,
+        excluded: false,
+      }),
+    ]);
+  });
+
   it('repairs legacy Serena boolean flags that were persisted without a value', () => {
     const settings = parseExtensionsSettings(JSON.stringify({
       extraMcpServers: {

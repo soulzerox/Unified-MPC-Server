@@ -4,6 +4,7 @@ import { McpConfigLoader } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory } from './mcp-session-manager.js';
 import { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
+import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
 import { SkillCatalog } from './skill-catalog.js';
 import type {
   DiscoveredMcpServer,
@@ -74,10 +75,11 @@ export class LocalExtensionsService implements ExtensionsService {
         this.discoverMcpServers(),
         this.skillCatalog(),
       ]);
+      if (!discovered.ok) return err(discovered.error);
       if (!catalog.ok) return err(catalog.error);
       const skills = await catalog.value.list({});
       if (!skills.ok) return err(skills.error);
-      return ok(reconcileRuntimePolicies(settings, discovered, skills.value.skills));
+      return ok(reconcileRuntimePolicies(settings, discovered.value, skills.value.skills));
     } catch (error: unknown) {
       return err(appError('INTERNAL_ERROR', `Failed to resolve runtime policy: ${error instanceof Error ? error.message : String(error)}`, true));
     }
@@ -85,12 +87,13 @@ export class LocalExtensionsService implements ExtensionsService {
 
   public async listMcpServers(): Promise<Result<{ readonly servers: readonly McpServerListItem[] }>> {
     const discovered = await this.discoverMcpServers();
+    if (!discovered.ok) return err(discovered.error);
     const required = new Set(configuredPolicies(this.settingsProvider())
       .filter((policy) => policy.resourceType === 'server' && policy.mandatory)
       .map((policy) => policy.resourceId.trim().toLowerCase()));
     const lastStatus = new Map((this.mandatoryMcpLastResult?.servers ?? []).map((server) => [server.name.toLowerCase(), server] as const));
     return ok({
-      servers: discovered.map((server) => {
+      servers: discovered.value.map((server) => {
         const requiredServer = required.has(server.name.toLowerCase());
         const connected = this.sessions.isConnected(server.name);
         const pinned = this.sessions.isPinned(server.name);
@@ -134,7 +137,8 @@ export class LocalExtensionsService implements ExtensionsService {
     }
     const requiredNames = new Set(requirements.keys());
     const discovered = await this.discoverMcpServers();
-    for (const server of discovered) {
+    if (!discovered.ok) return err(discovered.error);
+    for (const server of discovered.value) {
       if (!requiredNames.has(server.name.toLowerCase())) this.sessions.unpin(server.name);
     }
     const servers = await Promise.all([...requirements.values()].map(async ({ name, requiredTools }) => {
@@ -312,27 +316,48 @@ export class LocalExtensionsService implements ExtensionsService {
     }));
   }
 
-  private async loader(): Promise<McpConfigLoader> {
+  private async loader(): Promise<Result<McpConfigLoader>> {
     const workspaceRoot = await this.workspaceRootProvider();
-    return new McpConfigLoader({
+    let managedRegistryMode: 'exclusive' | undefined;
+    let managedServers: readonly { readonly name: string; readonly config: import('./types.js').McpServerLaunchConfig }[] | undefined;
+
+    if (this.dataDir !== undefined) {
+      const active = await new CanonicalMcpMigrationCutoverStateStore({ dataDir: this.dataDir })
+        .resolveActiveGeneration();
+      if (!active.ok) return err(active.error);
+      if (active.value !== undefined) {
+        managedRegistryMode = 'exclusive';
+        managedServers = active.value.stagedServers.map((server) => ({
+          name: server.name,
+          config: server.config,
+        }));
+      }
+    }
+
+    return ok(new McpConfigLoader({
       settings: this.settingsProvider(),
       ...(this.homeDir === undefined ? {} : { homeDir: this.homeDir }),
       ...(this.appDataDir === undefined ? {} : { appDataDir: this.appDataDir }),
       ...(this.dataDir === undefined ? {} : { dataDir: this.dataDir }),
       ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
-    });
+      ...(managedRegistryMode === undefined ? {} : { managedRegistryMode }),
+      ...(managedServers === undefined ? {} : { managedServers }),
+    }));
   }
 
-  private async discoverMcpServers(): Promise<readonly DiscoveredMcpServer[]> {
-    const discovered = await this.loader().then((loader) => loader.discover());
+  private async discoverMcpServers(): Promise<Result<readonly DiscoveredMcpServer[]>> {
+    const loader = await this.loader();
+    if (!loader.ok) return err(loader.error);
+    const discovered = await loader.value.discover();
     await this.sessions.reconcile(discovered);
-    return discovered;
+    return ok(discovered);
   }
 
   private async findServer(name: string): Promise<Result<Awaited<ReturnType<McpConfigLoader['discover']>>[number]>> {
     const discovered = await this.discoverMcpServers();
+    if (!discovered.ok) return err(discovered.error);
     const normalized = name.trim().toLowerCase();
-    const server = discovered.find((entry) => entry.name.toLowerCase() === normalized);
+    const server = discovered.value.find((entry) => entry.name.toLowerCase() === normalized);
     if (server === undefined) return err(appError('INVALID_INPUT', `Unknown MCP server: ${name}`));
     return ok(server);
   }

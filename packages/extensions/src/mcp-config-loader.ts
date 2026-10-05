@@ -4,6 +4,11 @@ import path from 'node:path';
 import { isServerEnabled } from './allowlist.js';
 import type { DiscoveredMcpServer, ExtensionsSettings, McpServerLaunchConfig } from './types.js';
 
+export interface McpConfigLoaderManagedServer {
+  readonly name: string;
+  readonly config: McpServerLaunchConfig;
+}
+
 export interface McpConfigLoaderOptions {
   readonly homeDir?: string;
   readonly appDataDir?: string;
@@ -12,6 +17,8 @@ export interface McpConfigLoaderOptions {
   readonly workspaceRoot?: string;
   readonly settings: ExtensionsSettings;
   readonly env?: NodeJS.ProcessEnv;
+  readonly managedRegistryMode?: 'supplemental' | 'exclusive';
+  readonly managedServers?: readonly McpConfigLoaderManagedServer[];
 }
 
 export class McpConfigLoader {
@@ -27,6 +34,15 @@ export class McpConfigLoader {
       ? configuredAppData
       : defaultApplicationDataDirectory(platform, home, environment);
     const discovered: DiscoveredMcpServer[] = [];
+    const managedRegistryMode = this.options.managedRegistryMode ?? 'supplemental';
+    const managedServers = this.options.managedServers ?? [];
+
+    if (managedRegistryMode === 'exclusive') {
+      for (const server of managedServers) {
+        discovered.push(this.toServer(server.name, 'unified-mpc-registry', server.config));
+      }
+      return dedupeServers(discovered);
+    }
 
     // Cursor global
     await this.loadFile(
@@ -101,6 +117,10 @@ export class McpConfigLoader {
         path.join(dataDir, 'extensions', 'mcp', 'registry.json'),
         'unified-mpc-registry',
       );
+    }
+
+    for (const server of managedServers) {
+      discovered.push(this.toServer(server.name, 'unified-mpc-registry', server.config));
     }
 
     return dedupeServers(discovered);

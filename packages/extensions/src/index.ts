@@ -67,6 +67,12 @@ export {
   type CanonicalSkillMigrationDryRunResult,
 } from './canonical-skill-migration-dry-run.js';
 export {
+  CanonicalSkillMigrationCutoverStateStore,
+  type CanonicalSkillMigrationCutoverActivation,
+  type CanonicalSkillMigrationCutoverState,
+  type CanonicalSkillMigrationCutoverStateStoreOptions,
+} from './canonical-skill-migration-cutover-state.js';
+export {
   EXTENSIONS_SETTINGS_KEY,
   createLocalExtensionsService,
   type CreateLocalExtensionsOptions,

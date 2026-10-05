@@ -10,7 +10,9 @@ import { bundledSkillRootCandidates } from './create-local-extensions.js';
 import { buildCanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
 import { CanonicalSkillMigrationStager, fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
 import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
-import { attachChildStderrDrain, McpSessionManager, type McpClientFactory, type McpClientSession } from './mcp-session-manager.js';
+import { CanonicalMcpMigrationStager } from './canonical-mcp-migration-stager.js';
+import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
+import { attachChildStderrDrain, fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory, type McpClientSession } from './mcp-session-manager.js';
 
 function settingsWithMockServer(): typeof DEFAULT_EXTENSIONS_SETTINGS {
   return {
@@ -234,6 +236,142 @@ describe('LocalExtensionsService MCP bridge', () => {
       if (!listed.ok) {
         expect(listed.error.code).toBe('INVALID_INPUT');
         expect(listed.error.message).toContain('fingerprint');
+      }
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('switches MCP runtime discovery to the verified active canonical generation without legacy leakage', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-active-mcp-runtime-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const home = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      await mkdir(path.join(home, '.cursor'), { recursive: true });
+      await mkdir(path.join(dataDir, 'extensions', 'mcp'), { recursive: true });
+      await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
+        mcpServers: { 'legacy-cursor': { command: 'node', args: ['legacy-cursor.js'] } },
+      }), 'utf8');
+      await writeFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), JSON.stringify({
+        mcpServers: { 'legacy-managed': { command: 'node', args: ['legacy-managed.js'] } },
+      }), 'utf8');
+
+      const canonicalConfig = { command: 'node', args: ['canonical.js'] };
+      const manifest = buildCanonicalExtensionMigrationManifest([{
+        kind: 'mcp_server',
+        id: 'mcp:canonical-active',
+        name: 'canonical-active',
+        fingerprint: fingerprintExternalMcpValue(canonicalConfig),
+        enabled: true,
+        launchConfig: canonicalConfig,
+        provenance: {
+          originType: 'client-import',
+          origin: path.join(root, 'source', 'canonical-active'),
+          sourceClient: 'cline',
+        },
+        compatibility: { platforms: ['linux'] },
+      }], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(['node']),
+      });
+      expect(manifest.ok).toBe(true);
+      if (!manifest.ok) return;
+      const staged = await new CanonicalMcpMigrationStager({ dataDir }).stage(manifest.value);
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      const activated = await new CanonicalMcpMigrationCutoverStateStore({ dataDir })
+        .activate(manifest.value, staged.value);
+      expect(activated.ok).toBe(true);
+      if (!activated.ok) return;
+
+      const service = new LocalExtensionsService({
+        settings: {
+          ...DEFAULT_EXTENSIONS_SETTINGS,
+          extraMcpServers: {
+            'legacy-settings': { command: 'node', args: ['legacy-settings.js'] },
+          },
+        },
+        homeDir: home,
+        appDataDir: path.join(home, 'appdata'),
+        dataDir,
+        workspaceRootProvider: async (): Promise<string> => workspace,
+      } as never);
+
+      const listed = await service.listMcpServers();
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return;
+      expect(listed.value.servers).toEqual([
+        expect.objectContaining({
+          name: 'canonical-active',
+          source: 'unified-mpc-registry',
+          enabled: true,
+          excluded: false,
+          command: 'node',
+        }),
+      ]);
+      expect(listed.value.servers.some((server) => server.name.startsWith('legacy-'))).toBe(false);
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed in MCP runtime discovery when the active canonical generation is corrupt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-active-mcp-corrupt-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const canonicalConfig = { command: 'node', args: ['canonical.js'] };
+      const manifest = buildCanonicalExtensionMigrationManifest([{
+        kind: 'mcp_server',
+        id: 'mcp:canonical-active',
+        name: 'canonical-active',
+        fingerprint: fingerprintExternalMcpValue(canonicalConfig),
+        enabled: true,
+        launchConfig: canonicalConfig,
+        provenance: {
+          originType: 'client-import',
+          origin: path.join(root, 'source', 'canonical-active'),
+          sourceClient: 'cline',
+        },
+        compatibility: { platforms: ['linux'] },
+      }], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(['node']),
+      });
+      expect(manifest.ok).toBe(true);
+      if (!manifest.ok) return;
+      const staged = await new CanonicalMcpMigrationStager({ dataDir }).stage(manifest.value);
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+      const activated = await store.activate(manifest.value, staged.value);
+      expect(activated.ok).toBe(true);
+      if (!activated.ok) return;
+
+      await writeFile(staged.value.registryPath, JSON.stringify({
+        mcpServers: { 'legacy-tamper': { command: 'node', args: ['tampered.js'] } },
+      }) + '\n', 'utf8');
+
+      const service = new LocalExtensionsService({
+        settings: {
+          ...DEFAULT_EXTENSIONS_SETTINGS,
+          extraMcpServers: {
+            'legacy-fallback': { command: 'node', args: ['legacy-fallback.js'] },
+          },
+        },
+        homeDir: path.join(root, 'home'),
+        dataDir,
+      } as never);
+
+      const listed = await service.listMcpServers();
+      expect(listed.ok).toBe(false);
+      if (!listed.ok) {
+        expect(listed.error.code).toBe('INVALID_INPUT');
+        expect(listed.error.message).toContain('registry');
       }
       await service.close();
     } finally {

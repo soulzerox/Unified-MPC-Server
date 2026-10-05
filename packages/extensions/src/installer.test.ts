@@ -52,6 +52,103 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
     await expect(readFile(path.join(home, '.cline', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
   });
 
+  it('rejects a declared incompatible skill before copying it into the canonical store', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-incompatible-skill-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const sourceDir = path.join(root, 'source-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(path.join(sourceDir, 'SKILL.md'), '---\nname: windows-skill\ndescription: Windows-only skill\n---\n# Windows Skill\n', 'utf8');
+    await writeFile(path.join(sourceDir, 'manifest.json'), JSON.stringify({
+      compatibility: { platforms: ['win32'] },
+    }), 'utf8');
+
+    const result = await new InstallerService({
+      homeDir: home,
+      dataDir,
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(),
+    }).installSkill({
+      name: 'windows-skill',
+      source: sourceDir,
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('UNSUPPORTED_PLATFORM');
+      expect(result.error.message).toContain('linux');
+      expect(result.error.message).toContain('win32');
+    }
+    await expect(readFile(path.join(dataDir, 'extensions', 'skills', 'windows-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects a skill with missing declared runtime commands before copying it', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-missing-command-skill-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const sourceDir = path.join(root, 'source-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(path.join(sourceDir, 'SKILL.md'), '# Command Skill\n', 'utf8');
+    await writeFile(path.join(sourceDir, 'manifest.json'), JSON.stringify({
+      compatibility: { platforms: ['linux'], requiresCommands: ['missing-tool'] },
+    }), 'utf8');
+
+    const result = await new InstallerService({
+      homeDir: home,
+      dataDir,
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(),
+    }).installSkill({
+      name: 'command-skill',
+      source: sourceDir,
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('EXECUTABLE_NOT_FOUND');
+      expect(result.error.message).toContain('missing-tool');
+    }
+    await expect(readFile(path.join(dataDir, 'extensions', 'skills', 'command-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('accepts a skill whose declared compatibility matches the current host', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-compatible-skill-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const sourceDir = path.join(root, 'source-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(path.join(sourceDir, 'SKILL.md'), '# Linux Skill\n', 'utf8');
+    await writeFile(path.join(sourceDir, 'manifest.json'), JSON.stringify({
+      compatibility: {
+        platforms: ['linux'],
+        architectures: ['x64'],
+        requiresCommands: ['node'],
+      },
+    }), 'utf8');
+
+    const result = await new InstallerService({
+      homeDir: home,
+      dataDir,
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['node']),
+    }).installSkill({
+      name: 'linux-skill',
+      source: sourceDir,
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(await readFile(path.join(dataDir, 'extensions', 'skills', 'linux-skill', 'SKILL.md'), 'utf8')).toContain('# Linux Skill');
+  });
+
   it('materializes an HTTPS Git repository before installing a skill', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'installer-remote-skill-'));
     temporaryRoots.push(root);
@@ -271,6 +368,40 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     expect(registry.mcpServers['parent-child']).toEqual({ command: 'node', args: ['server.js'] });
     await expect(readFile(path.join(home, '.cursor', 'mcp.json'), 'utf8')).rejects.toThrow();
     await expect(readFile(path.join(home, '.cline', 'mcp.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects a declared incompatible managed MCP source before registering it', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-incompatible-mcp-'));
+    temporaryRoots.push(root);
+    const fixture = path.join(root, 'fixture');
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    await mkdir(fixture, { recursive: true });
+    await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ name: 'windows-mcp', bin: 'server.js' }), 'utf8');
+    await writeFile(path.join(fixture, 'server.js'), '#!/usr/bin/env node\n', 'utf8');
+    await writeFile(path.join(fixture, 'manifest.json'), JSON.stringify({
+      compatibility: { platforms: ['win32'] },
+    }), 'utf8');
+
+    const result = await new InstallerService({
+      homeDir: home,
+      dataDir,
+      gitRunner: fixtureGitRunner(fixture),
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['node']),
+    }).installServer({
+      name: 'windows-mcp',
+      transport: 'stdio',
+      source: 'https://github.com/example/windows-mcp.git',
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('UNSUPPORTED_PLATFORM');
+    await expect(readFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), 'utf8')).rejects.toThrow();
+    const versionsDirectory = path.join(dataDir, 'extensions', 'mcp', 'windows-mcp', 'versions');
+    expect(await readdir(versionsDirectory)).toEqual([]);
   });
 
   it('materializes an HTTPS Git repository and derives a stdio command from package.json bin', async () => {

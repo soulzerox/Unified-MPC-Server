@@ -7,7 +7,10 @@ import type {
   CanonicalExtensionMigrationManifestEntry,
   CanonicalExtensionMigrationSource,
 } from './canonical-extension-migration-manifest.js';
-import type { CanonicalExtensionProvenance } from './canonical-extension-registry.js';
+import type {
+  CanonicalExtensionEntry,
+  CanonicalExtensionProvenance,
+} from './canonical-extension-registry.js';
 import { exclusionReason } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue } from './mcp-session-manager.js';
 import type { McpServerLaunchConfig } from './types.js';
@@ -28,10 +31,11 @@ export interface CanonicalMcpMigrationStagedServer {
   readonly fingerprint: string;
   readonly config: McpServerLaunchConfig;
   readonly provenance: readonly CanonicalExtensionProvenance[];
+  readonly canonicalEntry?: CanonicalExtensionEntry;
 }
 
 export interface CanonicalMcpMigrationStageResult {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly generationId: string;
   readonly generationPath: string;
   readonly registryPath: string;
@@ -51,13 +55,13 @@ interface PlannedServer {
 }
 
 interface McpStageSnapshot {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly generationId: string;
   readonly stagedServers: readonly CanonicalMcpMigrationStagedServer[];
   readonly skipped: readonly CanonicalMcpMigrationSkippedEntry[];
 }
 
-const STAGE_SCHEMA_VERSION = 1 as const;
+const STAGE_SCHEMA_VERSION = 2 as const;
 
 export class CanonicalMcpMigrationStager {
   private readonly dataDir: string;
@@ -230,6 +234,18 @@ function buildStagePlan(
         fingerprint: entry.selectedFingerprint,
         config: source.launchConfig,
         provenance: entry.provenance,
+        canonicalEntry: {
+          kind: 'mcp_server',
+          id: entry.id,
+          name: entry.name,
+          fingerprint: entry.selectedFingerprint,
+          enabled: true,
+          ...(source.compatibility === undefined ? {} : { compatibility: source.compatibility }),
+          compatibilityState: 'compatible',
+          conflict: false,
+          variantFingerprints: entry.variantFingerprints,
+          provenance: entry.provenance,
+        },
       },
     });
   }

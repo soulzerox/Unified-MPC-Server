@@ -27,7 +27,12 @@ function candidate(input: {
   readonly name: string;
   readonly config: McpServerLaunchConfig;
   readonly sourceClient: string;
-  readonly compatibility?: { readonly platforms?: readonly NodeJS.Platform[] };
+  readonly compatibility?: {
+    readonly platforms?: readonly NodeJS.Platform[];
+    readonly architectures?: readonly string[];
+    readonly requiresCommands?: readonly string[];
+    readonly optionalCommands?: readonly string[];
+  };
 }): CanonicalExtensionMigrationCandidate {
   return {
     kind: 'mcp_server',
@@ -92,6 +97,7 @@ describe('CanonicalMcpMigrationStager', () => {
     const first = await stager.stage(manifest);
     expect(first.ok).toBe(true);
     if (!first.ok) return;
+    expect(first.value.schemaVersion).toBe(2);
     expect(first.value.reused).toBe(false);
     expect(first.value.stagedServers).toEqual([{
       id: 'mcp:context7',
@@ -107,6 +113,21 @@ describe('CanonicalMcpMigrationStager', () => {
         expect.objectContaining({ sourceClient: 'cline' }),
         expect.objectContaining({ sourceClient: 'cursor' }),
       ],
+      canonicalEntry: {
+        kind: 'mcp_server',
+        id: 'mcp:context7',
+        name: 'context7',
+        fingerprint: fingerprintExternalMcpValue(cursorConfig),
+        enabled: true,
+        compatibility: { platforms: ['linux'] },
+        compatibilityState: 'compatible',
+        conflict: false,
+        variantFingerprints: [fingerprintExternalMcpValue(cursorConfig)],
+        provenance: [
+          expect.objectContaining({ sourceClient: 'cline' }),
+          expect.objectContaining({ sourceClient: 'cursor' }),
+        ],
+      },
     }]);
 
     const stagedRegistry = JSON.parse(await readFile(first.value.registryPath, 'utf8')) as {
@@ -129,6 +150,55 @@ describe('CanonicalMcpMigrationStager', () => {
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.value).toEqual({ ...first.value, reused: true });
+  });
+
+  it('hashes canonical compatibility metadata into the generation identity', async () => {
+    const root = await fixtureRoot('canonical-mcp-stage-metadata-hash-');
+    const dataDir = path.join(root, 'data');
+    const config: McpServerLaunchConfig = { command: 'node', args: ['same.js'] };
+    const platformOnly = manifestFor([
+      candidate({
+        name: 'same',
+        config,
+        sourceClient: 'cursor',
+        compatibility: { platforms: ['linux'] },
+      }),
+    ]);
+    const platformAndArchitecture = manifestFor([
+      candidate({
+        name: 'same',
+        config,
+        sourceClient: 'cursor',
+        compatibility: {
+          platforms: ['linux'],
+          architectures: ['x64'],
+          requiresCommands: ['node'],
+          optionalCommands: ['rg'],
+        },
+      }),
+    ]);
+
+    const stager = new CanonicalMcpMigrationStager({ dataDir });
+    const first = await stager.stage(platformOnly);
+    const second = await stager.stage(platformAndArchitecture);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+
+    expect(first.value.generationId).not.toBe(second.value.generationId);
+    expect(first.value.stagedServers[0]?.canonicalEntry).toMatchObject({
+      compatibility: { platforms: ['linux'] },
+      compatibilityState: 'compatible',
+    });
+    expect(second.value.stagedServers[0]?.canonicalEntry).toMatchObject({
+      compatibility: {
+        platforms: ['linux'],
+        architectures: ['x64'],
+        requiresCommands: ['node'],
+        optionalCommands: ['rg'],
+      },
+      compatibilityState: 'compatible',
+    });
   });
 
   it('refuses conflicting same-name MCP configs before materialization', async () => {

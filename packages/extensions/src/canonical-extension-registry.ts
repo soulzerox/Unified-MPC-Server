@@ -240,6 +240,7 @@ export class CanonicalExtensionRegistry {
     host: CanonicalExtensionHostProfile,
     siblingFiles: readonly string[],
     operation: () => Promise<void>,
+    rollbackOperation?: () => Promise<void>,
   ): Promise<Result<CanonicalExtensionRegistrySnapshot>> {
     const reconciled = reconcileCanonicalExtensionCandidates([candidate], host);
     if (!reconciled.ok) return err(reconciled.error);
@@ -264,16 +265,31 @@ export class CanonicalExtensionRegistry {
           const currentEntries = [...current.value.entries].sort(compareEntries);
           const changed = JSON.stringify(entries) !== JSON.stringify(currentEntries);
 
-          await operation();
-          if (!changed) return current;
+          try {
+            await operation();
+            if (!changed) return current;
 
-          const next: CanonicalExtensionRegistrySnapshot = {
-            schemaVersion: REGISTRY_SCHEMA_VERSION,
-            generation: current.value.generation + 1,
-            entries,
-          };
-          await writeAtomic(this.registryPath, JSON.stringify(next, null, 2) + '\n');
-          return ok(next);
+            const next: CanonicalExtensionRegistrySnapshot = {
+              schemaVersion: REGISTRY_SCHEMA_VERSION,
+              generation: current.value.generation + 1,
+              entries,
+            };
+            await writeAtomic(this.registryPath, JSON.stringify(next, null, 2) + '\n');
+            return ok(next);
+          } catch (error: unknown) {
+            if (rollbackOperation !== undefined) {
+              try {
+                await rollbackOperation();
+              } catch (rollbackError: unknown) {
+                throw new Error(
+                  'Canonical extension mutation failed and compensation also failed: '
+                    + (rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+                  { cause: error },
+                );
+              }
+            }
+            throw error;
+          }
         },
       );
     } catch (error: unknown) {

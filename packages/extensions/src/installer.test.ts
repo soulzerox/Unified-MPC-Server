@@ -2,6 +2,8 @@ import { cp, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CanonicalExtensionRegistry } from './canonical-extension-registry.js';
+import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
 import { InstallerService, type InstallSkillInput } from './installer.js';
 
 const temporaryRoots: string[] = [];
@@ -50,6 +52,186 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
     expect(await readFile(result.value.installedPaths[0]!, 'utf8')).toContain('# Parent Skill');
     await expect(readFile(path.join(home, '.cursor', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
     await expect(readFile(path.join(home, '.cline', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('persists canonical Skill installed-state, preserves MCP entries, and keeps identical installs idempotent', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-canonical-skill-registry-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const sourceDir = path.join(root, 'source-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, 'SKILL.md'),
+      '---\nname: persisted-skill\ndescription: Persisted canonical skill\n---\n# Persisted Skill\n',
+      'utf8',
+    );
+
+    const registry = new CanonicalExtensionRegistry({ dataDir });
+    const seeded = await registry.upsertAtomically({
+      kind: 'mcp_server',
+      id: 'mcp:existing-child',
+      name: 'existing-child',
+      fingerprint: 'c'.repeat(64),
+      enabled: true,
+      provenance: {
+        originType: 'managed',
+        origin: 'unified-mpc:mcp_install',
+      },
+    }, {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(),
+    }, [], async () => undefined);
+    expect(seeded.ok).toBe(true);
+
+    const fingerprint = await fingerprintCanonicalSkillDirectory(sourceDir);
+    expect(fingerprint.ok).toBe(true);
+    if (!fingerprint.ok) return;
+
+    const installer = new InstallerService({ homeDir: home, dataDir });
+    const first = await installer.installSkill({
+      name: 'persisted-skill',
+      source: sourceDir,
+      targets: ['unified-mpc'],
+    });
+    expect(first.ok).toBe(true);
+
+    const afterFirst = await registry.load();
+    expect(afterFirst.ok).toBe(true);
+    if (!afterFirst.ok) return;
+    expect(afterFirst.value.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'mcp_server',
+        id: 'mcp:existing-child',
+        fingerprint: 'c'.repeat(64),
+      }),
+      expect.objectContaining({
+        kind: 'skill',
+        id: 'skill:persisted-skill',
+        name: 'persisted-skill',
+        fingerprint: fingerprint.value,
+        enabled: true,
+        provenance: [expect.objectContaining({
+          originType: 'local-import',
+          origin: sourceDir,
+          contentSha256: fingerprint.value,
+        })],
+      }),
+    ]));
+    const generation = afterFirst.value.generation;
+
+    const second = await installer.installSkill({
+      name: 'persisted-skill',
+      source: sourceDir,
+      targets: ['unified-mpc'],
+    });
+    expect(second.ok).toBe(true);
+
+    const afterSecond = await registry.load();
+    expect(afterSecond.ok).toBe(true);
+    if (!afterSecond.ok) return;
+    expect(afterSecond.value.generation).toBe(generation);
+    expect(afterSecond.value.entries).toEqual(afterFirst.value.entries);
+  });
+
+  it('preserves the working canonical Skill copy and registry when staged validation fails', async () => {
+    const { symlink } = await import('node:fs/promises');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-canonical-skill-rollback-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const originalDir = path.join(root, 'original-skill');
+    const replacementDir = path.join(root, 'replacement-skill');
+    const outside = path.join(root, 'outside.txt');
+    await mkdir(originalDir, { recursive: true });
+    await mkdir(replacementDir, { recursive: true });
+    await writeFile(
+      path.join(originalDir, 'SKILL.md'),
+      '---\nname: rollback-skill\ndescription: Original\n---\n# Original Skill\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(replacementDir, 'SKILL.md'),
+      '---\nname: rollback-skill\ndescription: Replacement\n---\n# Replacement Skill\n',
+      'utf8',
+    );
+    await writeFile(outside, 'outside\n', 'utf8');
+    await symlink(outside, path.join(replacementDir, 'unsafe-link'));
+
+    const installer = new InstallerService({ homeDir: home, dataDir });
+    const installed = await installer.installSkill({
+      name: 'rollback-skill',
+      source: originalDir,
+      targets: ['unified-mpc'],
+    });
+    expect(installed.ok).toBe(true);
+
+    const registry = new CanonicalExtensionRegistry({ dataDir });
+    const before = await registry.load();
+    expect(before.ok).toBe(true);
+    if (!before.ok) return;
+
+    const replacement = await installer.installSkill({
+      name: 'rollback-skill',
+      source: replacementDir,
+      targets: ['unified-mpc'],
+    });
+    expect(replacement.ok).toBe(false);
+    expect(await readFile(
+      path.join(dataDir, 'extensions', 'skills', 'rollback-skill', 'SKILL.md'),
+      'utf8',
+    )).toContain('# Original Skill');
+    expect(await registry.load()).toEqual(before);
+  });
+
+  it('preserves the working canonical Skill copy and registry when activation cannot swap directories', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-canonical-skill-activation-failure-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const originalDir = path.join(root, 'original-skill');
+    const replacementDir = path.join(root, 'replacement-skill');
+    await mkdir(originalDir, { recursive: true });
+    await mkdir(replacementDir, { recursive: true });
+    await writeFile(
+      path.join(originalDir, 'SKILL.md'),
+      '---\nname: activation-skill\ndescription: Original\n---\n# Original Skill\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(replacementDir, 'SKILL.md'),
+      '---\nname: activation-skill\ndescription: Replacement\n---\n# Replacement Skill\n',
+      'utf8',
+    );
+
+    const installer = new InstallerService({ homeDir: home, dataDir });
+    const installed = await installer.installSkill({
+      name: 'activation-skill',
+      source: originalDir,
+      targets: ['unified-mpc'],
+    });
+    expect(installed.ok).toBe(true);
+
+    const registry = new CanonicalExtensionRegistry({ dataDir });
+    const before = await registry.load();
+    expect(before.ok).toBe(true);
+    if (!before.ok) return;
+
+    const backupRoot = path.join(dataDir, 'extensions', 'state', 'skill-install-backups');
+    await writeFile(backupRoot, 'block directory creation\n', 'utf8');
+
+    const replacementResult = await installer.installSkill({
+      name: 'activation-skill',
+      source: replacementDir,
+      targets: ['unified-mpc'],
+    });
+    expect(replacementResult.ok).toBe(false);
+    expect(await readFile(
+      path.join(dataDir, 'extensions', 'skills', 'activation-skill', 'SKILL.md'),
+      'utf8',
+    )).toContain('# Original Skill');
+    expect(await registry.load()).toEqual(before);
   });
 
   it('rejects a declared incompatible skill before copying it into the canonical store', async () => {

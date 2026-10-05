@@ -5,6 +5,7 @@ import { appError, err, ok } from '@unified-mpc/domain';
 import { describe, expect, it } from 'vitest';
 import {
   CanonicalExtensionRegistry,
+  canonicalExtensionRegistryPath,
   reconcileCanonicalExtensionCandidates,
   type CanonicalExtensionCandidate,
   type CanonicalExtensionEntry,
@@ -256,6 +257,44 @@ describe('canonical extension registry', () => {
       expect(failed.ok).toBe(false);
       expect(await readFile(siblingFile, 'utf8')).toBe('after\n');
       expect(await registry.load()).toEqual(first);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('compensates materialization when canonical registry persistence fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-compensate-'));
+    try {
+      const registry = new CanonicalExtensionRegistry({ dataDir: root });
+      const registryPath = canonicalExtensionRegistryPath(root);
+      const host = {
+        platform: 'linux' as const,
+        architecture: 'x64',
+        availableCommands: new Set<string>(),
+      };
+      let materialized = 'before';
+      let compensated = false;
+
+      const failed = await registry.upsertAtomically(
+        skillCandidate(),
+        host,
+        [],
+        async () => {
+          materialized = 'after';
+          await mkdir(registryPath, { recursive: true });
+        },
+        async () => {
+          await rm(registryPath, { recursive: true, force: true });
+          materialized = 'before';
+          compensated = true;
+        },
+      );
+
+      expect(failed.ok).toBe(false);
+      expect(compensated).toBe(true);
+      expect(materialized).toBe('before');
+      const loaded = await registry.load();
+      expect(loaded).toMatchObject({ ok: true, value: { generation: 0, entries: [] } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -6,12 +6,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer, type StorageDiagnosticsSnapshot, type WebGoalSummary, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
+  CanonicalSkillMigrationCutoverStateStore,
+  CanonicalSkillMigrationStager,
   InstallerService,
   McpConfigLoader,
   PrunerService,
   IdeSyncService,
   SkillCatalog,
   DEFAULT_EXTENSIONS_SETTINGS,
+  buildCanonicalExtensionMigrationManifest,
+  fingerprintCanonicalSkillDirectory,
 } from '@unified-mpc/extensions';
 
 describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
@@ -1389,6 +1393,221 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(captured).toEqual({ name: 'owned-server', targets: ['unified-mpc'] });
     } finally {
       await ownedServer.close();
+    }
+  });
+
+  it('serves only the active canonical Skill generation after cutover', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-active-canonical-generation-'));
+    const dataDir = path.join(root, 'data');
+    const legacySkillRoot = path.join(dataDir, 'extensions', 'skills', 'legacy-web-skill');
+    const sourcePath = path.join(root, 'migration-source');
+    await mkdir(legacySkillRoot, { recursive: true });
+    await mkdir(sourcePath, { recursive: true });
+    await writeFile(
+      path.join(legacySkillRoot, 'SKILL.md'),
+      '---\nname: legacy-web-skill\ndescription: Legacy Web Skill\n---\n# Legacy\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(sourcePath, 'SKILL.md'),
+      '---\nname: canonical-web-skill\ndescription: Canonical Web Skill\n---\n# Canonical\n',
+      'utf8',
+    );
+    await writeFile(path.join(sourcePath, 'helper.txt'), 'canonical helper\n', 'utf8');
+
+    const fingerprint = await fingerprintCanonicalSkillDirectory(sourcePath);
+    expect(fingerprint.ok).toBe(true);
+    if (!fingerprint.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const manifest = buildCanonicalExtensionMigrationManifest([{
+      kind: 'skill',
+      id: 'skill:canonical-web-skill',
+      name: 'canonical-web-skill',
+      fingerprint: fingerprint.value,
+      enabled: true,
+      sourcePath,
+      provenance: {
+        originType: 'client-import',
+        origin: sourcePath,
+        sourceClient: 'cline',
+      },
+      compatibility: { platforms: ['linux'] },
+    }], {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['git']),
+    });
+    expect(manifest.ok).toBe(true);
+    if (!manifest.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const staged = await new CanonicalSkillMigrationStager({ dataDir }).stage(manifest.value);
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const activated = await new CanonicalSkillMigrationCutoverStateStore({ dataDir })
+      .activate(manifest.value, staged.value);
+    expect(activated.ok).toBe(true);
+
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+    });
+    await dynamic.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${dynamic.port}/api/skills`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { skills: readonly { name: string; source: string }[] };
+      expect(body.skills).toEqual([
+        expect.objectContaining({
+          name: 'canonical-web-skill',
+          source: 'unified-mpc-skills',
+        }),
+      ]);
+      expect(body.skills.some((skill) => skill.name === 'legacy-web-skill')).toBe(false);
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed in Web Skill discovery when the active canonical generation is corrupt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-corrupt-canonical-generation-'));
+    const dataDir = path.join(root, 'data');
+    const legacySkillRoot = path.join(dataDir, 'extensions', 'skills', 'legacy-web-skill');
+    const sourcePath = path.join(root, 'migration-source');
+    await mkdir(legacySkillRoot, { recursive: true });
+    await mkdir(sourcePath, { recursive: true });
+    await writeFile(
+      path.join(legacySkillRoot, 'SKILL.md'),
+      '---\nname: legacy-web-skill\ndescription: Legacy Web Skill\n---\n# Legacy\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(sourcePath, 'SKILL.md'),
+      '---\nname: canonical-web-skill\ndescription: Canonical Web Skill\n---\n# Canonical\n',
+      'utf8',
+    );
+    await writeFile(path.join(sourcePath, 'helper.txt'), 'canonical helper\n', 'utf8');
+
+    const fingerprint = await fingerprintCanonicalSkillDirectory(sourcePath);
+    expect(fingerprint.ok).toBe(true);
+    if (!fingerprint.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const manifest = buildCanonicalExtensionMigrationManifest([{
+      kind: 'skill',
+      id: 'skill:canonical-web-skill',
+      name: 'canonical-web-skill',
+      fingerprint: fingerprint.value,
+      enabled: true,
+      sourcePath,
+      provenance: {
+        originType: 'client-import',
+        origin: sourcePath,
+        sourceClient: 'cline',
+      },
+      compatibility: { platforms: ['linux'] },
+    }], {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['git']),
+    });
+    expect(manifest.ok).toBe(true);
+    if (!manifest.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const staged = await new CanonicalSkillMigrationStager({ dataDir }).stage(manifest.value);
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest.value, staged.value);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) {
+      await rm(root, { recursive: true, force: true });
+      return;
+    }
+    await writeFile(
+      path.join(staged.value.generationPath, staged.value.stagedSkills[0]!.relativePath, 'helper.txt'),
+      'corrupt after activation\n',
+      'utf8',
+    );
+
+    const settings = new Map<string, string>([
+      ['extensions', JSON.stringify({
+        mode: 'enable_all',
+        disabledServers: [],
+        enabledServers: [],
+        disabledSkillRoots: [],
+        extraSkillRoots: [],
+        extraMcpServers: {},
+        mandatoryMcpServers: [],
+        policies: [{
+          id: 'legacy-skill-policy',
+          resourceId: 'legacy-web-skill',
+          resourceType: 'skill',
+          mandatory: true,
+          enforcement: 'EVERY_SESSION',
+          directive: 'Legacy Skill must not satisfy policy after canonical cutover.',
+        }],
+      })],
+    ]);
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await dynamic.listen();
+    try {
+      const skillsResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/skills`);
+      expect(skillsResponse.status).toBe(500);
+      const skillsBody = await skillsResponse.json() as { ok: boolean; error?: { code?: string; message?: string } };
+      expect(skillsBody).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: expect.stringContaining('fingerprint'),
+        },
+      });
+
+      const policiesResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/policies`);
+      expect(policiesResponse.status).toBe(200);
+      const policiesBody = await policiesResponse.json() as {
+        ready: boolean;
+        policies: readonly {
+          id: string;
+          available: boolean;
+          resolvedResourceId?: string;
+        }[];
+      };
+      expect(policiesBody.ready).toBe(false);
+      const legacyPolicy = policiesBody.policies.find((policy) => policy.id === 'legacy-skill-policy');
+      expect(legacyPolicy).toEqual(expect.objectContaining({
+        id: 'legacy-skill-policy',
+        available: false,
+      }));
+      expect(legacyPolicy).not.toHaveProperty('resolvedResourceId');
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

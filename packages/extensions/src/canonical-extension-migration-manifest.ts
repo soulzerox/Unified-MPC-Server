@@ -8,6 +8,7 @@ import {
   type CanonicalExtensionKind,
   type CanonicalExtensionProvenance,
 } from './canonical-extension-registry.js';
+import type { McpServerLaunchConfig } from './types.js';
 
 export type CanonicalExtensionMigrationClassification =
   | 'unique'
@@ -20,15 +21,18 @@ export type CanonicalExtensionMigrationConflictReason =
   | 'variant_fingerprint'
   | 'name_drift'
   | 'compatibility_drift'
-  | 'enabled_drift';
+  | 'enabled_drift'
+  | 'launch_config_drift';
 
 export type CanonicalExtensionCutoverBlocker =
   | 'conflicts_present'
   | 'unknown_compatibility_present'
-  | 'canonical_active_set_empty';
+  | 'canonical_active_set_empty'
+  | 'mcp_launch_config_missing';
 
 export interface CanonicalExtensionMigrationCandidate extends CanonicalExtensionCandidate {
   readonly sourcePath?: string;
+  readonly launchConfig?: McpServerLaunchConfig;
 }
 
 export interface CanonicalExtensionMigrationSource {
@@ -36,6 +40,7 @@ export interface CanonicalExtensionMigrationSource {
   readonly fingerprint: string;
   readonly enabled: boolean;
   readonly sourcePath?: string;
+  readonly launchConfig?: McpServerLaunchConfig;
   readonly compatibility?: CanonicalExtensionCompatibility;
   readonly compatibilityState: CanonicalExtensionCompatibilityState;
   readonly missingCommands?: readonly string[];
@@ -149,6 +154,18 @@ export function buildCanonicalExtensionMigrationManifest(
   if (activeInventoryCount > 0 && activeCanonicalCount === 0) {
     reasons.push('canonical_active_set_empty');
   }
+  const missingMcpLaunchConfig = entries.some((entry) => (
+    entry.kind === 'mcp_server'
+    && isActiveCanonicalEntry(entry, grouped)
+    && entry.selectedFingerprint !== undefined
+    && !entry.sources.some((source) => (
+      source.enabled
+      && source.compatibilityState === 'compatible'
+      && source.fingerprint === entry.selectedFingerprint
+      && source.launchConfig !== undefined
+    ))
+  ));
+  if (missingMcpLaunchConfig) reasons.push('mcp_launch_config_missing');
 
   return ok({
     schemaVersion: 1,
@@ -190,6 +207,9 @@ function buildMigrationSourceInventory(
         fingerprint: candidate.fingerprint,
         enabled: candidate.enabled,
         ...(candidate.sourcePath === undefined ? {} : { sourcePath: candidate.sourcePath }),
+        ...(candidate.kind !== 'mcp_server' || candidate.launchConfig === undefined
+          ? {}
+          : { launchConfig: normalizeMcpLaunchConfig(candidate.launchConfig) }),
         ...(canonical.compatibility === undefined ? {} : { compatibility: canonical.compatibility }),
         compatibilityState: canonical.compatibilityState,
         ...(canonical.missingCommands === undefined ? {} : { missingCommands: canonical.missingCommands }),
@@ -214,6 +234,7 @@ function migrationSourceKey(source: CanonicalExtensionMigrationSource): string {
     source.enabled ? '1' : '0',
     source.name,
     stableCompatibility(source.compatibility),
+    stableMcpLaunchConfig(source.launchConfig),
     provenanceKey(source.provenance),
     source.sourcePath ?? '',
   ].join('\u0000');
@@ -232,7 +253,7 @@ function provenanceKey(value: CanonicalExtensionProvenance): string {
 }
 
 function conflictReasonsFor(
-  candidates: readonly CanonicalExtensionCandidate[],
+  candidates: readonly CanonicalExtensionMigrationCandidate[],
 ): readonly CanonicalExtensionMigrationConflictReason[] {
   const reasons: CanonicalExtensionMigrationConflictReason[] = [];
   if (uniqueStrings(candidates.map((candidate) => candidate.fingerprint)).length > 1) {
@@ -246,6 +267,12 @@ function conflictReasonsFor(
   }
   if (new Set(candidates.map((candidate) => candidate.enabled)).size > 1) {
     reasons.push('enabled_drift');
+  }
+  if (
+    candidates.some((candidate) => candidate.kind === 'mcp_server')
+    && uniqueStrings(candidates.map((candidate) => stableMcpLaunchConfig(candidate.launchConfig))).length > 1
+  ) {
+    reasons.push('launch_config_drift');
   }
   return reasons;
 }
@@ -273,6 +300,27 @@ function isActiveCanonicalEntry(
   if (entry.compatibilityState !== 'compatible') return false;
   const candidates = grouped.get(candidateKey(entry.kind, entry.id)) ?? [];
   return candidates.length > 0 && candidates.every((candidate) => candidate.enabled);
+}
+
+function normalizeMcpLaunchConfig(config: McpServerLaunchConfig): McpServerLaunchConfig {
+  const env = config.env === undefined
+    ? undefined
+    : Object.fromEntries(
+      Object.entries(config.env).sort(([left], [right]) => left.localeCompare(right)),
+    );
+  return {
+    command: config.command,
+    ...(config.args === undefined ? {} : { args: [...config.args] }),
+    ...(env === undefined ? {} : { env }),
+    ...(config.cwd === undefined ? {} : { cwd: config.cwd }),
+    ...(config.type === undefined ? {} : { type: config.type }),
+    ...(config.url === undefined ? {} : { url: config.url }),
+  };
+}
+
+function stableMcpLaunchConfig(value: McpServerLaunchConfig | undefined): string {
+  if (value === undefined) return '';
+  return JSON.stringify(normalizeMcpLaunchConfig(value));
 }
 
 function stableCompatibility(value: CanonicalExtensionCompatibility | undefined): string {

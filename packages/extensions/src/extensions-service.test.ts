@@ -7,6 +7,9 @@ import { type ResultBudget } from '@unified-mpc/domain';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 import { LocalExtensionsService } from './extensions-service.js';
 import { bundledSkillRootCandidates } from './create-local-extensions.js';
+import { buildCanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
+import { CanonicalSkillMigrationStager, fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
+import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
 import { attachChildStderrDrain, McpSessionManager, type McpClientFactory, type McpClientSession } from './mcp-session-manager.js';
 
 function settingsWithMockServer(): typeof DEFAULT_EXTENSIONS_SETTINGS {
@@ -55,6 +58,158 @@ describe('LocalExtensionsService MCP bridge', () => {
         ok: true,
         value: { servers: [expect.objectContaining({ name: 'parent-child', source: 'unified-mpc-registry', enabled: true })] },
       });
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('switches Skill runtime discovery to the active canonical generation without leaking legacy roots', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-active-generation-runtime-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const home = path.join(root, 'home');
+      const legacyManaged = path.join(dataDir, 'extensions', 'skills', 'legacy-managed');
+      const legacyGlobal = path.join(home, '.agents', 'skills', 'legacy-global');
+      const sourcePath = path.join(root, 'migration-source');
+      for (const [skillRoot, name] of [
+        [legacyManaged, 'legacy-managed'],
+        [legacyGlobal, 'legacy-global'],
+        [sourcePath, 'canonical-active'],
+      ] as const) {
+        await mkdir(skillRoot, { recursive: true });
+        await writeFile(
+          path.join(skillRoot, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: ${name}\n---\n# ${name}\n`,
+          'utf8',
+        );
+        await writeFile(path.join(skillRoot, 'helper.txt'), `helper:${name}\n`, 'utf8');
+      }
+
+      const fingerprint = await fingerprintCanonicalSkillDirectory(sourcePath);
+      expect(fingerprint.ok).toBe(true);
+      if (!fingerprint.ok) return;
+      const manifest = buildCanonicalExtensionMigrationManifest([
+        {
+          kind: 'skill',
+          id: 'skill:canonical-active',
+          name: 'canonical-active',
+          fingerprint: fingerprint.value,
+          enabled: true,
+          sourcePath,
+          provenance: {
+            originType: 'client-import',
+            origin: sourcePath,
+            sourceClient: 'cline',
+          },
+          compatibility: { platforms: ['linux'] },
+        },
+      ], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(['git']),
+      });
+      expect(manifest.ok).toBe(true);
+      if (!manifest.ok) return;
+      const staged = await new CanonicalSkillMigrationStager({ dataDir }).stage(manifest.value);
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      const activated = await new CanonicalSkillMigrationCutoverStateStore({ dataDir })
+        .activate(manifest.value, staged.value);
+      expect(activated.ok).toBe(true);
+      if (!activated.ok) return;
+
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: home,
+        dataDir,
+      } as never);
+      const listed = await service.listSkills({});
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return;
+      expect(listed.value.skills).toEqual([
+        expect.objectContaining({
+          name: 'canonical-active',
+          source: 'unified-mpc-skills',
+        }),
+      ]);
+      expect(listed.value.skills.some((skill) => skill.name.startsWith('legacy-'))).toBe(false);
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed instead of falling back to legacy roots when the active canonical generation is corrupt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-active-generation-corrupt-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const home = path.join(root, 'home');
+      const legacyGlobal = path.join(home, '.agents', 'skills', 'legacy-global');
+      const sourcePath = path.join(root, 'migration-source');
+      for (const [skillRoot, name] of [
+        [legacyGlobal, 'legacy-global'],
+        [sourcePath, 'canonical-active'],
+      ] as const) {
+        await mkdir(skillRoot, { recursive: true });
+        await writeFile(
+          path.join(skillRoot, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: ${name}\n---\n# ${name}\n`,
+          'utf8',
+        );
+        await writeFile(path.join(skillRoot, 'helper.txt'), `helper:${name}\n`, 'utf8');
+      }
+
+      const fingerprint = await fingerprintCanonicalSkillDirectory(sourcePath);
+      expect(fingerprint.ok).toBe(true);
+      if (!fingerprint.ok) return;
+      const manifest = buildCanonicalExtensionMigrationManifest([
+        {
+          kind: 'skill',
+          id: 'skill:canonical-active',
+          name: 'canonical-active',
+          fingerprint: fingerprint.value,
+          enabled: true,
+          sourcePath,
+          provenance: {
+            originType: 'client-import',
+            origin: sourcePath,
+            sourceClient: 'cline',
+          },
+          compatibility: { platforms: ['linux'] },
+        },
+      ], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(['git']),
+      });
+      expect(manifest.ok).toBe(true);
+      if (!manifest.ok) return;
+      const staged = await new CanonicalSkillMigrationStager({ dataDir }).stage(manifest.value);
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+      const activated = await store.activate(manifest.value, staged.value);
+      expect(activated.ok).toBe(true);
+      if (!activated.ok) return;
+
+      await writeFile(
+        path.join(staged.value.generationPath, staged.value.stagedSkills[0]!.relativePath, 'helper.txt'),
+        'corrupt after activation\n',
+        'utf8',
+      );
+
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: home,
+        dataDir,
+      } as never);
+      const listed = await service.listSkills({});
+      expect(listed.ok).toBe(false);
+      if (!listed.ok) {
+        expect(listed.error.code).toBe('INVALID_INPUT');
+        expect(listed.error.message).toContain('fingerprint');
+      }
       await service.close();
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -68,6 +68,7 @@ export {
 } from './canonical-skill-migration-dry-run.js';
 export {
   CanonicalSkillMigrationCutoverStateStore,
+  type CanonicalSkillMigrationActiveGeneration,
   type CanonicalSkillMigrationCutoverActivation,
   type CanonicalSkillMigrationCutoverState,
   type CanonicalSkillMigrationCutoverStateStoreOptions,

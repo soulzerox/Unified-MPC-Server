@@ -12,6 +12,8 @@ export interface SkillCatalogOptions {
   readonly bundledRoots?: readonly string[];
   /** Parent-owned canonical skill root managed by unified-mpc itself. */
   readonly managedRoot?: string;
+  /** Use only the parent-owned managed root after canonical cutover. */
+  readonly managedRootMode?: 'supplemental' | 'exclusive';
   readonly extraRoots?: readonly string[];
 }
 
@@ -115,6 +117,13 @@ export class SkillCatalog {
   }
 
   private roots(): readonly { readonly source: string; readonly path: string }[] {
+    const managedRoot = this.options.managedRoot?.trim();
+    if (this.options.managedRootMode === 'exclusive') {
+      return managedRoot === undefined || managedRoot.length === 0
+        ? []
+        : [{ source: 'unified-mpc-skills', path: path.resolve(managedRoot) }];
+    }
+
     const home = this.options.homeDir ?? os.homedir();
     const configuredCodexHome = this.options.homeDir === undefined ? process.env.CODEX_HOME?.trim() : undefined;
     const codexHome = configuredCodexHome === undefined || configuredCodexHome.length === 0
@@ -169,7 +178,6 @@ export class SkillCatalog {
     for (const bundled of this.options.bundledRoots ?? []) {
       defaults.push({ source: 'bundled:agent-skills', path: path.resolve(bundled) });
     }
-    const managedRoot = this.options.managedRoot?.trim();
     if (managedRoot !== undefined && managedRoot.length > 0) {
       defaults.push({ source: 'unified-mpc-skills', path: path.resolve(managedRoot) });
     }

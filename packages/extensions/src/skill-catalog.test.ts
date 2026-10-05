@@ -69,6 +69,45 @@ Do the thing.
     expect(escape.ok).toBe(false);
   });
 
+  it('supports an exclusive parent-owned managed root that hides legacy global and workspace roots', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-exclusive-managed-root-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const managedRoot = path.join(root, 'canonical', 'skills');
+    const roots = [
+      [path.join(home, '.agents', 'skills', 'legacy-global'), 'legacy-global'],
+      [path.join(workspace, '.agents', 'skills', 'legacy-workspace'), 'legacy-workspace'],
+      [path.join(managedRoot, 'canonical-only'), 'canonical-only'],
+    ] as const;
+    for (const [skillRoot, name] of roots) {
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(
+        path.join(skillRoot, 'SKILL.md'),
+        `---\nname: ${name}\ndescription: ${name}\n---\n# ${name}\n`,
+        'utf8',
+      );
+    }
+
+    const catalog = new SkillCatalog({
+      homeDir: home,
+      workspaceRoot: workspace,
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+      managedRoot,
+      managedRootMode: 'exclusive',
+    });
+    const listed = await catalog.list({});
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.skills).toEqual([
+      expect.objectContaining({
+        id: 'unified-mpc-skills/canonical-only',
+        name: 'canonical-only',
+        source: 'unified-mpc-skills',
+      }),
+    ]);
+  });
+
   it('discovers and reads workspace .agents skills by source-qualified id', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-skills-'));
     temporaryRoots.push(root);

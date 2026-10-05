@@ -61,6 +61,15 @@ export {
   type CanonicalMcpMigrationStagerOptions,
 } from './canonical-mcp-migration-stager.js';
 export {
+  CanonicalMcpMigrationCutoverStateStore,
+  type CanonicalMcpMigrationActiveGeneration,
+  type CanonicalMcpMigrationCutoverActivation,
+  type CanonicalMcpMigrationCutoverRollback,
+  type CanonicalMcpMigrationCutoverState,
+  type CanonicalMcpMigrationRollbackTarget,
+  type CanonicalMcpMigrationCutoverStateStoreOptions,
+} from './canonical-mcp-migration-cutover-state.js';
+export {
   CanonicalSkillMigrationStager,
   fingerprintCanonicalSkillDirectory,
   type CanonicalSkillMigrationSkipReason,

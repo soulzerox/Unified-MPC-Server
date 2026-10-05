@@ -1,11 +1,13 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { appError, err, ok } from '@unified-mpc/domain';
 import { describe, expect, it } from 'vitest';
 import {
   CanonicalExtensionRegistry,
   reconcileCanonicalExtensionCandidates,
   type CanonicalExtensionCandidate,
+  type CanonicalExtensionEntry,
 } from './canonical-extension-registry.js';
 
 const fingerprintA = 'a'.repeat(64);
@@ -24,6 +26,29 @@ function skillCandidate(overrides: Partial<CanonicalExtensionCandidate> = {}): C
       sourceClient: 'cline',
     },
     ...overrides,
+  };
+}
+
+function mcpEntry(input: {
+  readonly id: string;
+  readonly name: string;
+  readonly fingerprint: string;
+}): CanonicalExtensionEntry {
+  return {
+    kind: 'mcp_server',
+    id: input.id,
+    name: input.name,
+    fingerprint: input.fingerprint,
+    enabled: true,
+    compatibility: { platforms: ['linux'] },
+    compatibilityState: 'compatible',
+    conflict: false,
+    variantFingerprints: [input.fingerprint],
+    provenance: [{
+      originType: 'client-import',
+      origin: `/fixture/${input.name}`,
+      sourceClient: 'cursor',
+    }],
   };
 }
 
@@ -231,6 +256,119 @@ describe('canonical extension registry', () => {
       expect(failed.ok).toBe(false);
       expect(await readFile(siblingFile, 'utf8')).toBe('after\n');
       expect(await registry.load()).toEqual(first);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('atomically replaces one extension kind while preserving other installed entries', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-kind-'));
+    try {
+      const registry = new CanonicalExtensionRegistry({ dataDir: root });
+      const initial = reconcileCanonicalExtensionCandidates([
+        skillCandidate(),
+        {
+          kind: 'mcp_server',
+          id: 'mcp:stale',
+          name: 'stale',
+          fingerprint: fingerprintA,
+          enabled: true,
+          compatibility: { platforms: ['linux'] },
+          provenance: {
+            originType: 'client-import',
+            origin: '/fixture/stale',
+            sourceClient: 'cursor',
+          },
+        },
+      ], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(),
+      });
+      if (!initial.ok) throw new Error(initial.error.message);
+      expect((await registry.save(initial.value)).ok).toBe(true);
+
+      const siblingFile = path.join(root, 'extensions', 'state', 'migration', 'mcp-cutover-state.json');
+      await mkdir(path.dirname(siblingFile), { recursive: true });
+      await writeFile(siblingFile, 'before\n', 'utf8');
+
+      const replacement = mcpEntry({
+        id: 'mcp:active',
+        name: 'active',
+        fingerprint: fingerprintB,
+      });
+      const replaced = await registry.replaceKindAtomically(
+        'mcp_server',
+        [replacement],
+        [siblingFile],
+        async () => {
+          await writeFile(siblingFile, 'after\n', 'utf8');
+          return ok('updated');
+        },
+      );
+      expect(replaced).toMatchObject({
+        ok: true,
+        value: {
+          operationValue: 'updated',
+          registry: {
+            schemaVersion: 1,
+            generation: 2,
+            entries: [
+              { kind: 'mcp_server', id: 'mcp:active' },
+              { kind: 'skill', id: 'skill:code-review' },
+            ],
+          },
+        },
+      });
+      expect(await readFile(siblingFile, 'utf8')).toBe('after\n');
+
+      const repeated = await registry.replaceKindAtomically(
+        'mcp_server',
+        [replacement],
+        [siblingFile],
+        async () => ok('same'),
+      );
+      expect(repeated).toMatchObject({
+        ok: true,
+        value: {
+          operationValue: 'same',
+          registry: { generation: 2 },
+        },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rolls sibling mutations back when an atomic kind replacement returns an error', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-kind-error-'));
+    try {
+      const registry = new CanonicalExtensionRegistry({ dataDir: root });
+      const initial = reconcileCanonicalExtensionCandidates([skillCandidate()], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(),
+      });
+      if (!initial.ok) throw new Error(initial.error.message);
+      const saved = await registry.save(initial.value);
+      expect(saved.ok).toBe(true);
+
+      const siblingFile = path.join(root, 'extensions', 'state', 'migration', 'mcp-cutover-state.json');
+      await mkdir(path.dirname(siblingFile), { recursive: true });
+      await writeFile(siblingFile, 'before\n', 'utf8');
+
+      const failed = await registry.replaceKindAtomically(
+        'mcp_server',
+        [mcpEntry({ id: 'mcp:active', name: 'active', fingerprint: fingerprintB })],
+        [siblingFile],
+        async () => {
+          await writeFile(siblingFile, 'broken\n', 'utf8');
+          return err(appError('CONFLICT', 'simulated cutover race', true));
+        },
+      );
+      expect(failed).toEqual(err(appError('CONFLICT', 'simulated cutover race', true)));
+      expect(await readFile(siblingFile, 'utf8')).toBe('before\n');
+      expect(await registry.load()).toEqual(saved);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

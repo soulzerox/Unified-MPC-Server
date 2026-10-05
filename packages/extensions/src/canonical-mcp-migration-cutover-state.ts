@@ -4,10 +4,11 @@ import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
 import {
+  CanonicalExtensionRegistry,
   isCanonicalExtensionEntry,
+  type CanonicalExtensionEntry,
   type CanonicalExtensionProvenance,
 } from './canonical-extension-registry.js';
-import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { writeAtomic } from './ide-sync.js';
 import { exclusionReason } from './mcp-config-loader.js';
 import {
@@ -82,12 +83,14 @@ export class CanonicalMcpMigrationCutoverStateStore {
   private readonly dataDir: string;
   private readonly statePath: string;
   private readonly generationsRoot: string;
+  private readonly installedRegistry: CanonicalExtensionRegistry;
 
   public constructor(options: CanonicalMcpMigrationCutoverStateStoreOptions) {
     this.dataDir = path.resolve(options.dataDir);
     const migrationRoot = path.join(this.dataDir, 'extensions', 'state', 'migration');
     this.statePath = path.join(migrationRoot, CUTOVER_STATE_FILENAME);
     this.generationsRoot = path.join(migrationRoot, 'staged-mcp-generations');
+    this.installedRegistry = new CanonicalExtensionRegistry({ dataDir: this.dataDir });
   }
 
   public async load(): Promise<Result<CanonicalMcpMigrationCutoverState | undefined>> {
@@ -137,53 +140,95 @@ export class CanonicalMcpMigrationCutoverStateStore {
       return err(appError('INVALID_INPUT', 'Canonical MCP rollback requires a valid expected active generation id'));
     }
 
-    try {
-      return await withConfigMutationTransaction([this.statePath], async () => {
-        const current = await loadCutoverState(this.statePath);
-        if (!current.ok) return err(current.error);
-        if (current.value === undefined) {
+    const current = await loadCutoverState(this.statePath);
+    if (!current.ok) return err(current.error);
+    if (current.value === undefined) {
+      return err(appError('CONFLICT', 'Canonical MCP rollback requires an active generation'));
+    }
+    if (current.value.activeGenerationId !== expectedActiveGenerationId) {
+      return err(appError(
+        'CONFLICT',
+        'Canonical MCP active generation changed before rollback could be applied',
+        true,
+      ));
+    }
+
+    const previousGenerationId = current.value.previousGenerationId;
+    let replacementEntries: readonly CanonicalExtensionEntry[] = [];
+    if (previousGenerationId !== undefined) {
+      const rollbackState: CanonicalMcpMigrationCutoverState = {
+        schemaVersion: CUTOVER_STATE_SCHEMA_VERSION,
+        activeGenerationId: previousGenerationId,
+        previousGenerationId: current.value.activeGenerationId,
+      };
+      const verified = await verifyPersistedGeneration(this.generationsRoot, rollbackState);
+      if (!verified.ok) return err(verified.error);
+      const entries = canonicalEntriesForInstalledState(verified.value);
+      if (!entries.ok) return err(entries.error);
+      replacementEntries = entries.value;
+    }
+
+    const replaced = await this.installedRegistry.replaceKindAtomically(
+      'mcp_server',
+      replacementEntries,
+      [this.statePath],
+      async () => {
+        const lockedCurrent = await loadCutoverState(this.statePath);
+        if (!lockedCurrent.ok) return err(lockedCurrent.error);
+        if (lockedCurrent.value === undefined) {
           return err(appError('CONFLICT', 'Canonical MCP rollback requires an active generation'));
         }
-        if (current.value.activeGenerationId !== expectedActiveGenerationId) {
+        if (lockedCurrent.value.activeGenerationId !== expectedActiveGenerationId) {
           return err(appError(
             'CONFLICT',
             'Canonical MCP active generation changed before rollback could be applied',
             true,
           ));
         }
+        if (lockedCurrent.value.previousGenerationId !== previousGenerationId) {
+          return err(appError(
+            'CONFLICT',
+            'Canonical MCP rollback target changed before rollback could be applied',
+            true,
+          ));
+        }
 
-        const previousGenerationId = current.value.previousGenerationId;
         if (previousGenerationId === undefined) {
           await unlink(this.statePath);
-          return ok({
+          return ok<CanonicalMcpMigrationCutoverRollback>({
             target: 'legacy',
-            fromGenerationId: current.value.activeGenerationId,
+            fromGenerationId: lockedCurrent.value.activeGenerationId,
           });
         }
 
         const nextState: CanonicalMcpMigrationCutoverState = {
           schemaVersion: CUTOVER_STATE_SCHEMA_VERSION,
           activeGenerationId: previousGenerationId,
-          previousGenerationId: current.value.activeGenerationId,
+          previousGenerationId: lockedCurrent.value.activeGenerationId,
         };
-        const verified = await verifyPersistedGeneration(this.generationsRoot, nextState);
-        if (!verified.ok) return err(verified.error);
+        const lockedVerified = await verifyPersistedGeneration(this.generationsRoot, nextState);
+        if (!lockedVerified.ok) return err(lockedVerified.error);
+        const lockedEntries = canonicalEntriesForInstalledState(lockedVerified.value);
+        if (!lockedEntries.ok) return err(lockedEntries.error);
+        if (JSON.stringify(lockedEntries.value) !== JSON.stringify(replacementEntries)) {
+          return err(appError(
+            'CONFLICT',
+            'Canonical MCP rollback target metadata changed before rollback could be applied',
+            true,
+          ));
+        }
 
         await writeAtomic(this.statePath, JSON.stringify(nextState, null, 2) + '\n');
-        return ok({
+        return ok<CanonicalMcpMigrationCutoverRollback>({
           target: 'canonical',
-          fromGenerationId: current.value.activeGenerationId,
+          fromGenerationId: lockedCurrent.value.activeGenerationId,
           toGenerationId: previousGenerationId,
           state: nextState,
         });
-      });
-    } catch (error: unknown) {
-      return err(appError(
-        'INTERNAL_ERROR',
-        `Failed to rollback canonical MCP cutover state: ${error instanceof Error ? error.message : String(error)}`,
-        true,
-      ));
-    }
+      },
+    );
+    if (!replaced.ok) return err(replaced.error);
+    return ok(replaced.value.operationValue);
   }
 
   public async activate(
@@ -205,14 +250,19 @@ export class CanonicalMcpMigrationCutoverStateStore {
 
     const verified = await verifyStagedGenerationForActivation(this.dataDir, manifest, staged);
     if (!verified.ok) return err(verified.error);
+    const replacementEntries = canonicalEntriesFromStagedServers(staged.stagedServers);
+    if (!replacementEntries.ok) return err(replacementEntries.error);
 
-    try {
-      return await withConfigMutationTransaction([this.statePath], async () => {
+    const replaced = await this.installedRegistry.replaceKindAtomically(
+      'mcp_server',
+      replacementEntries.value,
+      [this.statePath],
+      async () => {
         const current = await loadCutoverState(this.statePath);
         if (!current.ok) return err(current.error);
 
         if (current.value?.activeGenerationId === staged.generationId) {
-          return ok({
+          return ok<CanonicalMcpMigrationCutoverActivation>({
             changed: false,
             state: current.value,
           });
@@ -226,19 +276,38 @@ export class CanonicalMcpMigrationCutoverStateStore {
             : { previousGenerationId: current.value.activeGenerationId }),
         };
         await writeAtomic(this.statePath, JSON.stringify(nextState, null, 2) + '\n');
-        return ok({
+        return ok<CanonicalMcpMigrationCutoverActivation>({
           changed: true,
           state: nextState,
         });
-      });
-    } catch (error: unknown) {
+      },
+    );
+    if (!replaced.ok) return err(replaced.error);
+    return ok(replaced.value.operationValue);
+  }
+}
+
+function canonicalEntriesForInstalledState(
+  generation: CanonicalMcpMigrationActiveGeneration,
+): Result<readonly CanonicalExtensionEntry[]> {
+  if (generation.stageSchemaVersion === 1) return ok([]);
+  return canonicalEntriesFromStagedServers(generation.stagedServers);
+}
+
+function canonicalEntriesFromStagedServers(
+  stagedServers: readonly CanonicalMcpMigrationStagedServer[],
+): Result<readonly CanonicalExtensionEntry[]> {
+  const entries: CanonicalExtensionEntry[] = [];
+  for (const server of stagedServers) {
+    if (server.canonicalEntry === undefined) {
       return err(appError(
-        'INTERNAL_ERROR',
-        `Failed to update canonical MCP cutover state: ${error instanceof Error ? error.message : String(error)}`,
-        true,
+        'INVALID_INPUT',
+        `Canonical MCP schema-v2 staged entry is missing installed-state metadata: ${server.id}`,
       ));
     }
+    entries.push(server.canonicalEntry);
   }
+  return ok(entries);
 }
 
 async function verifyStagedGenerationForActivation(

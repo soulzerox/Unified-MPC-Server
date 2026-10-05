@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type AppError, type Result } from '@unified-mpc/domain';
 import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { writeAtomic } from './ide-sync.js';
 
@@ -78,7 +78,18 @@ export interface CanonicalExtensionRegistryOptions {
   readonly dataDir: string;
 }
 
+export interface CanonicalExtensionRegistryKindReplacement<T> {
+  readonly registry: CanonicalExtensionRegistrySnapshot;
+  readonly operationValue: T;
+}
+
 const REGISTRY_SCHEMA_VERSION = 1 as const;
+
+class RegistryMutationAbort extends Error {
+  public constructor(public readonly appError: AppError) {
+    super(appError.message);
+  }
+}
 
 export function reconcileCanonicalExtensionCandidates(
   candidates: readonly CanonicalExtensionCandidate[],
@@ -153,6 +164,72 @@ export class CanonicalExtensionRegistry {
       return err(appError(
         'INTERNAL_ERROR',
         'Failed to persist canonical extension registry: ' + (error instanceof Error ? error.message : String(error)),
+        true,
+      ));
+    }
+  }
+
+  public async replaceKindAtomically<T>(
+    kind: CanonicalExtensionKind,
+    replacementEntries: readonly CanonicalExtensionEntry[],
+    siblingFiles: readonly string[],
+    operation: () => Promise<Result<T>>,
+  ): Promise<Result<CanonicalExtensionRegistryKindReplacement<T>>> {
+    const seenIds = new Set<string>();
+    for (const entry of replacementEntries) {
+      if (entry.kind !== kind || !isCanonicalExtensionEntry(entry)) {
+        return err(appError(
+          'INVALID_INPUT',
+          `Canonical extension kind replacement contains an invalid ${kind} entry`,
+        ));
+      }
+      if (seenIds.has(entry.id)) {
+        return err(appError(
+          'INVALID_INPUT',
+          `Canonical extension kind replacement contains duplicate id: ${entry.id}`,
+        ));
+      }
+      seenIds.add(entry.id);
+    }
+
+    try {
+      return await withConfigMutationTransaction(
+        [this.registryPath, ...siblingFiles],
+        async () => {
+          const current = await this.load();
+          if (!current.ok) throw new RegistryMutationAbort(current.error);
+
+          const entries = [
+            ...current.value.entries.filter((entry) => entry.kind !== kind),
+            ...replacementEntries,
+          ].sort(compareEntries);
+          const currentEntries = [...current.value.entries].sort(compareEntries);
+          const changed = JSON.stringify(entries) !== JSON.stringify(currentEntries);
+          const operationResult = await operation();
+          if (!operationResult.ok) throw new RegistryMutationAbort(operationResult.error);
+
+          const registry = changed
+            ? {
+                schemaVersion: REGISTRY_SCHEMA_VERSION,
+                generation: current.value.generation + 1,
+                entries,
+              } satisfies CanonicalExtensionRegistrySnapshot
+            : current.value;
+          if (changed) {
+            await writeAtomic(this.registryPath, JSON.stringify(registry, null, 2) + '\n');
+          }
+          return ok({
+            registry,
+            operationValue: operationResult.value,
+          });
+        },
+      );
+    } catch (error: unknown) {
+      if (error instanceof RegistryMutationAbort) return err(error.appError);
+      return err(appError(
+        'INTERNAL_ERROR',
+        'Failed to atomically replace canonical extension kind: '
+          + (error instanceof Error ? error.message : String(error)),
         true,
       ));
     }

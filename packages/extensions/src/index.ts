@@ -70,6 +70,7 @@ export {
   CanonicalSkillMigrationCutoverStateStore,
   type CanonicalSkillMigrationActiveGeneration,
   type CanonicalSkillMigrationCutoverActivation,
+  type CanonicalSkillMigrationCutoverRollback,
   type CanonicalSkillMigrationCutoverState,
   type CanonicalSkillMigrationCutoverStateStoreOptions,
 } from './canonical-skill-migration-cutover-state.js';

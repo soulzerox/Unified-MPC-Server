@@ -23,6 +23,12 @@ export interface CanonicalSkillMigrationCutoverActivation {
   readonly state: CanonicalSkillMigrationCutoverState;
 }
 
+export interface CanonicalSkillMigrationCutoverRollback {
+  readonly fromGenerationId: string;
+  readonly toGenerationId: string;
+  readonly state: CanonicalSkillMigrationCutoverState;
+}
+
 export interface CanonicalSkillMigrationActiveGeneration {
   readonly state: CanonicalSkillMigrationCutoverState;
   readonly generationPath: string;
@@ -65,6 +71,56 @@ export class CanonicalSkillMigrationCutoverStateStore {
       this.generationsRoot,
       state.value,
     );
+  }
+
+  public async rollback(
+    expectedActiveGenerationId: string,
+  ): Promise<Result<CanonicalSkillMigrationCutoverRollback>> {
+    if (!isGenerationId(expectedActiveGenerationId)) {
+      return err(appError('INVALID_INPUT', 'Canonical Skill rollback requires a valid expected active generation id'));
+    }
+
+    try {
+      return await withConfigMutationTransaction([this.statePath], async () => {
+        const current = await loadCutoverState(this.statePath);
+        if (!current.ok) return err(current.error);
+        if (current.value === undefined) {
+          return err(appError('CONFLICT', 'Canonical Skill rollback requires an active generation'));
+        }
+        if (current.value.activeGenerationId !== expectedActiveGenerationId) {
+          return err(appError(
+            'CONFLICT',
+            'Canonical Skill active generation changed before rollback could be applied',
+            true,
+          ));
+        }
+        const previousGenerationId = current.value.previousGenerationId;
+        if (previousGenerationId === undefined) {
+          return err(appError('CONFLICT', 'Canonical Skill rollback has no previous generation available'));
+        }
+
+        const nextState: CanonicalSkillMigrationCutoverState = {
+          schemaVersion: CUTOVER_STATE_SCHEMA_VERSION,
+          activeGenerationId: previousGenerationId,
+          previousGenerationId: current.value.activeGenerationId,
+        };
+        const verified = await verifyPersistedGeneration(this.generationsRoot, nextState);
+        if (!verified.ok) return err(verified.error);
+
+        await writeAtomic(this.statePath, JSON.stringify(nextState, null, 2) + '\n');
+        return ok({
+          fromGenerationId: current.value.activeGenerationId,
+          toGenerationId: previousGenerationId,
+          state: nextState,
+        });
+      });
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to rollback canonical Skill cutover state: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ));
+    }
   }
 
   public async activate(

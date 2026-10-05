@@ -62,6 +62,11 @@ export {
   type CanonicalSkillMigrationStagerOptions,
 } from './canonical-skill-migration-stager.js';
 export {
+  CanonicalSkillMigrationDryRunVerifier,
+  type CanonicalSkillMigrationDryRunResolvedSkill,
+  type CanonicalSkillMigrationDryRunResult,
+} from './canonical-skill-migration-dry-run.js';
+export {
   EXTENSIONS_SETTINGS_KEY,
   createLocalExtensionsService,
   type CreateLocalExtensionsOptions,

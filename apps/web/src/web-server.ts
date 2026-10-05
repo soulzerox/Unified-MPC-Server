@@ -19,6 +19,7 @@ import type {
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import { isMcpRuntimeDiagnosticsSnapshot, resolveDataPath, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import {
+  CanonicalExtensionRegistry,
   CanonicalMcpMigrationCutoverStateStore,
   CanonicalSkillMigrationCutoverStateStore,
   DEFAULT_EXTENSIONS_SETTINGS,
@@ -30,6 +31,7 @@ import {
   configuredPolicies,
   parseExtensionsSettings,
   reconcileRuntimePolicies,
+  type CanonicalExtensionEntry,
   type ExtensionsSettings,
   type PolicyEntry,
   type PruneServerInput,
@@ -230,6 +232,37 @@ interface RegisteredServer {
   readonly serverId: string;
   readonly name: string;
   readonly source: string;
+}
+
+interface CanonicalSkillGenerationDiagnostics {
+  readonly activeGenerationId: string;
+  readonly previousGenerationId?: string;
+  readonly generationPath: string;
+  readonly managedRoot: string;
+  readonly stagedCount: number;
+  readonly skippedCount: number;
+}
+
+interface CanonicalMcpGenerationDiagnostics {
+  readonly activeGenerationId: string;
+  readonly previousGenerationId?: string;
+  readonly stageSchemaVersion: 1 | 2;
+  readonly generationPath: string;
+  readonly registryPath: string;
+  readonly stagedCount: number;
+  readonly skippedCount: number;
+}
+
+interface CanonicalExtensionDiagnostics {
+  readonly registryGeneration: number;
+  readonly skills: {
+    readonly entries: readonly CanonicalExtensionEntry[];
+    readonly activeGeneration: CanonicalSkillGenerationDiagnostics | null;
+  };
+  readonly mcpServers: {
+    readonly entries: readonly CanonicalExtensionEntry[];
+    readonly activeGeneration: CanonicalMcpGenerationDiagnostics | null;
+  };
 }
 
 export interface TelemetryLogEntry {
@@ -817,6 +850,13 @@ export class ControlPlaneServer {
       return;
     }
 
+    if (pathname === '/api/extensions/canonical' && req.method === 'GET') {
+      const diagnostics = await this.canonicalExtensionDiagnostics();
+      res.writeHead(diagnostics.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(diagnostics.ok ? diagnostics.value : diagnostics));
+      return;
+    }
+
     if (pathname === '/api/servers' && req.method === 'GET') {
       const servers = await this.listRegisteredServers();
       if (!servers.ok) {
@@ -1299,6 +1339,56 @@ export class ControlPlaneServer {
   private extensionsSettings(): ExtensionsSettings {
     if (this.settingsRepository === undefined) return DEFAULT_EXTENSIONS_SETTINGS;
     return parseExtensionsSettings(this.settingsRepository.get(SETTING_KEYS.extensions));
+  }
+
+  private async canonicalExtensionDiagnostics(): Promise<Result<CanonicalExtensionDiagnostics>> {
+    const registry = await new CanonicalExtensionRegistry({ dataDir: this.dataDir }).load();
+    if (!registry.ok) return err(registry.error);
+
+    const [skillGeneration, mcpGeneration] = await Promise.all([
+      new CanonicalSkillMigrationCutoverStateStore({ dataDir: this.dataDir }).resolveActiveGeneration(),
+      new CanonicalMcpMigrationCutoverStateStore({ dataDir: this.dataDir }).resolveActiveGeneration(),
+    ]);
+    if (!skillGeneration.ok) return err(skillGeneration.error);
+    if (!mcpGeneration.ok) return err(mcpGeneration.error);
+
+    const skillActive = skillGeneration.value === undefined
+      ? null
+      : {
+          activeGenerationId: skillGeneration.value.state.activeGenerationId,
+          ...(skillGeneration.value.state.previousGenerationId === undefined
+            ? {}
+            : { previousGenerationId: skillGeneration.value.state.previousGenerationId }),
+          generationPath: skillGeneration.value.generationPath,
+          managedRoot: skillGeneration.value.managedRoot,
+          stagedCount: skillGeneration.value.stagedSkills.length,
+          skippedCount: skillGeneration.value.skipped.length,
+        };
+    const mcpActive = mcpGeneration.value === undefined
+      ? null
+      : {
+          activeGenerationId: mcpGeneration.value.state.activeGenerationId,
+          ...(mcpGeneration.value.state.previousGenerationId === undefined
+            ? {}
+            : { previousGenerationId: mcpGeneration.value.state.previousGenerationId }),
+          stageSchemaVersion: mcpGeneration.value.stageSchemaVersion,
+          generationPath: mcpGeneration.value.generationPath,
+          registryPath: mcpGeneration.value.registryPath,
+          stagedCount: mcpGeneration.value.stagedServers.length,
+          skippedCount: mcpGeneration.value.skipped.length,
+        };
+
+    return ok({
+      registryGeneration: registry.value.generation,
+      skills: {
+        entries: registry.value.entries.filter((entry) => entry.kind === 'skill'),
+        activeGeneration: skillActive,
+      },
+      mcpServers: {
+        entries: registry.value.entries.filter((entry) => entry.kind === 'mcp_server'),
+        activeGeneration: mcpActive,
+      },
+    });
   }
 
   private async currentSkillCatalog(): Promise<Result<SkillCatalog>> {

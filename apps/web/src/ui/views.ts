@@ -240,6 +240,28 @@ export function renderDashboardViewsHtml(): string {
           <button class="btn btn-secondary btn-sm" id="servers-view-refresh-btn">Refresh</button>
         </div>
       </div>
+      <div id="canonical-server-diagnostics" style="margin: 4px 0 18px;">
+        <h3 style="margin-bottom: 4px;">Canonical Installed State</h3>
+        <p id="canonical-server-registry-meta" class="mono" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px;">
+          Registry generation: loading · Active generation: loading
+        </p>
+        <div class="table-responsive">
+          <table id="canonical-server-diagnostics-table">
+            <thead>
+              <tr>
+                <th>Canonical ID</th>
+                <th>Compatibility</th>
+                <th>Fingerprint</th>
+                <th>Provenance</th>
+              </tr>
+            </thead>
+            <tbody id="canonical-server-diagnostics-body">
+              <tr><td colspan="4" style="color: var(--text-muted); text-align: center;">Loading canonical MCP installed state...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <h3 style="margin-bottom: 8px;">Runtime / Management Projection</h3>
       <div class="table-responsive">
         <table id="server-table-detailed">
           <thead>
@@ -272,6 +294,28 @@ export function renderDashboardViewsHtml(): string {
           <button class="btn btn-secondary btn-sm" id="skills-view-refresh-btn">Refresh</button>
         </div>
       </div>
+      <div id="canonical-skill-diagnostics" style="margin: 4px 0 18px;">
+        <h3 style="margin-bottom: 4px;">Canonical Installed State</h3>
+        <p id="canonical-skill-registry-meta" class="mono" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px;">
+          Registry generation: loading · Active generation: loading
+        </p>
+        <div class="table-responsive">
+          <table id="canonical-skill-diagnostics-table">
+            <thead>
+              <tr>
+                <th>Canonical ID</th>
+                <th>Compatibility</th>
+                <th>Fingerprint</th>
+                <th>Provenance</th>
+              </tr>
+            </thead>
+            <tbody id="canonical-skill-diagnostics-body">
+              <tr><td colspan="4" style="color: var(--text-muted); text-align: center;">Loading canonical Skill installed state...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <h3 style="margin-bottom: 8px;">Runtime / Management Projection</h3>
       <div class="table-responsive">
         <table id="skill-table-detailed">
           <thead>

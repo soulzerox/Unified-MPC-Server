@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer, type StorageDiagnosticsSnapshot, type WebGoalSummary, type WebWorkspaceSelectionSnapshot, type WebWorkspaceSummary } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import {
+  CanonicalExtensionRegistry,
   CanonicalMcpMigrationCutoverStateStore,
   CanonicalMcpMigrationStager,
   CanonicalSkillMigrationCutoverStateStore,
@@ -1411,6 +1412,99 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
+  it('exposes canonical installed extension diagnostics from the parent-owned registry', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-extension-diagnostics-'));
+    const dataDir = path.join(root, 'data');
+    const registry = new CanonicalExtensionRegistry({ dataDir });
+    const saved = await registry.save({
+      entries: [
+        {
+          kind: 'skill',
+          id: 'skill:diagnostic-skill',
+          name: 'diagnostic-skill',
+          fingerprint: 'a'.repeat(64),
+          enabled: true,
+          compatibility: { platforms: ['linux'], requiresCommands: ['git'] },
+          compatibilityState: 'compatible',
+          conflict: false,
+          variantFingerprints: ['a'.repeat(64)],
+          provenance: [{
+            originType: 'github',
+            origin: 'https://github.com/example/diagnostic-skill.git',
+            revision: 'abc123',
+            contentSha256: 'a'.repeat(64),
+          }],
+        },
+        {
+          kind: 'mcp_server',
+          id: 'mcp:diagnostic-mcp',
+          name: 'diagnostic-mcp',
+          fingerprint: 'b'.repeat(64),
+          enabled: false,
+          compatibility: { platforms: ['linux'], architectures: ['x64'] },
+          compatibilityState: 'incompatible_architecture',
+          conflict: false,
+          variantFingerprints: ['b'.repeat(64)],
+          provenance: [{
+            originType: 'managed',
+            origin: 'unified-mpc:mcp_install',
+          }],
+        },
+      ],
+    });
+    expect(saved.ok).toBe(true);
+
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+    });
+    await dynamic.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${dynamic.port}/api/extensions/canonical`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        registryGeneration: number;
+        skills: {
+          entries: readonly Record<string, unknown>[];
+          activeGeneration: null | { activeGenerationId: string };
+        };
+        mcpServers: {
+          entries: readonly Record<string, unknown>[];
+          activeGeneration: null | { activeGenerationId: string };
+        };
+      };
+      expect(body.registryGeneration).toBe(1);
+      expect(body.skills.activeGeneration).toBeNull();
+      expect(body.mcpServers.activeGeneration).toBeNull();
+      expect(body.skills.entries).toEqual([
+        expect.objectContaining({
+          id: 'skill:diagnostic-skill',
+          compatibilityState: 'compatible',
+          provenance: [expect.objectContaining({
+            originType: 'github',
+            revision: 'abc123',
+          })],
+        }),
+      ]);
+      expect(body.mcpServers.entries).toEqual([
+        expect.objectContaining({
+          id: 'mcp:diagnostic-mcp',
+          enabled: false,
+          compatibilityState: 'incompatible_architecture',
+          provenance: [expect.objectContaining({
+            originType: 'managed',
+            origin: 'unified-mpc:mcp_install',
+          })],
+        }),
+      ]);
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('serves only the active canonical Skill generation after cutover', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'web-active-canonical-generation-'));
     const dataDir = path.join(root, 'data');
@@ -1487,6 +1581,33 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         }),
       ]);
       expect(body.skills.some((skill) => skill.name === 'legacy-web-skill')).toBe(false);
+
+      const diagnosticsResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/extensions/canonical`);
+      expect(diagnosticsResponse.status).toBe(200);
+      const diagnostics = await diagnosticsResponse.json() as {
+        registryGeneration: number;
+        skills: {
+          entries: readonly { id: string; compatibilityState: string; provenance: readonly { sourceClient?: string }[] }[];
+          activeGeneration: null | {
+            activeGenerationId: string;
+            managedRoot: string;
+            stagedCount: number;
+            skippedCount: number;
+          };
+        };
+        mcpServers: { activeGeneration: null | { activeGenerationId: string } };
+      };
+      expect(diagnostics.skills.activeGeneration).toMatchObject({
+        activeGenerationId: staged.value.generationId,
+        managedRoot: path.join(staged.value.generationPath, 'skills'),
+        stagedCount: 1,
+        skippedCount: 0,
+      });
+      expect(diagnostics.mcpServers.activeGeneration).toBeNull();
+      // The migration cutover read model is authoritative for active-generation state.
+      // Do not synthesize installed-registry provenance when migration has not persisted a Skill entry.
+      expect(diagnostics.registryGeneration).toBe(0);
+      expect(diagnostics.skills.entries).toEqual([]);
     } finally {
       await dynamic.close();
       await rm(root, { recursive: true, force: true });
@@ -1620,6 +1741,17 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         available: false,
       }));
       expect(legacyPolicy).not.toHaveProperty('resolvedResourceId');
+
+      const diagnosticsResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/extensions/canonical`);
+      expect(diagnosticsResponse.status).toBe(500);
+      const diagnosticsBody = await diagnosticsResponse.json() as { ok: boolean; error?: { code?: string; message?: string } };
+      expect(diagnosticsBody).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: expect.stringContaining('fingerprint'),
+        },
+      });
     } finally {
       await dynamic.close();
       await rm(root, { recursive: true, force: true });
@@ -1711,6 +1843,37 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         }),
       ]);
       expect(body.servers.some((server) => server.name.startsWith('legacy-'))).toBe(false);
+
+      const diagnosticsResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/extensions/canonical`);
+      expect(diagnosticsResponse.status).toBe(200);
+      const diagnostics = await diagnosticsResponse.json() as {
+        mcpServers: {
+          entries: readonly {
+            id: string;
+            compatibilityState: string;
+            provenance: readonly { sourceClient?: string }[];
+          }[];
+          activeGeneration: null | {
+            activeGenerationId: string;
+            registryPath: string;
+            stagedCount: number;
+            skippedCount: number;
+          };
+        };
+      };
+      expect(diagnostics.mcpServers.activeGeneration).toMatchObject({
+        activeGenerationId: staged.value.generationId,
+        registryPath: staged.value.registryPath,
+        stagedCount: 1,
+        skippedCount: 0,
+      });
+      expect(diagnostics.mcpServers.entries).toEqual([
+        expect.objectContaining({
+          id: 'mcp:canonical-web-mcp',
+          compatibilityState: 'compatible',
+          provenance: [expect.objectContaining({ sourceClient: 'cline' })],
+        }),
+      ]);
     } finally {
       await dynamic.close();
       await rm(root, { recursive: true, force: true });
@@ -1825,6 +1988,17 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         available: false,
       }));
       expect(legacyPolicy).not.toHaveProperty('resolvedResourceId');
+
+      const diagnosticsResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/extensions/canonical`);
+      expect(diagnosticsResponse.status).toBe(500);
+      const diagnosticsBody = await diagnosticsResponse.json() as { ok: boolean; error?: { code?: string; message?: string } };
+      expect(diagnosticsBody).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: expect.stringContaining('registry'),
+        },
+      });
     } finally {
       await dynamic.close();
       await rm(root, { recursive: true, force: true });

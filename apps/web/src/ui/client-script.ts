@@ -23,6 +23,7 @@ export function getClientScriptJs(): string {
       let currentLogs = [];
       let cachedServers = [];
       let cachedSkills = [];
+      let cachedCanonicalExtensions = null;
       let cachedPolicies = [];
       let cachedWorkspaces = [];
       let workspaceSelection = null;
@@ -1353,22 +1354,33 @@ export function getClientScriptJs(): string {
         const detailedSkillBody = document.getElementById('skill-table-detailed-body');
 
         try {
-          const [serversRes, skillsRes] = await Promise.all([fetch('/api/servers'), fetch('/api/skills')]);
-          if (!serversRes.ok || !skillsRes.ok) throw new Error('Inventory request failed');
+          const [serversRes, skillsRes, canonicalRes] = await Promise.all([
+            fetch('/api/servers'),
+            fetch('/api/skills'),
+            fetch('/api/extensions/canonical'),
+          ]);
+          if (!serversRes.ok || !skillsRes.ok || !canonicalRes.ok) throw new Error('Inventory request failed');
           cachedServers = (await serversRes.json()).servers || [];
           cachedSkills = (await skillsRes.json()).skills || [];
+          cachedCanonicalExtensions = await canonicalRes.json();
 
-          // Update stats
+          // Canonical installed-state drives inventory counts; runtime projections remain available for prune actions.
           const serversCountEl = document.getElementById('stat-servers-count');
-          if (serversCountEl) serversCountEl.textContent = String(cachedServers.length);
+          if (serversCountEl) serversCountEl.textContent = String(cachedCanonicalExtensions.mcpServers?.entries?.length || 0);
           const skillsCountEl = document.getElementById('stat-skills-count');
-          if (skillsCountEl) skillsCountEl.textContent = String(cachedSkills.length);
+          if (skillsCountEl) skillsCountEl.textContent = String(cachedCanonicalExtensions.skills?.entries?.length || 0);
 
           renderServerTables();
           renderSkillTables();
+          renderCanonicalExtensionDiagnostics();
         } catch (err) {
+          cachedCanonicalExtensions = null;
           if (serverBody) serverBody.replaceChildren(emptyRow(5, 'Failed to load server inventory'));
           if (skillBody) skillBody.replaceChildren(emptyRow(4, 'Failed to load skill inventory'));
+          const canonicalServerBody = document.getElementById('canonical-server-diagnostics-body');
+          const canonicalSkillBody = document.getElementById('canonical-skill-diagnostics-body');
+          if (canonicalServerBody) canonicalServerBody.replaceChildren(emptyRow(4, 'Canonical MCP diagnostics unavailable'));
+          if (canonicalSkillBody) canonicalSkillBody.replaceChildren(emptyRow(4, 'Canonical Skill diagnostics unavailable'));
           logEvent('ERROR', 'Inventory refresh error: ' + err.message);
         }
       }
@@ -1515,6 +1527,77 @@ export function getClientScriptJs(): string {
             }
           }
         }
+      }
+
+      function canonicalGenerationLabel(activeGeneration) {
+        if (!activeGeneration) return 'none (direct/current registry state)';
+        const previous = activeGeneration.previousGenerationId
+          ? ' · previous ' + activeGeneration.previousGenerationId
+          : '';
+        return activeGeneration.activeGenerationId + previous;
+      }
+
+      function canonicalCompatibilityLabel(entry) {
+        const parts = [entry.enabled === false ? 'disabled' : 'enabled', entry.compatibilityState || 'unknown'];
+        if (entry.conflict) parts.push('conflict');
+        if (Array.isArray(entry.missingCommands) && entry.missingCommands.length > 0) {
+          parts.push('missing: ' + entry.missingCommands.join(', '));
+        }
+        return parts.join(' · ');
+      }
+
+      function canonicalProvenanceLabel(entry) {
+        if (!Array.isArray(entry.provenance) || entry.provenance.length === 0) return 'unknown';
+        return entry.provenance.map((source) => {
+          const parts = [source.originType || 'unknown', source.origin || 'unknown'];
+          if (source.sourceClient) parts.push('client=' + source.sourceClient);
+          if (source.version) parts.push('version=' + source.version);
+          if (source.revision) parts.push('revision=' + source.revision);
+          if (source.importedAt) parts.push('imported=' + source.importedAt);
+          return parts.join(' · ');
+        }).join(' | ');
+      }
+
+      function renderCanonicalRows(entries, body) {
+        if (!body) return;
+        body.replaceChildren();
+        if (!Array.isArray(entries) || entries.length === 0) {
+          body.appendChild(emptyRow(4, 'No canonical installed entries'));
+          return;
+        }
+        for (const entry of entries) {
+          const row = document.createElement('tr');
+          addCell(row, entry.id || entry.name, 'mono');
+          const compatibilityCell = addCell(row, canonicalCompatibilityLabel(entry));
+          compatibilityCell.style.color = entry.compatibilityState === 'compatible'
+            ? 'var(--status-healthy)'
+            : entry.compatibilityState === 'unknown'
+              ? 'var(--status-syncing)'
+              : 'var(--status-offline)';
+          addCell(row, entry.fingerprint || (Array.isArray(entry.variantFingerprints) ? entry.variantFingerprints.join(', ') : ''), 'mono');
+          addCell(row, canonicalProvenanceLabel(entry), 'mono');
+        }
+      }
+
+      function renderCanonicalExtensionDiagnostics() {
+        if (!cachedCanonicalExtensions) return;
+        const registryGeneration = cachedCanonicalExtensions.registryGeneration ?? 0;
+        const skills = cachedCanonicalExtensions.skills || { entries: [], activeGeneration: null };
+        const mcpServers = cachedCanonicalExtensions.mcpServers || { entries: [], activeGeneration: null };
+
+        const serverMeta = document.getElementById('canonical-server-registry-meta');
+        if (serverMeta) {
+          serverMeta.textContent = 'Registry generation: ' + registryGeneration
+            + ' · Active generation: ' + canonicalGenerationLabel(mcpServers.activeGeneration);
+        }
+        const skillMeta = document.getElementById('canonical-skill-registry-meta');
+        if (skillMeta) {
+          skillMeta.textContent = 'Registry generation: ' + registryGeneration
+            + ' · Active generation: ' + canonicalGenerationLabel(skills.activeGeneration);
+        }
+
+        renderCanonicalRows(mcpServers.entries, document.getElementById('canonical-server-diagnostics-body'));
+        renderCanonicalRows(skills.entries, document.getElementById('canonical-skill-diagnostics-body'));
       }
 
       async function pruneServer(server) {

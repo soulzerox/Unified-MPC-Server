@@ -155,6 +155,20 @@ describe('Dashboard HTML Reactive SPA', () => {
     ]) expect(html).not.toContain(forbidden);
   });
 
+  it('renders canonical installed-state diagnostics for Skills and MCP servers', () => {
+    const html = renderDashboardHtml();
+    expect(html).toContain('/api/extensions/canonical');
+    expect(html).toContain('id="canonical-server-diagnostics"');
+    expect(html).toContain('id="canonical-server-diagnostics-body"');
+    expect(html).toContain('id="canonical-skill-diagnostics"');
+    expect(html).toContain('id="canonical-skill-diagnostics-body"');
+    expect(html).toContain('Canonical Installed State');
+    expect(html).toContain('Registry generation');
+    expect(html).toContain('Active generation');
+    expect(html).toContain('Compatibility');
+    expect(html).toContain('Provenance');
+  });
+
   it('contains live inventory and opaque-ID prune workflows', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('/api/servers');

@@ -27,10 +27,15 @@ export type CanonicalExtensionCutoverBlocker =
   | 'unknown_compatibility_present'
   | 'canonical_active_set_empty';
 
+export interface CanonicalExtensionMigrationCandidate extends CanonicalExtensionCandidate {
+  readonly sourcePath?: string;
+}
+
 export interface CanonicalExtensionMigrationSource {
   readonly name: string;
   readonly fingerprint: string;
   readonly enabled: boolean;
+  readonly sourcePath?: string;
   readonly compatibility?: CanonicalExtensionCompatibility;
   readonly compatibilityState: CanonicalExtensionCompatibilityState;
   readonly missingCommands?: readonly string[];
@@ -76,7 +81,7 @@ export interface CanonicalExtensionMigrationManifest {
 }
 
 export function buildCanonicalExtensionMigrationManifest(
-  candidates: readonly CanonicalExtensionCandidate[],
+  candidates: readonly CanonicalExtensionMigrationCandidate[],
   host: CanonicalExtensionHostProfile,
 ): Result<CanonicalExtensionMigrationManifest> {
   const reconciled = reconcileCanonicalExtensionCandidates(candidates, host);
@@ -157,9 +162,9 @@ export function buildCanonicalExtensionMigrationManifest(
 }
 
 function groupCandidates(
-  candidates: readonly CanonicalExtensionCandidate[],
-): ReadonlyMap<string, readonly CanonicalExtensionCandidate[]> {
-  const groups = new Map<string, CanonicalExtensionCandidate[]>();
+  candidates: readonly CanonicalExtensionMigrationCandidate[],
+): ReadonlyMap<string, readonly CanonicalExtensionMigrationCandidate[]> {
+  const groups = new Map<string, CanonicalExtensionMigrationCandidate[]>();
   for (const candidate of candidates) {
     const key = candidateKey(candidate.kind, candidate.id);
     const current = groups.get(key);
@@ -170,7 +175,7 @@ function groupCandidates(
 }
 
 function buildMigrationSourceInventory(
-  grouped: ReadonlyMap<string, readonly CanonicalExtensionCandidate[]>,
+  grouped: ReadonlyMap<string, readonly CanonicalExtensionMigrationCandidate[]>,
   host: CanonicalExtensionHostProfile,
 ): Result<ReadonlyMap<string, readonly CanonicalExtensionMigrationSource[]>> {
   const inventory = new Map<string, readonly CanonicalExtensionMigrationSource[]>();
@@ -184,6 +189,7 @@ function buildMigrationSourceInventory(
         name: candidate.name,
         fingerprint: candidate.fingerprint,
         enabled: candidate.enabled,
+        ...(candidate.sourcePath === undefined ? {} : { sourcePath: candidate.sourcePath }),
         ...(canonical.compatibility === undefined ? {} : { compatibility: canonical.compatibility }),
         compatibilityState: canonical.compatibilityState,
         ...(canonical.missingCommands === undefined ? {} : { missingCommands: canonical.missingCommands }),
@@ -209,6 +215,7 @@ function migrationSourceKey(source: CanonicalExtensionMigrationSource): string {
     source.name,
     stableCompatibility(source.compatibility),
     provenanceKey(source.provenance),
+    source.sourcePath ?? '',
   ].join('\u0000');
 }
 

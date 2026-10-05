@@ -44,6 +44,7 @@ export {
   buildCanonicalExtensionMigrationManifest,
   type CanonicalExtensionCutoverBlocker,
   type CanonicalExtensionCutoverDecision,
+  type CanonicalExtensionMigrationCandidate,
   type CanonicalExtensionMigrationClassification,
   type CanonicalExtensionMigrationConflictReason,
   type CanonicalExtensionMigrationManifest,
@@ -51,6 +52,15 @@ export {
   type CanonicalExtensionMigrationSource,
   type CanonicalExtensionMigrationSummary,
 } from './canonical-extension-migration-manifest.js';
+export {
+  CanonicalSkillMigrationStager,
+  fingerprintCanonicalSkillDirectory,
+  type CanonicalSkillMigrationSkipReason,
+  type CanonicalSkillMigrationSkippedEntry,
+  type CanonicalSkillMigrationStagedSkill,
+  type CanonicalSkillMigrationStageResult,
+  type CanonicalSkillMigrationStagerOptions,
+} from './canonical-skill-migration-stager.js';
 export {
   EXTENSIONS_SETTINGS_KEY,
   createLocalExtensionsService,

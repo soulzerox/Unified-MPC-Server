@@ -382,10 +382,10 @@ function isRegistrySnapshot(value: unknown): value is CanonicalExtensionRegistry
   if (value.schemaVersion !== REGISTRY_SCHEMA_VERSION) return false;
   if (!Number.isSafeInteger(value.generation) || (value.generation as number) < 0) return false;
   if (!Array.isArray(value.entries)) return false;
-  return value.entries.every(isRegistryEntry);
+  return value.entries.every(isCanonicalExtensionEntry);
 }
 
-function isRegistryEntry(value: unknown): value is CanonicalExtensionEntry {
+export function isCanonicalExtensionEntry(value: unknown): value is CanonicalExtensionEntry {
   if (!isRecord(value)) return false;
   if (value.kind !== 'skill' && value.kind !== 'mcp_server') return false;
   if (!isCanonicalId(value.id) || !isBoundedNonEmptyString(value.name, 256)) return false;

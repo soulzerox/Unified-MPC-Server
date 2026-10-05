@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -108,11 +109,72 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     if (!resolved.ok) return;
     expect(resolved.value).toMatchObject({
       state: activated.value.state,
+      stageSchemaVersion: 2,
       generationPath: staged.generationPath,
       registryPath: staged.registryPath,
       stagedServers: staged.stagedServers,
       skipped: staged.skipped,
     });
+  });
+
+  it('keeps verified schema-v1 active generations runtime-compatible without inventing canonical metadata', async () => {
+    const root = await fixtureRoot('canonical-mcp-cutover-v1-compat-');
+    const dataDir = path.join(root, 'data');
+    const config: McpServerLaunchConfig = { command: 'node', args: ['legacy.js'] };
+    const stagedServers = [{
+      id: 'mcp:legacy',
+      name: 'legacy',
+      fingerprint: fingerprintExternalMcpValue(config),
+      config,
+      provenance: [{
+        originType: 'client-import' as const,
+        origin: '/fixture/cursor/legacy',
+        sourceClient: 'cursor',
+      }],
+    }];
+    const projection = {
+      schemaVersion: 1 as const,
+      stagedServers,
+      skipped: [],
+    };
+    const generationId = createHash('sha256')
+      .update(JSON.stringify(projection))
+      .digest('hex');
+    const generationPath = path.join(
+      dataDir,
+      'extensions',
+      'state',
+      'migration',
+      'staged-mcp-generations',
+      generationId,
+    );
+    await mkdir(generationPath, { recursive: true });
+    const stagePath = path.join(generationPath, 'stage.json');
+    await writeFile(
+      stagePath,
+      JSON.stringify({ ...projection, generationId }, null, 2) + '\n',
+      'utf8',
+    );
+    const stageBefore = await readFile(stagePath, 'utf8');
+    await writeFile(
+      path.join(generationPath, 'registry.json'),
+      JSON.stringify({ mcpServers: { legacy: config } }, null, 2) + '\n',
+      'utf8',
+    );
+    const statePath = path.join(dataDir, 'extensions', 'state', 'migration', 'mcp-cutover-state.json');
+    await writeFile(
+      statePath,
+      JSON.stringify({ schemaVersion: 1, activeGenerationId: generationId }, null, 2) + '\n',
+      'utf8',
+    );
+
+    const resolved = await new CanonicalMcpMigrationCutoverStateStore({ dataDir }).resolveActiveGeneration();
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok || resolved.value === undefined) return;
+    expect(resolved.value.stageSchemaVersion).toBe(1);
+    expect(resolved.value.stagedServers).toEqual(stagedServers);
+    expect(resolved.value.stagedServers[0]?.canonicalEntry).toBeUndefined();
+    expect(await readFile(stagePath, 'utf8')).toBe(stageBefore);
   });
 
   it('reuses the same generation idempotently without inventing rollback history', async () => {
@@ -216,6 +278,38 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     if (!resolved.ok) {
       expect(resolved.error.code).toBe('INVALID_INPUT');
       expect(resolved.error.message).toContain('registry');
+    }
+  });
+
+  it('fails closed when hash-covered canonical compatibility metadata drifts after staging', async () => {
+    const root = await fixtureRoot('canonical-mcp-cutover-corrupt-metadata-');
+    const dataDir = path.join(root, 'data');
+    const manifest = manifestFor([
+      candidate({ name: 'alpha', config: { command: 'node', args: ['alpha.js'] } }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    expect((await store.activate(manifest, staged)).ok).toBe(true);
+
+    const stagePath = path.join(staged.generationPath, 'stage.json');
+    const stageSnapshot = JSON.parse(await readFile(stagePath, 'utf8')) as {
+      stagedServers: Array<{
+        canonicalEntry?: {
+          compatibility?: { platforms?: NodeJS.Platform[] };
+        };
+      }>;
+    };
+    const canonicalEntry = stageSnapshot.stagedServers[0]?.canonicalEntry;
+    expect(canonicalEntry?.compatibility).toBeDefined();
+    if (canonicalEntry?.compatibility === undefined) return;
+    canonicalEntry.compatibility.platforms = ['darwin'];
+    await writeFile(stagePath, JSON.stringify(stageSnapshot, null, 2) + '\n', 'utf8');
+
+    const resolved = await store.resolveActiveGeneration();
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.error.code).toBe('INVALID_INPUT');
+      expect(resolved.error.message).toContain('generation hash');
     }
   });
 

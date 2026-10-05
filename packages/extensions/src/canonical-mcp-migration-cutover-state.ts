@@ -3,7 +3,10 @@ import { readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
-import type { CanonicalExtensionProvenance } from './canonical-extension-registry.js';
+import {
+  isCanonicalExtensionEntry,
+  type CanonicalExtensionProvenance,
+} from './canonical-extension-registry.js';
 import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { writeAtomic } from './ide-sync.js';
 import { exclusionReason } from './mcp-config-loader.js';
@@ -41,6 +44,7 @@ export type CanonicalMcpMigrationCutoverRollback =
 
 export interface CanonicalMcpMigrationActiveGeneration {
   readonly state: CanonicalMcpMigrationCutoverState;
+  readonly stageSchemaVersion: 1 | 2;
   readonly generationPath: string;
   readonly registryPath: string;
   readonly stagedServers: readonly CanonicalMcpMigrationStagedServer[];
@@ -64,7 +68,7 @@ export interface CanonicalMcpMigrationCutoverStateStoreOptions {
 }
 
 interface McpStageSnapshot {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly generationId: string;
   readonly stagedServers: readonly CanonicalMcpMigrationStagedServer[];
   readonly skipped: readonly CanonicalMcpMigrationSkippedEntry[];
@@ -273,7 +277,8 @@ function sameStageProjection(
   expected: CanonicalMcpMigrationStageResult,
   actual: CanonicalMcpMigrationStageResult,
 ): boolean {
-  return expected.generationId === actual.generationId
+  return expected.schemaVersion === actual.schemaVersion
+    && expected.generationId === actual.generationId
     && path.resolve(expected.generationPath) === path.resolve(actual.generationPath)
     && path.resolve(expected.registryPath) === path.resolve(actual.registryPath)
     && JSON.stringify(expected.stagedServers) === JSON.stringify(actual.stagedServers)
@@ -357,6 +362,7 @@ async function verifyPersistedGeneration(
 
     return ok({
       state,
+      stageSchemaVersion: snapshot.value.schemaVersion,
       generationPath,
       registryPath,
       stagedServers: snapshot.value.stagedServers,
@@ -386,8 +392,9 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
   if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
     return err(appError('INVALID_INPUT', 'Persisted canonical MCP stage metadata contains unknown fields'));
   }
+  const schemaVersion = record.schemaVersion;
   if (
-    record.schemaVersion !== 1
+    (schemaVersion !== 1 && schemaVersion !== 2)
     || !isGenerationId(record.generationId)
     || !Array.isArray(record.stagedServers)
     || !Array.isArray(record.skipped)
@@ -399,7 +406,7 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
   const ids = new Set<string>();
   const names = new Set<string>();
   for (const value of record.stagedServers) {
-    const server = decodeStagedServer(value);
+    const server = decodeStagedServer(value, schemaVersion);
     if (!server.ok) return err(server.error);
     const runtimeName = server.value.name.toLowerCase();
     if (ids.has(server.value.id) || names.has(runtimeName)) {
@@ -439,19 +446,24 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
   }
 
   return ok({
-    schemaVersion: 1,
+    schemaVersion,
     generationId: record.generationId,
     stagedServers,
     skipped,
   });
 }
 
-function decodeStagedServer(value: unknown): Result<CanonicalMcpMigrationStagedServer> {
+function decodeStagedServer(
+  value: unknown,
+  schemaVersion: 1 | 2,
+): Result<CanonicalMcpMigrationStagedServer> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged entry is invalid'));
   }
   const record = value as Record<string, unknown>;
-  const allowedKeys = new Set(['id', 'name', 'fingerprint', 'config', 'provenance']);
+  const allowedKeys = schemaVersion === 1
+    ? new Set(['id', 'name', 'fingerprint', 'config', 'provenance'])
+    : new Set(['id', 'name', 'fingerprint', 'config', 'provenance', 'canonicalEntry']);
   if (
     Object.keys(record).some((key) => !allowedKeys.has(key))
     || typeof record.id !== 'string'
@@ -469,12 +481,42 @@ function decodeStagedServer(value: unknown): Result<CanonicalMcpMigrationStagedS
   const provenance = decodeProvenance(record.provenance);
   if (!provenance.ok) return err(provenance.error);
 
+  if (schemaVersion === 1) {
+    return ok({
+      id: record.id,
+      name: record.name,
+      fingerprint: record.fingerprint,
+      config: config.value,
+      provenance: provenance.value,
+    });
+  }
+
+  if (!isCanonicalExtensionEntry(record.canonicalEntry)) {
+    return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged canonical metadata is invalid'));
+  }
+  const canonicalEntry = record.canonicalEntry;
+  if (
+    canonicalEntry.kind !== 'mcp_server'
+    || canonicalEntry.id !== record.id
+    || canonicalEntry.name !== record.name
+    || canonicalEntry.fingerprint !== record.fingerprint
+    || canonicalEntry.enabled !== true
+    || canonicalEntry.compatibility === undefined
+    || canonicalEntry.compatibilityState !== 'compatible'
+    || canonicalEntry.conflict
+    || canonicalEntry.missingCommands !== undefined
+    || !sameProvenance(canonicalEntry.provenance, provenance.value)
+  ) {
+    return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged canonical metadata is inconsistent'));
+  }
+
   return ok({
     id: record.id,
     name: record.name,
     fingerprint: record.fingerprint,
     config: config.value,
     provenance: provenance.value,
+    canonicalEntry,
   });
 }
 
@@ -550,6 +592,24 @@ function decodeProvenance(value: readonly unknown[]): Result<readonly CanonicalE
     });
   }
   return ok(provenance);
+}
+
+function sameProvenance(
+  left: readonly CanonicalExtensionProvenance[],
+  right: readonly CanonicalExtensionProvenance[],
+): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((entry, index) => {
+    const other = right[index];
+    return other !== undefined
+      && entry.originType === other.originType
+      && entry.origin === other.origin
+      && entry.sourceClient === other.sourceClient
+      && entry.version === other.version
+      && entry.revision === other.revision
+      && entry.contentSha256 === other.contentSha256
+      && entry.importedAt === other.importedAt;
+  });
 }
 
 function serializeRegistry(servers: readonly CanonicalMcpMigrationStagedServer[]): string {

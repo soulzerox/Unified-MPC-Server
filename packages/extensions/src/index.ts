@@ -41,6 +41,16 @@ export {
   type CanonicalExtensionRegistrySnapshot,
 } from './canonical-extension-registry.js';
 export {
+  buildCanonicalExtensionMigrationManifest,
+  type CanonicalExtensionCutoverBlocker,
+  type CanonicalExtensionCutoverDecision,
+  type CanonicalExtensionMigrationClassification,
+  type CanonicalExtensionMigrationConflictReason,
+  type CanonicalExtensionMigrationManifest,
+  type CanonicalExtensionMigrationManifestEntry,
+  type CanonicalExtensionMigrationSummary,
+} from './canonical-extension-migration-manifest.js';
+export {
   EXTENSIONS_SETTINGS_KEY,
   createLocalExtensionsService,
   type CreateLocalExtensionsOptions,

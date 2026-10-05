@@ -6,6 +6,7 @@ import { renderDashboardHtml } from './dashboard-html.js';
 import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
+import { err, ok, type Result } from '@unified-mpc/domain';
 import type {
   GoalRuntimeEventReplayPage,
   GoalRuntimeSnapshotRecord,
@@ -18,6 +19,7 @@ import type {
 import type { SecretStore, SqliteSettingsRepository } from '@unified-mpc/storage';
 import { isMcpRuntimeDiagnosticsSnapshot, resolveDataPath, type McpRuntimeDiagnosticsSnapshot } from '@unified-mpc/shared';
 import {
+  CanonicalSkillMigrationCutoverStateStore,
   DEFAULT_EXTENSIONS_SETTINGS,
   EXTENSIONS_SETTINGS_KEY,
   IdeSyncService,
@@ -822,7 +824,13 @@ export class ControlPlaneServer {
     }
 
     if (pathname === '/api/skills' && req.method === 'GET') {
-      const result = await this.currentSkillCatalog().list({});
+      const catalog = await this.currentSkillCatalog();
+      if (!catalog.ok) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(catalog));
+        return;
+      }
+      const result = await catalog.value.list({});
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.ok ? result.value : result));
       return;
@@ -1287,11 +1295,18 @@ export class ControlPlaneServer {
     return parseExtensionsSettings(this.settingsRepository.get(SETTING_KEYS.extensions));
   }
 
-  private currentSkillCatalog(): SkillCatalog {
-    return this.skillCatalogOverride ?? new SkillCatalog({
+  private async currentSkillCatalog(): Promise<Result<SkillCatalog>> {
+    if (this.skillCatalogOverride !== undefined) return ok(this.skillCatalogOverride);
+
+    const active = await new CanonicalSkillMigrationCutoverStateStore({ dataDir: this.dataDir })
+      .resolveActiveGeneration();
+    if (!active.ok) return err(active.error);
+
+    return ok(new SkillCatalog({
       settings: this.extensionsSettings(),
-      managedRoot: path.join(this.dataDir, 'extensions', 'skills'),
-    });
+      managedRoot: active.value?.managedRoot ?? path.join(this.dataDir, 'extensions', 'skills'),
+      managedRootMode: active.value === undefined ? 'supplemental' : 'exclusive',
+    }));
   }
 
   private currentServerCatalog(): McpConfigLoader {
@@ -1307,10 +1322,14 @@ export class ControlPlaneServer {
 
   private async policySnapshot(): Promise<RuntimePolicySnapshot> {
     const settings = this.extensionsSettings();
-    const [servers, skillsResult] = await Promise.all([
+    const [servers, catalog] = await Promise.all([
       this.currentServerCatalog().discover(),
-      this.currentSkillCatalog().list({}),
+      this.currentSkillCatalog(),
     ]);
+    if (!catalog.ok) {
+      return reconcileRuntimePolicies(settings, servers, []);
+    }
+    const skillsResult = await catalog.value.list({});
     return reconcileRuntimePolicies(settings, servers, skillsResult.ok ? skillsResult.value.skills : []);
   }
 

@@ -261,6 +261,68 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     expect(await readFile(statePath, 'utf8')).toContain('not-a-sha');
   });
 
+  it('resolves an active generation only after revalidating persisted generation metadata and fingerprints', async () => {
+    const root = await fixtureRoot('canonical-cutover-resolve-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'alpha', '# Alpha');
+    const manifest = manifestFor([
+      candidate({
+        id: 'skill:alpha',
+        name: 'alpha',
+        fingerprint: source.fingerprint,
+        sourcePath: source.sourcePath,
+      }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+
+    const resolved = await store.resolveActiveGeneration();
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value).toMatchObject({
+      state: {
+        schemaVersion: 1,
+        activeGenerationId: staged.generationId,
+      },
+      generationPath: staged.generationPath,
+      managedRoot: path.join(staged.generationPath, 'skills'),
+      stagedSkills: staged.stagedSkills,
+    });
+  });
+
+  it('fails closed when an already-active generation is corrupted after activation', async () => {
+    const root = await fixtureRoot('canonical-cutover-resolve-corrupt-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'alpha', '# Alpha');
+    const manifest = manifestFor([
+      candidate({
+        id: 'skill:alpha',
+        name: 'alpha',
+        fingerprint: source.fingerprint,
+        sourcePath: source.sourcePath,
+      }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+
+    await writeFile(
+      path.join(staged.generationPath, staged.stagedSkills[0]!.relativePath, 'helper.txt'),
+      'corrupt after activation\n',
+      'utf8',
+    );
+
+    const resolved = await store.resolveActiveGeneration();
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.error.code).toBe('INVALID_INPUT');
+      expect(resolved.error.message).toContain('fingerprint');
+    }
+  });
+
   it('serializes concurrent activation of the same generation so exactly one call mutates state', async () => {
     const root = await fixtureRoot('canonical-cutover-concurrent-');
     const dataDir = path.join(root, 'data');

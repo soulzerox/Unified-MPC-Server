@@ -3,6 +3,7 @@ import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory } from './mcp-session-manager.js';
 import { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
+import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
 import { SkillCatalog } from './skill-catalog.js';
 import type {
   DiscoveredMcpServer,
@@ -56,21 +57,25 @@ export class LocalExtensionsService implements ExtensionsService {
 
   public async listSkills(input: { readonly query?: string; readonly source?: string }): Promise<Result<{ readonly skills: readonly SkillSummary[] }>> {
     const catalog = await this.skillCatalog();
-    return catalog.list(input);
+    if (!catalog.ok) return err(catalog.error);
+    return catalog.value.list(input);
   }
 
   public async readSkill(input: { readonly skillId: string; readonly relativePath?: string }): Promise<Result<SkillContent>> {
     const catalog = await this.skillCatalog();
-    return catalog.read(input);
+    if (!catalog.ok) return err(catalog.error);
+    return catalog.value.read(input);
   }
 
   public async runtimePolicySnapshot(): Promise<Result<RuntimePolicySnapshot>> {
     try {
       const settings = this.settingsProvider();
-      const [discovered, skills] = await Promise.all([
+      const [discovered, catalog] = await Promise.all([
         this.discoverMcpServers(),
-        this.skillCatalog().then((catalog) => catalog.list({})),
+        this.skillCatalog(),
       ]);
+      if (!catalog.ok) return err(catalog.error);
+      const skills = await catalog.value.list({});
       if (!skills.ok) return err(skills.error);
       return ok(reconcileRuntimePolicies(settings, discovered, skills.value.skills));
     } catch (error: unknown) {
@@ -279,15 +284,32 @@ export class LocalExtensionsService implements ExtensionsService {
     await this.sessions.close();
   }
 
-  private async skillCatalog(): Promise<SkillCatalog> {
+  private async skillCatalog(): Promise<Result<SkillCatalog>> {
     const workspaceRoot = await this.workspaceRootProvider();
-    return new SkillCatalog({
+    let managedRoot: string | undefined;
+    let managedRootMode: 'supplemental' | 'exclusive' | undefined;
+
+    if (this.dataDir !== undefined) {
+      const active = await new CanonicalSkillMigrationCutoverStateStore({ dataDir: this.dataDir })
+        .resolveActiveGeneration();
+      if (!active.ok) return err(active.error);
+      if (active.value === undefined) {
+        managedRoot = path.join(this.dataDir, 'extensions', 'skills');
+        managedRootMode = 'supplemental';
+      } else {
+        managedRoot = active.value.managedRoot;
+        managedRootMode = 'exclusive';
+      }
+    }
+
+    return ok(new SkillCatalog({
       settings: this.settingsProvider(),
       ...(this.homeDir === undefined ? {} : { homeDir: this.homeDir }),
       ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
       bundledRoots: this.bundledSkillRoots,
-      ...(this.dataDir === undefined ? {} : { managedRoot: path.join(this.dataDir, 'extensions', 'skills') }),
-    });
+      ...(managedRoot === undefined ? {} : { managedRoot }),
+      ...(managedRootMode === undefined ? {} : { managedRootMode }),
+    }));
   }
 
   private async loader(): Promise<McpConfigLoader> {

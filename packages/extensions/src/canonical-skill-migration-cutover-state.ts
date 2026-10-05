@@ -1,10 +1,15 @@
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
 import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { CanonicalSkillMigrationDryRunVerifier } from './canonical-skill-migration-dry-run.js';
-import type { CanonicalSkillMigrationStageResult } from './canonical-skill-migration-stager.js';
+import {
+  type CanonicalSkillMigrationSkippedEntry,
+  type CanonicalSkillMigrationStagedSkill,
+  type CanonicalSkillMigrationStageResult,
+} from './canonical-skill-migration-stager.js';
 import { writeAtomic } from './ide-sync.js';
 
 export interface CanonicalSkillMigrationCutoverState {
@@ -16,6 +21,14 @@ export interface CanonicalSkillMigrationCutoverState {
 export interface CanonicalSkillMigrationCutoverActivation {
   readonly changed: boolean;
   readonly state: CanonicalSkillMigrationCutoverState;
+}
+
+export interface CanonicalSkillMigrationActiveGeneration {
+  readonly state: CanonicalSkillMigrationCutoverState;
+  readonly generationPath: string;
+  readonly managedRoot: string;
+  readonly stagedSkills: readonly CanonicalSkillMigrationStagedSkill[];
+  readonly skipped: readonly CanonicalSkillMigrationSkippedEntry[];
 }
 
 export interface CanonicalSkillMigrationCutoverStateStoreOptions {
@@ -41,6 +54,17 @@ export class CanonicalSkillMigrationCutoverStateStore {
 
   public async load(): Promise<Result<CanonicalSkillMigrationCutoverState | undefined>> {
     return loadCutoverState(this.statePath);
+  }
+
+  public async resolveActiveGeneration(): Promise<Result<CanonicalSkillMigrationActiveGeneration | undefined>> {
+    const state = await this.load();
+    if (!state.ok) return err(state.error);
+    if (state.value === undefined) return ok(undefined);
+
+    return verifyPersistedGeneration(
+      this.generationsRoot,
+      state.value,
+    );
   }
 
   public async activate(
@@ -97,6 +121,192 @@ export class CanonicalSkillMigrationCutoverStateStore {
       ));
     }
   }
+}
+
+interface PersistedStageSnapshot {
+  readonly schemaVersion: 1;
+  readonly generationId: string;
+  readonly manifestSha256: string;
+  readonly stagedSkills: readonly CanonicalSkillMigrationStagedSkill[];
+  readonly skipped: readonly CanonicalSkillMigrationSkippedEntry[];
+}
+
+async function verifyPersistedGeneration(
+  generationsRoot: string,
+  state: CanonicalSkillMigrationCutoverState,
+): Promise<Result<CanonicalSkillMigrationActiveGeneration>> {
+  const generationPath = path.resolve(generationsRoot, state.activeGenerationId);
+  try {
+    const generationInfo = await stat(generationPath);
+    if (!generationInfo.isDirectory()) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Persisted canonical Skill cutover state points to a non-directory generation',
+      ));
+    }
+
+    const manifestContent = await readFile(path.join(generationPath, 'manifest.json'), 'utf8');
+    const manifestValue: unknown = JSON.parse(manifestContent);
+    const manifestSha256 = createHash('sha256')
+      .update(JSON.stringify(manifestValue))
+      .digest('hex');
+    if (manifestSha256 !== state.activeGenerationId) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Persisted canonical Skill generation manifest hash does not match the active generation id',
+      ));
+    }
+
+    const stageContent = await readFile(path.join(generationPath, 'stage.json'), 'utf8');
+    const stageValue: unknown = JSON.parse(stageContent);
+    const snapshot = decodeStageSnapshot(stageValue);
+    if (!snapshot.ok) return err(snapshot.error);
+    if (
+      snapshot.value.generationId !== state.activeGenerationId
+      || snapshot.value.manifestSha256 !== state.activeGenerationId
+    ) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Persisted canonical Skill stage metadata does not match the active generation id',
+      ));
+    }
+
+    const staged: CanonicalSkillMigrationStageResult = {
+      schemaVersion: 1,
+      generationId: snapshot.value.generationId,
+      generationPath,
+      reused: true,
+      stagedSkills: snapshot.value.stagedSkills,
+      skipped: snapshot.value.skipped,
+    };
+
+    let proof;
+    try {
+      proof = await new CanonicalSkillMigrationDryRunVerifier().verify(
+        manifestValue as CanonicalExtensionMigrationManifest,
+        staged,
+      );
+    } catch {
+      return err(appError(
+        'INVALID_INPUT',
+        'Persisted canonical Skill generation manifest is structurally invalid',
+      ));
+    }
+    if (!proof.ok) return err(proof.error);
+
+    return ok({
+      state,
+      generationPath,
+      managedRoot: path.join(generationPath, 'skills'),
+      stagedSkills: staged.stagedSkills,
+      skipped: staged.skipped,
+    });
+  } catch (error: unknown) {
+    if (isMissingPath(error) || error instanceof SyntaxError) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Persisted canonical Skill active generation is missing or corrupt',
+      ));
+    }
+    return err(appError(
+      'INTERNAL_ERROR',
+      `Failed to verify persisted canonical Skill active generation: ${error instanceof Error ? error.message : String(error)}`,
+      true,
+    ));
+  }
+}
+
+function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return err(appError('INVALID_INPUT', 'Persisted canonical Skill stage metadata must be an object'));
+  }
+  const record = value as Record<string, unknown>;
+  const allowedKeys = new Set([
+    'schemaVersion',
+    'generationId',
+    'manifestSha256',
+    'stagedSkills',
+    'skipped',
+  ]);
+  if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
+    return err(appError('INVALID_INPUT', 'Persisted canonical Skill stage metadata contains unknown fields'));
+  }
+  if (
+    record.schemaVersion !== 1
+    || !isGenerationId(record.generationId)
+    || !isGenerationId(record.manifestSha256)
+    || !Array.isArray(record.stagedSkills)
+    || !Array.isArray(record.skipped)
+  ) {
+    return err(appError('INVALID_INPUT', 'Persisted canonical Skill stage metadata is invalid'));
+  }
+
+  const stagedSkills: CanonicalSkillMigrationStagedSkill[] = [];
+  const ids = new Set<string>();
+  const relativePaths = new Set<string>();
+  for (const value of record.stagedSkills) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return err(appError('INVALID_INPUT', 'Persisted canonical Skill staged entry is invalid'));
+    }
+    const skill = value as Record<string, unknown>;
+    const allowedSkillKeys = new Set(['id', 'name', 'fingerprint', 'sourcePath', 'relativePath']);
+    if (
+      Object.keys(skill).some((key) => !allowedSkillKeys.has(key))
+      || typeof skill.id !== 'string'
+      || skill.id.trim().length === 0
+      || typeof skill.name !== 'string'
+      || skill.name.trim().length === 0
+      || !isGenerationId(skill.fingerprint)
+      || typeof skill.sourcePath !== 'string'
+      || skill.sourcePath.trim().length === 0
+      || typeof skill.relativePath !== 'string'
+      || skill.relativePath.trim().length === 0
+      || ids.has(skill.id)
+      || relativePaths.has(skill.relativePath)
+    ) {
+      return err(appError('INVALID_INPUT', 'Persisted canonical Skill staged entry is invalid'));
+    }
+    ids.add(skill.id);
+    relativePaths.add(skill.relativePath);
+    stagedSkills.push({
+      id: skill.id,
+      name: skill.name,
+      fingerprint: skill.fingerprint,
+      sourcePath: skill.sourcePath,
+      relativePath: skill.relativePath,
+    });
+  }
+
+  const skipped: CanonicalSkillMigrationSkippedEntry[] = [];
+  for (const value of record.skipped) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return err(appError('INVALID_INPUT', 'Persisted canonical Skill skipped entry is invalid'));
+    }
+    const skippedEntry = value as Record<string, unknown>;
+    if (
+      typeof skippedEntry.id !== 'string'
+      || skippedEntry.id.trim().length === 0
+      || (
+        skippedEntry.reason !== 'disabled'
+        && skippedEntry.reason !== 'incompatible'
+        && skippedEntry.reason !== 'not_skill'
+      )
+    ) {
+      return err(appError('INVALID_INPUT', 'Persisted canonical Skill skipped entry is invalid'));
+    }
+    skipped.push({
+      id: skippedEntry.id,
+      reason: skippedEntry.reason,
+    });
+  }
+
+  return ok({
+    schemaVersion: 1,
+    generationId: record.generationId,
+    manifestSha256: record.manifestSha256,
+    stagedSkills,
+    skipped,
+  });
 }
 
 async function loadCutoverState(

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -204,6 +204,67 @@ describe('canonical extension registry', () => {
           entries: [{ conflict: false }],
         },
       });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed persisted registry metadata instead of trusting partial shape checks', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-invalid-'));
+    try {
+      const registry = new CanonicalExtensionRegistry({ dataDir: root });
+      const registryFile = path.join(root, 'extensions', 'state', 'registry.json');
+      await mkdir(path.dirname(registryFile), { recursive: true });
+      const baseEntry = {
+        kind: 'skill',
+        id: 'skill:code-review',
+        name: 'code-review',
+        fingerprint: fingerprintA,
+        enabled: true,
+        compatibility: {
+          platforms: ['linux'],
+          architectures: ['x64'],
+          requiresCommands: ['git'],
+        },
+        compatibilityState: 'compatible',
+        conflict: false,
+        variantFingerprints: [fingerprintA],
+        provenance: [{
+          originType: 'client-import',
+          origin: '/home/test/.cline/skills/code-review',
+          sourceClient: 'cline',
+        }],
+      };
+
+      const invalidEntries = [
+        { ...baseEntry, fingerprint: 'not-a-sha256' },
+        {
+          ...baseEntry,
+          provenance: [{ ...baseEntry.provenance[0], originType: 'unknown-origin' }],
+        },
+        {
+          ...baseEntry,
+          compatibility: { ...baseEntry.compatibility, platforms: ['plan9'] },
+        },
+        {
+          ...baseEntry,
+          missingCommands: [42],
+          compatibilityState: 'missing_dependency',
+        },
+      ];
+
+      for (const entry of invalidEntries) {
+        await writeFile(registryFile, JSON.stringify({
+          schemaVersion: 1,
+          generation: 1,
+          entries: [entry],
+        }), 'utf8');
+        const loaded = await registry.load();
+        expect(loaded).toMatchObject({
+          ok: false,
+          error: { code: 'INVALID_INPUT' },
+        });
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

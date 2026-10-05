@@ -337,10 +337,54 @@ function isRegistrySnapshot(value: unknown): value is CanonicalExtensionRegistry
 function isRegistryEntry(value: unknown): value is CanonicalExtensionEntry {
   if (!isRecord(value)) return false;
   if (value.kind !== 'skill' && value.kind !== 'mcp_server') return false;
-  if (typeof value.id !== 'string' || typeof value.name !== 'string') return false;
+  if (!isCanonicalId(value.id) || !isBoundedNonEmptyString(value.name, 256)) return false;
   if (typeof value.enabled !== 'boolean' || typeof value.conflict !== 'boolean') return false;
-  if (!Array.isArray(value.variantFingerprints) || !value.variantFingerprints.every((entry) => typeof entry === 'string')) return false;
-  if (!Array.isArray(value.provenance) || !value.provenance.every(isProvenance)) return false;
+  if (!isOptionalSha256(value.fingerprint)) return false;
+  if (!isSha256Array(value.variantFingerprints) || value.variantFingerprints.length === 0) return false;
+  if (!Array.isArray(value.provenance) || value.provenance.length === 0 || !value.provenance.every(isProvenance)) return false;
+  if (!isCompatibilityState(value.compatibilityState)) return false;
+  if (value.compatibility !== undefined && !isCompatibility(value.compatibility)) return false;
+  if (!isOptionalStringArray(value.missingCommands)) return false;
+
+  if (value.conflict) {
+    return value.compatibilityState === 'conflict' && value.fingerprint === undefined;
+  }
+  return value.compatibilityState !== 'conflict'
+    && typeof value.fingerprint === 'string'
+    && value.variantFingerprints.length === 1
+    && value.variantFingerprints[0] === value.fingerprint;
+}
+
+function isProvenance(value: unknown): value is CanonicalExtensionProvenance {
+  if (!isRecord(value)) return false;
+  if (![
+    'bundled',
+    'github',
+    'url',
+    'local-import',
+    'client-import',
+    'managed',
+  ].includes(String(value.originType))) return false;
+  if (!isBoundedNonEmptyString(value.origin, 4096)) return false;
+  if (!isOptionalBoundedString(value.sourceClient, 256)) return false;
+  if (!isOptionalBoundedString(value.version, 256)) return false;
+  if (!isOptionalBoundedString(value.revision, 512)) return false;
+  if (!isOptionalSha256(value.contentSha256)) return false;
+  return isOptionalBoundedString(value.importedAt, 128);
+}
+
+function isCompatibility(value: unknown): value is CanonicalExtensionCompatibility {
+  if (!isRecord(value)) return false;
+  if (
+    value.platforms !== undefined
+    && (!Array.isArray(value.platforms) || !value.platforms.every(isKnownNodePlatform))
+  ) return false;
+  if (!isOptionalStringArray(value.architectures)) return false;
+  if (!isOptionalStringArray(value.requiresCommands)) return false;
+  return isOptionalStringArray(value.optionalCommands);
+}
+
+function isCompatibilityState(value: unknown): value is CanonicalExtensionCompatibilityState {
   return [
     'compatible',
     'incompatible_platform',
@@ -348,13 +392,57 @@ function isRegistryEntry(value: unknown): value is CanonicalExtensionEntry {
     'missing_dependency',
     'unknown',
     'conflict',
-  ].includes(String(value.compatibilityState));
+  ].includes(String(value));
 }
 
-function isProvenance(value: unknown): value is CanonicalExtensionProvenance {
-  return isRecord(value)
-    && typeof value.originType === 'string'
-    && typeof value.origin === 'string';
+function isKnownNodePlatform(value: unknown): value is NodeJS.Platform {
+  return typeof value === 'string' && [
+    'aix',
+    'android',
+    'cygwin',
+    'darwin',
+    'freebsd',
+    'haiku',
+    'linux',
+    'netbsd',
+    'openbsd',
+    'sunos',
+    'win32',
+  ].includes(value);
+}
+
+function isCanonicalId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9:._/-]*$/.test(value);
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isOptionalSha256(value: unknown): value is string | undefined {
+  return value === undefined || isSha256(value);
+}
+
+function isSha256Array(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isSha256);
+}
+
+function isOptionalStringArray(value: unknown): value is string[] | undefined {
+  return value === undefined || (
+    Array.isArray(value)
+    && value.every((entry) => isBoundedNonEmptyString(entry, 1024))
+  );
+}
+
+function isOptionalBoundedString(value: unknown, maxLength: number): value is string | undefined {
+  return value === undefined || isBoundedNonEmptyString(value, maxLength);
+}
+
+function isBoundedNonEmptyString(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= maxLength;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

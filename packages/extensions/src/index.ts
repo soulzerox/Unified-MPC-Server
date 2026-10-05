@@ -48,6 +48,7 @@ export {
   type CanonicalExtensionMigrationConflictReason,
   type CanonicalExtensionMigrationManifest,
   type CanonicalExtensionMigrationManifestEntry,
+  type CanonicalExtensionMigrationSource,
   type CanonicalExtensionMigrationSummary,
 } from './canonical-extension-migration-manifest.js';
 export {

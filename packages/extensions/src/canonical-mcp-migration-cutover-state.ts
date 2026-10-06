@@ -5,10 +5,12 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
 import {
   CanonicalExtensionRegistry,
+  canonicalExtensionRegistryPath,
   isCanonicalExtensionEntry,
   type CanonicalExtensionEntry,
   type CanonicalExtensionProvenance,
 } from './canonical-extension-registry.js';
+import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { writeAtomic } from './ide-sync.js';
 import { exclusionReason } from './mcp-config-loader.js';
 import {
@@ -50,6 +52,11 @@ export interface CanonicalMcpMigrationActiveGeneration {
   readonly registryPath: string;
   readonly stagedServers: readonly CanonicalMcpMigrationStagedServer[];
   readonly skipped: readonly CanonicalMcpMigrationSkippedEntry[];
+}
+
+export interface CanonicalMcpMigrationDirectPromotion {
+  readonly changed: boolean;
+  readonly fromGenerationId?: string;
 }
 
 export type CanonicalMcpMigrationRollbackTarget =
@@ -102,6 +109,59 @@ export class CanonicalMcpMigrationCutoverStateStore {
     if (!state.ok) return err(state.error);
     if (state.value === undefined) return ok(undefined);
     return verifyPersistedGeneration(this.generationsRoot, state.value);
+  }
+
+  public async promoteActiveGenerationToDirectStore(): Promise<Result<CanonicalMcpMigrationDirectPromotion>> {
+    const directRegistryPath = path.join(this.dataDir, 'extensions', 'mcp', 'registry.json');
+    try {
+      return await withConfigMutationTransaction(
+        [
+          canonicalExtensionRegistryPath(this.dataDir),
+          this.statePath,
+          directRegistryPath,
+        ],
+        async (): Promise<Result<CanonicalMcpMigrationDirectPromotion>> => {
+          const state = await loadCutoverState(this.statePath);
+          if (!state.ok) return err(state.error);
+          if (state.value === undefined) return ok({ changed: false });
+
+          const verified = await verifyPersistedGeneration(this.generationsRoot, state.value);
+          if (!verified.ok) return err(verified.error);
+          if (verified.value.stageSchemaVersion !== 2) {
+            return err(appError(
+              'CONFLICT',
+              'Canonical MCP direct-store promotion requires schema-v2 installed-state metadata',
+              true,
+            ));
+          }
+          const expectedEntries = canonicalEntriesForInstalledState(verified.value);
+          if (!expectedEntries.ok) return err(expectedEntries.error);
+          const installed = await this.installedRegistry.load();
+          if (!installed.ok) return err(installed.error);
+          if (!sameInstalledKindEntries(installed.value.entries, expectedEntries.value, 'mcp_server')) {
+            return err(appError(
+              'CONFLICT',
+              'Canonical MCP installed-state drifted from the active generation before promotion',
+              true,
+            ));
+          }
+
+          const stagedRegistryContent = await readFile(verified.value.registryPath, 'utf8');
+          await writeAtomic(directRegistryPath, stagedRegistryContent);
+          await unlink(this.statePath);
+          return ok({
+            changed: true,
+            fromGenerationId: state.value.activeGenerationId,
+          });
+        },
+      );
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to promote canonical MCP generation into direct runtime authority: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ));
+    }
   }
 
   public async resolveRollbackTarget(): Promise<Result<CanonicalMcpMigrationRollbackTarget | undefined>> {
@@ -285,6 +345,20 @@ export class CanonicalMcpMigrationCutoverStateStore {
     if (!replaced.ok) return err(replaced.error);
     return ok(replaced.value.operationValue);
   }
+}
+
+function sameInstalledKindEntries(
+  current: readonly CanonicalExtensionEntry[],
+  expected: readonly CanonicalExtensionEntry[],
+  kind: CanonicalExtensionEntry['kind'],
+): boolean {
+  const currentKind = current
+    .filter((entry) => entry.kind === kind)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const expectedKind = expected
+    .filter((entry) => entry.kind === kind)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return JSON.stringify(currentKind) === JSON.stringify(expectedKind);
 }
 
 function canonicalEntriesForInstalledState(

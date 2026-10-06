@@ -391,6 +391,108 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     });
   });
 
+  it('promotes a verified active generation into the direct Skill store without merging stale direct content', async () => {
+    const root = await fixtureRoot('canonical-cutover-promote-direct-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'alpha', '# Alpha');
+    const staleSkill = path.join(dataDir, 'extensions', 'skills', 'stale', 'SKILL.md');
+    await mkdir(path.dirname(staleSkill), { recursive: true });
+    await writeFile(
+      staleSkill,
+      '---\nname: stale\ndescription: stale direct copy\n---\n# Stale\n',
+      'utf8',
+    );
+    const manifest = manifestFor([
+      candidate({
+        id: 'skill:alpha',
+        name: 'alpha',
+        fingerprint: source.fingerprint,
+        sourcePath: source.sourcePath,
+      }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+    const registryBefore = await installedRegistry(dataDir);
+
+    const promoted = await store.promoteActiveGenerationToDirectStore();
+    expect(promoted).toEqual({
+      ok: true,
+      value: {
+        changed: true,
+        fromGenerationId: staged.generationId,
+      },
+    });
+    expect(await store.load()).toEqual({ ok: true, value: undefined });
+    expect(await installedRegistry(dataDir)).toEqual(registryBefore);
+    await expect(readFile(staleSkill, 'utf8')).rejects.toThrow();
+    await expect(readFile(
+      path.join(dataDir, 'extensions', staged.stagedSkills[0]!.relativePath, 'SKILL.md'),
+      'utf8',
+    )).resolves.toContain('# Alpha');
+    await expect(readFile(
+      path.join(staged.generationPath, staged.stagedSkills[0]!.relativePath, 'SKILL.md'),
+      'utf8',
+    )).resolves.toContain('# Alpha');
+
+    await expect(store.promoteActiveGenerationToDirectStore()).resolves.toEqual({
+      ok: true,
+      value: { changed: false },
+    });
+  });
+
+  it('fails closed instead of discarding installed-state drift during direct Skill promotion', async () => {
+    const root = await fixtureRoot('canonical-cutover-promote-drift-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'alpha', '# Alpha');
+    const manifest = manifestFor([
+      candidate({
+        id: 'skill:alpha',
+        name: 'alpha',
+        fingerprint: source.fingerprint,
+        sourcePath: source.sourcePath,
+      }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+
+    const drifted = await new CanonicalExtensionRegistry({ dataDir }).upsertAtomically({
+      kind: 'skill',
+      id: 'skill:ghost',
+      name: 'ghost',
+      fingerprint: 'e'.repeat(64),
+      enabled: true,
+      provenance: {
+        originType: 'managed',
+        origin: 'unified-mpc:ghost-test',
+      },
+    }, {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(),
+    }, [], async () => undefined);
+    expect(drifted.ok).toBe(true);
+
+    const promoted = await store.promoteActiveGenerationToDirectStore();
+    expect(promoted).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT' },
+    });
+    expect(await store.load()).toEqual({
+      ok: true,
+      value: activated.value.state,
+    });
+    await expect(readFile(
+      path.join(dataDir, 'extensions', staged.stagedSkills[0]!.relativePath, 'SKILL.md'),
+      'utf8',
+    )).rejects.toThrow();
+  });
+
   it('fails closed when an already-active generation is corrupted after activation', async () => {
     const root = await fixtureRoot('canonical-cutover-resolve-corrupt-');
     const dataDir = path.join(root, 'data');

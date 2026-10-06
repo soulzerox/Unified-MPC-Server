@@ -3,8 +3,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CanonicalExtensionRegistry } from './canonical-extension-registry.js';
-import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
+import { buildCanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
+import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
+import { CanonicalMcpMigrationStager } from './canonical-mcp-migration-stager.js';
+import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
+import { CanonicalSkillMigrationStager, fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
+import { LocalExtensionsService } from './extensions-service.js';
 import { InstallerService, type InstallSkillInput } from './installer.js';
+import { fingerprintExternalMcpValue } from './mcp-session-manager.js';
+import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 
 const temporaryRoots: string[] = [];
 const FIXTURE_REVISION = '0123456789abcdef0123456789abcdef01234567';
@@ -52,6 +59,81 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
     expect(await readFile(result.value.installedPaths[0]!, 'utf8')).toContain('# Parent Skill');
     await expect(readFile(path.join(home, '.cursor', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
     await expect(readFile(path.join(home, '.cline', 'skills', 'parent-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('promotes an active Skill migration generation before a canonical install so the mutation is runtime-visible', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-post-cutover-skill-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const alphaDir = path.join(root, 'alpha-source');
+    const betaDir = path.join(root, 'beta-source');
+    await mkdir(alphaDir, { recursive: true });
+    await mkdir(betaDir, { recursive: true });
+    await writeFile(
+      path.join(alphaDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Migrated alpha\n---\n# Alpha\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(betaDir, 'SKILL.md'),
+      '---\nname: beta\ndescription: Newly installed beta\n---\n# Beta\n',
+      'utf8',
+    );
+
+    const alphaFingerprint = await fingerprintCanonicalSkillDirectory(alphaDir);
+    expect(alphaFingerprint.ok).toBe(true);
+    if (!alphaFingerprint.ok) return;
+    const manifest = buildCanonicalExtensionMigrationManifest([{
+      kind: 'skill',
+      id: 'skill:alpha',
+      name: 'alpha',
+      fingerprint: alphaFingerprint.value,
+      enabled: true,
+      sourcePath: alphaDir,
+      provenance: {
+        originType: 'client-import',
+        origin: alphaDir,
+        sourceClient: 'cline',
+      },
+      compatibility: { platforms: [process.platform] },
+    }], {
+      platform: process.platform,
+      architecture: process.arch,
+      availableCommands: new Set<string>(),
+    });
+    expect(manifest.ok).toBe(true);
+    if (!manifest.ok) return;
+    const staged = await new CanonicalSkillMigrationStager({ dataDir }).stage(manifest.value);
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    const cutover = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+    const activated = await cutover.activate(manifest.value, staged.value);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+
+    const installed = await new InstallerService({ dataDir }).installSkill({
+      name: 'beta',
+      source: betaDir,
+      targets: ['unified-mpc'],
+    });
+    expect(installed.ok).toBe(true);
+    expect(await cutover.load()).toEqual({ ok: true, value: undefined });
+
+    const service = new LocalExtensionsService({
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+      dataDir,
+      bundledSkillRoots: [],
+    });
+    const listed = await service.listSkills({});
+    await service.close();
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.skills.map((skill) => skill.name).sort()).toEqual(['alpha', 'beta']);
+    const promotedAlpha = listed.value.skills.find((skill) => skill.name === 'alpha');
+    expect(promotedAlpha).toBeDefined();
+    await expect(readFile(promotedAlpha!.skillPath, 'utf8')).resolves.toContain('# Alpha');
+    await expect(readFile(path.join(dataDir, 'extensions', 'skills', 'beta', 'SKILL.md'), 'utf8'))
+      .resolves.toContain('# Beta');
   });
 
   it('persists canonical Skill installed-state, preserves MCP entries, and keeps identical installs idempotent', async () => {
@@ -583,6 +665,65 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
 
     await expect(readFile(path.join(home, '.cursor', 'mcp.json'), 'utf8')).rejects.toThrow();
     await expect(readFile(path.join(home, '.cline', 'mcp.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('promotes an active MCP migration generation before a canonical install so the mutation is runtime-visible', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-post-cutover-mcp-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const alphaConfig = { command: 'node', args: ['alpha.js'] };
+    const manifest = buildCanonicalExtensionMigrationManifest([{
+      kind: 'mcp_server',
+      id: 'mcp:alpha',
+      name: 'alpha',
+      fingerprint: fingerprintExternalMcpValue(alphaConfig),
+      enabled: true,
+      launchConfig: alphaConfig,
+      provenance: {
+        originType: 'client-import',
+        origin: path.join(root, 'legacy', 'alpha'),
+        sourceClient: 'cline',
+      },
+      compatibility: { platforms: [process.platform] },
+    }], {
+      platform: process.platform,
+      architecture: process.arch,
+      availableCommands: new Set(['node']),
+    });
+    expect(manifest.ok).toBe(true);
+    if (!manifest.ok) return;
+    const staged = await new CanonicalMcpMigrationStager({ dataDir }).stage(manifest.value);
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    const cutover = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    const activated = await cutover.activate(manifest.value, staged.value);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+
+    const installed = await new InstallerService({ dataDir }).installServer({
+      name: 'beta',
+      transport: 'stdio',
+      command: 'node',
+      args: ['beta.js'],
+      targets: ['unified-mpc'],
+    });
+    expect(installed.ok).toBe(true);
+    expect(await cutover.load()).toEqual({ ok: true, value: undefined });
+
+    const service = new LocalExtensionsService({
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+      dataDir,
+    });
+    const listed = await service.listMcpServers();
+    await service.close();
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.servers.map((server) => server.name).sort()).toEqual(['alpha', 'beta']);
+
+    const directRegistry = JSON.parse(
+      await readFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), 'utf8'),
+    ) as { mcpServers: Record<string, unknown> };
+    expect(Object.keys(directRegistry.mcpServers).sort()).toEqual(['alpha', 'beta']);
   });
 
   it('fails closed before MCP config writes when canonical installed-state registry is invalid', async () => {

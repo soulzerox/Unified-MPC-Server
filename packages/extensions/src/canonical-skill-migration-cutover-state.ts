@@ -1,14 +1,17 @@
-import { createHash } from 'node:crypto';
-import { readFile, stat, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { cp, mkdir, mkdtemp, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
 import {
   CanonicalExtensionRegistry,
+  canonicalExtensionRegistryPath,
   type CanonicalExtensionEntry,
 } from './canonical-extension-registry.js';
+import { withConfigMutationTransaction } from './config-mutation-lock.js';
 import { CanonicalSkillMigrationDryRunVerifier } from './canonical-skill-migration-dry-run.js';
 import {
+  fingerprintCanonicalSkillDirectory,
   type CanonicalSkillMigrationSkippedEntry,
   type CanonicalSkillMigrationStagedSkill,
   type CanonicalSkillMigrationStageResult,
@@ -44,6 +47,11 @@ export interface CanonicalSkillMigrationActiveGeneration {
   readonly managedRoot: string;
   readonly stagedSkills: readonly CanonicalSkillMigrationStagedSkill[];
   readonly skipped: readonly CanonicalSkillMigrationSkippedEntry[];
+}
+
+export interface CanonicalSkillMigrationDirectPromotion {
+  readonly changed: boolean;
+  readonly fromGenerationId?: string;
 }
 
 export type CanonicalSkillMigrationRollbackTarget =
@@ -101,6 +109,149 @@ export class CanonicalSkillMigrationCutoverStateStore {
     );
     if (!verified.ok) return err(verified.error);
     return ok(verified.value.generation);
+  }
+
+  public async promoteActiveGenerationToDirectStore(): Promise<Result<CanonicalSkillMigrationDirectPromotion>> {
+    const active = await this.resolveActiveGeneration();
+    if (!active.ok) return err(active.error);
+    if (active.value === undefined) return ok({ changed: false });
+
+    const expectedGenerationId = active.value.state.activeGenerationId;
+    const promotionRoot = path.join(
+      this.dataDir,
+      'extensions',
+      'state',
+      'skill-cutover-promotion',
+    );
+    let stagingContainer: string;
+    try {
+      await mkdir(promotionRoot, { recursive: true });
+      stagingContainer = await mkdtemp(path.join(promotionRoot, `${expectedGenerationId}-`));
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to create canonical Skill promotion staging directory: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ));
+    }
+
+    const stagedDirectRoot = path.join(stagingContainer, 'skills');
+    let backupPath: string | undefined;
+    try {
+      await cp(active.value.managedRoot, stagedDirectRoot, { recursive: true });
+      for (const staged of active.value.stagedSkills) {
+        const relativeToManagedRoot = skillPathWithinManagedRoot(staged.relativePath);
+        if (!relativeToManagedRoot.ok) return err(relativeToManagedRoot.error);
+        const fingerprint = await fingerprintCanonicalSkillDirectory(
+          path.join(stagedDirectRoot, relativeToManagedRoot.value),
+        );
+        if (!fingerprint.ok || fingerprint.value !== staged.fingerprint) {
+          return err(appError(
+            'INVALID_INPUT',
+            `Canonical Skill promotion copy does not match active generation: ${staged.id}`,
+          ));
+        }
+      }
+
+      const directRoot = path.join(this.dataDir, 'extensions', 'skills');
+      const backupRoot = path.join(
+        this.dataDir,
+        'extensions',
+        'state',
+        'skill-cutover-promotion-backups',
+      );
+      const result = await withConfigMutationTransaction(
+        [canonicalExtensionRegistryPath(this.dataDir), this.statePath],
+        async (): Promise<Result<CanonicalSkillMigrationDirectPromotion>> => {
+          const lockedState = await loadCutoverState(this.statePath);
+          if (!lockedState.ok) return err(lockedState.error);
+          if (lockedState.value === undefined) return ok({ changed: false });
+          if (lockedState.value.activeGenerationId !== expectedGenerationId) {
+            return err(appError(
+              'CONFLICT',
+              'Canonical Skill active generation changed before direct-store promotion',
+              true,
+            ));
+          }
+
+          const lockedVerified = await verifyPersistedGeneration(
+            this.generationsRoot,
+            lockedState.value,
+          );
+          if (!lockedVerified.ok) return err(lockedVerified.error);
+          const expectedEntries = canonicalEntriesForInstalledState(lockedVerified.value);
+          if (!expectedEntries.ok) return err(expectedEntries.error);
+          const installed = await this.installedRegistry.load();
+          if (!installed.ok) return err(installed.error);
+          if (!sameInstalledKindEntries(installed.value.entries, expectedEntries.value, 'skill')) {
+            return err(appError(
+              'CONFLICT',
+              'Canonical Skill installed-state drifted from the active generation before promotion',
+              true,
+            ));
+          }
+
+          let previousMoved = false;
+          let stagedActivated = false;
+          try {
+            await mkdir(path.dirname(directRoot), { recursive: true });
+            await mkdir(backupRoot, { recursive: true });
+            backupPath = path.join(backupRoot, `${expectedGenerationId}-${randomUUID()}`);
+            try {
+              await rename(directRoot, backupPath);
+              previousMoved = true;
+            } catch (error: unknown) {
+              if (!isMissingPath(error)) throw error;
+              backupPath = undefined;
+            }
+
+            await rename(stagedDirectRoot, directRoot);
+            stagedActivated = true;
+            for (const staged of lockedVerified.value.generation.stagedSkills) {
+              const relativeToManagedRoot = skillPathWithinManagedRoot(staged.relativePath);
+              if (!relativeToManagedRoot.ok) {
+                throw new Error(relativeToManagedRoot.error.message);
+              }
+              const fingerprint = await fingerprintCanonicalSkillDirectory(
+                path.join(directRoot, relativeToManagedRoot.value),
+              );
+              if (!fingerprint.ok || fingerprint.value !== staged.fingerprint) {
+                throw new Error(`Promoted canonical Skill fingerprint mismatch: ${staged.id}`);
+              }
+            }
+
+            await unlink(this.statePath);
+            return ok({
+              changed: true,
+              fromGenerationId: expectedGenerationId,
+            });
+          } catch (error: unknown) {
+            if (stagedActivated) {
+              await rm(directRoot, { recursive: true, force: true }).catch(() => undefined);
+            }
+            if (previousMoved && backupPath !== undefined) {
+              await rename(backupPath, directRoot);
+              backupPath = undefined;
+            }
+            throw error;
+          }
+        },
+      );
+
+      if (result.ok && result.value.changed && backupPath !== undefined) {
+        await rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
+        backupPath = undefined;
+      }
+      return result;
+    } catch (error: unknown) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Failed to promote canonical Skill generation into direct runtime authority: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ));
+    } finally {
+      await rm(stagingContainer, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   public async resolveRollbackTarget(): Promise<Result<CanonicalSkillMigrationRollbackTarget | undefined>> {
@@ -293,6 +444,37 @@ interface PersistedStageSnapshot {
   readonly manifestSha256: string;
   readonly stagedSkills: readonly CanonicalSkillMigrationStagedSkill[];
   readonly skipped: readonly CanonicalSkillMigrationSkippedEntry[];
+}
+
+function skillPathWithinManagedRoot(relativePath: string): Result<string> {
+  const normalized = path.posix.normalize(relativePath);
+  const relative = path.posix.relative('skills', normalized);
+  if (
+    path.posix.isAbsolute(relative)
+    || relative.length === 0
+    || relative === '..'
+    || relative.startsWith('../')
+  ) {
+    return err(appError(
+      'INVALID_INPUT',
+      'Canonical Skill staged path is outside the managed Skill root',
+    ));
+  }
+  return ok(relative.split('/').join(path.sep));
+}
+
+function sameInstalledKindEntries(
+  current: readonly CanonicalExtensionEntry[],
+  expected: readonly CanonicalExtensionEntry[],
+  kind: CanonicalExtensionEntry['kind'],
+): boolean {
+  const currentKind = current
+    .filter((entry) => entry.kind === kind)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const expectedKind = expected
+    .filter((entry) => entry.kind === kind)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return JSON.stringify(currentKind) === JSON.stringify(expectedKind);
 }
 
 function canonicalEntriesForInstalledState(

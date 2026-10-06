@@ -278,6 +278,47 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     ]);
   });
 
+  it('fails closed instead of promoting schema-v1 MCP state without canonical metadata', async () => {
+    const root = await fixtureRoot('canonical-mcp-cutover-v1-promote-blocked-');
+    const dataDir = path.join(root, 'data');
+    await seedInstalledSkill(dataDir);
+    const legacy = await writeSchemaV1Generation(dataDir, 'legacy-v1');
+    const statePath = path.join(dataDir, 'extensions', 'state', 'migration', 'mcp-cutover-state.json');
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        activeGenerationId: legacy.generationId,
+      }, null, 2) + '\n',
+      'utf8',
+    );
+    const liveRegistry = path.join(dataDir, 'extensions', 'mcp', 'registry.json');
+    await mkdir(path.dirname(liveRegistry), { recursive: true });
+    const liveBefore = JSON.stringify({ mcpServers: { stale: { command: 'stale' } } }) + '\n';
+    await writeFile(liveRegistry, liveBefore, 'utf8');
+
+    const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    const promoted = await store.promoteActiveGenerationToDirectStore();
+    expect(promoted).toMatchObject({
+      ok: false,
+      error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('schema-v2'),
+      },
+    });
+    expect(await store.load()).toEqual({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        activeGenerationId: legacy.generationId,
+      },
+    });
+    expect(await readFile(liveRegistry, 'utf8')).toBe(liveBefore);
+    expect(await installedEntries(dataDir)).toEqual([
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-me' }),
+    ]);
+  });
+
   it('rolls back to schema-v1 runtime state without seeding incomplete MCP installed metadata', async () => {
     const root = await fixtureRoot('canonical-mcp-cutover-v1-rollback-');
     const dataDir = path.join(root, 'data');
@@ -391,6 +432,97 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
         stagedServers: firstStage.stagedServers,
       },
     });
+  });
+
+  it('promotes a verified active generation into the direct MCP registry without merging stale direct entries', async () => {
+    const root = await fixtureRoot('canonical-mcp-cutover-promote-direct-');
+    const dataDir = path.join(root, 'data');
+    const liveRegistry = path.join(dataDir, 'extensions', 'mcp', 'registry.json');
+    await mkdir(path.dirname(liveRegistry), { recursive: true });
+    await writeFile(
+      liveRegistry,
+      JSON.stringify({ mcpServers: { stale: { command: 'stale' } } }) + '\n',
+      'utf8',
+    );
+    const manifest = manifestFor([
+      candidate({ name: 'alpha', config: { command: 'node', args: ['alpha.js'] } }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+    const entriesBefore = await installedEntries(dataDir);
+
+    const promoted = await store.promoteActiveGenerationToDirectStore();
+    expect(promoted).toEqual({
+      ok: true,
+      value: {
+        changed: true,
+        fromGenerationId: staged.generationId,
+      },
+    });
+    expect(await store.load()).toEqual({ ok: true, value: undefined });
+    expect(await installedEntries(dataDir)).toEqual(entriesBefore);
+    expect(JSON.parse(await readFile(liveRegistry, 'utf8'))).toEqual({
+      mcpServers: {
+        alpha: {
+          command: 'node',
+          args: ['alpha.js'],
+        },
+      },
+    });
+    await expect(readFile(staged.registryPath, 'utf8')).resolves.toContain('"alpha"');
+
+    await expect(store.promoteActiveGenerationToDirectStore()).resolves.toEqual({
+      ok: true,
+      value: { changed: false },
+    });
+  });
+
+  it('fails closed instead of discarding installed-state drift during direct MCP promotion', async () => {
+    const root = await fixtureRoot('canonical-mcp-cutover-promote-drift-');
+    const dataDir = path.join(root, 'data');
+    const liveRegistry = path.join(dataDir, 'extensions', 'mcp', 'registry.json');
+    await mkdir(path.dirname(liveRegistry), { recursive: true });
+    const liveBefore = JSON.stringify({ mcpServers: { stale: { command: 'stale' } } }) + '\n';
+    await writeFile(liveRegistry, liveBefore, 'utf8');
+    const manifest = manifestFor([
+      candidate({ name: 'alpha', config: { command: 'node', args: ['alpha.js'] } }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalMcpMigrationCutoverStateStore({ dataDir });
+    const activated = await store.activate(manifest, staged);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) return;
+
+    const drifted = await new CanonicalExtensionRegistry({ dataDir }).upsertAtomically({
+      kind: 'mcp_server',
+      id: 'mcp:ghost',
+      name: 'ghost',
+      fingerprint: 'e'.repeat(64),
+      enabled: true,
+      provenance: {
+        originType: 'managed',
+        origin: 'unified-mpc:ghost-test',
+      },
+    }, {
+      platform: 'linux',
+      architecture: 'x64',
+      availableCommands: new Set(['node']),
+    }, [], async () => undefined);
+    expect(drifted.ok).toBe(true);
+
+    const promoted = await store.promoteActiveGenerationToDirectStore();
+    expect(promoted).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT' },
+    });
+    expect(await store.load()).toEqual({
+      ok: true,
+      value: activated.value.state,
+    });
+    expect(await readFile(liveRegistry, 'utf8')).toBe(liveBefore);
   });
 
   it('fails closed on staged registry drift before activation and preserves the active pointer', async () => {

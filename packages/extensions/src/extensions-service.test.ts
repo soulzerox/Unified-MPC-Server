@@ -66,6 +66,81 @@ describe('LocalExtensionsService MCP bridge', () => {
     }
   });
 
+  it('treats direct canonical stores as exclusive runtime authority before migration cutover', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-direct-canonical-runtime-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const home = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      const bundledRoot = path.join(root, 'bundled');
+      const skillRoots = [
+        [path.join(dataDir, 'extensions', 'skills', 'direct-canonical'), 'direct-canonical'],
+        [path.join(home, '.agents', 'skills', 'legacy-global'), 'legacy-global'],
+        [path.join(workspace, '.agents', 'skills', 'legacy-workspace'), 'legacy-workspace'],
+        [path.join(bundledRoot, 'legacy-bundled'), 'legacy-bundled'],
+      ] as const;
+      for (const [skillRoot, name] of skillRoots) {
+        await mkdir(skillRoot, { recursive: true });
+        await writeFile(
+          path.join(skillRoot, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: ${name}\n---\n# ${name}\n`,
+          'utf8',
+        );
+      }
+
+      await mkdir(path.join(home, '.cursor'), { recursive: true });
+      await mkdir(path.join(workspace, '.cursor'), { recursive: true });
+      await mkdir(path.join(dataDir, 'extensions', 'mcp'), { recursive: true });
+      await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
+        mcpServers: { 'legacy-global': { command: 'node', args: ['legacy-global.js'] } },
+      }), 'utf8');
+      await writeFile(path.join(workspace, '.cursor', 'mcp.json'), JSON.stringify({
+        mcpServers: { 'legacy-workspace': { command: 'node', args: ['legacy-workspace.js'] } },
+      }), 'utf8');
+      await writeFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), JSON.stringify({
+        mcpServers: { 'direct-canonical': { command: 'node', args: ['direct.js'] } },
+      }), 'utf8');
+
+      const service = new LocalExtensionsService({
+        settings: {
+          ...DEFAULT_EXTENSIONS_SETTINGS,
+          extraMcpServers: {
+            'legacy-settings': { command: 'node', args: ['legacy-settings.js'] },
+          },
+        },
+        homeDir: home,
+        appDataDir: path.join(root, 'appdata'),
+        dataDir,
+        workspaceRootProvider: async (): Promise<string> => workspace,
+        bundledSkillRoots: [bundledRoot],
+      } as never);
+
+      const skills = await service.listSkills({});
+      expect(skills.ok).toBe(true);
+      if (!skills.ok) return;
+      expect(skills.value.skills).toEqual([
+        expect.objectContaining({
+          name: 'direct-canonical',
+          source: 'unified-mpc-skills',
+        }),
+      ]);
+
+      const servers = await service.listMcpServers();
+      expect(servers.ok).toBe(true);
+      if (!servers.ok) return;
+      expect(servers.value.servers).toEqual([
+        expect.objectContaining({
+          name: 'direct-canonical',
+          source: 'unified-mpc-registry',
+          command: 'node',
+        }),
+      ]);
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('switches Skill runtime discovery to the active canonical generation without leaking legacy roots', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-active-generation-runtime-'));
     try {

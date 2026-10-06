@@ -12,7 +12,7 @@ export interface SkillCatalogOptions {
   readonly bundledRoots?: readonly string[];
   /** Parent-owned canonical skill root managed by unified-mpc itself. */
   readonly managedRoot?: string;
-  /** Use only the parent-owned managed root after canonical cutover. */
+  /** Use only the parent-owned managed root when canonical runtime authority is enabled. */
   readonly managedRootMode?: 'supplemental' | 'exclusive';
   readonly extraRoots?: readonly string[];
 }

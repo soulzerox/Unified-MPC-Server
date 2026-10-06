@@ -1401,7 +1401,7 @@ export class ControlPlaneServer {
     return ok(new SkillCatalog({
       settings: this.extensionsSettings(),
       managedRoot: active.value?.managedRoot ?? path.join(this.dataDir, 'extensions', 'skills'),
-      managedRootMode: active.value === undefined ? 'supplemental' : 'exclusive',
+      managedRootMode: 'exclusive',
     }));
   }
 
@@ -1415,8 +1415,8 @@ export class ControlPlaneServer {
     return ok(new McpConfigLoader({
       settings: this.extensionsSettings(),
       dataDir: this.dataDir,
+      managedRegistryMode: 'exclusive',
       ...(active.value === undefined ? {} : {
-        managedRegistryMode: 'exclusive' as const,
         managedServers: active.value.stagedServers.map((server) => ({
           name: server.name,
           config: server.config,

@@ -108,6 +108,69 @@ Do the thing.
     ]);
   });
 
+  it('keeps exact bundled first-party ids readable under exclusive managed authority without restoring legacy peers', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-exclusive-bundled-overlay-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const managedRoot = path.join(root, 'canonical', 'skills');
+    const bundledRoot = path.join(root, 'bundled');
+    const managedSkillRoot = path.join(managedRoot, 'ponytail');
+    const bundledSkillRoot = path.join(bundledRoot, 'ponytail');
+    const workspaceSkillRoot = path.join(workspace, '.agents', 'skills', 'ponytail');
+
+    for (const [skillRoot, description, marker] of [
+      [managedSkillRoot, 'Managed Ponytail', 'MANAGED_PONYTAIL'],
+      [bundledSkillRoot, 'Bundled Ponytail', 'BUNDLED_PONYTAIL'],
+      [workspaceSkillRoot, 'Workspace collision', 'WORKSPACE_FAKE'],
+    ] as const) {
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(
+        path.join(skillRoot, 'SKILL.md'),
+        `---\nname: ponytail\ndescription: ${description}\n---\n${marker}\n`,
+        'utf8',
+      );
+    }
+
+    const catalog = new SkillCatalog({
+      homeDir: home,
+      workspaceRoot: workspace,
+      settings: DEFAULT_EXTENSIONS_SETTINGS,
+      bundledRoots: [bundledRoot],
+      managedRoot,
+      managedRootMode: 'exclusive',
+    });
+
+    const listed = await catalog.list({ query: 'ponytail' });
+    expect(listed).toMatchObject({
+      ok: true,
+      value: {
+        skills: [expect.objectContaining({
+          id: 'unified-mpc-skills/ponytail',
+          source: 'unified-mpc-skills',
+        })],
+      },
+    });
+
+    const managed = await catalog.read({ skillId: 'ponytail' });
+    expect(managed).toMatchObject({
+      ok: true,
+      value: { id: 'unified-mpc-skills/ponytail', source: 'unified-mpc-skills' },
+    });
+    if (managed.ok) expect(managed.value.content).toContain('MANAGED_PONYTAIL');
+
+    const bundled = await catalog.read({ skillId: 'bundled:agent-skills/ponytail' });
+    expect(bundled).toMatchObject({
+      ok: true,
+      value: {
+        id: 'bundled:agent-skills/ponytail',
+        source: 'bundled:agent-skills',
+        trustTier: 'bundled',
+      },
+    });
+    if (bundled.ok) expect(bundled.value.content).toContain('BUNDLED_PONYTAIL');
+  });
+
   it('discovers and reads workspace .agents skills by source-qualified id', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-workspace-skills-'));
     temporaryRoots.push(root);

@@ -1,5 +1,9 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
+import { DEFAULT_EXTENSIONS_SETTINGS, LocalExtensionsService } from '@unified-mpc/extensions';
 import { permissionProfiles } from '@unified-mpc/permissions';
 import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_REVIEW_SKILL_ID, BUNDLED_PONYTAIL_SKILL_ID, PonytailActivationLedger } from './ponytail-runtime.js';
@@ -101,6 +105,90 @@ describe('Ponytail ToolRegistry enforcement', () => {
     const allowed = await registry.invoke('write_file', { workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 3;\n' });
     expect(allowed.isError).not.toBe(true);
     expect(writes).toEqual(['README.md', 'src/app.ts']);
+  });
+
+  it('loads the exact bundled Ponytail id through real canonical LocalExtensionsService semantics', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-ponytail-real-extensions-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const workspace = path.join(root, 'workspace');
+      const bundledRoot = path.join(root, 'bundled');
+      const bundledSkill = path.join(bundledRoot, 'ponytail');
+      const workspaceSkill = path.join(workspace, '.agents', 'skills', 'ponytail');
+      await mkdir(bundledSkill, { recursive: true });
+      await mkdir(workspaceSkill, { recursive: true });
+      await writeFile(
+        path.join(bundledSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Bundled native Ponytail\n---\n# Bundled Ponytail\n',
+        'utf8',
+      );
+      await writeFile(
+        path.join(workspaceSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Workspace collision\n---\n# Workspace Fake\n',
+        'utf8',
+      );
+
+      const extensions = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        dataDir,
+        workspaceRootProvider: async (): Promise<string> => workspace,
+        bundledSkillRoots: [bundledRoot],
+      } as never);
+      const base = createServices();
+      const services = {
+        ...(base.services as unknown as Record<string, unknown>),
+        extensions: {
+          listSkills: (input: { readonly query?: string; readonly source?: string }) => extensions.listSkills(input),
+          readSkill: (input: { readonly skillId: string; readonly relativePath?: string }) => extensions.readSkill(input),
+        },
+      } as unknown as McpApplicationServices;
+      const registry = fullRegistry(services);
+
+      const listed = await extensions.listSkills({ query: 'ponytail' });
+      expect(listed).toMatchObject({
+        ok: true,
+        value: {
+          skills: [expect.objectContaining({
+            id: 'unified-mpc-skills/ponytail',
+            source: 'unified-mpc-skills',
+          })],
+        },
+      });
+
+      const blocked = await registry.invoke('write_file', {
+        workspaceId: 'workspace-1',
+        path: 'src/real-extensions.ts',
+        content: 'export const before = true;\n',
+      });
+      expect(blocked).toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+      expect(base.writes).toEqual([]);
+
+      const exactLoad = await registry.invoke('skill_load', {
+        skillId: BUNDLED_PONYTAIL_SKILL_ID,
+        workspaceId: 'workspace-1',
+      });
+      expect(exactLoad).toMatchObject({
+        structuredContent: {
+          skill: {
+            id: BUNDLED_PONYTAIL_SKILL_ID,
+            source: 'bundled:agent-skills',
+            trustTier: 'bundled',
+          },
+        },
+      });
+
+      const allowed = await registry.invoke('write_file', {
+        workspaceId: 'workspace-1',
+        path: 'src/real-extensions.ts',
+        content: 'export const after = true;\n',
+      });
+      expect(allowed.isError).not.toBe(true);
+      expect(base.writes).toEqual(['src/real-extensions.ts']);
+      await extensions.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('activates from the exact bundled skill_load even when skill_match returns zero results or fails', async () => {

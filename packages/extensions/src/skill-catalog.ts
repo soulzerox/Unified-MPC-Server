@@ -46,7 +46,15 @@ export class SkillCatalog {
         `Skill name is ambiguous: ${input.skillId}. Use one of: ${named.map((entry) => entry.id).join(', ')}`,
       ));
     }
-    const skill = exact ?? named[0];
+    let skill = exact ?? named[0];
+    if (
+      skill === undefined
+      && this.options.managedRootMode === 'exclusive'
+      && normalizedSkillId.startsWith('bundled:agent-skills/')
+    ) {
+      const bundled = await this.discoverRoots(this.bundledOverlayRoots());
+      skill = bundled.find((entry) => entry.id === normalizedSkillId);
+    }
     if (skill === undefined) return err(appError('FILE_NOT_FOUND', `Skill not found: ${input.skillId}`));
 
     const relativePath = input.relativePath?.trim() || 'SKILL.md';
@@ -86,7 +94,12 @@ export class SkillCatalog {
   }
 
   private async discover(): Promise<readonly SkillSummary[]> {
-    const roots = this.roots();
+    return this.discoverRoots(this.roots());
+  }
+
+  private async discoverRoots(
+    roots: readonly { readonly source: string; readonly path: string }[],
+  ): Promise<readonly SkillSummary[]> {
     const skills: SkillSummary[] = [];
     for (const root of roots) {
       if (!isSkillRootEnabled(root.path, this.options.settings)) continue;
@@ -114,6 +127,11 @@ export class SkillCatalog {
       }
     }
     return dedupeByPathAndDisambiguateIds(skills);
+  }
+
+  private bundledOverlayRoots(): readonly { readonly source: string; readonly path: string }[] {
+    return [...new Set((this.options.bundledRoots ?? []).map((root) => path.resolve(root)))]
+      .map((root) => ({ source: 'bundled:agent-skills', path: root }));
   }
 
   private roots(): readonly { readonly source: string; readonly path: string }[] {

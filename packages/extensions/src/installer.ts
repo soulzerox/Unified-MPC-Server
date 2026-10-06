@@ -11,6 +11,7 @@ import {
   type CanonicalExtensionCandidate,
   type CanonicalExtensionCompatibility,
   type CanonicalExtensionCompatibilityState,
+  type CanonicalExtensionProvenance,
 } from './canonical-extension-registry.js';
 import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
 import { parseSkillMarkdown } from './skill-catalog.js';
@@ -145,6 +146,27 @@ export class InstallerService {
     }
   }
 
+  public async installBundledSkill(input: {
+    readonly name: string;
+    readonly source: string;
+  }): Promise<Result<InstallSkillResult>> {
+    const skillName = input.name.trim();
+    if (
+      skillName.length === 0
+      || !/^[A-Za-z0-9_-]+$/.test(skillName)
+      || ['constructor', '__proto__', 'prototype'].includes(skillName.toLowerCase())
+    ) {
+      return err(appError('INVALID_INPUT', `Invalid skill name: "${input.name}"`));
+    }
+    const resolvedSource = path.resolve(input.source);
+    return this.installSkillFromResolvedSource(
+      { name: skillName, source: resolvedSource, targets: ['unified-mpc'] },
+      skillName,
+      resolvedSource,
+      { originType: 'bundled', origin: resolvedSource },
+    );
+  }
+
   private async materializeSkillSource(source: string): Promise<Result<{ readonly path: string; readonly cleanupRoot?: string }>> {
     const remote = parseHttpsGitSource(source);
     if (remote === undefined) {
@@ -190,6 +212,7 @@ export class InstallerService {
     input: InstallSkillInput,
     skillName: string,
     resolvedSource: string,
+    canonicalProvenance?: CanonicalExtensionProvenance,
   ): Promise<Result<InstallSkillResult>> {
     let sourceSkillFile: string;
     let sourceSkillDir: string;
@@ -231,6 +254,7 @@ export class InstallerService {
         skillName,
         input.source,
         sourceSkillDir,
+        canonicalProvenance,
       );
       if (!canonical.ok) return err(canonical.error);
       installedPaths.push(canonical.value);
@@ -251,6 +275,7 @@ export class InstallerService {
     skillName: string,
     inputSource: string,
     sourceSkillDir: string,
+    provenanceOverride?: CanonicalExtensionProvenance,
   ): Promise<Result<string>> {
     const stagingRoot = path.join(
       this.dataDir,
@@ -303,11 +328,16 @@ export class InstallerService {
         name: skillName,
         fingerprint: stagedFingerprint.value,
         enabled: true,
-        provenance: {
-          originType: remoteSource === undefined ? 'local-import' : 'github',
-          origin: remoteSource?.href ?? path.resolve(inputSource),
-          contentSha256: stagedFingerprint.value,
-        },
+        provenance: provenanceOverride === undefined
+          ? {
+              originType: remoteSource === undefined ? 'local-import' : 'github',
+              origin: remoteSource?.href ?? path.resolve(inputSource),
+              contentSha256: stagedFingerprint.value,
+            }
+          : {
+              ...provenanceOverride,
+              contentSha256: stagedFingerprint.value,
+            },
         ...(compatibility.value.compatibility === undefined
           ? {}
           : { compatibility: compatibility.value.compatibility }),

@@ -291,19 +291,14 @@ export class LocalExtensionsService implements ExtensionsService {
   private async skillCatalog(): Promise<Result<SkillCatalog>> {
     const workspaceRoot = await this.workspaceRootProvider();
     let managedRoot: string | undefined;
-    let managedRootMode: 'supplemental' | 'exclusive' | undefined;
+    let managedRootMode: 'exclusive' | undefined;
 
     if (this.dataDir !== undefined) {
       const active = await new CanonicalSkillMigrationCutoverStateStore({ dataDir: this.dataDir })
         .resolveActiveGeneration();
       if (!active.ok) return err(active.error);
-      if (active.value === undefined) {
-        managedRoot = path.join(this.dataDir, 'extensions', 'skills');
-        managedRootMode = 'supplemental';
-      } else {
-        managedRoot = active.value.managedRoot;
-        managedRootMode = 'exclusive';
-      }
+      managedRoot = active.value?.managedRoot ?? path.join(this.dataDir, 'extensions', 'skills');
+      managedRootMode = 'exclusive';
     }
 
     return ok(new SkillCatalog({
@@ -325,8 +320,8 @@ export class LocalExtensionsService implements ExtensionsService {
       const active = await new CanonicalMcpMigrationCutoverStateStore({ dataDir: this.dataDir })
         .resolveActiveGeneration();
       if (!active.ok) return err(active.error);
+      managedRegistryMode = 'exclusive';
       if (active.value !== undefined) {
-        managedRegistryMode = 'exclusive';
         managedServers = active.value.stagedServers.map((server) => ({
           name: server.name,
           config: server.config,

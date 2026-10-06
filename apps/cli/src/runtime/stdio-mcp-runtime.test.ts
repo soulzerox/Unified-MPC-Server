@@ -619,6 +619,15 @@ describe('stdio MCP runtime', () => {
     const workspaceDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     await new SqliteWorkspaceRepository(workspaceDatabase).insert(workspace);
     workspaceDatabase.close();
+
+    const registryDir = path.join(dataPath, 'extensions', 'mcp');
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(path.join(registryDir, 'registry.json'), JSON.stringify({
+      mcpServers: {
+        'cross-process-mock': { command: 'node', args: ['mock-server.js'] },
+      },
+    }), 'utf8');
+
     const runtime = createStdioMcpRuntime(dataPath, workspace);
     const externalDatabase = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const externalSettings = new SqliteSettingsRepository(externalDatabase);
@@ -626,31 +635,33 @@ describe('stdio MCP runtime', () => {
       const before = await runtime.services.extensions.listMcpServers();
       expect(before.ok).toBe(true);
       if (!before.ok) throw new Error(before.error.message);
-      expect(before.value.servers.some((server) => server.name === 'cross-process-mock')).toBe(false);
-
-      externalSettings.set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
-        ...DEFAULT_EXTENSIONS_SETTINGS,
-        mandatoryMcpServers: [],
-        extraMcpServers: {
-          'cross-process-mock': { command: 'node', args: ['mock-server.js'] },
-        },
-      }));
-
-      const updated = await runtime.services.extensions.listMcpServers();
-      expect(updated.ok).toBe(true);
-      if (!updated.ok) throw new Error(updated.error.message);
-      expect(updated.value.servers).toEqual(expect.arrayContaining([
+      expect(before.value.servers).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'cross-process-mock', command: 'node', enabled: true }),
       ]));
 
       externalSettings.set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
         ...DEFAULT_EXTENSIONS_SETTINGS,
         mandatoryMcpServers: [],
+        disabledServers: ['cross-process-mock'],
       }));
-      const removed = await runtime.services.extensions.listMcpServers();
-      expect(removed.ok).toBe(true);
-      if (!removed.ok) throw new Error(removed.error.message);
-      expect(removed.value.servers.some((server) => server.name === 'cross-process-mock')).toBe(false);
+
+      const updated = await runtime.services.extensions.listMcpServers();
+      expect(updated.ok).toBe(true);
+      if (!updated.ok) throw new Error(updated.error.message);
+      expect(updated.value.servers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'cross-process-mock', command: 'node', enabled: false }),
+      ]));
+
+      externalSettings.set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+        ...DEFAULT_EXTENSIONS_SETTINGS,
+        mandatoryMcpServers: [],
+      }));
+      const restored = await runtime.services.extensions.listMcpServers();
+      expect(restored.ok).toBe(true);
+      if (!restored.ok) throw new Error(restored.error.message);
+      expect(restored.value.servers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'cross-process-mock', command: 'node', enabled: true }),
+      ]));
     } finally {
       externalDatabase.close();
       await runtime.close();

@@ -35,11 +35,22 @@ export class McpConfigLoader {
       : defaultApplicationDataDirectory(platform, home, environment);
     const discovered: DiscoveredMcpServer[] = [];
     const managedRegistryMode = this.options.managedRegistryMode ?? 'supplemental';
-    const managedServers = this.options.managedServers ?? [];
+    const managedServers = this.options.managedServers;
 
     if (managedRegistryMode === 'exclusive') {
-      for (const server of managedServers) {
-        discovered.push(this.toServer(server.name, 'unified-mpc-registry', server.config));
+      if (managedServers === undefined) {
+        const dataDir = this.options.dataDir?.trim();
+        if (dataDir !== undefined && dataDir.length > 0) {
+          await this.loadFile(
+            discovered,
+            path.join(dataDir, 'extensions', 'mcp', 'registry.json'),
+            'unified-mpc-registry',
+          );
+        }
+      } else {
+        for (const server of managedServers) {
+          discovered.push(this.toServer(server.name, 'unified-mpc-registry', server.config));
+        }
       }
       return dedupeServers(discovered);
     }
@@ -119,7 +130,7 @@ export class McpConfigLoader {
       );
     }
 
-    for (const server of managedServers) {
+    for (const server of managedServers ?? []) {
       discovered.push(this.toServer(server.name, 'unified-mpc-registry', server.config));
     }
 

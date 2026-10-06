@@ -1604,10 +1604,14 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         skippedCount: 0,
       });
       expect(diagnostics.mcpServers.activeGeneration).toBeNull();
-      // The migration cutover read model is authoritative for active-generation state.
-      // Do not synthesize installed-registry provenance when migration has not persisted a Skill entry.
-      expect(diagnostics.registryGeneration).toBe(0);
-      expect(diagnostics.skills.entries).toEqual([]);
+      expect(diagnostics.registryGeneration).toBe(1);
+      expect(diagnostics.skills.entries).toEqual([
+        expect.objectContaining({
+          id: 'skill:canonical-web-skill',
+          compatibilityState: 'compatible',
+          provenance: [expect.objectContaining({ sourceClient: 'cline' })],
+        }),
+      ]);
     } finally {
       await dynamic.close();
       await rm(root, { recursive: true, force: true });
@@ -1999,6 +2003,72 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
           message: expect.stringContaining('registry'),
         },
       });
+    } finally {
+      await dynamic.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps Web runtime inventory canonical-only before migration cutover', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'web-direct-canonical-authority-'));
+    const dataDir = path.join(root, 'data');
+    const canonicalSkill = path.join(dataDir, 'extensions', 'skills', 'web-direct-canonical');
+    const externalSkillRoot = path.join(root, 'external-skills');
+    const externalSkill = path.join(externalSkillRoot, 'legacy-extra-skill');
+    const registryDir = path.join(dataDir, 'extensions', 'mcp');
+    await mkdir(canonicalSkill, { recursive: true });
+    await mkdir(externalSkill, { recursive: true });
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(
+      path.join(canonicalSkill, 'SKILL.md'),
+      '---\nname: web-direct-canonical\ndescription: Canonical Web skill\n---\n# Canonical\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(externalSkill, 'SKILL.md'),
+      '---\nname: legacy-extra-skill\ndescription: Legacy extra skill\n---\n# Legacy\n',
+      'utf8',
+    );
+    await writeFile(path.join(registryDir, 'registry.json'), JSON.stringify({
+      mcpServers: { 'web-direct-canonical': { command: 'node', args: ['canonical.js'] } },
+    }), 'utf8');
+
+    const settings = new Map<string, string>([[
+      'extensions',
+      JSON.stringify({
+        mode: 'enable_all',
+        extraSkillRoots: [externalSkillRoot],
+        extraMcpServers: {
+          'legacy-extra-server': { command: 'node', args: ['legacy.js'] },
+        },
+      }),
+    ]]);
+    const dynamic = new ControlPlaneServer({
+      port: 0,
+      gateway: new GatewayService(gatewayOptions),
+      capabilityToken,
+      dataDir,
+      settingsRepository: {
+        get: (key: string): string | null => settings.get(key) ?? null,
+        set: (key: string, value: string): void => { settings.set(key, value); },
+        delete: (key: string): void => { settings.delete(key); },
+      },
+    });
+    await dynamic.listen();
+    try {
+      const skillsResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/skills`);
+      expect(skillsResponse.status).toBe(200);
+      const skills = (await skillsResponse.json()).skills as readonly { name: string; source: string }[];
+      expect(skills).toEqual([
+        expect.objectContaining({ name: 'web-direct-canonical', source: 'unified-mpc-skills' }),
+      ]);
+
+      const serversResponse = await fetch(`http://127.0.0.1:${dynamic.port}/api/servers`);
+      expect(serversResponse.status).toBe(200);
+      const servers = (await serversResponse.json()).servers as readonly { name: string; source: string }[];
+      expect(servers).toEqual([
+        expect.objectContaining({ name: 'web-direct-canonical', source: 'unified-mpc-registry' }),
+      ]);
     } finally {
       await dynamic.close();
       await rm(root, { recursive: true, force: true });

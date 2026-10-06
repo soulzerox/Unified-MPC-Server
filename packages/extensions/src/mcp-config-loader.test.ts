@@ -208,6 +208,42 @@ describe('McpConfigLoader', () => {
     ]);
   });
 
+  it('uses only the direct parent-owned registry in exclusive mode when no staged snapshot is supplied', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-exclusive-direct-mcp-'));
+    temporaryRoots.push(home);
+    const dataDir = path.join(home, 'data');
+    await mkdir(path.join(home, '.cursor'), { recursive: true });
+    await mkdir(path.join(dataDir, 'extensions', 'mcp'), { recursive: true });
+    await writeFile(path.join(home, '.cursor', 'mcp.json'), JSON.stringify({
+      mcpServers: { legacy: { command: 'legacy-command' } },
+    }), 'utf8');
+    await writeFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), JSON.stringify({
+      mcpServers: { canonical: { command: 'canonical-command', args: ['managed'] } },
+    }), 'utf8');
+
+    const servers = await new McpConfigLoader({
+      homeDir: home,
+      appDataDir: path.join(home, 'appdata'),
+      dataDir,
+      settings: {
+        ...DEFAULT_EXTENSIONS_SETTINGS,
+        extraMcpServers: {
+          'legacy-settings': { command: 'settings-command' },
+        },
+      },
+      managedRegistryMode: 'exclusive',
+    } as never).discover();
+
+    expect(servers).toEqual([
+      expect.objectContaining({
+        name: 'canonical',
+        source: 'unified-mpc-registry',
+        enabled: true,
+        config: { command: 'canonical-command', args: ['managed'] },
+      }),
+    ]);
+  });
+
   it('uses only the verified managed MCP snapshot in exclusive mode', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-exclusive-mcp-'));
     temporaryRoots.push(home);

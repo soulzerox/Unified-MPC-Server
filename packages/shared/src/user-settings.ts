@@ -17,6 +17,8 @@ export const USER_SETTING_KEYS = Object.freeze({
   codexToolsEnabled: 'codex_tools_enabled',
   ponytailMode: 'ponytail_mode',
   toolAvailability: 'tool_availability_v1',
+  repositoryMergePolicies: 'repository_merge_policies_v1',
+  guardedMergeProviderServer: 'guarded_merge_provider_server_v1',
   updateAutoCheck: 'update_auto_check',
   updateCheckOnStartup: 'update_check_on_startup',
   updateIntervalMinutes: 'update_interval_minutes',

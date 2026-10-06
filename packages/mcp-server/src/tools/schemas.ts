@@ -666,6 +666,21 @@ export const ragIndexStatusSchema = z.object({
 
 export const ragCancelIndexSchema = ragIndexStatusSchema;
 
+export const mergePolicyGetSchema = z.object({
+  repository: z.string().trim().min(1).max(512),
+}).strict();
+
+const mergeShaSchema = z.string().trim().regex(/^[a-f0-9]{40,64}$/i);
+
+export const guardedPrMergeSchema = z.object({
+  repository: z.string().trim().min(1).max(512),
+  pullRequest: z.number().int().positive(),
+  headSha: mergeShaSchema,
+  baseBranch: z.string().trim().min(1).max(256),
+  baseSha: mergeShaSchema.optional(),
+  receiptRef: z.string().trim().min(1).max(1024),
+}).strict();
+
 export const mcpCallSchema = z.object({
   server: z.string().trim().min(1).max(256),
   tool: z.string().trim().min(1).max(256),

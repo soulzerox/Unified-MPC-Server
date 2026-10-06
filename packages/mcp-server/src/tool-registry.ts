@@ -83,6 +83,7 @@ import { gitTools } from './tools/git-tools.js';
 import { goalTools } from './tools/goal-tools.js';
 import { harnessTools } from './tools/harness-tools.js';
 import { mcpBridgeTools } from './tools/mcp-bridge-tools.js';
+import { mergeTools } from './tools/merge-tools.js';
 import { processTools } from './tools/process-tools.js';
 import { ragTools } from './tools/rag-tools.js';
 import { sessionTools } from './tools/session-tools.js';
@@ -346,6 +347,7 @@ export class ToolRegistry {
       ...capabilityTools(context, options.setOfMarksStore),
       ...skillTools(context),
       ...mcpBridgeTools(context),
+      ...mergeTools(context),
       ...ragTools(context),
       ...contextTools(context, contextEngine),
       ...filePageTools(filePageEngine),

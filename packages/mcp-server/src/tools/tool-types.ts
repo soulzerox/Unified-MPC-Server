@@ -1,4 +1,4 @@
-import { err, ok, type InvocationAuthorization, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
+import { err, ok, type InvocationAuthorization, type RepositoryMergePolicy, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
@@ -16,6 +16,7 @@ import type {
   FileActor,
   FileService,
   GitService,
+  GuardedMergeService,
   GoalRequestCancellationPort,
   GoalContinuationService,
   GoalMutationFenceService,
@@ -162,6 +163,10 @@ export interface McpApplicationServices {
   readonly localProviders?: () => { readonly pdfProvider?: string; readonly lspCommands?: Readonly<Record<string, string>> };
   readonly capabilities?: CapabilityService;
   readonly extensions?: ExtensionsService;
+  readonly mergePolicy?: {
+    getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
+  };
+  readonly guardedMerge?: Pick<GuardedMergeService, 'dispatch'>;
   /** Parent-owned native Thai-RAG provider. Repository-local child MCP configuration cannot replace this port. */
   readonly thaiRag?: ThaiRagProviderPort;
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;

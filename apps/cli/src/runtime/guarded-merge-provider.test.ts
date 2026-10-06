@@ -80,6 +80,20 @@ describe('createGuardedMergeDispatchPort', () => {
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
+  it('fails closed before child dispatch when the repository is not in owner/repo form', async () => {
+    const callMcpTool = vi.fn();
+    const port = createGuardedMergeDispatchPort({
+      async describeMcpServer() { return description(); },
+      callMcpTool,
+    }, () => 'github');
+
+    await expect(port.dispatchMerge({
+      receiptRef: 'receipt-278',
+      subject: { ...subject, repository: 'invalid-repository' },
+    })).rejects.toThrow('must use owner/repo form');
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
   it('fails closed when the child merge provider rejects the exact-head call', async () => {
     const port = createGuardedMergeDispatchPort({
       async describeMcpServer() { return description(); },

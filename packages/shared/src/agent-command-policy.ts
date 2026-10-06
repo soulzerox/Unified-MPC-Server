@@ -12,6 +12,7 @@ const JAVASCRIPT_EXECUTABLES = new Set(['node', 'nodejs', 'bun', 'deno']);
 const PYTHON_EXECUTABLES = new Set(['python', 'python3']);
 const INLINE_SCRIPT_EXECUTABLES = new Set(['perl', 'ruby']);
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-C', '-c', '-cde', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
+const GH_GLOBAL_OPTIONS_WITH_VALUES = new Set(['--hostname', '--repo', '-r']);
 
 /**
  * Hard blocks machine-level commands plus terminal-style inline text editing that
@@ -23,6 +24,8 @@ export function prohibitedAgentCommandReason(executable: string, args: readonly 
   const basename = executableBasename(executable);
   const unscopedGitPush = prohibitedUnscopedGitPushReason(executable, args);
   if (unscopedGitPush !== undefined) return unscopedGitPush;
+  const unscopedPullRequestMerge = prohibitedUnscopedPullRequestMergeReason(executable, args);
+  if (unscopedPullRequestMerge !== undefined) return unscopedPullRequestMerge;
   const fileEditReason = terminalTextEditRoutingReason(basename, args);
   if (fileEditReason !== undefined) return fileEditReason;
   if (HARD_BLOCK_EXECUTABLES.has(basename)) return `${basename} is blocked for AI-issued execution`;
@@ -46,8 +49,25 @@ export function prohibitedUnscopedGitPushReason(
   return undefined;
 }
 
+export function prohibitedUnscopedPullRequestMergeReason(
+  executable: string,
+  args: readonly string[],
+): string | undefined {
+  const basename = executableBasename(executable);
+  if (basename === 'gh' && hasGhPullRequestMergeArguments(args)) return guardedPullRequestMergeReason();
+  if (isOpaqueGitRunner(basename)) {
+    const commandText = interpreterCommandText(basename, args);
+    if (commandText !== undefined && hasGhPullRequestMergeCommand(commandText)) return guardedPullRequestMergeReason();
+  }
+  return undefined;
+}
+
 function guardedGitPushReason(): string {
   return 'AI-issued git push must use the guarded git tool so the repository default branch and pull-request review gate are enforced';
+}
+
+function guardedPullRequestMergeReason(): string {
+  return 'AI-issued gh pr merge is blocked until a guarded merge path validates exact-head verification and truthful review evidence';
 }
 
 function isOpaqueGitRunner(basename: string): boolean {
@@ -78,6 +98,42 @@ function hasGitPushCommand(commandText: string): boolean {
     if (hasGitPushArguments(tokens.slice(index + 1).map(unquote))) return true;
   }
   return false;
+}
+
+function hasGhPullRequestMergeCommand(commandText: string): boolean {
+  const tokens = commandText.split(/\s+/).filter(Boolean).map((token) => token.replace(/^[('"`]+|[)"'`;|&]+$/g, ''));
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = unquote(tokens[index]!);
+    if (executableBasename(token) !== 'gh') continue;
+    if (hasGhPullRequestMergeArguments(tokens.slice(index + 1).map(unquote))) return true;
+  }
+  return false;
+}
+
+function hasGhPullRequestMergeArguments(args: readonly string[]): boolean {
+  const commands: string[] = [];
+  let index = 0;
+  while (index < args.length && commands.length < 2) {
+    const raw = unquote(args[index]!);
+    const lower = raw.toLowerCase();
+    if (lower.startsWith('-')) {
+      if (ghOptionTakesValue(lower) && !lower.includes('=') && !isAttachedShortGhOption(lower)) index += 2;
+      else index += 1;
+      continue;
+    }
+    commands.push(lower);
+    index += 1;
+  }
+  return commands[0] === 'pr' && commands[1] === 'merge';
+}
+
+function ghOptionTakesValue(argument: string): boolean {
+  if (GH_GLOBAL_OPTIONS_WITH_VALUES.has(argument)) return true;
+  return argument.startsWith('--repo=') || argument.startsWith('--hostname=') || isAttachedShortGhOption(argument);
+}
+
+function isAttachedShortGhOption(argument: string): boolean {
+  return argument.startsWith('-r') && argument.length > 2;
 }
 
 function unquote(value: string): string {

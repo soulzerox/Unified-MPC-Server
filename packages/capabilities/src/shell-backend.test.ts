@@ -141,6 +141,33 @@ describe('ShellCapabilityBackend', () => {
   });
 
   it.each([
+    ['direct GitHub CLI', 'gh', ['pr', 'merge', '275']],
+    ['GitHub CLI with repository override', 'gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'pr', 'merge', '275', '--merge']],
+    ['shell GitHub CLI', 'bash', ['-lc', 'gh pr merge 275 --merge']],
+  ] as const)('blocks unscoped PR merge via %s under Full Bypass', async (_label, executable, args) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-pr-merge-'));
+    temporaryRoots.push(root);
+    const backend = new ShellCapabilityBackend({
+      allowedRoots: [root],
+      executableResolver: { async resolve(): Promise<Result<string>> { return ok(process.execPath); } },
+    });
+    const executeWithAuthorization = backend.execute.bind(backend) as unknown as (
+      input: unknown,
+      signal: AbortSignal | undefined,
+      authorization: unknown,
+    ) => Promise<Result<unknown>>;
+
+    await expect(executeWithAuthorization({
+      operation: 'run', executable, arguments: args, cwd: root, execution: 'foreground', userConfirmed: true,
+    }, undefined, {
+      mode: 'full_bypass',
+      applicationApproved: true,
+      bypassApplicationAuthorization: true,
+      source: 'full_bypass',
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+  });
+
+  it.each([
     ['direct delete utility', 'rm', ['victim.txt']],
     ['inline PowerShell command', 'powershell.exe', ['-NoProfile', '-Command', 'Remove-Item victim.txt']],
     ['inline Node program', 'node.exe', ['-e', "process.stdout.write('inline')"]],

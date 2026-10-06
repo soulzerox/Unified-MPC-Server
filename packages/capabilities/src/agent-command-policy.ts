@@ -1,1 +1,1 @@
-export { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from '@unified-mpc/shared';
+export { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, prohibitedUnscopedPullRequestMergeReason, riskyAgentCommandReason } from '@unified-mpc/shared';

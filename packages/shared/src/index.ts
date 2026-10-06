@@ -34,7 +34,7 @@ export {
   type StdioPermissionProfileName,
 } from './agent-policy.js';
 
-export { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from './agent-command-policy.js';
+export { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, prohibitedUnscopedPullRequestMergeReason, riskyAgentCommandReason } from './agent-command-policy.js';
 export { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitConfigMutationReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason, prohibitedGitSubcommandReason } from './git-mutation-policy.js';
 export type { GitMutationPolicyOptions, GitPushArguments } from './git-mutation-policy.js';
 

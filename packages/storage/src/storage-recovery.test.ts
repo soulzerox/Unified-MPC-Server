@@ -95,7 +95,7 @@ describe('historical storage recovery', () => {
       expect(recovered.prepare('SELECT value FROM settings WHERE key = ?').get('cloudflare_public_url'))
         .toMatchObject({ value: 'https://historical.example.test' });
       expect(recovered.prepare('SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 1').get())
-        .toMatchObject({ id: '029_goal_runtime_integration_observations' });
+        .toMatchObject({ id: '030_merge_verification_receipts' });
     } finally {
       recovered.close();
     }

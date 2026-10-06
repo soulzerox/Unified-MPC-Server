@@ -413,6 +413,59 @@ describe('canonical extension registry', () => {
     }
   });
 
+  it('rolls sibling mutations back and runs compensation when atomic removal fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-remove-error-'));
+    try {
+      const registry = new CanonicalExtensionRegistry({ dataDir: root });
+      const initial = reconcileCanonicalExtensionCandidates([
+        skillCandidate(),
+        {
+          kind: 'mcp_server',
+          id: 'mcp:keep',
+          name: 'keep',
+          fingerprint: fingerprintB,
+          enabled: true,
+          provenance: {
+            originType: 'managed',
+            origin: 'unified-mpc:test',
+          },
+        },
+      ], {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(),
+      });
+      if (!initial.ok) throw new Error(initial.error.message);
+      const saved = await registry.save(initial.value);
+      expect(saved.ok).toBe(true);
+
+      const siblingFile = path.join(root, 'extensions', 'mcp', 'registry.json');
+      await mkdir(path.dirname(siblingFile), { recursive: true });
+      await writeFile(siblingFile, 'before\n', 'utf8');
+      let compensated = false;
+
+      const failed = await registry.removeAtomically(
+        'skill',
+        'skill:code-review',
+        [siblingFile],
+        async () => {
+          await writeFile(siblingFile, 'broken\n', 'utf8');
+          return err(appError('CONFLICT', 'simulated prune failure', true));
+        },
+        async () => {
+          compensated = true;
+        },
+      );
+
+      expect(failed).toEqual(err(appError('CONFLICT', 'simulated prune failure', true)));
+      expect(compensated).toBe(true);
+      expect(await readFile(siblingFile, 'utf8')).toBe('before\n');
+      expect(await registry.load()).toEqual(saved);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('serializes concurrent registry replacements through the shared config mutation lock', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-extension-registry-lock-'));
     try {

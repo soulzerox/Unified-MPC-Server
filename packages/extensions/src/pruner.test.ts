@@ -2,11 +2,45 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CanonicalExtensionRegistry, type CanonicalExtensionEntry } from './canonical-extension-registry.js';
 import { InstallerService } from './installer.js';
 import { PrunerService } from './pruner.js';
 import type { McpSessionManager } from './mcp-session-manager.js';
 
 const temporaryRoots: string[] = [];
+
+function canonicalEntry(
+  kind: CanonicalExtensionEntry['kind'],
+  name: string,
+  fingerprintCharacter: string,
+): CanonicalExtensionEntry {
+  const fingerprint = fingerprintCharacter.repeat(64);
+  return {
+    kind,
+    id: `${kind === 'skill' ? 'skill' : 'mcp'}:${name}`,
+    name,
+    fingerprint,
+    enabled: true,
+    compatibility: { platforms: ['linux'] },
+    compatibilityState: 'compatible',
+    conflict: false,
+    variantFingerprints: [fingerprint],
+    provenance: [{
+      originType: 'managed',
+      origin: `unified-mpc:test:${name}`,
+    }],
+  };
+}
+
+async function seedCanonicalRegistry(
+  dataDir: string,
+  entries: readonly CanonicalExtensionEntry[],
+): Promise<CanonicalExtensionRegistry> {
+  const registry = new CanonicalExtensionRegistry({ dataDir });
+  const saved = await registry.save({ entries });
+  if (!saved.ok) throw new Error(saved.error.message);
+  return registry;
+}
 
 afterEach(async () => {
   const { rm } = await import('node:fs/promises');
@@ -137,8 +171,17 @@ describe('PrunerService - Skill Pruning Pipeline', () => {
     await mkdir(cursorSkill, { recursive: true });
     await writeFile(path.join(parentSkill, 'SKILL.md'), '# Parent Skill\n', 'utf8');
     await writeFile(path.join(cursorSkill, 'SKILL.md'), '# Exported Copy\n', 'utf8');
+    const registry = await seedCanonicalRegistry(dataDir, [
+      canonicalEntry('skill', 'parent-skill', 'a'),
+      canonicalEntry('skill', 'keep-skill', 'b'),
+      canonicalEntry('mcp_server', 'keep-server', 'c'),
+    ]);
+    const before = await registry.load();
+    expect(before.ok).toBe(true);
+    if (!before.ok) return;
 
-    const result = await new PrunerService({ homeDir: home, dataDir }).pruneSkill({
+    const pruner = new PrunerService({ homeDir: home, dataDir });
+    const result = await pruner.pruneSkill({
       name: 'parent-skill',
       targets: ['unified-mpc'],
     });
@@ -148,6 +191,47 @@ describe('PrunerService - Skill Pruning Pipeline', () => {
     expect(result.value.removedPaths).toEqual([parentSkill]);
     await expect(stat(parentSkill)).rejects.toThrow();
     await expect(stat(cursorSkill)).resolves.toBeDefined();
+
+    const after = await registry.load();
+    expect(after.ok).toBe(true);
+    if (!after.ok) return;
+    expect(after.value.generation).toBe(before.value.generation + 1);
+    expect(after.value.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-skill' }),
+      expect.objectContaining({ kind: 'mcp_server', id: 'mcp:keep-server' }),
+    ]));
+    expect(after.value.entries.some((entry) => entry.id === 'skill:parent-skill')).toBe(false);
+
+    const repeated = await pruner.pruneSkill({
+      name: 'parent-skill',
+      targets: ['unified-mpc'],
+    });
+    expect(repeated.ok).toBe(true);
+    const afterRepeated = await registry.load();
+    expect(afterRepeated.ok).toBe(true);
+    if (!afterRepeated.ok) return;
+    expect(afterRepeated.value.generation).toBe(after.value.generation);
+  });
+
+  it('fails closed and preserves the canonical Skill when installed-state is malformed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-parent-skill-malformed-registry-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const parentSkill = path.join(dataDir, 'extensions', 'skills', 'parent-skill');
+    const registryFile = path.join(dataDir, 'extensions', 'state', 'registry.json');
+    await mkdir(parentSkill, { recursive: true });
+    await mkdir(path.dirname(registryFile), { recursive: true });
+    await writeFile(path.join(parentSkill, 'SKILL.md'), '# Parent Skill\n', 'utf8');
+    await writeFile(registryFile, '{"schemaVersion":1,"generation":"bad","entries":[]}\n', 'utf8');
+
+    const result = await new PrunerService({ dataDir }).pruneSkill({
+      name: 'parent-skill',
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    await expect(stat(parentSkill)).resolves.toBeDefined();
+    expect(await readFile(registryFile, 'utf8')).toContain('"generation":"bad"');
   });
 });
 
@@ -259,8 +343,17 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     await writeFile(cursorConfig, JSON.stringify({ mcpServers: {
       'parent-child': { command: 'node', args: ['exported.js'] },
     } }), 'utf8');
+    const canonicalRegistry = await seedCanonicalRegistry(dataDir, [
+      canonicalEntry('mcp_server', 'parent-child', 'a'),
+      canonicalEntry('mcp_server', 'keep-server', 'b'),
+      canonicalEntry('skill', 'keep-skill', 'c'),
+    ]);
+    const canonicalBefore = await canonicalRegistry.load();
+    expect(canonicalBefore.ok).toBe(true);
+    if (!canonicalBefore.ok) return;
 
-    const result = await new PrunerService({ homeDir: home, dataDir }).pruneServer({
+    const pruner = new PrunerService({ homeDir: home, dataDir });
+    const result = await pruner.pruneServer({
       name: 'parent-child',
       targets: ['unified-mpc'],
     });
@@ -269,13 +362,61 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     if (!result.ok) return;
     expect(result.value.updatedConfigFiles).toEqual([registryFile]);
     expect(result.value.processTerminated).toBe(false);
-    const registry = JSON.parse(await readFile(registryFile, 'utf8'));
-    expect(registry.mcpServers['parent-child']).toBeUndefined();
-    expect(registry.mcpServers.keeper).toEqual({ command: 'node', args: ['keep.js'] });
+    const configRegistry = JSON.parse(await readFile(registryFile, 'utf8'));
+    expect(configRegistry.mcpServers['parent-child']).toBeUndefined();
+    expect(configRegistry.mcpServers.keeper).toEqual({ command: 'node', args: ['keep.js'] });
     expect(result.value.removedPaths).toContain(managedServerRoot);
     await expect(stat(managedServerRoot)).rejects.toThrow();
     const cursor = JSON.parse(await readFile(cursorConfig, 'utf8'));
     expect(cursor.mcpServers['parent-child']).toBeDefined();
+
+    const canonicalAfter = await canonicalRegistry.load();
+    expect(canonicalAfter.ok).toBe(true);
+    if (!canonicalAfter.ok) return;
+    expect(canonicalAfter.value.generation).toBe(canonicalBefore.value.generation + 1);
+    expect(canonicalAfter.value.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'mcp_server', id: 'mcp:keep-server' }),
+      expect.objectContaining({ kind: 'skill', id: 'skill:keep-skill' }),
+    ]));
+    expect(canonicalAfter.value.entries.some((entry) => entry.id === 'mcp:parent-child')).toBe(false);
+
+    const repeated = await pruner.pruneServer({
+      name: 'parent-child',
+      targets: ['unified-mpc'],
+    });
+    expect(repeated.ok).toBe(true);
+    const canonicalAfterRepeated = await canonicalRegistry.load();
+    expect(canonicalAfterRepeated.ok).toBe(true);
+    if (!canonicalAfterRepeated.ok) return;
+    expect(canonicalAfterRepeated.value.generation).toBe(canonicalAfter.value.generation);
+  });
+
+  it('fails closed and preserves canonical MCP config when installed-state is malformed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-parent-server-malformed-registry-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const configFile = path.join(dataDir, 'extensions', 'mcp', 'registry.json');
+    const managedServerRoot = path.join(dataDir, 'extensions', 'mcp', 'parent-child');
+    const registryFile = path.join(dataDir, 'extensions', 'state', 'registry.json');
+    await mkdir(managedServerRoot, { recursive: true });
+    await mkdir(path.dirname(configFile), { recursive: true });
+    await mkdir(path.dirname(registryFile), { recursive: true });
+    const originalConfig = JSON.stringify({
+      mcpServers: { 'parent-child': { command: 'node', args: ['parent.js'] } },
+    });
+    await writeFile(configFile, originalConfig, 'utf8');
+    await writeFile(path.join(managedServerRoot, 'artifact.txt'), 'keep me\n', 'utf8');
+    await writeFile(registryFile, '{"schemaVersion":1,"generation":"bad","entries":[]}\n', 'utf8');
+
+    const result = await new PrunerService({ dataDir }).pruneServer({
+      name: 'parent-child',
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(await readFile(configFile, 'utf8')).toBe(originalConfig);
+    await expect(stat(managedServerRoot)).resolves.toBeDefined();
+    expect(await readFile(registryFile, 'utf8')).toContain('"generation":"bad"');
   });
 
   it('purges server entry and associated data dirs and broken symlinks', async () => {

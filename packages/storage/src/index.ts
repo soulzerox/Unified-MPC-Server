@@ -23,3 +23,5 @@ export * from './managed-resource-binding-repository.js';
 export * from './migrations/managed-resource-binding-migration.js';
 export * from './merge-verification-repository.js';
 export * from './migrations/merge-verification-receipt-migration.js';
+export * from './merge-reconciliation-repository.js';
+export * from './migrations/merge-reconciliation-migration.js';

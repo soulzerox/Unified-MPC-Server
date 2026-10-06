@@ -31,6 +31,7 @@ import { WORKSPACE_BASE_REF_MIGRATION_SQL } from './migrations/workspace-base-re
 import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base-rebase-migration.js';
 import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-integration-observation-migration.js';
 import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
+import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconciliation-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -100,6 +101,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '028_workspace_base_rebase', sql: WORKSPACE_BASE_REBASE_MIGRATION_SQL });
     this.applyMigration({ id: '029_goal_runtime_integration_observations', sql: GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL });
     this.applyMigration({ id: '030_merge_verification_receipts', sql: MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL });
+    this.applyMigration({ id: '031_merge_reconciliation_records', sql: MERGE_RECONCILIATION_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

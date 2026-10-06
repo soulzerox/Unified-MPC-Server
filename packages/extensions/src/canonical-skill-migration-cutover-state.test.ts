@@ -7,6 +7,7 @@ import {
   type CanonicalExtensionMigrationCandidate,
   type CanonicalExtensionMigrationManifest,
 } from './canonical-extension-migration-manifest.js';
+import { CanonicalExtensionRegistry, type CanonicalExtensionRegistrySnapshot } from './canonical-extension-registry.js';
 import {
   CanonicalSkillMigrationStager,
   fingerprintCanonicalSkillDirectory,
@@ -89,6 +90,33 @@ async function stage(
   return result.value;
 }
 
+async function seedInstalledMcp(dataDir: string): Promise<void> {
+  const saved = await new CanonicalExtensionRegistry({ dataDir }).save({
+    entries: [{
+      kind: 'mcp_server',
+      id: 'mcp:keep-me',
+      name: 'keep-me',
+      fingerprint: 'd'.repeat(64),
+      enabled: true,
+      compatibility: { platforms: ['linux'] },
+      compatibilityState: 'compatible',
+      conflict: false,
+      variantFingerprints: ['d'.repeat(64)],
+      provenance: [{
+        originType: 'managed',
+        origin: 'unified-mpc:mcp-test',
+      }],
+    }],
+  });
+  if (!saved.ok) throw new Error(saved.error.message);
+}
+
+async function installedRegistry(dataDir: string): Promise<CanonicalExtensionRegistrySnapshot> {
+  const loaded = await new CanonicalExtensionRegistry({ dataDir }).load();
+  if (!loaded.ok) throw new Error(loaded.error.message);
+  return loaded.value;
+}
+
 describe('CanonicalSkillMigrationCutoverStateStore', () => {
   it('activates a verified staged generation atomically without touching the runtime skill root', async () => {
     const root = await fixtureRoot('canonical-cutover-first-');
@@ -103,6 +131,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
       }),
     ]);
     const staged = await stage(dataDir, manifest);
+    await seedInstalledMcp(dataDir);
 
     const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
     const activated = await store.activate(manifest, staged);
@@ -121,6 +150,32 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
 
     const statePath = path.join(dataDir, 'extensions', 'state', 'migration', 'cutover-state.json');
     expect(JSON.parse(await readFile(statePath, 'utf8'))).toEqual(activated.value.state);
+
+    const installed = await installedRegistry(dataDir);
+    expect(installed.generation).toBe(2);
+    expect(installed.entries).toHaveLength(2);
+    expect(installed.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'mcp_server',
+        id: 'mcp:keep-me',
+      }),
+      expect.objectContaining({
+        kind: 'skill',
+        id: 'skill:alpha',
+        name: 'alpha',
+        fingerprint: source.fingerprint,
+        enabled: true,
+        compatibility: { platforms: ['linux'] },
+        compatibilityState: 'compatible',
+        conflict: false,
+        variantFingerprints: [source.fingerprint],
+        provenance: [expect.objectContaining({
+          originType: 'client-import',
+          origin: source.sourcePath,
+          sourceClient: 'cline',
+        })],
+      }),
+    ]));
     await expect(stat(path.join(dataDir, 'extensions', 'skills'))).rejects.toThrow();
   });
 
@@ -140,7 +195,9 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
 
     const first = await store.activate(manifest, staged);
+    const registryAfterFirst = await installedRegistry(dataDir);
     const second = await store.activate(manifest, staged);
+    const registryAfterSecond = await installedRegistry(dataDir);
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
     if (!first.ok || !second.ok) return;
@@ -148,6 +205,46 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     expect(second.value.changed).toBe(false);
     expect(second.value.state).toEqual(first.value.state);
     expect(second.value.state.previousGenerationId).toBeUndefined();
+    expect(registryAfterFirst.generation).toBe(1);
+    expect(registryAfterSecond).toEqual(registryAfterFirst);
+  });
+
+  it('repairs canonical Skill installed-state drift without inventing rollback history', async () => {
+    const root = await fixtureRoot('canonical-cutover-registry-repair-');
+    const dataDir = path.join(root, 'data');
+    const source = await createSkill(root, 'source', 'same', '# Same');
+    const manifest = manifestFor([
+      candidate({
+        id: 'skill:same',
+        name: 'same',
+        fingerprint: source.fingerprint,
+        sourcePath: source.sourcePath,
+      }),
+    ]);
+    const staged = await stage(dataDir, manifest);
+    const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
+
+    const first = await store.activate(manifest, staged);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const drifted = await new CanonicalExtensionRegistry({ dataDir }).save({ entries: [] });
+    expect(drifted.ok).toBe(true);
+    expect((await installedRegistry(dataDir)).entries).toEqual([]);
+
+    const second = await store.activate(manifest, staged);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.value.changed).toBe(false);
+    expect(second.value.state).toEqual(first.value.state);
+    expect(second.value.state.previousGenerationId).toBeUndefined();
+    expect((await installedRegistry(dataDir)).entries).toEqual([
+      expect.objectContaining({
+        kind: 'skill',
+        id: 'skill:same',
+        fingerprint: source.fingerprint,
+      }),
+    ]);
   });
 
   it('preserves the previously active generation for rollback when activating a new generation', async () => {
@@ -207,6 +304,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
     const first = await store.activate(firstManifest, firstStage);
     expect(first.ok).toBe(true);
+    const registryBeforeFailedActivation = await installedRegistry(dataDir);
 
     const secondSource = await createSkill(root, 'source-b', 'beta', '# Beta');
     const secondManifest = manifestFor([
@@ -232,6 +330,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     expect(loaded.ok).toBe(true);
     if (!loaded.ok || !first.ok) return;
     expect(loaded.value).toEqual(first.value.state);
+    expect(await installedRegistry(dataDir)).toEqual(registryBeforeFailedActivation);
   });
 
   it('fails closed instead of replacing a corrupt persisted cutover state', async () => {
@@ -407,6 +506,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
       candidate({ id: 'skill:beta', name: 'beta', fingerprint: secondSource.fingerprint, sourcePath: secondSource.sourcePath }),
     ]);
     const secondStage = await stage(dataDir, secondManifest);
+    await seedInstalledMcp(dataDir);
     const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
     expect((await store.activate(firstManifest, firstStage)).ok).toBe(true);
     expect((await store.activate(secondManifest, secondStage)).ok).toBe(true);
@@ -430,6 +530,10 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     if (!resolved.ok) return;
     expect(resolved.value?.state).toEqual(rolledBack.value.state);
     expect(resolved.value?.generationPath).toBe(firstStage.generationPath);
+    expect((await installedRegistry(dataDir)).entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'mcp_server', id: 'mcp:keep-me' }),
+      expect.objectContaining({ kind: 'skill', id: 'skill:alpha', fingerprint: firstSource.fingerprint }),
+    ]));
   });
 
   it('rolls the first canonical cutover back to legacy mode without touching staged or live roots', async () => {
@@ -440,6 +544,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
       candidate({ id: 'skill:alpha', name: 'alpha', fingerprint: source.fingerprint, sourcePath: source.sourcePath }),
     ]);
     const staged = await stage(dataDir, manifest);
+    await seedInstalledMcp(dataDir);
     const store = new CanonicalSkillMigrationCutoverStateStore({ dataDir });
     const activated = await store.activate(manifest, staged);
     expect(activated.ok).toBe(true);
@@ -466,6 +571,9 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     expect((await stat(staged.generationPath)).isDirectory()).toBe(true);
     expect(await readFile(stagedSkillPath, 'utf8')).toBe(stagedSkillBeforeRollback);
     await expect(stat(path.join(dataDir, 'extensions', 'skills'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await installedRegistry(dataDir)).entries).toEqual([
+      expect.objectContaining({ kind: 'mcp_server', id: 'mcp:keep-me' }),
+    ]);
   });
 
   it('makes concurrent first-cutover rollback retry-safe and leaves legacy mode active', async () => {

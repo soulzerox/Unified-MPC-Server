@@ -23,7 +23,7 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'skills_list',
-      description: 'List the union of bundled skills and every discovered machine-global or active-workspace skill from Cursor, Claude, Agents, Codex, the Codex plugin cache, GitHub workspace roots, and unified-mpc settings. Nested and symlinked skill collections are included. Filter with query or source.',
+      description: 'List skills from the current Unified runtime authority. When a canonical data directory is configured, the verified staged generation or direct canonical managed store is authoritative and client/global/workspace roots are not merged as runtime peers. Standalone callers without canonical data-directory ownership retain legacy multi-source discovery. Filter with query or source.',
       ...readOnlyInspection,
       inputSchema: skillsListSchema,
       handler: async (input) => context.services.extensions === undefined

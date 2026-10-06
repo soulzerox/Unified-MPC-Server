@@ -42,14 +42,21 @@ describe('skills and mcp bridge tools', () => {
       expect(tool?.annotations.readOnlyHint).toBe(true);
       expect(tool?.annotations.destructiveHint).toBe(false);
     }
-    expect(tools.find((entry) => entry.name === 'skills_list')?.description).toContain('Codex plugin');
-    expect(tools.find((entry) => entry.name === 'skills_list')?.description).toContain('machine-global');
+    const skillsList = tools.find((entry) => entry.name === 'skills_list');
+    expect(skillsList?.description).toContain('current Unified runtime authority');
+    expect(skillsList?.description).toContain('not merged as runtime peers');
+    expect(skillsList?.description).toContain('Standalone callers');
     for (const name of ['mcp_list', 'mcp_describe']) {
       const tool = tools.find((entry) => entry.name === name);
       expect(tool?.permission).toBe('READ');
       expect(tool?.annotations.readOnlyHint).toBe(true);
       expect(tool?.annotations.destructiveHint).toBe(false);
     }
+    const mcpList = tools.find((entry) => entry.name === 'mcp_list');
+    expect(mcpList?.description).toContain('current Unified runtime authority');
+    expect(mcpList?.description).toContain('not merged as runtime peers');
+    expect(mcpList?.description).toContain('standalone callers');
+
     const mcpCall = tools.find((entry) => entry.name === 'mcp_call');
     expect(mcpCall?.permission).toBe('DANGEROUS');
     expect(mcpCall?.annotations.readOnlyHint).toBe(false);

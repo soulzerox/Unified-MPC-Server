@@ -2121,13 +2121,31 @@ export class UpgradeRuntimeService {
       : loaded;
   }
 
-  private async importSkill(input: Record<string, unknown>, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
+  private async importSkill(input: Record<string, unknown>, _signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
     const workspaceId = readString(input, 'workspaceId');
     const sourcePath = readString(input, 'source_path') ?? readString(input, 'sourcePath') ?? readString(input, 'path');
     const requestedName = readString(input, 'name');
     if (workspaceId === undefined || sourcePath === undefined) return err(appError('INVALID_INPUT', 'skills_import requires workspaceId and source_path'));
+
     const file = this.services.file;
-    if (file === undefined) return ok(truthfulUnavailable('skills_import', 'needs_setup', ['workspace file service']));
+    const workspaceInfo = this.services.workspaceInfo;
+    const extensions = this.services.extensions;
+    const installer = this.services.installer;
+    const missingRequirements = [
+      ...(file === undefined ? ['workspace file service'] : []),
+      ...(workspaceInfo === undefined ? ['workspace info service'] : []),
+      ...(extensions === undefined ? ['canonical extension catalog'] : []),
+      ...(installer === undefined ? ['canonical skill installer'] : []),
+    ];
+    if (
+      file === undefined
+      || workspaceInfo === undefined
+      || extensions === undefined
+      || installer === undefined
+    ) {
+      return ok(truthfulUnavailable('skills_import', 'needs_setup', missingRequirements));
+    }
+
     const loaded = await file.readFile(this.actor, workspaceId, { path: sourcePath }, authorization);
     if (!loaded.ok) return loaded;
     const content = (loaded.value as { content?: unknown }).content;
@@ -2135,20 +2153,76 @@ export class UpgradeRuntimeService {
     if (Buffer.byteLength(content, 'utf8') > 256 * 1024) return err(appError('FILE_TOO_LARGE', 'Skill source exceeds 256 KiB'));
     const parsed = parseSkillDescriptor(content);
     if (!parsed.ok) return parsed;
+
     const name = requestedName ?? parsed.value.name;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return err(appError('INVALID_INPUT', 'Skill name must be 1-128 safe filename characters'));
-    const targetPath = `.agents/skills/${name}/SKILL.md`;
-    const plan = { tool: 'skills_import', status: 'ready', available: true, ready: true, workspaceId, sourcePath, targetPath, skill: parsed.value };
-    if (input.dryRun !== false && input.dry_run !== false) return ok({ ...plan, dryRun: true, executed: false, imported: false });
-    const saved = await file.writeFile(this.actor, workspaceId, {
-      path: targetPath,
-      content,
-      overwriteExisting: input.overwriteExisting === true || input.overwrite_existing === true,
-      ...(input.userConfirmed === true ? { userConfirmed: true } : {}),
-    }, signal, authorization);
-    return saved.ok
-      ? ok({ ...plan, dryRun: false, executed: true, imported: true, write: saved.value })
-      : saved;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) {
+      return err(appError('INVALID_INPUT', 'Skill name must be 1-128 safe filename characters'));
+    }
+    if (requestedName !== undefined && requestedName !== parsed.value.name) {
+      return err(appError('INVALID_INPUT', 'skills_import name must match the SKILL.md name; rename the source metadata before importing'));
+    }
+
+    const info = await workspaceInfo.info(this.actor, workspaceId);
+    if (!info.ok) return info;
+    if (typeof info.value !== 'object' || info.value === null || Array.isArray(info.value)) {
+      return err(appError('WORKSPACE_NOT_FOUND', `Workspace metadata is unavailable: ${workspaceId}`));
+    }
+    const workspace = info.value as Record<string, unknown>;
+    const rootValue = typeof workspace.realRootPath === 'string'
+      ? workspace.realRootPath
+      : typeof workspace.rootPath === 'string'
+        ? workspace.rootPath
+        : undefined;
+    if (rootValue === undefined || !path.isAbsolute(rootValue)) {
+      return err(appError('WORKSPACE_NOT_FOUND', `Workspace root is unavailable: ${workspaceId}`));
+    }
+    const workspaceRoot = path.resolve(rootValue);
+    const absoluteSourcePath = path.resolve(workspaceRoot, sourcePath);
+    const relativeSourcePath = path.relative(workspaceRoot, absoluteSourcePath);
+    if (
+      path.isAbsolute(relativeSourcePath)
+      || relativeSourcePath === '..'
+      || relativeSourcePath.startsWith(`..${path.sep}`)
+    ) {
+      return err(appError('PATH_OUTSIDE_WORKSPACE', 'Skill import source must stay inside the selected workspace'));
+    }
+
+    const canonical = await extensions.listSkills({ source: 'unified-mpc-skills' });
+    if (!canonical.ok) return canonical;
+    const existing = canonical.value.skills.find((skill) => skill.name === name);
+    const overwriteExisting = input.overwriteExisting === true || input.overwrite_existing === true;
+    const plan = {
+      tool: 'skills_import',
+      status: 'ready',
+      available: true,
+      ready: true,
+      workspaceId,
+      sourcePath,
+      target: 'unified-mpc',
+      canonicalSkillId: `skill:${name}`,
+      replacedExisting: existing !== undefined,
+      skill: parsed.value,
+    };
+    if (input.dryRun !== false && input.dry_run !== false) {
+      return ok({ ...plan, dryRun: true, executed: false, imported: false });
+    }
+    if (existing !== undefined && !overwriteExisting) {
+      return err(appError(
+        'CONFLICT',
+        `Canonical Skill already exists: ${existing.id}. Set overwriteExisting=true to replace it explicitly.`,
+        true,
+      ));
+    }
+
+    const installed = await installer.installSkill({
+      name,
+      source: absoluteSourcePath,
+      targets: ['unified-mpc'],
+      scope: 'global',
+    });
+    return installed.ok
+      ? ok({ ...plan, dryRun: false, executed: true, imported: true, install: installed.value })
+      : installed;
   }
 
   private async gitInsight(name: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<Result<unknown>> {

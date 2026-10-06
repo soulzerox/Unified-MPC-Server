@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, wr
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { CanonicalExtensionRegistry } from './canonical-extension-registry.js';
 import type { InstallScope, InstallTarget } from './installer.js';
 import { stripJsonComments } from './mcp-config-loader.js';
 import { writeAtomic } from './ide-sync.js';
@@ -114,6 +115,13 @@ export class PrunerService {
       const targetDir = this.skillTargetDirectory(target, scope, skillName, workspaceRoot);
       if (targetDir === undefined) continue;
 
+      if (target === 'unified-mpc') {
+        const canonical = await this.pruneCanonicalSkill(skillName, targetDir);
+        if (!canonical.ok) return err(canonical.error);
+        if (canonical.value) removedPaths.push(targetDir);
+        continue;
+      }
+
       try {
         const s = await stat(targetDir);
         if (s.isDirectory() || s.isFile()) {
@@ -130,6 +138,57 @@ export class PrunerService {
       name: skillName,
       removedPaths,
     });
+  }
+
+  private async pruneCanonicalSkill(
+    skillName: string,
+    targetDir: string,
+  ): Promise<Result<boolean>> {
+    const backupRoot = path.join(
+      this.dataDir,
+      'extensions',
+      'state',
+      'skill-prune-backups',
+    );
+    let backupPath: string | undefined;
+    let moved = false;
+
+    const removed = await new CanonicalExtensionRegistry({ dataDir: this.dataDir }).removeAtomically(
+      'skill',
+      `skill:${skillName}`,
+      [],
+      async () => {
+        try {
+          const target = await stat(targetDir);
+          if (!target.isDirectory() && !target.isFile()) return ok(false);
+          await mkdir(backupRoot, { recursive: true });
+          backupPath = path.join(backupRoot, `${skillName}-${randomUUID()}`);
+          await rename(targetDir, backupPath);
+          moved = true;
+          return ok(true);
+        } catch (error: unknown) {
+          if (isMissingPath(error)) return ok(false);
+          return err(appError(
+            'INTERNAL_ERROR',
+            `Failed to stage canonical Skill removal '${targetDir}': ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          ));
+        }
+      },
+      async () => {
+        if (!moved || backupPath === undefined) return;
+        await mkdir(path.dirname(targetDir), { recursive: true });
+        await rename(backupPath, targetDir);
+        moved = false;
+      },
+    );
+    if (!removed.ok) return err(removed.error);
+
+    if (moved && backupPath !== undefined) {
+      await rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
+      moved = false;
+    }
+    return ok(removed.value.operationValue);
   }
 
   private expandTargets(targets: readonly InstallTarget[]): readonly InstallTarget[] {
@@ -233,64 +292,95 @@ export class PrunerService {
     const movedData: Array<{ readonly source: string; readonly recoveryPath: string }> = [];
     let processTerminated = false;
     let recoveryStatus: 'partial' | 'rollback_failed' = 'partial';
+    const canonicalTarget = targets.includes('unified-mpc');
+    const managedServerRoot = path.join(this.dataDir, 'extensions', 'mcp', serverName);
+    const managedBackupRoot = path.join(this.dataDir, 'extensions', 'state', 'mcp-prune-backups');
+    let managedBackupPath: string | undefined;
+    let managedServerMoved = false;
+
+    const restoreManagedServer = async (): Promise<void> => {
+      if (!managedServerMoved || managedBackupPath === undefined) return;
+      await mkdir(path.dirname(managedServerRoot), { recursive: true });
+      await rename(managedBackupPath, managedServerRoot);
+      managedServerMoved = false;
+    };
+
+    const mutate = async (): Promise<void> => {
+      for (const configFile of configFiles) {
+        if (await purgeServerFromConfigFile(configFile, serverName)) {
+          updatedConfigFiles.push(configFile);
+        }
+      }
+
+      if (input.purgeDataDirs !== undefined) {
+        for (const dir of input.purgeDataDirs) {
+          const s = await lstat(dir);
+          if (s.isSymbolicLink()) continue;
+          if (s.isDirectory() || s.isFile()) {
+            const recoveryId = randomUUID();
+            const recoveryDir = path.join(this.recoveryTrashRoot, this.workspaceId!, recoveryId);
+            const recoveryPath = path.join(recoveryDir, 'payload');
+            await mkdir(recoveryDir, { recursive: true, mode: 0o700 });
+            const metadata = {
+              version: 2,
+              kind: 'deleted' as const,
+              state: 'prepared' as const,
+              recoveryId,
+              workspaceId: this.workspaceId!,
+              relativePath: path.relative(recoveryWorkspaceRoot!, dir),
+              deletedAt: new Date().toISOString(),
+              isDirectory: s.isDirectory(),
+            };
+            await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+            await rename(dir, recoveryPath);
+            movedData.push({ source: dir, recoveryPath });
+            await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify({ ...metadata, state: 'moved' })}\n`, { mode: 0o600 });
+            recoveryIds.push(recoveryId);
+            removedPaths.push(dir);
+          }
+        }
+      }
+
+      // Terminate session before removing parent-managed source. If termination fails,
+      // the transaction restores config while the managed checkout remains intact.
+      if (this.sessionManager !== undefined) {
+        await this.sessionManager.dropServer(serverName);
+        processTerminated = true;
+      }
+
+      if (canonicalTarget) {
+        try {
+          await lstat(managedServerRoot);
+          await mkdir(managedBackupRoot, { recursive: true });
+          managedBackupPath = path.join(managedBackupRoot, `${serverName}-${randomUUID()}`);
+          await rename(managedServerRoot, managedBackupPath);
+          managedServerMoved = true;
+          removedPaths.push(managedServerRoot);
+        } catch (error: unknown) {
+          if (!isMissingPath(error)) throw error;
+        }
+      }
+    };
 
     try {
-      await withConfigMutationTransaction(configFiles, async () => {
-        for (const configFile of configFiles) {
-          if (await purgeServerFromConfigFile(configFile, serverName)) {
-            updatedConfigFiles.push(configFile);
-          }
-        }
-
-        if (input.purgeDataDirs !== undefined) {
-          for (const dir of input.purgeDataDirs) {
-            const s = await lstat(dir);
-            if (s.isSymbolicLink()) continue;
-            if (s.isDirectory() || s.isFile()) {
-              const recoveryId = randomUUID();
-              const recoveryDir = path.join(this.recoveryTrashRoot, this.workspaceId!, recoveryId);
-              const recoveryPath = path.join(recoveryDir, 'payload');
-              await mkdir(recoveryDir, { recursive: true, mode: 0o700 });
-              const metadata = {
-                version: 2,
-                kind: 'deleted' as const,
-                state: 'prepared' as const,
-                recoveryId,
-                workspaceId: this.workspaceId!,
-                relativePath: path.relative(recoveryWorkspaceRoot!, dir),
-                deletedAt: new Date().toISOString(),
-                isDirectory: s.isDirectory(),
-              };
-              await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
-              await rename(dir, recoveryPath);
-              movedData.push({ source: dir, recoveryPath });
-              await writeFile(path.join(recoveryDir, 'metadata.json'), `${JSON.stringify({ ...metadata, state: 'moved' })}\n`, { mode: 0o600 });
-              recoveryIds.push(recoveryId);
-              removedPaths.push(dir);
-            }
-          }
-        }
-
-        // Terminate session before deleting parent-managed source. If termination fails,
-        // the config transaction can still roll back while the managed checkout remains intact.
-        if (this.sessionManager !== undefined) {
-          await this.sessionManager.dropServer(serverName);
-          processTerminated = true;
-        }
-
-        if (targets.includes('unified-mpc')) {
-          const managedServerRoot = path.join(this.dataDir, 'extensions', 'mcp', serverName);
-          try {
-            await lstat(managedServerRoot);
-            await rm(managedServerRoot, { recursive: true, force: true });
-            removedPaths.push(managedServerRoot);
-          } catch (error: unknown) {
-            if (!isMissingPath(error)) throw error;
-          }
-        }
-      });
+      if (canonicalTarget) {
+        const removed = await new CanonicalExtensionRegistry({ dataDir: this.dataDir }).removeAtomically(
+          'mcp_server',
+          `mcp:${serverName}`,
+          configFiles,
+          async () => {
+            await mutate();
+            return ok(undefined);
+          },
+          restoreManagedServer,
+        );
+        if (!removed.ok) throw new Error(removed.error.message);
+      } else {
+        await withConfigMutationTransaction(configFiles, mutate);
+      }
     } catch (error: unknown) {
       try {
+        await restoreManagedServer();
         for (const moved of [...movedData].reverse()) {
           await mkdir(path.dirname(moved.source), { recursive: true });
           await rename(moved.recoveryPath, moved.source);
@@ -305,6 +395,11 @@ export class PrunerService {
         recoveryStatus !== 'rollback_failed',
         { recoveryStatus },
       ));
+    }
+
+    if (managedServerMoved && managedBackupPath !== undefined) {
+      await rm(managedBackupPath, { recursive: true, force: true }).catch(() => undefined);
+      managedServerMoved = false;
     }
 
     return ok({

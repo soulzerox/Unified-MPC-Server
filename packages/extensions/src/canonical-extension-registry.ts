@@ -235,6 +235,75 @@ export class CanonicalExtensionRegistry {
     }
   }
 
+  public async removeAtomically<T>(
+    kind: CanonicalExtensionKind,
+    id: string,
+    siblingFiles: readonly string[],
+    operation: () => Promise<Result<T>>,
+    rollbackOperation?: () => Promise<void>,
+  ): Promise<Result<CanonicalExtensionRegistryKindReplacement<T>>> {
+    if (id.trim().length === 0) {
+      return err(appError('INVALID_INPUT', 'Canonical extension removal requires a non-empty id'));
+    }
+
+    try {
+      return await withConfigMutationTransaction(
+        [this.registryPath, ...siblingFiles],
+        async () => {
+          const current = await this.load();
+          if (!current.ok) throw new RegistryMutationAbort(current.error);
+
+          const entries = current.value.entries
+            .filter((entry) => entry.kind !== kind || entry.id !== id)
+            .sort(compareEntries);
+          const currentEntries = [...current.value.entries].sort(compareEntries);
+          const changed = JSON.stringify(entries) !== JSON.stringify(currentEntries);
+
+          try {
+            const operationResult = await operation();
+            if (!operationResult.ok) throw new RegistryMutationAbort(operationResult.error);
+
+            const registry = changed
+              ? {
+                  schemaVersion: REGISTRY_SCHEMA_VERSION,
+                  generation: current.value.generation + 1,
+                  entries,
+                } satisfies CanonicalExtensionRegistrySnapshot
+              : current.value;
+            if (changed) {
+              await writeAtomic(this.registryPath, JSON.stringify(registry, null, 2) + '\n');
+            }
+            return ok({
+              registry,
+              operationValue: operationResult.value,
+            });
+          } catch (error: unknown) {
+            if (rollbackOperation !== undefined) {
+              try {
+                await rollbackOperation();
+              } catch (rollbackError: unknown) {
+                throw new Error(
+                  'Canonical extension removal failed and compensation also failed: '
+                    + (rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+                  { cause: error },
+                );
+              }
+            }
+            throw error;
+          }
+        },
+      );
+    } catch (error: unknown) {
+      if (error instanceof RegistryMutationAbort) return err(error.appError);
+      return err(appError(
+        'INTERNAL_ERROR',
+        'Failed to atomically remove canonical extension: '
+          + (error instanceof Error ? error.message : String(error)),
+        true,
+      ));
+    }
+  }
+
   public async upsertAtomically(
     candidate: CanonicalExtensionCandidate,
     host: CanonicalExtensionHostProfile,

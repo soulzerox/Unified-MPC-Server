@@ -13,6 +13,8 @@ import {
   type CanonicalExtensionCompatibilityState,
   type CanonicalExtensionProvenance,
 } from './canonical-extension-registry.js';
+import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
+import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
 import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
 import { parseSkillMarkdown } from './skill-catalog.js';
 import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
@@ -250,6 +252,9 @@ export class InstallerService {
     const installedPaths: string[] = [];
     const targets = this.expandTargets(input.targets);
     if (targets.includes('unified-mpc')) {
+      const promoted = await new CanonicalSkillMigrationCutoverStateStore({ dataDir: this.dataDir })
+        .promoteActiveGenerationToDirectStore();
+      if (!promoted.ok) return err(promoted.error);
       const canonical = await this.installCanonicalSkill(
         skillName,
         input.source,
@@ -648,6 +653,16 @@ export class InstallerService {
     }
 
     const expandedTargets = this.expandTargets(input.targets);
+    if (expandedTargets.includes('unified-mpc')) {
+      const promoted = await new CanonicalMcpMigrationCutoverStateStore({ dataDir: this.dataDir })
+        .promoteActiveGenerationToDirectStore();
+      if (!promoted.ok) {
+        if (managedVersionRoot !== undefined) {
+          await rm(managedVersionRoot, { recursive: true, force: true }).catch(() => undefined);
+        }
+        return err(promoted.error);
+      }
+    }
     const configFiles = expandedTargets
       .map((target) => this.serverTargetConfigFile(target, scope, workspaceRoot))
       .filter((configFile): configFile is string => configFile !== undefined);

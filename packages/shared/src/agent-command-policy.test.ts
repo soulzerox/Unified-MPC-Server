@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from './agent-command-policy.js';
+import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, prohibitedUnscopedPullRequestMergeReason, riskyAgentCommandReason } from './agent-command-policy.js';
 
 describe('agent command policy', () => {
   it.each([
@@ -66,6 +66,26 @@ describe('agent command policy', () => {
   ] as const)('hard-blocks unscoped Git push execution: %s', (executable, args) => {
     expect(prohibitedUnscopedGitPushReason(executable, args)).toBeDefined();
     expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['gh', ['pr', 'merge', '275']],
+    ['gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'pr', 'merge', '275', '--merge']],
+    ['bash', ['-lc', 'gh pr merge 275 --merge']],
+    ['powershell.exe', ['-Command', 'gh.exe --repo soulzerox/Unified-MPC-Server pr merge 275 --merge']],
+    ['cmd.exe', ['/c', '"gh pr merge 275 --merge"']],
+  ] as const)('hard-blocks unscoped GitHub PR merge execution: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toContain('exact-head');
+    expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['gh', ['pr', 'view', '275']],
+    ['gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'pr', 'checks', '275']],
+    ['bash', ['-lc', 'gh pr status']],
+  ] as const)('allows non-merge GitHub CLI PR commands: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toBeUndefined();
+    expect(prohibitedAgentCommandReason(executable, args)).toBeUndefined();
   });
 
 });

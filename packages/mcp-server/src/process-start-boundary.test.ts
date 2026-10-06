@@ -76,6 +76,22 @@ describe('process_start gateway boundary', () => {
     ]);
   });
 
+  it.each([
+    ['gh', ['pr', 'merge', '275']],
+    ['gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'pr', 'merge', '275', '--merge']],
+    ['bash', ['-lc', 'gh pr merge 275 --merge']],
+  ] as const)('hard-blocks unscoped PR merge via process_start even when confirmed: %s', async (executable, args) => {
+    const approvals: unknown[] = [];
+    const starts: unknown[] = [];
+    const registry = registryWithCapture(starts, approvals);
+    const response = await registry.invoke('process_start', {
+      workspaceId: 'workspace-a', executable, args, userConfirmed: true,
+    });
+    expect(response).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED' } } });
+    expect(approvals).toEqual([]);
+    expect(starts).toEqual([]);
+  });
+
   it('hard-blocks machine-level destructive execution even when confirmed', async () => {
     const approvals: unknown[] = [];
     const starts: unknown[] = [];

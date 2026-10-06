@@ -212,6 +212,25 @@ describe('ProcessService', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it.each([
+    ['direct GitHub CLI', 'gh', ['pr', 'merge', '275']],
+    ['GitHub CLI with repository override', 'gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'pr', 'merge', '275', '--merge']],
+    ['shell GitHub CLI', 'bash', ['-lc', 'gh pr merge 275 --merge']],
+  ] as const)('blocks unscoped PR merge via %s even under Full Bypass', async (_label, executable, args) => {
+    const workspace = await createWorkspace();
+    const calls: ManagedProcessStart[] = [];
+    const service = new ProcessService(repository(workspace), { processManager: fakeManager(calls) });
+
+    await expect(service.start(
+      { clientId: 'client-1', clientName: 'test' },
+      workspace.id,
+      { executable, args, userConfirmed: true },
+      undefined,
+      fullBypassAuthorization,
+    )).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toHaveLength(0);
+  });
+
   it('shares process handles across clients and sessions in the same workspace while isolating other workspaces', async () => {
     const workspace = await createWorkspace();
     const service = new ProcessService(repository(workspace), { processManager: fakeManager([]) });

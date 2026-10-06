@@ -13,7 +13,7 @@ import {
 import { CommandPolicy, DefaultPermissionEngine, permissionProfiles, type PermissionEngine, type PermissionProfile } from '@unified-mpc/permissions';
 import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessRecoveryIdentity, type ManagedProcessStart, type ProcessLogResult } from '@unified-mpc/process';
 import { JsCommandDetector, ProjectDetector, type ProjectCommandKind } from '@unified-mpc/project';
-import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, riskyAgentCommandReason } from '@unified-mpc/shared';
+import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, prohibitedUnscopedPullRequestMergeReason, riskyAgentCommandReason } from '@unified-mpc/shared';
 import { isAbsoluteHostPath, isHostPathWithin, resolveHostPath, WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 import type { FileActor } from './file-service.js';
 import { ProjectService } from './project-service.js';
@@ -228,6 +228,8 @@ export class ProcessService {
 
     const unscopedGitPush = prohibitedUnscopedGitPushReason(request.executable, request.args);
     if (unscopedGitPush !== undefined) return err(appError('PERMISSION_DENIED', unscopedGitPush));
+    const unscopedPullRequestMerge = prohibitedUnscopedPullRequestMergeReason(request.executable, request.args);
+    if (unscopedPullRequestMerge !== undefined) return err(appError('PERMISSION_DENIED', unscopedPullRequestMerge));
 
     const applicationApproved = isApplicationAuthorized(authorization, request.userConfirmed === true);
     if (!bypassAuthorization) {

@@ -148,6 +148,24 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     scheduledContinuations: serviceProxy('scheduledContinuations', calls, (method) => method === 'authorizeWorkspaceMutation'
       ? { allowed: true }
       : { continuationId: 'continuation-1', status: 'scheduled', version: 1 }),
+    mergePolicy: {
+      async getByRepository() {
+        calls.push('mergePolicy.getByRepository');
+        return {
+          repository: 'soulzerox/Unified-MPC-Server',
+          defaultBranch: 'main',
+          verificationMode: 'local_exact_head' as const,
+          requiredGates: [{ name: 'test', source: 'local_command' as const }],
+          reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review' as const] },
+        };
+      },
+    },
+    guardedMerge: {
+      async dispatch(request: Parameters<NonNullable<McpApplicationServices['guardedMerge']>['dispatch']>[0]) {
+        calls.push('guardedMerge.dispatch');
+        return { status: 'dispatched' as const, receiptRef: request.receiptRef, subject: request.subject };
+      },
+    },
     extensions: serviceProxy('extensions', calls, (method, args) => {
       if (method === 'listSkills') return { skills: [] };
       if (method === 'runtimePolicySnapshot') return { ready: true, policies: [{

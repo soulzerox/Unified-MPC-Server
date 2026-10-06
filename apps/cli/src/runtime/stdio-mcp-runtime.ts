@@ -8,6 +8,7 @@ import {
   CodexService,
   FileService,
   GitService,
+  GuardedMergeService,
   GoalContinuationService,
   GoalRequestCancellationService,
   GoalTaskCancellationService,
@@ -56,13 +57,16 @@ import {
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
   SqliteManagedResourceBindingRepository,
+  SqliteMergeVerificationReceiptRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
-import { appError, err, ok, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, err, ok, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
+import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
+import { parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
 
 export interface StdioMcpRuntime {
@@ -252,6 +256,22 @@ export function createStdioMcpRuntime(
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
     idleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
   });
+  const mergeReceiptRepository = new SqliteMergeVerificationReceiptRepository(database);
+  const mergePolicy = {
+    async getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined> {
+      return parseRepositoryMergePolicySetting(
+        settingsRepository.get(USER_SETTING_KEYS.repositoryMergePolicies),
+        repository,
+      );
+    },
+  };
+  const guardedMerge = new GuardedMergeService(
+    mergeReceiptRepository,
+    createGuardedMergeDispatchPort(
+      extensions,
+      () => settingsRepository.get(USER_SETTING_KEYS.guardedMergeProviderServer)?.trim() || 'github',
+    ),
+  );
   const codexService = new CodexService(workspaceRepository, {
     auditService,
     profileProvider,
@@ -655,6 +675,8 @@ export function createStdioMcpRuntime(
     }),
     capabilities: capabilityRuntime.service,
     extensions,
+    mergePolicy,
+    guardedMerge,
     thaiRag: thaiRagPort,
     installer: {
       installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installSkill(input),

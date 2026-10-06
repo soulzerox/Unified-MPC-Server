@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -10,6 +10,7 @@ import { bundledSkillRootCandidates } from './create-local-extensions.js';
 import { buildCanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
 import { CanonicalSkillMigrationStager, fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
 import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
+import { CanonicalExtensionRegistry } from './canonical-extension-registry.js';
 import { CanonicalMcpMigrationStager } from './canonical-mcp-migration-stager.js';
 import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
 import { attachChildStderrDrain, fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory, type McpClientSession } from './mcp-session-manager.js';
@@ -123,7 +124,19 @@ describe('LocalExtensionsService MCP bridge', () => {
           name: 'direct-canonical',
           source: 'unified-mpc-skills',
         }),
+        expect.objectContaining({
+          name: 'legacy-bundled',
+          source: 'unified-mpc-skills',
+        }),
       ]);
+      await expect(service.readSkill({ skillId: 'bundled:agent-skills/legacy-bundled' })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          id: 'bundled:agent-skills/legacy-bundled',
+          source: 'bundled:agent-skills',
+          trustTier: 'bundled',
+        },
+      });
 
       const servers = await service.listMcpServers();
       expect(servers.ok).toBe(true);
@@ -135,6 +148,277 @@ describe('LocalExtensionsService MCP bridge', () => {
           command: 'node',
         }),
       ]);
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('materializes one bundled first-party generation into the direct canonical store with bundled provenance', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-direct-bundled-materialization-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const bundledRoot = path.join(root, 'bundled');
+      const bundledSkill = path.join(bundledRoot, 'ponytail');
+      await mkdir(bundledSkill, { recursive: true });
+      await writeFile(
+        path.join(bundledSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Bundled Ponytail\n---\n# Ponytail\n',
+        'utf8',
+      );
+      await writeFile(path.join(bundledSkill, 'policy.md'), 'first-party policy\n', 'utf8');
+
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        dataDir,
+        bundledSkillRoots: [bundledRoot],
+      } as never);
+
+      const listed = await service.listSkills({ query: 'ponytail' });
+      expect(listed).toMatchObject({
+        ok: true,
+        value: {
+          skills: [expect.objectContaining({
+            id: 'unified-mpc-skills/ponytail',
+            source: 'unified-mpc-skills',
+          })],
+        },
+      });
+
+      const bundledRead = await service.readSkill({ skillId: 'bundled:agent-skills/ponytail' });
+      expect(bundledRead).toMatchObject({
+        ok: true,
+        value: {
+          id: 'bundled:agent-skills/ponytail',
+          source: 'bundled:agent-skills',
+          trustTier: 'bundled',
+        },
+      });
+
+      const registry = await new CanonicalExtensionRegistry({ dataDir }).load();
+      expect(registry).toMatchObject({
+        ok: true,
+        value: {
+          entries: [expect.objectContaining({
+            kind: 'skill',
+            id: 'skill:ponytail',
+            name: 'ponytail',
+            provenance: [expect.objectContaining({
+              originType: 'bundled',
+              origin: bundledSkill,
+              contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            })],
+          })],
+        },
+      });
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reconciles bundled first-party upgrades deterministically while same-version restarts stay idempotent', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-upgrade-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const bundledRoot = path.join(root, 'bundled');
+      const bundledSkill = path.join(bundledRoot, 'ponytail');
+      const managedSkillFile = path.join(dataDir, 'extensions', 'skills', 'ponytail', 'SKILL.md');
+      await mkdir(bundledSkill, { recursive: true });
+      await writeFile(
+        path.join(bundledSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Bundled Ponytail v1\n---\nBUNDLED_V1\n',
+        'utf8',
+      );
+
+      const createService = (): LocalExtensionsService => new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        dataDir,
+        bundledSkillRoots: [bundledRoot],
+      } as never);
+
+      const first = createService();
+      await expect(first.listSkills({ query: 'ponytail' })).resolves.toMatchObject({
+        ok: true,
+        value: { skills: [expect.objectContaining({ id: 'unified-mpc-skills/ponytail' })] },
+      });
+      expect(await readFile(managedSkillFile, 'utf8')).toContain('BUNDLED_V1');
+      const registry = new CanonicalExtensionRegistry({ dataDir });
+      const firstRegistry = await registry.load();
+      expect(firstRegistry.ok).toBe(true);
+      if (!firstRegistry.ok) return;
+      const firstEntry = firstRegistry.value.entries.find((entry) => entry.id === 'skill:ponytail');
+      expect(firstEntry).toMatchObject({
+        provenance: [expect.objectContaining({ originType: 'bundled' })],
+      });
+      await first.close();
+
+      const sameVersion = createService();
+      await expect(sameVersion.listSkills({ query: 'ponytail' })).resolves.toMatchObject({ ok: true });
+      const secondRegistry = await registry.load();
+      expect(secondRegistry).toEqual(firstRegistry);
+      await sameVersion.close();
+
+      await writeFile(
+        path.join(bundledSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Bundled Ponytail v2\n---\nBUNDLED_V2\n',
+        'utf8',
+      );
+
+      const upgraded = createService();
+      await expect(upgraded.listSkills({ query: 'ponytail' })).resolves.toMatchObject({ ok: true });
+      expect(await readFile(managedSkillFile, 'utf8')).toContain('BUNDLED_V2');
+      const upgradedRegistry = await registry.load();
+      expect(upgradedRegistry.ok).toBe(true);
+      if (!upgradedRegistry.ok) return;
+      expect(upgradedRegistry.value.generation).toBe(firstRegistry.value.generation + 1);
+      const upgradedEntry = upgradedRegistry.value.entries.find((entry) => entry.id === 'skill:ponytail');
+      expect(upgradedEntry?.fingerprint).not.toBe(firstEntry?.fingerprint);
+      expect(upgradedEntry).toMatchObject({
+        provenance: [expect.objectContaining({
+          originType: 'bundled',
+          origin: bundledSkill,
+          contentSha256: upgradedEntry?.fingerprint,
+        })],
+      });
+      await upgraded.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves non-bundled canonical provenance when its managed payload is missing', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-missing-managed-provenance-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const bundledRoot = path.join(root, 'bundled');
+      const bundledSkill = path.join(bundledRoot, 'ponytail');
+      await mkdir(bundledSkill, { recursive: true });
+      await writeFile(
+        path.join(bundledSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Bundled Ponytail\n---\nBUNDLED_COPY\n',
+        'utf8',
+      );
+      const fingerprint = await fingerprintCanonicalSkillDirectory(bundledSkill);
+      expect(fingerprint.ok).toBe(true);
+      if (!fingerprint.ok) return;
+
+      const registry = new CanonicalExtensionRegistry({ dataDir });
+      const seeded = await registry.upsertAtomically({
+        kind: 'skill',
+        id: 'skill:ponytail',
+        name: 'ponytail',
+        fingerprint: fingerprint.value,
+        enabled: true,
+        provenance: {
+          originType: 'local-import',
+          origin: path.join(root, 'user-source'),
+          contentSha256: fingerprint.value,
+        },
+      }, {
+        platform: 'linux',
+        architecture: 'x64',
+        availableCommands: new Set(),
+      }, [], async () => undefined);
+      expect(seeded.ok).toBe(true);
+
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        dataDir,
+        bundledSkillRoots: [bundledRoot],
+      } as never);
+
+      const listed = await service.listSkills({ query: 'ponytail' });
+      expect(listed).toMatchObject({ ok: true, value: { skills: [] } });
+      const bundledRead = await service.readSkill({ skillId: 'bundled:agent-skills/ponytail' });
+      expect(bundledRead).toMatchObject({
+        ok: true,
+        value: { source: 'bundled:agent-skills', trustTier: 'bundled' },
+      });
+      await expect(readFile(path.join(dataDir, 'extensions', 'skills', 'ponytail', 'SKILL.md'), 'utf8'))
+        .rejects.toThrow();
+
+      const after = await registry.load();
+      expect(after).toMatchObject({
+        ok: true,
+        value: {
+          entries: [expect.objectContaining({
+            id: 'skill:ponytail',
+            provenance: [expect.objectContaining({ originType: 'local-import' })],
+          })],
+        },
+      });
+      await service.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not overwrite a same-name managed Skill when bundled content differs without bundled provenance', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-bundled-managed-conflict-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      const managedSkill = path.join(dataDir, 'extensions', 'skills', 'ponytail');
+      const bundledRoot = path.join(root, 'bundled');
+      const bundledSkill = path.join(bundledRoot, 'ponytail');
+      await mkdir(managedSkill, { recursive: true });
+      await mkdir(bundledSkill, { recursive: true });
+      await writeFile(
+        path.join(managedSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: User managed Ponytail\n---\nMANAGED_USER_COPY\n',
+        'utf8',
+      );
+      await writeFile(
+        path.join(bundledSkill, 'SKILL.md'),
+        '---\nname: ponytail\ndescription: Bundled Ponytail\n---\nBUNDLED_DISTRIBUTION_COPY\n',
+        'utf8',
+      );
+
+      const service = new LocalExtensionsService({
+        settings: DEFAULT_EXTENSIONS_SETTINGS,
+        homeDir: path.join(root, 'home'),
+        dataDir,
+        bundledSkillRoots: [bundledRoot],
+      } as never);
+
+      const listed = await service.listSkills({ query: 'ponytail' });
+      expect(listed).toMatchObject({
+        ok: true,
+        value: {
+          skills: [expect.objectContaining({
+            id: 'unified-mpc-skills/ponytail',
+            source: 'unified-mpc-skills',
+          })],
+        },
+      });
+      expect(await readFile(path.join(managedSkill, 'SKILL.md'), 'utf8')).toContain('MANAGED_USER_COPY');
+
+      const managedRead = await service.readSkill({ skillId: 'ponytail' });
+      expect(managedRead).toMatchObject({
+        ok: true,
+        value: {
+          id: 'unified-mpc-skills/ponytail',
+          source: 'unified-mpc-skills',
+        },
+      });
+      if (managedRead.ok) expect(managedRead.value.content).toContain('MANAGED_USER_COPY');
+
+      const bundledRead = await service.readSkill({ skillId: 'bundled:agent-skills/ponytail' });
+      expect(bundledRead).toMatchObject({
+        ok: true,
+        value: {
+          id: 'bundled:agent-skills/ponytail',
+          source: 'bundled:agent-skills',
+          trustTier: 'bundled',
+        },
+      });
+      if (bundledRead.ok) expect(bundledRead.value.content).toContain('BUNDLED_DISTRIBUTION_COPY');
+
+      const registry = await new CanonicalExtensionRegistry({ dataDir }).load();
+      expect(registry).toMatchObject({ ok: true, value: { entries: [] } });
       await service.close();
     } finally {
       await rm(root, { recursive: true, force: true });

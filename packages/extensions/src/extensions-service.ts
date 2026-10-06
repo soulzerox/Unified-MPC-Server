@@ -5,6 +5,9 @@ import { fingerprintExternalMcpValue, McpSessionManager, type McpClientFactory }
 import { configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 import { CanonicalSkillMigrationCutoverStateStore } from './canonical-skill-migration-cutover-state.js';
 import { CanonicalMcpMigrationCutoverStateStore } from './canonical-mcp-migration-cutover-state.js';
+import { CanonicalExtensionRegistry } from './canonical-extension-registry.js';
+import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-stager.js';
+import { InstallerService } from './installer.js';
 import { SkillCatalog } from './skill-catalog.js';
 import type {
   DiscoveredMcpServer,
@@ -38,6 +41,7 @@ export class LocalExtensionsService implements ExtensionsService {
   private readonly workspaceRootProvider: () => Promise<string | undefined>;
   private readonly bundledSkillRoots: readonly string[];
   private readonly sessions: McpSessionManager;
+  private bundledSkillReconciliation: Promise<Result<undefined>> | undefined;
   private mandatoryMcpLastResult: MandatoryMcpBootstrapResult | undefined;
   private mandatoryMcpLastCheckedAt: string | undefined;
   private closed = false;
@@ -297,6 +301,10 @@ export class LocalExtensionsService implements ExtensionsService {
       const active = await new CanonicalSkillMigrationCutoverStateStore({ dataDir: this.dataDir })
         .resolveActiveGeneration();
       if (!active.ok) return err(active.error);
+      if (active.value === undefined) {
+        const reconciledBundled = await this.reconcileBundledSkillsIntoDirectStore();
+        if (!reconciledBundled.ok) return err(reconciledBundled.error);
+      }
       managedRoot = active.value?.managedRoot ?? path.join(this.dataDir, 'extensions', 'skills');
       managedRootMode = 'exclusive';
     }
@@ -309,6 +317,86 @@ export class LocalExtensionsService implements ExtensionsService {
       ...(managedRoot === undefined ? {} : { managedRoot }),
       ...(managedRootMode === undefined ? {} : { managedRootMode }),
     }));
+  }
+
+  private async reconcileBundledSkillsIntoDirectStore(): Promise<Result<undefined>> {
+    if (this.dataDir === undefined || this.bundledSkillRoots.length === 0) return ok(undefined);
+    this.bundledSkillReconciliation ??= this.performBundledSkillReconciliation();
+    return this.bundledSkillReconciliation;
+  }
+
+  private async performBundledSkillReconciliation(): Promise<Result<undefined>> {
+    if (this.dataDir === undefined) return ok(undefined);
+
+    const settings = this.settingsProvider();
+    const bundledCatalog = new SkillCatalog({
+      homeDir: path.join(this.dataDir, 'extensions', 'state', 'bundled-scan-home'),
+      settings: { ...settings, extraSkillRoots: [] },
+      bundledRoots: this.bundledSkillRoots,
+    });
+    const listed = await bundledCatalog.list({ source: 'bundled:agent-skills' });
+    if (!listed.ok) return err(listed.error);
+
+    const selectedByName = new Map<string, SkillSummary>();
+    for (const skill of listed.value.skills) {
+      if (!selectedByName.has(skill.name)) selectedByName.set(skill.name, skill);
+    }
+    if (selectedByName.size === 0) return ok(undefined);
+
+    const registry = new CanonicalExtensionRegistry({ dataDir: this.dataDir });
+    const registrySnapshot = await registry.load();
+    if (!registrySnapshot.ok) return err(registrySnapshot.error);
+
+    const installer = new InstallerService({
+      dataDir: this.dataDir,
+      ...(this.homeDir === undefined ? {} : { homeDir: this.homeDir }),
+      ...(this.appDataDir === undefined ? {} : { appDataDir: this.appDataDir }),
+    });
+
+    for (const skill of selectedByName.values()) {
+      const bundledDirectory = path.dirname(skill.skillPath);
+      const bundledFingerprint = await fingerprintCanonicalSkillDirectory(bundledDirectory);
+      if (!bundledFingerprint.ok) return err(bundledFingerprint.error);
+
+      const canonicalId = `skill:${skill.name}`;
+      const registryEntry = registrySnapshot.value.entries.find((entry) => (
+        entry.kind === 'skill' && entry.id === canonicalId
+      ));
+      const managedDirectory = path.join(this.dataDir, 'extensions', 'skills', skill.name);
+      const managedFingerprint = await fingerprintCanonicalSkillDirectory(managedDirectory);
+
+      let shouldMaterialize = false;
+      if (managedFingerprint.ok) {
+        if (managedFingerprint.value === bundledFingerprint.value) {
+          shouldMaterialize = registryEntry === undefined
+            || registryEntry.provenance.some((source) => source.originType === 'bundled');
+        } else {
+          shouldMaterialize = registryEntry !== undefined
+            && !registryEntry.conflict
+            && registryEntry.fingerprint === managedFingerprint.value
+            && registryEntry.provenance.some((source) => source.originType === 'bundled');
+        }
+      } else if (managedFingerprint.error.code === 'FILE_NOT_FOUND') {
+        shouldMaterialize = registryEntry === undefined
+          || registryEntry.provenance.some((source) => source.originType === 'bundled');
+      } else {
+        return err(managedFingerprint.error);
+      }
+
+      if (!shouldMaterialize) continue;
+      const installed = await installer.installBundledSkill({
+        name: skill.name,
+        source: bundledDirectory,
+      });
+      if (!installed.ok) {
+        if (installed.error.code === 'UNSUPPORTED_PLATFORM' || installed.error.code === 'EXECUTABLE_NOT_FOUND') {
+          continue;
+        }
+        return err(installed.error);
+      }
+    }
+
+    return ok(undefined);
   }
 
   private async loader(): Promise<Result<McpConfigLoader>> {

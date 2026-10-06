@@ -6,6 +6,7 @@ export * from './doctor-service.js';
 export * from './error-sanitizer.js';
 export * from './git-service.js';
 export * from './guarded-merge-service.js';
+export * from './merge-reconciliation-service.js';
 export * from './issue-closure-github-collection-service.js';
 export * from './issue-closure-successor-owner-discovery-service.js';
 export * from './issue-closure-successor-owner-creation-service.js';

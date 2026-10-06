@@ -469,6 +469,12 @@ export class ToolRegistry {
       const goalLease = readGoalLeaseProof(parsed.value);
       const parsedInput = stripGoalLeaseEnvelope(parsed.value);
       let activeRoutedInput = await this.routeInputToActiveWorkspace(tool.name, parsedInput);
+      const hardBlockedReason = hardBlockedInvocationReason(tool.name, activeRoutedInput);
+      if (hardBlockedReason !== undefined) {
+        const response = mapError(appError('PERMISSION_DENIED', hardBlockedReason));
+        await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, hardBlockedReason);
+        return response;
+      }
       const prohibitedReason = fullBypass ? undefined : prohibitedInvocationReason(tool.name, activeRoutedInput);
       if (prohibitedReason !== undefined) {
         const response = mapError(appError('PERMISSION_DENIED', prohibitedReason));
@@ -2592,6 +2598,15 @@ function projectCommandKind(toolName: string): ProjectCommandKind | undefined {
   if (toolName === 'project_typecheck') return 'typecheck';
   if (toolName === 'project_build') return 'build';
   return undefined;
+}
+
+function hardBlockedInvocationReason(toolName: string, input: unknown): string | undefined {
+  if (toolName !== 'mcp_call' || !isRecord(input)) return undefined;
+  const childTool = readTrimmedString(input.tool);
+  if (childTool === undefined) return undefined;
+  const normalizedChildTool = childTool.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (normalizedChildTool !== 'mergepullrequest' && normalizedChildTool !== 'enableautomerge') return undefined;
+  return 'AI-issued child MCP pull-request merge actions are blocked until a guarded merge path validates exact-head verification and truthful review evidence';
 }
 
 function prohibitedInvocationReason(toolName: string, input: unknown): string | undefined {

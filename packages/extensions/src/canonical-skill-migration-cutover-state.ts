@@ -3,7 +3,10 @@ import { readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalExtensionMigrationManifest } from './canonical-extension-migration-manifest.js';
-import { withConfigMutationTransaction } from './config-mutation-lock.js';
+import {
+  CanonicalExtensionRegistry,
+  type CanonicalExtensionEntry,
+} from './canonical-extension-registry.js';
 import { CanonicalSkillMigrationDryRunVerifier } from './canonical-skill-migration-dry-run.js';
 import {
   type CanonicalSkillMigrationSkippedEntry,
@@ -59,6 +62,11 @@ export interface CanonicalSkillMigrationCutoverStateStoreOptions {
   readonly dataDir: string;
 }
 
+interface VerifiedCanonicalSkillMigrationGeneration {
+  readonly generation: CanonicalSkillMigrationActiveGeneration;
+  readonly manifest: CanonicalExtensionMigrationManifest;
+}
+
 const CUTOVER_STATE_SCHEMA_VERSION = 1 as const;
 const GENERATION_ID_PATTERN = /^[a-f0-9]{64}$/;
 const CUTOVER_STATE_FILENAME = 'cutover-state.json';
@@ -67,6 +75,7 @@ export class CanonicalSkillMigrationCutoverStateStore {
   private readonly dataDir: string;
   private readonly statePath: string;
   private readonly generationsRoot: string;
+  private readonly installedRegistry: CanonicalExtensionRegistry;
   private readonly verifier = new CanonicalSkillMigrationDryRunVerifier();
 
   public constructor(options: CanonicalSkillMigrationCutoverStateStoreOptions) {
@@ -74,6 +83,7 @@ export class CanonicalSkillMigrationCutoverStateStore {
     const migrationRoot = path.join(this.dataDir, 'extensions', 'state', 'migration');
     this.statePath = path.join(migrationRoot, CUTOVER_STATE_FILENAME);
     this.generationsRoot = path.join(migrationRoot, 'staged-generations');
+    this.installedRegistry = new CanonicalExtensionRegistry({ dataDir: this.dataDir });
   }
 
   public async load(): Promise<Result<CanonicalSkillMigrationCutoverState | undefined>> {
@@ -85,10 +95,12 @@ export class CanonicalSkillMigrationCutoverStateStore {
     if (!state.ok) return err(state.error);
     if (state.value === undefined) return ok(undefined);
 
-    return verifyPersistedGeneration(
+    const verified = await verifyPersistedGeneration(
       this.generationsRoot,
       state.value,
     );
+    if (!verified.ok) return err(verified.error);
+    return ok(verified.value.generation);
   }
 
   public async resolveRollbackTarget(): Promise<Result<CanonicalSkillMigrationRollbackTarget | undefined>> {
@@ -116,7 +128,7 @@ export class CanonicalSkillMigrationCutoverStateStore {
       target: 'canonical',
       fromGenerationId: current.value.activeGenerationId,
       toGenerationId: previousGenerationId,
-      generation: generation.value,
+      generation: generation.value.generation,
     });
   }
 
@@ -127,52 +139,95 @@ export class CanonicalSkillMigrationCutoverStateStore {
       return err(appError('INVALID_INPUT', 'Canonical Skill rollback requires a valid expected active generation id'));
     }
 
-    try {
-      return await withConfigMutationTransaction([this.statePath], async () => {
-        const current = await loadCutoverState(this.statePath);
-        if (!current.ok) return err(current.error);
-        if (current.value === undefined) {
+    const current = await loadCutoverState(this.statePath);
+    if (!current.ok) return err(current.error);
+    if (current.value === undefined) {
+      return err(appError('CONFLICT', 'Canonical Skill rollback requires an active generation'));
+    }
+    if (current.value.activeGenerationId !== expectedActiveGenerationId) {
+      return err(appError(
+        'CONFLICT',
+        'Canonical Skill active generation changed before rollback could be applied',
+        true,
+      ));
+    }
+
+    const previousGenerationId = current.value.previousGenerationId;
+    let replacementEntries: readonly CanonicalExtensionEntry[] = [];
+    if (previousGenerationId !== undefined) {
+      const rollbackState: CanonicalSkillMigrationCutoverState = {
+        schemaVersion: CUTOVER_STATE_SCHEMA_VERSION,
+        activeGenerationId: previousGenerationId,
+        previousGenerationId: current.value.activeGenerationId,
+      };
+      const verified = await verifyPersistedGeneration(this.generationsRoot, rollbackState);
+      if (!verified.ok) return err(verified.error);
+      const entries = canonicalEntriesForInstalledState(verified.value);
+      if (!entries.ok) return err(entries.error);
+      replacementEntries = entries.value;
+    }
+
+    const replaced = await this.installedRegistry.replaceKindAtomically(
+      'skill',
+      replacementEntries,
+      [this.statePath],
+      async () => {
+        const lockedCurrent = await loadCutoverState(this.statePath);
+        if (!lockedCurrent.ok) return err(lockedCurrent.error);
+        if (lockedCurrent.value === undefined) {
           return err(appError('CONFLICT', 'Canonical Skill rollback requires an active generation'));
         }
-        if (current.value.activeGenerationId !== expectedActiveGenerationId) {
+        if (lockedCurrent.value.activeGenerationId !== expectedActiveGenerationId) {
           return err(appError(
             'CONFLICT',
             'Canonical Skill active generation changed before rollback could be applied',
             true,
           ));
         }
-        const previousGenerationId = current.value.previousGenerationId;
+        if (lockedCurrent.value.previousGenerationId !== previousGenerationId) {
+          return err(appError(
+            'CONFLICT',
+            'Canonical Skill rollback target changed before rollback could be applied',
+            true,
+          ));
+        }
+
         if (previousGenerationId === undefined) {
           await unlink(this.statePath);
-          return ok({
+          return ok<CanonicalSkillMigrationCutoverRollback>({
             target: 'legacy',
-            fromGenerationId: current.value.activeGenerationId,
+            fromGenerationId: lockedCurrent.value.activeGenerationId,
           });
         }
 
         const nextState: CanonicalSkillMigrationCutoverState = {
           schemaVersion: CUTOVER_STATE_SCHEMA_VERSION,
           activeGenerationId: previousGenerationId,
-          previousGenerationId: current.value.activeGenerationId,
+          previousGenerationId: lockedCurrent.value.activeGenerationId,
         };
-        const verified = await verifyPersistedGeneration(this.generationsRoot, nextState);
-        if (!verified.ok) return err(verified.error);
+        const lockedVerified = await verifyPersistedGeneration(this.generationsRoot, nextState);
+        if (!lockedVerified.ok) return err(lockedVerified.error);
+        const lockedEntries = canonicalEntriesForInstalledState(lockedVerified.value);
+        if (!lockedEntries.ok) return err(lockedEntries.error);
+        if (JSON.stringify(lockedEntries.value) !== JSON.stringify(replacementEntries)) {
+          return err(appError(
+            'CONFLICT',
+            'Canonical Skill rollback target metadata changed before rollback could be applied',
+            true,
+          ));
+        }
 
         await writeAtomic(this.statePath, JSON.stringify(nextState, null, 2) + '\n');
-        return ok({
+        return ok<CanonicalSkillMigrationCutoverRollback>({
           target: 'canonical',
-          fromGenerationId: current.value.activeGenerationId,
+          fromGenerationId: lockedCurrent.value.activeGenerationId,
           toGenerationId: previousGenerationId,
           state: nextState,
         });
-      });
-    } catch (error: unknown) {
-      return err(appError(
-        'INTERNAL_ERROR',
-        `Failed to rollback canonical Skill cutover state: ${error instanceof Error ? error.message : String(error)}`,
-        true,
-      ));
-    }
+      },
+    );
+    if (!replaced.ok) return err(replaced.error);
+    return ok(replaced.value.operationValue);
   }
 
   public async activate(
@@ -186,22 +241,28 @@ export class CanonicalSkillMigrationCutoverStateStore {
     );
     if (!generationPath.ok) return err(generationPath.error);
 
-    try {
-      return await withConfigMutationTransaction([this.statePath], async () => {
+    const proof = await this.verifier.verify(manifest, staged);
+    if (!proof.ok) return err(proof.error);
+    if (proof.value.generationId !== staged.generationId || !proof.value.exactParity) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Canonical Skill cutover requires an exact dry-run proof for the staged generation',
+      ));
+    }
+
+    const replacementEntries = canonicalEntriesFromManifest(manifest, staged.stagedSkills);
+    if (!replacementEntries.ok) return err(replacementEntries.error);
+
+    const replaced = await this.installedRegistry.replaceKindAtomically(
+      'skill',
+      replacementEntries.value,
+      [this.statePath],
+      async () => {
         const current = await loadCutoverState(this.statePath);
         if (!current.ok) return err(current.error);
 
-        const proof = await this.verifier.verify(manifest, staged);
-        if (!proof.ok) return err(proof.error);
-        if (proof.value.generationId !== staged.generationId || !proof.value.exactParity) {
-          return err(appError(
-            'INVALID_INPUT',
-            'Canonical Skill cutover requires an exact dry-run proof for the staged generation',
-          ));
-        }
-
         if (current.value?.activeGenerationId === staged.generationId) {
-          return ok({
+          return ok<CanonicalSkillMigrationCutoverActivation>({
             changed: false,
             state: current.value,
           });
@@ -214,20 +275,15 @@ export class CanonicalSkillMigrationCutoverStateStore {
             ? {}
             : { previousGenerationId: current.value.activeGenerationId }),
         };
-
         await writeAtomic(this.statePath, JSON.stringify(nextState, null, 2) + '\n');
-        return ok({
+        return ok<CanonicalSkillMigrationCutoverActivation>({
           changed: true,
           state: nextState,
         });
-      });
-    } catch (error: unknown) {
-      return err(appError(
-        'INTERNAL_ERROR',
-        `Failed to update canonical Skill cutover state: ${error instanceof Error ? error.message : String(error)}`,
-        true,
-      ));
-    }
+      },
+    );
+    if (!replaced.ok) return err(replaced.error);
+    return ok(replaced.value.operationValue);
   }
 }
 
@@ -239,10 +295,79 @@ interface PersistedStageSnapshot {
   readonly skipped: readonly CanonicalSkillMigrationSkippedEntry[];
 }
 
+function canonicalEntriesForInstalledState(
+  generation: VerifiedCanonicalSkillMigrationGeneration,
+): Result<readonly CanonicalExtensionEntry[]> {
+  return canonicalEntriesFromManifest(generation.manifest, generation.generation.stagedSkills);
+}
+
+function canonicalEntriesFromManifest(
+  manifest: CanonicalExtensionMigrationManifest,
+  stagedSkills: readonly CanonicalSkillMigrationStagedSkill[],
+): Result<readonly CanonicalExtensionEntry[]> {
+  const activeManifestEntries = manifest.entries.filter((entry) => (
+    entry.kind === 'skill'
+    && entry.enabledStates.length === 1
+    && entry.enabledStates[0] === true
+    && entry.compatibilityState === 'compatible'
+    && (entry.classification === 'unique' || entry.classification === 'identical')
+    && entry.selectedFingerprint !== undefined
+  ));
+  if (activeManifestEntries.length !== stagedSkills.length) {
+    return err(appError(
+      'INVALID_INPUT',
+      'Canonical Skill staged generation does not match installed-state manifest entries',
+    ));
+  }
+
+  const entries: CanonicalExtensionEntry[] = [];
+  for (const staged of stagedSkills) {
+    const entry = activeManifestEntries.find((candidate) => candidate.id === staged.id);
+    if (
+      entry === undefined
+      || entry.selectedFingerprint !== staged.fingerprint
+      || entry.name !== staged.name
+    ) {
+      return err(appError(
+        'INVALID_INPUT',
+        `Canonical Skill installed-state metadata does not match staged entry: ${staged.id}`,
+      ));
+    }
+
+    const source = entry.sources.find((candidate) => (
+      candidate.enabled
+      && candidate.compatibilityState === 'compatible'
+      && candidate.fingerprint === staged.fingerprint
+      && candidate.sourcePath === staged.sourcePath
+    ));
+    if (source === undefined) {
+      return err(appError(
+        'INVALID_INPUT',
+        `Canonical Skill installed-state source metadata is missing: ${staged.id}`,
+      ));
+    }
+
+    entries.push({
+      kind: 'skill',
+      id: entry.id,
+      name: entry.name,
+      fingerprint: staged.fingerprint,
+      enabled: true,
+      ...(source.compatibility === undefined ? {} : { compatibility: source.compatibility }),
+      compatibilityState: 'compatible',
+      conflict: false,
+      variantFingerprints: entry.variantFingerprints,
+      provenance: entry.provenance,
+    });
+  }
+
+  return ok(entries.sort((left, right) => left.id.localeCompare(right.id)));
+}
+
 async function verifyPersistedGeneration(
   generationsRoot: string,
   state: CanonicalSkillMigrationCutoverState,
-): Promise<Result<CanonicalSkillMigrationActiveGeneration>> {
+): Promise<Result<VerifiedCanonicalSkillMigrationGeneration>> {
   const generationPath = path.resolve(generationsRoot, state.activeGenerationId);
   try {
     const generationInfo = await stat(generationPath);
@@ -303,11 +428,14 @@ async function verifyPersistedGeneration(
     if (!proof.ok) return err(proof.error);
 
     return ok({
-      state,
-      generationPath,
-      managedRoot: path.join(generationPath, 'skills'),
-      stagedSkills: staged.stagedSkills,
-      skipped: staged.skipped,
+      generation: {
+        state,
+        generationPath,
+        managedRoot: path.join(generationPath, 'skills'),
+        stagedSkills: staged.stagedSkills,
+        skipped: staged.skipped,
+      },
+      manifest: manifestValue as CanonicalExtensionMigrationManifest,
     });
   } catch (error: unknown) {
     if (isMissingPath(error) || error instanceof SyntaxError) {

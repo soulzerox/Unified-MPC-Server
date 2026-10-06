@@ -21,3 +21,5 @@ export * from './storage-identity.js';
 export * from './storage-recovery.js';
 export * from './managed-resource-binding-repository.js';
 export * from './migrations/managed-resource-binding-migration.js';
+export * from './merge-verification-repository.js';
+export * from './migrations/merge-verification-receipt-migration.js';

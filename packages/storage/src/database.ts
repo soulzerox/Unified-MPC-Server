@@ -30,6 +30,7 @@ import { WORKSPACE_ADMISSION_MIGRATION_SQL } from './migrations/workspace-admiss
 import { WORKSPACE_BASE_REF_MIGRATION_SQL } from './migrations/workspace-base-ref-migration.js';
 import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base-rebase-migration.js';
 import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-integration-observation-migration.js';
+import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -98,6 +99,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '027_workspace_base_ref', sql: WORKSPACE_BASE_REF_MIGRATION_SQL });
     this.applyMigration({ id: '028_workspace_base_rebase', sql: WORKSPACE_BASE_REBASE_MIGRATION_SQL });
     this.applyMigration({ id: '029_goal_runtime_integration_observations', sql: GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL });
+    this.applyMigration({ id: '030_merge_verification_receipts', sql: MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

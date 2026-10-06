@@ -935,6 +935,178 @@ describe('upgrade runtime', () => {
     ]);
   });
 
+  it('routes skills_import into the canonical Unified store without writing a workspace skill copy', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-skill-import-'));
+    const fileReads: string[] = [];
+    const workspaceWrites: string[] = [];
+    const installs: unknown[] = [];
+    try {
+      const runtime = new UpgradeRuntimeService({
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({ id: 'ws-1', rootPath: root, realRootPath: root });
+          },
+        },
+        file: {
+          async readFile(_actor, _workspaceId, request) {
+            fileReads.push(request.path);
+            return ok({
+              path: request.path,
+              content: '---\nname: imported-skill\ndescription: Imported skill\n---\n# Imported\n',
+              startLine: 1,
+              endLine: 5,
+              encoding: 'utf8' as const,
+            });
+          },
+          async writeFile(_actor, _workspaceId, request) {
+            workspaceWrites.push(request.path);
+            return ok({ path: request.path, bytesWritten: 1 });
+          },
+        } as never,
+        extensions: {
+          async listSkills() {
+            return ok({ skills: [] });
+          },
+        } as never,
+        installer: {
+          async installSkill(input) {
+            installs.push(input);
+            return ok({
+              name: input.name,
+              installedPaths: ['/canonical/extensions/skills/imported-skill/SKILL.md'],
+              targets: input.targets,
+            });
+          },
+        } as never,
+      }, actor);
+
+      const dryRun = await runtime.execute('skills_import', {
+        workspaceId: 'ws-1',
+        source_path: 'imports/imported-skill/SKILL.md',
+      });
+      expect(dryRun).toMatchObject({
+        ok: true,
+        value: {
+          dryRun: true,
+          executed: false,
+          imported: false,
+          target: 'unified-mpc',
+          canonicalSkillId: 'skill:imported-skill',
+        },
+      });
+      expect(installs).toEqual([]);
+      expect(workspaceWrites).toEqual([]);
+
+      const imported = await runtime.execute('skills_import', {
+        workspaceId: 'ws-1',
+        source_path: 'imports/imported-skill/SKILL.md',
+        dryRun: false,
+      });
+      expect(imported).toMatchObject({
+        ok: true,
+        value: {
+          dryRun: false,
+          executed: true,
+          imported: true,
+          target: 'unified-mpc',
+          canonicalSkillId: 'skill:imported-skill',
+        },
+      });
+      expect(fileReads).toEqual([
+        'imports/imported-skill/SKILL.md',
+        'imports/imported-skill/SKILL.md',
+      ]);
+      expect(workspaceWrites).toEqual([]);
+      expect(installs).toEqual([{
+        name: 'imported-skill',
+        source: path.join(root, 'imports', 'imported-skill', 'SKILL.md'),
+        targets: ['unified-mpc'],
+        scope: 'global',
+      }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('requires explicit overwriteExisting before skills_import replaces a canonical same-name skill', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-canonical-skill-import-conflict-'));
+    const installs: unknown[] = [];
+    try {
+      const runtime = new UpgradeRuntimeService({
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({ id: 'ws-1', rootPath: root, realRootPath: root });
+          },
+        },
+        file: {
+          async readFile(_actor, _workspaceId, request) {
+            return ok({
+              path: request.path,
+              content: '---\nname: imported-skill\ndescription: Imported skill\n---\n# Replacement\n',
+              startLine: 1,
+              endLine: 5,
+              encoding: 'utf8' as const,
+            });
+          },
+        } as never,
+        extensions: {
+          async listSkills() {
+            return ok({
+              skills: [{
+                id: 'unified-mpc-skills/imported-skill',
+                name: 'imported-skill',
+                description: 'Existing canonical skill',
+                source: 'unified-mpc-skills',
+                trustTier: 'user' as const,
+                rootPath: '/canonical/extensions/skills',
+                skillPath: '/canonical/extensions/skills/imported-skill/SKILL.md',
+              }],
+            });
+          },
+        } as never,
+        installer: {
+          async installSkill(input) {
+            installs.push(input);
+            return ok({
+              name: input.name,
+              installedPaths: ['/canonical/extensions/skills/imported-skill/SKILL.md'],
+              targets: input.targets,
+            });
+          },
+        } as never,
+      }, actor);
+
+      const blocked = await runtime.execute('skills_import', {
+        workspaceId: 'ws-1',
+        source_path: 'imports/imported-skill/SKILL.md',
+        dryRun: false,
+      });
+      expect(blocked).toMatchObject({
+        ok: false,
+        error: { code: 'CONFLICT' },
+      });
+      expect(installs).toEqual([]);
+
+      const replaced = await runtime.execute('skills_import', {
+        workspaceId: 'ws-1',
+        source_path: 'imports/imported-skill/SKILL.md',
+        dryRun: false,
+        overwriteExisting: true,
+      });
+      expect(replaced).toMatchObject({
+        ok: true,
+        value: {
+          imported: true,
+          replacedExisting: true,
+          target: 'unified-mpc',
+        },
+      });
+      expect(installs).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the 50-prompt routing golden set in the top-20 with a local p95 budget', async () => {
     const templates = [
       ['run a Linux WSL developer command', 'wsl_exec'],

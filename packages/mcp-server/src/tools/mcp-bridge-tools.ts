@@ -45,7 +45,7 @@ export function mcpBridgeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'mcp_list',
-      description: 'List local MCP servers discovered from Cursor, Claude Desktop, and unified-mpc settings. This inspection is read-only and does not flatten child tools into the unified-mpc catalog.',
+      description: 'List child MCP servers from the current Unified runtime authority. With a canonical data directory, the verified staged generation or direct canonical registry is authoritative and client/workspace configs are not merged as runtime peers; standalone callers without canonical ownership retain legacy discovery. This inspection is read-only and does not flatten child tools into the unified-mpc catalog.',
       ...readOnlyInspection,
       inputSchema: mcpListSchema,
       handler: async () => context.services.extensions === undefined

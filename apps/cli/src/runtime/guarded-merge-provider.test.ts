@@ -26,6 +26,19 @@ function description(tools: readonly string[] = ['merge_pull_request']): ReturnT
       name,
       qualifiedName: `mcp:github/${name}`,
       description: name,
+      inputSchema: name === 'merge_pull_request'
+        ? {
+            type: 'object',
+            properties: {
+              owner: { type: 'string' },
+              repo: { type: 'string' },
+              pullNumber: { type: 'number' },
+              merge_method: { type: 'string' },
+              expectedHeadSha: { type: 'string' },
+            },
+            required: ['owner', 'repo', 'pullNumber'],
+          }
+        : undefined,
     })),
   });
 }
@@ -44,10 +57,11 @@ describe('createGuardedMergeDispatchPort', () => {
       server: 'github',
       tool: 'merge_pull_request',
       arguments: {
-        repository_full_name: subject.repository,
-        pr_number: subject.pullRequest,
+        owner: 'soulzerox',
+        repo: 'Unified-MPC-Server',
+        pullNumber: subject.pullRequest,
         merge_method: 'merge',
-        expected_head_sha: subject.headSha,
+        expectedHeadSha: subject.headSha,
       },
       descriptorFingerprint: 'a'.repeat(64),
       catalogFingerprint: 'b'.repeat(64),
@@ -63,6 +77,20 @@ describe('createGuardedMergeDispatchPort', () => {
 
     await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject }))
       .rejects.toThrow('does not expose merge_pull_request');
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before child dispatch when the repository is not in owner/repo form', async () => {
+    const callMcpTool = vi.fn();
+    const port = createGuardedMergeDispatchPort({
+      async describeMcpServer() { return description(); },
+      callMcpTool,
+    }, () => 'github');
+
+    await expect(port.dispatchMerge({
+      receiptRef: 'receipt-278',
+      subject: { ...subject, repository: 'invalid-repository' },
+    })).rejects.toThrow('must use owner/repo form');
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 

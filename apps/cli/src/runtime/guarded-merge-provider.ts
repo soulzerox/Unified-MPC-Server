@@ -16,14 +16,16 @@ export function createGuardedMergeDispatchPort(
         throw new Error(`Guarded merge provider '${server}' does not expose ${MERGE_TOOL}`);
       }
 
+      const { owner, repo } = repositoryCoordinates(request.subject.repository);
       const result = await extensions.callMcpTool({
         server,
         tool: MERGE_TOOL,
         arguments: {
-          repository_full_name: request.subject.repository,
-          pr_number: request.subject.pullRequest,
+          owner,
+          repo,
+          pullNumber: request.subject.pullRequest,
           merge_method: 'merge',
-          expected_head_sha: request.subject.headSha,
+          expectedHeadSha: request.subject.headSha,
         },
         descriptorFingerprint: described.value.provenance.descriptorFingerprint,
         catalogFingerprint: described.value.provenance.catalogFingerprint,
@@ -31,6 +33,15 @@ export function createGuardedMergeDispatchPort(
       if (!result.ok) throw new Error(result.error.message);
     },
   };
+}
+
+function repositoryCoordinates(value: string): { owner: string; repo: string } {
+  const trimmed = value.trim();
+  const parts = trimmed.split('/');
+  if (parts.length !== 2 || parts.some((part) => part.length === 0)) {
+    throw new Error(`Guarded merge repository '${value}' must use owner/repo form`);
+  }
+  return { owner: parts[0]!, repo: parts[1]! };
 }
 
 function requiredProviderServer(value: string): string {

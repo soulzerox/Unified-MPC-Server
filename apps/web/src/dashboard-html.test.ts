@@ -120,6 +120,7 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('id="cleanup-evaluations-body"');
     expect(html).toContain('/api/workspaces/cleanup-evaluations');
     expect(html).toContain('Durable refs');
+    expect(html).toContain('Retention pending');
     expect(html).toContain('Unknown (fail-closed)');
     expect(html).not.toContain('id="cleanup-workspace-delete-btn"');
     expect(html).not.toContain('id="cleanup-workspace-run-btn"');

@@ -680,11 +680,14 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const evaluation = {
       workspaceId: 'goal-workspace-a',
       goalId: 'goal-a',
-      disposition: 'blocked' as const,
-      blockers: ['durable_references_unknown'],
+      disposition: 'retention_pending' as const,
+      blockers: [],
       workspaceAvailable: true,
       writerLeaseActive: false,
-      durableReferenceState: 'unknown' as const,
+      durableReferenceState: 'clear' as const,
+      retentionStartedAt: '2026-10-07T00:00:00.000Z',
+      retentionEligibleAt: '2026-10-08T00:00:00.000Z',
+      retentionRemainingMs: 43_200_000,
     };
     const workspaceControl = {
       list: async (): Promise<readonly WebWorkspaceSummary[]> => [],

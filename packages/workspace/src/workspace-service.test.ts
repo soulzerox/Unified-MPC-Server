@@ -338,6 +338,7 @@ describe('WorkspaceService', () => {
     const result = await service.evaluateGoalWorkspaceCleanup({
       goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
       goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+      goalRetentionGraceMs: 0,
     });
 
     expect(result).toMatchObject({
@@ -353,6 +354,125 @@ describe('WorkspaceService', () => {
     const unrelatedInspection = repository.entries.find((workspace) => workspace.id === 'inspection-missing');
     expect(unrelatedInspection?.archivedAt).toBeUndefined();
     expect(unrelatedInspection?.unavailableSince).toBeUndefined();
+  });
+
+  it('keeps a safe Goal Workspace in retention pending until the default grace elapses', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-retention-pending-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-retention-pending',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') });
+
+    const result = await service.evaluateGoalWorkspaceCleanup({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: [{
+        workspaceId: 'goal-workspace-retention-pending',
+        disposition: 'retention_pending',
+        blockers: [],
+        retentionStartedAt: '2026-09-22T11:00:00.000Z',
+        retentionEligibleAt: '2026-09-23T11:00:00.000Z',
+        retentionRemainingMs: 82_800_000,
+      }],
+    });
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
+  });
+
+  it('promotes a safe Goal Workspace to retention candidate only after the default grace elapses', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-retention-ready-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-retention-ready',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-23T11:00:00.001Z') });
+
+    const result = await service.evaluateGoalWorkspaceCleanup({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: [{
+        workspaceId: 'goal-workspace-retention-ready',
+        disposition: 'retention_candidate',
+        blockers: [],
+        retentionStartedAt: '2026-09-22T11:00:00.000Z',
+        retentionEligibleAt: '2026-09-23T11:00:00.000Z',
+        retentionRemainingMs: 0,
+      }],
+    });
+  });
+
+  it('fails cleanup classification closed when authoritative Goal activity cannot anchor retention', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-retention-invalid-anchor-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-invalid-anchor',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+
+    const result = await new WorkspaceService(repository).evaluateGoalWorkspaceCleanup({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection({ lastActivityAt: 'not-a-timestamp' })]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: [{
+        workspaceId: 'goal-workspace-invalid-anchor',
+        disposition: 'blocked',
+        blockers: ['goal_retention_anchor_invalid'],
+      }],
+    });
+  });
+
+  it('rejects an invalid Goal Workspace retention grace instead of weakening it', async () => {
+    const result = await new WorkspaceService(lifecycleRepository([])).evaluateGoalWorkspaceCleanup({
+      goalRetentionGraceMs: -1,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
   });
 
   it('classifies a completed integrated clean Goal Workspace as a retention candidate without archiving it', async () => {
@@ -377,6 +497,7 @@ describe('WorkspaceService', () => {
     const result = await service.reconcileLifecycle({
       goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
       goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+      goalRetentionGraceMs: 0,
     });
 
     expect(result).toMatchObject({

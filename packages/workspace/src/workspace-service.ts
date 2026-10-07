@@ -74,7 +74,10 @@ export interface WorkspaceRegistrationOptions {
 
 export type WorkspaceDurableReferenceState = 'clear' | 'present' | 'unknown';
 
-export type WorkspaceCleanupDisposition = 'blocked' | 'retention_candidate';
+export const DEFAULT_GOAL_WORKSPACE_RETENTION_GRACE_MS = 24 * 60 * 60 * 1_000;
+const MAX_GOAL_WORKSPACE_RETENTION_GRACE_MS = 365 * 24 * 60 * 60 * 1_000;
+
+export type WorkspaceCleanupDisposition = 'blocked' | 'retention_pending' | 'retention_candidate';
 
 export type WorkspaceCleanupBlockerReason =
   | 'protected_workspace'
@@ -87,6 +90,7 @@ export type WorkspaceCleanupBlockerReason =
   | 'goal_runtime_not_idle'
   | 'goal_integration_not_integrated'
   | 'goal_workspace_not_clean'
+  | 'goal_retention_anchor_invalid'
   | 'active_writer_lease'
   | 'durable_references_unknown'
   | 'durable_references_present';
@@ -99,10 +103,15 @@ export interface WorkspaceLifecycleCleanupEvaluation {
   readonly workspaceAvailable: boolean;
   readonly writerLeaseActive: boolean;
   readonly durableReferenceState: WorkspaceDurableReferenceState;
+  readonly retentionStartedAt?: string;
+  readonly retentionEligibleAt?: string;
+  readonly retentionRemainingMs?: number;
 }
 
 export interface WorkspaceCleanupEvaluationOptions {
   readonly protectedWorkspaceIds?: readonly WorkspaceId[];
+  /** Conservative retention grace after the last authoritative Goal runtime activity. */
+  readonly goalRetentionGraceMs?: number;
   /** Authoritative #82 projection keyed by durable Goal identity. Missing truth fails cleanup classification closed. */
   readonly goalRuntimeProjections?: ReadonlyMap<string, GoalRuntimeProjection>;
   /**
@@ -304,6 +313,10 @@ export class WorkspaceService {
   public async evaluateGoalWorkspaceCleanup(
     options: WorkspaceCleanupEvaluationOptions = {},
   ): Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>> {
+    const retentionGraceMs = resolveGoalRetentionGraceMs(options.goalRetentionGraceMs);
+    if (retentionGraceMs === null) {
+      return err(appError('INVALID_INPUT', 'Goal Workspace retention grace must be safe integer milliseconds between 0 and 365 days'));
+    }
     const protectedIds = new Set(options.protectedWorkspaceIds ?? []);
     const now = this.options.now?.() ?? new Date();
     const workspaces = await this.repository.list();
@@ -319,6 +332,7 @@ export class WorkspaceService {
         options.goalRuntimeProjections?.get(workspace.goalId ?? ''),
         options.goalDurableReferenceStates?.get(workspace.goalId ?? '') ?? 'unknown',
         now,
+        retentionGraceMs,
       ));
     }
 
@@ -328,6 +342,10 @@ export class WorkspaceService {
   public async reconcileLifecycle(
     options: WorkspaceLifecycleReconcileOptions = {},
   ): Promise<Result<WorkspaceLifecycleReconciliation>> {
+    const retentionGraceMs = resolveGoalRetentionGraceMs(options.goalRetentionGraceMs);
+    if (retentionGraceMs === null) {
+      return err(appError('INVALID_INPUT', 'Goal Workspace retention grace must be safe integer milliseconds between 0 and 365 days'));
+    }
     const protectedIds = new Set(options.protectedWorkspaceIds ?? []);
     const endedSessions = new Set(options.endedOwnerSessionIds ?? []);
     const endedJobs = new Set(options.endedOwnerJobIds ?? []);
@@ -350,6 +368,7 @@ export class WorkspaceService {
           options.goalRuntimeProjections?.get(workspace.goalId ?? ''),
           options.goalDurableReferenceStates?.get(workspace.goalId ?? '') ?? 'unknown',
           now,
+          retentionGraceMs,
         ));
       }
       const expired = workspace.expiresAt !== undefined
@@ -424,14 +443,16 @@ function classifyGoalWorkspaceCleanup(
   projection: GoalRuntimeProjection | undefined,
   durableReferenceState: WorkspaceDurableReferenceState,
   now: Date,
+  retentionGraceMs: number,
 ): WorkspaceLifecycleCleanupEvaluation {
   const blockers: WorkspaceCleanupBlockerReason[] = [];
   const goalId = workspace.goalId?.trim();
   const writerLeaseActive = workspace.writerLease !== undefined
-    && (() => {
+    && ((): boolean => {
       const expiresAt = Date.parse(workspace.writerLease.expiresAt);
       return !Number.isFinite(expiresAt) || expiresAt > now.getTime();
     })();
+  let retentionStartedMs: number | undefined;
 
   if (protectedWorkspace) blockers.push('protected_workspace');
   if (!workspaceAvailable) blockers.push('workspace_unavailable');
@@ -465,21 +486,56 @@ function classifyGoalWorkspaceCleanup(
     if (validProjection.runtimeState !== 'idle') blockers.push('goal_runtime_not_idle');
     if (validProjection.integrationState !== 'integrated') blockers.push('goal_integration_not_integrated');
     if (validProjection.workspaceState !== 'clean') blockers.push('goal_workspace_not_clean');
+
+    const parsedRetentionStart = Date.parse(validProjection.lastActivityAt);
+    if (!Number.isFinite(parsedRetentionStart)) {
+      blockers.push('goal_retention_anchor_invalid');
+    } else {
+      retentionStartedMs = parsedRetentionStart;
+    }
   }
 
   if (writerLeaseActive) blockers.push('active_writer_lease');
   if (durableReferenceState === 'unknown') blockers.push('durable_references_unknown');
   if (durableReferenceState === 'present') blockers.push('durable_references_present');
 
+  let disposition: WorkspaceCleanupDisposition = 'blocked';
+  let retentionStartedAt: string | undefined;
+  let retentionEligibleAt: string | undefined;
+  let retentionRemainingMs: number | undefined;
+  if (blockers.length === 0 && retentionStartedMs !== undefined) {
+    const eligibleMs = retentionStartedMs + retentionGraceMs;
+    const eligibleDate = new Date(eligibleMs);
+    if (!Number.isFinite(eligibleDate.getTime())) {
+      blockers.push('goal_retention_anchor_invalid');
+    } else {
+      retentionStartedAt = new Date(retentionStartedMs).toISOString();
+      retentionEligibleAt = eligibleDate.toISOString();
+      retentionRemainingMs = Math.max(0, eligibleMs - now.getTime());
+      disposition = retentionRemainingMs === 0 ? 'retention_candidate' : 'retention_pending';
+    }
+  }
+
   return {
     workspaceId: workspace.id,
     ...(goalId === undefined || goalId.length === 0 ? {} : { goalId }),
-    disposition: blockers.length === 0 ? 'retention_candidate' : 'blocked',
+    disposition,
     blockers,
     workspaceAvailable,
     writerLeaseActive,
     durableReferenceState,
+    ...(retentionStartedAt === undefined ? {} : { retentionStartedAt }),
+    ...(retentionEligibleAt === undefined ? {} : { retentionEligibleAt }),
+    ...(retentionRemainingMs === undefined ? {} : { retentionRemainingMs }),
   };
+}
+
+function resolveGoalRetentionGraceMs(value: number | undefined): number | null {
+  const resolved = value ?? DEFAULT_GOAL_WORKSPACE_RETENTION_GRACE_MS;
+  if (!Number.isSafeInteger(resolved) || resolved < 0 || resolved > MAX_GOAL_WORKSPACE_RETENTION_GRACE_MS) {
+    return null;
+  }
+  return resolved;
 }
 
 function samePath(left: string, right: string, platform: NodeJS.Platform): boolean {

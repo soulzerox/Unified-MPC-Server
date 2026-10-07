@@ -681,6 +681,17 @@ export const guardedPrMergeSchema = z.object({
   receiptRef: z.string().trim().min(1).max(1024),
 }).strict();
 
+export const mergeVerificationRunSchema = z.object({
+  repository: z.string().trim().min(1).max(512),
+  pullRequest: z.number().int().positive(),
+  workspaceId: workspaceIdSchema.optional(),
+  review: z.object({
+    outcome: z.enum(['github_approved', 'clean_llm_review', 'rejected', 'missing']),
+    reviewId: z.number().int().positive().optional(),
+    evidence: z.string().trim().min(1).max(4096).optional(),
+  }).strict(),
+}).strict();
+
 export const mergeReconcileSchema = z.object({
   repository: z.string().trim().min(1).max(512),
   pullRequest: z.number().int().positive(),

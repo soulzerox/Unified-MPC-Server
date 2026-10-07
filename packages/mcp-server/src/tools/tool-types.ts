@@ -1,4 +1,4 @@
-import { err, ok, type InvocationAuthorization, type RepositoryMergePolicy, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
+import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type MergeReviewOutcome, type MergeVerificationReceipt, type RepositoryMergePolicy, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
@@ -148,6 +148,26 @@ export interface ManagedResourceBindingPort {
   markReleased(operationId: string, updatedAt: string): unknown;
 }
 
+export interface MergeVerificationRunPort {
+  run(request: {
+    readonly policy: RepositoryMergePolicy;
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly workspaceId?: string;
+    readonly review: {
+      readonly outcome: MergeReviewOutcome;
+      readonly reviewId?: number;
+      readonly evidence?: string;
+      readonly userConfirmed?: boolean;
+    };
+  }, signal?: AbortSignal): Promise<Result<{
+    readonly receiptRef: string;
+    readonly receipt: MergeVerificationReceipt;
+    readonly decision: MergeEvidenceDecision;
+    readonly sequence: number;
+  }>>;
+}
+
 export interface McpApplicationServices {
   /** Host platform selected by the composition root; tests may inject a deterministic profile. */
   readonly platform?: NodeJS.Platform;
@@ -167,6 +187,7 @@ export interface McpApplicationServices {
   readonly mergePolicy?: {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };
+  readonly mergeVerificationRun?: MergeVerificationRunPort;
   readonly guardedMerge?: Pick<GuardedMergeService, 'dispatch'>;
   readonly mergeReconciliation?: Pick<ObservedMergeReconciliationService, 'reconcile'>;
   /** Parent-owned native Thai-RAG provider. Repository-local child MCP configuration cannot replace this port. */

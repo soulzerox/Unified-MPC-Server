@@ -160,10 +160,48 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         };
       },
     },
+    mergeVerificationRun: {
+      async run(request: Parameters<NonNullable<McpApplicationServices['mergeVerificationRun']>['run']>[0]) {
+        calls.push('mergeVerificationRun.run');
+        return ok({
+          receiptRef: `runtime-contract:${request.pullRequest}`,
+          receipt: {
+            repository: request.repository,
+            pullRequest: request.pullRequest,
+            headSha: '1'.repeat(40),
+            verificationMode: request.policy.verificationMode,
+            gates: [],
+            review: { outcome: 'missing' as const, headSha: '1'.repeat(40) },
+            createdAt: new Date(0).toISOString(),
+          },
+          decision: { status: 'MERGE_BLOCKED' as const, blockers: [{ code: 'receipt_missing' as const }] },
+          sequence: 1,
+        });
+      },
+    },
     guardedMerge: {
       async dispatch(request: Parameters<NonNullable<McpApplicationServices['guardedMerge']>['dispatch']>[0]) {
         calls.push('guardedMerge.dispatch');
         return { status: 'dispatched' as const, receiptRef: request.receiptRef, subject: request.subject };
+      },
+    },
+    mergeReconciliation: {
+      async reconcile(request: Parameters<NonNullable<McpApplicationServices['mergeReconciliation']>['reconcile']>[0]) {
+        calls.push('mergeReconciliation.reconcile');
+        return {
+          status: 'policy_breach' as const,
+          record: {
+            decision: { status: 'POLICY_BREACH' as const, reason: 'verification_receipt_missing' as const },
+            observation: {
+              repository: request.repository,
+              pullRequest: request.pullRequest,
+              headSha: '1'.repeat(40),
+              baseBranch: request.policy.defaultBranch,
+              merged: true,
+              observedAt: new Date(0).toISOString(),
+            },
+          } as never,
+        };
       },
     },
     extensions: serviceProxy('extensions', calls, (method, args) => {

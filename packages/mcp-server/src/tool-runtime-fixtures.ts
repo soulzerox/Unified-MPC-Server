@@ -151,6 +151,11 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   mcp_install: service({ name: 'smoke-server', transport: 'stdio', command: 'node' }, 'installer.installServer'),
   mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, descriptorFingerprint: '0'.repeat(64), catalogFingerprint: '0'.repeat(64), userConfirmed: true }, 'extensions.callMcpTool'),
   merge_policy_get: service({ repository: 'soulzerox/Unified-MPC-Server' }, 'mergePolicy.getByRepository'),
+  merge_verification_run: service({
+    repository: 'soulzerox/Unified-MPC-Server',
+    pullRequest: 278,
+    review: { outcome: 'missing' },
+  }, 'mergeVerificationRun.run'),
   guarded_pr_merge: service({
     repository: 'soulzerox/Unified-MPC-Server',
     pullRequest: 278,
@@ -158,6 +163,11 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
     baseBranch: 'main',
     receiptRef: 'runtime-contract-receipt',
   }, 'guardedMerge.dispatch'),
+  merge_reconcile: service({
+    repository: 'soulzerox/Unified-MPC-Server',
+    pullRequest: 278,
+    expectedMergeMethod: 'merge',
+  }, 'mergeReconciliation.reconcile'),
   workspace_context: service({ workspaceId, query: 'smoke' }, 'search.searchText'),
   workspace_context_continue: service({ continuationToken: 'context-token' }, 'file.readFile', 'workspace_context'),
   workspace_full_scan: service({ workspaceId }, 'search.searchFiles'),

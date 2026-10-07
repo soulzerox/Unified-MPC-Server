@@ -21,16 +21,62 @@ export UNIFIED_MPC_DEPLOY_STATE_DIR="$XDG_STATE_HOME/unified-mpc/deployments"
 export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$VALIDATOR"
 export UNIFIED_MPC_SYSTEMD_SERVICE="unified-mpc.service"
 export UNIFIED_MPC_TEST_SYSTEMCTL_LOG="$TMP_ROOT/systemctl.log"
+export UNIFIED_MPC_TEST_SYSTEMD_RUN_LOG="$TMP_ROOT/systemd-run.log"
+export UNIFIED_MPC_SELF_CGROUP_FILE="$TMP_ROOT/self.cgroup"
+export UNIFIED_MPC_TEST_TRANSIENT_CGROUP_FILE="$TMP_ROOT/transient.cgroup"
 export UNIFIED_MPC_READINESS_TIMEOUT_SECONDS="1"
 export UNIFIED_MPC_READINESS_RETRY_INTERVAL_SECONDS="0.05"
 
 mkdir -p "$HOME" "$UNIFIED_MPC_RUNTIME_DIR/releases" "$TMP_ROOT/bin"
+printf '0::/user.slice/test-session.scope\n' >"$UNIFIED_MPC_SELF_CGROUP_FILE"
+printf '0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u12345.service\n' >"$UNIFIED_MPC_TEST_TRANSIENT_CGROUP_FILE"
 
 cat >"$TMP_ROOT/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$UNIFIED_MPC_TEST_SYSTEMCTL_LOG"
+if [[ "${UNIFIED_MPC_TEST_REQUIRE_DELEGATED_RESTART:-}" == "1" && "${UNIFIED_MPC_PROMOTION_DELEGATED:-}" != "1" ]]; then
+  printf 'self-hosted restart was not delegated outside the runtime service cgroup\n' >&2
+  exit 99
+fi
 exit 0
+EOF
+
+cat >"$TMP_ROOT/bin/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+env_args=()
+command_args=()
+while (($# > 0)); do
+  case "$1" in
+    --user|--wait|--collect|--quiet)
+      shift
+      ;;
+    --setenv=*)
+      env_args+=("${1#--setenv=}")
+      shift
+      ;;
+    --)
+      shift
+      command_args=("$@")
+      break
+      ;;
+    -*)
+      printf 'unsupported fake systemd-run option: %s\n' "$1" >&2
+      exit 98
+      ;;
+    *)
+      command_args=("$@")
+      break
+      ;;
+  esac
+done
+printf '%s\n' "${command_args[*]}" >>"$UNIFIED_MPC_TEST_SYSTEMD_RUN_LOG"
+((${#command_args[@]} > 0)) || exit 97
+if [[ -n "${UNIFIED_MPC_TEST_TRANSIENT_CGROUP_FILE:-}" ]]; then
+  env_args+=("UNIFIED_MPC_SELF_CGROUP_FILE=$UNIFIED_MPC_TEST_TRANSIENT_CGROUP_FILE")
+fi
+exec env "${env_args[@]}" "${command_args[@]}"
 EOF
 
 cat >"$TMP_ROOT/bin/curl" <<'EOF'
@@ -79,8 +125,9 @@ else
 fi
 EOF
 
-chmod +x "$TMP_ROOT/bin/systemctl" "$TMP_ROOT/bin/curl"
+chmod +x "$TMP_ROOT/bin/systemctl" "$TMP_ROOT/bin/systemd-run" "$TMP_ROOT/bin/curl"
 export UNIFIED_MPC_SYSTEMCTL="$TMP_ROOT/bin/systemctl"
+export UNIFIED_MPC_SYSTEMD_RUN="$TMP_ROOT/bin/systemd-run"
 export UNIFIED_MPC_CURL="$TMP_ROOT/bin/curl"
 
 make_runtime() {
@@ -144,6 +191,8 @@ commit_d="dddddddddddddddddddddddddddddddddddddddd"
 commit_e="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 commit_f="ffffffffffffffffffffffffffffffffffffffff"
 commit_g="9999999999999999999999999999999999999999"
+commit_h="8888888888888888888888888888888888888888"
+commit_i="7777777777777777777777777777777777777777"
 
 release_a="$UNIFIED_MPC_RUNTIME_DIR/releases/deploy-a"
 make_runtime "$release_a" "$commit_a"
@@ -232,5 +281,38 @@ expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_e" "deploy-e
 grep -Fxq failed_no_rollback "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/status"
 grep -Fxq mcp_request_failed "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/health_failure_detail"
 grep -Fxq unavailable "$UNIFIED_MPC_DEPLOY_STATE_DIR/deploy-e/rollback_result"
+
+# A promoter launched from a Unified runtime service cgroup must delegate the real
+# transaction before restart so the service restart cannot kill the transaction.
+export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/data-self-hosted/unified-mpc/runtime"
+export UNIFIED_MPC_DEPLOY_STATE_DIR="$TMP_ROOT/state-self-hosted/unified-mpc/deployments"
+mkdir -p "$UNIFIED_MPC_RUNTIME_DIR/releases"
+printf '0::/user.slice/user-1000.slice/user@1000.service/app.slice/test-session.scope\n' >"$UNIFIED_MPC_SELF_CGROUP_FILE"
+release_self_base="$UNIFIED_MPC_RUNTIME_DIR/releases/self-base"
+make_runtime "$release_self_base" "$commit_g"
+bash "$PROMOTER" "$release_self_base" "self-base" >/dev/null
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_self_base"
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_self_base"
+
+printf '0::/user.slice/user-1000.slice/user@1000.service/app.slice/unified-mpc-mcp-http.service\n' >"$UNIFIED_MPC_SELF_CGROUP_FILE"
+export UNIFIED_MPC_TEST_REQUIRE_DELEGATED_RESTART=1
+release_self="$UNIFIED_MPC_RUNTIME_DIR/releases/self-hosted"
+make_runtime "$release_self" "$commit_h"
+bash "$PROMOTER" "$release_self" "self-hosted" >/dev/null
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_self"
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_self"
+grep -Fxq healthy "$UNIFIED_MPC_DEPLOY_STATE_DIR/self-hosted/status"
+
+release_self_bad="$UNIFIED_MPC_RUNTIME_DIR/releases/self-hosted-bad"
+make_runtime "$release_self_bad" "$commit_i"
+touch "$release_self_bad/web.fail"
+expect_fail RUNTIME_PROMOTION_INCOMPLETE bash "$PROMOTER" "$release_self_bad" "self-hosted-bad"
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/current" "$release_self"
+assert_link "$UNIFIED_MPC_RUNTIME_DIR/last-known-good" "$release_self"
+grep -Fxq rolled_back "$UNIFIED_MPC_DEPLOY_STATE_DIR/self-hosted-bad/status"
+grep -Fxq success "$UNIFIED_MPC_DEPLOY_STATE_DIR/self-hosted-bad/rollback_result"
+[[ "$(wc -l <"$UNIFIED_MPC_TEST_SYSTEMD_RUN_LOG")" -eq 2 ]]
+unset UNIFIED_MPC_TEST_REQUIRE_DELEGATED_RESTART
+printf '0::/user.slice/test-session.scope\n' >"$UNIFIED_MPC_SELF_CGROUP_FILE"
 
 printf 'runtime promotion regression: passed\n'

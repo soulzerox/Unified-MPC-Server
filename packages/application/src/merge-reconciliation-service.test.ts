@@ -6,6 +6,7 @@ import {
   type RepositoryMergePolicy,
 } from '@unified-mpc/domain';
 import {
+  AutomaticMergeReconciliationService,
   MergeReconciliationService,
   ObservedMergeReconciliationService,
   type MergeObservationReader,
@@ -288,6 +289,97 @@ describe('ObservedMergeReconciliationService', () => {
       status: 'inspect_required',
       reason: 'merge_observation_error',
     });
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+});
+
+describe('AutomaticMergeReconciliationService', () => {
+  it('selects the newest policy-valid exact-head receipt before reconciliation', async () => {
+    const observer: MergeObservationReader = { observe: vi.fn(async () => observation) };
+    const invalid = { ...receipt, gates: [{ ...receipt.gates[0]!, outcome: 'failed' as const }] };
+    const listForExactHead = vi.fn(async () => [
+      { receiptRef: 'newer-invalid', receipt: invalid },
+      { receiptRef: RECEIPT_REF, receipt },
+    ]);
+    const reconcile = vi.fn(async () => ({ status: 'reconciled' as const, record: {} as MergeReconciliationRecord }));
+    const service = new AutomaticMergeReconciliationService(observer, { listForExactHead }, { reconcile });
+
+    await expect(service.reconcile({
+      policy,
+      repository: policy.repository,
+      pullRequest: 279,
+      expectedMergeMethod: 'merge',
+    })).resolves.toMatchObject({ status: 'reconciled' });
+
+    expect(listForExactHead).toHaveBeenCalledWith({
+      repository: policy.repository,
+      pullRequest: 279,
+      headSha: HEAD,
+      limit: 100,
+    });
+    expect(reconcile).toHaveBeenCalledWith({
+      policy,
+      expectedMergeMethod: 'merge',
+      observation,
+      receiptRef: RECEIPT_REF,
+    });
+  });
+
+  it('uses the newest invalid exact-head receipt when none satisfy policy so the breach keeps evidence', async () => {
+    const invalid = { ...receipt, review: { ...receipt.review, outcome: 'rejected' as const } };
+    const reconcile = vi.fn(async () => ({ status: 'policy_breach' as const, record: {} as MergeReconciliationRecord }));
+    const service = new AutomaticMergeReconciliationService(
+      { observe: async (): Promise<MergeObservation> => observation },
+      { listForExactHead: async (): Promise<readonly { readonly receiptRef: string; readonly receipt: MergeVerificationReceipt }[]> => [{ receiptRef: 'invalid-receipt', receipt: invalid }] },
+      { reconcile },
+    );
+
+    await service.reconcile({
+      policy,
+      repository: policy.repository,
+      pullRequest: 279,
+      expectedMergeMethod: 'merge',
+    });
+
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ receiptRef: 'invalid-receipt' }));
+  });
+
+  it('reconciles without a receipt when no exact-head receipt exists', async () => {
+    const reconcile = vi.fn(async () => ({ status: 'policy_breach' as const, record: {} as MergeReconciliationRecord }));
+    const service = new AutomaticMergeReconciliationService(
+      { observe: async (): Promise<MergeObservation> => observation },
+      { listForExactHead: async (): Promise<readonly { readonly receiptRef: string; readonly receipt: MergeVerificationReceipt }[]> => [] },
+      { reconcile },
+    );
+
+    await service.reconcile({
+      policy,
+      repository: policy.repository,
+      pullRequest: 279,
+      expectedMergeMethod: 'merge',
+    });
+
+    expect(reconcile).toHaveBeenCalledWith({
+      policy,
+      expectedMergeMethod: 'merge',
+      observation,
+    });
+  });
+
+  it('fails closed when exact-head receipt storage cannot be listed', async () => {
+    const reconcile = vi.fn();
+    const service = new AutomaticMergeReconciliationService(
+      { observe: async (): Promise<MergeObservation> => observation },
+      { async listForExactHead(): Promise<never> { throw new Error('storage unavailable'); } },
+      { reconcile },
+    );
+
+    await expect(service.reconcile({
+      policy,
+      repository: policy.repository,
+      pullRequest: 279,
+      expectedMergeMethod: 'merge',
+    })).resolves.toEqual({ status: 'inspect_required', reason: 'receipt_store_error' });
     expect(reconcile).not.toHaveBeenCalled();
   });
 });

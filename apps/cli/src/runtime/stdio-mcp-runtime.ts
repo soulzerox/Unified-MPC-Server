@@ -8,6 +8,7 @@ import {
   CodexService,
   FileService,
   GitService,
+  AutomaticMergeReconciliationService,
   GuardedMergeService,
   MergeReconciliationService,
   ObservedMergeReconciliationService,
@@ -69,8 +70,13 @@ import { appError, err, ok, type RepositoryMergePolicy, type WorkspaceAdmissionR
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
-import { createGitHubMergeObservationPort } from './github-merge-observer.js';
-import { parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
+import { createGitHubApiReader, createGitHubMergeObservationPort } from './github-merge-observer.js';
+import {
+  createGitHubClosedPullRequestFeed,
+  createSettingsMergeReconciliationPollStateStore,
+  GitHubMergeReconciliationPoller,
+} from './github-merge-reconciliation-poller.js';
+import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
 
 export interface StdioMcpRuntime {
@@ -90,6 +96,7 @@ export interface StdioMcpRuntime {
   readonly codexToolsEnabled: boolean;
   readonly ponytailMode: PonytailMode;
   readonly toolAvailabilityService: ToolAvailabilityService;
+  readonly mergeReconciliationPoller: Pick<GitHubMergeReconciliationPoller, 'start' | 'close' | 'reconcileOnce'>;
   initializeThaiRag(): Promise<void>;
   close(): Promise<void>;
 }
@@ -261,6 +268,13 @@ export function createStdioMcpRuntime(
     idleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
   });
   const mergeReceiptRepository = new SqliteMergeVerificationReceiptRepository(database);
+  const mergeReconciliationRepository = new SqliteMergeReconciliationRepository(database);
+  const githubApi = createGitHubApiReader();
+  const mergeObserver = createGitHubMergeObservationPort(githubApi);
+  const mergeReconciliationCore = new MergeReconciliationService(
+    mergeReceiptRepository,
+    mergeReconciliationRepository,
+  );
   const mergePolicy = {
     async getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined> {
       return parseRepositoryMergePolicySetting(
@@ -277,11 +291,25 @@ export function createStdioMcpRuntime(
     ),
   );
   const mergeReconciliation = new ObservedMergeReconciliationService(
-    createGitHubMergeObservationPort(),
-    new MergeReconciliationService(
-      mergeReceiptRepository,
-      new SqliteMergeReconciliationRepository(database),
-    ),
+    mergeObserver,
+    mergeReconciliationCore,
+  );
+  const automaticMergeReconciliation = new AutomaticMergeReconciliationService(
+    mergeObserver,
+    mergeReceiptRepository,
+    mergeReconciliationCore,
+  );
+  const mergeReconciliationPoller = new GitHubMergeReconciliationPoller(
+    () => {
+      const configured = settingsRepository.get(USER_SETTING_KEYS.repositoryMergePolicies);
+      if (configured === null || configured.trim().length === 0) return [];
+      const policies = parseRepositoryMergePoliciesSetting(configured);
+      if (policies === undefined) throw new Error('Configured repository merge policies are invalid');
+      return policies;
+    },
+    createGitHubClosedPullRequestFeed(githubApi),
+    createSettingsMergeReconciliationPollStateStore(settingsRepository),
+    automaticMergeReconciliation,
   );
   const codexService = new CodexService(workspaceRepository, {
     auditService,
@@ -763,11 +791,13 @@ export function createStdioMcpRuntime(
     codexToolsEnabled: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.codexToolsEnabled), DEFAULT_CODEX_TOOLS_ENABLED),
     ponytailMode: parsePonytailMode(settingsRepository.get(USER_SETTING_KEYS.ponytailMode), DEFAULT_PONYTAIL_MODE),
     toolAvailabilityService,
+    mergeReconciliationPoller,
     initializeThaiRag,
     close: async (): Promise<void> => {
       stopToolAvailabilityWatch();
       await recoveryReady.catch(() => undefined);
       managedResourceRecovery.close();
+      mergeReconciliationPoller.close();
       await thaiRagCoordinator.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);

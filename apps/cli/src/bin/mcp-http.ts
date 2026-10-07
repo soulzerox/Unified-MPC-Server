@@ -85,6 +85,12 @@ async function main(): Promise<void> {
     initializeProvider: runtime.initializeThaiRag,
   });
   process.stderr.write(`Unified-MPC MCP HTTP ready endpoint=${startup.handle.endpoint.href} identity=${new URL('/_unified-mpc/identity', startup.handle.endpoint).href} thai-rag=starting\n`);
+  void runtime.mergeReconciliationPoller.start().then((summary) => {
+    const nonOk = summary.repositories.filter((entry) => entry.status !== 'ok');
+    process.stderr.write(`Unified-MPC merge reconciliation polling started repositories=${summary.repositories.length} non_ok=${nonOk.length}\n`);
+  }).catch((error: unknown) => {
+    process.stderr.write(`Unified-MPC merge reconciliation polling startup error=${error instanceof Error ? error.message : String(error)}\n`);
+  });
 
   let closing = false;
   let exitCode = 0;

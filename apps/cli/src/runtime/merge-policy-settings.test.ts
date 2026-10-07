@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
+import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 
 describe('parseRepositoryMergePolicySetting', () => {
   it('returns one exact configured policy by case-insensitive repository identity', () => {
@@ -46,6 +46,30 @@ describe('parseRepositoryMergePolicySetting', () => {
     expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
   });
 
+  it('returns all configured policies for automatic reconciliation without weakening validation', () => {
+    const value = JSON.stringify([
+      {
+        repository: 'Owner/Repo-A',
+        defaultBranch: 'main',
+        verificationMode: 'github_ci',
+        requiredGates: [{ name: 'ci', source: 'github_check' }],
+        reviewPolicy: { required: true, acceptedOutcomes: ['github_approved'] },
+      },
+      {
+        repository: 'Owner/Repo-B',
+        defaultBranch: 'trunk',
+        verificationMode: 'local_exact_head',
+        requiredGates: [{ name: 'test', source: 'local_command' }],
+        reviewPolicy: { required: false, acceptedOutcomes: [] },
+      },
+    ]);
+
+    expect(parseRepositoryMergePoliciesSetting(value)).toEqual([
+      expect.objectContaining({ repository: 'Owner/Repo-A', defaultBranch: 'main' }),
+      expect.objectContaining({ repository: 'Owner/Repo-B', defaultBranch: 'trunk' }),
+    ]);
+  });
+
   it('fails closed when multiple policies normalize to the same repository', () => {
     const value = JSON.stringify([
       {
@@ -64,6 +88,7 @@ describe('parseRepositoryMergePolicySetting', () => {
       },
     ]);
 
+    expect(parseRepositoryMergePoliciesSetting(value)).toBeUndefined();
     expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
   });
 });

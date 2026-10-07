@@ -20,6 +20,7 @@ export interface MergeReconciliationPollCursor {
 export interface MergeReconciliationPollStateStore {
   get(repository: string): MergeReconciliationPollCursor | undefined;
   set(repository: string, cursor: MergeReconciliationPollCursor): void;
+  retain(repositories: readonly string[]): void;
 }
 
 export interface MergeReconciliationPollSettings {
@@ -101,8 +102,10 @@ export class GitHubMergeReconciliationPoller {
     if (this.running) return { repositories: [] };
     this.running = true;
     try {
+      const policies = this.policiesProvider();
+      this.stateStore.retain(policies.map((policy) => policy.repository));
       const repositories: MergeReconciliationPollRepositorySummary[] = [];
-      for (const policy of this.policiesProvider()) {
+      for (const policy of policies) {
         repositories.push(await this.reconcileRepository(policy));
       }
       return { repositories };
@@ -246,6 +249,18 @@ export function createSettingsMergeReconciliationPollStateStore(
           ...state.repositories,
           [repositoryKey(repository)]: cursor,
         },
+      }));
+    },
+    retain(repositories): void {
+      const state = readPersistedState(settings);
+      const active = new Set(repositories.map(repositoryKey));
+      const retained = Object.fromEntries(
+        Object.entries(state.repositories).filter(([repository]) => active.has(repository)),
+      );
+      if (Object.keys(retained).length === Object.keys(state.repositories).length) return;
+      settings.set(MERGE_RECONCILIATION_POLL_STATE_KEY, JSON.stringify({
+        schemaVersion: 1,
+        repositories: retained,
       }));
     },
   };

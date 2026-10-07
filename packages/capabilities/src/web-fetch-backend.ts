@@ -52,6 +52,10 @@ export class WebFetchCapabilityBackend implements CapabilityBackend {
     if (request.dryRun) {
       return ok({ dry_run: true, url: url.toString(), method: request.method });
     }
+    const githubIntegrationBlock = githubIntegrationMutationReason(url, request);
+    if (githubIntegrationBlock !== undefined) {
+      return err(appError('PERMISSION_DENIED', githubIntegrationBlock));
+    }
     if (request.method !== 'GET' && request.method !== 'HEAD' && !isApplicationAuthorized(authorization, request.userConfirmed)) {
       return err(appError('PERMISSION_REQUIRED', 'HTTP mutation requests require explicit user confirmation'));
     }
@@ -143,6 +147,64 @@ interface WebFetchRequest {
 
 function isMutationMethod(method: WebFetchRequest['method']): boolean {
   return method !== 'GET' && method !== 'HEAD';
+}
+
+function githubIntegrationMutationReason(url: URL, request: WebFetchRequest): string | undefined {
+  if (!isMutationMethod(request.method)) return undefined;
+  const hostname = url.hostname.toLowerCase().replace(/\.+$/g, '');
+  if (hostname !== 'api.github.com') return undefined;
+
+  const segments = decodedPathSegments(url.pathname);
+  const restPullRequestMerge = segments.length === 6
+    && segments[0] === 'repos'
+    && segments[3] === 'pulls'
+    && segments[5] === 'merge';
+  const restBranchMerge = segments.length === 4
+    && segments[0] === 'repos'
+    && segments[3] === 'merges';
+  const restRepositoryContentsMutation = segments.length >= 5
+    && segments[0] === 'repos'
+    && segments[3] === 'contents';
+  const graphqlIntegration = segments.length === 1
+    && segments[0] === 'graphql'
+    && githubGraphqlIntegrationMutation(request.body);
+  if (!restPullRequestMerge && !restBranchMerge && !restRepositoryContentsMutation && !graphqlIntegration) return undefined;
+  return 'AI-issued GitHub repository integration mutations through web_fetch are blocked; use the guarded merge/Git path with exact-head verification and truthful review evidence';
+}
+
+function decodedPathSegments(pathname: string): readonly string[] {
+  let decoded = pathname;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return decoded.split('/').filter(Boolean).map((segment) => segment.toLowerCase());
+}
+
+function githubGraphqlIntegrationMutation(body: string | undefined): boolean {
+  if (body === undefined) return false;
+  const candidates = [body, decodeJsonUnicodeEscapes(body)];
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (isRecord(parsed) && typeof parsed.query === 'string') candidates.push(parsed.query);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed.slice(0, 100)) {
+        if (isRecord(entry) && typeof entry.query === 'string') candidates.push(entry.query);
+      }
+    }
+  } catch {
+    // application/graphql bodies are valid raw GraphQL and are inspected below as-is.
+  }
+  return candidates.some((candidate) => /\b(?:mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|updateRef|createCommitOnBranch)\b/i.test(candidate));
+}
+
+function decodeJsonUnicodeEscapes(value: string): string {
+  return value.replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
 }
 
 function cancelledRequest(method: WebFetchRequest['method'], reason: string): Result<never> {

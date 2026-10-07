@@ -57,6 +57,67 @@ describe('WebFetchCapabilityBackend', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['PUT', 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/pulls/285/merge', undefined],
+    ['PUT', 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/pulls/285/%6derge', undefined],
+    ['PUT', 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/pulls/285%2Fmerge', undefined],
+    ['POST', 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/merges', JSON.stringify({ base: 'main', head: 'feature' })],
+    ['POST', 'https://api.github.com/graphql', JSON.stringify({ query: 'mutation { mergePullRequest(input:{pullRequestId:"PR_x"}) { clientMutationId } }' })],
+    ['POST', 'https://api.github.com/graphql', JSON.stringify({ query: 'mutation { enablePullRequestAutoMerge(input:{pullRequestId:"PR_x",mergeMethod:MERGE}) { clientMutationId } }' })],
+    ['POST', 'https://api.github.com/graphql', JSON.stringify({ query: 'mutation { enqueuePullRequest(input:{pullRequestId:"PR_x"}) { clientMutationId } }' })],
+    ['POST', 'https://api.github.com/graphql', JSON.stringify({ query: 'mutation { updateRef(input:{refId:"REF_x",oid:"abc"}) { clientMutationId } }' })],
+    ['POST', 'https://api.github.com/graphql', JSON.stringify({ query: 'mutation { createCommitOnBranch(input:{branch:{repositoryNameWithOwner:"soulzerox/Unified-MPC-Server",branchName:"main"},message:{headline:"bypass"},expectedHeadOid:"abc",fileChanges:{additions:[]}}) { clientMutationId } }' })],
+    ['PUT', 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/contents/src/index.ts', JSON.stringify({ message: 'bypass', content: 'YQ==', branch: 'main' })],
+    ['DELETE', 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/contents/src/index.ts', JSON.stringify({ message: 'bypass', sha: 'abc', branch: 'main' })],
+    ['POST', 'https://api.github.com/graphql', JSON.stringify({ query: 'mutation { mergePullRequest(input:{pullRequestId:"PR_x"}) { clientMutationId } }' }).replace('mergePullRequest', 'merge\\u0050ullRequest')],
+  ] as const)('hard-blocks GitHub integration mutation %s %s even under Full Bypass', async (method, url, body) => {
+    const fetchImpl = vi.fn(async (): Promise<Response> => textResponse('merged'));
+    const backend = new WebFetchCapabilityBackend({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
+
+    await expect(backend.execute({
+      url,
+      method,
+      ...(body === undefined ? {} : { body }),
+    }, undefined, authorization)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        message: expect.stringContaining('guarded merge'),
+      },
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('allows read-only GitHub merge status and unrelated confirmed GitHub mutations', async () => {
+    const fetchImpl = vi.fn(async (): Promise<Response> => textResponse('ok'));
+    const backend = new WebFetchCapabilityBackend({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
+
+    await expect(backend.execute({
+      url: 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/pulls/285/merge',
+      method: 'GET',
+    }, undefined, authorization)).resolves.toMatchObject({ ok: true, value: { text: 'ok' } });
+    await expect(backend.execute({
+      url: 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/issues/101/comments',
+      method: 'POST',
+      body: '{"body":"audit note"}',
+    }, undefined, authorization)).resolves.toMatchObject({ ok: true, value: { text: 'ok' } });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows a dry-run preview of a fenced GitHub merge API request without dispatch', async () => {
+    const fetchImpl = vi.fn(async (): Promise<Response> => textResponse('should not be fetched'));
+    const backend = new WebFetchCapabilityBackend({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await expect(backend.execute({
+      url: 'https://api.github.com/repos/soulzerox/Unified-MPC-Server/pulls/285/merge',
+      method: 'PUT',
+      dry_run: true,
+    })).resolves.toMatchObject({ ok: true, value: { dry_run: true, method: 'PUT' } });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('rejects non-http protocols', async () => {
     const backend = new WebFetchCapabilityBackend({});
 

@@ -17,6 +17,7 @@ import type {
   FileService,
   GitService,
   GuardedMergeService,
+  ObservedMergeReconciliationService,
   GoalRequestCancellationPort,
   GoalContinuationService,
   GoalMutationFenceService,
@@ -167,6 +168,7 @@ export interface McpApplicationServices {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };
   readonly guardedMerge?: Pick<GuardedMergeService, 'dispatch'>;
+  readonly mergeReconciliation?: Pick<ObservedMergeReconciliationService, 'reconcile'>;
   /** Parent-owned native Thai-RAG provider. Repository-local child MCP configuration cannot replace this port. */
   readonly thaiRag?: ThaiRagProviderPort;
   readonly installer?: Pick<InstallerService, 'installSkill' | 'installServer'>;

@@ -162,4 +162,54 @@ describe('mergeTools', () => {
     });
     expect(result).toMatchObject({ ok: true, value: { status: 'dispatched', receiptRef: 'receipt-278' } });
   });
+
+  it('reconciles provider-observed merge state with the host-owned policy and defaults to merge method', async () => {
+    const reconcile = vi.fn(async () => ({
+      status: 'policy_breach' as const,
+      record: {
+        decision: { status: 'POLICY_BREACH' as const, reason: 'verification_receipt_missing' as const },
+      },
+    }));
+    const tool = mergeTools(context({
+      mergePolicy: { async getByRepository(): Promise<RepositoryMergePolicy> { return policy; } },
+      mergeReconciliation: { reconcile },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'merge_reconcile');
+    if (tool === undefined) throw new Error('missing merge_reconcile');
+
+    const result = await tool.execute({
+      repository: policy.repository,
+      pullRequest: 281,
+    }, new AbortController().signal);
+
+    expect(reconcile).toHaveBeenCalledWith({
+      policy,
+      repository: policy.repository,
+      pullRequest: 281,
+      expectedMergeMethod: 'merge',
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        status: 'policy_breach',
+        record: { decision: { reason: 'verification_receipt_missing' } },
+      },
+    });
+  });
+
+  it('fails closed when reconciliation has no authoritative repository policy', async () => {
+    const reconcile = vi.fn();
+    const tool = mergeTools(context({
+      mergePolicy: { async getByRepository(): Promise<undefined> { return undefined; } },
+      mergeReconciliation: { reconcile },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'merge_reconcile');
+    if (tool === undefined) throw new Error('missing merge_reconcile');
+
+    const result = await tool.execute({
+      repository: policy.repository,
+      pullRequest: 281,
+    }, new AbortController().signal);
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+  });
 });

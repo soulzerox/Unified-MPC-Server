@@ -681,6 +681,13 @@ export const guardedPrMergeSchema = z.object({
   receiptRef: z.string().trim().min(1).max(1024),
 }).strict();
 
+export const mergeReconcileSchema = z.object({
+  repository: z.string().trim().min(1).max(512),
+  pullRequest: z.number().int().positive(),
+  expectedMergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
+  receiptRef: z.string().trim().min(1).max(1024).optional(),
+}).strict();
+
 export const mcpCallSchema = z.object({
   server: z.string().trim().min(1).max(256),
   tool: z.string().trim().min(1).max(256),

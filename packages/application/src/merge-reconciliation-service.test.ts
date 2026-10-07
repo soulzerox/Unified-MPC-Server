@@ -7,6 +7,8 @@ import {
 } from '@unified-mpc/domain';
 import {
   MergeReconciliationService,
+  ObservedMergeReconciliationService,
+  type MergeObservationReader,
   type MergeReconciliationHistoryWriter,
   type MergeReconciliationReceiptReader,
 } from './merge-reconciliation-service.js';
@@ -240,5 +242,52 @@ describe('MergeReconciliationService', () => {
       reason: 'reconciliation_store_error',
       receiptRef: RECEIPT_REF,
     });
+  });
+});
+
+describe('ObservedMergeReconciliationService', () => {
+  it('uses provider-observed merge state instead of caller-supplied merge facts', async () => {
+    const observer: MergeObservationReader = {
+      observe: vi.fn(async () => observation),
+    };
+    const reconcile = vi.fn(async () => ({ status: 'reconciled' as const, record: {} as MergeReconciliationRecord }));
+    const service = new ObservedMergeReconciliationService(observer, { reconcile });
+
+    await expect(service.reconcile({
+      policy,
+      repository: policy.repository,
+      pullRequest: 279,
+      expectedMergeMethod: 'merge',
+      receiptRef: RECEIPT_REF,
+    })).resolves.toMatchObject({ status: 'reconciled' });
+
+    expect(observer.observe).toHaveBeenCalledWith({ repository: policy.repository, pullRequest: 279 });
+    expect(reconcile).toHaveBeenCalledWith({
+      policy,
+      expectedMergeMethod: 'merge',
+      observation,
+      receiptRef: RECEIPT_REF,
+    });
+  });
+
+  it('fails closed without persisting when provider observation is unavailable', async () => {
+    const observer: MergeObservationReader = {
+      async observe(): Promise<never> {
+        throw new Error('provider unavailable');
+      },
+    };
+    const reconcile = vi.fn();
+    const service = new ObservedMergeReconciliationService(observer, { reconcile });
+
+    await expect(service.reconcile({
+      policy,
+      repository: policy.repository,
+      pullRequest: 279,
+      expectedMergeMethod: 'merge',
+    })).resolves.toEqual({
+      status: 'inspect_required',
+      reason: 'merge_observation_error',
+    });
+    expect(reconcile).not.toHaveBeenCalled();
   });
 });

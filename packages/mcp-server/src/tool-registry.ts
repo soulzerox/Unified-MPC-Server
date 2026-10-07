@@ -2607,8 +2607,18 @@ function hardBlockedInvocationReason(toolName: string, input: unknown): string |
   const childTool = readTrimmedString(input.tool);
   if (childTool === undefined) return undefined;
   const normalizedChildTool = childTool.toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (normalizedChildTool !== 'mergepullrequest' && normalizedChildTool !== 'enableautomerge') return undefined;
-  return 'AI-issued child MCP pull-request merge actions are blocked until a guarded merge path validates exact-head verification and truthful review evidence';
+  if (normalizedChildTool === 'updateref') {
+    return 'AI-issued child MCP branch-ref mutations are blocked; use the guarded Git/merge path so default-branch integration policy and exact-head verification cannot be bypassed';
+  }
+  const childArguments = isRecord(input.arguments) ? input.arguments : undefined;
+  const repositoryTarget = childArguments === undefined ? undefined : readTrimmedString(childArguments.repository_full_name);
+  if (repositoryTarget !== undefined && ['createfile', 'updatefile', 'deletefile'].includes(normalizedChildTool)) {
+    return 'AI-issued child MCP repository-content mutations are blocked; use the guarded local file/Git/PR path so default-branch integration policy cannot be bypassed';
+  }
+  if (normalizedChildTool === 'mergepullrequest' || normalizedChildTool === 'enableautomerge') {
+    return 'AI-issued child MCP pull-request merge actions are blocked until a guarded merge path validates exact-head verification and truthful review evidence';
+  }
+  return undefined;
 }
 
 function prohibitedInvocationReason(toolName: string, input: unknown): string | undefined {

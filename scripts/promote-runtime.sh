@@ -20,6 +20,7 @@ if [[ ! "$deployment_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 validator="${UNIFIED_MPC_VALIDATE_RUNTIME_ROOT:-$script_dir/validate-runtime-root.sh}"
 runtime_dir="${UNIFIED_MPC_RUNTIME_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/unified-mpc/runtime}"
 state_root="${UNIFIED_MPC_DEPLOY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/unified-mpc/deployments}"
@@ -27,6 +28,9 @@ systemctl_bin="${UNIFIED_MPC_SYSTEMCTL:-systemctl}"
 curl_bin="${UNIFIED_MPC_CURL:-curl}"
 node_bin="${UNIFIED_MPC_NODE:-node}"
 flock_bin="${UNIFIED_MPC_FLOCK:-flock}"
+systemd_run_bin="${UNIFIED_MPC_SYSTEMD_RUN:-systemd-run}"
+self_cgroup_file="${UNIFIED_MPC_SELF_CGROUP_FILE:-/proc/self/cgroup}"
+promotion_delegated="${UNIFIED_MPC_PROMOTION_DELEGATED:-0}"
 service="${UNIFIED_MPC_SYSTEMD_SERVICE:-unified-mpc.service}"
 health_url="${UNIFIED_MPC_HEALTH_URL:-http://127.0.0.1:18765/_unified-mpc/identity}"
 web_health_url="${UNIFIED_MPC_WEB_HEALTH_URL:-http://127.0.0.1:3000/api/status}"
@@ -111,6 +115,41 @@ candidate_commit="${candidate_provenance[0]:-}"
 candidate_dirty="${candidate_provenance[1]:-}"
 if [[ -z "$candidate_commit" || "$candidate_dirty" != "false" ]]; then
   fail 67 "RUNTIME_PROMOTION_INCOMPLETE: candidate provenance is invalid or dirty"
+fi
+
+running_inside_runtime_service_cgroup() {
+  [[ -r "$self_cgroup_file" ]] || return 1
+  grep -Eq '/unified-mpc(-mcp-http|-web)?[.]service($|/)' "$self_cgroup_file"
+}
+
+delegate_self_hosted_promotion() {
+  if [[ ! -x "$systemd_run_bin" ]] && ! command -v "$systemd_run_bin" >/dev/null 2>&1; then
+    fail 69 "RUNTIME_PROMOTION_INCOMPLETE: systemd-run is unavailable for self-hosted promotion delegation"
+  fi
+  "$systemd_run_bin" --user --wait --collect --quiet \
+    "--setenv=UNIFIED_MPC_PROMOTION_DELEGATED=1" \
+    "--setenv=UNIFIED_MPC_RUNTIME_DIR=$runtime_dir" \
+    "--setenv=UNIFIED_MPC_DEPLOY_STATE_DIR=$state_root" \
+    "--setenv=UNIFIED_MPC_VALIDATE_RUNTIME_ROOT=$validator" \
+    "--setenv=UNIFIED_MPC_SYSTEMCTL=$systemctl_bin" \
+    "--setenv=UNIFIED_MPC_CURL=$curl_bin" \
+    "--setenv=UNIFIED_MPC_NODE=$node_bin" \
+    "--setenv=UNIFIED_MPC_FLOCK=$flock_bin" \
+    "--setenv=UNIFIED_MPC_SYSTEMD_SERVICE=$service" \
+    "--setenv=UNIFIED_MPC_HEALTH_URL=$health_url" \
+    "--setenv=UNIFIED_MPC_WEB_HEALTH_URL=$web_health_url" \
+    "--setenv=UNIFIED_MPC_HEALTH_TIMEOUT_SECONDS=$health_timeout" \
+    "--setenv=UNIFIED_MPC_READINESS_TIMEOUT_SECONDS=$readiness_timeout" \
+    "--setenv=UNIFIED_MPC_READINESS_RETRY_INTERVAL_SECONDS=$readiness_retry_interval" \
+    /usr/bin/bash "$script_path" "$candidate" "$deployment_id"
+}
+
+if running_inside_runtime_service_cgroup; then
+  if [[ "$promotion_delegated" == "1" ]]; then
+    fail 70 "RUNTIME_PROMOTION_INCOMPLETE: delegated promoter is still inside a Unified runtime service cgroup"
+  fi
+  delegate_self_hosted_promotion
+  exit $?
 fi
 
 exec 9>"$runtime_dir/.promotion.lock"

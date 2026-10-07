@@ -151,6 +151,8 @@ The promoter:
 
 Deployment evidence is stored under `~/.local/state/unified-mpc/deployments/<deployment-id>/` with bounded status/health/rollback fields. Deployment IDs are immutable; reusing an existing ID fails closed.
 
+When the promoter is invoked from a process that is itself inside the `unified-mpc.service`, `unified-mpc-mcp-http.service`, or `unified-mpc-web.service` cgroup, it delegates the real promotion transaction to an independent transient `systemd --user` service **before** acquiring the promotion lock or creating deployment state. This keeps the promotion owner alive while the aggregate runtime restarts its child services. The delegated transaction owns lock/state/health/rollback to completion; if delegation cannot escape the runtime service cgroup, promotion fails closed instead of recursing. Direct operator invocations outside the runtime service cgroups keep the original synchronous path.
+
 This promotion step intentionally activates an **already materialized runnable release**. Copy/package/materialization from a source worktree is a separate deployment step and must preserve artifact provenance; source cleanup must not change anything inside the promoted release.
 
 Validate the checked-in unit syntax before installation or after edits:

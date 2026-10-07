@@ -30,7 +30,12 @@ export interface CapabilityService {
 }
 
 export { LocalCapabilityService, type CapabilityBackend, type LocalCapabilityBackends } from './local-capability-service.js';
-export { ShellCapabilityBackend, type ShellCapabilityOptions } from './shell-backend.js';
+export { ShellCapabilityBackend, type DurableShellTaskReconciliationProvider, type ShellCapabilityOptions } from './shell-backend.js';
+export {
+  type DurableShellTaskExternalReconciler,
+  type DurableShellTaskExternalReconciliationDescriptor,
+  type DurableShellTaskExternalReconciliationResult,
+} from './durable-shell-task-store.js';
 export {
   CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY,
   CAPABILITY_TASK_OWNER_METADATA_KEY,

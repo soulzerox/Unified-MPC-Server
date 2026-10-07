@@ -1,7 +1,7 @@
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ShellCapabilityBackend } from './shell-backend.js';
 import { DurableShellTaskStore, parsePosixProcessProbe } from './durable-shell-task-store.js';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
@@ -27,6 +27,145 @@ describe('durable shell background tasks', () => {
       processStartedAt: expect.any(String),
     });
     expect(parsePosixProcessProbe('not-a-valid-ps-row')).toEqual({ state: 'unverifiable', reason: 'invalid_probe_response' });
+  });
+
+  it.each([
+    ['completed', { state: 'completed' as const, exitCode: 0 }, { state: 'completed', exit_code: 0 }],
+    ['failed', { state: 'failed' as const, exitCode: 70, error: 'promotion rolled back' }, { state: 'failed', exit_code: 70, error: 'promotion rolled back' }],
+    ['running', { state: 'running' as const }, { state: 'running' }],
+  ])('reconciles a lost durable worker from an external receipt: %s', async (_label, external, expected) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-external-'));
+    temporaryRoots.push(root);
+    const taskId = 'promotion-task';
+    const taskDir = path.join(root, taskId);
+    await mkdir(taskDir, { recursive: true });
+    const now = new Date();
+    await writeFile(path.join(taskDir, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'running',
+      started_at: new Date(now.getTime() - 1_000).toISOString(),
+      include_stdout: true,
+      include_stderr: true,
+      max_output_bytes: 1024,
+      deadline_at: new Date(now.getTime() + 60_000).toISOString(),
+      external_reconciliation: { kind: 'fixture', key: 'receipt-1' },
+    }), 'utf8');
+    const reconciler = vi.fn(async () => external);
+    const store = new DurableShellTaskStore(root, { externalReconciler: reconciler });
+
+    const snapshot = await store.snapshot(taskId);
+
+    expect(snapshot).toMatchObject({ ok: true, value: expected });
+    expect(reconciler).toHaveBeenCalledWith({ kind: 'fixture', key: 'receipt-1' });
+  });
+
+  it('restores a prior termination-unverified snapshot to running while the external receipt is still active', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-external-'));
+    temporaryRoots.push(root);
+    const taskId = 'running-external-task';
+    const taskDir = path.join(root, taskId);
+    await mkdir(taskDir, { recursive: true });
+    const now = new Date();
+    await writeFile(path.join(taskDir, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'termination_unverified',
+      error: 'Durable task worker exited while its child process is still running',
+      started_at: new Date(now.getTime() - 1_000).toISOString(),
+      include_stdout: true,
+      include_stderr: true,
+      max_output_bytes: 1024,
+      deadline_at: new Date(now.getTime() + 60_000).toISOString(),
+      external_reconciliation: { kind: 'fixture', key: 'still-running' },
+    }), 'utf8');
+    const store = new DurableShellTaskStore(root, {
+      externalReconciler: async (): Promise<{ state: 'running' }> => ({ state: 'running' }),
+    });
+
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: 'running' },
+    });
+  });
+
+  it('surfaces an elapsed task deadline as termination-unverified while external work is still running', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-external-'));
+    temporaryRoots.push(root);
+    const taskId = 'expired-external-task';
+    const taskDir = path.join(root, taskId);
+    await mkdir(taskDir, { recursive: true });
+    const now = new Date();
+    await writeFile(path.join(taskDir, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'running',
+      started_at: new Date(now.getTime() - 120_000).toISOString(),
+      include_stdout: true,
+      include_stderr: true,
+      max_output_bytes: 1024,
+      deadline_at: new Date(now.getTime() - 60_000).toISOString(),
+      external_reconciliation: { kind: 'fixture', key: 'still-running-after-deadline' },
+    }), 'utf8');
+    let externalState: 'running' | 'completed' = 'running';
+    const store = new DurableShellTaskStore(root, {
+      externalReconciler: async (): Promise<{ state: 'running' } | { state: 'completed'; exitCode: number }> => externalState === 'running'
+        ? { state: 'running' }
+        : { state: 'completed', exitCode: 0 },
+    });
+
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        state: 'termination_unverified',
+        error: 'Durable task deadline elapsed while externally reconciled work is still running',
+      },
+    });
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        state: 'termination_unverified',
+        error: 'Durable task deadline elapsed while externally reconciled work is still running',
+      },
+    });
+    externalState = 'completed';
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        state: 'completed',
+        exit_code: 0,
+      },
+    });
+  });
+
+  it('falls back to the historical worker-lost failure when the external receipt cannot be resolved', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-external-'));
+    temporaryRoots.push(root);
+    const taskId = 'unresolved-task';
+    const taskDir = path.join(root, taskId);
+    await mkdir(taskDir, { recursive: true });
+    const now = new Date();
+    await writeFile(path.join(taskDir, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'running',
+      started_at: new Date(now.getTime() - 1_000).toISOString(),
+      include_stdout: true,
+      include_stderr: true,
+      max_output_bytes: 1024,
+      deadline_at: new Date(now.getTime() + 60_000).toISOString(),
+      external_reconciliation: { kind: 'fixture', key: 'missing' },
+    }), 'utf8');
+    const store = new DurableShellTaskStore(root, { externalReconciler: async (): Promise<undefined> => undefined });
+
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        state: 'failed',
+        exit_code: -1,
+        error: 'Durable task worker exited before recording a final state',
+      },
+    });
   });
 
   it.skipIf(process.platform === 'win32')('cancels the detached child group before retiring its durable worker', async () => {

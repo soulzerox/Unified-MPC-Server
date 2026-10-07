@@ -22,16 +22,22 @@ function memoryState(initial?: MergeReconciliationPollCursor): {
   store: MergeReconciliationPollStateStore;
   get: () => MergeReconciliationPollCursor | undefined;
   set: ReturnType<typeof vi.fn>;
+  retain: ReturnType<typeof vi.fn>;
 } {
   let value = initial;
   const set = vi.fn((_repository: string, next: MergeReconciliationPollCursor) => { value = next; });
+  const retain = vi.fn((repositories: readonly string[]) => {
+    if (!repositories.some((repository) => repository.toLowerCase() === policy.repository.toLowerCase())) value = undefined;
+  });
   return {
     store: {
       get: () => value,
       set,
+      retain,
     },
     get: () => value,
     set,
+    retain,
   };
 }
 
@@ -206,11 +212,66 @@ describe('GitHubMergeReconciliationPoller', () => {
     expect(state.set).not.toHaveBeenCalled();
   });
 
+  it('retires a removed policy cursor and bootstraps a fresh epoch when the policy is re-added', async () => {
+    let policies: readonly RepositoryMergePolicy[] = [policy];
+    let now = new Date('2026-10-07T06:10:00Z');
+    const state = memoryState({
+      startedAt: '2026-10-07T06:00:00Z',
+      updatedAtWatermark: '2026-10-07T06:05:00Z',
+      pullRequestsAtWatermark: [282],
+    });
+    const reconcile = vi.fn(async () => ({ status: 'policy_breach' as const, record: {} as never }));
+    const feed = {
+      listUpdatedClosed: vi.fn(async (): Promise<GitHubClosedPullRequestFeedResult> => ({
+        complete: true,
+        updates: [{
+          pullRequest: 284,
+          updatedAt: '2026-10-07T06:21:00Z',
+          mergedAt: '2026-10-07T06:15:00Z',
+        }],
+      })),
+    };
+    const poller = new GitHubMergeReconciliationPoller(
+      () => policies,
+      feed,
+      state.store,
+      { reconcile },
+      { now: (): Date => now },
+    );
+
+    policies = [];
+    await poller.reconcileOnce();
+    expect(state.get()).toBeUndefined();
+    expect(feed.listUpdatedClosed).not.toHaveBeenCalled();
+
+    now = new Date('2026-10-07T06:20:00Z');
+    policies = [policy];
+    const result = await poller.reconcileOnce();
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(result.repositories[0]).toMatchObject({
+      status: 'ok',
+      candidates: 0,
+      ignoredHistorical: 1,
+    });
+    expect(state.get()).toEqual({
+      startedAt: '2026-10-07T06:20:00.000Z',
+      updatedAtWatermark: '2026-10-07T06:21:00Z',
+      pullRequestsAtWatermark: [284],
+    });
+  });
+
   it('keeps the periodic retry armed when the initial policy provider fails', async () => {
     vi.useFakeTimers();
     try {
       let policyReads = 0;
       const feed = { listUpdatedClosed: vi.fn(async () => ({ complete: true, updates: [] })) };
+      const initial = {
+        startedAt: '2026-10-07T06:00:00Z',
+        updatedAtWatermark: '2026-10-07T06:05:00Z',
+        pullRequestsAtWatermark: [282],
+      };
+      const state = memoryState(initial);
       const poller = new GitHubMergeReconciliationPoller(
         () => {
           policyReads += 1;
@@ -218,12 +279,13 @@ describe('GitHubMergeReconciliationPoller', () => {
           return [policy];
         },
         feed,
-        memoryState().store,
+        state.store,
         { reconcile: vi.fn() },
         { pollIntervalMs: 10 },
       );
 
       await expect(poller.start()).rejects.toThrow('malformed policy state');
+      expect(state.get()).toEqual(initial);
       await vi.advanceTimersByTimeAsync(10);
 
       expect(policyReads).toBeGreaterThanOrEqual(2);
@@ -300,6 +362,31 @@ describe('createSettingsMergeReconciliationPollStateStore', () => {
 
     expect(store.get('owner/repo')).toEqual(cursor);
     expect(values.get(MERGE_RECONCILIATION_POLL_STATE_KEY)).toContain('"owner/repo"');
+  });
+
+  it('retires inactive repository cursors while preserving active cursor state', () => {
+    const values = new Map<string, string>();
+    const store = createSettingsMergeReconciliationPollStateStore({
+      get: (key) => values.get(key) ?? null,
+      set: (key, value) => { values.set(key, value); },
+    });
+    const activeCursor: MergeReconciliationPollCursor = {
+      startedAt: '2026-10-07T06:00:00Z',
+      updatedAtWatermark: '2026-10-07T06:00:03Z',
+      pullRequestsAtWatermark: [282],
+    };
+    const inactiveCursor: MergeReconciliationPollCursor = {
+      startedAt: '2026-10-07T06:01:00Z',
+      updatedAtWatermark: '2026-10-07T06:01:03Z',
+      pullRequestsAtWatermark: [10],
+    };
+    store.set('Owner/Active', activeCursor);
+    store.set('Owner/Inactive', inactiveCursor);
+
+    store.retain(['owner/active']);
+
+    expect(store.get('OWNER/ACTIVE')).toEqual(activeCursor);
+    expect(store.get('owner/inactive')).toBeUndefined();
   });
 
   it('fails closed when persisted repository keys collide after normalization', () => {

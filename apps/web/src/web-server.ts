@@ -73,11 +73,14 @@ export interface WebGoalSummary {
 export interface WebWorkspaceCleanupEvaluation {
   readonly workspaceId: string;
   readonly goalId?: string;
-  readonly disposition: 'blocked' | 'retention_candidate';
+  readonly disposition: 'blocked' | 'retention_pending' | 'retention_candidate';
   readonly blockers: readonly string[];
   readonly workspaceAvailable: boolean;
   readonly writerLeaseActive: boolean;
   readonly durableReferenceState: 'clear' | 'present' | 'unknown';
+  readonly retentionStartedAt?: string;
+  readonly retentionEligibleAt?: string;
+  readonly retentionRemainingMs?: number;
 }
 
 export interface WorkspaceControlPort {

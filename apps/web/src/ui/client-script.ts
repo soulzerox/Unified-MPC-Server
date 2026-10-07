@@ -958,7 +958,12 @@ export function getClientScriptJs(): string {
             const row = document.createElement('tr');
             addCell(row, evaluation.workspaceId || '—', 'mono');
             addCell(row, evaluation.goalId || '—', 'mono');
-            addCell(row, evaluation.disposition === 'retention_candidate' ? 'Retention candidate' : 'Blocked');
+            const cleanupDisposition = evaluation.disposition === 'retention_candidate'
+              ? 'Retention candidate'
+              : evaluation.disposition === 'retention_pending'
+                ? 'Retention pending' + (typeof evaluation.retentionEligibleAt === 'string' ? ' until ' + evaluation.retentionEligibleAt : '')
+                : 'Blocked';
+            addCell(row, cleanupDisposition);
             addCell(row, Array.isArray(evaluation.blockers) && evaluation.blockers.length > 0
               ? evaluation.blockers.join(', ')
               : '—', 'mono');

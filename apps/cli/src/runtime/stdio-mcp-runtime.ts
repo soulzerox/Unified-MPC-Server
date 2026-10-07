@@ -9,6 +9,8 @@ import {
   FileService,
   GitService,
   GuardedMergeService,
+  MergeReconciliationService,
+  ObservedMergeReconciliationService,
   GoalContinuationService,
   GoalRequestCancellationService,
   GoalTaskCancellationService,
@@ -57,6 +59,7 @@ import {
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
   SqliteManagedResourceBindingRepository,
+  SqliteMergeReconciliationRepository,
   SqliteMergeVerificationReceiptRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
@@ -66,6 +69,7 @@ import { appError, err, ok, type RepositoryMergePolicy, type WorkspaceAdmissionR
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
+import { createGitHubMergeObservationPort } from './github-merge-observer.js';
 import { parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
 
@@ -270,6 +274,13 @@ export function createStdioMcpRuntime(
     createGuardedMergeDispatchPort(
       extensions,
       () => settingsRepository.get(USER_SETTING_KEYS.guardedMergeProviderServer)?.trim() || 'github',
+    ),
+  );
+  const mergeReconciliation = new ObservedMergeReconciliationService(
+    createGitHubMergeObservationPort(),
+    new MergeReconciliationService(
+      mergeReceiptRepository,
+      new SqliteMergeReconciliationRepository(database),
     ),
   );
   const codexService = new CodexService(workspaceRepository, {
@@ -677,6 +688,7 @@ export function createStdioMcpRuntime(
     extensions,
     mergePolicy,
     guardedMerge,
+    mergeReconciliation,
     thaiRag: thaiRagPort,
     installer: {
       installSkill: async (input) => new InstallerService({ workspaceRoot: await primaryWorkspaceRoot(), dataDir: dataPath }).installSkill(input),

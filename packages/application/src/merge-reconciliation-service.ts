@@ -49,6 +49,59 @@ export type MergeReconciliationResult =
       readonly record?: MergeReconciliationRecord;
     };
 
+export interface MergeObservationRequest {
+  readonly repository: string;
+  readonly pullRequest: number;
+}
+
+export interface MergeObservationReader {
+  observe(request: MergeObservationRequest): Promise<MergeObservation>;
+}
+
+export interface ObservedMergeReconciliationRequest {
+  readonly policy: RepositoryMergePolicy;
+  readonly repository: string;
+  readonly pullRequest: number;
+  readonly expectedMergeMethod: MergeMethod;
+  readonly receiptRef?: string;
+}
+
+export type ObservedMergeReconciliationResult = MergeReconciliationResult | {
+  readonly status: 'inspect_required';
+  readonly reason: 'merge_observation_error';
+  readonly receiptRef?: string;
+};
+
+export class ObservedMergeReconciliationService {
+  public constructor(
+    private readonly observer: MergeObservationReader,
+    private readonly reconciliation: Pick<MergeReconciliationService, 'reconcile'>,
+  ) {}
+
+  public async reconcile(request: ObservedMergeReconciliationRequest): Promise<ObservedMergeReconciliationResult> {
+    let observation: MergeObservation;
+    try {
+      observation = await this.observer.observe({
+        repository: request.repository,
+        pullRequest: request.pullRequest,
+      });
+    } catch {
+      return {
+        status: 'inspect_required',
+        reason: 'merge_observation_error',
+        ...(request.receiptRef === undefined ? {} : { receiptRef: request.receiptRef }),
+      };
+    }
+
+    return this.reconciliation.reconcile({
+      policy: request.policy,
+      expectedMergeMethod: request.expectedMergeMethod,
+      observation,
+      ...(request.receiptRef === undefined ? {} : { receiptRef: request.receiptRef }),
+    });
+  }
+}
+
 export class MergeReconciliationService {
   public constructor(
     private readonly receiptReader: MergeReconciliationReceiptReader,

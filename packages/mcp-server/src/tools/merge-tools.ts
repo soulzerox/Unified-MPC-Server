@@ -1,6 +1,6 @@
 import { appError, err, ok } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { guardedPrMergeSchema, mergePolicyGetSchema } from './schemas.js';
+import { guardedPrMergeSchema, mergePolicyGetSchema, mergeReconcileSchema } from './schemas.js';
 
 export function mergeTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -68,6 +68,45 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
         if (result.status === 'inspect_required') {
           return err(appError('CONFLICT', `Guarded merge requires inspection: ${result.reason}`, true));
         }
+        return ok(result);
+      },
+    }),
+    defineTool({
+      name: 'merge_reconcile',
+      description: 'Observe one pull request from the host GitHub provider, reconcile its actual post-merge state against the authoritative repository policy and optional exact-head receipt, and persist immutable reconciliation evidence. A merged PR without a valid receipt is surfaced as a policy breach rather than terminal success.',
+      permission: 'WRITE',
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      inputSchema: mergeReconcileSchema,
+      handler: async (input) => {
+        if (context.services.mergePolicy === undefined || context.services.mergeReconciliation === undefined) {
+          return missingService();
+        }
+
+        let policy;
+        try {
+          policy = await context.services.mergePolicy.getByRepository(input.repository);
+        } catch {
+          return err(appError('PERMISSION_DENIED', 'Authoritative merge policy could not be inspected'));
+        }
+        if (policy === undefined) {
+          return err(appError(
+            'PERMISSION_DENIED',
+            `No authoritative merge policy is configured for ${input.repository}`,
+          ));
+        }
+
+        const result = await context.services.mergeReconciliation.reconcile({
+          policy,
+          repository: input.repository,
+          pullRequest: input.pullRequest,
+          expectedMergeMethod: input.expectedMergeMethod ?? 'merge',
+          ...(input.receiptRef === undefined ? {} : { receiptRef: input.receiptRef }),
+        });
         return ok(result);
       },
     }),

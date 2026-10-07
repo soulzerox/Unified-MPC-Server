@@ -72,6 +72,7 @@ import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort } from './github-merge-observer.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
+import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
 import {
   createGitHubClosedPullRequestFeed,
   createSettingsMergeReconciliationPollStateStore,
@@ -322,7 +323,8 @@ export function createStdioMcpRuntime(
     profileProvider,
   });
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
-  () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
+  () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
+  createRuntimePromotionTaskReconciliation());
   const requestCancellation = new GoalRequestCancellationService();
   const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
   const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
@@ -871,6 +873,7 @@ function createStdioCapabilityService(
   strictAllowedRoots?: readonly string[],
   configuredRootsProvider: () => readonly string[] = () => [],
   synchronousWaitSecondsProvider: () => number = () => DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS,
+  durableTaskReconciliation = createRuntimePromotionTaskReconciliation(),
 ): StdioCapabilityRuntime {
   const runtime = createPlatformCapabilitySet({
     platform: process.platform,
@@ -879,6 +882,7 @@ function createStdioCapabilityService(
     unrestricted,
     configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.UNIFIED_MPC_CAPABILITY_ROOTS), ...configuredRootsProvider()],
     synchronousWaitSecondsProvider,
+    durableTaskReconciliation,
   });
   return { service: runtime.service, shell: runtime.shell };
 }

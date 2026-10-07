@@ -15,7 +15,11 @@ import {
 import { createProcessTreeTerminator, PathExecutableResolver, toSpawnInvocation, type ExecutableResolver, type ProcessTreeTerminator } from '@unified-mpc/process';
 import type { CapabilityBackend } from './local-capability-service.js';
 import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, prohibitedUnscopedPullRequestMergeReason, riskyAgentCommandReason } from './agent-command-policy.js';
-import { DurableShellTaskStore } from './durable-shell-task-store.js';
+import {
+  DurableShellTaskStore,
+  type DurableShellTaskExternalReconciler,
+  type DurableShellTaskExternalReconciliationDescriptor,
+} from './durable-shell-task-store.js';
 import { capabilityTaskOwnerMatches, legacyCapabilityTaskOwner, readCapabilityActiveWorkspaceRoot, readCapabilityTaskOwner, type CapabilityTaskOwner } from './task-ownership.js';
 
 type ShellOperation = 'run' | 'list' | 'status' | 'wait' | 'logs' | 'result' | 'cancel' | 'resume' | 'approve' | 'deny';
@@ -43,6 +47,16 @@ interface ShellRequest {
 }
 
 
+export interface DurableShellTaskReconciliationProvider {
+  describe(input: {
+    readonly executable: string;
+    readonly arguments: readonly string[];
+    readonly cwd: string;
+    readonly environment: NodeJS.ProcessEnv;
+  }): DurableShellTaskExternalReconciliationDescriptor | undefined;
+  readonly reconcile: DurableShellTaskExternalReconciler;
+}
+
 export interface ShellCapabilityOptions {
   readonly allowedRoots: readonly string[];
   readonly allowedRootsProvider?: () => Promise<readonly string[]>;
@@ -55,6 +69,7 @@ export interface ShellCapabilityOptions {
   readonly maxSynchronousWaitSeconds?: number;
   readonly maxSynchronousWaitSecondsProvider?: () => number;
   readonly maxOutputBytes?: number;
+  readonly durableTaskReconciliation?: DurableShellTaskReconciliationProvider;
   /**
    * Full-access mode: cwd may be any existing directory, the full environment is
    * passed through, and .cmd/.bat argument metacharacters are not rejected.
@@ -110,6 +125,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly maxSynchronousWaitSecondsProvider: (() => number) | undefined;
   private readonly maxOutputBytes: number;
   private readonly unrestricted: boolean;
+  private readonly durableTaskReconciliation: DurableShellTaskReconciliationProvider | undefined;
 
   public constructor(options: ShellCapabilityOptions) {
     if (options.allowedRoots.length === 0) throw new Error('At least one local capability root is required');
@@ -119,7 +135,10 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.terminator = options.terminator ?? createProcessTreeTerminator();
     this.defaultTimeoutSeconds = clampNumber(options.defaultTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS, 0.1, MAX_TIMEOUT_SECONDS);
     this.defaultBackgroundTimeoutSeconds = clampNumber(options.defaultBackgroundTimeoutSeconds ?? DEFAULT_BACKGROUND_TIMEOUT_SECONDS, 0.1, MAX_TIMEOUT_SECONDS);
-    this.durableStore = options.taskStateDirectory === undefined ? undefined : new DurableShellTaskStore(path.resolve(options.taskStateDirectory));
+    this.durableTaskReconciliation = options.durableTaskReconciliation;
+    this.durableStore = options.taskStateDirectory === undefined ? undefined : new DurableShellTaskStore(path.resolve(options.taskStateDirectory), {
+      ...(options.durableTaskReconciliation === undefined ? {} : { externalReconciler: options.durableTaskReconciliation.reconcile }),
+    });
     this.autoWaitSeconds = clampNumber(options.autoWaitSeconds ?? DEFAULT_AUTO_WAIT_SECONDS, 0, DEFAULT_TIMEOUT_SECONDS);
     this.maxSynchronousWaitSeconds = clampNumber(options.maxSynchronousWaitSeconds ?? DEFAULT_MAX_SYNCHRONOUS_WAIT_SECONDS, 0.01, 90);
     this.maxSynchronousWaitSecondsProvider = options.maxSynchronousWaitSecondsProvider;
@@ -429,18 +448,26 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   ): Promise<Result<unknown>> {
     if (this.durableStore === undefined) return err(appError('INTERNAL_ERROR', 'Durable task store is unavailable', true));
     const taskId = randomUUID();
+    const environment = createSafeEnvironment(process.env, this.unrestricted);
+    const externalReconciliation = this.durableTaskReconciliation?.describe({
+      executable: invocation.executable,
+      arguments: invocation.args,
+      cwd,
+      environment,
+    });
     const launched = await this.durableStore.launch({
       taskId,
       executable: invocation.executable,
       arguments: invocation.args,
       cwd,
-      environment: createSafeEnvironment(process.env, this.unrestricted),
+      environment,
       ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
       timeoutSeconds: request.timeoutSeconds,
       maxOutputBytes: request.maxOutputBytes,
       includeStdout: request.includeStdout,
       includeStderr: request.includeStderr,
       owner: request.owner,
+      ...(externalReconciliation === undefined ? {} : { externalReconciliation }),
     });
     if (!launched.ok || request.execution === 'background') return launched;
     return this.durableStore.wait(taskId, Math.min(this.autoWaitSeconds, this.currentMaxSynchronousWaitSeconds()), undefined, request.owner);

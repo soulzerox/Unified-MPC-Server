@@ -8,6 +8,21 @@ import { capabilityTaskOwnerMatches, legacyCapabilityTaskOwner, type CapabilityT
 
 export type DurableShellTaskState = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
 
+export interface DurableShellTaskExternalReconciliationDescriptor {
+  readonly kind: string;
+  readonly key: string;
+}
+
+export interface DurableShellTaskExternalReconciliationResult {
+  readonly state: 'running' | 'completed' | 'failed';
+  readonly exitCode?: number;
+  readonly error?: string;
+}
+
+export type DurableShellTaskExternalReconciler = (
+  descriptor: DurableShellTaskExternalReconciliationDescriptor,
+) => Promise<DurableShellTaskExternalReconciliationResult | undefined>;
+
 export interface DurableShellLaunchRequest {
   readonly taskId: string;
   readonly executable: string;
@@ -20,6 +35,7 @@ export interface DurableShellLaunchRequest {
   readonly includeStdout: boolean;
   readonly includeStderr: boolean;
   readonly owner: CapabilityTaskOwner;
+  readonly externalReconciliation?: DurableShellTaskExternalReconciliationDescriptor;
 }
 
 interface DurableTaskMetadata {
@@ -44,6 +60,7 @@ interface DurableTaskMetadata {
   readonly owner_session_id?: string;
   readonly owner_workspace_id?: string;
   readonly cwd?: string;
+  readonly external_reconciliation?: DurableShellTaskExternalReconciliationDescriptor;
 }
 
 interface DurableWorkerSpec {
@@ -84,6 +101,7 @@ const execFileAsync = promisify(execFile);
 export interface DurableShellTaskStoreOptions {
   readonly maxConcurrentTasks?: number;
   readonly platform?: NodeJS.Platform;
+  readonly externalReconciler?: DurableShellTaskExternalReconciler;
 }
 
 export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
@@ -91,10 +109,12 @@ export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
 export class DurableShellTaskStore {
   private readonly maxConcurrentTasks: number;
   private readonly platform: NodeJS.Platform;
+  private readonly externalReconciler: DurableShellTaskExternalReconciler | undefined;
 
   public constructor(private readonly rootDirectory: string, options: DurableShellTaskStoreOptions = {}) {
     this.maxConcurrentTasks = normalizeMaxConcurrentTasks(options.maxConcurrentTasks);
     this.platform = options.platform ?? process.platform;
+    this.externalReconciler = options.externalReconciler;
   }
 
   public async launch(request: DurableShellLaunchRequest): Promise<Result<Record<string, unknown>>> {
@@ -125,6 +145,7 @@ export class DurableShellTaskStore {
       owner_session_id: request.owner.sessionId,
       ...(request.owner.workspaceId === undefined ? {} : { owner_workspace_id: request.owner.workspaceId }),
       cwd: request.cwd,
+      ...(request.externalReconciliation === undefined ? {} : { external_reconciliation: request.externalReconciliation }),
     };
     const spec: DurableWorkerSpec = {
       version: 1,
@@ -364,6 +385,44 @@ export class DurableShellTaskStore {
         return current;
       }
     }
+    if (current.external_reconciliation !== undefined && this.externalReconciler !== undefined) {
+      let external: DurableShellTaskExternalReconciliationResult | undefined;
+      try {
+        external = await this.externalReconciler(current.external_reconciliation);
+      } catch {
+        external = undefined;
+      }
+      if (external?.state === 'running') {
+        const deadlineAt = Date.parse(current.deadline_at);
+        const deadlineElapsed = Number.isFinite(deadlineAt) && Date.now() >= deadlineAt;
+        if (deadlineElapsed) {
+          const error = 'Durable task deadline elapsed while externally reconciled work is still running';
+          if (current.state !== 'termination_unverified' || current.error !== error || current.finished_at !== undefined) {
+            current.state = 'termination_unverified';
+            current.error = error;
+            delete current.finished_at;
+            await this.writeMetadata(current);
+          }
+          return current;
+        }
+        if (current.state !== 'running') {
+          current.state = 'running';
+          delete current.error;
+          delete current.finished_at;
+          await this.writeMetadata(current);
+        }
+        return current;
+      }
+      if (external?.state === 'completed' || external?.state === 'failed') {
+        current.state = external.state;
+        current.exit_code = external.exitCode ?? (external.state === 'completed' ? 0 : -1);
+        if (external.error === undefined) delete current.error;
+        else current.error = external.error;
+        current.finished_at = current.finished_at ?? new Date().toISOString();
+        await this.writeMetadata(current);
+        return current;
+      }
+    }
     if (current.state === 'termination_unverified') return current;
     current.state = 'failed';
     current.exit_code = current.exit_code ?? -1;
@@ -486,7 +545,15 @@ function isMetadata(value: unknown): value is DurableTaskMetadata {
     && (record.owner_workspace_id === undefined || typeof record.owner_workspace_id === 'string')
     && (record.cwd === undefined || typeof record.cwd === 'string')
     && (record.worker_started_at === undefined || typeof record.worker_started_at === 'string')
-    && (record.child_started_at === undefined || typeof record.child_started_at === 'string');
+    && (record.child_started_at === undefined || typeof record.child_started_at === 'string')
+    && (record.external_reconciliation === undefined || isExternalReconciliationDescriptor(record.external_reconciliation));
+}
+
+function isExternalReconciliationDescriptor(value: unknown): value is DurableShellTaskExternalReconciliationDescriptor {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.kind === 'string' && record.kind.length > 0 && record.kind.length <= 128
+    && typeof record.key === 'string' && record.key.length > 0 && record.key.length <= 1024;
 }
 
 async function readPublishedStartedAt(filename: string): Promise<string | undefined> {

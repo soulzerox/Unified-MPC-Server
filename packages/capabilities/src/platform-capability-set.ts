@@ -3,7 +3,7 @@ import { BrowserCdpBackend } from './browser-cdp-backend.js';
 import { NodeBrowserCdpProtocol } from './browser-cdp-protocol.js';
 import { HealthCapabilityBackend } from './health-backend.js';
 import { LocalCapabilityService, type CapabilityBackend } from './local-capability-service.js';
-import { ShellCapabilityBackend } from './shell-backend.js';
+import { ShellCapabilityBackend, type DurableShellTaskReconciliationProvider } from './shell-backend.js';
 import { WebFetchCapabilityBackend } from './web-fetch-backend.js';
 import { UnavailableCapabilityBackend } from './unavailable-backend.js';
 import type { NativeHostProcessBridge } from './native-host-protocol.js';
@@ -21,6 +21,7 @@ export interface PlatformCapabilitySetOptions {
   readonly unrestricted?: boolean;
   readonly configuredRootsProvider?: () => readonly string[];
   readonly synchronousWaitSecondsProvider?: () => number;
+  readonly durableTaskReconciliation?: DurableShellTaskReconciliationProvider;
   /** Electron-main providers whose semantics are shared by macOS/Linux. */
   readonly shared?: Partial<Record<import('./index.js').CapabilityToolName, CapabilityBackend>>;
   /** Optional integrity-bound native host for macOS/Linux desktop capabilities. */
@@ -52,6 +53,7 @@ export function createPlatformCapabilitySet(options: PlatformCapabilitySetOption
     unrestricted,
     taskStateDirectory: path.join(options.dataPath, 'background-tasks'),
     ...(options.synchronousWaitSecondsProvider === undefined ? {} : { maxSynchronousWaitSecondsProvider: options.synchronousWaitSecondsProvider }),
+    ...(options.durableTaskReconciliation === undefined ? {} : { durableTaskReconciliation: options.durableTaskReconciliation }),
   });
   const browserProtocol = new NodeBrowserCdpProtocol({ platform, profileDir: path.join(options.dataPath, 'browser-profile') });
   const browser = new BrowserCdpBackend({

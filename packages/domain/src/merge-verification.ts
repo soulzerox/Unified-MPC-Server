@@ -1,3 +1,5 @@
+import type { CommandSpec } from './command.js';
+
 export type VerificationMode = 'github_ci' | 'local_exact_head' | 'hybrid';
 
 export type MergeEvidenceSource = 'github_check' | 'local_command' | 'external_verifier';
@@ -16,6 +18,8 @@ export type AcceptedMergeReviewOutcome = Exclude<MergeReviewOutcome, 'rejected' 
 export interface RequiredMergeGate {
   readonly name: string;
   readonly source: MergeEvidenceSource;
+  /** Host-owned argv executed for local_exact_head/hybrid local_command gates. Never supplied by merge callers. */
+  readonly command?: CommandSpec;
 }
 
 export interface MergeReviewPolicy {

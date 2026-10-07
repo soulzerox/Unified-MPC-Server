@@ -71,6 +71,7 @@ import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort } from './github-merge-observer.js';
+import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import {
   createGitHubClosedPullRequestFeed,
   createSettingsMergeReconciliationPollStateStore,
@@ -271,6 +272,11 @@ export function createStdioMcpRuntime(
   const mergeReconciliationRepository = new SqliteMergeReconciliationRepository(database);
   const githubApi = createGitHubApiReader();
   const mergeObserver = createGitHubMergeObservationPort(githubApi);
+  const mergeVerificationRun = createMergeVerificationRunPort({
+    github: githubApi,
+    receipts: mergeReceiptRepository,
+    workspaces: workspaceRepository,
+  });
   const mergeReconciliationCore = new MergeReconciliationService(
     mergeReceiptRepository,
     mergeReconciliationRepository,
@@ -715,6 +721,7 @@ export function createStdioMcpRuntime(
     capabilities: capabilityRuntime.service,
     extensions,
     mergePolicy,
+    mergeVerificationRun,
     guardedMerge,
     mergeReconciliation,
     thaiRag: thaiRagPort,

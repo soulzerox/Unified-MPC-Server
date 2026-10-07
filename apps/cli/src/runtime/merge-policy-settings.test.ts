@@ -46,6 +46,51 @@ describe('parseRepositoryMergePolicySetting', () => {
     expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
   });
 
+  it('parses a bounded host-owned local command only for local_command gates', () => {
+    const value = JSON.stringify([{
+      repository: 'owner/repo',
+      defaultBranch: 'main',
+      verificationMode: 'local_exact_head',
+      requiredGates: [{
+        name: 'pytest default suite',
+        source: 'local_command',
+        command: {
+          executable: '/usr/bin/env',
+          args: ['TMPDIR=/dev/shm', 'python', '-m', 'pytest', '-q'],
+          cwdRelative: '.',
+        },
+      }],
+      reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
+    }]);
+
+    expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toMatchObject({
+      requiredGates: [{
+        name: 'pytest default suite',
+        source: 'local_command',
+        command: {
+          executable: '/usr/bin/env',
+          args: ['TMPDIR=/dev/shm', 'python', '-m', 'pytest', '-q'],
+          cwdRelative: '.',
+        },
+      }],
+    });
+  });
+
+  it.each([
+    { name: 'ci', source: 'github_check', command: { executable: 'echo', args: ['fake'] } },
+    { name: 'local', source: 'local_command', command: { executable: '', args: [] } },
+    { name: 'local', source: 'local_command', command: { executable: 'python', args: 'not-array' } },
+  ])('fails closed for malformed or source-incompatible host command %#', (gate) => {
+    const value = JSON.stringify([{
+      repository: 'owner/repo',
+      defaultBranch: 'main',
+      verificationMode: 'hybrid',
+      requiredGates: [gate],
+      reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
+    }]);
+    expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
+  });
+
   it('returns all configured policies for automatic reconciliation without weakening validation', () => {
     const value = JSON.stringify([
       {

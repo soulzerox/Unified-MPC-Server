@@ -1,5 +1,6 @@
 import type {
   AcceptedMergeReviewOutcome,
+  CommandSpec,
   MergeEvidenceSource,
   RepositoryMergePolicy,
   VerificationMode,
@@ -58,17 +59,20 @@ function parsePolicy(value: unknown): RepositoryMergePolicy | undefined {
   if (repository === undefined || defaultBranch === undefined || verificationMode === undefined) return undefined;
   if (!Array.isArray(value.requiredGates)) return undefined;
 
-  const requiredGates: Array<{ readonly name: string; readonly source: MergeEvidenceSource }> = [];
+  const requiredGates: Array<{ readonly name: string; readonly source: MergeEvidenceSource; readonly command?: CommandSpec }> = [];
   const gateNames = new Set<string>();
   for (const entry of value.requiredGates) {
     if (!isRecord(entry)) return undefined;
     const name = boundedString(entry.name, 512);
     const source = parseEvidenceSource(entry.source);
     if (name === undefined || source === undefined) return undefined;
+    const command = entry.command === undefined ? undefined : parseCommandSpec(entry.command);
+    if (entry.command !== undefined && command === undefined) return undefined;
+    if (source !== 'local_command' && command !== undefined) return undefined;
     const normalizedName = name.toLowerCase();
     if (gateNames.has(normalizedName)) return undefined;
     gateNames.add(normalizedName);
-    requiredGates.push({ name, source });
+    requiredGates.push({ name, source, ...(command === undefined ? {} : { command }) });
   }
 
   if (!isRecord(value.reviewPolicy) || typeof value.reviewPolicy.required !== 'boolean') return undefined;
@@ -106,6 +110,20 @@ function boundedString(value: unknown, maximum: number): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length === 0 || trimmed.length > maximum ? undefined : trimmed;
+}
+
+function parseCommandSpec(value: unknown): CommandSpec | undefined {
+  if (!isRecord(value)) return undefined;
+  const executable = boundedString(value.executable, 512);
+  if (executable === undefined || !Array.isArray(value.args) || value.args.length > 128) return undefined;
+  const args: string[] = [];
+  for (const entry of value.args) {
+    if (typeof entry !== 'string' || entry.length > 2_048) return undefined;
+    args.push(entry);
+  }
+  const cwdRelative = value.cwdRelative === undefined ? undefined : boundedString(value.cwdRelative, 1_024);
+  if (value.cwdRelative !== undefined && cwdRelative === undefined) return undefined;
+  return { executable, args, ...(cwdRelative === undefined ? {} : { cwdRelative }) };
 }
 
 function parseVerificationMode(value: unknown): VerificationMode | undefined {

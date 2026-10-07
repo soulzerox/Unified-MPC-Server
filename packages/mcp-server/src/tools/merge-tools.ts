@@ -1,6 +1,6 @@
 import { appError, err, ok } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { guardedPrMergeSchema, mergePolicyGetSchema, mergeReconcileSchema } from './schemas.js';
+import { guardedPrMergeSchema, mergePolicyGetSchema, mergeReconcileSchema, mergeVerificationRunSchema } from './schemas.js';
 
 export function mergeTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -20,6 +20,48 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
         } catch {
           return err(appError('PERMISSION_DENIED', 'Authoritative merge policy could not be inspected'));
         }
+      },
+    }),
+    defineTool({
+      name: 'merge_verification_run',
+      description: 'Produce and persist a host-owned exact-head merge verification receipt for one open pull request. The repository policy is authoritative: local command argv and GitHub check requirements come from host configuration, never caller-supplied gate outcomes. Local gates require a clean registered workspace whose origin and HEAD exactly match the PR head. Review evidence is bound to the exact head before a receipt is persisted.',
+      permission: 'EXECUTE',
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      inputSchema: mergeVerificationRunSchema,
+      handler: async (input, signal) => {
+        if (context.services.mergePolicy === undefined || context.services.mergeVerificationRun === undefined) {
+          return missingService();
+        }
+
+        let policy;
+        try {
+          policy = await context.services.mergePolicy.getByRepository(input.repository);
+        } catch {
+          return err(appError('PERMISSION_DENIED', 'Authoritative merge policy could not be inspected'));
+        }
+        if (policy === undefined) {
+          return err(appError(
+            'PERMISSION_DENIED',
+            `No authoritative merge policy is configured for ${input.repository}`,
+          ));
+        }
+
+        return context.services.mergeVerificationRun.run({
+          policy,
+          repository: input.repository,
+          pullRequest: input.pullRequest,
+          ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+          review: {
+            outcome: input.review.outcome,
+            ...(input.review.reviewId === undefined ? {} : { reviewId: input.review.reviewId }),
+            ...(input.review.evidence === undefined ? {} : { evidence: input.review.evidence }),
+          },
+        }, signal);
       },
     }),
     defineTool({

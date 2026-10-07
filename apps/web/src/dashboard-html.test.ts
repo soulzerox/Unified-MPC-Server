@@ -237,12 +237,19 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).not.toContain('id="view-install"');
   });
 
-  it('embeds the museum-grade canvas topology visualizer', () => {
+  it('presents the overview architecture as static architecture and reachability, not subsystem runtime health', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('topology-canvas-container');
     expect(html).toContain('canvas-svg');
-    expect(html).toContain('Obsidian Control Plane Topology');
+    expect(html).toContain('Control Plane Architecture');
+    expect(html).toContain('MCP Clients');
+    expect(html).toContain('Web / CLI / IDEs');
+    expect(html).toContain('Host Adapters');
+    expect(html).toContain('Control Plane & Gateway Status');
+    expect(html).toContain('Control Plane Reachability');
     expect(html).toContain('UNIFIED CONTROL');
+    expect(html).not.toContain('Obsidian Control Plane Topology');
+    expect(html).not.toContain('Subsystem Status & Downstream Servers');
   });
 
   it('renders authoritative MCP process memory and retention diagnostics without project-health inference', () => {

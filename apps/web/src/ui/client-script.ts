@@ -248,7 +248,7 @@ export function getClientScriptJs(): string {
             const connectorRegistration = data.gateway?.connectorRegistration || {};
             tel.innerHTML =
               '<div style="line-height: 1.8;">' +
-              '<div>Status: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
+              '<div>Control Plane Reachability: <span style="color: var(--status-healthy);">' + data.status + '</span></div>' +
               '<div>Gateway State: ' + (data.gateway?.state || 'STOPPED') + '</div>' +
               '<div>Connector Registration: ' + (connectorRegistration.state || 'unverified') + '</div>' +
               '<div>Connector Recovery: ' + (connectorRegistration.recoveryState || 'none') + '</div>' +

@@ -13,14 +13,10 @@ const ACCEPTED_REVIEW_OUTCOMES = new Set<AcceptedMergeReviewOutcome>([
   'user_override',
 ]);
 
-export function parseRepositoryMergePolicySetting(
+export function parseRepositoryMergePoliciesSetting(
   value: string | null | undefined,
-  repository: string,
-): RepositoryMergePolicy | undefined {
-  const repositoryKey = normalizeRepository(repository);
-  if (repositoryKey === undefined || value === null || value === undefined || value.trim().length === 0) {
-    return undefined;
-  }
+): readonly RepositoryMergePolicy[] | undefined {
+  if (value === null || value === undefined || value.trim().length === 0) return undefined;
 
   let parsed: unknown;
   try {
@@ -30,13 +26,28 @@ export function parseRepositoryMergePolicySetting(
   }
   if (!Array.isArray(parsed)) return undefined;
 
-  const matches: RepositoryMergePolicy[] = [];
+  const policies: RepositoryMergePolicy[] = [];
+  const repositories = new Set<string>();
   for (const entry of parsed) {
     const policy = parsePolicy(entry);
     if (policy === undefined) return undefined;
-    if (normalizeRepository(policy.repository) === repositoryKey) matches.push(policy);
+    const repositoryKey = normalizeRepository(policy.repository);
+    if (repositoryKey === undefined || repositories.has(repositoryKey)) return undefined;
+    repositories.add(repositoryKey);
+    policies.push(policy);
   }
-  return matches.length === 1 ? matches[0] : undefined;
+  return policies;
+}
+
+export function parseRepositoryMergePolicySetting(
+  value: string | null | undefined,
+  repository: string,
+): RepositoryMergePolicy | undefined {
+  const repositoryKey = normalizeRepository(repository);
+  if (repositoryKey === undefined) return undefined;
+  const policies = parseRepositoryMergePoliciesSetting(value);
+  if (policies === undefined) return undefined;
+  return policies.find((policy) => normalizeRepository(policy.repository) === repositoryKey);
 }
 
 function parsePolicy(value: unknown): RepositoryMergePolicy | undefined {

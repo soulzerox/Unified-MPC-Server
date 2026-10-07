@@ -7,11 +7,11 @@ const execFileAsync = promisify(execFile);
 const SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 
 export interface GitHubApiReader {
-  get(path: string): Promise<unknown>;
+  get(path: string, options?: { readonly maxBufferBytes?: number }): Promise<unknown>;
 }
 
 export function createGitHubMergeObservationPort(
-  github: GitHubApiReader = createGhApiReader(),
+  github: GitHubApiReader = createGitHubApiReader(),
 ): MergeObservationReader {
   return {
     async observe(request: MergeObservationRequest): Promise<MergeObservation> {
@@ -84,12 +84,12 @@ export function createGitHubMergeObservationPort(
   };
 }
 
-function createGhApiReader(): GitHubApiReader {
+export function createGitHubApiReader(): GitHubApiReader {
   return {
-    async get(apiPath: string): Promise<unknown> {
+    async get(apiPath: string, options): Promise<unknown> {
       const { stdout } = await execFileAsync('gh', ['api', apiPath], {
         timeout: 30_000,
-        maxBuffer: 2 * 1024 * 1024,
+        maxBuffer: options?.maxBufferBytes ?? 2 * 1024 * 1024,
         encoding: 'utf8',
       });
       return JSON.parse(stdout);

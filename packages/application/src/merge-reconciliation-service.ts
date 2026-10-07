@@ -1,4 +1,5 @@
 import {
+  evaluateMergeEvidence,
   reconcileMergeEvidence,
   type MergeMethod,
   type MergeObservation,
@@ -15,6 +16,15 @@ export interface MergeReconciliationReceiptRecord {
 
 export interface MergeReconciliationReceiptReader {
   getByRef(receiptRef: string): Promise<MergeReconciliationReceiptRecord | undefined>;
+}
+
+export interface ExactHeadMergeReconciliationReceiptReader {
+  listForExactHead(request: {
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly headSha: string;
+    readonly limit?: number;
+  }): Promise<readonly MergeReconciliationReceiptRecord[]>;
 }
 
 export interface MergeReconciliationHistoryWriter {
@@ -98,6 +108,59 @@ export class ObservedMergeReconciliationService {
       expectedMergeMethod: request.expectedMergeMethod,
       observation,
       ...(request.receiptRef === undefined ? {} : { receiptRef: request.receiptRef }),
+    });
+  }
+}
+
+export class AutomaticMergeReconciliationService {
+  public constructor(
+    private readonly observer: MergeObservationReader,
+    private readonly receiptReader: ExactHeadMergeReconciliationReceiptReader,
+    private readonly reconciliation: Pick<MergeReconciliationService, 'reconcile'>,
+  ) {}
+
+  public async reconcile(request: ObservedMergeReconciliationRequest): Promise<ObservedMergeReconciliationResult> {
+    let observation: MergeObservation;
+    try {
+      observation = await this.observer.observe({
+        repository: request.repository,
+        pullRequest: request.pullRequest,
+      });
+    } catch {
+      return { status: 'inspect_required', reason: 'merge_observation_error' };
+    }
+
+    let receiptRef: string | undefined;
+    if (observation.merged) {
+      let receipts: readonly MergeReconciliationReceiptRecord[];
+      try {
+        receipts = await this.receiptReader.listForExactHead({
+          repository: observation.repository,
+          pullRequest: observation.pullRequest,
+          headSha: observation.headSha,
+          limit: 100,
+        });
+      } catch {
+        return { status: 'inspect_required', reason: 'receipt_store_error' };
+      }
+
+      const subject = {
+        repository: observation.repository,
+        pullRequest: observation.pullRequest,
+        headSha: observation.headSha,
+        baseBranch: observation.baseBranch,
+        ...(observation.baseSha === undefined ? {} : { baseSha: observation.baseSha }),
+      };
+      const selected = receipts.find((record) => evaluateMergeEvidence(request.policy, subject, record.receipt).status === 'MERGE_ALLOWED')
+        ?? receipts[0];
+      receiptRef = selected?.receiptRef;
+    }
+
+    return this.reconciliation.reconcile({
+      policy: request.policy,
+      expectedMergeMethod: request.expectedMergeMethod,
+      observation,
+      ...(receiptRef === undefined ? {} : { receiptRef }),
     });
   }
 }

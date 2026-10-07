@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
+import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
 import { describe, expect, it } from 'vitest';
 import { createGoalControl, createWebGoalRuntimeProjection, runWeb, parseWebArgs } from './web.js';
 
@@ -207,7 +208,7 @@ describe('web CLI command', () => {
               sqlite: {
                 path: path.join(root, 'unified-mpc.sqlite'),
                 exists: true,
-                schemaVersion: '029_goal_runtime_integration_observations',
+                schemaVersion: CURRENT_SCHEMA_MIGRATION_ID,
                 settingsRowCount: expect.any(Number),
                 keyPresence: {
                   cloudflare_public_url: true,

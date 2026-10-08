@@ -52,6 +52,9 @@ async function setup(reuseProof = false) {
           if (reuseProof) return replayToken ??= token;
           return token;
         },
+        async validateLiveBinding(): Promise<boolean> {
+          return allowed.has(WS) && !stats.disposed;
+        },
         verifyWorkerChallenge(challenge: string, response: unknown): boolean {
           stats.attested += 1;
           stats.challenges.push(challenge);
@@ -122,12 +125,24 @@ describe('private FD3 per-session authority MCP client', () => {
     expect(decode(await session.callTool('remember', { workspace_id: WS }))).toMatchObject({ valid: true, accepted: 1 });
     allowed.delete(WS);
     await expect(session.callTool('remember', { workspace_id: WS })).rejects.toThrow('workspace_authority_denied');
-    expect(decode(await session.callTool('health', {}))).toMatchObject({ accepted: 1 });
+    await expect(session.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
     await session.close();
     await session.close();
     expect(created[0]?.disposed).toBe(true);
     await expect(session.callTool('remember', { workspace_id: WS })).rejects.toThrow('workspace_authority_denied');
   }, 20_000);
+
+  it('proactively terminates the idle inherited-FD3 child on live registration loss', async () => {
+    const { factory, launch, allowed, created } = await setup();
+    const session = await factory.connect(launch);
+    expect(created[0]?.disposed).toBe(false);
+    allowed.delete(WS);
+    await expect.poll(() => created[0]?.disposed, { timeout: 3_000, interval: 25 }).toBe(true);
+    expect(created[0]?.payload.every(x => x === 0)).toBe(true);
+    await expect(session.listTools()).rejects.toThrow('workspace_authority_denied');
+    await expect(session.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+    await session.close();
+  }, 10_000);
 
   it('keeps every child connection isolated with independently generated bootstrap secrets', async () => {
     const { factory, launch, created } = await setup();

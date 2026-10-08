@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -81,6 +81,40 @@ describe('Unified private Python-worker bootstrap payload', () => {
       await expect(createThaiRagPrivateWorkerBootstrap(options(async () => entries)))
         .rejects.toThrow('thai_rag_authority_denied');
     }
+  });
+
+  it('fences an existing child on live registration deletion even when its root stays on disk', async () => {
+    const root = await tempRoot();
+    let registered = true;
+    const worker = await createThaiRagPrivateWorkerBootstrap(options(async () =>
+      registered ? [{ id: WS, realRootPath: root }] : []));
+    expect(await worker.validateLiveBinding()).toBe(true);
+    registered = false;
+    expect(await worker.validateLiveBinding()).toBe(false);
+    await expect(worker.issue({ workspaceId: WS, operation: 'recall' }))
+      .rejects.toThrow('thai_rag_authority_denied');
+    worker.dispose();
+    expect(await worker.validateLiveBinding()).toBe(false);
+  });
+
+  it('fences same-path directory replacement and symlink relocation despite unchanged registry entry', async () => {
+    const parent = await tempRoot();
+    const root = path.join(parent, 'workspace');
+    const replacement = path.join(parent, 'replacement');
+    await mkdir(root);
+    await mkdir(replacement);
+    const worker = await createThaiRagPrivateWorkerBootstrap(options(async () =>
+      [{ id: WS, realRootPath: root }]));
+    expect(await worker.validateLiveBinding()).toBe(true);
+    await rm(root, { recursive: true });
+    await symlink(replacement, root);
+    expect(await worker.validateLiveBinding()).toBe(false);
+    await rm(root);
+    await mkdir(root);
+    expect(await worker.validateLiveBinding()).toBe(false);
+    await expect(worker.issue({ workspaceId: WS, operation: 'recall' }))
+      .rejects.toThrow('thai_rag_authority_denied');
+    worker.dispose();
   });
 
   it('fails closed on bad authority context/registry and never exposes key in env/argv', async () => {

@@ -27,6 +27,8 @@ export interface ThaiRagPrivateWorkerBootstrap {
   readonly payload: Buffer;
   /** Recheck the live registry for every new signed operation. */
   issue(request: ThaiRagRegisteredProofRequest): Promise<string>;
+  /** Fail closed on live registry drift, root relink or same-path inode replacement. */
+  validateLiveBinding(): Promise<boolean>;
   /** Host-only proof that this child actually holds its private FD3 bootstrap key. */
   verifyWorkerChallenge(challenge: string, response: unknown): boolean;
   /** Best-effort zeroization; caller must also close any duplicated FDs. */
@@ -57,6 +59,7 @@ export async function createThaiRagPrivateWorkerBootstrap(
     if (!Array.isArray(roots) || roots.length < 1 || roots.length > MAX_WORKSPACES) denied();
     const workspaceRoots: Record<string, string> = Object.create(null) as Record<string, string>;
     const usedPaths = new Set<string>();
+    const snapshot = new Map<string, { readonly root: string; readonly device: number; readonly inode: number }>();
     for (const entry of roots) {
       if (!entry || typeof entry.id !== 'string' || !CANONICAL_UUID.test(entry.id)
         || typeof entry.realRootPath !== 'string' || !path.isAbsolute(entry.realRootPath)
@@ -67,6 +70,7 @@ export async function createThaiRagPrivateWorkerBootstrap(
       const info = await lstat(entry.realRootPath);
       if (resolved !== canonical || !info.isDirectory() || usedPaths.has(resolved)) denied();
       usedPaths.add(resolved);
+      snapshot.set(entry.id, { root: canonical, device: info.dev, inode: info.ino });
       workspaceRoots[entry.id] = canonical;
     }
 
@@ -90,11 +94,41 @@ export async function createThaiRagPrivateWorkerBootstrap(
       authorityGeneration: options.authorityGeneration,
       workspacesProvider: options.workspacesProvider,
     };
+    let invalidated = false;
+    async function validateLiveBinding(): Promise<boolean> {
+      if (disposed || invalidated) return false;
+      try {
+        const live = await options.workspacesProvider();
+        if (!Array.isArray(live) || live.length !== snapshot.size) denied();
+        const observed = new Set<string>();
+        for (const entry of live) {
+          if (!entry || typeof entry.id !== 'string' || typeof entry.realRootPath !== 'string'
+            || observed.has(entry.id)) denied();
+          observed.add(entry.id);
+          const expected = snapshot.get(entry.id);
+          if (expected === undefined || entry.realRootPath !== expected.root) denied();
+          const real = await realpath(entry.realRootPath);
+          const metadata = await lstat(entry.realRootPath);
+          if (real !== expected.root || !metadata.isDirectory() ||
+            metadata.isSymbolicLink() || metadata.dev !== expected.device ||
+            metadata.ino !== expected.inode) denied();
+        }
+        return true;
+      } catch {
+        // Sticky fencing: recreating a deleted registration cannot resurrect
+        // any previously bootstrapped key, proof or child process.
+        invalidated = true;
+        return false;
+      }
+    }
     return {
       payload,
+      validateLiveBinding,
       async issue(request): Promise<string> {
-        if (disposed) denied();
-        return issueRegisteredThaiRagWorkspaceProof(authority, request);
+        if (disposed || !(await validateLiveBinding())) denied();
+        const proof = await issueRegisteredThaiRagWorkspaceProof(authority, request);
+        if (!(await validateLiveBinding())) denied();
+        return proof;
       },
       verifyWorkerChallenge(challenge: string, response: unknown): boolean {
         if (disposed) return false;
@@ -107,6 +141,7 @@ export async function createThaiRagPrivateWorkerBootstrap(
       dispose(): void {
         if (disposed) return;
         disposed = true;
+        invalidated = true;
         payload.fill(0);
         secret.fill(0);
       },

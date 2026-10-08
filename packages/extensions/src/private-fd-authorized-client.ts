@@ -21,6 +21,8 @@ export interface PrivateFdSessionBootstrap {
   issue(request: { readonly workspaceId: string; readonly operation: string }): Promise<string>;
   /** Verify Python's strict private-FD3 worker MAC with this session's key. */
   verifyWorkerChallenge(challenge: string, response: unknown): boolean;
+  /** Bind this specific child to the full live canonical workspace snapshot. */
+  validateLiveBinding(): Promise<boolean>;
   dispose(): void;
 }
 
@@ -53,6 +55,7 @@ export function createPrivateFdAuthorizedClientFactory(
       if (!bootstrap || !Buffer.isBuffer(bootstrap.payload) ||
         typeof bootstrap.issue !== 'function' ||
         typeof bootstrap.verifyWorkerChallenge !== 'function' ||
+        typeof bootstrap.validateLiveBinding !== 'function' ||
         typeof bootstrap.dispose !== 'function') {
         bootstrap?.dispose?.();
         throw denied();
@@ -89,7 +92,7 @@ export function createPrivateFdAuthorizedClientFactory(
           const parsed: unknown = JSON.parse(text);
           verified = bootstrap.verifyWorkerChallenge(challenge, parsed);
         }
-        if (!verified) throw denied();
+        if (!verified || !(await bootstrap.validateLiveBinding())) throw denied();
       } catch {
         await client.close().catch(() => undefined);
         bootstrap.dispose();
@@ -97,7 +100,35 @@ export function createPrivateFdAuthorizedClientFactory(
       }
 
       let closed = false;
+      let closing: Promise<void> | undefined;
+      let sweep: NodeJS.Timeout | undefined;
+      async function closePrivateSession(): Promise<void> {
+        if (closing !== undefined) return closing;
+        closed = true;
+        if (sweep !== undefined) clearInterval(sweep);
+        closing = client.close().catch(() => undefined).finally(() => bootstrap.dispose());
+        return closing;
+      }
+      async function assertLiveBinding(): Promise<void> {
+        if (closed) throw denied();
+        const valid = await bootstrap.validateLiveBinding().catch(() => false);
+        if (!valid || closed) {
+          await closePrivateSession();
+          throw denied();
+        }
+      }
+      // Registry provider has no push subscription yet. Keep an idle child
+      // bounded by proactive polling as well as pre/post-call checks.
+      let checking = false;
+      sweep = setInterval(() => {
+        if (checking || closed) return;
+        checking = true;
+        void assertLiveBinding().catch(() => undefined).finally(() => { checking = false; });
+      }, 250);
+      sweep.unref();
+
       async function guardedArgs(tool: string, args: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
+        await assertLiveBinding();
         if (closed || Object.hasOwn(args, 'authority_proof') || !SCOPED_OPERATIONS.has(tool)) throw denied();
         if ((tool === 'health' || tool === 'version') && !Object.hasOwn(args, 'workspace_id')) {
           return { ...args }; // exact unscoped startup handshake only
@@ -107,7 +138,7 @@ export function createPrivateFdAuthorizedClientFactory(
         try {
           const proof = await bootstrap.issue({ workspaceId, operation: tool });
           if (typeof proof !== 'string' || proof.length < 32) throw denied();
-          if (closed) throw denied();
+          await assertLiveBinding();
           return { ...args, authority_proof: proof };
         } catch {
           throw denied();
@@ -116,8 +147,9 @@ export function createPrivateFdAuthorizedClientFactory(
 
       return {
         async listTools(listSignal) {
-          if (closed) throw denied();
+          await assertLiveBinding();
           const catalog = await client.listTools(undefined, listSignal === undefined ? undefined : { signal: listSignal });
+          await assertLiveBinding();
           // Never advertise the host-only bootstrap probe to general callers.
           return catalog.tools.filter(tool => tool.name !== 'worker_authority_probe').map((tool) => ({
             name: tool.name,
@@ -127,8 +159,9 @@ export function createPrivateFdAuthorizedClientFactory(
           }));
         },
         async listResources(listSignal) {
-          if (closed) throw denied();
+          await assertLiveBinding();
           const resources = await client.listResources(undefined, listSignal === undefined ? undefined : { signal: listSignal });
+          await assertLiveBinding();
           return resources.resources.map((resource) => ({
             uri: resource.uri,
             ...(resource.name === undefined ? {} : { name: resource.name }),
@@ -138,22 +171,18 @@ export function createPrivateFdAuthorizedClientFactory(
         },
         async callTool(name, args, callSignal, timeoutMs) {
           const trusted = await guardedArgs(name, args);
-          return client.callTool({ name, arguments: trusted },
+          const result = await client.callTool({ name, arguments: trusted },
             callSignal === undefined && timeoutMs === undefined
               ? undefined
               : {
                   ...(callSignal === undefined ? {} : { signal: callSignal }),
                   ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
                 });
+          await assertLiveBinding();
+          return result;
         },
         async close() {
-          if (closed) return;
-          closed = true;
-          try {
-            await client.close();
-          } finally {
-            bootstrap.dispose();
-          }
+          await closePrivateSession();
         },
       };
     },

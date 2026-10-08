@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SqliteDatabase } from './database.js';
+import { CURRENT_SCHEMA_MIGRATION_ID, SqliteDatabase } from './database.js';
 import { assertStorageIdentitySafe } from './storage-identity.js';
 import { recoverHistoricalStorageIdentity, StorageRecoveryError } from './storage-recovery.js';
 
@@ -95,7 +95,7 @@ describe('historical storage recovery', () => {
       expect(recovered.prepare('SELECT value FROM settings WHERE key = ?').get('cloudflare_public_url'))
         .toMatchObject({ value: 'https://historical.example.test' });
       expect(recovered.prepare('SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 1').get())
-        .toMatchObject({ id: '031_merge_reconciliation_records' });
+        .toMatchObject({ id: CURRENT_SCHEMA_MIGRATION_ID });
     } finally {
       recovered.close();
     }

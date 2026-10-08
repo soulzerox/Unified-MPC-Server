@@ -276,3 +276,167 @@ export function classifyWorkspaceAdmission(
   }
   return { status: 'ADMITTED' };
 }
+
+
+/**
+ * An independently verified content seal for a single preserved dirty file.
+ * A caller must derive observedChanges from Git/filesystem state and
+ * retainedChanges from an immutable retention store, never from a client claim.
+ */
+export interface GoalWorkspaceRetainedEntry {
+  readonly path: string;
+  readonly kind: 'tracked' | 'untracked';
+  readonly contentSha256: string;
+}
+
+/**
+ * Preflight for a *separate* owner-authorized Goal Workspace relocation.
+ *
+ * This deliberately does not grant admission, move a worktree, reset dirty
+ * content, or change an ownership receipt. A service that consumes an eligible
+ * result still needs a durable sealed snapshot, exclusive branch/Goal CAS, and
+ * atomic registry handoff before accepting writes.
+ *
+ * All boolean proofs here must be supplied by trusted first-party verifiers,
+ * not arbitrary MCP input flags.
+ */
+export interface GoalWorkspaceRelocationEvidence {
+  readonly goalId: string;
+  readonly workspaceGoalId: string;
+  readonly workspaceId: string;
+  readonly expectedWorkspaceId: string;
+  readonly expectedRepositoryIdentity: string;
+  readonly observedRepositoryIdentity: string;
+  readonly expectedHead: string;
+  readonly observedHead: string;
+  readonly expectedBranchName: string;
+  readonly observedBranchName: string;
+  readonly expectedLeaseGeneration: number;
+  readonly observedLeaseGeneration: number;
+  readonly leaseExpiresAt: string;
+  readonly now: string;
+  readonly expectedAdmissionGeneration: number;
+  readonly observedAdmissionGeneration: number;
+  readonly observedChanges: readonly GoalWorkspaceRetainedEntry[];
+  readonly retainedChanges: readonly GoalWorkspaceRetainedEntry[];
+  readonly retentionReceiptVerified: boolean;
+  readonly originalWorkspaceRetained: boolean;
+  readonly ownerApprovedRelocation: boolean;
+  readonly replacement: {
+    readonly workspaceId: string;
+    readonly sameProject: boolean;
+    readonly sameRepository: boolean;
+    readonly clean: boolean;
+    readonly exclusive: boolean;
+    readonly goalBranchReserved: boolean;
+  };
+}
+
+export type GoalWorkspaceRelocationDecision =
+  | {
+    readonly status: 'RECOVERY_REQUIRED';
+    readonly reason:
+      | 'owner_approval_missing'
+      | 'retention_unverified'
+      | 'original_workspace_not_retained'
+      | 'goal_ownership_changed'
+      | 'workspace_identity_changed'
+      | 'repository_or_branch_changed'
+      | 'workspace_head_changed'
+      | 'writer_lease_invalid'
+      | 'admission_generation_changed'
+      | 'invalid_dirty_manifest'
+      | 'retained_delta_mismatch'
+      | 'replacement_not_exclusive'
+      | 'replacement_identity_changed';
+  }
+  | {
+    readonly status: 'RELOCATION_ELIGIBLE';
+    readonly oldWorkspaceId: string;
+    readonly newWorkspaceId: string;
+    readonly expectedAdmissionGeneration: number;
+    readonly leaseGeneration: number;
+    readonly preservedPaths: readonly string[];
+  };
+
+function validRetainedEntry(entry: GoalWorkspaceRetainedEntry): boolean {
+  const path = entry.path;
+  if (typeof path !== 'string' || path.length === 0 || path.length > 4096
+    || path.startsWith('/') || path.includes('\\') || path.includes(String.fromCharCode(0))
+    || path.includes('//') || path.split('/').some((part) => part === '.' || part === '..')
+    || /^[A-Za-z]:/.test(path)
+    || (entry.kind !== 'tracked' && entry.kind !== 'untracked')
+    || !/^[0-9a-f]{64}$/.test(entry.contentSha256)) return false;
+  return true;
+}
+
+function validRetainedManifest(entries: readonly GoalWorkspaceRetainedEntry[]): boolean {
+  if (entries.length === 0 || entries.length > 1000) return false;
+  const paths = new Set<string>();
+  for (const entry of entries) {
+    if (!validRetainedEntry(entry) || paths.has(entry.path)) return false;
+    paths.add(entry.path);
+  }
+  return true;
+}
+
+/**
+ * Fail-closed authorization *preflight* for preserving a mixed foreign delta.
+ * Even RELOCATION_ELIGIBLE only allows an atomic relocation attempt, not
+ * permission to adopt foreign files or write to either workspace.
+ */
+export function decideGoalWorkspaceRelocation(evidence: GoalWorkspaceRelocationEvidence): GoalWorkspaceRelocationDecision {
+  const blocked = (reason: Extract<GoalWorkspaceRelocationDecision, { status: 'RECOVERY_REQUIRED' }>['reason']):
+    GoalWorkspaceRelocationDecision => ({ status: 'RECOVERY_REQUIRED', reason });
+  if (!evidence.ownerApprovedRelocation) return blocked('owner_approval_missing');
+  if (!evidence.retentionReceiptVerified) return blocked('retention_unverified');
+  if (!evidence.originalWorkspaceRetained) return blocked('original_workspace_not_retained');
+  if (!evidence.goalId || evidence.workspaceGoalId !== evidence.goalId) return blocked('goal_ownership_changed');
+  if (!evidence.workspaceId || evidence.workspaceId !== evidence.expectedWorkspaceId) return blocked('workspace_identity_changed');
+  if (!evidence.expectedRepositoryIdentity
+    || evidence.expectedRepositoryIdentity !== evidence.observedRepositoryIdentity
+    || !evidence.expectedBranchName || evidence.expectedBranchName !== evidence.observedBranchName) {
+    return blocked('repository_or_branch_changed');
+  }
+  if (!/^[0-9a-f]{40,64}$/.test(evidence.expectedHead)
+    || evidence.observedHead !== evidence.expectedHead) return blocked('workspace_head_changed');
+  const expiresAt = Date.parse(evidence.leaseExpiresAt);
+  const now = Date.parse(evidence.now);
+  if (!Number.isSafeInteger(evidence.expectedLeaseGeneration) || evidence.expectedLeaseGeneration < 1
+    || evidence.observedLeaseGeneration !== evidence.expectedLeaseGeneration
+    || !Number.isFinite(expiresAt) || !Number.isFinite(now) || expiresAt <= now) {
+    return blocked('writer_lease_invalid');
+  }
+  if (!Number.isSafeInteger(evidence.expectedAdmissionGeneration) || evidence.expectedAdmissionGeneration < 1
+    || evidence.observedAdmissionGeneration !== evidence.expectedAdmissionGeneration) {
+    return blocked('admission_generation_changed');
+  }
+  if (!validRetainedManifest(evidence.observedChanges)
+    || !validRetainedManifest(evidence.retainedChanges)
+    || !evidence.observedChanges.some((entry) => entry.kind === 'tracked')
+    || !evidence.observedChanges.some((entry) => entry.kind === 'untracked')) {
+    return blocked('invalid_dirty_manifest');
+  }
+  const expected = [...evidence.observedChanges].sort((a, b) => a.path.localeCompare(b.path));
+  const preserved = [...evidence.retainedChanges].sort((a, b) => a.path.localeCompare(b.path));
+  if (expected.length !== preserved.length
+    || expected.some((entry, index) => entry.path !== preserved[index]?.path
+      || entry.kind !== preserved[index]?.kind || entry.contentSha256 !== preserved[index]?.contentSha256)) {
+    return blocked('retained_delta_mismatch');
+  }
+  if (!evidence.replacement.workspaceId
+    || evidence.replacement.workspaceId === evidence.workspaceId
+    || !evidence.replacement.sameProject || !evidence.replacement.sameRepository) {
+    return blocked('replacement_identity_changed');
+  }
+  if (!evidence.replacement.clean || !evidence.replacement.exclusive
+    || !evidence.replacement.goalBranchReserved) return blocked('replacement_not_exclusive');
+  return {
+    status: 'RELOCATION_ELIGIBLE',
+    oldWorkspaceId: evidence.workspaceId,
+    newWorkspaceId: evidence.replacement.workspaceId,
+    expectedAdmissionGeneration: evidence.expectedAdmissionGeneration,
+    leaseGeneration: evidence.expectedLeaseGeneration,
+    preservedPaths: expected.map((entry) => entry.path),
+  };
+}

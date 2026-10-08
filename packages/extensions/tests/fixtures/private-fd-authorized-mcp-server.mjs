@@ -77,7 +77,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     const valid = check(name, args);
     if (valid) accepted += 1;
-    respond(message.id, { content: [{ type: 'text', text: JSON.stringify({ valid, accepted, operation: name }) }], isError: !valid });
+    const result = { content: [{ type: 'text', text: JSON.stringify({ valid, accepted, operation: name }) }], isError: !valid };
+    if (name === 'recall' && args.delay_ms === 1000) {
+      setTimeout(() => respond(message.id, result), 1000);
+    } else {
+      respond(message.id, result);
+    }
     continue;
   }
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'not found' } }) + '\n');

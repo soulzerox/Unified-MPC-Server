@@ -17,7 +17,7 @@ function decode(result: unknown) {
   const r = result as { content: { text: string }[] };
   return JSON.parse(r.content[0]!.text) as Record<string, unknown>;
 }
-async function setup(reuseProof = false) {
+async function setup(reuseProof = false, revocationSignal?: AbortSignal) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'private-fd-authorized-session-'));
   roots.push(root);
   const allowed = new Set([WS]);
@@ -35,6 +35,7 @@ async function setup(reuseProof = false) {
       created.push(stats);
       return {
         payload,
+        ...(revocationSignal === undefined ? {} : { revocationSignal }),
         async issue({ workspaceId, operation }: { workspaceId: string; operation: string }): Promise<string> {
           stats.issued += 1;
           if (!allowed.has(workspaceId)) throw new Error('scope_not_registered');
@@ -143,6 +144,35 @@ describe('private FD3 per-session authority MCP client', () => {
     await expect(session.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
     await session.close();
   }, 10_000);
+
+  it('fences a live child synchronously on host-owned revocation, without waiting for polling', async () => {
+    const controller = new AbortController();
+    const { factory, launch, created } = await setup(false, controller.signal);
+    const session = await factory.connect(launch);
+    controller.abort();
+    await expect(session.callTool('remember', { workspace_id: WS })).rejects.toThrow('workspace_authority_denied');
+    await expect.poll(() => created[0]?.disposed, { timeout: 1_500, interval: 10 }).toBe(true);
+    expect(created[0]?.issued).toBe(0);
+    await expect(session.listTools()).rejects.toThrow('workspace_authority_denied');
+    await session.close();
+  }, 15_000);
+
+  it('aborts an in-flight worker RPC on host revocation and never delivers its stale result', async () => {
+    const controller = new AbortController();
+    const { factory, launch, created } = await setup(false, controller.signal);
+    const session = await factory.connect(launch);
+    try {
+      const pending = session.callTool('recall', { workspace_id: WS, delay_ms: 1000 });
+      const rejected = expect(pending).rejects.toThrow();
+      await new Promise(resolve => setTimeout(resolve, 80));
+      controller.abort();
+      await rejected;
+      await expect(session.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+      await expect.poll(() => created[0]?.disposed, { timeout: 1_500, interval: 10 }).toBe(true);
+    } finally {
+      await session.close();
+    }
+  }, 15_000);
 
   it('keeps every child connection isolated with independently generated bootstrap secrets', async () => {
     const { factory, launch, created } = await setup();

@@ -4,6 +4,7 @@ export * from './database.js';
 export * from './goal-repository.js';
 export * from './goal-workspace-transfer-repository.js';
 export * from './goal-workspace-retention-custody-repository.js';
+export * from './goal-workspace-retention-evidence-repository.js';
 export * from './goal-runtime-event-repository.js';
 export * from './goal-runtime-snapshot-repository.js';
 export * from './migrations/scheduled-continuation-migration.js';

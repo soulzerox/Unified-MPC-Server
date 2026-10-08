@@ -3,9 +3,11 @@ import path from 'node:path';
 import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import {
   McpSessionManager,
+  createPrivateFdAuthorizedClientFactory,
   type McpClientFactory,
   type McpServerLaunchConfig,
 } from '@unified-mpc/extensions';
+import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 import {
   ThaiRagIndexJobStore,
   parseCanonicalWorkspaceId,
@@ -43,6 +45,8 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly launchConfig: McpServerLaunchConfig;
   readonly workspacesProvider: () => Promise<readonly NativeThaiRagWorkspace[]>;
   readonly clientFactory?: McpClientFactory;
+  /** Explicit native-only strict FD3 authority. Default remains legacy until security E2E cutover. */
+  readonly strictWorkerAuthority?: boolean;
   readonly callTimeoutMs?: number;
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
@@ -82,14 +86,33 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly indexJobMonitors = new Map<string, Promise<void>>();
 
   public constructor(private readonly options: NativeThaiRagProviderDriverOptions) {
+    if (options.strictWorkerAuthority === true && options.clientFactory !== undefined) {
+      throw new Error('native_thai_rag_strict_factory_conflict');
+    }
+    // Both normal and admission/index sessions MUST use this same trusted factory
+    // so every child, including reconnects, gets its own independently keyed FD3.
+    const chosenFactory = options.strictWorkerAuthority === true
+      ? createPrivateFdAuthorizedClientFactory({
+          createBootstrap: async () => {
+            if (this.ownerId === undefined || this.stopRequested || this.shuttingDown) {
+              throw new Error('native_thai_rag_strict_worker_not_ready');
+            }
+            return createThaiRagPrivateWorkerBootstrap({
+              ownerId: this.ownerId,
+              authorityGeneration: this.lifecycleGeneration + 1,
+              workspacesProvider: options.workspacesProvider,
+            });
+          },
+        })
+      : options.clientFactory;
     this.sessions = new McpSessionManager({
-      ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
+      ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
       ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
       validateToolSchemas: false,
       idleTimeoutMs: 24 * 60 * 60_000,
     });
     this.indexSessions = new McpSessionManager({
-      ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
+      ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
       callTimeoutMs: Math.max(options.callTimeoutMs ?? 60_000, INDEX_CALL_TIMEOUT_MS),
       validateToolSchemas: false,
       preserveReadOnlyStatusSessionOnTimeout: true,

@@ -90,7 +90,7 @@ export interface GoalRelocationOrchestratorResult {
 }
 
 /** Return true ONLY for mixed tracked-unstaged + untracked files, in manifest path order. */
-function exactDirtyManifest(
+export function exactDirtyManifest(
   snapshot: GitWorkspaceSnapshot,
   retained: GoalWorkspaceRetentionManifest,
 ): boolean {
@@ -107,7 +107,7 @@ function exactDirtyManifest(
   });
 }
 
-async function matchesDirtySourceBytes(sourceRoot: string, manifest: GoalWorkspaceRetentionManifest): Promise<boolean> {
+export async function verifyGoalWorkspaceDirtySourceBytes(sourceRoot: string, manifest: GoalWorkspaceRetentionManifest): Promise<boolean> {
   try {
     const root = await realpath(sourceRoot);
     if (root !== path.resolve(sourceRoot)) return false;
@@ -237,7 +237,7 @@ export class GoalWorkspaceRelocationOrchestrator {
       || replacement.gitCommonDirIdentity !== observed.gitCommonDirIdentity
       || replacement.worktreeIdentity === observed.worktreeIdentity
       || replacement.statusEntries.length !== 0 || !exactDirtyManifest(observed, retained.value)
-      || !(await matchesDirtySourceBytes(old.realRootPath, retained.value))) {
+      || !(await verifyGoalWorkspaceDirtySourceBytes(old.realRootPath, retained.value))) {
       return err(appError('CONFLICT', 'Original/clean replacement Git truth no longer agrees with retained bytes', true));
     }
 
@@ -284,7 +284,7 @@ export class GoalWorkspaceRelocationOrchestrator {
     if (!afterPin.ok) return afterPin;
     if (!matchingSnapshot(observed, afterOld.value)
       || !matchingSnapshot(replacement, afterNew.value)
-      || !(await matchesDirtySourceBytes(old.realRootPath, retained.value))
+      || !(await verifyGoalWorkspaceDirtySourceBytes(old.realRootPath, retained.value))
       || afterGoal === null || afterGoal.revision !== goal.revision
       || afterGoal.workspaceId !== old.id || afterGoal.leaseGeneration !== goal.leaseGeneration
       || afterGoal.leaseTokenHash !== tokenHash || afterGoal.leaseExpiresAt === undefined

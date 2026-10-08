@@ -54,9 +54,9 @@ export function createPrivateFdAuthorizedClientFactory(
       }
       const transport = new PrivateFdStdioClientTransport({
         command: config.command,
-        args: config.args,
-        cwd: config.cwd,
-        env: config.env,
+        ...(config.args === undefined ? {} : { args: config.args }),
+        ...(config.cwd === undefined ? {} : { cwd: config.cwd }),
+        ...(config.env === undefined ? {} : { env: config.env }),
         bootstrap: bootstrap.payload,
       });
       const client = new Client(

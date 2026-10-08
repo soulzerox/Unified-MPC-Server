@@ -20,7 +20,8 @@ import type { GoalRuntimeAdmissionIdentity } from './goal-runtime-control-plane-
  */
 export interface GoalRelocationHostFence {
   withAuthorizedOwner<T>(
-    identity: { goalId: string; operationId: string; clientId: string; sessionId: string },
+    identity: { goalId: string; operationId: string; clientId: string; sessionId: string;
+      fromWorkspaceId: string; toWorkspaceId: string; action: 'attest_custody' | 'relocate_goal' },
     run: () => Promise<T>,
   ): Promise<T>;
 }
@@ -170,6 +171,8 @@ export class GoalWorkspaceRelocationOrchestrator {
       return await this.ports.host.withAuthorizedOwner({
         goalId: request.goalId, operationId: request.operationId,
         clientId: request.actor.clientId, sessionId: request.actor.sessionId,
+        fromWorkspaceId: request.oldWorkspaceId, toWorkspaceId: request.newWorkspaceId,
+        action: 'relocate_goal',
       }, async (): Promise<Result<GoalRelocationOrchestratorResult>> => this.transferWithinHostFence(request));
     } catch {
       return err(appError('CONFLICT', 'Goal relocation Host Approval/fence is not currently established', true));

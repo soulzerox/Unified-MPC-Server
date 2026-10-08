@@ -80,6 +80,8 @@ export class GoalWorkspaceCustodyAttestationService {
       return await this.ports.host.withAuthorizedOwner({
         goalId: request.goalId, operationId: request.operationId,
         clientId: request.actor.clientId, sessionId: request.actor.sessionId,
+        fromWorkspaceId: request.oldWorkspaceId, toWorkspaceId: request.newWorkspaceId,
+        action: 'attest_custody',
       }, async (): Promise<Result<GoalCustodyAttestationResult>> => this.verifyWithinHostFence(request));
     } catch {
       return err(appError('PERMISSION_DENIED', 'Verified custody requires active exact-action Host Approval and owner fence'));

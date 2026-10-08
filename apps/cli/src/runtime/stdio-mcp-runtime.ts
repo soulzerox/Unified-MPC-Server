@@ -33,6 +33,9 @@ import {
   WorkspaceQueryService,
   ToolAvailabilityService,
   type FileActor,
+  type GoalRelocationHostFence,
+  GoalWorkspaceCustodyAttestationService,
+  type GoalCustodyTrustedEvidence,
 } from '@unified-mpc/application';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
 import {
@@ -57,6 +60,7 @@ import {
   SqliteCheckpointRepository,
   SqliteDatabase,
   SqliteGoalRepository,
+  SqliteGoalWorkspaceRetentionCustodyRepository,
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
   SqliteManagedResourceBindingRepository,
@@ -79,11 +83,15 @@ import {
   GitHubMergeReconciliationPoller,
 } from './github-merge-reconciliation-poller.js';
 import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
-import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity } from '@unified-mpc/mcp-server';
+import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest } from '@unified-mpc/mcp-server';
+import { createTrustedGoalRelocationHostFence, type TrustedGoalRelocationHostActor } from './goal-relocation-host-fence.js';
 
 export interface StdioMcpRuntime {
   readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
   readonly services: McpApplicationServices;
+  readonly goalRelocationHostFence: GoalRelocationHostFence;
+  /** Not installed without a trusted native-host permission and evidence source. */
+  readonly goalCustodyAttestation?: GoalWorkspaceCustodyAttestationService;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
   readonly activityTracker: ActivityTracker;
@@ -118,6 +126,13 @@ export interface StdioMcpRuntimeOptions {
   /** Test seam for the parent-owned provider worker. */
   readonly thaiRagDriver?: ThaiRagProviderDriver;
   readonly extensions?: ExtensionsService;
+  /** Supplied by the first-party host transport, never by request parameters. */
+  readonly trustedGoalRelocationActorProvider?: () => TrustedGoalRelocationHostActor | null;
+  readonly goalRelocationExactActionApproval?: (request: HostMutationApprovalRequest) => Promise<boolean> | boolean;
+  /** Durable trusted host evidence provider. Never sourced from MCP request arguments. */
+  readonly trustedGoalCustodyEvidence?: {
+    getByOperation(operationId: string): Promise<GoalCustodyTrustedEvidence | null>;
+  };
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
 }
@@ -128,6 +143,11 @@ export function createStdioMcpRuntime(
   unrestricted: boolean = false,
   options: StdioMcpRuntimeOptions = {},
 ): StdioMcpRuntime {
+  const goalRelocationHostFence = createTrustedGoalRelocationHostFence({
+    currentHostActor: options.trustedGoalRelocationActorProvider ?? ((): null => null),
+    ...(options.goalRelocationExactActionApproval === undefined ? {}
+      : { approveExactAction: options.goalRelocationExactActionApproval }),
+  });
   const databaseFilename = path.join(dataPath, 'unified-mpc.sqlite');
   const database = new SqliteDatabase(databaseFilename, { backupDirectory: path.join(dataPath, 'backups') });
   const resourceAdmissionController = sharedProcessResourceAdmissionController();
@@ -261,6 +281,39 @@ export function createStdioMcpRuntime(
     if (unsafe.length > 0) throw new Error(`Recovery reconciliation found unsafe entries: ${unsafe.length}`);
   });
   const gitService = new GitService(workspaceRepository);
+  // An actual host must supply BOTH exact-action approval and independently
+  // durable operation evidence. The generic Full Bypass profile grants neither.
+  const goalCustodyAttestation = options.goalRelocationExactActionApproval !== undefined
+    && options.trustedGoalRelocationActorProvider !== undefined
+    && options.trustedGoalCustodyEvidence !== undefined
+    ? new GoalWorkspaceCustodyAttestationService({
+        host: goalRelocationHostFence,
+        trustedEvidence: options.trustedGoalCustodyEvidence,
+        goals: goalRepository,
+        workspaces: {
+          get: async (workspaceId): Promise<Workspace | null> => workspaceRepository.get(workspaceId),
+          getAdmissionReceipt: async (workspaceId): Promise<WorkspaceAdmissionReceipt | null> => {
+            if (await workspaceRepository.get(workspaceId) === null) return null;
+            return rawWorkspaceRepository.getAdmissionReceipt(workspaceId);
+          },
+        },
+        git: {
+          observeWorkspace: async (rootPath): ReturnType<GitService['observeWorkspace']> => {
+            const registered = (await workspaceRepository.list()).find(
+              (entry) => entry.realRootPath === rootPath,
+            );
+            if (registered === undefined) {
+              return err(appError('WORKSPACE_NOT_FOUND', 'Goal custody Git observation requires a registered workspace'));
+            }
+            return gitService.observeWorkspace(
+              { clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime' },
+              registered.id,
+            );
+          },
+        },
+        custody: new SqliteGoalWorkspaceRetentionCustodyRepository(database),
+      })
+    : undefined;
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
   const extensions = options.extensions ?? createLocalExtensionsService({
     settingsJsonProvider: (): string | null => settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
@@ -776,6 +829,8 @@ export function createStdioMcpRuntime(
   return {
     ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
     services,
+    goalRelocationHostFence,
+    ...(goalCustodyAttestation === undefined ? {} : { goalCustodyAttestation }),
     actor,
     extensions,
     activityTracker,

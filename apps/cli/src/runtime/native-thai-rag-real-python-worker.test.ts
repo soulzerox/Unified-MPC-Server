@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -37,6 +37,12 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           await expect(session.callTool('recall', { workspace_id: WS, query: 'attack',
             authority_proof: 'forged' })).rejects.toThrow('workspace_authority_denied');
           registered = false;
+          // No further operation is required to fence the existing Python child.
+          await expect.poll(async () => {
+            try { await session.listTools(); return false; } catch { return true; }
+          }, { timeout: 3_000, interval: 50 }).toBe(true);
+          // Restoring the same registration cannot revive its old secret.
+          registered = true;
           await expect(session.callTool('recall', { workspace_id: WS, query: 'revoked' }))
             .rejects.toThrow('workspace_authority_denied');
         } finally {
@@ -45,6 +51,42 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'fences idle actual Python worker on root symlink swap and refuses restored path',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-root-swap-'));
+      const root = path.join(base, 'root');
+      const other = path.join(base, 'other');
+      try {
+        await mkdir(root);
+        await mkdir(other);
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-real-python-root-swap', authorityGeneration: 24,
+            workspacesProvider: async () => [{ id: WS, realRootPath: root }],
+          }),
+        });
+        const session = await factory.connect({
+          command: python!,
+          args: ['-m', 'thai_rag.server'],
+          env: { PYTHONPATH: source! },
+        });
+        try {
+          expect((await session.listTools()).some(t => t.name === 'recall')).toBe(true);
+          await rm(root, { recursive: true });
+          await symlink(other, root);
+          await expect.poll(async () => {
+            try { await session.listTools(); return false; } catch { return true; }
+          }, { timeout: 3_000, interval: 50 }).toBe(true);
+          await rm(root);
+          await mkdir(root);
+          await expect(session.callTool('health', {}))
+            .rejects.toThrow('workspace_authority_denied');
+        } finally { await session.close(); }
+      } finally { await rm(base, { recursive: true, force: true }); }
     }, 45_000,
   );
 });

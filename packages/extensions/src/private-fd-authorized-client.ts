@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/client';
+import { randomBytes } from 'node:crypto';
 import type { McpClientFactory, McpClientSession } from './mcp-session-manager.js';
 import { PrivateFdStdioClientTransport } from './private-fd-stdio-transport.js';
 
@@ -18,6 +19,8 @@ function denied(): Error {
 export interface PrivateFdSessionBootstrap {
   readonly payload: Buffer;
   issue(request: { readonly workspaceId: string; readonly operation: string }): Promise<string>;
+  /** Verify Python's strict private-FD3 worker MAC with this session's key. */
+  verifyWorkerChallenge(challenge: string, response: unknown): boolean;
   dispose(): void;
 }
 
@@ -48,7 +51,9 @@ export function createPrivateFdAuthorizedClientFactory(
         throw denied();
       }
       if (!bootstrap || !Buffer.isBuffer(bootstrap.payload) ||
-        typeof bootstrap.issue !== 'function' || typeof bootstrap.dispose !== 'function') {
+        typeof bootstrap.issue !== 'function' ||
+        typeof bootstrap.verifyWorkerChallenge !== 'function' ||
+        typeof bootstrap.dispose !== 'function') {
         bootstrap?.dispose?.();
         throw denied();
       }
@@ -65,6 +70,26 @@ export function createPrivateFdAuthorizedClientFactory(
       );
       try {
         await client.connect(transport, signal === undefined ? undefined : { signal });
+        // Initialize only establishes an MCP transport, NOT an authenticated
+        // worker. Never return a session without a unique FD3 challenge proof.
+        const challenge = randomBytes(32).toString('base64url');
+        const reply = await client.callTool(
+          { name: 'worker_authority_probe', arguments: { challenge } },
+          { timeout: 5_000, ...(signal === undefined ? {} : { signal }) },
+        );
+        if (reply.isError) throw denied();
+        // Python FastMCP may expose the returned dict via structuredContent
+        // or its single JSON text fallback. No arbitrary nested result is trusted.
+        const structured = reply.structuredContent;
+        const text = reply.content.length === 1 &&
+          reply.content[0]?.type === 'text' ? reply.content[0].text : undefined;
+        let verified = structured !== undefined &&
+          bootstrap.verifyWorkerChallenge(challenge, structured);
+        if (!verified && structured === undefined && typeof text === 'string' && text.length < 4096) {
+          const parsed: unknown = JSON.parse(text);
+          verified = bootstrap.verifyWorkerChallenge(challenge, parsed);
+        }
+        if (!verified) throw denied();
       } catch {
         await client.close().catch(() => undefined);
         bootstrap.dispose();
@@ -93,7 +118,8 @@ export function createPrivateFdAuthorizedClientFactory(
         async listTools(listSignal) {
           if (closed) throw denied();
           const catalog = await client.listTools(undefined, listSignal === undefined ? undefined : { signal: listSignal });
-          return catalog.tools.map((tool) => ({
+          // Never advertise the host-only bootstrap probe to general callers.
+          return catalog.tools.filter(tool => tool.name !== 'worker_authority_probe').map((tool) => ({
             name: tool.name,
             description: tool.description ?? '',
             ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),

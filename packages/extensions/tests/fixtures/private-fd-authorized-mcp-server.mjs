@@ -5,6 +5,27 @@ import { createInterface } from 'node:readline';
 const envelope = JSON.parse(readFileSync(3, 'utf8'));
 const secret = Buffer.from(envelope.secret_b64url, 'base64url');
 const usedNonces = new Set();
+const challengeMode = process.env.TEST_FD_CHALLENGE_MODE ?? 'valid';
+function workerChallenge(args) {
+  const challenge = args?.challenge;
+  if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return { status: 'scope_denied' };
+  const raw = Buffer.from(challenge, 'base64url');
+  const material = Buffer.concat([
+    Buffer.from('thai-rag-worker-fd3-challenge-v1'), Buffer.from([0]),
+    raw, Buffer.from([0]), Buffer.from(envelope.owner_id), Buffer.from([0]),
+    Buffer.from(String(envelope.authority_generation)),
+  ]);
+  const proof = createHmac('sha256', secret).update(material).digest('base64url');
+  const good = { status: 'ok', strict_mode: true, challenge,
+    owner_id: envelope.owner_id, authority_generation: envelope.authority_generation, proof };
+  if (challengeMode === 'missing') return null;
+  if (challengeMode === 'wrong-owner') return { ...good, owner_id: 'impostor' };
+  if (challengeMode === 'wrong-epoch') return { ...good, authority_generation: envelope.authority_generation + 1 };
+  if (challengeMode === 'bad-mac') return { ...good, proof: 'a'.repeat(43) };
+  if (challengeMode === 'stale') return { ...good, challenge: Buffer.alloc(32, 7).toString('base64url') };
+  if (challengeMode === 'downgrade') return { ...good, strict_mode: false };
+  return good;
+}
 let accepted = 0;
 function check(name, args) {
   const token = args.authority_proof;
@@ -38,7 +59,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     }); continue;
   }
   if (message.method === 'tools/list') {
-    respond(message.id, { tools: ['health', 'version', 'remember', 'recall'].map(name => ({
+    respond(message.id, { tools: ['health', 'version', 'remember', 'recall', ...(challengeMode === 'missing' ? [] : ['worker_authority_probe'])].map(name => ({
       name, inputSchema: { type: 'object', additionalProperties: true },
     })) }); continue;
   }
@@ -46,6 +67,11 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (message.method === 'tools/call') {
     const name = message.params?.name;
     const args = message.params?.arguments ?? {};
+    if (name === 'worker_authority_probe' && challengeMode !== 'missing') {
+      const response = workerChallenge(args);
+      respond(message.id, { content: [{ type: 'text', text: JSON.stringify(response) }],
+        structuredContent: response }); continue;
+    }
     if (name === 'health' || name === 'version') {
       respond(message.id, { content: [{ type: 'text', text: JSON.stringify({ accepted, unscoped: true, proofReceived: Object.hasOwn(args, 'authority_proof') }) }] }); continue;
     }

@@ -21,7 +21,7 @@ async function setup(reuseProof = false) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'private-fd-authorized-session-'));
   roots.push(root);
   const allowed = new Set([WS]);
-  const created: Array<{ payload: Buffer; disposed: boolean; issued: number }> = [];
+  const created: Array<{ payload: Buffer; disposed: boolean; issued: number; attested: number; challenges: string[] }> = [];
   const factory = createPrivateFdAuthorizedClientFactory({
     async createBootstrap() {
       const secret = randomBytes(32);
@@ -31,7 +31,7 @@ async function setup(reuseProof = false) {
         owner_id: 'unified-worker-1', authority_generation: 9,
         workspace_roots: { [WS]: root },
       }), 'utf8');
-      const stats = { payload, disposed: false, issued: 0 };
+      const stats = { payload, disposed: false, issued: 0, attested: 0, challenges: [] as string[] };
       created.push(stats);
       return {
         payload,
@@ -52,6 +52,20 @@ async function setup(reuseProof = false) {
           if (reuseProof) return replayToken ??= token;
           return token;
         },
+        verifyWorkerChallenge(challenge: string, response: unknown): boolean {
+          stats.attested += 1;
+          stats.challenges.push(challenge);
+          if (stats.disposed || typeof response !== 'object' || response === null) return false;
+          const r = response as Record<string, unknown>;
+          const expected = createHmac('sha256', secret)
+            .update('thai-rag-worker-fd3-challenge-v1\0')
+            .update(Buffer.from(challenge, 'base64url'))
+            .update(Buffer.from([0])).update('unified-worker-1').update(Buffer.from([0]))
+            .update('9').digest('base64url');
+          return r.status === 'ok' && r.strict_mode === true &&
+            r.challenge === challenge && r.owner_id === 'unified-worker-1' &&
+            r.authority_generation === 9 && r.proof === expected;
+        },
         dispose() { stats.disposed = true; payload.fill(0); secret.fill(0); },
       };
     },
@@ -71,6 +85,7 @@ describe('private FD3 per-session authority MCP client', () => {
       expect(decode(await session.callTool('remember', { workspace_id: WS, content: 'second' }))).toMatchObject({ valid: true, accepted: 2 });
       expect(decode(await session.callTool('recall', { workspace_id: WS, query: 'first' }))).toMatchObject({ valid: true, accepted: 3 });
       expect(created[0]?.issued).toBe(3);
+      expect(created[0]?.attested).toBe(1);
       expect(created[0]?.payload.every(b => b === 0)).toBe(true);
       expect(await session.listResources()).toEqual([]);
     } finally { await session.close(); }
@@ -85,6 +100,7 @@ describe('private FD3 per-session authority MCP client', () => {
       await expect(session.callTool('remember', { content: 'unscoped' })).rejects.toThrow('workspace_authority_denied');
       await expect(session.callTool('remember', { workspace_id: WS, content: 'attack', authority_proof: 'attacker' })).rejects.toThrow('workspace_authority_denied');
       await expect(session.callTool('not_registered', { workspace_id: WS })).rejects.toThrow('workspace_authority_denied');
+      await expect(session.callTool('worker_authority_probe', { challenge: 'caller' })).rejects.toThrow('workspace_authority_denied');
       await expect(session.callTool('health', { authority_proof: 'attacker' })).rejects.toThrow('workspace_authority_denied');
       expect(decode(await session.callTool('health', {}))).toMatchObject({ accepted: 0, proofReceived: false });
       expect(created[0]?.issued).toBe(1); // only the foreign ID reaches trusted issuer; rejected there
@@ -122,9 +138,26 @@ describe('private FD3 per-session authority MCP client', () => {
       expect(decode(await first.callTool('remember', { workspace_id: WS }))).toMatchObject({ valid: true, accepted: 1 });
       expect(decode(await second.callTool('remember', { workspace_id: WS }))).toMatchObject({ valid: true, accepted: 1 });
       expect(created.map(x => x.issued)).toEqual([1, 1]);
+      expect(created.map(x => x.attested)).toEqual([1, 1]);
+      expect(created[0]?.challenges[0]).not.toBe(created[1]?.challenges[0]);
     } finally { await Promise.all([first.close(), second.close()]); }
     expect(created.every(x => x.disposed)).toBe(true);
   }, 20_000);
+
+  it.each(['missing', 'wrong-owner', 'wrong-epoch', 'bad-mac', 'stale', 'downgrade'])(
+    'denies %s worker challenge and disposes the private key before returning a session',
+    async mode => {
+      const { factory, launch, created } = await setup();
+      await expect(factory.connect({
+        ...launch, env: { TEST_FD_CHALLENGE_MODE: mode },
+      })).rejects.toThrow('workspace_authority_denied');
+      expect(created).toHaveLength(1);
+      expect(created[0]?.disposed).toBe(true);
+      expect(created[0]?.payload.every(x => x === 0)).toBe(true);
+      expect(created[0]?.issued).toBe(0);
+    },
+    15_000,
+  );
 
   it('rejects network transports and cleans bootstrap when spawning its private worker fails', async () => {
     const { factory, launch, created } = await setup();

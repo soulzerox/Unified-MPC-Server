@@ -32,6 +32,9 @@ import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base
 import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-integration-observation-migration.js';
 import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
 import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconciliation-migration.js';
+import { GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL } from './migrations/goal-workspace-transfer-intent-migration.js';
+import { GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL } from './migrations/goal-workspace-retention-custody-migration.js';
+import { GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL } from './migrations/goal-workspace-retention-evidence-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -51,7 +54,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '031_merge_reconciliation_records' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '034_goal_workspace_retention_evidence' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -110,7 +113,10 @@ export class SqliteDatabase {
     this.applyMigration({ id: '028_workspace_base_rebase', sql: WORKSPACE_BASE_REBASE_MIGRATION_SQL });
     this.applyMigration({ id: '029_goal_runtime_integration_observations', sql: GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL });
     this.applyMigration({ id: '030_merge_verification_receipts', sql: MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: MERGE_RECONCILIATION_MIGRATION_SQL });
+    this.applyMigration({ id: '031_merge_reconciliation_records', sql: MERGE_RECONCILIATION_MIGRATION_SQL });
+    this.applyMigration({ id: '032_goal_workspace_transfer_intents', sql: GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL });
+    this.applyMigration({ id: '033_goal_workspace_retention_custody', sql: GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

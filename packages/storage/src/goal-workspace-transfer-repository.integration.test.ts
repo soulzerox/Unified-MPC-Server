@@ -39,6 +39,7 @@ async function fixture(): Promise<{
   database: SqliteDatabase;
   transfer: SqliteGoalWorkspaceTransferRepository;
   workspaces: SqliteWorkspaceRepository;
+  databasePath: string;
 }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'umcp-transfer-prepared-'));
   roots.push(root);
@@ -92,7 +93,8 @@ async function fixture(): Promise<{
     ownerClientId: request.ownerClientId, ownerSessionId: request.ownerSessionId,
     pinnedAt: now,
   })).toBe(true);
-  return { database, transfer: new SqliteGoalWorkspaceTransferRepository(database), workspaces };
+  return { database, transfer: new SqliteGoalWorkspaceTransferRepository(database), workspaces,
+    databasePath: path.join(root, 'goal.sqlite') };
 }
 
 const newAdmission: WorkspaceAdmissionReceipt = {
@@ -129,6 +131,102 @@ const newAdmission: WorkspaceAdmissionReceipt = {
 };
 
 describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)', () => {
+  it('classifies a prepared intent as needing new owner verification after restart without mutating anything', async () => {
+    const t = await fixture();
+    try {
+      expect(await t.transfer.prepare(request)).toBe(true);
+      const before = await t.transfer.get(request.operationId);
+      expect(await t.transfer.inspectRecovery(request.operationId, now)).toEqual({
+        operationId: request.operationId, goalId: request.goalId,
+        oldWorkspaceId: request.fromWorkspaceId, newWorkspaceId: request.toWorkspaceId,
+        state: 'prepared_requires_fresh_owner_verification',
+      });
+      expect(await t.transfer.get(request.operationId)).toEqual(before);
+      expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
+      expect(await t.workspaces.get(request.toWorkspaceId)).toMatchObject({ lifecycleKind: 'temporary' });
+    } finally {
+      t.database.close();
+    }
+  });
+
+  it('reads a persisted prepared operation after a real database close and reopen without resuming ownership', async () => {
+    const t = await fixture();
+    expect(await t.transfer.prepare(request)).toBe(true);
+    t.database.close();
+    const restarted = new SqliteDatabase(t.databasePath);
+    try {
+      const recovery = new SqliteGoalWorkspaceTransferRepository(restarted);
+      expect(await recovery.inspectRecovery(request.operationId, now)).toMatchObject({
+        state: 'prepared_requires_fresh_owner_verification',
+        goalId: request.goalId,
+      });
+      expect(restarted.connection.prepare('SELECT workspace_id, revision FROM goals WHERE id = ?')
+        .get(request.goalId)).toEqual({ workspace_id: request.fromWorkspaceId, revision: 0 });
+    } finally {
+      restarted.close();
+    }
+  });
+
+  it('flags lease expiry, rotation and missing pinned custody as owner-review blockers', async () => {
+    const t = await fixture();
+    try {
+      expect(await t.transfer.prepare(request)).toBe(true);
+      expect((await t.transfer.inspectRecovery(request.operationId, '2026-10-09T00:20:00.000Z')).state)
+        .toBe('prepared_stale_owner_review');
+      t.database.connection.prepare('UPDATE goals SET lease_generation = lease_generation + 1 WHERE id = ?')
+        .run(request.goalId);
+      expect((await t.transfer.inspectRecovery(request.operationId, now)).state).toBe('prepared_stale_owner_review');
+      t.database.connection.prepare('UPDATE goals SET lease_generation = ? WHERE id = ?').run(1, request.goalId);
+      t.database.connection.prepare('UPDATE goal_workspace_retention_custody SET status = ? WHERE operation_id = ?')
+        .run('revoked', request.operationId);
+      expect((await t.transfer.inspectRecovery(request.operationId, now)).state).toBe('prepared_stale_owner_review');
+      expect(await t.transfer.get(request.operationId)).toMatchObject({ status: 'prepared' });
+    } finally {
+      t.database.close();
+    }
+  });
+
+  it('reports committed storage as runtime admission REQUIRED, not ADMITTED', async () => {
+    const t = await fixture();
+    try {
+      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.commit({
+        operationId: request.operationId, goalId: request.goalId,
+        leaseTokenHash: request.leaseTokenHash,
+        retainedManifestSha256: request.retainedManifestSha256,
+        admissionReceipt: newAdmission, now,
+      })).toBe(true);
+      expect(await t.transfer.inspectRecovery(request.operationId, now)).toMatchObject({
+        state: 'committed_runtime_admission_required', goalId: request.goalId,
+        oldWorkspaceId: request.fromWorkspaceId, newWorkspaceId: request.toWorkspaceId,
+      });
+      expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ lifecycleKind: 'inspection' });
+    } finally {
+      t.database.close();
+    }
+  });
+
+  it('fails closed on inconsistent post-commit custody or admission; ignores unknown operations', async () => {
+    const t = await fixture();
+    try {
+      expect((await t.transfer.inspectRecovery('missing-operation', now)).state).toBe('missing_or_unverified');
+      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.commit({
+        operationId: request.operationId, goalId: request.goalId,
+        leaseTokenHash: request.leaseTokenHash,
+        retainedManifestSha256: request.retainedManifestSha256,
+        admissionReceipt: newAdmission, now,
+      })).toBe(true);
+      t.database.connection.prepare('UPDATE goal_workspace_retention_custody SET status = ? WHERE operation_id = ?')
+        .run('revoked', request.operationId);
+      expect((await t.transfer.inspectRecovery(request.operationId, now)).state)
+        .toBe('committed_inconsistent_owner_review');
+    } finally {
+      t.database.close();
+    }
+  });
+
+
   it('durably pins exact verified-retention intent, idempotently, without changing Goal or original workspace', async () => {
     const t = await fixture();
     try {

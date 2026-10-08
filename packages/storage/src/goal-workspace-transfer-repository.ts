@@ -31,6 +31,22 @@ export type GoalWorkspaceTransferIntent = Omit<GoalWorkspaceTransferIntentReques
   readonly status: 'prepared' | 'completed' | 'cancelled';
 };
 
+/** Read-only startup/reconnect classification. Never grants write permission. */
+export interface GoalWorkspaceTransferRecoveryObservation {
+  readonly operationId: string;
+  readonly goalId?: string;
+  readonly oldWorkspaceId?: string;
+  readonly newWorkspaceId?: string;
+  readonly state:
+    | 'missing_or_unverified'
+    | 'prepared_requires_fresh_owner_verification'
+    | 'prepared_stale_owner_review'
+    | 'committed_runtime_admission_required'
+    | 'committed_inconsistent_owner_review'
+    | 'cancelled';
+}
+
+
 interface GoalRow {
   workspace_id: string;
   goal_key: string;
@@ -444,6 +460,94 @@ export class SqliteGoalWorkspaceTransferRepository {
       conn.exec('ROLLBACK;');
       throw error;
     }
+  }
+
+  /**
+   * Recover intent *state* after restart without recovering authorization.
+   * Never changes rows, claims a lease, resumes an intent or grants ADMITTED.
+   * A 'prepared' operation must go through fresh first-party Host Approval,
+   * independent retained-byte verification and current Git truth before retry.
+   */
+  public async inspectRecovery(operationId: string, now: string): Promise<GoalWorkspaceTransferRecoveryObservation> {
+    const missing: GoalWorkspaceTransferRecoveryObservation = {
+      operationId, state: 'missing_or_unverified',
+    };
+    if (operationId.length === 0 || operationId.length > 128
+      || !Number.isFinite(Date.parse(now))) return missing;
+    const prepared = await this.get(operationId);
+    if (prepared === null) return missing;
+    const identity = {
+      operationId, goalId: prepared.goalId,
+      oldWorkspaceId: prepared.fromWorkspaceId,
+      newWorkspaceId: prepared.toWorkspaceId,
+    };
+    if (prepared.status === 'cancelled') return { ...identity, state: 'cancelled' };
+    const conn = this.database.connection;
+    const goal = conn.prepare(`
+      SELECT workspace_id, status, revision, lease_generation,
+        lease_owner_client_id, lease_owner_session_id, lease_expires_at
+      FROM goals WHERE id = ?
+    `).get(prepared.goalId) as {
+      workspace_id: string; status: string; revision: number;
+      lease_generation: number; lease_owner_client_id: string | null;
+      lease_owner_session_id: string | null; lease_expires_at: string | null;
+    } | undefined;
+    const old = conn.prepare('SELECT workspace_kind, goal_id, archived_at, writer_lease_generation FROM workspaces WHERE id = ?')
+      .get(prepared.fromWorkspaceId) as {
+        workspace_kind: string; goal_id: string | null; archived_at: string | null;
+        writer_lease_generation: number | null;
+      } | undefined;
+    const next = conn.prepare('SELECT workspace_kind, goal_id, archived_at, writer_lease_generation FROM workspaces WHERE id = ?')
+      .get(prepared.toWorkspaceId) as {
+        workspace_kind: string; goal_id: string | null; archived_at: string | null;
+        writer_lease_generation: number | null;
+      } | undefined;
+    const custody = conn.prepare('SELECT status, manifest_sha256, lease_generation FROM goal_workspace_retention_custody WHERE operation_id = ?')
+      .get(operationId) as { status: string; manifest_sha256: string; lease_generation: number } | undefined;
+    if (prepared.status === 'prepared') {
+      const valid = goal?.status === 'active' && goal.workspace_id === prepared.fromWorkspaceId
+        && goal.revision === prepared.expectedRevision
+        && goal.lease_generation === prepared.leaseGeneration
+        && goal.lease_owner_client_id === prepared.ownerClientId
+        && goal.lease_owner_session_id === prepared.ownerSessionId
+        && goal.lease_expires_at !== null && goal.lease_expires_at !== undefined
+        && goal.lease_expires_at > now
+        && old?.workspace_kind === 'goal' && old.goal_id === prepared.goalId
+        && old.archived_at === null && old.writer_lease_generation === prepared.leaseGeneration
+        && next?.workspace_kind === 'temporary' && next.goal_id === null
+        && next.archived_at === null && next.writer_lease_generation === null
+        && custody?.status === 'pinned'
+        && custody.lease_generation === prepared.leaseGeneration
+        && custody.manifest_sha256 === prepared.retainedManifestSha256;
+      return {
+        ...identity,
+        state: valid ? 'prepared_requires_fresh_owner_verification' : 'prepared_stale_owner_review',
+      };
+    }
+    const receipt = conn.prepare('SELECT receipt_json FROM workspace_admission_receipts WHERE workspace_id = ?')
+      .get(prepared.toWorkspaceId) as { receipt_json: string } | undefined;
+    let attested: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = receipt === undefined ? null : JSON.parse(receipt.receipt_json);
+      if (parsed !== null && typeof parsed === 'object') attested = parsed as Record<string, unknown>;
+    } catch { /* invalid stored evidence fails closed */ }
+    const consistent = goal?.status === 'active'
+      && goal.workspace_id === prepared.toWorkspaceId
+      && goal.revision === prepared.expectedRevision + 1
+      && old?.workspace_kind === 'inspection' && old.goal_id === null
+      && old.archived_at === null && old.writer_lease_generation === null
+      && next?.workspace_kind === 'goal' && next.goal_id === prepared.goalId
+      && next.archived_at === null && next.writer_lease_generation === prepared.leaseGeneration
+      && custody?.status === 'consumed'
+      && custody.lease_generation === prepared.leaseGeneration
+      && custody.manifest_sha256 === prepared.retainedManifestSha256
+      && attested?.goalId === prepared.goalId && attested.workspaceId === prepared.toWorkspaceId
+      && attested.dirtyState === 'clean' && attested.invalidatedAt === undefined
+      && attested.writeLeaseGeneration === prepared.leaseGeneration;
+    return {
+      ...identity,
+      state: consistent ? 'committed_runtime_admission_required' : 'committed_inconsistent_owner_review',
+    };
   }
 
   public async get(operationId: string): Promise<GoalWorkspaceTransferIntent | null> {

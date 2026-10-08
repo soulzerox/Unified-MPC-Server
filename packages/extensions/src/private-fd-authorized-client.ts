@@ -23,6 +23,8 @@ export interface PrivateFdSessionBootstrap {
   verifyWorkerChallenge(challenge: string, response: unknown): boolean;
   /** Bind this specific child to the full live canonical workspace snapshot. */
   validateLiveBinding(): Promise<boolean>;
+  /** Optional trusted host revocation event; never accepted from an MCP caller. */
+  readonly revocationSignal?: AbortSignal;
   dispose(): void;
 }
 
@@ -60,6 +62,10 @@ export function createPrivateFdAuthorizedClientFactory(
         bootstrap?.dispose?.();
         throw denied();
       }
+      if (bootstrap.revocationSignal?.aborted) {
+        bootstrap.dispose();
+        throw denied();
+      }
       const transport = new PrivateFdStdioClientTransport({
         command: config.command,
         ...(config.args === undefined ? {} : { args: config.args }),
@@ -92,7 +98,7 @@ export function createPrivateFdAuthorizedClientFactory(
           const parsed: unknown = JSON.parse(text);
           verified = bootstrap.verifyWorkerChallenge(challenge, parsed);
         }
-        if (!verified || !(await bootstrap.validateLiveBinding())) throw denied();
+        if (!verified || bootstrap.revocationSignal?.aborted || !(await bootstrap.validateLiveBinding()) || bootstrap.revocationSignal?.aborted) throw denied();
       } catch {
         await client.close().catch(() => undefined);
         bootstrap.dispose();
@@ -102,23 +108,34 @@ export function createPrivateFdAuthorizedClientFactory(
       let closed = false;
       let closing: Promise<void> | undefined;
       let sweep: NodeJS.Timeout | undefined;
-      async function closePrivateSession(): Promise<void> {
+      const sessionAbort = new AbortController();
+      const revocationSignal = bootstrap.revocationSignal;
+      function closePrivateSession(): Promise<void> {
         if (closing !== undefined) return closing;
+        // Synchronous admission barrier: no further tool dispatch after this
+        // point, even while the Python process is still being terminated.
         closed = true;
+        sessionAbort.abort(denied());
+        revocationSignal?.removeEventListener('abort', onRevoked);
         if (sweep !== undefined) clearInterval(sweep);
         closing = client.close().catch(() => undefined).finally(() => bootstrap.dispose());
         return closing;
       }
+      function onRevoked(): void {
+        void closePrivateSession();
+      }
+      revocationSignal?.addEventListener('abort', onRevoked, { once: true });
+      if (revocationSignal?.aborted) onRevoked();
       async function assertLiveBinding(): Promise<void> {
-        if (closed) throw denied();
+        if (closed || revocationSignal?.aborted) throw denied();
         const valid = await bootstrap.validateLiveBinding().catch(() => false);
-        if (!valid || closed) {
+        if (!valid || closed || revocationSignal?.aborted) {
           await closePrivateSession();
           throw denied();
         }
       }
-      // Registry provider has no push subscription yet. Keep an idle child
-      // bounded by proactive polling as well as pre/post-call checks.
+      // Host-published revocation is immediate; registry polling remains the
+      // fallback for mutations not yet connected to a trusted event publisher.
       let checking = false;
       sweep = setInterval(() => {
         if (checking || closed) return;
@@ -148,7 +165,7 @@ export function createPrivateFdAuthorizedClientFactory(
       return {
         async listTools(listSignal) {
           await assertLiveBinding();
-          const catalog = await client.listTools(undefined, listSignal === undefined ? undefined : { signal: listSignal });
+          const catalog = await client.listTools(undefined, { signal: listSignal === undefined ? sessionAbort.signal : AbortSignal.any([listSignal, sessionAbort.signal]) });
           await assertLiveBinding();
           // Never advertise the host-only bootstrap probe to general callers.
           return catalog.tools.filter(tool => tool.name !== 'worker_authority_probe').map((tool) => ({
@@ -160,7 +177,7 @@ export function createPrivateFdAuthorizedClientFactory(
         },
         async listResources(listSignal) {
           await assertLiveBinding();
-          const resources = await client.listResources(undefined, listSignal === undefined ? undefined : { signal: listSignal });
+          const resources = await client.listResources(undefined, { signal: listSignal === undefined ? sessionAbort.signal : AbortSignal.any([listSignal, sessionAbort.signal]) });
           await assertLiveBinding();
           return resources.resources.map((resource) => ({
             uri: resource.uri,
@@ -171,15 +188,22 @@ export function createPrivateFdAuthorizedClientFactory(
         },
         async callTool(name, args, callSignal, timeoutMs) {
           const trusted = await guardedArgs(name, args);
-          const result = await client.callTool({ name, arguments: trusted },
-            callSignal === undefined && timeoutMs === undefined
-              ? undefined
-              : {
-                  ...(callSignal === undefined ? {} : { signal: callSignal }),
-                  ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
-                });
-          await assertLiveBinding();
-          return result;
+          // Recheck immediately before dispatch; an aborted session must not
+          // consume a newly issued proof. Closing the child aborts the pending
+          // host RPC, but cannot retroactively undo a Python side effect.
+          if (closed || revocationSignal?.aborted) throw denied();
+          const combined = callSignal === undefined ? sessionAbort.signal : AbortSignal.any([callSignal, sessionAbort.signal]);
+          try {
+            const result = await client.callTool({ name, arguments: trusted }, {
+              signal: combined,
+              ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
+            });
+            await assertLiveBinding();
+            return result;
+          } catch (error) {
+            if (closed || revocationSignal?.aborted) throw denied();
+            throw error;
+          }
         },
         async close() {
           await closePrivateSession();

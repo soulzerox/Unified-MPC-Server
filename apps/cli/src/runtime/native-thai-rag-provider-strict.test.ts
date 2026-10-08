@@ -70,6 +70,28 @@ describe('NativeThaiRagProviderDriver strict worker authority opt-in',()=>{
   expect(events.filter(x=>x.name==='version'||x.name==='health').every(x=>x.valid)).toBe(true);
  },25_000);
 
+ it('fences the strict driver child from a host-owned event before the registry poll',async()=>{
+  const dataRoot=await tmp(),root=await tmp(),trace=path.join(dataRoot,'trace.jsonl');
+  const revoke=new AbortController();
+  await writeFile(trace,'');
+  const driver=new NativeThaiRagProviderDriver({
+   dataRoot,strictWorkerAuthority:true,strictWorkerRevocationSignalProvider:()=>revoke.signal,
+   launchConfig:{command:process.execPath,args:[fixture],
+    env:{NATIVE_RAG_FIXTURE_HANDSHAKE_B64:Buffer.from(JSON.stringify(handshake())).toString('base64url'),
+     NATIVE_RAG_FIXTURE_TRACE:trace}},
+   workspacesProvider:async()=>[{id:WS,realRootPath:root}],
+  });
+  try{
+   const started=await driver.start(startOptions(dataRoot));
+   expect(started.ok).toBe(true);
+   await expect(driver.call('recall',{workspace_id:WS,query:'before'})).resolves.toMatchObject({ok:true});
+   revoke.abort();
+   await expect(driver.call('recall',{workspace_id:WS,query:'after'})).resolves.toMatchObject({ok:false});
+  } finally {await driver.stop();}
+  const events=lines(await readFile(trace,'utf8'));
+  expect(events.filter(e=>e.name==='recall')).toHaveLength(1);
+ },25_000);
+
  it('protects background admission index via a SECOND private FD3 worker session',async()=>{
   const dataRoot=await tmp(),root=await tmp(),trace=path.join(dataRoot,'trace.jsonl');
   await writeFile(trace,'');

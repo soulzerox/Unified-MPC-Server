@@ -20,6 +20,8 @@ export interface ThaiRagWorkerBootstrapOptions {
   readonly ownerId: string;
   readonly authorityGeneration: number;
   readonly workspacesProvider: ThaiRagTrustedAuthority['workspacesProvider'];
+  /** Optional first-party host mutation signal; never derived from MCP arguments. */
+  readonly revocationSignal?: AbortSignal;
 }
 
 export interface ThaiRagPrivateWorkerBootstrap {
@@ -96,7 +98,10 @@ export async function createThaiRagPrivateWorkerBootstrap(
     };
     let invalidated = false;
     async function validateLiveBinding(): Promise<boolean> {
-      if (disposed || invalidated) return false;
+      if (disposed || invalidated || options.revocationSignal?.aborted) {
+        invalidated = true;
+        return false;
+      }
       try {
         const live = await options.workspacesProvider();
         if (!Array.isArray(live) || live.length !== snapshot.size) denied();
@@ -113,6 +118,7 @@ export async function createThaiRagPrivateWorkerBootstrap(
             metadata.isSymbolicLink() || metadata.dev !== expected.device ||
             metadata.ino !== expected.inode) denied();
         }
+        if (options.revocationSignal?.aborted) denied();
         return true;
       } catch {
         // Sticky fencing: recreating a deleted registration cannot resurrect
@@ -123,6 +129,7 @@ export async function createThaiRagPrivateWorkerBootstrap(
     }
     return {
       payload,
+      ...(options.revocationSignal === undefined ? {} : { revocationSignal: options.revocationSignal }),
       validateLiveBinding,
       async issue(request): Promise<string> {
         if (disposed || !(await validateLiveBinding())) denied();

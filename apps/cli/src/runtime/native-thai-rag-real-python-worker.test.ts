@@ -89,4 +89,40 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
       } finally { await rm(base, { recursive: true, force: true }); }
     }, 45_000,
   );
+
+  it.skipIf(!python || !source)(
+    'reacts to a host revocation event and restarts the real Python child under a rotated generation',
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'strict-python-revocation-event-'));
+      let generation = 31;
+      let controller = new AbortController();
+      const factory = createPrivateFdAuthorizedClientFactory({
+        createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+          ownerId: 'unified-real-python-event', authorityGeneration: generation,
+          workspacesProvider: async () => [{ id: WS, realRootPath: root }],
+          revocationSignal: controller.signal,
+        }),
+      });
+      const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+      try {
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.listTools()).some(t => t.name === 'health')).toBe(true);
+          controller.abort();
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          await expect(old.listTools()).rejects.toThrow('workspace_authority_denied');
+
+          generation = 32;
+          controller = new AbortController();
+          const fresh = await factory.connect(launch);
+          try {
+            expect((await fresh.listTools()).some(t => t.name === 'health')).toBe(true);
+            const result = await fresh.callTool('health', {});
+            expect(result.isError).not.toBe(true);
+            await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          } finally { await fresh.close(); }
+        } finally { await old.close(); }
+      } finally { await rm(root, { recursive: true, force: true }); }
+    }, 45_000,
+  );
 });

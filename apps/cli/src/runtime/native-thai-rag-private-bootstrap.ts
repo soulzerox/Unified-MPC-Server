@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { verifyThaiRagFd3WorkerChallenge } from './native-thai-rag-worker-challenge.js';
 import {
   issueRegisteredThaiRagWorkspaceProof,
   type ThaiRagRegisteredProofRequest,
@@ -26,6 +27,8 @@ export interface ThaiRagPrivateWorkerBootstrap {
   readonly payload: Buffer;
   /** Recheck the live registry for every new signed operation. */
   issue(request: ThaiRagRegisteredProofRequest): Promise<string>;
+  /** Host-only proof that this child actually holds its private FD3 bootstrap key. */
+  verifyWorkerChallenge(challenge: string, response: unknown): boolean;
   /** Best-effort zeroization; caller must also close any duplicated FDs. */
   dispose(): void;
 }
@@ -92,6 +95,14 @@ export async function createThaiRagPrivateWorkerBootstrap(
       async issue(request): Promise<string> {
         if (disposed) denied();
         return issueRegisteredThaiRagWorkspaceProof(authority, request);
+      },
+      verifyWorkerChallenge(challenge: string, response: unknown): boolean {
+        if (disposed) return false;
+        return verifyThaiRagFd3WorkerChallenge({
+          secret, ownerId: options.ownerId,
+          authorityGeneration: options.authorityGeneration,
+          challenge, response,
+        });
       },
       dispose(): void {
         if (disposed) return;

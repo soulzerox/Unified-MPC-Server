@@ -43,6 +43,7 @@ describe('stdio runtime owner-goal host approval integration #298', () => {
       await runtime.recoveryReady;
       expect(runtime.authorizationModeProvider()).toBe('full_bypass');
       expect(runtime.goalCustodyAttestation).toBeUndefined();
+      expect(runtime.goalRetentionEvidenceSealing).toBeUndefined();
       let actionCount = 0;
       await expect(runtime.goalRelocationHostFence.withAuthorizedOwner(exact, async () => { actionCount++; }))
         .rejects.toThrow('exact-action approval');
@@ -56,7 +57,6 @@ describe('stdio runtime owner-goal host approval integration #298', () => {
     const runtime = createStdioMcpRuntime(f.data, f.project, true, {
       fullBypassAll: true, checkpointEncryptionKey: Buffer.alloc(32, 0x46),
       trustedGoalRelocationActorProvider: () => hostIdentity,
-      trustedGoalCustodyEvidence: { async getByOperation() { return null; } },
       goalRelocationExactActionApproval: async approval => {
         approvals.push(approval);
         return true;
@@ -75,6 +75,7 @@ describe('stdio runtime owner-goal host approval integration #298', () => {
         workspaceId: exact.fromWorkspaceId, toolName: 'goal_workspace_custody_attest',
       });
       expect(runtime.goalCustodyAttestation).toBeDefined();
+      expect(runtime.goalRetentionEvidenceSealing).toBeDefined();
       const attempt = await runtime.goalCustodyAttestation?.verifyAndPin({
         goalId: exact.goalId, operationId: exact.operationId,
         oldWorkspaceId: exact.fromWorkspaceId, newWorkspaceId: exact.toWorkspaceId,
@@ -82,6 +83,13 @@ describe('stdio runtime owner-goal host approval integration #298', () => {
       });
       expect(attempt?.ok).toBe(false);
       expect(approvals).toHaveLength(2);
+      const sealed = await runtime.goalRetentionEvidenceSealing?.sealAndRecord({
+        goalId: exact.goalId, operationId: exact.operationId,
+        oldWorkspaceId: exact.fromWorkspaceId, newWorkspaceId: exact.toWorkspaceId,
+        actor: hostIdentity, leaseToken: 'unknown-lease',
+      });
+      expect(sealed?.ok).toBe(false);
+      expect(approvals).toHaveLength(3);
     } finally { await runtime.close(); }
   });
 });

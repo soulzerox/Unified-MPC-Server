@@ -35,7 +35,7 @@ import {
   type FileActor,
   type GoalRelocationHostFence,
   GoalWorkspaceCustodyAttestationService,
-  type GoalCustodyTrustedEvidence,
+  GoalWorkspaceRetentionEvidenceSealingService,
 } from '@unified-mpc/application';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
 import {
@@ -61,6 +61,7 @@ import {
   SqliteDatabase,
   SqliteGoalRepository,
   SqliteGoalWorkspaceRetentionCustodyRepository,
+  SqliteGoalWorkspaceRetentionEvidenceRepository,
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
   SqliteManagedResourceBindingRepository,
@@ -90,8 +91,9 @@ export interface StdioMcpRuntime {
   readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
   readonly services: McpApplicationServices;
   readonly goalRelocationHostFence: GoalRelocationHostFence;
-  /** Not installed without a trusted native-host permission and evidence source. */
+  /** Not installed without trusted native-host actor and exact-action approval. */
   readonly goalCustodyAttestation?: GoalWorkspaceCustodyAttestationService;
+  readonly goalRetentionEvidenceSealing?: GoalWorkspaceRetentionEvidenceSealingService;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
   readonly activityTracker: ActivityTracker;
@@ -129,10 +131,6 @@ export interface StdioMcpRuntimeOptions {
   /** Supplied by the first-party host transport, never by request parameters. */
   readonly trustedGoalRelocationActorProvider?: () => TrustedGoalRelocationHostActor | null;
   readonly goalRelocationExactActionApproval?: (request: HostMutationApprovalRequest) => Promise<boolean> | boolean;
-  /** Durable trusted host evidence provider. Never sourced from MCP request arguments. */
-  readonly trustedGoalCustodyEvidence?: {
-    getByOperation(operationId: string): Promise<GoalCustodyTrustedEvidence | null>;
-  };
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
 }
@@ -281,36 +279,62 @@ export function createStdioMcpRuntime(
     if (unsafe.length > 0) throw new Error(`Recovery reconciliation found unsafe entries: ${unsafe.length}`);
   });
   const gitService = new GitService(workspaceRepository);
-  // An actual host must supply BOTH exact-action approval and independently
-  // durable operation evidence. The generic Full Bypass profile grants neither.
-  const goalCustodyAttestation = options.goalRelocationExactActionApproval !== undefined
-    && options.trustedGoalRelocationActorProvider !== undefined
-    && options.trustedGoalCustodyEvidence !== undefined
+  const evidenceLedger = new SqliteGoalWorkspaceRetentionEvidenceRepository(database);
+  const custodyActor: FileActor = {
+    clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',
+  };
+  const getRegisteredGoal = async (rootPath: string): Promise<Workspace | null> =>
+    (await workspaceRepository.list()).find((entry) =>
+      entry.realRootPath === rootPath && entry.lifecycleKind === 'goal') ?? null;
+  const observeRegisteredGoal = async (rootPath: string): ReturnType<GitService['observeWorkspace']> => {
+    const registered = await getRegisteredGoal(rootPath);
+    if (registered === null) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Goal retention Git observation requires a registered Goal workspace'));
+    }
+    return gitService.observeWorkspace(custodyActor, registered.id);
+  };
+  const registeredGitSeal = {
+    status: async (rootPath: string): ReturnType<GitService['status']> => {
+      const registered = await getRegisteredGoal(rootPath);
+      return registered === null
+        ? err(appError('WORKSPACE_NOT_FOUND', 'Goal retention Git status requires a registered Goal workspace'))
+        : gitService.status(custodyActor, registered.id);
+    },
+    run: async (rootPath: string, args: readonly string[]): ReturnType<GitService['run']> => {
+      const registered = await getRegisteredGoal(rootPath);
+      return registered === null
+        ? err(appError('WORKSPACE_NOT_FOUND', 'Goal retention Git command requires a registered Goal workspace'))
+        : gitService.run(custodyActor, { workspaceId: registered.id, args: [...args] });
+    },
+  };
+  const goalWorkspacePorts = {
+    get: async (workspaceId: string): Promise<Workspace | null> => workspaceRepository.get(workspaceId),
+    getAdmissionReceipt: async (workspaceId: string): Promise<WorkspaceAdmissionReceipt | null> => {
+      if (await workspaceRepository.get(workspaceId) === null) return null;
+      return rawWorkspaceRepository.getAdmissionReceipt(workspaceId);
+    },
+  };
+  // A native host must supply BOTH its trusted current actor and exact-action
+  // approval; generic Full Bypass never enables the transfer pipeline.
+  const trustedGoalHostReady = options.goalRelocationExactActionApproval !== undefined
+    && options.trustedGoalRelocationActorProvider !== undefined;
+  const goalRetentionEvidenceSealing = trustedGoalHostReady
+    ? new GoalWorkspaceRetentionEvidenceSealingService({
+        host: goalRelocationHostFence,
+        goals: goalRepository,
+        workspaces: goalWorkspacePorts,
+        git: { observeWorkspace: observeRegisteredGoal, seal: registeredGitSeal },
+        evidence: evidenceLedger,
+        retentionRoot: path.join(dataPath, 'goal-retention-evidence'),
+      })
+    : undefined;
+  const goalCustodyAttestation = trustedGoalHostReady
     ? new GoalWorkspaceCustodyAttestationService({
         host: goalRelocationHostFence,
-        trustedEvidence: options.trustedGoalCustodyEvidence,
+        trustedEvidence: evidenceLedger,
         goals: goalRepository,
-        workspaces: {
-          get: async (workspaceId): Promise<Workspace | null> => workspaceRepository.get(workspaceId),
-          getAdmissionReceipt: async (workspaceId): Promise<WorkspaceAdmissionReceipt | null> => {
-            if (await workspaceRepository.get(workspaceId) === null) return null;
-            return rawWorkspaceRepository.getAdmissionReceipt(workspaceId);
-          },
-        },
-        git: {
-          observeWorkspace: async (rootPath): ReturnType<GitService['observeWorkspace']> => {
-            const registered = (await workspaceRepository.list()).find(
-              (entry) => entry.realRootPath === rootPath,
-            );
-            if (registered === undefined) {
-              return err(appError('WORKSPACE_NOT_FOUND', 'Goal custody Git observation requires a registered workspace'));
-            }
-            return gitService.observeWorkspace(
-              { clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime' },
-              registered.id,
-            );
-          },
-        },
+        workspaces: goalWorkspacePorts,
+        git: { observeWorkspace: observeRegisteredGoal },
         custody: new SqliteGoalWorkspaceRetentionCustodyRepository(database),
       })
     : undefined;
@@ -831,6 +855,7 @@ export function createStdioMcpRuntime(
     services,
     goalRelocationHostFence,
     ...(goalCustodyAttestation === undefined ? {} : { goalCustodyAttestation }),
+    ...(goalRetentionEvidenceSealing === undefined ? {} : { goalRetentionEvidenceSealing }),
     actor,
     extensions,
     activityTracker,

@@ -64,6 +64,57 @@ interface AdmissionRow {
   receipt_json: string;
 }
 
+interface CustodyRow {
+  readonly operation_id: string;
+  readonly goal_id: string;
+  readonly old_workspace_id: string;
+  readonly new_workspace_id: string;
+  readonly goal_revision: number;
+  readonly admission_generation: number;
+  readonly lease_generation: number;
+  readonly manifest_sha256: string;
+  readonly pin_json: string;
+  readonly status: string;
+}
+
+/** Transaction-scoped immutable pin check, independent of the retention folder. */
+function matchingPinnedCustody(
+  db: SqliteDatabase['connection'],
+  request: Pick<GoalWorkspaceTransferIntentRequest, 'operationId' | 'goalId' | 'fromWorkspaceId'
+    | 'toWorkspaceId' | 'expectedRevision' | 'expectedAdmissionGeneration' | 'leaseGeneration'
+    | 'retainedManifestSha256' | 'ownerClientId' | 'ownerSessionId' | 'expectedOldHead' | 'expectedOldBranch'>,
+): boolean {
+  const row = db.prepare(`
+    SELECT operation_id, goal_id, old_workspace_id, new_workspace_id, goal_revision,
+      admission_generation, lease_generation, manifest_sha256, pin_json, status
+    FROM goal_workspace_retention_custody WHERE operation_id = ?
+  `).get(request.operationId) as CustodyRow | undefined;
+  if (row === undefined || row.status !== 'pinned'
+    || row.goal_id !== request.goalId || row.old_workspace_id !== request.fromWorkspaceId
+    || row.new_workspace_id !== request.toWorkspaceId
+    || row.goal_revision !== request.expectedRevision
+    || row.admission_generation !== request.expectedAdmissionGeneration
+    || row.lease_generation !== request.leaseGeneration
+    || row.manifest_sha256 !== request.retainedManifestSha256) return false;
+  try {
+    const pin: unknown = JSON.parse(row.pin_json);
+    if (pin === null || typeof pin !== 'object') return false;
+    const p = pin as Record<string, unknown>;
+    return p.operationId === request.operationId && p.goalId === request.goalId
+      && p.expectedGoalId === request.goalId && p.expectedWorkspaceId === request.fromWorkspaceId
+      && p.newWorkspaceId === request.toWorkspaceId
+      && p.expectedRevision === request.expectedRevision
+      && p.expectedAdmissionGeneration === request.expectedAdmissionGeneration
+      && p.leaseGeneration === request.leaseGeneration
+      && p.expectedManifestSha256 === request.retainedManifestSha256
+      && p.expectedHead === request.expectedOldHead && p.expectedBranch === request.expectedOldBranch
+      && p.ownerClientId === request.ownerClientId && p.ownerSessionId === request.ownerSessionId
+      && typeof p.retentionPath === 'string' && p.retentionPath.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function validPersistedIntent(request: Omit<GoalWorkspaceTransferIntentRequest, 'leaseTokenHash'>): boolean {
   return request.operationId.length > 0 && request.operationId.length <= 128
     && request.goalId.length > 0 && request.goalKey.length > 0
@@ -154,6 +205,7 @@ export class SqliteGoalWorkspaceTransferRepository {
         || admission.admission_generation !== request.expectedAdmissionGeneration
         || admission.write_lease_generation > request.leaseGeneration
         || otherGoal !== undefined
+        || !matchingPinnedCustody(conn, request)
         || attested === null || attested.invalidatedAt !== undefined || attested.workspaceId !== request.fromWorkspaceId
         || attested.goalId !== request.goalId
         || attested.expectedWorkspaceHead !== request.expectedOldHead
@@ -250,6 +302,16 @@ export class SqliteGoalWorkspaceTransferRepository {
         return alreadyCommitted;
       }
       if (record.status !== 'prepared') return refuse();
+      if (!matchingPinnedCustody(conn, {
+        operationId: prepared.operationId, goalId: prepared.goalId,
+        fromWorkspaceId: prepared.fromWorkspaceId, toWorkspaceId: prepared.toWorkspaceId,
+        expectedRevision: prepared.expectedRevision,
+        expectedAdmissionGeneration: prepared.expectedAdmissionGeneration,
+        leaseGeneration: prepared.leaseGeneration,
+        retainedManifestSha256: request.retainedManifestSha256,
+        ownerClientId: prepared.ownerClientId, ownerSessionId: prepared.ownerSessionId,
+        expectedOldHead: prepared.expectedOldHead, expectedOldBranch: prepared.expectedOldBranch,
+      })) return refuse();
       const goal = conn.prepare(`
         SELECT workspace_id, goal_key, owner_client_id, status, revision, lease_generation,
           lease_token_hash, lease_owner_client_id, lease_owner_session_id, lease_expires_at
@@ -370,6 +432,12 @@ export class SqliteGoalWorkspaceTransferRepository {
         WHERE operation_id = ? AND goal_id = ? AND status = 'prepared'
       `).run(prepared.operationId, prepared.goalId);
       if (Number(intentWrite.changes) !== 1) return refuse();
+      const custodyWrite = conn.prepare(`
+        UPDATE goal_workspace_retention_custody SET status = 'consumed'
+        WHERE operation_id = ? AND goal_id = ? AND status = 'pinned'
+          AND manifest_sha256 = ? AND lease_generation = ?
+      `).run(prepared.operationId, prepared.goalId, request.retainedManifestSha256, prepared.leaseGeneration);
+      if (Number(custodyWrite.changes) !== 1) return refuse();
       conn.exec('COMMIT;');
       return true;
     } catch (error) {

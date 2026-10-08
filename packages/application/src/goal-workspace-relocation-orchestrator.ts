@@ -45,6 +45,13 @@ export interface GoalRelocationSourceCheckpoint {
 /** Pin is persisted separately from the retention bundle by a trusted store. */
 export interface GoalRelocationCustodyPin extends VerifyRetainedGoalWorkspaceBundleRequest {
   readonly operationId: string;
+  readonly newWorkspaceId: string;
+  readonly ownerClientId: string;
+  readonly ownerSessionId: string;
+  readonly expectedRevision: number;
+  readonly expectedAdmissionGeneration: number;
+  readonly leaseGeneration: number;
+  readonly pinnedAt: string;
 }
 
 export interface GoalRelocationTransferPort {
@@ -191,13 +198,18 @@ export class GoalWorkspaceRelocationOrchestrator {
       || next.ownerSessionId !== request.actor.sessionId || next.goalId !== undefined
       || next.writerLease !== undefined || next.realRootPath === old.realRootPath
       || pin === null || pin.operationId !== request.operationId || pin.expectedGoalId !== goal.id
-      || pin.expectedWorkspaceId !== old.id || pin.expectedBranch !== old.branchName
+      || pin.expectedWorkspaceId !== old.id || pin.newWorkspaceId !== next.id
+      || pin.expectedRevision !== goal.revision || pin.leaseGeneration !== goal.leaseGeneration
+      || pin.ownerClientId !== request.actor.clientId || pin.ownerSessionId !== request.actor.sessionId
+      || !Number.isFinite(Date.parse(pin.pinnedAt)) || pin.pinnedAt > now
+      || pin.expectedBranch !== old.branchName
       || runtimeIdentity.runtimeBuildDirty) {
       return err(appError('CONFLICT', 'Goal owner/lease, replacement registry, custody or runtime identity is stale', true));
     }
     const prior = await workspaces.getAdmissionReceipt(old.id);
     const checkpoint = await checkpoints.readForSource(next.id);
-    if (prior === null || prior.invalidatedAt !== undefined || prior.goalId !== goal.id
+    if (prior === null || prior.admissionGeneration !== pin.expectedAdmissionGeneration
+      || prior.invalidatedAt !== undefined || prior.goalId !== goal.id
       || prior.workspaceId !== old.id || prior.writeLeaseGeneration > goal.leaseGeneration
       || prior.branchName !== old.branchName
       || checkpoint === null || checkpoint.workspaceId !== next.id

@@ -41,6 +41,7 @@ interface Fixture {
     revalidationDrift: boolean;
     dirtyReplacement: boolean;
     missingCheckpoint: boolean;
+    custodyOwnerDrift: boolean;
     goal: GoalRecord;
     old: Workspace;
     next: Workspace;
@@ -122,6 +123,7 @@ async function fixture(): Promise<Fixture> {
   const state = {
     allowed: true, prepareCount: 0, commitCount: 0,
     revalidationDrift: false, dirtyReplacement: false, missingCheckpoint: false,
+    custodyOwnerDrift: false,
     goal, old, next, oldReceipt: original,
     newReceipt: null as WorkspaceAdmissionReceipt | null,
   };
@@ -157,8 +159,12 @@ async function fixture(): Promise<Fixture> {
         return {
           operationId, retentionPath: retained.value.retentionPath,
           expectedManifestSha256: retained.value.manifestSha256,
-          expectedGoalId: goalId, expectedWorkspaceId: oldId,
+          expectedGoalId: goalId, expectedWorkspaceId: oldId, newWorkspaceId: newId,
           expectedHead: head, expectedBranch: 'goal/old',
+          expectedRevision: 33, expectedAdmissionGeneration: 3, leaseGeneration: 3,
+          ownerClientId: state.custodyOwnerDrift ? 'other-owner' : actor.clientId,
+          ownerSessionId: actor.sessionId,
+          pinnedAt: '2026-10-09T00:00:00.000Z',
         };
       },
     },
@@ -215,6 +221,13 @@ describe('GoalWorkspaceRelocationOrchestrator #298', () => {
     expect(await readFile(path.join(f.oldRoot, 'src/dirty.ts'), 'utf8')).toBe('const dirty = 1;\n');
     expect(await readFile(path.join(f.oldRoot, 'tests/new.test.ts'), 'utf8')).toBe('test();\n');
     expect(f.state.old.lifecycleKind).toBe('inspection');
+  });
+
+  it('rejects a custody pin bound to another authenticated owner before prepare', async () => {
+    const f = await fixture();
+    f.state.custodyOwnerDrift = true;
+    expect((await f.service.transfer(f.request)).ok).toBe(false);
+    expect(f.state.prepareCount).toBe(0);
   });
 
   it('refuses altered owner lease before any prepared transaction', async () => {

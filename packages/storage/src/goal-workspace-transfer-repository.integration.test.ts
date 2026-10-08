@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { SqliteDatabase } from './database.js';
 import { SqliteGoalRepository } from './goal-repository.js';
+import { SqliteGoalWorkspaceRetentionCustodyRepository } from './goal-workspace-retention-custody-repository.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
 import { SqliteGoalWorkspaceTransferRepository } from './goal-workspace-transfer-repository.js';
 
@@ -78,6 +79,19 @@ async function fixture(): Promise<{
     expectedWorkspaceHead: sha, observedWorkspaceHead: sha,
     branchName: request.expectedOldBranch, dirtyState: 'dirty',
   }), now);
+  const custody = new SqliteGoalWorkspaceRetentionCustodyRepository(database);
+  expect(await custody.recordVerified({
+    operationId: request.operationId, goalId: request.goalId, expectedGoalId: request.goalId,
+    expectedWorkspaceId: request.fromWorkspaceId, newWorkspaceId: request.toWorkspaceId,
+    retentionPath: '/srv/verified-retention/test-bundle',
+    expectedManifestSha256: request.retainedManifestSha256,
+    expectedHead: request.expectedOldHead, expectedBranch: request.expectedOldBranch,
+    expectedRevision: request.expectedRevision,
+    expectedAdmissionGeneration: request.expectedAdmissionGeneration,
+    leaseGeneration: request.leaseGeneration, leaseTokenHash: request.leaseTokenHash,
+    ownerClientId: request.ownerClientId, ownerSessionId: request.ownerSessionId,
+    pinnedAt: now,
+  })).toBe(true);
   return { database, transfer: new SqliteGoalWorkspaceTransferRepository(database), workspaces };
 }
 
@@ -134,6 +148,41 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
       const row = t.database.connection.prepare('SELECT workspace_id, revision FROM goals WHERE id = ?')
         .get(request.goalId) as { workspace_id: string; revision: number };
       expect(row).toEqual({ workspace_id: request.fromWorkspaceId, revision: 0 });
+    } finally {
+      t.database.close();
+    }
+  });
+
+  it('fails closed without independently stored custody even when a matching digest is supplied', async () => {
+    const t = await fixture();
+    try {
+      t.database.connection.prepare(
+        'DELETE FROM goal_workspace_retention_custody WHERE operation_id = ?',
+      ).run(request.operationId);
+      expect(await t.transfer.prepare(request)).toBe(false);
+      expect(await t.transfer.get(request.operationId)).toBeNull();
+      expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
+    } finally {
+      t.database.close();
+    }
+  });
+
+  it('refuses post-prepare custody revocation without changing the Goal pointer or source workspace', async () => {
+    const t = await fixture();
+    try {
+      expect(await t.transfer.prepare(request)).toBe(true);
+      t.database.connection.prepare(`
+        UPDATE goal_workspace_retention_custody SET status = 'revoked' WHERE operation_id = ?
+      `).run(request.operationId);
+      expect(await t.transfer.commit({
+        operationId: request.operationId, goalId: request.goalId,
+        leaseTokenHash: request.leaseTokenHash,
+        retainedManifestSha256: request.retainedManifestSha256,
+        admissionReceipt: newAdmission, now,
+      })).toBe(false);
+      expect(await t.transfer.get(request.operationId)).toMatchObject({ status: 'prepared' });
+      expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
+      expect(await t.workspaces.get(request.toWorkspaceId)).toMatchObject({ lifecycleKind: 'temporary' });
     } finally {
       t.database.close();
     }
@@ -197,6 +246,9 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
       expect(await t.transfer.commit(args)).toBe(true); // exact CAS idempotency
       expect(await t.transfer.commit({ ...args, leaseTokenHash: 'unauthorized-replay' })).toBe(false);
       expect(await t.transfer.get(request.operationId)).toMatchObject({ status: 'completed' });
+      expect(t.database.connection.prepare(
+        'SELECT status FROM goal_workspace_retention_custody WHERE operation_id = ?',
+      ).get(request.operationId)).toMatchObject({ status: 'consumed' });
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({
         lifecycleKind: 'inspection', branchName: request.expectedOldBranch,
       });

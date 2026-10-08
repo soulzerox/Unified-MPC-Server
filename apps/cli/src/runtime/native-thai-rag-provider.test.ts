@@ -630,6 +630,102 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('denies registered-shape but unregistered and revoked workspace identities before worker calls', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    let active = true;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => active ? [{ id: workspaceId, realRootPath: workspaceRoot }] : [],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index') return success('indexed');
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+
+    // A syntactically canonical UUID cannot confer the authority of a
+    // registration. No memory/code operation may reach the private worker.
+    const foreign: Array<[string, Readonly<Record<string, unknown>>]> = [
+      ['remember', { content: 'do not write' }],
+      ['recall', { query: 'do not read' }],
+      ['record_event', { event_type: 'decision', content: 'do not write' }],
+      ['forget', { memory_id: 'mem-1' }],
+      ['code_search', { query: 'do not search' }],
+      ['code_context', { file_path: 'src/index.ts', line_number: 1 }],
+      ['code_blast_radius', { symbol_name: 'fn' }],
+    ];
+    for (const [tool, args] of foreign) {
+      const before = calls.length;
+      const result = await driver.call(tool, { ...args, workspace_id: recoveredWorkspaceId });
+      expect(result).toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
+      expect(calls.length).toBe(before);
+    }
+
+    const valid = await driver.call('remember', { workspace_id: workspaceId, content: 'allowed' });
+    expect(valid.ok).toBe(true);
+    expect(calls.at(-1)?.args.workspace_id).toBe(workspaceId);
+
+    // Removing Unified's owner-issued workspace revokes future access even
+    // when a well-formed UUID was previously seen by the native driver.
+    active = false;
+    const before = calls.length;
+    await expect(driver.call('remember', { workspace_id: workspaceId, content: 'revoked' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
+    expect(calls.length).toBe(before);
+    await driver.stop();
+  });
+
+  it('refuses a registered workspace UUID paired with another registered source root', async () => {
+    const dataRoot = await tempRoot();
+    const rootA = await tempRoot();
+    const rootB = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: rootA },
+        { id: recoveredWorkspaceId, realRootPath: rootB },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+
+    const before = calls.length;
+    await expect(driver.call('code_index', {
+      workspace_path: rootA,
+      workspace_id: recoveredWorkspaceId,
+      background: false,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    // Admission may legitimately index B; the forged B/root-A pair must not.
+    expect(calls.slice(before).filter((call) =>
+      call.tool === 'code_index' && call.args.workspace_id === recoveredWorkspaceId
+      && call.args.workspace_path === rootA
+    )).toEqual([]);
+    await driver.stop();
+  });
+
   it('launches without the obsolete remember_turn dependency', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -1420,7 +1516,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const options = { providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 };
 
     expect((await driver.start(options)).ok).toBe(true);
-    const refreshing = driver.call('recall', { query: 'refresh before stop' });
+    const refreshing = driver.call('recall', { workspace_id: workspaceId, query: 'refresh before stop' });
     await expect.poll(() => workspaceReads).toBe(2);
     const stopping = driver.stop();
     releaseRefresh?.();
@@ -1543,7 +1639,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const scheduled = await driver.call('code_index', { workspace_path: workspaceRoot, force: false, background: true });
     expect(scheduled.ok).toBe(true);
     if (!scheduled.ok || !isRecord(scheduled.value) || typeof scheduled.value.job_id !== 'string') return;
-    const foreground = driver.call('recall', { query: 'after index' });
+    const foreground = driver.call('recall', { workspace_id: workspaceId, query: 'after index' });
     await foreground;
     await new Promise((resolve) => setTimeout(resolve, 10));
     const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId });

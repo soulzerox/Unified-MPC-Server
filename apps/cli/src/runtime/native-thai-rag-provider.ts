@@ -253,6 +253,27 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
+    // A UUID-shaped caller argument is not proof of workspace ownership.
+    // Check Unified's authoritative live registry before any scoped dispatch,
+    // including index-job reads/cancellation and the provider IPC bridge.
+    // code_index can also resolve a registered workspace from workspace_path.
+    const requestedId = typeof args.workspace_id === 'string' ? args.workspace_id : '';
+    if (tool !== 'health' && tool !== 'version' && (tool !== 'code_index' || requestedId.length > 0)) {
+      const canonical = parseCanonicalWorkspaceId(requestedId);
+      if (!canonical.ok) {
+        return err(appError('INVALID_INPUT', 'Native Thai-RAG requires a canonical workspace_id',
+          false, { reason: 'workspace_scope_required' }));
+      }
+      let registered: readonly NativeThaiRagWorkspace[];
+      try {
+        registered = await this.options.workspacesProvider();
+      } catch (error: unknown) {
+        return err(appError('INTERNAL_ERROR', `Native Thai-RAG cannot verify workspace registration: ${errorMessage(error)}`, true));
+      }
+      if (!registered.some((workspace) => workspace.id === canonical.value)) {
+        return err(appError('WORKSPACE_NOT_FOUND', `Native Thai-RAG workspace is not registered: ${canonical.value}`));
+      }
+    }
     if (tool === 'adopt_legacy_index') return this.adoptLegacyIndex(args, signal, budget);
     if (tool === 'index_status') {
       const jobId = typeof args.job_id === 'string' ? args.job_id : '';
@@ -364,6 +385,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const workspaceValue = typeof args.workspace_path === 'string' ? args.workspace_path : '';
     const workspace = this.resolveIndexWorkspace(workspaceValue);
     if (!workspace.ok) return workspace;
+    if (typeof args.workspace_id === 'string' && args.workspace_id !== workspace.value.workspaceId) {
+      return err(appError('PERMISSION_DENIED', 'Native Thai-RAG code_index workspace_id does not match registered workspace root'));
+    }
     const force = args.force === true;
     const background = args.background === true;
     const childArgs = {

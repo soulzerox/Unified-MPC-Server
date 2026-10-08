@@ -131,6 +131,58 @@ function matchingPinnedCustody(
   }
 }
 
+/** The independently sealed evidence and the verified custody pin must
+ * refer to the SAME retained bytes and source/destination under one operation.
+ * This is checked inside both prepare and commit SQLite transactions.
+ */
+function matchingSealedEvidence(
+  db: SqliteDatabase['connection'],
+  request: Pick<GoalWorkspaceTransferIntentRequest, 'operationId' | 'goalId' | 'fromWorkspaceId'
+    | 'toWorkspaceId' | 'expectedRevision' | 'expectedAdmissionGeneration' | 'leaseGeneration'
+    | 'retainedManifestSha256' | 'expectedOldHead' | 'expectedOldBranch'>,
+): boolean {
+  const evidence = db.prepare(`
+    SELECT goal_id, source_workspace_id, destination_workspace_id,
+      expected_revision, expected_admission_generation, lease_generation,
+      manifest_sha256, evidence_json, status
+    FROM goal_workspace_retention_evidence WHERE operation_id = ?
+  `).get(request.operationId) as {
+    goal_id: string; source_workspace_id: string; destination_workspace_id: string;
+    expected_revision: number; expected_admission_generation: number; lease_generation: number;
+    manifest_sha256: string; evidence_json: string; status: string;
+  } | undefined;
+  const custody = db.prepare(`
+    SELECT pin_json FROM goal_workspace_retention_custody WHERE operation_id = ? AND status = 'pinned'
+  `).get(request.operationId) as { pin_json: string } | undefined;
+  if (evidence?.status !== 'sealed' || custody === undefined
+    || evidence.goal_id !== request.goalId
+    || evidence.source_workspace_id !== request.fromWorkspaceId
+    || evidence.destination_workspace_id !== request.toWorkspaceId
+    || evidence.expected_revision !== request.expectedRevision
+    || evidence.expected_admission_generation !== request.expectedAdmissionGeneration
+    || evidence.lease_generation !== request.leaseGeneration
+    || evidence.manifest_sha256 !== request.retainedManifestSha256) return false;
+  try {
+    const source: unknown = JSON.parse(evidence.evidence_json);
+    const pinned: unknown = JSON.parse(custody.pin_json);
+    if (source === null || typeof source !== 'object'
+      || pinned === null || typeof pinned !== 'object') return false;
+    const s = source as Record<string, unknown>;
+    const c = pinned as Record<string, unknown>;
+    return s.operationId === request.operationId
+      && s.expectedGoalId === request.goalId
+      && s.expectedWorkspaceId === request.fromWorkspaceId
+      && s.newWorkspaceId === request.toWorkspaceId
+      && s.expectedHead === request.expectedOldHead
+      && s.expectedBranch === request.expectedOldBranch
+      && s.expectedManifestSha256 === request.retainedManifestSha256
+      && typeof s.retentionPath === 'string' && s.retentionPath.length > 0
+      && s.retentionPath === c.retentionPath;
+  } catch {
+    return false;
+  }
+}
+
 function validPersistedIntent(request: Omit<GoalWorkspaceTransferIntentRequest, 'leaseTokenHash'>): boolean {
   return request.operationId.length > 0 && request.operationId.length <= 128
     && request.goalId.length > 0 && request.goalKey.length > 0
@@ -222,6 +274,7 @@ export class SqliteGoalWorkspaceTransferRepository {
         || admission.write_lease_generation > request.leaseGeneration
         || otherGoal !== undefined
         || !matchingPinnedCustody(conn, request)
+        || !matchingSealedEvidence(conn, request)
         || attested === null || attested.invalidatedAt !== undefined || attested.workspaceId !== request.fromWorkspaceId
         || attested.goalId !== request.goalId
         || attested.expectedWorkspaceHead !== request.expectedOldHead
@@ -318,7 +371,7 @@ export class SqliteGoalWorkspaceTransferRepository {
         return alreadyCommitted;
       }
       if (record.status !== 'prepared') return refuse();
-      if (!matchingPinnedCustody(conn, {
+      const liveEvidence = {
         operationId: prepared.operationId, goalId: prepared.goalId,
         fromWorkspaceId: prepared.fromWorkspaceId, toWorkspaceId: prepared.toWorkspaceId,
         expectedRevision: prepared.expectedRevision,
@@ -327,7 +380,9 @@ export class SqliteGoalWorkspaceTransferRepository {
         retainedManifestSha256: request.retainedManifestSha256,
         ownerClientId: prepared.ownerClientId, ownerSessionId: prepared.ownerSessionId,
         expectedOldHead: prepared.expectedOldHead, expectedOldBranch: prepared.expectedOldBranch,
-      })) return refuse();
+      };
+      if (!matchingPinnedCustody(conn, liveEvidence)
+        || !matchingSealedEvidence(conn, liveEvidence)) return refuse();
       const goal = conn.prepare(`
         SELECT workspace_id, goal_key, owner_client_id, status, revision, lease_generation,
           lease_token_hash, lease_owner_client_id, lease_owner_session_id, lease_expires_at
@@ -454,6 +509,12 @@ export class SqliteGoalWorkspaceTransferRepository {
           AND manifest_sha256 = ? AND lease_generation = ?
       `).run(prepared.operationId, prepared.goalId, request.retainedManifestSha256, prepared.leaseGeneration);
       if (Number(custodyWrite.changes) !== 1) return refuse();
+      const sealedWrite = conn.prepare(`
+        UPDATE goal_workspace_retention_evidence SET status = 'consumed'
+        WHERE operation_id = ? AND goal_id = ? AND status = 'sealed'
+          AND manifest_sha256 = ? AND lease_generation = ?
+      `).run(prepared.operationId, prepared.goalId, request.retainedManifestSha256, prepared.leaseGeneration);
+      if (Number(sealedWrite.changes) !== 1) return refuse();
       conn.exec('COMMIT;');
       return true;
     } catch (error) {
@@ -504,6 +565,8 @@ export class SqliteGoalWorkspaceTransferRepository {
       } | undefined;
     const custody = conn.prepare('SELECT status, manifest_sha256, lease_generation FROM goal_workspace_retention_custody WHERE operation_id = ?')
       .get(operationId) as { status: string; manifest_sha256: string; lease_generation: number } | undefined;
+    const evidence = conn.prepare('SELECT status, manifest_sha256, lease_generation FROM goal_workspace_retention_evidence WHERE operation_id = ?')
+      .get(operationId) as { status: string; manifest_sha256: string; lease_generation: number } | undefined;
     if (prepared.status === 'prepared') {
       const valid = goal?.status === 'active' && goal.workspace_id === prepared.fromWorkspaceId
         && goal.revision === prepared.expectedRevision
@@ -518,7 +581,10 @@ export class SqliteGoalWorkspaceTransferRepository {
         && next.archived_at === null && next.writer_lease_generation === null
         && custody?.status === 'pinned'
         && custody.lease_generation === prepared.leaseGeneration
-        && custody.manifest_sha256 === prepared.retainedManifestSha256;
+        && custody.manifest_sha256 === prepared.retainedManifestSha256
+        && evidence?.status === 'sealed'
+        && evidence.lease_generation === prepared.leaseGeneration
+        && evidence.manifest_sha256 === prepared.retainedManifestSha256;
       return {
         ...identity,
         state: valid ? 'prepared_requires_fresh_owner_verification' : 'prepared_stale_owner_review',
@@ -541,6 +607,9 @@ export class SqliteGoalWorkspaceTransferRepository {
       && custody?.status === 'consumed'
       && custody.lease_generation === prepared.leaseGeneration
       && custody.manifest_sha256 === prepared.retainedManifestSha256
+      && evidence?.status === 'consumed'
+      && evidence.lease_generation === prepared.leaseGeneration
+      && evidence.manifest_sha256 === prepared.retainedManifestSha256
       && attested?.goalId === prepared.goalId && attested.workspaceId === prepared.toWorkspaceId
       && attested.dirtyState === 'clean' && attested.invalidatedAt === undefined
       && attested.writeLeaseGeneration === prepared.leaseGeneration;

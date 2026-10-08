@@ -6,6 +6,7 @@ import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { SqliteDatabase } from './database.js';
 import { SqliteGoalRepository } from './goal-repository.js';
 import { SqliteGoalWorkspaceRetentionCustodyRepository } from './goal-workspace-retention-custody-repository.js';
+import { SqliteGoalWorkspaceRetentionEvidenceRepository } from './goal-workspace-retention-evidence-repository.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
 import { SqliteGoalWorkspaceTransferRepository } from './goal-workspace-transfer-repository.js';
 
@@ -80,6 +81,19 @@ async function fixture(): Promise<{
     expectedWorkspaceHead: sha, observedWorkspaceHead: sha,
     branchName: request.expectedOldBranch, dirtyState: 'dirty',
   }), now);
+  const evidence = new SqliteGoalWorkspaceRetentionEvidenceRepository(database);
+  expect(await evidence.recordSealed({
+    operationId: request.operationId, expectedGoalId: request.goalId,
+    expectedWorkspaceId: request.fromWorkspaceId, newWorkspaceId: request.toWorkspaceId,
+    retentionPath: '/srv/verified-retention/test-bundle',
+    expectedManifestSha256: request.retainedManifestSha256,
+    expectedHead: request.expectedOldHead, expectedBranch: request.expectedOldBranch,
+    ownerClientId: request.ownerClientId, ownerSessionId: request.ownerSessionId,
+    expectedRevision: request.expectedRevision,
+    expectedAdmissionGeneration: request.expectedAdmissionGeneration,
+    leaseGeneration: request.leaseGeneration, leaseTokenHash: request.leaseTokenHash,
+    now,
+  })).toBe(true);
   const custody = new SqliteGoalWorkspaceRetentionCustodyRepository(database);
   expect(await custody.recordVerified({
     operationId: request.operationId, goalId: request.goalId, expectedGoalId: request.goalId,
@@ -251,6 +265,35 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
     }
   });
 
+  it('refuses prepare without independently sealed evidence even if a custody digest exists', async () => {
+    const t = await fixture();
+    try {
+      t.database.connection.prepare('DELETE FROM goal_workspace_retention_evidence WHERE operation_id = ?')
+        .run(request.operationId);
+      expect(await t.transfer.prepare(request)).toBe(false);
+      expect(await t.transfer.get(request.operationId)).toBeNull();
+      expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
+    } finally { t.database.close(); }
+  });
+
+  it('rejects evidence path drift and revocation after prepare, without changing the Goal pointer', async () => {
+    const t = await fixture();
+    try {
+      expect(await t.transfer.prepare(request)).toBe(true);
+      t.database.connection.prepare('UPDATE goal_workspace_retention_evidence SET status = ? WHERE operation_id = ?')
+        .run('revoked', request.operationId);
+      expect((await t.transfer.inspectRecovery(request.operationId, now)).state).toBe('prepared_stale_owner_review');
+      expect(await t.transfer.commit({
+        operationId: request.operationId, goalId: request.goalId,
+        leaseTokenHash: request.leaseTokenHash,
+        retainedManifestSha256: request.retainedManifestSha256,
+        admissionReceipt: newAdmission, now,
+      })).toBe(false);
+      expect(await t.transfer.get(request.operationId)).toMatchObject({ status: 'prepared' });
+      expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
+    } finally { t.database.close(); }
+  });
+
   it('fails closed without independently stored custody even when a matching digest is supplied', async () => {
     const t = await fixture();
     try {
@@ -346,6 +389,9 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
       expect(await t.transfer.get(request.operationId)).toMatchObject({ status: 'completed' });
       expect(t.database.connection.prepare(
         'SELECT status FROM goal_workspace_retention_custody WHERE operation_id = ?',
+      ).get(request.operationId)).toMatchObject({ status: 'consumed' });
+      expect(t.database.connection.prepare(
+        'SELECT status FROM goal_workspace_retention_evidence WHERE operation_id = ?',
       ).get(request.operationId)).toMatchObject({ status: 'consumed' });
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({
         lifecycleKind: 'inspection', branchName: request.expectedOldBranch,

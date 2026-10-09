@@ -52,7 +52,7 @@ describe('SqliteWorkspaceRepository', () => {
       realRootPath: '/tmp/authority-event', createdAt: new Date(0).toISOString(),
     };
     const repository = new SqliteWorkspaceRepository(database, {
-      onBeforeAuthorityMutation: () => {
+      onBeforeAuthorityMutation: (): void => {
         const state = database.connection.prepare('SELECT archived_at FROM workspaces WHERE id = ?')
           .get(ws.id) as { archived_at: string | null } | undefined;
         snapshots.push(state === undefined ? 'missing' : state.archived_at === null ? 'active' : 'archived');
@@ -76,7 +76,7 @@ describe('SqliteWorkspaceRepository', () => {
     try {
       await new SqliteWorkspaceRepository(database).insert(ws);
       const repository = new SqliteWorkspaceRepository(database, {
-        onBeforeAuthorityMutation: () => { throw new Error('trusted_authority_event_unavailable'); },
+        onBeforeAuthorityMutation: (): void => { throw new Error('trusted_authority_event_unavailable'); },
       });
       await expect(repository.archive(ws.id)).rejects.toThrow('trusted_authority_event_unavailable');
       await expect(repository.get(ws.id)).resolves.toEqual(ws);

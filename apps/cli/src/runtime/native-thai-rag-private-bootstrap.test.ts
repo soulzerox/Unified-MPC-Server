@@ -18,7 +18,9 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-function options(workspacesProvider: () => Promise<readonly { id: string; realRootPath: string }[]>) {
+function options(workspacesProvider: () => Promise<readonly { id: string; realRootPath: string }[]>): {
+  ownerId: string; authorityGeneration: number; workspacesProvider: typeof workspacesProvider;
+} {
   return { ownerId: 'unified-worker-1', authorityGeneration: 7, workspacesProvider };
 }
 
@@ -146,7 +148,7 @@ describe('Unified private Python-worker bootstrap payload', () => {
 
   it('fails closed on bad authority context/registry and never exposes key in env/argv', async () => {
     const root = await tempRoot();
-    const provider = async () => [{ id: WS, realRootPath: root }];
+    const provider = async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: WS, realRootPath: root }];
     await expect(createThaiRagPrivateWorkerBootstrap({ ...options(provider), authorityGeneration: 0 }))
       .rejects.toThrow('thai_rag_authority_denied');
     await expect(createThaiRagPrivateWorkerBootstrap({ ...options(provider), ownerId: 'illegal 🔥' }))

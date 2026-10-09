@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
@@ -193,6 +194,9 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
         await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
           'commit', '--allow-empty', '-m', 'admitted']);
         const admittedHead = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+        const commonDirectory = await realpath(path.join(goalRoot, '.git'));
+        const commonStat = await stat(commonDirectory, { bigint: true });
+        const fingerprint = (value: string): string => createHash('sha256').update(value).digest('hex');
         await writer.insert({ id: OTHER, displayName: 'Project', rootPath: projectRoot,
           realRootPath: projectRoot, createdAt: new Date(0).toISOString() });
         await writer.insert({ id: WS, displayName: 'Git Goal', rootPath: goalRoot,
@@ -204,7 +208,10 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
         expect(lease).not.toBeNull();
         const admission: WorkspaceAdmissionReceipt = {
           admissionId: 'admission-1', projectId: OTHER, workspaceId: WS, goalId: 'goal-1',
-          workspaceKind: 'git', worktreeIdentity: goalRoot, branchName: 'goal/1',
+          workspaceKind: 'git', repositoryIdentity: fingerprint(commonDirectory),
+          gitCommonDirIdentity: fingerprint(commonDirectory),
+          gitCommonDirFilesystemIdentity: fingerprint(`${commonStat.dev}:${commonStat.ino}`),
+          worktreeIdentity: fingerprint(await realpath(goalRoot)), branchName: 'goal/1',
           expectedWorkspaceHead: admittedHead, observedWorkspaceHead: admittedHead,
           dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
           runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
@@ -259,6 +266,103 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
         } finally { await old.close(); }
       } finally { watcher.close(); writerDb.close(); host.close(); await rm(base, { recursive: true, force: true }); }
     }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'rejects a replacement Git repository with the SAME admitted HEAD, branch and clean status in real Python FD3',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-repository-swap-'));
+      const root = path.join(base, 'goal');
+      const projectRoot = path.join(base, 'project');
+      await mkdir(root);
+      await mkdir(projectRoot);
+      const git = async (args: readonly string[], cwd = root): Promise<string> => {
+        const result = await execFileAsync('git', [...args], { cwd, timeout: 8_000, windowsHide: true });
+        return result.stdout.trim();
+      };
+      const host = new SqliteDatabase(path.join(base, 'authority.sqlite'));
+      const peer = new SqliteDatabase(path.join(base, 'authority.sqlite'));
+      const hostRegistry = new SqliteWorkspaceRepository(host);
+      const peerRegistry = new SqliteWorkspaceRepository(peer);
+      const epoch = new LocalWorkspaceAuthorityEpoch();
+      const watcher = new CrossProcessWorkspaceAuthorityWatcher(
+        (): number => hostRegistry.readAuthorityGeneration(), epoch, 20,
+      );
+      const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
+      try {
+        await git(['init', '-b', 'goal/1']);
+        await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
+          'commit', '--allow-empty', '-m', 'admitted']);
+        const head = await git(['rev-parse', 'HEAD']);
+        const gitDirectory = await realpath(path.join(root, '.git'));
+        const originalGitDirectoryStats = await stat(gitDirectory, { bigint: true });
+        const canonicalRoot = await realpath(root);
+        await peerRegistry.insert({ id: OTHER, displayName: 'Project',
+          rootPath: projectRoot, realRootPath: projectRoot, createdAt: new Date(0).toISOString() });
+        await peerRegistry.insert({ id: WS, displayName: 'Goal',
+          rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
+          lifecycleKind: 'goal', goalWorkspaceKind: 'git_worktree',
+          goalId: 'goal-1', branchName: 'goal/1' });
+        const lease = await peerRegistry.acquireGoalWriterLease(
+          WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+        );
+        expect(lease).not.toBeNull();
+        const admission: WorkspaceAdmissionReceipt = {
+          admissionId: 'admission-1', projectId: OTHER, workspaceId: WS, goalId: 'goal-1',
+          workspaceKind: 'git', repositoryIdentity: digest(gitDirectory),
+          gitCommonDirIdentity: digest(gitDirectory),
+          gitCommonDirFilesystemIdentity: digest(`${originalGitDirectoryStats.dev}:${originalGitDirectoryStats.ino}`),
+          worktreeIdentity: digest(canonicalRoot),
+          branchName: 'goal/1', expectedWorkspaceHead: head, observedWorkspaceHead: head,
+          dirtyState: 'clean', dirtyFingerprint: 'clean',
+          writeLeaseGeneration: lease!.generation, runtimeDeploymentId: 'deploy-1',
+          runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
+          runtimeBuildDirty: false, runtimeProtocolGeneration: 1,
+          runtimeStartedAt: '2026-10-09T08:00:00.000Z', workflowVersion: 1,
+          admissionGeneration: 1, createdAt: '2026-10-09T08:00:00.000Z',
+        };
+        expect(await peerRegistry.compareAndSwapAdmissionReceipt(
+          WS, 0, lease!.generation, admission,
+        )).toBe(true);
+        const scopes = createStrictThaiRagGoalAdmissionProvider(hostRegistry);
+        expect((await scopes()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'real-python-repository-identity', authorityGeneration: epoch.currentGeneration(),
+            workspacesProvider: scopes, revocationSignal: watcher.signal(),
+            registryGenerationProvider: (): number => hostRegistry.readAuthorityGeneration(),
+          }),
+        });
+        const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.callTool('health', {})).isError).not.toBe(true);
+          const unchangedEpoch = hostRegistry.readAuthorityGeneration();
+          const savedRoot = path.join(base, 'old-repository');
+          await rename(root, savedRoot);
+          await git(['clone', '--no-hardlinks', '--branch', 'goal/1', '--', savedRoot, root], base);
+          expect(await git(['rev-parse', 'HEAD'])).toBe(head);
+          expect(await git(['symbolic-ref', '--short', 'HEAD'])).toBe('goal/1');
+          expect(await git(['status', '--porcelain=v1'])).toBe('');
+          const replacementGitDirectory = await realpath(path.join(root, '.git'));
+          const replacementStats = await stat(replacementGitDirectory, { bigint: true });
+          expect(replacementGitDirectory).toBe(gitDirectory); // the canonical path alone is NOT an identity
+          expect(`${replacementStats.dev}:${replacementStats.ino}`)
+            .not.toBe(`${originalGitDirectoryStats.dev}:${originalGitDirectoryStats.ino}`);
+          expect(hostRegistry.readAuthorityGeneration()).toBe(unchangedEpoch);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          expect((await scopes()).map(x => x.id)).toEqual([OTHER]);
+          const fresh = await factory.connect(launch);
+          try {
+            expect((await fresh.callTool('health', {})).isError).not.toBe(true);
+            await expect(fresh.callTool('recall', { workspace_id: WS, query: 'wrong-repository' }))
+              .rejects.toThrow('workspace_authority_denied');
+            await expect(fresh.callTool('recall', { workspace_id: OTHER, query: 'project-ok' }))
+              .resolves.toHaveProperty('content');
+          } finally { await fresh.close(); }
+        } finally { await old.close(); }
+      } finally { watcher.close(); peer.close(); host.close(); await rm(base, { recursive: true, force: true }); }
+    }, 55_000,
   );
 
   it.skipIf(!python || !source)(

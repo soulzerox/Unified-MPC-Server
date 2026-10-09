@@ -12,6 +12,8 @@ export interface GitStatusResult {
 export interface GitWorkspaceSnapshot {
   readonly repositoryIdentity: string;
   readonly gitCommonDirIdentity: string;
+  /** Device/inode marker complements path-based identity when a repository is replaced at the same path. */
+  readonly gitCommonDirFilesystemIdentity?: string;
   readonly worktreeIdentity: string;
   readonly branch: string | null;
   readonly head: string;
@@ -125,6 +127,20 @@ export class GitAdapter {
       commonDirectory = await realpath(path.resolve(workspaceRoot, commonResult.stdout.trim()));
     } catch {
       return err(appError('INTERNAL_ERROR', 'Git common directory could not be resolved', true));
+    }
+
+    // Path hashes alone cannot detect a replaced repository mounted at the
+    // same canonical directory. Capture the underlying directory's device/inode
+    // when issuing source evidence, without making this a stable cross-host ID.
+    let gitCommonDirFilesystemIdentity: string;
+    try {
+      const gitDirectory = await stat(commonDirectory, { bigint: true });
+      if (!gitDirectory.isDirectory() || gitDirectory.ino <= 0n) {
+        return err(appError('CONFLICT', 'Git common directory has no stable local filesystem identity'));
+      }
+      gitCommonDirFilesystemIdentity = sha256(`${gitDirectory.dev}:${gitDirectory.ino}`);
+    } catch {
+      return err(appError('CONFLICT', 'Git common directory filesystem identity is unavailable'));
     }
 
     const headResult = await this.runner.run(['rev-parse', '--verify', 'HEAD^{commit}'], cwd, this.signalOptions(signal));
@@ -263,6 +279,7 @@ export class GitAdapter {
     return ok({
       repositoryIdentity: sha256(commonDirectory),
       gitCommonDirIdentity: sha256(commonDirectory),
+      gitCommonDirFilesystemIdentity,
       worktreeIdentity: sha256(workspaceRoot),
       branch,
       head,

@@ -702,7 +702,7 @@ function isWorkspaceAdmissionReceipt(value: unknown): value is WorkspaceAdmissio
   const receipt = value as Partial<WorkspaceAdmissionReceipt>;
   const allowedKeys = new Set([
     'admissionId', 'projectId', 'workspaceId', 'goalId', 'workspaceKind', 'repositoryIdentity',
-    'gitCommonDirIdentity', 'worktreeIdentity', 'branchName', 'expectedWorkspaceHead',
+    'gitCommonDirIdentity', 'gitCommonDirFilesystemIdentity', 'worktreeIdentity', 'branchName', 'expectedWorkspaceHead',
     'observedWorkspaceHead', 'baseRef', 'expectedBaseSha', 'resolvedBaseSha', 'remoteGoalRef',
     'remoteGoalSha', 'mergeBaseSha', 'dirtyState', 'dirtyFingerprint', 'stagedFingerprint',
     'untrackedFingerprint', 'checkpointId', 'checkpointRevision', 'writeLeaseGeneration',
@@ -716,6 +716,9 @@ function isWorkspaceAdmissionReceipt(value: unknown): value is WorkspaceAdmissio
     && typeof receipt.workspaceId === 'string'
     && (receipt.workspaceKind === 'git' || receipt.workspaceKind === 'non_git')
     && typeof receipt.worktreeIdentity === 'string'
+    && (receipt.gitCommonDirFilesystemIdentity === undefined
+      || (typeof receipt.gitCommonDirFilesystemIdentity === 'string'
+        && /^[0-9a-f]{64}$/i.test(receipt.gitCommonDirFilesystemIdentity)))
     && typeof receipt.expectedWorkspaceHead === 'string'
     && typeof receipt.observedWorkspaceHead === 'string'
     && (receipt.dirtyState === 'clean' || receipt.dirtyState === 'dirty' || receipt.dirtyState === 'unknown')

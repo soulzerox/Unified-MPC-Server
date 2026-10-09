@@ -51,6 +51,8 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly strictWorkerRevocationSignalProvider?: () => AbortSignal;
   /** Optional trusted epoch source; read per child and fail closed on overflow. */
   readonly strictWorkerAuthorityGenerationProvider?: () => number;
+  /** Reads the durable SQLite epoch for each private FD3 child's live RPC check. */
+  readonly strictWorkerRegistryGenerationProvider?: () => number;
   readonly callTimeoutMs?: number;
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
@@ -105,6 +107,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
               ownerId: this.ownerId,
               authorityGeneration: this.lifecycleGeneration + (options.strictWorkerAuthorityGenerationProvider?.() ?? 1),
               workspacesProvider: options.workspacesProvider,
+              ...(options.strictWorkerRegistryGenerationProvider === undefined ? {} : {
+                registryGenerationProvider: options.strictWorkerRegistryGenerationProvider,
+              }),
               ...(options.strictWorkerRevocationSignalProvider === undefined ? {} : {
                 revocationSignal: options.strictWorkerRevocationSignalProvider(),
               }),

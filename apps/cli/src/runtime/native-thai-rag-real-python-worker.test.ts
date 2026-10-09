@@ -93,6 +93,55 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
   );
 
   it.skipIf(!python || !source)(
+    'denies old Python FD3 child after archive+restore from an independent SQLite connection before a polling interval',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-crossprocess-'));
+      const filename = path.join(base, 'runtime.sqlite');
+      const root = path.join(base, 'project');
+      await mkdir(root);
+      const host = new SqliteDatabase(filename);
+      const webui = new SqliteDatabase(filename);
+      const hostRegistry = new SqliteWorkspaceRepository(host);
+      const webuiRegistry = new SqliteWorkspaceRepository(webui);
+      const workspace = { id: WS, displayName: 'Cross-process', rootPath: root, realRootPath: root,
+        createdAt: new Date(0).toISOString() };
+      try {
+        await webuiRegistry.insert(workspace);
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-real-crossprocess', authorityGeneration: hostRegistry.readAuthorityGeneration(),
+            registryGenerationProvider: () => hostRegistry.readAuthorityGeneration(),
+            workspacesProvider: async () => (await hostRegistry.list()).map(x => ({
+              id: x.id, realRootPath: x.realRootPath,
+            })),
+          }),
+        });
+        const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.listTools()).some(x => x.name === 'recall')).toBe(true);
+          const prior = hostRegistry.readAuthorityGeneration();
+          // WebUI's independent connection knows nothing about STDIO's
+          // in-memory AbortSignal. Return the same root before the next call.
+          await webuiRegistry.archive(WS);
+          await webuiRegistry.restore(WS);
+          expect(hostRegistry.readAuthorityGeneration()).toBe(prior + 2);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          const fresh = await factory.connect(launch);
+          try {
+            const response = await fresh.callTool('health', {});
+            expect(response.isError).not.toBe(true);
+            await expect(old.listTools()).rejects.toThrow('workspace_authority_denied');
+          } finally { await fresh.close(); }
+        } finally { await old.close(); }
+      } finally {
+        webui.close(); host.close();
+        await rm(base, { recursive: true, force: true });
+      }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
     'SQLite unregister/relink publishes a synchronous host revocation to the real Python worker',
     async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'strict-python-sqlite-revocation-'));

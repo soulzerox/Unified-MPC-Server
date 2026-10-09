@@ -18,11 +18,40 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-function options(workspacesProvider: () => Promise<readonly { id: string; realRootPath: string }[]>) {
+function options(workspacesProvider: () => Promise<readonly { id: string; realRootPath: string }[]>): {
+  ownerId: string; authorityGeneration: number; workspacesProvider: typeof workspacesProvider;
+} {
   return { ownerId: 'unified-worker-1', authorityGeneration: 7, workspacesProvider };
 }
 
 describe('Unified private Python-worker bootstrap payload', () => {
+  it('makes external durable-generation read errors sticky, even if the reader later recovers', async () => {
+    const root = await tempRoot();
+    let epoch = 7;
+    let unavailable = false;
+    const worker = await createThaiRagPrivateWorkerBootstrap({
+      ...options(async () => [{ id: WS, realRootPath: root }]),
+      registryGenerationProvider: () => {
+        if (unavailable) throw new Error('sqlite temporarily locked');
+        return epoch;
+      },
+    });
+    expect(await worker.validateLiveBinding()).toBe(true);
+    unavailable = true;
+    expect(await worker.validateLiveBinding()).toBe(false);
+    unavailable = false;
+    expect(await worker.validateLiveBinding()).toBe(false);
+    await expect(worker.issue({ workspaceId: WS, operation: 'recall' }))
+      .rejects.toThrow('thai_rag_authority_denied');
+    worker.dispose();
+
+    epoch += 1;
+    await expect(createThaiRagPrivateWorkerBootstrap({
+      ...options(async () => [{ id: WS, realRootPath: root }]),
+      registryGenerationProvider: () => epoch,
+    })).resolves.toHaveProperty('payload');
+  });
+
   it('matches inherited-FD Python wire schema, signs tokens with per-worker secret and live roots', async () => {
     const root = await tempRoot();
     const worker = await createThaiRagPrivateWorkerBootstrap(options(async () => [{ id: WS, realRootPath: root }]));
@@ -119,7 +148,7 @@ describe('Unified private Python-worker bootstrap payload', () => {
 
   it('fails closed on bad authority context/registry and never exposes key in env/argv', async () => {
     const root = await tempRoot();
-    const provider = async () => [{ id: WS, realRootPath: root }];
+    const provider = async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: WS, realRootPath: root }];
     await expect(createThaiRagPrivateWorkerBootstrap({ ...options(provider), authorityGeneration: 0 }))
       .rejects.toThrow('thai_rag_authority_denied');
     await expect(createThaiRagPrivateWorkerBootstrap({ ...options(provider), ownerId: 'illegal 🔥' }))

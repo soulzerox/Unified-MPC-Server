@@ -22,6 +22,8 @@ export interface ThaiRagWorkerBootstrapOptions {
   readonly workspacesProvider: ThaiRagTrustedAuthority['workspacesProvider'];
   /** Optional first-party host mutation signal; never derived from MCP arguments. */
   readonly revocationSignal?: AbortSignal;
+  /** Trusted durable cross-process registry generation; checked on every operation. */
+  readonly registryGenerationProvider?: () => number;
 }
 
 export interface ThaiRagPrivateWorkerBootstrap {
@@ -57,7 +59,14 @@ export async function createThaiRagPrivateWorkerBootstrap(
 
   let roots: readonly { readonly id: string; readonly realRootPath: string }[];
   try {
+    // Pin the authority epoch before observing any workspace root; neither a
+    // same-path restore nor an archive+restore between polls revives old keys.
+    const expectedRegistryGeneration = options.registryGenerationProvider?.();
+    if (options.registryGenerationProvider !== undefined
+      && (!Number.isSafeInteger(expectedRegistryGeneration) || expectedRegistryGeneration! < 1)) denied();
     roots = await options.workspacesProvider();
+    if (options.registryGenerationProvider !== undefined
+      && options.registryGenerationProvider() !== expectedRegistryGeneration) denied();
     if (!Array.isArray(roots) || roots.length < 1 || roots.length > MAX_WORKSPACES) denied();
     const workspaceRoots: Record<string, string> = Object.create(null) as Record<string, string>;
     const usedPaths = new Set<string>();
@@ -103,6 +112,9 @@ export async function createThaiRagPrivateWorkerBootstrap(
         return false;
       }
       try {
+        // A reader failure is a revocation (sticky), not a transient pass.
+        if (options.registryGenerationProvider !== undefined &&
+            options.registryGenerationProvider() !== expectedRegistryGeneration) denied();
         const live = await options.workspacesProvider();
         if (!Array.isArray(live) || live.length !== snapshot.size) denied();
         const observed = new Set<string>();
@@ -118,7 +130,9 @@ export async function createThaiRagPrivateWorkerBootstrap(
             metadata.isSymbolicLink() || metadata.dev !== expected.device ||
             metadata.ino !== expected.inode) denied();
         }
-        if (options.revocationSignal?.aborted) denied();
+        if (options.revocationSignal?.aborted ||
+          (options.registryGenerationProvider !== undefined &&
+           options.registryGenerationProvider() !== expectedRegistryGeneration)) denied();
         return true;
       } catch {
         // Sticky fencing: recreating a deleted registration cannot resurrect

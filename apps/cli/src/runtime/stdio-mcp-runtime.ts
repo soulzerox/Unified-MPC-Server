@@ -188,6 +188,7 @@ export function createStdioMcpRuntime(
       .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
     strictWorkerRevocationSignalProvider: workspaceAuthorityEpoch.signal,
     strictWorkerAuthorityGenerationProvider: workspaceAuthorityEpoch.currentGeneration,
+    strictWorkerRegistryGenerationProvider: (): number => rawWorkspaceRepository.readAuthorityGeneration(),
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
   });
   const thaiRagCoordinator = new ThaiRagProviderCoordinator({

@@ -71,6 +71,7 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
     let head = '1'.repeat(40);
     let branch = 'goal/1';
     let fail = false;
+    let status = '';
     const runner: TrustedSourceGitRunner = {
       async run(args): Promise<{ exitCode: number; stdout: string; stderr: string }> {
         if (fail) return { exitCode: 1, stdout: '', stderr: 'Git unavailable' };
@@ -79,7 +80,8 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
           exitCode: 0,
           stdout: op.includes('--show-toplevel') ? root + '\n'
             : op.includes('HEAD^{commit}') ? head + '\n'
-              : branch + '\n',
+              : op.includes('--porcelain=v1') ? status
+                : branch + '\n',
           stderr: '',
         };
       },
@@ -101,6 +103,13 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       )).toBe(true);
       const authorized = createStrictThaiRagGoalAdmissionProvider(registry, () => NOW, runner);
       expect((await authorized()).map(x => x.id).sort()).toEqual([GOAL, PROJECT].sort());
+      status = '?? unknown.ts\0';
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      status = 'M  staged.ts\0';
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      status = ' M modified.ts\0';
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      status = '';
       head = '3'.repeat(40);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       head = '1'.repeat(40);
@@ -112,6 +121,10 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       fail = false;
       // Invalid registered branch identity cannot be restored by the Git reader.
       db.connection.prepare('UPDATE workspaces SET branch_name = ? WHERE id = ?').run('goal/other', GOAL);
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      db.connection.prepare('UPDATE workspaces SET branch_name = ? WHERE id = ?').run('goal/1', GOAL);
+      db.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run(JSON.stringify({ ...receipt(lease!.generation), dirtyState: 'dirty' }), GOAL);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
     } finally { db.close(); await rm(root, { recursive: true, force: true }); }
   });

@@ -13,8 +13,9 @@ import type { Workspace } from '@unified-mpc/workspace';
  *
  * An epoch read before and after the provider (in the FD3 bootstrap) makes a
  * concurrently committed receipt/registry change fail closed. Git worktree
- * Goals additionally require live branch/HEAD parity. Dirty/base fingerprints
- * and completed Python side effects remain outside this narrow fence.
+ * Goals additionally require live branch/HEAD parity and a clean Git status
+ * when admitted clean. Exact dirty/base fingerprints and completed Python side
+ * effects remain outside this narrow fence.
  */
 export interface TrustedSourceGitRunner {
   run(args: readonly string[], cwd: string, options?: { readonly timeoutMs?: number }): Promise<{
@@ -112,19 +113,31 @@ const trustedSourceGitRunner: TrustedSourceGitRunner = {
  * This compares the on-disk commit and symbolic branch to BOTH admitted heads
  * and the registered branch, even if the SQLite epoch never changes.
  *
- * Dirty/staged fingerprints, base freshness and Python in-flight side effects
- * are outside this bounded gate and require separate authority checks.
+ * A dirty admission is denied until the canonical dirty-state fingerprint can
+ * be independently rechecked. For clean admissions, untracked, staged and
+ * unstaged Git changes fail closed even when SQLite and HEAD do not change.
+ * Base freshness and Python in-flight side effects require separate checks.
  */
 async function hasCurrentGitHeadAndBranch(
   workspace: Workspace,
   receipt: WorkspaceAdmissionReceipt,
   git: TrustedSourceGitRunner,
 ): Promise<boolean> {
-  if (receipt.workspaceKind !== 'git' || !workspace.branchName
+  // Fail closed for receipts declaring dirty state; the canonical content
+  // fingerprint algorithm is not available at this narrow FD3 boundary.
+  if (receipt.dirtyState !== 'clean'
+    || receipt.workspaceKind !== 'git' || !workspace.branchName
     || receipt.branchName !== workspace.branchName
     || !COMMIT_SHA.test(receipt.expectedWorkspaceHead)
     || !COMMIT_SHA.test(receipt.observedWorkspaceHead)) return false;
   try {
+    // Two status observations bracket identity checks. Git can mutate between
+    // these reads; this narrows, but does not close, the side-effect race.
+    const statusArgs = ['status', '--porcelain=v1', '-z', '--untracked-files=all'] as const;
+    const beforeStatus = await git.run(statusArgs, workspace.realRootPath, {
+      timeoutMs: ATTESTATION_TIMEOUT_MS,
+    });
+    if (beforeStatus.exitCode !== 0 || beforeStatus.stdout.length !== 0) return false;
     const root = await git.run(['rev-parse', '--show-toplevel'], workspace.realRootPath, {
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
@@ -143,7 +156,11 @@ async function hasCurrentGitHeadAndBranch(
     const branch = await git.run(['symbolic-ref', '--quiet', '--short', 'HEAD'], workspace.realRootPath, {
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
-    return branch.exitCode === 0 && branch.stdout.trim() === workspace.branchName;
+    if (branch.exitCode !== 0 || branch.stdout.trim() !== workspace.branchName) return false;
+    const afterStatus = await git.run(statusArgs, workspace.realRootPath, {
+      timeoutMs: ATTESTATION_TIMEOUT_MS,
+    });
+    return afterStatus.exitCode === 0 && afterStatus.stdout.length === 0;
   } catch {
     return false;
   }

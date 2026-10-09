@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
-import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
+import { createStrictThaiRagGoalAdmissionProvider, type TrustedSourceGitRunner } from './native-thai-rag-goal-admission.js';
 
 const GOAL = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
 const PROJECT = 'ee83c457-0b79-49d7-937e-5c35aa91975d';
@@ -10,7 +14,7 @@ const NOW = Date.parse('2026-10-09T09:00:00.000Z');
 function receipt(generation: number): WorkspaceAdmissionReceipt {
   return {
     admissionId: 'admission-1', projectId: PROJECT, workspaceId: GOAL, goalId: 'goal-1',
-    workspaceKind: 'git', worktreeIdentity: 'opaque-worktree', branchName: 'goal/1',
+    workspaceKind: 'non_git', worktreeIdentity: 'opaque-worktree', branchName: 'goal/1',
     expectedWorkspaceHead: '1'.repeat(40), observedWorkspaceHead: '1'.repeat(40),
     baseRef: 'origin/main', expectedBaseSha: '2'.repeat(40), resolvedBaseSha: '2'.repeat(40),
     mergeBaseSha: '2'.repeat(40), dirtyState: 'clean', dirtyFingerprint: 'clean',
@@ -32,7 +36,7 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
         realRootPath: '/tmp/project', createdAt: new Date(0).toISOString() });
       await registry.insert({ id: GOAL, displayName: 'Goal', rootPath: '/tmp/goal',
         realRootPath: '/tmp/goal', createdAt: new Date(0).toISOString(),
-        lifecycleKind: 'goal', goalId: 'goal-1' });
+        lifecycleKind: 'goal', goalId: 'goal-1', goalWorkspaceKind: 'snapshot' });
       const authorized = createStrictThaiRagGoalAdmissionProvider(registry, () => now);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       const writer = await registry.acquireGoalWriterLease(
@@ -58,6 +62,58 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       expect(await registry.releaseGoalWriterLease(GOAL, 'lease-1', writer!.generation)).toBe(true);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
     } finally { db.close(); }
+  });
+
+  it('rejects Git worktree Goal HEAD and branch drift with intact SQLite receipt/lease, preserving unrelated projects', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fd3-source-head-test-'));
+    const db = new SqliteDatabase(':memory:');
+    const registry = new SqliteWorkspaceRepository(db);
+    let head = '1'.repeat(40);
+    let branch = 'goal/1';
+    let fail = false;
+    const runner: TrustedSourceGitRunner = {
+      async run(args): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+        if (fail) return { exitCode: 1, stdout: '', stderr: 'Git unavailable' };
+        const op = args.join(' ');
+        return {
+          exitCode: 0,
+          stdout: op.includes('--show-toplevel') ? root + '\n'
+            : op.includes('HEAD^{commit}') ? head + '\n'
+              : branch + '\n',
+          stderr: '',
+        };
+      },
+    };
+    try {
+      await registry.insert({ id: PROJECT, displayName: 'Project',
+        rootPath: path.join(root, 'project'), realRootPath: path.join(root, 'project'),
+        createdAt: new Date(0).toISOString() });
+      await registry.insert({ id: GOAL, displayName: 'Goal',
+        rootPath: root, realRootPath: root, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1',
+        goalWorkspaceKind: 'git_worktree', branchName: 'goal/1' });
+      const lease = await registry.acquireGoalWriterLease(
+        GOAL, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-09T10:00:00.000Z',
+      );
+      expect(lease).not.toBeNull();
+      expect(await registry.compareAndSwapAdmissionReceipt(
+        GOAL, 0, lease!.generation, { ...receipt(lease!.generation), workspaceKind: 'git' },
+      )).toBe(true);
+      const authorized = createStrictThaiRagGoalAdmissionProvider(registry, () => NOW, runner);
+      expect((await authorized()).map(x => x.id).sort()).toEqual([GOAL, PROJECT].sort());
+      head = '3'.repeat(40);
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      head = '1'.repeat(40);
+      branch = 'another/branch';
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      branch = 'goal/1';
+      fail = true;
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      fail = false;
+      // Invalid registered branch identity cannot be restored by the Git reader.
+      db.connection.prepare('UPDATE workspaces SET branch_name = ? WHERE id = ?').run('goal/other', GOAL);
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+    } finally { db.close(); await rm(root, { recursive: true, force: true }); }
   });
 
   it('rejects clock uncertainty, malformed admission and fails closed on SQLite read exceptions', async () => {

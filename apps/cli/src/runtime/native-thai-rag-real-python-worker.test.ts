@@ -1,4 +1,6 @@
 import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,6 +15,7 @@ const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
 const OTHER = 'ee83c457-0b79-49d7-937e-5c35aa91975d';
 const python = process.env.THAI_RAG_REAL_PYTHON;
 const source = process.env.THAI_RAG_REAL_SOURCE;
+const execFileAsync = promisify(execFile);
 
 describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)', () => {
   it.skipIf(!python || !source)(
@@ -116,14 +119,14 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           realRootPath: projectRoot, createdAt: new Date(0).toISOString() });
         await writer.insert({ id: WS, displayName: 'Goal', rootPath: goalRoot,
           realRootPath: goalRoot, createdAt: new Date(0).toISOString(),
-          lifecycleKind: 'goal', goalId: 'goal-1' });
+          lifecycleKind: 'goal', goalWorkspaceKind: 'snapshot', goalId: 'goal-1' });
         const lease = await writer.acquireGoalWriterLease(
           WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
         );
         expect(lease).not.toBeNull();
         const admission: WorkspaceAdmissionReceipt = {
           admissionId: 'admission-1', projectId: OTHER, workspaceId: WS, goalId: 'goal-1',
-          workspaceKind: 'git', worktreeIdentity: goalRoot, branchName: 'goal/1',
+          workspaceKind: 'non_git', worktreeIdentity: goalRoot, branchName: 'goal/1',
           expectedWorkspaceHead: '1'.repeat(40), observedWorkspaceHead: '1'.repeat(40),
           dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
           runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
@@ -161,6 +164,85 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           } finally { await renewed.close(); }
         } finally { await old.close(); }
       } finally { watcher.close(); peer.close(); host.close(); await rm(base, { recursive: true, force: true }); }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'fences real Python FD3 Goal workers on Git HEAD drift without any SQLite mutation while retaining project scope',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-git-head-drift-'));
+      const goalRoot = path.join(base, 'goal');
+      const projectRoot = path.join(base, 'project');
+      await mkdir(goalRoot);
+      await mkdir(projectRoot);
+      const git = async (args: readonly string[]): Promise<string> => {
+        const command = await execFileAsync('git', [...args], { cwd: goalRoot, timeout: 8_000, windowsHide: true });
+        return command.stdout.trim();
+      };
+      const dbFile = path.join(base, 'authority.sqlite');
+      const host = new SqliteDatabase(dbFile);
+      const writerDb = new SqliteDatabase(dbFile);
+      const hostRegistry = new SqliteWorkspaceRepository(host);
+      const writer = new SqliteWorkspaceRepository(writerDb);
+      const epoch = new LocalWorkspaceAuthorityEpoch();
+      const watcher = new CrossProcessWorkspaceAuthorityWatcher(
+        (): number => hostRegistry.readAuthorityGeneration(), epoch, 20,
+      );
+      try {
+        await git(['init', '-b', 'goal/1']);
+        await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
+          'commit', '--allow-empty', '-m', 'admitted']);
+        const admittedHead = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+        await writer.insert({ id: OTHER, displayName: 'Project', rootPath: projectRoot,
+          realRootPath: projectRoot, createdAt: new Date(0).toISOString() });
+        await writer.insert({ id: WS, displayName: 'Git Goal', rootPath: goalRoot,
+          realRootPath: goalRoot, createdAt: new Date(0).toISOString(), lifecycleKind: 'goal',
+          goalWorkspaceKind: 'git_worktree', goalId: 'goal-1', branchName: 'goal/1' });
+        const lease = await writer.acquireGoalWriterLease(
+          WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+        );
+        expect(lease).not.toBeNull();
+        const admission: WorkspaceAdmissionReceipt = {
+          admissionId: 'admission-1', projectId: OTHER, workspaceId: WS, goalId: 'goal-1',
+          workspaceKind: 'git', worktreeIdentity: goalRoot, branchName: 'goal/1',
+          expectedWorkspaceHead: admittedHead, observedWorkspaceHead: admittedHead,
+          dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
+          runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
+          runtimeBuildDirty: false, runtimeProtocolGeneration: 1,
+          runtimeStartedAt: '2026-10-09T08:00:00.000Z', workflowVersion: 1,
+          admissionGeneration: 1, createdAt: '2026-10-09T08:00:00.000Z',
+        };
+        expect(await writer.compareAndSwapAdmissionReceipt(WS, 0, lease!.generation, admission)).toBe(true);
+        const authorized = createStrictThaiRagGoalAdmissionProvider(hostRegistry);
+        expect((await authorized()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-git-head-fd3', authorityGeneration: epoch.currentGeneration(),
+            workspacesProvider: authorized, revocationSignal: watcher.signal(),
+            registryGenerationProvider: (): number => hostRegistry.readAuthorityGeneration(),
+          }),
+        });
+        const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.listTools()).some(tool => tool.name === 'recall')).toBe(true);
+          const unchangedSqliteEpoch = hostRegistry.readAuthorityGeneration();
+          await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
+            'commit', '--allow-empty', '-m', 'moved-without-registration-update']);
+          expect(await git(['rev-parse', 'HEAD'])).not.toBe(admittedHead);
+          expect(hostRegistry.readAuthorityGeneration()).toBe(unchangedSqliteEpoch);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          expect((await authorized()).map(x => x.id)).toEqual([OTHER]);
+          const renewed = await factory.connect(launch);
+          try {
+            expect((await renewed.callTool('health', {})).isError).not.toBe(true);
+            await expect(renewed.callTool('recall', { workspace_id: WS, query: 'stale-head' }))
+              .rejects.toThrow('workspace_authority_denied');
+            await expect(renewed.callTool('recall', { workspace_id: OTHER, query: 'project' }))
+              .resolves.toHaveProperty('content');
+          } finally { await renewed.close(); }
+        } finally { await old.close(); }
+      } finally { watcher.close(); writerDb.close(); host.close(); await rm(base, { recursive: true, force: true }); }
     }, 45_000,
   );
 

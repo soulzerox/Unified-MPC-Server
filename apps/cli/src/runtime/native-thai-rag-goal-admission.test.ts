@@ -73,6 +73,7 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
     let branch = 'goal/1';
     let fail = false;
     let status = '';
+    let indexFlags = 'H tracked.ts\0';
     let commonDir = path.join(root, 'git-common-a');
     const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
     const runner: TrustedSourceGitRunner = {
@@ -85,7 +86,8 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
             : op.includes('--show-toplevel') ? root + '\n'
             : op.includes('HEAD^{commit}') ? head + '\n'
               : op.includes('--porcelain=v1') ? status
-                : branch + '\n',
+                : op.includes('ls-files -v -z') ? indexFlags
+                  : branch + '\n',
           stderr: '',
         };
       },
@@ -124,6 +126,11 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       status = ' M modified.ts\0';
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       status = '';
+      indexFlags = 'h tracked.ts\0';
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      indexFlags = 'S tracked.ts\0';
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      indexFlags = 'H tracked.ts\0';
       head = '3'.repeat(40);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       head = '1'.repeat(40);

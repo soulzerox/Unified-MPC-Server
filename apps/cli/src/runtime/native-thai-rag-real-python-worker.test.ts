@@ -191,8 +191,10 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
       );
       try {
         await git(['init', '-b', 'goal/1']);
+        await writeFile(path.join(goalRoot, 'tracked.ts'), 'export const original = true;\n');
+        await git(['add', 'tracked.ts']);
         await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
-          'commit', '--allow-empty', '-m', 'admitted']);
+          'commit', '-m', 'admitted']);
         const admittedHead = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
         const commonDirectory = await realpath(path.join(goalRoot, '.git'));
         const commonStat = await stat(commonDirectory, { bigint: true });
@@ -248,12 +250,27 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           const clean = await factory.connect(launch);
           try {
             expect((await clean.callTool('health', {})).isError).not.toBe(true);
+            // The Git index suppresses tracked modifications from porcelain
+            // when assume-unchanged is enabled. Never trust "clean" alone.
+            await git(['update-index', '--assume-unchanged', 'tracked.ts']);
+            await writeFile(path.join(goalRoot, 'tracked.ts'), 'export const replaced = true;\n');
+            expect(await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'])).toBe('');
+            expect(await git(['rev-parse', 'HEAD'])).toBe(admittedHead);
+            expect(hostRegistry.readAuthorityGeneration()).toBe(unchangedSqliteEpoch);
+            await expect(clean.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+            expect((await authorized()).map(x => x.id)).toEqual([OTHER]);
+            await git(['update-index', '--no-assume-unchanged', 'tracked.ts']);
+            await git(['restore', '--', 'tracked.ts']);
+          } finally { await clean.close(); }
+          const postMasked = await factory.connect(launch);
+          try {
+            expect((await postMasked.callTool('health', {})).isError).not.toBe(true);
             await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
               'commit', '--allow-empty', '-m', 'moved-without-registration-update']);
             expect(await git(['rev-parse', 'HEAD'])).not.toBe(admittedHead);
             expect(hostRegistry.readAuthorityGeneration()).toBe(unchangedSqliteEpoch);
-            await expect(clean.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
-          } finally { await clean.close(); }
+            await expect(postMasked.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          } finally { await postMasked.close(); }
           expect((await authorized()).map(x => x.id)).toEqual([OTHER]);
           const renewed = await factory.connect(launch);
           try {

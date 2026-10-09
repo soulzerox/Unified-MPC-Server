@@ -82,6 +82,9 @@ function isCurrentGoalAdmission(
 
 const execFileAsync = promisify(execFile);
 const MAX_ATTESTATION_CAPTURE_BYTES = 4_096;
+// Index flags require listing tracked paths: bound capture and reject larger
+// repositories rather than silently allowing hidden index mutations.
+const MAX_INDEX_FLAGS_BYTES = 1_048_576;
 const ATTESTATION_TIMEOUT_MS = 1_500;
 const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const SHA256 = /^[0-9a-f]{64}$/i;
@@ -102,7 +105,8 @@ const trustedSourceGitRunner: TrustedSourceGitRunner = {
         cwd,
         windowsHide: true,
         timeout: ATTESTATION_TIMEOUT_MS,
-        maxBuffer: MAX_ATTESTATION_CAPTURE_BYTES,
+        maxBuffer: args.length === 3 && args[0] === 'ls-files' && args[1] === '-v' && args[2] === '-z'
+          ? MAX_INDEX_FLAGS_BYTES : MAX_ATTESTATION_CAPTURE_BYTES,
         env: { ...cleanEnvironment, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
       });
       return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
@@ -146,6 +150,7 @@ async function hasCurrentGitHeadAndBranch(
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
     if (beforeStatus.exitCode !== 0 || beforeStatus.stdout.length !== 0) return false;
+    if (!(await hasSafeTrackedIndexFlags(git, workspace.realRootPath))) return false;
     const root = await git.run(['rev-parse', '--show-toplevel'], workspace.realRootPath, {
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
@@ -170,7 +175,8 @@ async function hasCurrentGitHeadAndBranch(
     const afterStatus = await git.run(statusArgs, workspace.realRootPath, {
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
-    return afterStatus.exitCode === 0 && afterStatus.stdout.length === 0;
+    return afterStatus.exitCode === 0 && afterStatus.stdout.length === 0
+      && await hasSafeTrackedIndexFlags(git, workspace.realRootPath);
   } catch {
     return false;
   }
@@ -185,6 +191,28 @@ async function hasCurrentGitHeadAndBranch(
  * Re-reading before and after HEAD/branch narrows Git-swap races; it does not
  * make an already-running Python write transactionally cancellable.
  */
+/**
+ * Git status can be deceptively clean when tracked entries carry the
+ * assume-unchanged (lowercase) or skip-worktree (S) index bits. Reject those
+ * flags rather than allowing unobserved on-disk source mutations.
+ *
+ * The listing is bounded; oversized repositories are conservatively denied
+ * in opt-in strict mode until a streaming reader can verify every index entry.
+ */
+async function hasSafeTrackedIndexFlags(
+  git: TrustedSourceGitRunner,
+  rootPath: string,
+): Promise<boolean> {
+  const flags = await git.run(['ls-files', '-v', '-z'], rootPath, {
+    timeoutMs: ATTESTATION_TIMEOUT_MS,
+  });
+  if (flags.exitCode !== 0 || Buffer.byteLength(flags.stdout, 'utf8') > MAX_INDEX_FLAGS_BYTES) return false;
+  if (flags.stdout.length === 0) return true;
+  if (!flags.stdout.endsWith('\0')) return false;
+  const records = flags.stdout.slice(0, -1).split('\0');
+  return records.every((record) => record.length >= 3 && /^[A-RT-Z] /.test(record));
+}
+
 async function matchesCommonDirectoryIdentity(
   canonicalRoot: string,
   receipt: WorkspaceAdmissionReceipt,

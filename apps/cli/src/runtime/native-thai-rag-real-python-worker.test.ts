@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createPrivateFdAuthorizedClientFactory } from '@unified-mpc/extensions';
+import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 
 const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
@@ -87,6 +89,46 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
             .rejects.toThrow('workspace_authority_denied');
         } finally { await session.close(); }
       } finally { await rm(base, { recursive: true, force: true }); }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'SQLite unregister/relink publishes a synchronous host revocation to the real Python worker',
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'strict-python-sqlite-revocation-'));
+      const epoch = new LocalWorkspaceAuthorityEpoch();
+      const database = new SqliteDatabase(':memory:');
+      const repository = new SqliteWorkspaceRepository(database, {
+        onBeforeAuthorityMutation: epoch.revokeBeforeMutation,
+      });
+      const workspace = { id: WS, displayName: 'Live SQL workspace', rootPath: root,
+        realRootPath: root, createdAt: new Date(0).toISOString() };
+      try {
+        await repository.insert(workspace);
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-real-sqlite-epoch', authorityGeneration: epoch.currentGeneration(),
+            workspacesProvider: async () => (await repository.list()).map(x => ({ id: x.id, realRootPath: x.realRootPath })),
+            revocationSignal: epoch.signal(),
+          }),
+        });
+        const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.listTools()).some(x => x.name === 'recall')).toBe(true);
+          const oldEpoch = epoch.currentGeneration();
+          await repository.archive(WS);
+          expect(epoch.currentGeneration()).toBe(oldEpoch + 1);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          await repository.restore(WS);
+          const fresh = await factory.connect(launch);
+          try {
+            expect((await fresh.listTools()).some(x => x.name === 'health')).toBe(true);
+            expect((await fresh.callTool('health', {})).isError).not.toBe(true);
+            await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          } finally { await fresh.close(); }
+        } finally { await old.close(); }
+      } finally { database.close(); await rm(root, { recursive: true, force: true }); }
     }, 45_000,
   );
 

@@ -49,6 +49,8 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly strictWorkerAuthority?: boolean;
   /** Optional first-party host event signal per private child; a revoked signal permanently fences that child. */
   readonly strictWorkerRevocationSignalProvider?: () => AbortSignal;
+  /** Optional trusted epoch source; read per child and fail closed on overflow. */
+  readonly strictWorkerAuthorityGenerationProvider?: () => number;
   readonly callTimeoutMs?: number;
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
@@ -101,7 +103,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             }
             return createThaiRagPrivateWorkerBootstrap({
               ownerId: this.ownerId,
-              authorityGeneration: this.lifecycleGeneration + 1,
+              authorityGeneration: this.lifecycleGeneration + (options.strictWorkerAuthorityGenerationProvider?.() ?? 1),
               workspacesProvider: options.workspacesProvider,
               ...(options.strictWorkerRevocationSignalProvider === undefined ? {} : {
                 revocationSignal: options.strictWorkerRevocationSignalProvider(),

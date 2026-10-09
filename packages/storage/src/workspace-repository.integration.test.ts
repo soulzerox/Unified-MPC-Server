@@ -14,6 +14,47 @@ afterEach(async () => {
 });
 
 describe('SqliteWorkspaceRepository', () => {
+  it('fences live worker authority before insert, archive, restore and delete write boundaries', async () => {
+    const database = new SqliteDatabase(':memory:');
+    const snapshots: string[] = [];
+    const ws: Workspace = {
+      id: 'authority-event-ws', displayName: 'Authority event', rootPath: '/tmp/authority-event',
+      realRootPath: '/tmp/authority-event', createdAt: new Date(0).toISOString(),
+    };
+    const repository = new SqliteWorkspaceRepository(database, {
+      onBeforeAuthorityMutation: () => {
+        const state = database.connection.prepare('SELECT archived_at FROM workspaces WHERE id = ?')
+          .get(ws.id) as { archived_at: string | null } | undefined;
+        snapshots.push(state === undefined ? 'missing' : state.archived_at === null ? 'active' : 'archived');
+      },
+    });
+    try {
+      await repository.insert(ws);
+      await repository.archive(ws.id);
+      await repository.restore(ws.id);
+      await repository.delete(ws.id);
+      expect(snapshots).toEqual(['missing', 'active', 'archived', 'active']);
+    } finally { database.close(); }
+  });
+
+  it('fails closed without changing registration when the trusted revocation publisher fails', async () => {
+    const database = new SqliteDatabase(':memory:');
+    const ws: Workspace = {
+      id: 'authority-denied-ws', displayName: 'Authority denied', rootPath: '/tmp/authority-denied',
+      realRootPath: '/tmp/authority-denied', createdAt: new Date(0).toISOString(),
+    };
+    try {
+      await new SqliteWorkspaceRepository(database).insert(ws);
+      const repository = new SqliteWorkspaceRepository(database, {
+        onBeforeAuthorityMutation: () => { throw new Error('trusted_authority_event_unavailable'); },
+      });
+      await expect(repository.archive(ws.id)).rejects.toThrow('trusted_authority_event_unavailable');
+      await expect(repository.get(ws.id)).resolves.toEqual(ws);
+      await expect(repository.delete(ws.id)).rejects.toThrow('trusted_authority_event_unavailable');
+      await expect(repository.get(ws.id)).resolves.toEqual(ws);
+    } finally { database.close(); }
+  });
+
   it('round-trips workspaces through the initial schema', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-db-'));
     temporaryRoots.push(root);

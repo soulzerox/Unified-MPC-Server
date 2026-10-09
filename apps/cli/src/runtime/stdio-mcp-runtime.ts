@@ -68,6 +68,7 @@ import {
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
+import { LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort } from './github-merge-observer.js';
@@ -136,7 +137,12 @@ export function createStdioMcpRuntime(
     managedResourceBindings,
     resourceAdmissionController,
   );
-  const rawWorkspaceRepository = new SqliteWorkspaceRepository(database);
+  // Local-process pre-write revocation fence. Other host processes require
+  // a separate durable cross-process authority epoch boundary (Issue #2).
+  const workspaceAuthorityEpoch = new LocalWorkspaceAuthorityEpoch();
+  const rawWorkspaceRepository = new SqliteWorkspaceRepository(database, {
+    onBeforeAuthorityMutation: workspaceAuthorityEpoch.revokeBeforeMutation,
+  });
   const workspaceRepository = options.strictAllowedRoots === undefined
     ? rawWorkspaceRepository
     : new StrictWorkspaceRepository(rawWorkspaceRepository, options.strictAllowedRoots);
@@ -180,6 +186,8 @@ export function createStdioMcpRuntime(
     },
     workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
       .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
+    strictWorkerRevocationSignalProvider: workspaceAuthorityEpoch.signal,
+    strictWorkerAuthorityGenerationProvider: workspaceAuthorityEpoch.currentGeneration,
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
   });
   const thaiRagCoordinator = new ThaiRagProviderCoordinator({

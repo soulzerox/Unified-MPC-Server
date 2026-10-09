@@ -59,7 +59,17 @@ const workspaceColumns = [
 ].join(', ');
 
 export class SqliteWorkspaceRepository {
-  public constructor(private readonly database: SqliteDatabase) {}
+  public constructor(
+    private readonly database: SqliteDatabase,
+    private readonly options: { readonly onBeforeAuthorityMutation?: () => void } = {},
+  ) {}
+
+  /** Synchronous, trusted in-process pre-write fence. Never await a publisher here. */
+  private beforeAuthorityMutation(): void {
+    if (this.options.onBeforeAuthorityMutation === undefined) return;
+    const result: unknown = this.options.onBeforeAuthorityMutation();
+    if (result !== undefined) throw new Error('workspace_authority_publisher_must_be_synchronous');
+  }
 
   public async getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null> {
     const row = this.database.connection.prepare(
@@ -308,6 +318,7 @@ export class SqliteWorkspaceRepository {
   }
 
   public async insert(workspace: Workspace): Promise<void> {
+    this.beforeAuthorityMutation();
     this.database.connection.prepare(
       'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_ref, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
@@ -349,6 +360,7 @@ export class SqliteWorkspaceRepository {
         this.database.connection.exec('ROLLBACK;');
         return false;
       }
+      this.beforeAuthorityMutation();
       this.database.connection.prepare(
         'INSERT INTO workspaces (id, display_name, root_path, real_root_path, created_at, archived_at, workspace_kind, owner_session_id, owner_job_id, auto_cleanup, expires_at, unavailable_since, goal_id, parent_workspace_id, goal_workspace_kind, parent_source, base_ref, base_revision, branch_name, checkpoint_id, integration_state, writer_lease_id, writer_lease_owner_id, writer_lease_generation, writer_lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       ).run(
@@ -387,10 +399,12 @@ export class SqliteWorkspaceRepository {
   }
 
   public async archive(id: string, archivedAt: string = new Date().toISOString()): Promise<void> {
+    this.beforeAuthorityMutation();
     this.database.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?').run(archivedAt, id);
   }
 
   public async archiveMany(ids: readonly string[], archivedAt: string = new Date().toISOString()): Promise<void> {
+    if (ids.length > 0) this.beforeAuthorityMutation();
     this.database.connection.exec('BEGIN IMMEDIATE;');
     try {
       const statement = this.database.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?');
@@ -404,6 +418,7 @@ export class SqliteWorkspaceRepository {
 
   public async restore(id: string, workspace?: Workspace): Promise<void> {
     if (workspace === undefined) {
+      this.beforeAuthorityMutation();
       this.database.connection.prepare('UPDATE workspaces SET archived_at = NULL WHERE id = ?').run(id);
       return;
     }
@@ -413,6 +428,7 @@ export class SqliteWorkspaceRepository {
         'SELECT 1 FROM workspaces WHERE archived_at IS NULL AND real_root_path = ? AND id <> ? LIMIT 1',
       ).get(workspace.realRootPath, id);
       if (existing !== undefined) throw new Error('Workspace root is already registered');
+      this.beforeAuthorityMutation();
       this.database.connection.prepare(
         'UPDATE workspaces SET display_name = ?, root_path = ?, real_root_path = ?, workspace_kind = ?, owner_session_id = ?, owner_job_id = ?, auto_cleanup = ?, expires_at = ?, unavailable_since = ?, goal_id = ?, parent_workspace_id = ?, goal_workspace_kind = ?, parent_source = ?, base_ref = ?, base_revision = ?, branch_name = ?, checkpoint_id = ?, integration_state = ?, writer_lease_id = ?, writer_lease_owner_id = ?, writer_lease_generation = ?, writer_lease_expires_at = ?, archived_at = NULL WHERE id = ?',
       ).run(
@@ -542,6 +558,7 @@ export class SqliteWorkspaceRepository {
   }
 
   public async delete(id: string): Promise<void> {
+    this.beforeAuthorityMutation();
     this.database.connection.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
   }
 

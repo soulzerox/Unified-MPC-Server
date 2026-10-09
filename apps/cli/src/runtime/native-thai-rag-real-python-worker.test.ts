@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createPrivateFdAuthorizedClientFactory } from '@unified-mpc/extensions';
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 
@@ -89,6 +90,70 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
             .rejects.toThrow('workspace_authority_denied');
         } finally { await session.close(); }
       } finally { await rm(base, { recursive: true, force: true }); }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'revokes an idle real Python FD3 child on an external committed workspace admission receipt invalidation',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-admission-revoke-'));
+      const root = path.join(base, 'project');
+      await mkdir(root);
+      const filename = path.join(base, 'state.sqlite');
+      const host = new SqliteDatabase(filename);
+      const peer = new SqliteDatabase(filename);
+      const hostRegistry = new SqliteWorkspaceRepository(host);
+      const peerRegistry = new SqliteWorkspaceRepository(peer);
+      const local = new LocalWorkspaceAuthorityEpoch();
+      const watcher = new CrossProcessWorkspaceAuthorityWatcher(
+        (): number => hostRegistry.readAuthorityGeneration(), local, 20,
+      );
+      try {
+        await peerRegistry.insert({
+          id: WS, displayName: 'Admission', rootPath: root, realRootPath: root,
+          createdAt: new Date(0).toISOString(), lifecycleKind: 'goal', goalId: 'goal-1',
+        });
+        const lease = await peerRegistry.acquireGoalWriterLease(
+          WS, 'lease-1', 'owner-1', '2026-10-09T09:00:00.000Z', '2026-10-10T00:00:00.000Z',
+        );
+        expect(lease).not.toBeNull();
+        const receipt: WorkspaceAdmissionReceipt = {
+          admissionId: 'admission-1', projectId: 'project-1', workspaceId: WS, goalId: 'goal-1',
+          workspaceKind: 'git', worktreeIdentity: root, branchName: 'goal/1',
+          expectedWorkspaceHead: '1'.repeat(40), observedWorkspaceHead: '1'.repeat(40),
+          baseRef: 'origin/main', expectedBaseSha: '2'.repeat(40), resolvedBaseSha: '2'.repeat(40),
+          mergeBaseSha: '2'.repeat(40), dirtyState: 'clean', dirtyFingerprint: 'clean',
+          checkpointId: 'checkpoint-1', checkpointRevision: 1, writeLeaseGeneration: lease!.generation,
+          runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1', runtimeBuildVersion: '1.0.0',
+          runtimeBuildDirty: false, runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-10-09T09:00:00.000Z',
+          workflowVersion: 1, admissionGeneration: 1, createdAt: '2026-10-09T09:00:00.000Z',
+        };
+        expect(await peerRegistry.compareAndSwapAdmissionReceipt(WS, 0, lease!.generation, receipt)).toBe(true);
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-real-python-admission', authorityGeneration: local.currentGeneration(),
+            registryGenerationProvider: (): number => hostRegistry.readAuthorityGeneration(),
+            revocationSignal: watcher.signal(),
+            workspacesProvider: async () => (await hostRegistry.list()).map(x => ({ id: x.id, realRootPath: x.realRootPath })),
+          }),
+        });
+        const old = await factory.connect({
+          command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! },
+        });
+        try {
+          expect((await old.listTools()).some(x => x.name === 'health')).toBe(true);
+          const oldSignal = watcher.signal();
+          const before = hostRegistry.readAuthorityGeneration();
+          expect(await peerRegistry.invalidateAdmissionReceipt(
+            WS, 1, 'writer_authority_changed', '2026-10-09T09:30:00.000Z',
+          )).toBe(true);
+          expect(hostRegistry.readAuthorityGeneration()).toBe(before + 1);
+          await expect.poll(() => oldSignal.aborted, { interval: 10, timeout: 2_000 }).toBe(true);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          // The registry root itself was never archived or relinked.
+          expect((await hostRegistry.get(WS))?.realRootPath).toBe(root);
+        } finally { await old.close(); }
+      } finally { watcher.close(); peer.close(); host.close(); await rm(base, { recursive: true, force: true }); }
     }, 45_000,
   );
 

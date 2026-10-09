@@ -33,6 +33,7 @@ import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations
 import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
 import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconciliation-migration.js';
 import { WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL } from './migrations/workspace-authority-epoch-migration.js';
+import { WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL } from './migrations/workspace-admission-authority-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -52,7 +53,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '035_workspace_authority_epoch' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '036_workspace_admission_authority' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -113,7 +114,8 @@ export class SqliteDatabase {
     this.applyMigration({ id: '030_merge_verification_receipts', sql: MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL });
     this.applyMigration({ id: '031_merge_reconciliation_records', sql: MERGE_RECONCILIATION_MIGRATION_SQL });
     // 032-034 are reserved for the independent Issue #298 draft PR #303.
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL });
+    this.applyMigration({ id: '035_workspace_authority_epoch', sql: WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

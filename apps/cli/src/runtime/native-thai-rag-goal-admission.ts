@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
-import { realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
@@ -82,6 +84,8 @@ const execFileAsync = promisify(execFile);
 const MAX_ATTESTATION_CAPTURE_BYTES = 4_096;
 const ATTESTATION_TIMEOUT_MS = 1_500;
 const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const SHA256 = /^[0-9a-f]{64}$/i;
+const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 
 /**
  * Source observations must not inherit GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_* from
@@ -127,6 +131,10 @@ async function hasCurrentGitHeadAndBranch(
   // fingerprint algorithm is not available at this narrow FD3 boundary.
   if (receipt.dirtyState !== 'clean'
     || receipt.workspaceKind !== 'git' || !workspace.branchName
+    || !SHA256.test(receipt.repositoryIdentity ?? '')
+    || !SHA256.test(receipt.gitCommonDirIdentity ?? '')
+    || !SHA256.test(receipt.gitCommonDirFilesystemIdentity ?? '')
+    || !SHA256.test(receipt.worktreeIdentity)
     || receipt.branchName !== workspace.branchName
     || !COMMIT_SHA.test(receipt.expectedWorkspaceHead)
     || !COMMIT_SHA.test(receipt.observedWorkspaceHead)) return false;
@@ -143,7 +151,8 @@ async function hasCurrentGitHeadAndBranch(
     });
     if (root.exitCode !== 0 || root.stdout.length > MAX_ATTESTATION_CAPTURE_BYTES) return false;
     const resolvedRoot = await realpath(root.stdout.trim());
-    if (resolvedRoot !== workspace.realRootPath) return false;
+    if (resolvedRoot !== workspace.realRootPath || hash(resolvedRoot) !== receipt.worktreeIdentity) return false;
+    if (!(await matchesCommonDirectoryIdentity(resolvedRoot, receipt, git))) return false;
 
     const head = await git.run(['rev-parse', '--verify', 'HEAD^{commit}'], workspace.realRootPath, {
       timeoutMs: ATTESTATION_TIMEOUT_MS,
@@ -157,10 +166,44 @@ async function hasCurrentGitHeadAndBranch(
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
     if (branch.exitCode !== 0 || branch.stdout.trim() !== workspace.branchName) return false;
+    if (!(await matchesCommonDirectoryIdentity(resolvedRoot, receipt, git))) return false;
     const afterStatus = await git.run(statusArgs, workspace.realRootPath, {
       timeoutMs: ATTESTATION_TIMEOUT_MS,
     });
     return afterStatus.exitCode === 0 && afterStatus.stdout.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * GitAdapter's canonical common-dir path digest alone survives an adversarial
+ * replacement at the SAME path. An admission now pins both the path digest
+ * and the local directory's dev/inode digest. The latter is a local,
+ * filesystem-lifetime identity, not a globally durable cross-host UUID.
+ *
+ * Re-reading before and after HEAD/branch narrows Git-swap races; it does not
+ * make an already-running Python write transactionally cancellable.
+ */
+async function matchesCommonDirectoryIdentity(
+  canonicalRoot: string,
+  receipt: WorkspaceAdmissionReceipt,
+  git: TrustedSourceGitRunner,
+): Promise<boolean> {
+  try {
+    const response = await git.run(['rev-parse', '--git-common-dir'], canonicalRoot, {
+      timeoutMs: ATTESTATION_TIMEOUT_MS,
+    });
+    if (response.exitCode !== 0 || response.stdout.length === 0
+      || response.stdout.length > MAX_ATTESTATION_CAPTURE_BYTES) return false;
+    const commonDirectory = await realpath(path.resolve(canonicalRoot, response.stdout.trim()));
+    const pathIdentity = hash(commonDirectory);
+    if (receipt.repositoryIdentity !== pathIdentity
+      || receipt.gitCommonDirIdentity !== pathIdentity) return false;
+
+    const inode = await stat(commonDirectory, { bigint: true });
+    if (!inode.isDirectory() || inode.ino <= 0n) return false;
+    return receipt.gitCommonDirFilesystemIdentity === hash(`${inode.dev}:${inode.ino}`);
   } catch {
     return false;
   }

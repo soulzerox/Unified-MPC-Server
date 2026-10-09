@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -72,13 +73,16 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
     let branch = 'goal/1';
     let fail = false;
     let status = '';
+    let commonDir = path.join(root, 'git-common-a');
+    const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
     const runner: TrustedSourceGitRunner = {
       async run(args): Promise<{ exitCode: number; stdout: string; stderr: string }> {
         if (fail) return { exitCode: 1, stdout: '', stderr: 'Git unavailable' };
         const op = args.join(' ');
         return {
           exitCode: 0,
-          stdout: op.includes('--show-toplevel') ? root + '\n'
+          stdout: op.includes('--git-common-dir') ? commonDir + '\n'
+            : op.includes('--show-toplevel') ? root + '\n'
             : op.includes('HEAD^{commit}') ? head + '\n'
               : op.includes('--porcelain=v1') ? status
                 : branch + '\n',
@@ -87,6 +91,9 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       },
     };
     try {
+      await mkdir(commonDir);
+      const initialCommon = await stat(commonDir, { bigint: true });
+      const commonFilesystemIdentity = digest(`${initialCommon.dev}:${initialCommon.ino}`);
       await registry.insert({ id: PROJECT, displayName: 'Project',
         rootPath: path.join(root, 'project'), realRootPath: path.join(root, 'project'),
         createdAt: new Date(0).toISOString() });
@@ -99,10 +106,17 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       );
       expect(lease).not.toBeNull();
       expect(await registry.compareAndSwapAdmissionReceipt(
-        GOAL, 0, lease!.generation, { ...receipt(lease!.generation), workspaceKind: 'git' },
+        GOAL, 0, lease!.generation, { ...receipt(lease!.generation), workspaceKind: 'git',
+          repositoryIdentity: digest(commonDir), gitCommonDirIdentity: digest(commonDir),
+          gitCommonDirFilesystemIdentity: commonFilesystemIdentity,
+          worktreeIdentity: digest(root) },
       )).toBe(true);
       const authorized = createStrictThaiRagGoalAdmissionProvider(registry, () => NOW, runner);
       expect((await authorized()).map(x => x.id).sort()).toEqual([GOAL, PROJECT].sort());
+      commonDir = path.join(root, 'git-common-b');
+      await mkdir(commonDir);
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      commonDir = path.join(root, 'git-common-a');
       status = '?? unknown.ts\0';
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       status = 'M  staged.ts\0';
@@ -119,6 +133,11 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       fail = true;
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       fail = false;
+      // Even replacing the directory at exactly the same canonical path
+      // must not let stale admissions authorize a different repository.
+      await rename(commonDir, path.join(root, 'old-common-directory'));
+      await mkdir(commonDir);
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       // Invalid registered branch identity cannot be restored by the Git reader.
       db.connection.prepare('UPDATE workspaces SET branch_name = ? WHERE id = ?').run('goal/other', GOAL);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);

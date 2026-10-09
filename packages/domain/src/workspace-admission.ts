@@ -96,6 +96,8 @@ export interface WorkspaceAdmissionReceipt {
   readonly workspaceKind: 'git' | 'non_git';
   readonly repositoryIdentity?: string;
   readonly gitCommonDirIdentity?: string;
+  /** SHA-256 of canonical Git common-dir filesystem device and inode at admission. */
+  readonly gitCommonDirFilesystemIdentity?: string;
   readonly worktreeIdentity: string;
   readonly branchName?: string;
   readonly expectedWorkspaceHead: string;

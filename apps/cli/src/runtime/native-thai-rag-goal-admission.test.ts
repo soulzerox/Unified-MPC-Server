@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rename, rm, stat, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -29,14 +29,20 @@ function receipt(generation: number): WorkspaceAdmissionReceipt {
 
 describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
   it('allows projects but denies unadmitted goals; accepts valid lease+receipt, then fences invalidated or expired admissions', async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), 'fd3-snapshot-identity-'));
+    const snapshotRoot = path.join(base, 'snapshot');
+    const replacementRoot = path.join(base, 'replacement');
+    await mkdir(snapshotRoot);
+    await mkdir(replacementRoot);
+    const rootIdentity = createHash('sha256').update(await realpath(snapshotRoot)).digest('hex');
     const db = new SqliteDatabase(':memory:');
     const registry = new SqliteWorkspaceRepository(db);
     let now = NOW;
     try {
       await registry.insert({ id: PROJECT, displayName: 'Project', rootPath: '/tmp/project',
         realRootPath: '/tmp/project', createdAt: new Date(0).toISOString() });
-      await registry.insert({ id: GOAL, displayName: 'Goal', rootPath: '/tmp/goal',
-        realRootPath: '/tmp/goal', createdAt: new Date(0).toISOString(),
+      await registry.insert({ id: GOAL, displayName: 'Goal', rootPath: snapshotRoot,
+        realRootPath: snapshotRoot, createdAt: new Date(0).toISOString(),
         lifecycleKind: 'goal', goalId: 'goal-1', goalWorkspaceKind: 'snapshot' });
       const authorized = createStrictThaiRagGoalAdmissionProvider(registry, () => now);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
@@ -45,24 +51,33 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       );
       expect(writer).not.toBeNull();
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
-      expect(await registry.compareAndSwapAdmissionReceipt(GOAL, 0, writer!.generation, receipt(writer!.generation))).toBe(true);
+      const validReceipt = { ...receipt(writer!.generation), worktreeIdentity: rootIdentity };
+      expect(await registry.compareAndSwapAdmissionReceipt(GOAL, 0, writer!.generation, validReceipt)).toBe(true);
+      expect((await authorized()).map(x => x.id).sort()).toEqual([GOAL, PROJECT].sort());
+      // An attacker replaces a registered snapshot root with a symlink to an
+      // unrelated directory without changing receipt, lease, or SQLite epoch.
+      await rename(snapshotRoot, path.join(base, 'parked'));
+      await symlink(replacementRoot, snapshotRoot);
+      expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
+      await rm(snapshotRoot);
+      await rename(path.join(base, 'parked'), snapshotRoot);
       expect((await authorized()).map(x => x.id).sort()).toEqual([GOAL, PROJECT].sort());
       expect(await registry.invalidateAdmissionReceipt(GOAL, 1, 'unsafe', '2026-10-09T08:30:00.000Z')).toBe(true);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       db.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
-        .run(JSON.stringify({ ...receipt(writer!.generation), expiresAt: '2026-10-09T08:59:00.000Z' }), GOAL);
+        .run(JSON.stringify({ ...validReceipt, expiresAt: '2026-10-09T08:59:00.000Z' }), GOAL);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       db.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
-        .run(JSON.stringify({ ...receipt(writer!.generation), goalId: 'another-goal' }), GOAL);
+        .run(JSON.stringify({ ...validReceipt, goalId: 'another-goal' }), GOAL);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       db.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
-        .run(JSON.stringify(receipt(writer!.generation)), GOAL);
+        .run(JSON.stringify(validReceipt), GOAL);
       now = Date.parse('2026-10-09T10:01:00.000Z');
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
       now = NOW;
       expect(await registry.releaseGoalWriterLease(GOAL, 'lease-1', writer!.generation)).toBe(true);
       expect((await authorized()).map(x => x.id)).toEqual([PROJECT]);
-    } finally { db.close(); }
+    } finally { db.close(); await rm(base, { recursive: true, force: true }); }
   });
 
   it('rejects Git worktree Goal HEAD and branch drift with intact SQLite receipt/lease, preserving unrelated projects', async () => {

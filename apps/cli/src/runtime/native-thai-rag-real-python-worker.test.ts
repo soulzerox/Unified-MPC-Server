@@ -127,7 +127,9 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
         expect(lease).not.toBeNull();
         const admission: WorkspaceAdmissionReceipt = {
           admissionId: 'admission-1', projectId: OTHER, workspaceId: WS, goalId: 'goal-1',
-          workspaceKind: 'non_git', worktreeIdentity: goalRoot, branchName: 'goal/1',
+          workspaceKind: 'non_git',
+          worktreeIdentity: createHash('sha256').update(await realpath(goalRoot)).digest('hex'),
+          branchName: 'goal/1',
           expectedWorkspaceHead: '1'.repeat(40), observedWorkspaceHead: '1'.repeat(40),
           dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
           runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
@@ -149,6 +151,20 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
         const old = await factory.connect(launch);
         try {
           expect((await old.listTools()).some(x => x.name === 'recall')).toBe(true);
+          const beforeSwap = hostRegistry.readAuthorityGeneration();
+          const parked = path.join(base, 'parked-snapshot');
+          await rename(goalRoot, parked);
+          await symlink(projectRoot, goalRoot);
+          expect(hostRegistry.readAuthorityGeneration()).toBe(beforeSwap);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          expect((await allowed()).map(x => x.id)).toEqual([OTHER]);
+          await rm(goalRoot);
+          await rename(parked, goalRoot);
+          expect((await allowed()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
+          const restored = await factory.connect(launch);
+          try {
+            expect((await restored.callTool('health', {})).isError).not.toBe(true);
+          } finally { await restored.close(); }
           expect(await writer.invalidateAdmissionReceipt(
             WS, 1, 'goal_admission_revoked', '2026-10-09T09:30:00.000Z',
           )).toBe(true);

@@ -51,6 +51,8 @@ export function createStrictThaiRagGoalAdmissionProvider(
           && workspace.goalWorkspaceKind !== 'snapshot') continue;
         if (workspace.goalWorkspaceKind === 'git_worktree'
           && !(await hasCurrentGitHeadAndBranch(workspace, receipt!, git))) continue;
+        if (workspace.goalWorkspaceKind === 'snapshot'
+          && !(await hasCurrentSnapshotRootIdentity(workspace, receipt!))) continue;
       }
       eligible.push({ id: workspace.id, rootPath: workspace.rootPath, realRootPath: workspace.realRootPath });
     }
@@ -78,6 +80,27 @@ function isCurrentGoalAdmission(
   return Number.isFinite(leaseExpiry) && leaseExpiry > now
     && Number.isFinite(admittedAt) && admittedAt <= now
     && receiptExpiry > now;
+}
+
+/**
+ * Snapshot Goals have no Git HEAD to fence; bind each strict private FD3
+ * scope to the canonical root recorded at admission instead. This checks
+ * path identity only, NOT snapshot contents or same-path inode replacement.
+ * Snapshot admission issuance/content provenance remains separate Issue #2 work.
+ */
+async function hasCurrentSnapshotRootIdentity(
+  workspace: Workspace,
+  receipt: WorkspaceAdmissionReceipt,
+): Promise<boolean> {
+  if (receipt.workspaceKind !== 'non_git' || !SHA256.test(receipt.worktreeIdentity)) return false;
+  try {
+    const canonical = await realpath(workspace.rootPath);
+    if (canonical !== workspace.realRootPath || hash(canonical) !== receipt.worktreeIdentity) return false;
+    const source = await stat(canonical);
+    return source.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 const execFileAsync = promisify(execFile);

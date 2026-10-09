@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createPrivateFdAuthorizedClientFactory } from '@unified-mpc/extensions';
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
-import { LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
+import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 
 const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
@@ -89,6 +89,48 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
             .rejects.toThrow('workspace_authority_denied');
         } finally { await session.close(); }
       } finally { await rm(base, { recursive: true, force: true }); }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'proactively terminates idle real Python FD3 worker after an external writer-lease generation SQL mutation',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-watch-idle-'));
+      const root = path.join(base, 'project');
+      await mkdir(root);
+      const host = new SqliteDatabase(path.join(base, 'state.sqlite'));
+      const webui = new SqliteDatabase(path.join(base, 'state.sqlite'));
+      const owner = new SqliteWorkspaceRepository(host);
+      const writer = new SqliteWorkspaceRepository(webui);
+      const local = new LocalWorkspaceAuthorityEpoch();
+      const watcher = new CrossProcessWorkspaceAuthorityWatcher((): number => owner.readAuthorityGeneration(), local, 20);
+      try {
+        await writer.insert({ id: WS, displayName: 'Live', rootPath: root, realRootPath: root,
+          createdAt: new Date(0).toISOString() });
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-real-python-idle-watch', authorityGeneration: local.currentGeneration(),
+            registryGenerationProvider: (): number => owner.readAuthorityGeneration(),
+            workspacesProvider: async () => (await owner.list()).map(x => ({ id: x.id, realRootPath: x.realRootPath })),
+            revocationSignal: watcher.signal(),
+          }),
+        });
+        const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.listTools()).some(t => t.name === 'health')).toBe(true);
+          const oldSignal = watcher.signal();
+          webui.connection.prepare('UPDATE workspaces SET writer_lease_generation = ? WHERE id = ?').run(11, WS);
+          // No new call to Python: the HOST watcher aborts the existing
+          // child signal. Python effects that already ran are not undone.
+          await expect.poll(() => oldSignal.aborted, { interval: 10, timeout: 2_000 }).toBe(true);
+          await expect(old.listTools()).rejects.toThrow('workspace_authority_denied');
+          const renewed = await factory.connect(launch);
+          try {
+            expect((await renewed.callTool('health', {})).isError).not.toBe(true);
+          } finally { await renewed.close(); }
+        } finally { await old.close(); }
+      } finally { watcher.close(); webui.close(); host.close(); await rm(base, { recursive: true, force: true }); }
     }, 45_000,
   );
 

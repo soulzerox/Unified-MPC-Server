@@ -10,8 +10,8 @@ const WS='14fc20d1-5836-4faf-aed6-0df6a9633a38';
 const OTHER='ee83c457-0b79-49d7-937e-5c35aa91975d';
 const fixture=fileURLToPath(new URL('./fixtures/native-thai-rag-private-worker.mjs',import.meta.url));
 const scratch:string[]=[];
-async function tmp(){const p=await mkdtemp(path.join(os.tmpdir(),'native-thai-rag-strict-'));scratch.push(p);return p;}
-afterEach(async()=>{await Promise.all(scratch.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
+async function tmp(): Promise<string> {const p=await mkdtemp(path.join(os.tmpdir(),'native-thai-rag-strict-'));scratch.push(p);return p;}
+afterEach(async (): Promise<void> => {await Promise.all(scratch.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
 function handshake():Record<string,unknown>{
  return {
   provider_id:'thai-rag',provider_version:'0.1.0',contract_version:'1.0',
@@ -31,20 +31,29 @@ function handshake():Record<string,unknown>{
 function lines(contents:string):Array<{pid:number;name:string;workspaceId:string|null;valid:boolean}>{
  return contents.trim().split('\n').filter(Boolean).map(line=>JSON.parse(line) as {pid:number;name:string;workspaceId:string|null;valid:boolean});
 }
-function startOptions(dataRoot:string){
+function startOptions(dataRoot:string): {providerRoot:string; ownerId:string; providerVersion:string; embeddingIndexGeneration:number} {
  return {providerRoot:path.join(dataRoot,'thai-rag'),ownerId:'unified-private-worker',
   providerVersion:'4.61.0',embeddingIndexGeneration:1};
 }
 describe('NativeThaiRagProviderDriver strict worker authority opt-in',()=>{
- it('rejects conflicting legacy client factory and strict authority without spawning',async()=>{
+ it('rejects conflicting legacy client factory and strict authority without spawning',async (): Promise<void> => {
   const dataRoot=await tmp(),root=await tmp();
-  expect(()=>new NativeThaiRagProviderDriver({
-   dataRoot,launchConfig:{command:process.execPath},workspacesProvider:async()=>[{id:WS,realRootPath:root}],
-   strictWorkerAuthority:true,clientFactory:{connect:async()=>{throw Error('unsafe');}},
+  expect((): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+   dataRoot,launchConfig:{command:process.execPath},workspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>[{id:WS,realRootPath:root}],
+   strictWorkerAuthority:true,clientFactory:{connect:async (): Promise<never> => {throw Error('unsafe');}},
   })).toThrow('native_thai_rag_strict_factory_conflict');
  });
 
- it('starts a real FD3 worker, attests recall, and refuses unknown/unregistered workspace before IPC',async()=>{
+ it('fails closed if strict mode has no trusted admission-checked workspace provider',async (): Promise<void> => {
+  const dataRoot=await tmp(),root=await tmp();
+  expect((): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+   dataRoot,launchConfig:{command:process.execPath},
+   workspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>[{id:WS,realRootPath:root}],
+   strictWorkerAuthority:true,
+  })).toThrow('native_thai_rag_strict_admission_provider_required');
+ });
+
+ it('starts a real FD3 worker, attests recall, and refuses unknown/unregistered workspace before IPC',async (): Promise<void> => {
   const dataRoot=await tmp(),root=await tmp(),trace=path.join(dataRoot,'trace.jsonl');
   await writeFile(trace,'');
   let active=true;
@@ -53,7 +62,8 @@ describe('NativeThaiRagProviderDriver strict worker authority opt-in',()=>{
     command:process.execPath,args:[fixture],
     env:{NATIVE_RAG_FIXTURE_HANDSHAKE_B64:Buffer.from(JSON.stringify(handshake())).toString('base64url'),
      NATIVE_RAG_FIXTURE_TRACE:trace}},
-   workspacesProvider:async()=>active?[{id:WS,realRootPath:root}]:[],
+   workspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>active?[{id:WS,realRootPath:root}]:[],
+   strictWorkerAuthorizedWorkspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>active?[{id:WS,realRootPath:root}]:[],
   });
   try{
    const started=await driver.start(startOptions(dataRoot));
@@ -70,16 +80,17 @@ describe('NativeThaiRagProviderDriver strict worker authority opt-in',()=>{
   expect(events.filter(x=>x.name==='version'||x.name==='health').every(x=>x.valid)).toBe(true);
  },25_000);
 
- it('fences the strict driver child from a host-owned event before the registry poll',async()=>{
+ it('fences the strict driver child from a host-owned event before the registry poll',async (): Promise<void> => {
   const dataRoot=await tmp(),root=await tmp(),trace=path.join(dataRoot,'trace.jsonl');
   const revoke=new AbortController();
   await writeFile(trace,'');
   const driver=new NativeThaiRagProviderDriver({
-   dataRoot,strictWorkerAuthority:true,strictWorkerRevocationSignalProvider:()=>revoke.signal,
+   dataRoot,strictWorkerAuthority:true,strictWorkerRevocationSignalProvider:(): AbortSignal => revoke.signal,
    launchConfig:{command:process.execPath,args:[fixture],
     env:{NATIVE_RAG_FIXTURE_HANDSHAKE_B64:Buffer.from(JSON.stringify(handshake())).toString('base64url'),
      NATIVE_RAG_FIXTURE_TRACE:trace}},
-   workspacesProvider:async()=>[{id:WS,realRootPath:root}],
+   workspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>[{id:WS,realRootPath:root}],
+   strictWorkerAuthorizedWorkspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>[{id:WS,realRootPath:root}],
   });
   try{
    const started=await driver.start(startOptions(dataRoot));
@@ -92,7 +103,7 @@ describe('NativeThaiRagProviderDriver strict worker authority opt-in',()=>{
   expect(events.filter(e=>e.name==='recall')).toHaveLength(1);
  },25_000);
 
- it('protects background admission index via a SECOND private FD3 worker session',async()=>{
+ it('protects background admission index via a SECOND private FD3 worker session',async (): Promise<void> => {
   const dataRoot=await tmp(),root=await tmp(),trace=path.join(dataRoot,'trace.jsonl');
   await writeFile(trace,'');
   const driver=new NativeThaiRagProviderDriver({
@@ -100,14 +111,15 @@ describe('NativeThaiRagProviderDriver strict worker authority opt-in',()=>{
    launchConfig:{command:process.execPath,args:[fixture],
     env:{NATIVE_RAG_FIXTURE_HANDSHAKE_B64:Buffer.from(JSON.stringify(handshake())).toString('base64url'),
      NATIVE_RAG_FIXTURE_TRACE:trace}},
-   workspacesProvider:async()=>[{id:WS,realRootPath:root}],
+   workspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>[{id:WS,realRootPath:root}],
+   strictWorkerAuthorizedWorkspacesProvider:async (): Promise<Array<{id:string;realRootPath:string}>> =>[{id:WS,realRootPath:root}],
   });
   try{
    const started=await driver.start(startOptions(dataRoot));
    expect(started.ok).toBe(true);
    if(!started.ok)throw Error(started.error.message);
    await driver.call('pre_edit_context',{workspace_id:WS,file_path:'src/a.ts'});
-   await expect.poll(async()=>lines(await readFile(trace,'utf8'))
+   await expect.poll(async (): Promise<number> => lines(await readFile(trace,'utf8'))
     .filter(e=>e.name==='code_index'||e.name==='index_status').length,{timeout:8_000}).toBeGreaterThan(0);
    await expect(driver.call('recall',{workspace_id:WS,query:'other'})).resolves.toMatchObject({ok:true});
   } finally {await driver.stop();}

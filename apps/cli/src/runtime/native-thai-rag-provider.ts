@@ -53,6 +53,8 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly strictWorkerAuthorityGenerationProvider?: () => number;
   /** Reads the durable SQLite epoch for each private FD3 child's live RPC check. */
   readonly strictWorkerRegistryGenerationProvider?: () => number;
+  /** Required for strict mode: admission-checked, host-owned workspace scopes; legacy uses workspacesProvider. */
+  readonly strictWorkerAuthorizedWorkspacesProvider?: () => Promise<readonly NativeThaiRagWorkspace[]>;
   readonly callTimeoutMs?: number;
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
@@ -95,6 +97,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (options.strictWorkerAuthority === true && options.clientFactory !== undefined) {
       throw new Error('native_thai_rag_strict_factory_conflict');
     }
+    if (options.strictWorkerAuthority === true && options.strictWorkerAuthorizedWorkspacesProvider === undefined) {
+      throw new Error('native_thai_rag_strict_admission_provider_required');
+    }
     // Both normal and admission/index sessions MUST use this same trusted factory
     // so every child, including reconnects, gets its own independently keyed FD3.
     const chosenFactory = options.strictWorkerAuthority === true
@@ -106,7 +111,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             return createThaiRagPrivateWorkerBootstrap({
               ownerId: this.ownerId,
               authorityGeneration: this.lifecycleGeneration + (options.strictWorkerAuthorityGenerationProvider?.() ?? 1),
-              workspacesProvider: options.workspacesProvider,
+              workspacesProvider: options.strictWorkerAuthorizedWorkspacesProvider!,
               ...(options.strictWorkerRegistryGenerationProvider === undefined ? {} : {
                 registryGenerationProvider: options.strictWorkerRegistryGenerationProvider,
               }),

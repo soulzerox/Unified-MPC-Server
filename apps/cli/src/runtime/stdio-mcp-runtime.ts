@@ -68,6 +68,7 @@ import {
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
+import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
@@ -190,6 +191,7 @@ export function createStdioMcpRuntime(
     },
     workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
       .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
+    strictWorkerAuthorizedWorkspacesProvider: createStrictThaiRagGoalAdmissionProvider(rawWorkspaceRepository),
     strictWorkerRevocationSignalProvider: workspaceAuthorityWatcher.signal,
     strictWorkerAuthorityGenerationProvider: workspaceAuthorityEpoch.currentGeneration,
     strictWorkerRegistryGenerationProvider: (): number => rawWorkspaceRepository.readAuthorityGeneration(),

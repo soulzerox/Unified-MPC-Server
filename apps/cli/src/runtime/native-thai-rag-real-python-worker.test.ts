@@ -7,6 +7,7 @@ import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage'
 import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
+import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 
 const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
 const OTHER = 'ee83c457-0b79-49d7-937e-5c35aa91975d';
@@ -90,6 +91,76 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
             .rejects.toThrow('workspace_authority_denied');
         } finally { await session.close(); }
       } finally { await rm(base, { recursive: true, force: true }); }
+    }, 45_000,
+  );
+
+  it.skipIf(!python || !source)(
+    'excludes invalidated Goal admission from NEW real Python FD3 worker while preserving ordinary project scope',
+    async () => {
+      const base = await mkdtemp(path.join(os.tmpdir(), 'strict-python-new-admission-'));
+      const goalRoot = path.join(base, 'goal');
+      const projectRoot = path.join(base, 'project');
+      await mkdir(goalRoot);
+      await mkdir(projectRoot);
+      const filename = path.join(base, 'state.sqlite');
+      const host = new SqliteDatabase(filename);
+      const peer = new SqliteDatabase(filename);
+      const hostRegistry = new SqliteWorkspaceRepository(host);
+      const writer = new SqliteWorkspaceRepository(peer);
+      const epoch = new LocalWorkspaceAuthorityEpoch();
+      const watcher = new CrossProcessWorkspaceAuthorityWatcher(
+        (): number => hostRegistry.readAuthorityGeneration(), epoch, 20,
+      );
+      try {
+        await writer.insert({ id: OTHER, displayName: 'Project', rootPath: projectRoot,
+          realRootPath: projectRoot, createdAt: new Date(0).toISOString() });
+        await writer.insert({ id: WS, displayName: 'Goal', rootPath: goalRoot,
+          realRootPath: goalRoot, createdAt: new Date(0).toISOString(),
+          lifecycleKind: 'goal', goalId: 'goal-1' });
+        const lease = await writer.acquireGoalWriterLease(
+          WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+        );
+        expect(lease).not.toBeNull();
+        const admission: WorkspaceAdmissionReceipt = {
+          admissionId: 'admission-1', projectId: OTHER, workspaceId: WS, goalId: 'goal-1',
+          workspaceKind: 'git', worktreeIdentity: goalRoot, branchName: 'goal/1',
+          expectedWorkspaceHead: '1'.repeat(40), observedWorkspaceHead: '1'.repeat(40),
+          dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
+          runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
+          runtimeBuildDirty: false, runtimeProtocolGeneration: 1,
+          runtimeStartedAt: '2026-10-09T08:00:00.000Z', workflowVersion: 1,
+          admissionGeneration: 1, createdAt: '2026-10-09T08:00:00.000Z',
+        };
+        expect(await writer.compareAndSwapAdmissionReceipt(WS, 0, lease!.generation, admission)).toBe(true);
+        const allowed = createStrictThaiRagGoalAdmissionProvider(hostRegistry);
+        expect((await allowed()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
+        const factory = createPrivateFdAuthorizedClientFactory({
+          createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
+            ownerId: 'unified-new-worker-admission', authorityGeneration: epoch.currentGeneration(),
+            workspacesProvider: allowed, revocationSignal: watcher.signal(),
+            registryGenerationProvider: (): number => hostRegistry.readAuthorityGeneration(),
+          }),
+        });
+        const launch = { command: python!, args: ['-m', 'thai_rag.server'], env: { PYTHONPATH: source! } };
+        const old = await factory.connect(launch);
+        try {
+          expect((await old.listTools()).some(x => x.name === 'recall')).toBe(true);
+          expect(await writer.invalidateAdmissionReceipt(
+            WS, 1, 'goal_admission_revoked', '2026-10-09T09:30:00.000Z',
+          )).toBe(true);
+          await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          expect((await allowed()).map(x => x.id)).toEqual([OTHER]);
+          const renewed = await factory.connect(launch);
+          try {
+            expect((await renewed.callTool('health', {})).isError).not.toBe(true);
+            await expect(renewed.callTool('recall', { workspace_id: WS, query: 'not-admitted' }))
+              .rejects.toThrow('workspace_authority_denied');
+            // No effect of the invalidation on unrelated ordinary projects.
+            await expect(renewed.callTool('recall', { workspace_id: OTHER, query: 'project' }))
+              .resolves.toHaveProperty('content');
+          } finally { await renewed.close(); }
+        } finally { await old.close(); }
+      } finally { watcher.close(); peer.close(); host.close(); await rm(base, { recursive: true, force: true }); }
     }, 45_000,
   );
 

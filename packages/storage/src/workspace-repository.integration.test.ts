@@ -14,6 +14,40 @@ afterEach(async () => {
 });
 
 describe('SqliteWorkspaceRepository', () => {
+  it('advances the committed epoch for independently-written admission receipt insert/invalidate/delete but not rollback', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'authority-admission-epoch-'));
+    temporaryRoots.push(root);
+    const file = path.join(root, 'state.sqlite');
+    const host = new SqliteDatabase(file);
+    const peer = new SqliteDatabase(file);
+    try {
+      const registry = new SqliteWorkspaceRepository(host);
+      await registry.insert({
+        id: 'admission-epoch-1', displayName: 'Admission epoch', rootPath: root,
+        realRootPath: root, createdAt: new Date(0).toISOString(),
+      });
+      const initial = registry.readAuthorityGeneration();
+      peer.connection.prepare(
+        'INSERT INTO workspace_admission_receipts (workspace_id, admission_generation, write_lease_generation, receipt_json, updated_at) VALUES (?, 1, 1, ?, ?)',
+      ).run('admission-epoch-1', '{}', '2026-10-09T00:00:00.000Z');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 1);
+      peer.connection.exec('BEGIN IMMEDIATE;');
+      peer.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run('{"invalidatedAt":"rolled-back"}', 'admission-epoch-1');
+      peer.connection.exec('ROLLBACK;');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 1);
+      peer.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run('{"invalidatedAt":"committed"}', 'admission-epoch-1');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 2);
+      peer.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run('{"invalidatedAt":"miss"}', 'absent-id');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 2);
+      peer.connection.prepare('DELETE FROM workspace_admission_receipts WHERE workspace_id = ?')
+        .run('admission-epoch-1');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 3);
+    } finally { peer.close(); host.close(); }
+  });
+
   it('commits a durable authority generation for independent connections, direct SQL and unregister/relink replay', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'authority-crossprocess-db-'));
     temporaryRoots.push(root);
@@ -291,7 +325,9 @@ describe('SqliteWorkspaceRepository', () => {
       await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, {
         ...receipt, createdAt: '2026-09-23T01:00:00.000Z',
       })).resolves.toBe(false);
+      const epochBeforeAdmission = repository.readAuthorityGeneration();
       await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, receipt)).resolves.toBe(true);
+      expect(repository.readAuthorityGeneration()).toBe(epochBeforeAdmission + 1);
       await expect(repository.getAdmissionReceipt(workspace.id)).resolves.toEqual(receipt);
 
       const nextReceipt = { ...receipt, admissionId: 'admission-2', admissionGeneration: 2 };
@@ -300,6 +336,9 @@ describe('SqliteWorkspaceRepository', () => {
       await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 1, lease!.generation, nextReceipt)).resolves.toBe(true);
       await expect(repository.invalidateAdmissionReceipt(workspace.id, 1, 'unexpected_workspace_change', '2026-09-23T00:30:00.000Z')).resolves.toBe(false);
       await expect(repository.invalidateAdmissionReceipt(workspace.id, 2, 'unexpected_workspace_change', '2026-09-23T00:30:00.000Z')).resolves.toBe(true);
+      // The repository's real invalidation path must revoke external strict
+      // worker generations without rewriting the workspace registry row.
+      expect(repository.readAuthorityGeneration()).toBe(epochBeforeAdmission + 3);
 
       database.close();
       database = new SqliteDatabase(databasePath);

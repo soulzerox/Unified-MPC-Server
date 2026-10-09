@@ -276,7 +276,7 @@ function assertCanonicalReplaceable(
 
 function hasApplicationData(database: DatabaseSync): boolean {
   const rows = database.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' ORDER BY name",
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('schema_migrations', 'workspace_authority_epoch') ORDER BY name",
   ).all() as unknown[];
   for (const row of rows) {
     const name = objectString(row, 'name');

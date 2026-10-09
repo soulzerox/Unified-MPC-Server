@@ -14,6 +14,36 @@ afterEach(async () => {
 });
 
 describe('SqliteWorkspaceRepository', () => {
+  it('commits a durable authority generation for independent connections, direct SQL and unregister/relink replay', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'authority-crossprocess-db-'));
+    temporaryRoots.push(root);
+    const filename = path.join(root, 'state.sqlite');
+    const first = new SqliteDatabase(filename);
+    const second = new SqliteDatabase(filename);
+    try {
+      const reader = new SqliteWorkspaceRepository(first);
+      const writer = new SqliteWorkspaceRepository(second);
+      const workspace: Workspace = {
+        id: 'crossprocess', displayName: 'Crossprocess', rootPath: '/tmp/crossprocess',
+        realRootPath: '/tmp/crossprocess', createdAt: new Date(0).toISOString(),
+      };
+      const initial = reader.readAuthorityGeneration();
+      expect(initial).toBeGreaterThan(0);
+      await writer.insert(workspace);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 1);
+      second.connection.prepare('UPDATE workspaces SET display_name = ? WHERE id = ?').run('Renamed elsewhere', workspace.id);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 2);
+      second.connection.exec('BEGIN IMMEDIATE;');
+      second.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?').run('2026-10-09T00:00:00.000Z', workspace.id);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 2);
+      second.connection.exec('ROLLBACK;');
+      expect(reader.readAuthorityGeneration()).toBe(initial + 2);
+      await writer.archive(workspace.id);
+      await writer.restore(workspace.id);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 4);
+    } finally { second.close(); first.close(); }
+  });
+
   it('fences live worker authority before insert, archive, restore and delete write boundaries', async () => {
     const database = new SqliteDatabase(':memory:');
     const snapshots: string[] = [];

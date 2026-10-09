@@ -64,6 +64,22 @@ export class SqliteWorkspaceRepository {
     private readonly options: { readonly onBeforeAuthorityMutation?: () => void } = {},
   ) {}
 
+  /**
+   * Read committed registry epoch on THIS SQLite connection. Unlike a local
+   * signal, it changes for writes from WebUI, other SQLite connections and SQL.
+   * A missing/malformed epoch fails closed; do not invent an initial version.
+   */
+  public readAuthorityGeneration(): number {
+    const row = this.database.connection.prepare(
+      'SELECT generation FROM workspace_authority_epoch WHERE id = 1',
+    ).get() as { generation: unknown } | undefined;
+    if (row === undefined || typeof row.generation !== 'number'
+      || !Number.isSafeInteger(row.generation) || row.generation < 1) {
+      throw new Error('workspace_authority_epoch_unavailable');
+    }
+    return row.generation;
+  }
+
   /** Synchronous, trusted in-process pre-write fence. Never await a publisher here. */
   private beforeAuthorityMutation(): void {
     if (this.options.onBeforeAuthorityMutation === undefined) return;

@@ -23,6 +23,33 @@ function options(workspacesProvider: () => Promise<readonly { id: string; realRo
 }
 
 describe('Unified private Python-worker bootstrap payload', () => {
+  it('makes external durable-generation read errors sticky, even if the reader later recovers', async () => {
+    const root = await tempRoot();
+    let epoch = 7;
+    let unavailable = false;
+    const worker = await createThaiRagPrivateWorkerBootstrap({
+      ...options(async () => [{ id: WS, realRootPath: root }]),
+      registryGenerationProvider: () => {
+        if (unavailable) throw new Error('sqlite temporarily locked');
+        return epoch;
+      },
+    });
+    expect(await worker.validateLiveBinding()).toBe(true);
+    unavailable = true;
+    expect(await worker.validateLiveBinding()).toBe(false);
+    unavailable = false;
+    expect(await worker.validateLiveBinding()).toBe(false);
+    await expect(worker.issue({ workspaceId: WS, operation: 'recall' }))
+      .rejects.toThrow('thai_rag_authority_denied');
+    worker.dispose();
+
+    epoch += 1;
+    await expect(createThaiRagPrivateWorkerBootstrap({
+      ...options(async () => [{ id: WS, realRootPath: root }]),
+      registryGenerationProvider: () => epoch,
+    })).resolves.toHaveProperty('payload');
+  });
+
   it('matches inherited-FD Python wire schema, signs tokens with per-worker secret and live roots', async () => {
     const root = await tempRoot();
     const worker = await createThaiRagPrivateWorkerBootstrap(options(async () => [{ id: WS, realRootPath: root }]));

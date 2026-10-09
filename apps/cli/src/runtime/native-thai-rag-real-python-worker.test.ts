@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
@@ -227,11 +227,26 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
         try {
           expect((await old.listTools()).some(tool => tool.name === 'recall')).toBe(true);
           const unchangedSqliteEpoch = hostRegistry.readAuthorityGeneration();
-          await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
-            'commit', '--allow-empty', '-m', 'moved-without-registration-update']);
-          expect(await git(['rev-parse', 'HEAD'])).not.toBe(admittedHead);
+          // Real filesystem mutation without a git commit or SQLite write:
+          // the original strict private FD3 worker must stop admitting Goal.
+          const untracked = path.join(goalRoot, 'untracked-source.ts');
+          await writeFile(untracked, 'export const unsafe = true;\n');
+          expect(await git(['rev-parse', 'HEAD'])).toBe(admittedHead);
           expect(hostRegistry.readAuthorityGeneration()).toBe(unchangedSqliteEpoch);
           await expect(old.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          expect((await authorized()).map(x => x.id)).toEqual([OTHER]);
+
+          await rm(untracked);
+          expect((await authorized()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
+          const clean = await factory.connect(launch);
+          try {
+            expect((await clean.callTool('health', {})).isError).not.toBe(true);
+            await git(['-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
+              'commit', '--allow-empty', '-m', 'moved-without-registration-update']);
+            expect(await git(['rev-parse', 'HEAD'])).not.toBe(admittedHead);
+            expect(hostRegistry.readAuthorityGeneration()).toBe(unchangedSqliteEpoch);
+            await expect(clean.callTool('health', {})).rejects.toThrow('workspace_authority_denied');
+          } finally { await clean.close(); }
           expect((await authorized()).map(x => x.id)).toEqual([OTHER]);
           const renewed = await factory.connect(launch);
           try {

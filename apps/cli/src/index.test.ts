@@ -288,9 +288,13 @@ describe('CLI default dependency lifecycle', () => {
   });
 
   it('projects canonical harness contracts through CLI tools list', async () => {
-    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-tools-'));
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mcp-cli-tools-'));
     const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
     process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = dataPath;
+    process.env.XDG_DATA_HOME = path.join(dataPath, 'xdg');
     try {
     const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
     const tools = await dependencies.toolsList?.();
@@ -310,6 +314,10 @@ describe('CLI default dependency lifecycle', () => {
       await rm(dataPath, { recursive: true, force: true });
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
     }
   }, 15_000);
 
@@ -385,7 +393,11 @@ describe('CLI default dependency lifecycle', () => {
   it('wires the standalone tools facade to extension services so child MCP inspection is available', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-mcp-list-'));
     const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
     process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = dataPath;
+    process.env.XDG_DATA_HOME = path.join(dataPath, 'xdg');
     try {
       const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
       const result = await dependencies.toolsCall?.('mcp_list', {});
@@ -394,6 +406,10 @@ describe('CLI default dependency lifecycle', () => {
       await rm(dataPath, { recursive: true, force: true });
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
     }
   }, 15_000);
 });

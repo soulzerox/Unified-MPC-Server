@@ -335,7 +335,12 @@ export function createStdioMcpRuntime(
     if (registered === null) {
       return err(appError('WORKSPACE_NOT_FOUND', 'Goal relocation requires a registered Goal or replacement workspace'));
     }
-    return gitService.observeWorkspace(custodyActor, registered.id);
+    // Carry the REGISTERED base proof into the observation. Without it the
+    // replacement snapshot has no base/merge-base, so the admission receipt
+    // cannot be re-verified against the canonical Goal afterwards.
+    const baseRef = registered.baseRef ?? registered.baseRevision;
+    return gitService.observeWorkspace(custodyActor, registered.id,
+      baseRef === undefined ? {} : { baseRef });
   };
   const registeredGitSeal = {
     status: async (rootPath: string): ReturnType<GitService['status']> => {
@@ -381,19 +386,6 @@ export function createStdioMcpRuntime(
         workspaces: goalWorkspacePorts,
         git: { observeWorkspace: observeRegisteredGoal, observeReplacement: observeRegisteredReplacement },
         custody: goalCustodyPins,
-      })
-    : undefined;
-  const transferRepository = new SqliteGoalWorkspaceTransferRepository(database);
-  const goalWorkspaceRelocation = trustedGoalHostReady && options.runtimeAdmissionIdentity !== undefined
-    ? new GoalWorkspaceRelocationOrchestrator({
-        host: goalRelocationHostFence,
-        goals: { getById: (goalId: string): Promise<GoalRecord | null> => goalRepository.getById(goalId) },
-        workspaces: goalWorkspacePorts,
-        git: { observeWorkspace: observeRegisteredRelocation },
-        custody: { readPinned: (operationId: string): Promise<GoalRelocationCustodyPin | null> =>
-          goalCustodyPins.readPinned(operationId) },
-        transfer: transferRepository,
-        runtimeIdentity: options.runtimeAdmissionIdentity,
       })
     : undefined;
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
@@ -484,6 +476,20 @@ export function createStdioMcpRuntime(
       ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
     },
   );
+  const transferRepository = new SqliteGoalWorkspaceTransferRepository(database);
+  const goalWorkspaceRelocation = trustedGoalHostReady && options.runtimeAdmissionIdentity !== undefined
+    ? new GoalWorkspaceRelocationOrchestrator({
+        host: goalRelocationHostFence,
+        goals: { getById: (goalId: string): Promise<GoalRecord | null> => goalRepository.getById(goalId) },
+        workspaces: goalWorkspacePorts,
+        git: { observeWorkspace: observeRegisteredRelocation },
+        custody: { readPinned: (operationId: string): Promise<GoalRelocationCustodyPin | null> =>
+          goalCustodyPins.readPinned(operationId) },
+        transfer: transferRepository,
+        runtimeIdentity: options.runtimeAdmissionIdentity,
+        validateAdmission: goalRuntimeControlPlane.validateWorkspaceAdmission.bind(goalRuntimeControlPlane),
+      })
+    : undefined;
   const goalWorkspaceService = new GoalWorkspaceService(workspaceRepository);
   const goalRunWorkspace: NonNullable<McpApplicationServices['goalRunWorkspace']> = {
     async resolveRunWorkspace(runActor, request) {

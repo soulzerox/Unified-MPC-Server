@@ -98,10 +98,15 @@ async function transferFixture(): Promise<TransferFixture> {
     lifecycleKind: 'goal', goalId, parentWorkspaceId: project.id,
     goalWorkspaceKind: 'git_worktree', branchName: 'goal/native-transfer',
   });
+  const baseCommit = git(source, 'rev-parse', 'HEAD');
   await workspaces.insert({
     id: newId, displayName: 'Clean destination', rootPath: nextPath,
     realRootPath: nextPath, createdAt: now, lifecycleKind: 'temporary',
     parentWorkspaceId: project.id, ownerSessionId: sessionId,
+    // A genuine runtime admission needs resolvable base proof for the Goal
+    // worktree; an unbased replacement can never reach ADMITTED. Goal
+    // worktrees pin their exact fork commit, not a moving named ref.
+    baseRevision: baseCommit,
   });
   const goals = new SqliteGoalRepository(db);
   const transferOf = (database: SqliteDatabase): SqliteGoalWorkspaceTransferRepository =>
@@ -210,8 +215,10 @@ describe('native Goal relocation storage CAS through trusted STDIO host #322', (
       // capability inside the same transaction that moves the Goal.
       const relocated = await runtime.goalWorkspaceRelocation?.transfer(request);
       if (relocated !== undefined && !relocated.ok) throw new Error(relocated.error.message);
-      expect(relocated)
-        .toMatchObject({ ok: true, value: { status: 'storage_committed_runtime_admission_required' } });
+      expect(relocated).toMatchObject({
+        ok: true,
+        value: { status: 'admitted', outstandingRuntimeAdmission: false },
+      });
       expect((await goals.getById(request.goalId))?.workspaceId).toBe(request.newWorkspaceId);
       expect(receiptCount()).toBe(1);
       const spent = db.connection.prepare(
@@ -226,7 +233,7 @@ describe('native Goal relocation storage CAS through trusted STDIO host #322', (
       await runtime.close();
       db.close();
     }
-  });
+  }, 60_000);
 });
 
 describe('Goal relocation restart reconciliation through trusted STDIO host #323', () => {
@@ -247,16 +254,16 @@ describe('Goal relocation restart reconciliation through trusted STDIO host #323
     // Resume: a FRESH single-use host approval plus full custody, retained
     // bytes and Git re-verification, then the commit CAS.
     expect(await restarted.runtime.goalWorkspaceRelocation?.reconcile(f.request))
-      .toMatchObject({ ok: true, value: { status: 'storage_committed_runtime_admission_required' } });
+      .toMatchObject({ ok: true, value: { status: 'admitted', outstandingRuntimeAdmission: false } });
     expect((await restarted.goals.getById(f.request.goalId))?.workspaceId).toBe(f.request.newWorkspaceId);
     expect(restarted.receiptCount()).toBe(1);
     // The foreign-dirty original is retained as inspection, never adopted.
     expect(await readFile(path.join(f.oldPath, 'tracked.txt'), 'utf8')).toBe('foreign tracked bytes\n');
     expect(await readFile(path.join(f.oldPath, 'foreign-untracked.txt'), 'utf8')).toBe('foreign untracked bytes\n');
     expect(f.git(f.oldPath, 'rev-parse', 'HEAD')).toBe(f.intent.expectedOldHead);
-    // Reconciling again is idempotent and still never reports ADMITTED.
+    // Reconciling again is idempotent and reports the same canonical outcome.
     expect(await restarted.runtime.goalWorkspaceRelocation?.reconcile(f.request))
-      .toMatchObject({ ok: true, value: { status: 'storage_committed_runtime_admission_required' } });
+      .toMatchObject({ ok: true, value: { status: 'admitted', outstandingRuntimeAdmission: false } });
     expect(restarted.receiptCount()).toBe(1);
     await restarted.runtime.close();
     restarted.db.close();
@@ -287,5 +294,68 @@ describe('Goal relocation restart reconciliation through trusted STDIO host #323
     expect(f.receiptCount()).toBe(0);
     await f.runtime.close();
     f.db.close();
+  }, 60_000);
+});
+
+describe('Goal relocation canonical admission recheck through trusted STDIO host #324', () => {
+  it('fails closed when the Goal lease is stolen between the storage CAS and the canonical recheck', async () => {
+    const f = await transferFixture();
+    try {
+      // Steal the canonical Goal lease from another owner, then relocate.
+      f.db.connection.prepare(
+        "UPDATE goals SET lease_owner_session_id = 'thief-session', lease_generation = lease_generation + 1 WHERE id = ?",
+      ).run(f.request.goalId);
+      const relocated = await f.runtime.goalWorkspaceRelocation?.reconcile(f.request);
+      // Recovery is blocked outright: no ADMITTED, no second admission.
+      expect(relocated?.ok).toBe(false);
+      expect(f.receiptCount()).toBe(0);
+    } finally {
+      await f.runtime.close();
+      f.db.close();
+    }
+  });
+
+  it('never reports ADMITTED once the canonical Goal lease has expired', async () => {
+    const f = await transferFixture();
+    try {
+      f.db.connection.prepare("UPDATE goals SET lease_expires_at = ? WHERE id = ?")
+        .run('2000-01-01T00:00:00.000Z', f.request.goalId);
+      const relocated = await f.runtime.goalWorkspaceRelocation?.transfer(f.request);
+      expect(relocated?.ok).toBe(false);
+      expect(f.receiptCount()).toBe(0);
+      expect((await f.goals.getById(f.request.goalId))?.workspaceId).toBe(f.request.oldWorkspaceId);
+    } finally {
+      await f.runtime.close();
+      f.db.close();
+    }
+  });
+
+  it('blocks dependent Goal work once the canonical replacement admission is invalidated', async () => {
+    const f = await transferFixture();
+    try {
+      expect(await f.runtime.goalWorkspaceRelocation?.transfer(f.request)).toMatchObject({
+        ok: true,
+        value: { status: 'admitted', outstandingRuntimeAdmission: false },
+      });
+      // The replacement receipt is the canonical admission for the relocated
+      // Goal. Invalidating it must block the mutation fence, not admit work.
+      f.db.connection.prepare(
+        `UPDATE workspace_admission_receipts
+         SET receipt_json = json_set(receipt_json, '$.invalidatedAt', '2026-01-01T00:00:00.000Z')
+         WHERE workspace_id = ?`,
+      ).run(f.request.newWorkspaceId);
+      const invalidated = await new SqliteWorkspaceRepository(f.db)
+        .getAdmissionReceipt(f.request.newWorkspaceId);
+      expect(invalidated?.invalidatedAt).toBe('2026-01-01T00:00:00.000Z');
+      // A reconcile against the invalidated canonical admission never reports
+      // ADMITTED again; it stays an explicit outstanding obligation.
+      const after = await f.runtime.goalWorkspaceRelocation?.reconcile(f.request);
+      expect(after?.ok === true
+        ? after.value.status !== 'admitted'
+        : true).toBe(true);
+    } finally {
+      await f.runtime.close();
+      f.db.close();
+    }
   }, 60_000);
 });

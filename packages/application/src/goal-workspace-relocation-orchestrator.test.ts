@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok, type GoalRecord, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, err, ok, type GoalRecord, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import type { GoalWorkspaceTransferRecoveryObservation } from '@unified-mpc/storage';
 import type { GitStatusResult, GitWorkspaceSnapshot } from '@unified-mpc/git';
 import type { Workspace } from '@unified-mpc/workspace';
@@ -131,6 +131,11 @@ async function fixture(): Promise<Fixture> {
     custodyOwnerDrift: false,
     recoveryState: 'prepared_requires_fresh_owner_verification' as GoalWorkspaceTransferRecoveryObservation['state'],
     recoveryGoalId: undefined as string | undefined,
+    admissionAdmitted: true,
+    admissionChecks: 0 as number,
+    /** Mutates CANONICAL Goal state right after the storage CAS, simulating
+     *  lease theft / owner change / fence loss in the commit-to-recheck window. */
+    canonicalDriftAfterCommit: undefined as 'lease_owner' | 'goal_owner' | 'lease_generation' | 'workspace_fence' | 'admission_invalidated' | undefined,
     approvalIssued: 0,
     lastApproval: null as GoalRelocationHostApproval | null,
     lastExpectedNewHead: undefined as string | undefined,
@@ -187,7 +192,19 @@ async function fixture(): Promise<Fixture> {
         };
       },
     },
+    validateAdmission: async (workspaceId, checkedGoalId, leaseGeneration, admissionGeneration) => {
+      state.admissionChecks += 1;
+      return state.admissionAdmitted && workspaceId === newId && checkedGoalId === goalId
+        && leaseGeneration === goal.leaseGeneration
+        && admissionGeneration === 1
+        ? ok(undefined)
+        : err(appError('WORKSPACE_ADMISSION_STALE', 'admission recheck failed', true));
+    },
     transfer: {
+      async get(observedOperationId) {
+        return observedOperationId === operationId
+          ? { retainedManifestSha256: retained.value.manifestSha256 } : null;
+      },
       async inspectRecovery(observedOperationId) {
         return {
           operationId: observedOperationId,
@@ -209,6 +226,25 @@ async function fixture(): Promise<Fixture> {
         state.old = { ...state.old, lifecycleKind: 'inspection', goalId: undefined };
         state.next = { ...state.next, lifecycleKind: 'goal', goalId, writerLease: state.old.writerLease };
         state.newReceipt = input.admissionReceipt;
+        switch (state.canonicalDriftAfterCommit) {
+          case 'lease_owner':
+            state.goal = { ...state.goal, leaseOwnerSessionId: 'thief-session' };
+            break;
+          case 'goal_owner':
+            state.goal = { ...state.goal, ownerClientId: 'thief-client' };
+            break;
+          case 'lease_generation':
+            state.goal = { ...state.goal, leaseGeneration: state.goal.leaseGeneration + 1 };
+            break;
+          case 'workspace_fence':
+            state.next = { ...state.next, writerLease: undefined };
+            break;
+          case 'admission_invalidated':
+            state.newReceipt = { ...input.admissionReceipt, invalidatedAt: '2026-10-09T00:00:01.000Z' };
+            break;
+          default:
+            break;
+        }
         return true;
       },
     },
@@ -237,8 +273,10 @@ describe('GoalWorkspaceRelocationOrchestrator #298', () => {
     const result = await f.service.transfer(f.request);
     expect(result).toMatchObject({
       ok: true,
-      value: { status: 'storage_committed_runtime_admission_required', goalId, workspaceId: newId },
+      value: { status: 'admitted', goalId, workspaceId: newId, outstandingRuntimeAdmission: false },
     });
+    // ADMITTED comes from the canonical recheck, not from the storage move.
+    expect(f.state.admissionChecks).toBe(1);
     expect(f.state.prepareCount).toBe(1);
     expect(f.state.commitCount).toBe(1);
     // The single-use approval minted by the host fence is handed to storage, and
@@ -305,7 +343,7 @@ describe('GoalWorkspaceRelocationOrchestrator.reconcile #323', () => {
     f.state.approvalIssued = 0;
     expect(await f.service.reconcile(f.request)).toMatchObject({
       ok: true,
-      value: { status: 'storage_committed_runtime_admission_required', goalId, workspaceId: newId },
+      value: { status: 'admitted', goalId, workspaceId: newId, outstandingRuntimeAdmission: false },
     });
     expect(f.state.approvalIssued).toBe(1);
     expect(f.state.commitCount).toBe(1);
@@ -334,14 +372,27 @@ describe('GoalWorkspaceRelocationOrchestrator.reconcile #323', () => {
     expect(f.state.commitCount).toBe(0);
   });
 
-  it('reports an already committed relocation as runtime-admission-required, not ADMITTED', async () => {
+  it('reaches a genuine ADMITTED on a restart of an already committed relocation', async () => {
     const f = await fixture();
+    expect((await f.service.transfer(f.request)).ok).toBe(true);
     f.state.recoveryState = 'committed_runtime_admission_required';
+    f.state.admissionChecks = 0;
     expect(await f.service.reconcile(f.request)).toMatchObject({
       ok: true,
-      value: { status: 'storage_committed_runtime_admission_required', goalId, workspaceId: newId },
+      value: { status: 'admitted', workspaceId: newId, outstandingRuntimeAdmission: false },
     });
-    expect(f.state.commitCount).toBe(0);
+    expect(f.state.admissionChecks).toBe(1);
+    expect(f.state.commitCount).toBe(1);
+  });
+
+  it('never reports ADMITTED when the canonical admission recheck still fails', async () => {
+    const f = await fixture();
+    f.state.admissionAdmitted = false;
+    expect(await f.service.transfer(f.request)).toMatchObject({
+      ok: true,
+      value: { status: 'storage_committed_runtime_admission_required', outstandingRuntimeAdmission: true },
+    });
+    expect(f.state.commitCount).toBe(1);
   });
 
   it('fails closed when the trusted custody pin no longer matches on the resume path', async () => {
@@ -350,5 +401,33 @@ describe('GoalWorkspaceRelocationOrchestrator.reconcile #323', () => {
     expect((await f.service.reconcile(f.request)).ok).toBe(false);
     expect(f.state.prepareCount).toBe(0);
     expect(f.state.commitCount).toBe(0);
+  });
+});
+
+describe('GoalWorkspaceRelocationOrchestrator canonical admission recheck #324', () => {
+  it('fails closed when canonical Goal state drifts between the CAS and the recheck', async () => {
+    for (const drift of ['lease_owner', 'goal_owner', 'lease_generation', 'workspace_fence', 'admission_invalidated'] as const) {
+      const f = await fixture();
+      f.state.canonicalDriftAfterCommit = drift;
+      const result = await f.service.transfer(f.request);
+      expect(result.ok).toBe(false);
+      // The drift is detected on canonical read-back: no ADMITTED is invented.
+      expect(f.state.admissionChecks).toBe(0);
+      expect(f.state.goal.workspaceId).toBe(newId);
+      expect(f.state.newReceipt).not.toBeNull();
+    }
+  });
+
+  it('surfaces the outstanding runtime-admission obligation instead of a false ADMITTED', async () => {
+    const f = await fixture();
+    f.state.admissionAdmitted = false;
+    expect(await f.service.transfer(f.request)).toMatchObject({
+      ok: true,
+      value: {
+        status: 'storage_committed_runtime_admission_required',
+        goalId, workspaceId: newId, outstandingRuntimeAdmission: true,
+      },
+    });
+    expect(f.state.admissionChecks).toBe(1);
   });
 });

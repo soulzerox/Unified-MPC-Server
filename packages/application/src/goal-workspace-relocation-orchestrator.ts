@@ -92,6 +92,8 @@ export interface GoalRelocationTransferPort {
    * authorization, a lease, or writer admission.
    */
   inspectRecovery(operationId: string, now: string): Promise<GoalWorkspaceTransferRecoveryObservation>;
+  /** Durable read-back of a persisted intent. Never recovers ownership. */
+  get(operationId: string): Promise<{ retainedManifestSha256: string } | null>;
 }
 
 export interface GoalRelocationOrchestratorPorts {
@@ -105,14 +107,31 @@ export interface GoalRelocationOrchestratorPorts {
   readonly custody: { readPinned(operationId: string): Promise<GoalRelocationCustodyPin | null> };
   readonly transfer: GoalRelocationTransferPort;
   readonly runtimeIdentity: GoalRuntimeAdmissionIdentity;
+  /**
+   * Rechecks writer admission against the CANONICAL Goal and live workspace
+   * after the storage CAS. Required: without it the flow could only ever
+   * report `storage_committed_runtime_admission_required`, never ADMITTED.
+   */
+  readonly validateAdmission: (
+    workspaceId: string,
+    goalId: string,
+    leaseGeneration: number,
+    admissionGeneration: number | undefined,
+  ) => Promise<Result<void>>;
   readonly now?: () => Date;
 }
 
 export interface GoalRelocationOrchestratorResult {
-  readonly status: 'storage_committed_runtime_admission_required';
+  /**
+   * `admitted` is only returned after a genuine canonical Goal + workspace
+   * admission recheck passed. Storage moving is never admission.
+   */
+  readonly status: 'admitted' | 'storage_committed_runtime_admission_required';
   readonly goalId: string;
   readonly workspaceId: string;
   readonly manifestSha256: string;
+  /** True while dependent work (#71/#102) must stay blocked on this Goal. */
+  readonly outstandingRuntimeAdmission: boolean;
 }
 
 /** Return true ONLY for mixed tracked-unstaged + untracked files, in manifest path order. */
@@ -212,10 +231,25 @@ export class GoalWorkspaceRelocationOrchestrator {
       return err(appError('CONFLICT', 'Recovery operation belongs to another Goal; explicit owner review required', true));
     }
     if (observation.state === 'committed_runtime_admission_required') {
-      return ok({
-        status: 'storage_committed_runtime_admission_required',
-        goalId: request.goalId, workspaceId: request.newWorkspaceId, manifestSha256: '',
-      });
+      // Storage already moved. Recheck the canonical Goal + live admission so
+      // a restart can still reach a genuine ADMITTED, and never assume it.
+      const [goal, next, receipt] = await Promise.all([
+        this.ports.goals.getById(request.goalId),
+        this.ports.workspaces.get(request.newWorkspaceId),
+        this.ports.workspaces.getAdmissionReceipt(request.newWorkspaceId),
+      ]);
+      if (goal === null || goal.workspaceId !== request.newWorkspaceId
+        || goal.ownerClientId !== request.actor.clientId
+        || goal.leaseOwnerClientId !== request.actor.clientId
+        || goal.leaseOwnerSessionId !== request.actor.sessionId
+        || receipt === null || receipt.invalidatedAt !== undefined
+        || receipt.goalId !== goal.id || receipt.workspaceId !== next?.id) {
+        return err(appError('CONFLICT', 'Committed relocation no longer matches canonical Goal admission; explicit reconciliation required', true));
+      }
+      const intent = await this.ports.transfer.get(request.operationId);
+      return this.recheckRuntimeAdmission(
+        request, goal, next as Workspace, receipt, intent?.retainedManifestSha256 ?? '',
+      );
     }
     if (observation.state !== 'prepared_requires_fresh_owner_verification') {
       return err(appError('CONFLICT', `Goal relocation recovery is blocked: ${observation.state}`, true));
@@ -403,17 +437,52 @@ export class GoalWorkspaceRelocationOrchestrator {
       retainedManifestSha256: retained.value.manifestSha256, admissionReceipt: receipt, now,
     });
     if (!committed) return err(appError('CONFLICT', 'Goal relocation commit failed compare-and-swap', true));
+    // Recheck against CANONICAL Goal state, not intent state: owner, lease and
+    // exclusive fence must still belong to this owner after the CAS.
     const [actualGoal, newWorkspace, newReceipt] = await Promise.all([
       goals.getById(goal.id), workspaces.get(next.id), workspaces.getAdmissionReceipt(next.id),
     ]);
-    if (actualGoal?.workspaceId !== next.id || newWorkspace?.goalId !== goal.id
-      || newWorkspace.lifecycleKind !== 'goal' || newReceipt?.admissionId !== receipt.admissionId
-      || newReceipt.invalidatedAt !== undefined) {
-      return err(appError('CONFLICT', 'Goal relocated in storage but runtime read-back is inconsistent; explicit reconciliation required', true));
+    if (actualGoal?.workspaceId !== next.id || actualGoal.status !== 'active'
+      || actualGoal.ownerClientId !== request.actor.clientId
+      || actualGoal.leaseOwnerClientId !== request.actor.clientId
+      || actualGoal.leaseOwnerSessionId !== request.actor.sessionId
+      || actualGoal.leaseTokenHash !== tokenHash || actualGoal.leaseGeneration !== goal.leaseGeneration
+      || actualGoal.leaseExpiresAt === undefined || actualGoal.leaseExpiresAt <= now
+      || newWorkspace?.goalId !== goal.id || newWorkspace.lifecycleKind !== 'goal'
+      || newWorkspace.writerLease?.generation !== goal.leaseGeneration
+      || newReceipt?.admissionId !== receipt.admissionId || newReceipt.invalidatedAt !== undefined) {
+      return err(appError('CONFLICT', 'Goal relocated in storage but canonical owner/admission read-back is inconsistent; explicit reconciliation required', true));
+    }
+    return this.recheckRuntimeAdmission(
+      request, goal, next, receipt, retained.value.manifestSha256,
+    );
+  }
+
+  /**
+   * Terminal outcome of a relocation. `ADMITTED` requires a live canonical
+   * admission recheck; anything else leaves an explicit outstanding obligation
+   * that blocks dependent Goal work instead of reporting a false admission.
+   */
+  private async recheckRuntimeAdmission(
+    request: GoalRelocationRuntimeRequest,
+    goal: GoalRecord,
+    next: Workspace,
+    receipt: WorkspaceAdmissionReceipt,
+    manifestSha256: string,
+  ): Promise<Result<GoalRelocationOrchestratorResult>> {
+    const admitted = await this.ports.validateAdmission(
+      next.id, goal.id, goal.leaseGeneration, receipt.admissionGeneration,
+    );
+    if (admitted.ok) {
+      return ok({
+        status: 'admitted', goalId: goal.id, workspaceId: next.id,
+        manifestSha256, outstandingRuntimeAdmission: false,
+      });
     }
     return ok({
       status: 'storage_committed_runtime_admission_required',
-      goalId: goal.id, workspaceId: next.id, manifestSha256: retained.value.manifestSha256,
+      goalId: goal.id, workspaceId: next.id, manifestSha256,
+      outstandingRuntimeAdmission: true,
     });
   }
 }

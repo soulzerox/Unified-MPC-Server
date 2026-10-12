@@ -10,6 +10,7 @@ import {
   type Result,
 } from '@unified-mpc/domain';
 import type { CapabilityBackend } from './local-capability-service.js';
+import { prohibitedTypedTextReason } from './agent-command-policy.js';
 import { NativeHostProcessBridge } from './native-host-protocol.js';
 import { readCapabilityActiveWorkspaceRoot } from './task-ownership.js';
 import { isNativeCapabilityAction } from './native-capability-contract.js';
@@ -83,6 +84,12 @@ export class NativeCapabilityBackend implements CapabilityBackend {
     if (requiresExplicitConfirmation(this.capability, input) && !isApplicationAuthorized(authorization, input.userConfirmed === true)) {
       return err(appError('PERMISSION_REQUIRED', `${this.capability} action requires explicit user confirmation`));
     }
+    if (this.capability === 'input_event') {
+      for (const text of typedTexts(input)) {
+        const denial = prohibitedTypedTextReason(text);
+        if (denial !== undefined) return err(appError('PERMISSION_DENIED', denial));
+      }
+    }
     const result = await bridge.execute(this.capability, input, signal, authorization);
     if (!result.ok) return result;
     if (isRecord(result.value)) return ok({ ...result.value, backend: `${this.options.platform}-native-host`, available: result.value.available !== false });
@@ -138,6 +145,22 @@ export class NativeCapabilityBackend implements CapabilityBackend {
 
 function readAction(input: Record<string, unknown>): string {
   return typeof input.action === 'string' ? input.action : typeof input.operation === 'string' ? input.operation : 'status';
+}
+
+/** Every string an `input_event` request would deliver as literal keystrokes or pasted text. */
+function typedTexts(input: Record<string, unknown>): readonly string[] {
+  const parameters = isRecord(input.parameters) ? input.parameters : {};
+  const texts: string[] = [];
+  if (typeof parameters.text === 'string') texts.push(parameters.text);
+  const steps = parameters.steps;
+  if (Array.isArray(steps)) {
+    for (const step of steps) {
+      if (!isRecord(step)) continue;
+      const stepParameters = isRecord(step.parameters) ? step.parameters : step;
+      if (typeof stepParameters.text === 'string') texts.push(stepParameters.text);
+    }
+  }
+  return texts;
 }
 
 function requiresExplicitConfirmation(capability: PortableNativeCapabilityName, input: Record<string, unknown>): boolean {

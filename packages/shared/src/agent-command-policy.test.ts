@@ -93,6 +93,59 @@ describe('agent command policy', () => {
   });
 
   it.each([
+    ['node', ['-e', "require('child_process').execSync('gh pr merge 275 --merge')"]],
+    ['node', ['-p', "'gh pr merge 275'"]],
+    ['node', ['--eval', "exec('gh api -X PUT repos/o/r/pulls/275/merge')"]],
+    ['bun', ['-e', "exec('gh pr merge 275')"]],
+    ['deno', ['eval', "await new Deno.Command('gh',{args:['pr','merge','275']})"]],
+    ['python3', ['-c', "os.system('gh pr merge 275')"]],
+    ['python', ['-c', "subprocess.run(['gh','api','-X','PUT','repos/o/r/pulls/275/merge'])"]],
+    ['perl', ['-e', 'system("gh pr merge 275")']],
+    ['ruby', ['-e', 'system("gh pr merge 275")']],
+  ] as const)('hard-blocks merge smuggled through an inline interpreter: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toContain('exact-head');
+    expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['env', ['gh', 'pr', 'merge', '275']],
+    ['env', ['-i', 'gh', 'pr', 'merge', '275']],
+    ['env', ['GH_TOKEN=x', 'gh', 'pr', 'merge', '275']],
+    ['env', ['--', 'gh', 'pr', 'merge', '275']],
+    ['env', ['gh', 'api', '-X', 'PUT', 'repos/o/r/pulls/275/merge']],
+    ['xargs', ['gh', 'pr', 'merge']],
+    ['xargs', ['-0', 'gh', 'api', '-X', 'PUT', 'repos/o/r/pulls/275/merge']],
+    ['nohup', ['gh', 'pr', 'merge', '275']],
+    ['setsid', ['gh', 'pr', 'merge', '275']],
+  ] as const)('hard-blocks merge smuggled through an argument wrapper: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toContain('exact-head');
+    expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['gh', ['alias', 'set', 'mm', 'pr merge 275']],
+    ['gh', ['alias', 'set', 'mm', 'api -X PUT repos/o/r/pulls/275/merge']],
+  ] as const)('hard-blocks defining a merge alias that later runs unguarded: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toContain('exact-head');
+    expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['node', ['-e', 'console.log(1)']],
+    ['node', ['-e', "exec('gh pr view 275')"]],
+    ['python3', ['-c', "subprocess.run(['gh','pr','list'])"]],
+    ['env', ['NODE_ENV=test', 'gh', 'pr', 'view', '275']],
+    ['env', ['node', '-e', 'console.log(1)']],
+    ['xargs', ['-0', 'rg', 'merge']],
+    ['gh', ['alias', 'set', 'st', 'pr status']],
+    ['gh', ['alias', 'list']],
+    ['gh', ['alias', 'delete', 'mm']],
+  ] as const)('allows non-merge wrapper and interpreter invocations: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toBeUndefined();
+    expect(prohibitedAgentCommandReason(executable, args)).toBeUndefined();
+  });
+
+  it.each([
     ['gh', ['api', 'repos/soulzerox/Unified-MPC-Server/pulls/275']],
     ['gh', ['api', 'repos/soulzerox/Unified-MPC-Server/commits/abc123/check-runs']],
     ['gh', ['api', 'graphql', '-f', 'query={viewer{login}}']],

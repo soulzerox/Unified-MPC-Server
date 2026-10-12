@@ -288,6 +288,10 @@ describe('CLI default dependency lifecycle', () => {
   });
 
   it('projects canonical harness contracts through CLI tools list', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-tools-'));
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    try {
     const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
     const tools = await dependencies.toolsList?.();
     const bootstrap = tools?.find((tool) => tool.name === 'workspace_bootstrap');
@@ -302,6 +306,11 @@ describe('CLI default dependency lifecycle', () => {
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
     });
+    } finally {
+      await rm(dataPath, { recursive: true, force: true });
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+    }
   }, 15_000);
 
   it('executes CLI harness bootstrap, prepare, and mutation with native Thai-RAG wiring', async () => {
@@ -374,9 +383,18 @@ describe('CLI default dependency lifecycle', () => {
   }, 30_000);
 
   it('wires the standalone tools facade to extension services so child MCP inspection is available', async () => {
-    const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
-    const result = await dependencies.toolsCall?.('mcp_list', {});
-    expect(result).toMatchObject({ ok: true });
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-mcp-list-'));
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    try {
+      const dependencies = createDefaultCliDependencies({ runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity });
+      const result = await dependencies.toolsCall?.('mcp_list', {});
+      expect(result).toMatchObject({ ok: true });
+    } finally {
+      await rm(dataPath, { recursive: true, force: true });
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+    }
   }, 15_000);
 });
 

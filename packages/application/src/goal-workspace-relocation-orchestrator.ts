@@ -6,6 +6,7 @@ import { appError, err, ok, type GoalRecord, type Result, type WorkspaceAdmissio
 import { decideGoalWorkspaceRelocation } from '@unified-mpc/domain';
 import type { GitWorkspaceSnapshot } from '@unified-mpc/git';
 import type { Workspace } from '@unified-mpc/workspace';
+import type { GoalWorkspaceTransferRecoveryObservation } from '@unified-mpc/storage';
 import {
   verifyRetainedGoalWorkspaceBundle,
   type GoalWorkspaceRetentionManifest,
@@ -86,6 +87,11 @@ export interface GoalRelocationTransferPort {
     operationId: string; goalId: string; leaseTokenHash: string;
     retainedManifestSha256: string; admissionReceipt: WorkspaceAdmissionReceipt; now: string;
   }): Promise<boolean>;
+  /**
+   * Read-only restart classification from durable storage. Never recovers
+   * authorization, a lease, or writer admission.
+   */
+  inspectRecovery(operationId: string, now: string): Promise<GoalWorkspaceTransferRecoveryObservation>;
 }
 
 export interface GoalRelocationOrchestratorPorts {
@@ -180,7 +186,54 @@ export class GoalWorkspaceRelocationOrchestrator {
     this.now = ports.now ?? ((): Date => new Date());
   }
 
+  /**
+   * Restart reconciliation for a relocation that crashed mid-flight.
+   *
+   * Deterministic and fail-closed from durable storage state alone:
+   * - `prepared_requires_fresh_owner_verification`: resume. A fresh single-use
+   *   Host Approval plus a full re-verification of custody pin, retained bytes
+   *   and Git truth runs, then the storage CAS. `prepare` is NOT repeated: the
+   *   prepared intent already consumed its capability, and storage refuses a
+   *   replayed approval id.
+   * - `committed_runtime_admission_required`: nothing to do here. Storage
+   *   already moved the Goal; runtime admission is a separate obligation.
+   * - everything else (`missing_or_unverified`, `prepared_stale_owner_review`,
+   *   `committed_inconsistent_owner_review`, `cancelled`): refuse without
+   *   touching the Goal, so a foreign-dirty workspace is never adopted.
+   */
+  public async reconcile(request: GoalRelocationRuntimeRequest): Promise<Result<GoalRelocationOrchestratorResult>> {
+    if (!request.goalId || !request.operationId || !request.oldWorkspaceId || !request.newWorkspaceId
+      || request.oldWorkspaceId === request.newWorkspaceId || !request.actor.clientId
+      || !request.actor.sessionId || !request.leaseToken) {
+      return err(appError('INVALID_INPUT', 'Goal relocation recovery requires an authenticated session and exact Goal/Workspace identity'));
+    }
+    const observation = await this.ports.transfer.inspectRecovery(request.operationId, this.now().toISOString());
+    if (observation.goalId !== undefined && observation.goalId !== request.goalId) {
+      return err(appError('CONFLICT', 'Recovery operation belongs to another Goal; explicit owner review required', true));
+    }
+    if (observation.state === 'committed_runtime_admission_required') {
+      return ok({
+        status: 'storage_committed_runtime_admission_required',
+        goalId: request.goalId, workspaceId: request.newWorkspaceId, manifestSha256: '',
+      });
+    }
+    if (observation.state !== 'prepared_requires_fresh_owner_verification') {
+      return err(appError('CONFLICT', `Goal relocation recovery is blocked: ${observation.state}`, true));
+    }
+    // ponytail: resume reuses the transfer path rather than a separate resume
+    // port; add one only if a resume ever needs to skip `prepare` for a reason
+    // other than the already-spent capability.
+    return this.runUnderFence(request, true);
+  }
+
   public async transfer(request: GoalRelocationRuntimeRequest): Promise<Result<GoalRelocationOrchestratorResult>> {
+    return this.runUnderFence(request, false);
+  }
+
+  private async runUnderFence(
+    request: GoalRelocationRuntimeRequest,
+    resumePrepared: boolean,
+  ): Promise<Result<GoalRelocationOrchestratorResult>> {
     if (!request.goalId || !request.operationId || !request.oldWorkspaceId || !request.newWorkspaceId
       || request.oldWorkspaceId === request.newWorkspaceId || !request.actor.clientId
       || !request.actor.sessionId || !request.leaseToken) {
@@ -193,7 +246,7 @@ export class GoalWorkspaceRelocationOrchestrator {
         fromWorkspaceId: request.oldWorkspaceId, toWorkspaceId: request.newWorkspaceId,
         action: 'relocate_goal',
       }, async (approval): Promise<Result<GoalRelocationOrchestratorResult>> =>
-        this.transferWithinHostFence(request, approval));
+        this.transferWithinHostFence(request, approval, resumePrepared));
     } catch {
       return err(appError('CONFLICT', 'Goal relocation Host Approval/fence is not currently established', true));
     }
@@ -202,6 +255,7 @@ export class GoalWorkspaceRelocationOrchestrator {
   private async transferWithinHostFence(
     request: GoalRelocationRuntimeRequest,
     approval: GoalRelocationHostApproval,
+    resumePrepared: boolean,
   ): Promise<Result<GoalRelocationOrchestratorResult>> {
     const tokenHash = createHash('sha256').update(request.leaseToken).digest('hex');
     const { goals, workspaces, git, custody, transfer, runtimeIdentity } = this.ports;
@@ -291,17 +345,23 @@ export class GoalWorkspaceRelocationOrchestrator {
       return err(appError('CONFLICT', 'Goal relocation preflight failed: ' + decision.reason, true));
     }
 
-    const prepared = await transfer.prepare({
-      operationId: request.operationId, goalId: goal.id, goalKey: goal.goalKey,
-      fromWorkspaceId: old.id, toWorkspaceId: next.id,
-      expectedRevision: goal.revision, expectedAdmissionGeneration: prior.admissionGeneration,
-      leaseGeneration: goal.leaseGeneration, leaseTokenHash: tokenHash,
-      ownerClientId: request.actor.clientId, ownerSessionId: request.actor.sessionId,
-      expectedOldHead: observed.head, expectedOldBranch: old.branchName,
-      expectedNewHead: checkpoint.head, approval,
-      retainedManifestSha256: retained.value.manifestSha256, now,
-    });
-    if (!prepared) return err(appError('CONFLICT', 'Durable Goal relocation preparation lost CAS ownership', true));
+    // Resume after a crash keeps the already-prepared intent. The intent
+    // serialized the approval that spent it, so re-preparing with a FRESH
+    // approval would fail the storage identity check; `commit` below still
+    // re-verifies custody, evidence, lease and replacement Git truth.
+    if (!resumePrepared) {
+      const prepared = await transfer.prepare({
+        operationId: request.operationId, goalId: goal.id, goalKey: goal.goalKey,
+        fromWorkspaceId: old.id, toWorkspaceId: next.id,
+        expectedRevision: goal.revision, expectedAdmissionGeneration: prior.admissionGeneration,
+        leaseGeneration: goal.leaseGeneration, leaseTokenHash: tokenHash,
+        ownerClientId: request.actor.clientId, ownerSessionId: request.actor.sessionId,
+        expectedOldHead: observed.head, expectedOldBranch: old.branchName,
+        expectedNewHead: checkpoint.head, approval,
+        retainedManifestSha256: retained.value.manifestSha256, now,
+      });
+      if (!prepared) return err(appError('CONFLICT', 'Durable Goal relocation preparation lost CAS ownership', true));
+    }
 
     const [afterOld, afterNew, afterGoal, afterPin] = await Promise.all([
       git.observeWorkspace(old.realRootPath), git.observeWorkspace(next.realRootPath),

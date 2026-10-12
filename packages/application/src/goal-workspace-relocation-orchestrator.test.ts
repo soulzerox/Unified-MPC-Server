@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ok, type GoalRecord, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import type { GoalWorkspaceTransferRecoveryObservation } from '@unified-mpc/storage';
 import type { GitStatusResult, GitWorkspaceSnapshot } from '@unified-mpc/git';
 import type { Workspace } from '@unified-mpc/workspace';
 import { sealMixedDirtyGoalWorkspace, type GoalWorkspaceRetentionGitPort, type GoalWorkspaceRetentionManifest } from './goal-workspace-retention-service.js';
@@ -128,6 +129,8 @@ async function fixture(): Promise<Fixture> {
     allowed: true, prepareCount: 0, commitCount: 0,
     revalidationDrift: false, dirtyReplacement: false, missingCheckpoint: false,
     custodyOwnerDrift: false,
+    recoveryState: 'prepared_requires_fresh_owner_verification' as GoalWorkspaceTransferRecoveryObservation['state'],
+    recoveryGoalId: undefined as string | undefined,
     approvalIssued: 0,
     lastApproval: null as GoalRelocationHostApproval | null,
     lastExpectedNewHead: undefined as string | undefined,
@@ -185,6 +188,15 @@ async function fixture(): Promise<Fixture> {
       },
     },
     transfer: {
+      async inspectRecovery(observedOperationId) {
+        return {
+          operationId: observedOperationId,
+          goalId: state.recoveryGoalId ?? goalId,
+          oldWorkspaceId: oldId,
+          newWorkspaceId: newId,
+          state: state.recoveryState,
+        };
+      },
       async prepare(input) {
         state.prepareCount += 1;
         state.lastApproval = input.approval;
@@ -277,6 +289,66 @@ describe('GoalWorkspaceRelocationOrchestrator #298', () => {
     f.state.revalidationDrift = true;
     expect((await f.service.transfer(f.request)).ok).toBe(false);
     expect(f.state.prepareCount).toBe(1);
+    expect(f.state.commitCount).toBe(0);
+  });
+});
+
+describe('GoalWorkspaceRelocationOrchestrator.reconcile #323', () => {
+  it('resumes a crash between prepare and commit under fresh owner verification', async () => {
+    const f = await fixture();
+    f.state.revalidationDrift = true;
+    expect((await f.service.transfer(f.request)).ok).toBe(false);
+    expect(f.state.prepareCount).toBe(1);
+    expect(f.state.commitCount).toBe(0);
+    // Restart: no drift any more, fresh Host Approval, re-verified custody.
+    f.state.revalidationDrift = false;
+    f.state.approvalIssued = 0;
+    expect(await f.service.reconcile(f.request)).toMatchObject({
+      ok: true,
+      value: { status: 'storage_committed_runtime_admission_required', goalId, workspaceId: newId },
+    });
+    expect(f.state.approvalIssued).toBe(1);
+    expect(f.state.commitCount).toBe(1);
+    expect(f.state.newReceipt?.admissionGeneration).toBe(1);
+  });
+
+  it('fails closed for every non-resumable durable state, never adopting the dirty workspace', async () => {
+    for (const state of ['missing_or_unverified', 'prepared_stale_owner_review',
+      'committed_inconsistent_owner_review', 'cancelled'] as const) {
+      const f = await fixture();
+      f.state.recoveryState = state;
+      expect((await f.service.reconcile(f.request)).ok).toBe(false);
+      expect(f.state.approvalIssued).toBe(0);
+      expect(f.state.prepareCount).toBe(0);
+      expect(f.state.commitCount).toBe(0);
+      expect(f.state.goal.workspaceId).toBe(oldId);
+      expect(await readFile(path.join(f.oldRoot, 'src/dirty.ts'), 'utf8')).toBe('const dirty = 1;\n');
+    }
+  });
+
+  it('refuses a recovery operation that belongs to another Goal', async () => {
+    const f = await fixture();
+    f.state.recoveryGoalId = 'goal-other';
+    const result = await f.service.reconcile(f.request);
+    expect(result.ok).toBe(false);
+    expect(f.state.commitCount).toBe(0);
+  });
+
+  it('reports an already committed relocation as runtime-admission-required, not ADMITTED', async () => {
+    const f = await fixture();
+    f.state.recoveryState = 'committed_runtime_admission_required';
+    expect(await f.service.reconcile(f.request)).toMatchObject({
+      ok: true,
+      value: { status: 'storage_committed_runtime_admission_required', goalId, workspaceId: newId },
+    });
+    expect(f.state.commitCount).toBe(0);
+  });
+
+  it('fails closed when the trusted custody pin no longer matches on the resume path', async () => {
+    const f = await fixture();
+    f.state.custodyOwnerDrift = true;
+    expect((await f.service.reconcile(f.request)).ok).toBe(false);
+    expect(f.state.prepareCount).toBe(0);
     expect(f.state.commitCount).toBe(0);
   });
 });

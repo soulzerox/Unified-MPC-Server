@@ -181,6 +181,46 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
     }
   });
 
+  it('fails closed on the resume path when the custody pin is missing or no longer matches the intent', async () => {
+    const missing = await fixture();
+    try {
+      expect(await missing.transfer.prepare(approvedRequest)).toBe(true);
+      missing.database.connection.prepare('DELETE FROM goal_workspace_retention_custody WHERE operation_id = ?')
+        .run(request.operationId);
+      expect((await missing.transfer.inspectRecovery(request.operationId, now)).state)
+        .toBe('prepared_stale_owner_review');
+      expect(await missing.transfer.commit({
+        operationId: request.operationId, goalId: request.goalId,
+        leaseTokenHash: request.leaseTokenHash,
+        retainedManifestSha256: request.retainedManifestSha256,
+        admissionReceipt: newAdmission, now,
+      })).toBe(false);
+      expect(missing.database.connection.prepare('SELECT workspace_id, revision FROM goals WHERE id = ?')
+        .get(request.goalId)).toEqual({ workspace_id: request.fromWorkspaceId, revision: 0 });
+    } finally {
+      missing.database.close();
+    }
+    const mismatched = await fixture();
+    try {
+      expect(await mismatched.transfer.prepare(approvedRequest)).toBe(true);
+      // The pin survives the retention move but its retained digest must keep
+      // matching the independently sealed evidence and the prepared intent.
+      mismatched.database.connection.prepare('UPDATE goal_workspace_retention_custody SET manifest_sha256 = ? WHERE operation_id = ?')
+        .run('f'.repeat(64), request.operationId);
+      expect((await mismatched.transfer.inspectRecovery(request.operationId, now)).state)
+        .toBe('prepared_stale_owner_review');
+      expect(await mismatched.transfer.commit({
+        operationId: request.operationId, goalId: request.goalId,
+        leaseTokenHash: request.leaseTokenHash,
+        retainedManifestSha256: request.retainedManifestSha256,
+        admissionReceipt: newAdmission, now,
+      })).toBe(false);
+      expect(await mismatched.transfer.get(request.operationId)).toMatchObject({ status: 'prepared' });
+    } finally {
+      mismatched.database.close();
+    }
+  });
+
   it('reads a persisted prepared operation after a real database close and reopen without resuming ownership', async () => {
     const t = await fixture();
     expect(await t.transfer.prepare(approvedRequest)).toBe(true);

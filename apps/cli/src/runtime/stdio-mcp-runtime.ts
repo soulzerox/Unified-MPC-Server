@@ -383,6 +383,7 @@ export function createStdioMcpRuntime(
         custody: goalCustodyPins,
       })
     : undefined;
+  const transferRepository = new SqliteGoalWorkspaceTransferRepository(database);
   const goalWorkspaceRelocation = trustedGoalHostReady && options.runtimeAdmissionIdentity !== undefined
     ? new GoalWorkspaceRelocationOrchestrator({
         host: goalRelocationHostFence,
@@ -391,7 +392,7 @@ export function createStdioMcpRuntime(
         git: { observeWorkspace: observeRegisteredRelocation },
         custody: { readPinned: (operationId: string): Promise<GoalRelocationCustodyPin | null> =>
           goalCustodyPins.readPinned(operationId) },
-        transfer: new SqliteGoalWorkspaceTransferRepository(database),
+        transfer: transferRepository,
         runtimeIdentity: options.runtimeAdmissionIdentity,
       })
     : undefined;

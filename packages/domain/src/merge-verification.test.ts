@@ -271,4 +271,24 @@ describe('evaluateMergeEvidence', () => {
       blockers: [],
     });
   });
+
+  it('fails closed when policy requires no gates, so no merge can be authorized on zero evidence', () => {
+    const noGatePolicy: RepositoryMergePolicy = {
+      ...localPolicy,
+      verificationMode: 'local_exact_head',
+      requiredGates: [],
+      reviewPolicy: { required: false, acceptedOutcomes: [] },
+    };
+
+    expect(evaluateMergeEvidence(
+      noGatePolicy,
+      subject,
+      localReceipt({ gates: [], review: { outcome: 'missing', headSha: HEAD } }),
+    )).toMatchObject({
+      status: 'MERGE_BLOCKED',
+      blockers: expect.arrayContaining([
+        expect.objectContaining({ code: 'policy_requires_no_gates' }),
+      ]),
+    });
+  });
 });

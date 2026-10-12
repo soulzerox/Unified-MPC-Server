@@ -32,6 +32,9 @@ import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base
 import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-integration-observation-migration.js';
 import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
 import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconciliation-migration.js';
+import { GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL } from './migrations/goal-workspace-transfer-intent-migration.js';
+import { GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL } from './migrations/goal-workspace-retention-custody-migration.js';
+import { GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL } from './migrations/goal-workspace-retention-evidence-migration.js';
 import { WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL } from './migrations/workspace-authority-epoch-migration.js';
 import { WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL } from './migrations/workspace-admission-authority-migration.js';
 
@@ -113,7 +116,9 @@ export class SqliteDatabase {
     this.applyMigration({ id: '029_goal_runtime_integration_observations', sql: GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL });
     this.applyMigration({ id: '030_merge_verification_receipts', sql: MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL });
     this.applyMigration({ id: '031_merge_reconciliation_records', sql: MERGE_RECONCILIATION_MIGRATION_SQL });
-    // 032-034 are reserved for the independent Issue #298 draft PR #303.
+    this.applyMigration({ id: '032_goal_workspace_transfer_intents', sql: GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL });
+    this.applyMigration({ id: '033_goal_workspace_retention_custody', sql: GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL });
+    this.applyMigration({ id: '034_goal_workspace_retention_evidence', sql: GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL });
     this.applyMigration({ id: '035_workspace_authority_epoch', sql: WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL });
     this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
   }

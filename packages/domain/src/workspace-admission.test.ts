@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyWorkspaceSourceEvidence, decideGuardedBaseRebase } from './workspace-admission.js';
+import { classifyWorkspaceSourceEvidence, decideGoalWorkspaceRelocation, decideGuardedBaseRebase } from './workspace-admission.js';
 
 const expected = {
   repositoryIdentity: 'repo-1',
@@ -186,6 +186,98 @@ describe('decideGuardedBaseRebase', () => {
     expect(decideGuardedBaseRebase({ ...safeRebaseEvidence, ...changes })).toEqual({
       status: 'RECOVERY_REQUIRED',
       reason,
+    });
+  });
+});
+
+/**
+ * #11: A recoverable mixed foreign delta is NOT an admitted writer workspace.
+ * The domain gate only permits a separate, owner-approved, sealed relocation
+ * transaction to begin. It does not change workspace/goal records itself.
+ */
+describe('decideGoalWorkspaceRelocation', () => {
+  const tracked = { path: '.github/workflows/release.yml', kind: 'tracked' as const, contentSha256: 'a'.repeat(64) };
+  const untracked = { path: 'scripts/restart.test.mjs', kind: 'untracked' as const, contentSha256: 'b'.repeat(64) };
+  const evidence = {
+    goalId: 'goal-a',
+    workspaceGoalId: 'goal-a',
+    workspaceId: 'old-goal-workspace',
+    expectedWorkspaceId: 'old-goal-workspace',
+    expectedRepositoryIdentity: 'repo-a',
+    observedRepositoryIdentity: 'repo-a',
+    expectedHead: '1'.repeat(40),
+    observedHead: '1'.repeat(40),
+    expectedBranchName: 'goal/goal-a',
+    observedBranchName: 'goal/goal-a',
+    expectedLeaseGeneration: 7,
+    observedLeaseGeneration: 7,
+    leaseExpiresAt: '2026-10-09T00:00:00.000Z',
+    now: '2026-10-08T16:00:00.000Z',
+    expectedAdmissionGeneration: 12,
+    observedAdmissionGeneration: 12,
+    observedChanges: [tracked, untracked],
+    retainedChanges: [tracked, untracked],
+    retentionReceiptVerified: true,
+    originalWorkspaceRetained: true,
+    ownerApprovedRelocation: true,
+    replacement: {
+      workspaceId: 'replacement-goal-workspace',
+      sameProject: true,
+      sameRepository: true,
+      clean: true,
+      exclusive: true,
+      goalBranchReserved: true,
+    },
+  };
+
+  it('only authorizes a relocation transaction with exact retained tracked and untracked bytes', () => {
+    expect(decideGoalWorkspaceRelocation(evidence)).toEqual({
+      status: 'RELOCATION_ELIGIBLE',
+      oldWorkspaceId: 'old-goal-workspace',
+      newWorkspaceId: 'replacement-goal-workspace',
+      expectedAdmissionGeneration: 12,
+      leaseGeneration: 7,
+      preservedPaths: ['.github/workflows/release.yml', 'scripts/restart.test.mjs'],
+    });
+  });
+
+  it.each([
+    ['missing owner approval', { ownerApprovedRelocation: false }, 'owner_approval_missing'],
+    ['missing retention seal', { retentionReceiptVerified: false }, 'retention_unverified'],
+    ['original workspace discarded', { originalWorkspaceRetained: false }, 'original_workspace_not_retained'],
+    ['different goal owner', { workspaceGoalId: 'goal-b' }, 'goal_ownership_changed'],
+    ['different original workspace', { workspaceId: 'wrong-workspace' }, 'workspace_identity_changed'],
+    ['different repository', { observedRepositoryIdentity: 'repo-b' }, 'repository_or_branch_changed'],
+    ['different branch', { observedBranchName: 'goal/goal-b' }, 'repository_or_branch_changed'],
+    ['HEAD drift', { observedHead: '2'.repeat(40) }, 'workspace_head_changed'],
+    ['stale writer generation', { observedLeaseGeneration: 8 }, 'writer_lease_invalid'],
+    ['expired lease', { leaseExpiresAt: '2026-10-08T15:59:59.000Z' }, 'writer_lease_invalid'],
+    ['CAS admission generation changed', { observedAdmissionGeneration: 13 }, 'admission_generation_changed'],
+    ['retained entry missing', { retainedChanges: [tracked] }, 'retained_delta_mismatch'],
+    ['retained bytes differ', { retainedChanges: [tracked, { ...untracked, contentSha256: 'c'.repeat(64) }] }, 'retained_delta_mismatch'],
+    ['new workspace is dirty', { replacement: { ...evidence.replacement, clean: false } }, 'replacement_not_exclusive'],
+    ['new workspace has a writer', { replacement: { ...evidence.replacement, exclusive: false } }, 'replacement_not_exclusive'],
+    ['goal branch not reserved', { replacement: { ...evidence.replacement, goalBranchReserved: false } }, 'replacement_not_exclusive'],
+    ['new workspace has another repository', { replacement: { ...evidence.replacement, sameRepository: false } }, 'replacement_identity_changed'],
+    ['new workspace has another parent', { replacement: { ...evidence.replacement, sameProject: false } }, 'replacement_identity_changed'],
+    ['replacement aliases old path', { replacement: { ...evidence.replacement, workspaceId: evidence.workspaceId } }, 'replacement_identity_changed'],
+    ['duplicate dirty path', { observedChanges: [tracked, tracked, untracked] }, 'invalid_dirty_manifest'],
+    ['path traversal', { observedChanges: [tracked, { ...untracked, path: '../escape' }] }, 'invalid_dirty_manifest'],
+    ['invalid sha256', { observedChanges: [tracked, { ...untracked, contentSha256: 'abcdef' }] }, 'invalid_dirty_manifest'],
+    ['tracked-only delta', { observedChanges: [tracked], retainedChanges: [tracked] }, 'invalid_dirty_manifest'],
+    ['untracked-only delta', { observedChanges: [untracked], retainedChanges: [untracked] }, 'invalid_dirty_manifest'],
+    ['null-containing path', { observedChanges: [tracked, { ...untracked, path: 'scripts/\\u0000file.test.mjs' }] }, 'invalid_dirty_manifest'],
+  ])('fails closed for %s', (_name, overrides, reason) => {
+    expect(decideGoalWorkspaceRelocation({ ...evidence, ...overrides })).toEqual({
+      status: 'RECOVERY_REQUIRED',
+      reason,
+    });
+  });
+
+  it('requires nonempty independently retained dirty changes rather than admitting a clean workspace through relocation', () => {
+    expect(decideGoalWorkspaceRelocation({ ...evidence, observedChanges: [], retainedChanges: [] })).toEqual({
+      status: 'RECOVERY_REQUIRED',
+      reason: 'invalid_dirty_manifest',
     });
   });
 });

@@ -91,8 +91,20 @@ export function reconcileMergeEvidence(
     };
   }
 
+  // A confirmed merge that reports no method is the same fence failure as reporting the
+  // wrong method: nothing proves the required method was used. `merge_method_mismatch`
+  // already surfaces as a breach, so an unreported method must not be the softer
+  // `INSPECT_REQUIRED` sibling. Genuinely unproven states (missing/invalid merge SHA,
+  // unobserved merge, malformed timestamp) stay inspectable below.
   if (observation.mergeMethod === undefined) {
-    return inspectDecision('merge_method_missing', expectedMergeMethod, observation);
+    return {
+      status: 'POLICY_BREACH',
+      action: 'surface_policy_breach',
+      reason: 'merge_method_missing',
+      expectedMergeMethod,
+      ...(observation.mergeSha === undefined ? {} : { mergeSha: observation.mergeSha }),
+      blockers: [],
+    };
   }
 
   if (observation.mergeMethod !== expectedMergeMethod) {
@@ -128,7 +140,7 @@ export function reconcileMergeEvidence(
 function inspectDecision(
   reason: Extract<
     MergeReconciliationReason,
-    'merge_not_observed' | 'merge_method_missing' | 'merge_sha_missing' | 'merge_sha_invalid' | 'observation_timestamp_invalid'
+    'merge_not_observed' | 'merge_sha_missing' | 'merge_sha_invalid' | 'observation_timestamp_invalid'
   >,
   expectedMergeMethod: MergeMethod,
   observation: MergeObservation,

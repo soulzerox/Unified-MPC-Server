@@ -46,6 +46,31 @@ describe('parseRepositoryMergePolicySetting', () => {
     expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
   });
 
+  it('still parses a zero-gate policy so the policy list itself stays usable', () => {
+    // The evaluator blocks zero-gate merges via policy_requires_no_gates. Rejecting the
+    // entry here would instead invalidate every other repository policy in the setting
+    // and make the reconciliation poller throw on each tick.
+    const value = JSON.stringify([
+      {
+        repository: 'owner/zero-gate',
+        defaultBranch: 'main',
+        verificationMode: 'local_exact_head',
+        requiredGates: [],
+        reviewPolicy: { required: false, acceptedOutcomes: [] },
+      },
+      {
+        repository: 'owner/repo',
+        defaultBranch: 'main',
+        verificationMode: 'local_exact_head',
+        requiredGates: [{ name: 'test', source: 'local_command' }],
+        reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
+      },
+    ]);
+
+    expect(parseRepositoryMergePoliciesSetting(value)?.map((policy) => policy.repository))
+      .toEqual(['owner/zero-gate', 'owner/repo']);
+  });
+
   it('parses a bounded host-owned local command only for local_command gates', () => {
     const value = JSON.stringify([{
       repository: 'owner/repo',

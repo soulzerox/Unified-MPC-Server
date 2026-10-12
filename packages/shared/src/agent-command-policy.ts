@@ -54,10 +54,23 @@ export function prohibitedUnscopedPullRequestMergeReason(
   args: readonly string[],
 ): string | undefined {
   const basename = executableBasename(executable);
-  if (basename === 'gh' && hasGhPullRequestMergeArguments(args)) return guardedPullRequestMergeReason();
+  if (basename === 'gh') {
+    if (hasGhPullRequestMergeArguments(args)) return guardedPullRequestMergeReason();
+    if (hasGhApiPullRequestMergeArguments(args)) return guardedPullRequestMergeReason();
+  }
   if (isOpaqueGitRunner(basename)) {
     const commandText = interpreterCommandText(basename, args);
-    if (commandText !== undefined && hasGhPullRequestMergeCommand(commandText)) return guardedPullRequestMergeReason();
+    if (commandText === undefined) return undefined;
+    const tokens = commandText.split(/\s+/).filter(Boolean)
+      .map((token) => token.replace(/^[('"`]+|[)"'`;|&]+$/g, ''))
+      .filter(Boolean);
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (executableBasename(unquote(tokens[index]!)) !== 'gh') continue;
+      const tail = tokens.slice(index + 1).map(unquote);
+      if (hasGhPullRequestMergeArguments(tail) || hasGhApiPullRequestMergeArguments(tail)) {
+        return guardedPullRequestMergeReason();
+      }
+    }
   }
   return undefined;
 }
@@ -100,14 +113,42 @@ function hasGitPushCommand(commandText: string): boolean {
   return false;
 }
 
-function hasGhPullRequestMergeCommand(commandText: string): boolean {
-  const tokens = commandText.split(/\s+/).filter(Boolean).map((token) => token.replace(/^[('"`]+|[)"'`;|&]+$/g, ''));
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = unquote(tokens[index]!);
-    if (executableBasename(token) !== 'gh') continue;
-    if (hasGhPullRequestMergeArguments(tokens.slice(index + 1).map(unquote))) return true;
+function hasGhApiPullRequestMergeArguments(args: readonly string[]): boolean {
+  const commands: string[] = [];
+  let index = 0;
+  while (index < args.length && commands.length < 2) {
+    const raw = unquote(args[index]!);
+    const lower = raw.toLowerCase();
+    if (lower.startsWith('-')) {
+      if (ghOptionTakesValue(lower) && !lower.includes('=') && !isAttachedShortGhOption(lower)) index += 2;
+      else index += 1;
+      continue;
+    }
+    commands.push(lower);
+    index += 1;
+  }
+  if (commands[0] !== 'api') return false;
+
+  // Every remaining argument is a candidate endpoint, flag value, or GraphQL body.
+  for (const argument of args) {
+    const value = unquote(argument).toLowerCase();
+    if (/(?:^|\/)pulls\/\d+\/merge(?:$|[/?#]|\?)/.test(value)) return true;
+    if (/(?:^|\/)repos\/[^/]+\/[^/]+\/merges(?:$|[/?#]|\?)/.test(value)) return true;
+    // Only a real GraphQL merge mutation merges. Matching arbitrary arguments would block
+    // legitimate searches or comments that merely mention the mutation name.
+    const queryBody = graphqlQueryBody(value);
+    if (queryBody === undefined) continue;
+    const flattened = queryBody.replace(/[^a-z]/g, '');
+    if (!flattened.startsWith('mutation')) continue;
+    if (flattened.includes('mergepullrequest') || flattened.includes('enablepullrequestautomerge')) return true;
   }
   return false;
+}
+
+/** Returns the GraphQL document carried by a `query=` / `query:` flag value, if any. */
+function graphqlQueryBody(value: string): string | undefined {
+  const match = /^(?:--raw-field[= ]|-f[= ]|-F[= ])?query=?(.*)$/s.exec(value);
+  return match?.[1];
 }
 
 function hasGhPullRequestMergeArguments(args: readonly string[]): boolean {

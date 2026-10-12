@@ -80,6 +80,30 @@ describe('agent command policy', () => {
   });
 
   it.each([
+    ['gh', ['api', '-X', 'PUT', 'repos/soulzerox/Unified-MPC-Server/pulls/275/merge']],
+    ['gh', ['api', '-X', 'POST', 'repos/soulzerox/Unified-MPC-Server/merges']],
+    ['gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'api', '-X', 'PUT', 'repos/soulzerox/Unified-MPC-Server/pulls/275/merge']],
+    ['gh', ['api', 'graphql', '-f', 'query=mutation{mergePullRequest(input:{}){clientMutationId}}']],
+    ['gh', ['api', 'graphql', '-f', 'query=mutation{enablePullRequestAutoMerge(input:{}){clientMutationId}}']],
+    ['bash', ['-lc', 'gh api -X PUT repos/soulzerox/Unified-MPC-Server/pulls/275/merge']],
+    ['powershell.exe', ['-Command', 'gh api -X PUT repos/soulzerox/Unified-MPC-Server/pulls/275/merge']],
+  ] as const)('hard-blocks unscoped GitHub merge API execution: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toContain('exact-head');
+    expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
+  });
+
+  it.each([
+    ['gh', ['api', 'repos/soulzerox/Unified-MPC-Server/pulls/275']],
+    ['gh', ['api', 'repos/soulzerox/Unified-MPC-Server/commits/abc123/check-runs']],
+    ['gh', ['api', 'graphql', '-f', 'query={viewer{login}}']],
+    ['gh', ['api', 'repos/soulzerox/Unified-MPC-Server/issues/1/comments', '-f', 'body=Please merge pull request when ready']],
+    ['gh', ['api', 'search/issues', '-f', 'q=merge pull request']],
+  ] as const)('allows non-merge GitHub merge-adjacent API reads: %s', (executable, args) => {
+    expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toBeUndefined();
+    expect(prohibitedAgentCommandReason(executable, args)).toBeUndefined();
+  });
+
+  it.each([
     ['gh', ['pr', 'view', '275']],
     ['gh.exe', ['--repo', 'soulzerox/Unified-MPC-Server', 'pr', 'checks', '275']],
     ['bash', ['-lc', 'gh pr status']],

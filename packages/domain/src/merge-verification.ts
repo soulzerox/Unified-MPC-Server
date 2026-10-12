@@ -85,7 +85,8 @@ export type MergeEvidenceBlockerCode =
   | 'review_missing'
   | 'review_rejected'
   | 'review_outcome_not_allowed'
-  | 'review_head_stale';
+  | 'review_head_stale'
+  | 'policy_requires_no_gates';
 
 export interface MergeEvidenceBlocker {
   readonly code: MergeEvidenceBlockerCode;
@@ -118,6 +119,14 @@ export function evaluateMergeEvidence(
       code: 'base_branch_mismatch',
       expected: policy.defaultBranch,
       observed: subject.baseBranch,
+    });
+  }
+
+  if (policy.requiredGates.length === 0) {
+    blockers.push({
+      code: 'policy_requires_no_gates',
+      expected: 'at least one required gate',
+      observed: '0',
     });
   }
 

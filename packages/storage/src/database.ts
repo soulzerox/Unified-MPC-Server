@@ -35,6 +35,8 @@ import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconcili
 import { GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL } from './migrations/goal-workspace-transfer-intent-migration.js';
 import { GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL } from './migrations/goal-workspace-retention-custody-migration.js';
 import { GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL } from './migrations/goal-workspace-retention-evidence-migration.js';
+import { WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL } from './migrations/workspace-authority-epoch-migration.js';
+import { WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL } from './migrations/workspace-admission-authority-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -54,7 +56,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '034_goal_workspace_retention_evidence' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '036_workspace_admission_authority' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -116,7 +118,9 @@ export class SqliteDatabase {
     this.applyMigration({ id: '031_merge_reconciliation_records', sql: MERGE_RECONCILIATION_MIGRATION_SQL });
     this.applyMigration({ id: '032_goal_workspace_transfer_intents', sql: GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL });
     this.applyMigration({ id: '033_goal_workspace_retention_custody', sql: GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL });
+    this.applyMigration({ id: '034_goal_workspace_retention_evidence', sql: GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL });
+    this.applyMigration({ id: '035_workspace_authority_epoch', sql: WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

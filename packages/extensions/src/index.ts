@@ -24,6 +24,15 @@ export {
   type McpClientFactory,
   type McpClientSession,
 } from './mcp-session-manager.js';
+export {
+  PrivateFdStdioClientTransport,
+  type PrivateFdStdioClientTransportOptions,
+} from './private-fd-stdio-transport.js';
+export {
+  createPrivateFdAuthorizedClientFactory,
+  type PrivateFdAuthorizedClientFactoryOptions,
+  type PrivateFdSessionBootstrap,
+} from './private-fd-authorized-client.js';
 export { LocalExtensionsService, type LocalExtensionsServiceOptions } from './extensions-service.js';
 export {
   CanonicalExtensionRegistry,

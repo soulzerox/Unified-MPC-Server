@@ -264,6 +264,8 @@ export class GoalWorkspaceService {
       workspaceKind: 'git',
       repositoryIdentity: snapshot.repositoryIdentity,
       gitCommonDirIdentity: snapshot.gitCommonDirIdentity,
+      ...(snapshot.gitCommonDirFilesystemIdentity === undefined ? {}
+        : { gitCommonDirFilesystemIdentity: snapshot.gitCommonDirFilesystemIdentity }),
       worktreeIdentity: snapshot.worktreeIdentity,
       ...(snapshot.branch === null ? {} : { branchName: snapshot.branch }),
       expectedWorkspaceHead: request.checkpointHead,

@@ -14,6 +14,111 @@ afterEach(async () => {
 });
 
 describe('SqliteWorkspaceRepository', () => {
+  it('advances the committed epoch for independently-written admission receipt insert/invalidate/delete but not rollback', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'authority-admission-epoch-'));
+    temporaryRoots.push(root);
+    const file = path.join(root, 'state.sqlite');
+    const host = new SqliteDatabase(file);
+    const peer = new SqliteDatabase(file);
+    try {
+      const registry = new SqliteWorkspaceRepository(host);
+      await registry.insert({
+        id: 'admission-epoch-1', displayName: 'Admission epoch', rootPath: root,
+        realRootPath: root, createdAt: new Date(0).toISOString(),
+      });
+      const initial = registry.readAuthorityGeneration();
+      peer.connection.prepare(
+        'INSERT INTO workspace_admission_receipts (workspace_id, admission_generation, write_lease_generation, receipt_json, updated_at) VALUES (?, 1, 1, ?, ?)',
+      ).run('admission-epoch-1', '{}', '2026-10-09T00:00:00.000Z');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 1);
+      peer.connection.exec('BEGIN IMMEDIATE;');
+      peer.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run('{"invalidatedAt":"rolled-back"}', 'admission-epoch-1');
+      peer.connection.exec('ROLLBACK;');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 1);
+      peer.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run('{"invalidatedAt":"committed"}', 'admission-epoch-1');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 2);
+      peer.connection.prepare('UPDATE workspace_admission_receipts SET receipt_json = ? WHERE workspace_id = ?')
+        .run('{"invalidatedAt":"miss"}', 'absent-id');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 2);
+      peer.connection.prepare('DELETE FROM workspace_admission_receipts WHERE workspace_id = ?')
+        .run('admission-epoch-1');
+      expect(registry.readAuthorityGeneration()).toBe(initial + 3);
+    } finally { peer.close(); host.close(); }
+  });
+
+  it('commits a durable authority generation for independent connections, direct SQL and unregister/relink replay', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'authority-crossprocess-db-'));
+    temporaryRoots.push(root);
+    const filename = path.join(root, 'state.sqlite');
+    const first = new SqliteDatabase(filename);
+    const second = new SqliteDatabase(filename);
+    try {
+      const reader = new SqliteWorkspaceRepository(first);
+      const writer = new SqliteWorkspaceRepository(second);
+      const workspace: Workspace = {
+        id: 'crossprocess', displayName: 'Crossprocess', rootPath: '/tmp/crossprocess',
+        realRootPath: '/tmp/crossprocess', createdAt: new Date(0).toISOString(),
+      };
+      const initial = reader.readAuthorityGeneration();
+      expect(initial).toBeGreaterThan(0);
+      await writer.insert(workspace);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 1);
+      second.connection.prepare('UPDATE workspaces SET display_name = ? WHERE id = ?').run('Renamed elsewhere', workspace.id);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 2);
+      second.connection.exec('BEGIN IMMEDIATE;');
+      second.connection.prepare('UPDATE workspaces SET archived_at = ? WHERE id = ?').run('2026-10-09T00:00:00.000Z', workspace.id);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 2);
+      second.connection.exec('ROLLBACK;');
+      expect(reader.readAuthorityGeneration()).toBe(initial + 2);
+      await writer.archive(workspace.id);
+      await writer.restore(workspace.id);
+      expect(reader.readAuthorityGeneration()).toBe(initial + 4);
+    } finally { second.close(); first.close(); }
+  });
+
+  it('fences live worker authority before insert, archive, restore and delete write boundaries', async () => {
+    const database = new SqliteDatabase(':memory:');
+    const snapshots: string[] = [];
+    const ws: Workspace = {
+      id: 'authority-event-ws', displayName: 'Authority event', rootPath: '/tmp/authority-event',
+      realRootPath: '/tmp/authority-event', createdAt: new Date(0).toISOString(),
+    };
+    const repository = new SqliteWorkspaceRepository(database, {
+      onBeforeAuthorityMutation: (): void => {
+        const state = database.connection.prepare('SELECT archived_at FROM workspaces WHERE id = ?')
+          .get(ws.id) as { archived_at: string | null } | undefined;
+        snapshots.push(state === undefined ? 'missing' : state.archived_at === null ? 'active' : 'archived');
+      },
+    });
+    try {
+      await repository.insert(ws);
+      await repository.archive(ws.id);
+      await repository.restore(ws.id);
+      await repository.delete(ws.id);
+      expect(snapshots).toEqual(['missing', 'active', 'archived', 'active']);
+    } finally { database.close(); }
+  });
+
+  it('fails closed without changing registration when the trusted revocation publisher fails', async () => {
+    const database = new SqliteDatabase(':memory:');
+    const ws: Workspace = {
+      id: 'authority-denied-ws', displayName: 'Authority denied', rootPath: '/tmp/authority-denied',
+      realRootPath: '/tmp/authority-denied', createdAt: new Date(0).toISOString(),
+    };
+    try {
+      await new SqliteWorkspaceRepository(database).insert(ws);
+      const repository = new SqliteWorkspaceRepository(database, {
+        onBeforeAuthorityMutation: (): void => { throw new Error('trusted_authority_event_unavailable'); },
+      });
+      await expect(repository.archive(ws.id)).rejects.toThrow('trusted_authority_event_unavailable');
+      await expect(repository.get(ws.id)).resolves.toEqual(ws);
+      await expect(repository.delete(ws.id)).rejects.toThrow('trusted_authority_event_unavailable');
+      await expect(repository.get(ws.id)).resolves.toEqual(ws);
+    } finally { database.close(); }
+  });
+
   it('round-trips workspaces through the initial schema', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-db-'));
     temporaryRoots.push(root);
@@ -220,7 +325,9 @@ describe('SqliteWorkspaceRepository', () => {
       await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, {
         ...receipt, createdAt: '2026-09-23T01:00:00.000Z',
       })).resolves.toBe(false);
+      const epochBeforeAdmission = repository.readAuthorityGeneration();
       await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 0, lease!.generation, receipt)).resolves.toBe(true);
+      expect(repository.readAuthorityGeneration()).toBe(epochBeforeAdmission + 1);
       await expect(repository.getAdmissionReceipt(workspace.id)).resolves.toEqual(receipt);
 
       const nextReceipt = { ...receipt, admissionId: 'admission-2', admissionGeneration: 2 };
@@ -229,6 +336,9 @@ describe('SqliteWorkspaceRepository', () => {
       await expect(repository.compareAndSwapAdmissionReceipt(workspace.id, 1, lease!.generation, nextReceipt)).resolves.toBe(true);
       await expect(repository.invalidateAdmissionReceipt(workspace.id, 1, 'unexpected_workspace_change', '2026-09-23T00:30:00.000Z')).resolves.toBe(false);
       await expect(repository.invalidateAdmissionReceipt(workspace.id, 2, 'unexpected_workspace_change', '2026-09-23T00:30:00.000Z')).resolves.toBe(true);
+      // The repository's real invalidation path must revoke external strict
+      // worker generations without rewriting the workspace registry row.
+      expect(repository.readAuthorityGeneration()).toBe(epochBeforeAdmission + 3);
 
       database.close();
       database = new SqliteDatabase(databasePath);

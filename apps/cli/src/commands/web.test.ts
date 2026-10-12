@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
@@ -164,7 +165,7 @@ describe('web CLI command', () => {
     });
 
     it('reports canonical storage identity and credential presence without secret values', async () => {
-      const root = await mkdtemp(path.join(process.cwd(), '.web-storage-diagnostics-'));
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-storage-diagnostics-'));
       const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
       const previousPublicUrl = process.env.UNIFIED_MPC_CLOUDFLARE_PUBLIC_URL;
       const previousHome = process.env.HOME;
@@ -244,7 +245,7 @@ describe('web CLI command', () => {
     });
 
     it('keeps successful secret presence truth when another Secret Service lookup fails', async () => {
-      const root = await mkdtemp(path.join(process.cwd(), '.web-storage-diagnostics-partial-'));
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-storage-diagnostics-partial-'));
       const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
       const previousHome = process.env.HOME;
       const previousXdgDataHome = process.env.XDG_DATA_HOME;
@@ -303,7 +304,7 @@ describe('web CLI command', () => {
     });
 
     it('fails visibly before creating a fresh canonical DB when a historical HOME DB contains gateway settings', async () => {
-      const root = await mkdtemp(path.join(process.cwd(), '.web-storage-drift-'));
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-storage-drift-'));
       const canonical = path.join(root, 'canonical');
       const home = path.join(root, 'home');
       const historicalRoot = path.join(home, '.local', 'share', 'unified-mpc');

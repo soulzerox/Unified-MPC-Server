@@ -132,8 +132,8 @@ function hasGhMergeInScriptText(scriptText: string): boolean {
   // Array-style argv hides the tokens behind quotes and commas (`{args:['pr','merge','5']}`),
   // so separators are flattened to spaces before the token pattern is applied.
   const text = scriptText.replace(/['"`\\,]+/g, ' ');
-  return /(?:^|[^\w./-])gh(?:\.exe)?\b[^\n;]*?\bpr\s+merge\b/i.test(text)
-    || /(?:^|[^\w./-])gh(?:\.exe)?\b[^\n;]*?\bapi\b[^\n;]*?(?:pulls\/\d+\/merge|\bmerges\b|mergePullRequest|enablePullRequestAutoMerge)/i.test(text);
+  return /\bgh(?:\.exe)?\b[^\n;]*?\bpr\s+merge\b/i.test(text)
+    || /\bgh(?:\.exe)?\b[^\n;]*?\bapi\b[^\n;]*?(?:pulls\/\d+\/merge|\bmerges\b|mergePullRequest|enablePullRequestAutoMerge)/i.test(text);
 }
 
 /** `gh alias set <name> 'pr merge 5'` defines a merge under a name that later runs unguarded. */

@@ -102,6 +102,8 @@ describe('agent command policy', () => {
     ['python', ['-c', "subprocess.run(['gh','api','-X','PUT','repos/o/r/pulls/275/merge'])"]],
     ['perl', ['-e', 'system("gh pr merge 275")']],
     ['ruby', ['-e', 'system("gh pr merge 275")']],
+    ['node', ['-e', "exec('/usr/bin/gh pr merge 275')"]],
+    ['bash', ['-lc', '/usr/bin/gh pr merge 275']],
   ] as const)('hard-blocks merge smuggled through an inline interpreter: %s', (executable, args) => {
     expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toContain('exact-head');
     expect(prohibitedAgentCommandReason(executable, args)).toBeDefined();
@@ -140,6 +142,8 @@ describe('agent command policy', () => {
     ['gh', ['alias', 'set', 'st', 'pr status']],
     ['gh', ['alias', 'list']],
     ['gh', ['alias', 'delete', 'mm']],
+    ['node', ['-e', 'console.log("spaghetti pr merge nightly")']],
+    ['bash', ['-lc', 'rg "github pr merge helper"']],
   ] as const)('allows non-merge wrapper and interpreter invocations: %s', (executable, args) => {
     expect(prohibitedUnscopedPullRequestMergeReason(executable, args)).toBeUndefined();
     expect(prohibitedAgentCommandReason(executable, args)).toBeUndefined();

@@ -1,5 +1,6 @@
 import { appError, err, isApplicationAuthorized, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
 import type { CapabilityBackend } from './local-capability-service.js';
+import { prohibitedTypedTextReason } from './agent-command-policy.js';
 import { NodeBrowserCdpProtocol } from './browser-cdp-protocol.js';
 
 export interface BrowserCdpTab {
@@ -110,13 +111,18 @@ export class BrowserCdpBackend implements CapabilityBackend {
       case 'navigate': return this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Page.navigate', { url: readString(parameters, 'url') ?? '' }, signal), signal);
       case 'evaluate': {
         const expression = readString(parameters, 'expression');
-        return expression === undefined
-          ? err(appError('INVALID_INPUT', 'JavaScript expression is required'))
-          : this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, signal), signal);
+        if (expression === undefined) return err(appError('INVALID_INPUT', 'JavaScript expression is required'));
+        const denial = prohibitedTypedTextReason(expression);
+        if (denial !== undefined) return err(appError('PERMISSION_DENIED', denial));
+        return this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, signal), signal);
       }
       case 'query': return this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Runtime.evaluate', { expression: queryScript(readString(parameters, 'selector') ?? ''), returnByValue: true, awaitPromise: true }, signal), signal);
       case 'click': return this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Runtime.evaluate', { expression: clickScript(readString(parameters, 'selector') ?? ''), returnByValue: true, awaitPromise: true }, signal), signal);
-      case 'type': return this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Runtime.evaluate', { expression: typeScript(readString(parameters, 'selector') ?? '', readString(parameters, 'text') ?? ''), returnByValue: true, awaitPromise: true }, signal), signal);
+      case 'type': {
+        const denial = prohibitedTypedTextReason(readString(parameters, 'text') ?? '');
+        if (denial !== undefined) return err(appError('PERMISSION_DENIED', denial));
+        return this.withTab(request, action, async (tab) => this.evaluateProtocol(tab.id, 'Runtime.evaluate', { expression: typeScript(readString(parameters, 'selector') ?? '', readString(parameters, 'text') ?? ''), returnByValue: true, awaitPromise: true }, signal), signal);
+      }
       case 'wait': return this.waitFor(request, parameters, signal);
       case 'screenshot': return this.withTab(request, action, async (tab) => {
         const result = await this.protocol.request(tab.id, 'Page.captureScreenshot', { format: 'png' }, signal);

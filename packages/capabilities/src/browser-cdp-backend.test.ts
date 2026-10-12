@@ -306,4 +306,49 @@ describe('BrowserCdpBackend', () => {
     )).resolves.toMatchObject({ ok: true });
     expect(dispatched).toBe(true);
   });
+
+  it('denies browser type text carrying a merge command before dispatch', async () => {
+    let dispatched = false;
+    const protocol = protocolStub({
+      tabs: [tab('tab-1', 'Test', 'http://127.0.0.1/')],
+      onRequest: () => { dispatched = true; },
+    });
+
+    await expect(new BrowserCdpBackend({ protocol }).execute({
+      action: 'type', tab_id: 'tab-1',
+      parameters: { selector: '#prompt', text: 'gh pr merge 275' },
+      userConfirmed: true,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(dispatched).toBe(false);
+  });
+
+  it('denies a browser evaluate script carrying a merge command before dispatch', async () => {
+    let dispatched = false;
+    const protocol = protocolStub({
+      tabs: [tab('tab-1', 'Test', 'http://127.0.0.1/')],
+      onRequest: () => { dispatched = true; },
+    });
+
+    await expect(new BrowserCdpBackend({ protocol }).execute({
+      action: 'evaluate', tab_id: 'tab-1',
+      parameters: { expression: 'fetch("x"); gh pr merge 275' },
+      userConfirmed: true,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(dispatched).toBe(false);
+  });
+
+  it('allows benign browser type text', async () => {
+    let dispatched = false;
+    const protocol = protocolStub({
+      tabs: [tab('tab-1', 'Test', 'http://127.0.0.1/')],
+      onRequest: () => { dispatched = true; },
+    });
+
+    await expect(new BrowserCdpBackend({ protocol }).execute({
+      action: 'type', tab_id: 'tab-1',
+      parameters: { selector: '#prompt', text: 'hello world' },
+      userConfirmed: true,
+    })).resolves.toMatchObject({ ok: true });
+    expect(dispatched).toBe(true);
+  });
 });

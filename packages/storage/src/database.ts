@@ -36,6 +36,7 @@ import { GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL } from './migrations/goal-
 import { GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL } from './migrations/goal-workspace-retention-custody-migration.js';
 import { GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL } from './migrations/goal-workspace-retention-evidence-migration.js';
 import { WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL } from './migrations/workspace-authority-epoch-migration.js';
+import { GOAL_RELOCATION_APPROVAL_MIGRATION_SQL } from './migrations/goal-relocation-approval-migration.js';
 import { WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL } from './migrations/workspace-admission-authority-migration.js';
 
 export interface SqliteDatabaseOptions {
@@ -56,7 +57,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '036_workspace_admission_authority' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '037_goal_relocation_approvals' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -120,7 +121,8 @@ export class SqliteDatabase {
     this.applyMigration({ id: '033_goal_workspace_retention_custody', sql: GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL });
     this.applyMigration({ id: '034_goal_workspace_retention_evidence', sql: GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL });
     this.applyMigration({ id: '035_workspace_authority_epoch', sql: WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
+    this.applyMigration({ id: '036_workspace_admission_authority', sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: GOAL_RELOCATION_APPROVAL_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

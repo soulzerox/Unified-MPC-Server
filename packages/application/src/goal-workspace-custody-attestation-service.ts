@@ -46,7 +46,11 @@ export interface GoalWorkspaceCustodyAttestationPorts {
     get(workspaceId: string): Promise<Workspace | null>;
     getAdmissionReceipt(workspaceId: string): Promise<WorkspaceAdmissionReceipt | null>;
   };
-  readonly git: { observeWorkspace(rootPath: string): Promise<Result<GitWorkspaceSnapshot>> };
+  readonly git: {
+    observeWorkspace(rootPath: string): Promise<Result<GitWorkspaceSnapshot>>;
+    /** The relocation target is a clean temporary workspace, not a Goal one. */
+    observeReplacement(rootPath: string): Promise<Result<GitWorkspaceSnapshot>>;
+  };
   readonly custody: {
     recordVerified(request: GoalCustodyRecordRequest): Promise<boolean>;
     readPinned(operationId: string): Promise<GoalRelocationCustodyPin | null>;
@@ -139,20 +143,33 @@ export class GoalWorkspaceCustodyAttestationService {
       return err(appError('CONFLICT', 'Source Git truth or original bytes drifted from the retained evidence', true));
     }
 
+    // The replacement HEAD is observed HERE, under the same host fence that
+    // verified the source, so the pin can never name a head a caller chose.
+    // A replacement that is not exactly clean cannot be a relocation target.
+    const replacement = await git.observeReplacement(next.realRootPath);
+    if (!replacement.ok) return replacement;
+    const replacementSnap = replacement.value;
+    if (replacementSnap.statusEntries.length !== 0) {
+      return err(appError('CONFLICT', 'Replacement workspace must be exactly clean to be a relocation target', true));
+    }
+
     // Verify again directly before pinning, so the trusted storage cannot seal
     // a stale owner/lease or a manifest mutated between checks.
-    const [goalAfter, originalAfter, retainedAfter, sourceAfter] = await Promise.all([
+    const [goalAfter, originalAfter, replacementAfter, retainedAfter, sourceAfter] = await Promise.all([
       goals.getById(goal.id), git.observeWorkspace(old.realRootPath),
+      git.observeReplacement(next.realRootPath),
       verifyRetainedGoalWorkspaceBundle(evidence),
       verifyGoalWorkspaceDirtySourceBytes(old.realRootPath, verified.value),
     ]);
     if (!originalAfter.ok) return originalAfter;
+    if (!replacementAfter.ok) return replacementAfter;
     if (!retainedAfter.ok) return retainedAfter;
     if (!sourceAfter || goalAfter === null || goalAfter.revision !== goal.revision
       || goalAfter.workspaceId !== old.id || goalAfter.leaseGeneration !== goal.leaseGeneration
       || goalAfter.leaseTokenHash !== tokenHash || goalAfter.leaseExpiresAt === undefined
       || goalAfter.leaseExpiresAt <= (this.ports.now ?? ((): Date => new Date()))().toISOString()
       || JSON.stringify(originalAfter.value) !== JSON.stringify(oldSnap)
+      || JSON.stringify(replacementAfter.value) !== JSON.stringify(replacementSnap)
       || retainedAfter.value.manifestSha256 !== verified.value.manifestSha256) {
       return err(appError('CONFLICT', 'Goal or retained source changed before durable custody pin', true));
     }
@@ -163,6 +180,7 @@ export class GoalWorkspaceCustodyAttestationService {
       retentionPath: evidence.retentionPath,
       expectedManifestSha256: verified.value.manifestSha256,
       expectedHead: evidence.expectedHead, expectedBranch: old.branchName,
+      newWorkspaceHead: replacementSnap.head,
       ownerClientId: request.actor.clientId, ownerSessionId: request.actor.sessionId,
       expectedRevision: goal.revision, expectedAdmissionGeneration: prior.admissionGeneration,
       leaseGeneration: goal.leaseGeneration, pinnedAt: now, leaseTokenHash: tokenHash,

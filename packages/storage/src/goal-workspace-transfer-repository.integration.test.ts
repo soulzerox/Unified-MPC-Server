@@ -11,6 +11,7 @@ import { SqliteWorkspaceRepository } from './workspace-repository.js';
 import { SqliteGoalWorkspaceTransferRepository } from './goal-workspace-transfer-repository.js';
 
 const roots: string[] = [];
+import { SqliteGoalRelocationApprovalRepository, type GoalRelocationApprovalRecord } from './goal-relocation-approval-repository.js';
 const now = '2026-10-09T00:00:00.000Z';
 const sha = 'a'.repeat(40);
 const manifest = 'b'.repeat(64);
@@ -28,9 +29,21 @@ const request = {
   ownerSessionId: 'owner-session',
   expectedOldHead: sha,
   expectedOldBranch: 'goal/goal-owner',
+  expectedNewHead: 'd'.repeat(40),
   retainedManifestSha256: manifest,
   now,
 } as const;
+
+/** Single-use capability the trusted host fence mints for this exact action. */
+const approval: GoalRelocationApprovalRecord = {
+ approvalId: 'approval-relocate-1', goalId: request.goalId, operationId: request.operationId,
+ action: 'relocate_goal', fromWorkspaceId: request.fromWorkspaceId,
+ toWorkspaceId: request.toWorkspaceId,
+ ownerClientId: request.ownerClientId, ownerSessionId: request.ownerSessionId,
+ issuedAt: Date.parse(now), expiresAt: Date.parse(now) + 120_000,
+};
+
+const approvedRequest = { ...request, approval };
 
 afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
@@ -39,6 +52,7 @@ afterEach(async (): Promise<void> => {
 async function fixture(): Promise<{
   database: SqliteDatabase;
   transfer: SqliteGoalWorkspaceTransferRepository;
+approvals: SqliteGoalRelocationApprovalRepository;
   workspaces: SqliteWorkspaceRepository;
   databasePath: string;
 }> {
@@ -101,13 +115,17 @@ async function fixture(): Promise<{
     retentionPath: '/srv/verified-retention/test-bundle',
     expectedManifestSha256: request.retainedManifestSha256,
     expectedHead: request.expectedOldHead, expectedBranch: request.expectedOldBranch,
+newWorkspaceHead: request.expectedNewHead,
     expectedRevision: request.expectedRevision,
     expectedAdmissionGeneration: request.expectedAdmissionGeneration,
     leaseGeneration: request.leaseGeneration, leaseTokenHash: request.leaseTokenHash,
     ownerClientId: request.ownerClientId, ownerSessionId: request.ownerSessionId,
     pinnedAt: now,
   })).toBe(true);
+  const approvals = new SqliteGoalRelocationApprovalRepository(database);
+  expect(await approvals.record(approval)).toBe(true);
   return { database, transfer: new SqliteGoalWorkspaceTransferRepository(database), workspaces,
+approvals: new SqliteGoalRelocationApprovalRepository(database),
     databasePath: path.join(root, 'goal.sqlite') };
 }
 
@@ -148,7 +166,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('classifies a prepared intent as needing new owner verification after restart without mutating anything', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       const before = await t.transfer.get(request.operationId);
       expect(await t.transfer.inspectRecovery(request.operationId, now)).toEqual({
         operationId: request.operationId, goalId: request.goalId,
@@ -165,7 +183,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
 
   it('reads a persisted prepared operation after a real database close and reopen without resuming ownership', async () => {
     const t = await fixture();
-    expect(await t.transfer.prepare(request)).toBe(true);
+    expect(await t.transfer.prepare(approvedRequest)).toBe(true);
     t.database.close();
     const restarted = new SqliteDatabase(t.databasePath);
     try {
@@ -184,7 +202,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('flags lease expiry, rotation and missing pinned custody as owner-review blockers', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       expect((await t.transfer.inspectRecovery(request.operationId, '2026-10-09T00:20:00.000Z')).state)
         .toBe('prepared_stale_owner_review');
       t.database.connection.prepare('UPDATE goals SET lease_generation = lease_generation + 1 WHERE id = ?')
@@ -203,7 +221,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('reports committed storage as runtime admission REQUIRED, not ADMITTED', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       expect(await t.transfer.commit({
         operationId: request.operationId, goalId: request.goalId,
         leaseTokenHash: request.leaseTokenHash,
@@ -224,7 +242,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
     const t = await fixture();
     try {
       expect((await t.transfer.inspectRecovery('missing-operation', now)).state).toBe('missing_or_unverified');
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       expect(await t.transfer.commit({
         operationId: request.operationId, goalId: request.goalId,
         leaseTokenHash: request.leaseTokenHash,
@@ -244,8 +262,8 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('durably pins exact verified-retention intent, idempotently, without changing Goal or original workspace', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       expect(await t.transfer.get(request.operationId)).toMatchObject({
         goalId: request.goalId, fromWorkspaceId: request.fromWorkspaceId,
         retainedManifestSha256: request.retainedManifestSha256, status: 'prepared',
@@ -270,7 +288,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
     try {
       t.database.connection.prepare('DELETE FROM goal_workspace_retention_evidence WHERE operation_id = ?')
         .run(request.operationId);
-      expect(await t.transfer.prepare(request)).toBe(false);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(false);
       expect(await t.transfer.get(request.operationId)).toBeNull();
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
     } finally { t.database.close(); }
@@ -279,7 +297,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('rejects evidence path drift and revocation after prepare, without changing the Goal pointer', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       t.database.connection.prepare('UPDATE goal_workspace_retention_evidence SET status = ? WHERE operation_id = ?')
         .run('revoked', request.operationId);
       expect((await t.transfer.inspectRecovery(request.operationId, now)).state).toBe('prepared_stale_owner_review');
@@ -300,7 +318,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
       t.database.connection.prepare(
         'DELETE FROM goal_workspace_retention_custody WHERE operation_id = ?',
       ).run(request.operationId);
-      expect(await t.transfer.prepare(request)).toBe(false);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(false);
       expect(await t.transfer.get(request.operationId)).toBeNull();
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
     } finally {
@@ -311,7 +329,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('refuses post-prepare custody revocation without changing the Goal pointer or source workspace', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       t.database.connection.prepare(`
         UPDATE goal_workspace_retention_custody SET status = 'revoked' WHERE operation_id = ?
       `).run(request.operationId);
@@ -340,10 +358,10 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
         { retainedManifestSha256: 'broken' }, { fromWorkspaceId: 'another-workspace' },
         { toWorkspaceId: request.fromWorkspaceId },
       ];
-      for (const changes of rejected) expect(await t.transfer.prepare({ ...request, ...changes })).toBe(false);
+      for (const changes of rejected) expect(await t.transfer.prepare({ ...approvedRequest, ...changes })).toBe(false);
       expect(await t.transfer.get(request.operationId)).toBeNull();
-      expect(await t.transfer.prepare(request)).toBe(true);
-      expect(await t.transfer.prepare({ ...request, operationId: 'another-operation' })).toBe(false);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
+      expect(await t.transfer.prepare({ ...approvedRequest, operationId: 'another-operation' })).toBe(false);
     } finally {
       t.database.close();
     }
@@ -354,7 +372,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
     try {
       const replacement = (await t.workspaces.get(request.toWorkspaceId))!;
       await t.workspaces.restore(request.toWorkspaceId, { ...replacement, ownerSessionId: 'foreign-owner' });
-      expect(await t.transfer.prepare(request)).toBe(false);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(false);
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
     } finally {
       t.database.close();
@@ -364,7 +382,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('rejects expired writer ownership and retains the original Goal Workspace', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare({ ...request, now: '2026-10-09T00:15:00.000Z' })).toBe(false);
+      expect(await t.transfer.prepare({ ...approvedRequest, now: '2026-10-09T00:15:00.000Z' })).toBe(false);
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
     } finally {
       t.database.close();
@@ -374,7 +392,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('atomically transfers the existing Goal pointer, writer lease and clean admission without deleting the original', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       const args = {
         operationId: request.operationId,
         goalId: request.goalId,
@@ -421,7 +439,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('refuses stale or corrupt post-preparation transfer evidence without moving either workspace', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       const commit = {
         operationId: request.operationId,
         goalId: request.goalId,
@@ -448,7 +466,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('fails closed when a competing worker rotates the Goal lease after preparation', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       t.database.connection.prepare('UPDATE goals SET lease_generation = lease_generation + 1 WHERE id = ?').run(request.goalId);
       expect(await t.transfer.commit({
         operationId: request.operationId, goalId: request.goalId,
@@ -465,7 +483,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('rejects changed old-branch registration after an intent has been prepared', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       t.database.connection.prepare('UPDATE workspaces SET branch_name = ? WHERE id = ?')
         .run('goal/other-owner', request.fromWorkspaceId);
       expect(await t.transfer.commit({
@@ -490,7 +508,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
         leaseTokenHash: 'other-token-hash', leaseSeconds: 600, now,
       });
       expect(competing.acquired).toBe(true);
-      expect(await t.transfer.prepare(request)).toBe(false);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(false);
       expect(await t.workspaces.get(request.fromWorkspaceId)).toMatchObject({ goalId: request.goalId });
     } finally {
       t.database.close();
@@ -500,7 +518,7 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
   it('rejects an original admission invalidated after the preparation receipt', async () => {
     const t = await fixture();
     try {
-      expect(await t.transfer.prepare(request)).toBe(true);
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
       const original = t.database.connection.prepare('SELECT receipt_json FROM workspace_admission_receipts WHERE workspace_id = ?')
         .get(request.fromWorkspaceId) as { receipt_json: string };
       const invalidated = JSON.stringify({ ...JSON.parse(original.receipt_json) as Record<string, unknown>, invalidatedAt: now });
@@ -515,5 +533,69 @@ describe('SqliteGoalWorkspaceTransferRepository #298 (prepare and atomic commit)
     } finally {
       t.database.close();
     }
+  });
+
+  it('refuses a forged, replayed, expired or differently bound Host Approval', async () => {
+    // Forged: an approval id the host fence never minted.
+    const forged = await fixture();
+    try {
+      expect(await forged.transfer.prepare({
+        ...approvedRequest, approval: { ...approval, approvalId: 'approval-not-minted' },
+      })).toBe(false);
+      expect(await forged.transfer.get(request.operationId)).toBeNull();
+      expect(await forged.approvals.read('approval-not-minted')).toBeNull();
+    } finally { forged.database.close(); }
+
+    // Wrong binding: a real, recorded capability pointed at another operation.
+    const rebound = await fixture();
+    try {
+      expect(await rebound.transfer.prepare({
+        ...approvedRequest, operationId: 'another-operation',
+        approval: { ...approval, operationId: 'another-operation' },
+      })).toBe(false);
+      expect(await rebound.transfer.get(request.operationId)).toBeNull();
+      expect((await rebound.approvals.read(approval.approvalId))?.consumedAt).toBeNull();
+    } finally { rebound.database.close(); }
+
+    // Expired: recorded, correctly bound, but past its TTL.
+    const expired = await fixture();
+    try {
+      const stale: GoalRelocationApprovalRecord = {
+        ...approval, approvalId: 'approval-expired',
+        issuedAt: Date.parse(now) - 600_000, expiresAt: Date.parse(now) - 300_000,
+      };
+      expect(await expired.approvals.record(stale)).toBe(true);
+      expect(await expired.transfer.prepare({ ...approvedRequest, approval: stale })).toBe(false);
+      expect(await expired.transfer.get(request.operationId)).toBeNull();
+    } finally { expired.database.close(); }
+
+    // Replay: a genuine capability spends exactly once, so a second Goal
+    // operation cannot reuse it.
+    const replayed = await fixture();
+    try {
+      expect(await replayed.transfer.prepare(approvedRequest)).toBe(true);
+      const spent = await replayed.approvals.read(approval.approvalId);
+      expect(spent).toMatchObject({
+        consumedAt: Date.parse(now),
+        admissionGeneration: request.expectedAdmissionGeneration,
+        leaseGeneration: request.leaseGeneration,
+      });
+      replayed.database.connection.prepare('DELETE FROM goal_workspace_transfer_intents').run();
+      expect(await replayed.transfer.prepare(approvedRequest)).toBe(false);
+      expect(await replayed.transfer.get(request.operationId)).toBeNull();
+    } finally { replayed.database.close(); }
+  });
+
+  it('never stores the approval or the lease token hash in the prepared intent', async () => {
+    const t = await fixture();
+    try {
+      expect(await t.transfer.prepare(approvedRequest)).toBe(true);
+      const saved = t.database.connection.prepare('SELECT request_json FROM goal_workspace_transfer_intents WHERE operation_id = ?')
+        .get(request.operationId) as { request_json: string };
+      expect(saved.request_json).not.toContain(request.leaseTokenHash);
+      // Only the capability ID is durable; the owner binding lives in the
+      // approval row, so a dumped intent leaks no extra authority.
+      expect(JSON.parse(saved.request_json).approval).toEqual({ approvalId: approval.approvalId });
+    } finally { t.database.close(); }
   });
 });

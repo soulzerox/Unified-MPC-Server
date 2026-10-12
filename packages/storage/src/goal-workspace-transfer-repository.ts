@@ -1,5 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import type { SqliteDatabase } from './database.js';
+import {
+  consumeGoalRelocationApproval,
+  type GoalRelocationApprovalRecord,
+} from './goal-relocation-approval-repository.js';
 
 /**
  * Trusted storage-layer preparation for an owner-approved Goal Workspace
@@ -22,12 +27,22 @@ export interface GoalWorkspaceTransferIntentRequest {
   readonly ownerSessionId: string;
   readonly expectedOldHead: string;
   readonly expectedOldBranch: string;
+  /** Replacement workspace Git HEAD observed by the same host fence as the pin. */
+  readonly expectedNewHead: string;
+  /**
+   * Owner-bound Host Approval capability minted by the trusted host fence.
+   * Every field is revalidated against the durable approval row inside the same
+   * transaction as this CAS, and the capability is spent by that transaction.
+   */
+  readonly approval: GoalRelocationApprovalRecord;
   /** Trusted first-party read-back digest pinned outside the retention tree. */
   readonly retainedManifestSha256: string;
   readonly now: string;
 }
 
-export type GoalWorkspaceTransferIntent = Omit<GoalWorkspaceTransferIntentRequest, 'leaseTokenHash'> & {
+/** The persisted shape. The lease token hash and the one-shot approval are never stored. */
+export type GoalWorkspaceTransferIntent = Omit<GoalWorkspaceTransferIntentRequest,
+  'leaseTokenHash' | 'approval'> & {
   readonly status: 'prepared' | 'completed' | 'cancelled';
 };
 
@@ -183,7 +198,8 @@ function matchingSealedEvidence(
   }
 }
 
-function validPersistedIntent(request: Omit<GoalWorkspaceTransferIntentRequest, 'leaseTokenHash'>): boolean {
+function validPersistedIntent(request: Omit<GoalWorkspaceTransferIntentRequest,
+  'leaseTokenHash' | 'approval'>): boolean {
   return request.operationId.length > 0 && request.operationId.length <= 128
     && request.goalId.length > 0 && request.goalKey.length > 0
     && request.fromWorkspaceId.length > 0 && request.toWorkspaceId.length > 0
@@ -219,7 +235,11 @@ export class SqliteGoalWorkspaceTransferRepository {
   /** One active CAS reservation per Goal. No source data or writer ownership changes. */
   public async prepare(request: GoalWorkspaceTransferIntentRequest): Promise<boolean> {
     if (!validRequest(request)) return false;
-    const serialized = JSON.stringify({ ...request, leaseTokenHash: undefined });
+    // The approval id is part of the persisted intent identity so an idempotent
+    // retry is recognised by the SAME capability, while a forged or re-minted id
+    // on an existing intent is rejected instead of silently matching.
+    const serialized = JSON.stringify({ ...request, leaseTokenHash: undefined,
+      approval: { approvalId: request.approval.approvalId } });
     if (Buffer.byteLength(serialized, 'utf8') > 8192) return false;
     const conn = this.database.connection;
     conn.exec('BEGIN IMMEDIATE;');
@@ -290,6 +310,16 @@ export class SqliteGoalWorkspaceTransferRepository {
       if (prior !== undefined) {
         conn.exec('ROLLBACK;');
         return prior.operation_id === request.operationId && prior.request_json === serialized;
+      }
+
+      // Fresh intent: the Host Approval capability must bind this exact Goal,
+      // operation, workspace pair and owner session, and must still be unspent
+      // and unexpired. It is spent inside THIS transaction, so a rollback can
+      // never burn the owner's capability and a commit can never leave it live.
+      if (!consumeGoalRelocationApproval(conn, request.approval, Date.parse(request.now),
+        request.expectedAdmissionGeneration, request.leaseGeneration)) {
+        conn.exec('ROLLBACK;');
+        return false;
       }
 
       const written = conn.prepare(`
@@ -481,6 +511,31 @@ export class SqliteGoalWorkspaceTransferRepository {
         prepared.expectedRevision, prepared.leaseGeneration, request.leaseTokenHash,
       );
       if (Number(goalWrite.changes) !== 1) return refuse();
+      // Every Goal revision owns exactly one checkpoint row. A relocation CAS
+      // that bumped the revision without its history would leave the Goal
+      // permanently unreadable, so the row lands in the same transaction and
+      // carries the prior checkpoint forward when the Goal already had one.
+      const checkpointWrite = conn.prepare(`
+        INSERT INTO goal_checkpoints (
+          id, goal_id, revision, current_phase, summary, step_updates_json,
+          next_action, blockers_json, evidence_json, active_task_ids_json,
+          tracked_tasks_json, created_at
+        )
+        SELECT ?, g.id, ?, COALESCE(c.current_phase, g.current_phase), ?,
+          COALESCE(c.step_updates_json, '[]'),
+          COALESCE(c.next_action, 'Await runtime admission on the replacement Goal workspace'),
+          COALESCE(c.blockers_json, '[]'), COALESCE(c.evidence_json, '[]'),
+          COALESCE(c.active_task_ids_json, '[]'),
+          COALESCE(c.tracked_tasks_json, g.tracked_tasks_json), ?
+        FROM goals g
+        LEFT JOIN goal_checkpoints c ON c.goal_id = g.id AND c.revision = ?
+        WHERE g.id = ?
+      `).run(
+        randomUUID(), prepared.expectedRevision + 1,
+        'Goal workspace relocated by verified custody transfer', request.now,
+        prepared.expectedRevision, prepared.goalId,
+      );
+      if (Number(checkpointWrite.changes) !== 1) return refuse();
 
       const invalidated = JSON.stringify({
         ...oldReceipt, invalidatedAt: request.now, invalidationReason: 'goal_workspace_relocated',

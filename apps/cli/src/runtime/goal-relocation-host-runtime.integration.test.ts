@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
+import { SqliteDatabase, SqliteGoalRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import type { HostMutationApprovalRequest } from '@unified-mpc/mcp-server';
 import { createStdioMcpRuntime } from './stdio-mcp-runtime.js';
 
@@ -29,7 +29,23 @@ async function source(): Promise<{ root: string; data: string; project: {
     rootPath: path.join(root, 'project'), realRootPath: path.join(root, 'project'),
     createdAt: '2026-10-09T00:00:00.000Z' };
   const db = new SqliteDatabase(path.join(data, 'unified-mpc.sqlite'));
-  try { await new SqliteWorkspaceRepository(db).insert(project); } finally { db.close(); }
+  try {
+    const workspaces = new SqliteWorkspaceRepository(db);
+    await workspaces.insert(project);
+    // The approval ledger only mints capabilities bound to a real Goal row.
+    await workspaces.insert({
+      id: 'goal-preserved', displayName: 'Goal Project Goal', rootPath: project.rootPath + '/goal',
+      realRootPath: project.rootPath + '/goal', createdAt: '2026-10-09T00:00:00.000Z',
+      lifecycleKind: 'goal', goalId: exact.goalId, parentWorkspaceId: project.id,
+      goalWorkspaceKind: 'git_worktree', branchName: 'goal/preserved',
+    });
+    await new SqliteGoalRepository(db).acquire({
+      goalId: exact.goalId, workspaceId: 'goal-preserved', goalKey: 'host-approval-key',
+      ownerClientId: hostIdentity.clientId, ownerSessionId: hostIdentity.sessionId,
+      objective: 'Preserve the Goal', plan: { steps: [] },
+      leaseTokenHash: 'host-approval-lease', leaseSeconds: 600, now: '2026-10-09T00:00:00.000Z',
+    });
+  } finally { db.close(); }
   return { root, data, project };
 }
 

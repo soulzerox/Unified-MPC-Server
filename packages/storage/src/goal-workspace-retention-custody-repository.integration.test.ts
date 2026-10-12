@@ -20,6 +20,7 @@ const pin: RecordVerifiedGoalWorkspaceCustodyRequest = {
   retentionPath: '/srv/verified-retention/custody-1',
   expectedManifestSha256: 'b'.repeat(64),
   expectedHead: sha, expectedBranch: 'goal/original',
+newWorkspaceHead: 'd'.repeat(40),
   ownerClientId: 'owner-client', ownerSessionId: 'owner-session',
   expectedRevision: 0, expectedAdmissionGeneration: 2,
   leaseGeneration: 1, leaseTokenHash: 'real-live-token-hash', pinnedAt: now,

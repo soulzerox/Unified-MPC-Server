@@ -14,15 +14,34 @@ import {
 import type { GoalRuntimeAdmissionIdentity } from './goal-runtime-control-plane-service.js';
 
 /**
+ * Exact owner-bound, single-use capability minted only after the trusted host
+ * confirmed this precise Goal/operation/stage/workspace pair. Storage consumes
+ * it exactly once at the CAS; replay, expiry, or a stale admission/lease
+ * generation blocks the compare-and-swap.
+ */
+export interface GoalRelocationHostApproval {
+  readonly approvalId: string;
+  readonly goalId: string;
+  readonly operationId: string;
+  readonly action: 'attest_custody' | 'relocate_goal';
+  readonly fromWorkspaceId: string;
+  readonly toWorkspaceId: string;
+  readonly ownerClientId: string;
+  readonly ownerSessionId: string;
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+}
+
+/**
  * First-party adapter only. This must be a host-level exclusive operation
- * fence that ALSO verifies the actor's session and explicit owner approval.
+ * fence that ALSO verifies the actor session and explicit owner approval.
  * It may never be implemented by trusting a boolean passed through MCP args.
  */
 export interface GoalRelocationHostFence {
   withAuthorizedOwner<T>(
     identity: { goalId: string; operationId: string; clientId: string; sessionId: string;
       fromWorkspaceId: string; toWorkspaceId: string; action: 'attest_custody' | 'relocate_goal' },
-    run: () => Promise<T>,
+    run: (approval: GoalRelocationHostApproval) => Promise<T>,
   ): Promise<T>;
 }
 
@@ -36,17 +55,17 @@ export interface GoalRelocationRuntimeRequest {
   readonly leaseToken: string;
 }
 
-export interface GoalRelocationSourceCheckpoint {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly head: string;
-  readonly revision: number;
-}
-
 /** Pin is persisted separately from the retention bundle by a trusted store. */
 export interface GoalRelocationCustodyPin extends VerifyRetainedGoalWorkspaceBundleRequest {
   readonly operationId: string;
   readonly newWorkspaceId: string;
+  /**
+   * Exact HEAD of the clean replacement worktree observed under the same host
+   * fence that pinned retention. This is the replacement source checkpoint,
+   * so the orchestrator never trusts an unverified per-workspace checkpoint
+   * read that the caller could steer.
+   */
+  readonly newWorkspaceHead: string;
   readonly ownerClientId: string;
   readonly ownerSessionId: string;
   readonly expectedRevision: number;
@@ -60,7 +79,8 @@ export interface GoalRelocationTransferPort {
     operationId: string; goalId: string; goalKey: string; fromWorkspaceId: string;
     toWorkspaceId: string; expectedRevision: number; expectedAdmissionGeneration: number;
     leaseGeneration: number; leaseTokenHash: string; ownerClientId: string; ownerSessionId: string;
-    expectedOldHead: string; expectedOldBranch: string; retainedManifestSha256: string; now: string;
+    expectedOldHead: string; expectedOldBranch: string; retainedManifestSha256: string;
+    expectedNewHead: string; approval: GoalRelocationHostApproval; now: string;
   }): Promise<boolean>;
   commit(request: {
     operationId: string; goalId: string; leaseTokenHash: string;
@@ -77,7 +97,6 @@ export interface GoalRelocationOrchestratorPorts {
   };
   readonly git: { observeWorkspace(rootPath: string): Promise<Result<GitWorkspaceSnapshot>> };
   readonly custody: { readPinned(operationId: string): Promise<GoalRelocationCustodyPin | null> };
-  readonly checkpoints: { readForSource(workspaceId: string): Promise<GoalRelocationSourceCheckpoint | null> };
   readonly transfer: GoalRelocationTransferPort;
   readonly runtimeIdentity: GoalRuntimeAdmissionIdentity;
   readonly now?: () => Date;
@@ -173,15 +192,19 @@ export class GoalWorkspaceRelocationOrchestrator {
         clientId: request.actor.clientId, sessionId: request.actor.sessionId,
         fromWorkspaceId: request.oldWorkspaceId, toWorkspaceId: request.newWorkspaceId,
         action: 'relocate_goal',
-      }, async (): Promise<Result<GoalRelocationOrchestratorResult>> => this.transferWithinHostFence(request));
+      }, async (approval): Promise<Result<GoalRelocationOrchestratorResult>> =>
+        this.transferWithinHostFence(request, approval));
     } catch {
       return err(appError('CONFLICT', 'Goal relocation Host Approval/fence is not currently established', true));
     }
   }
 
-  private async transferWithinHostFence(request: GoalRelocationRuntimeRequest): Promise<Result<GoalRelocationOrchestratorResult>> {
+  private async transferWithinHostFence(
+    request: GoalRelocationRuntimeRequest,
+    approval: GoalRelocationHostApproval,
+  ): Promise<Result<GoalRelocationOrchestratorResult>> {
     const tokenHash = createHash('sha256').update(request.leaseToken).digest('hex');
-    const { goals, workspaces, git, custody, checkpoints, transfer, runtimeIdentity } = this.ports;
+    const { goals, workspaces, git, custody, transfer, runtimeIdentity } = this.ports;
     const now = this.now().toISOString();
     const [goal, old, next, pin] = await Promise.all([
       goals.getById(request.goalId), workspaces.get(request.oldWorkspaceId),
@@ -210,13 +233,14 @@ export class GoalWorkspaceRelocationOrchestrator {
       return err(appError('CONFLICT', 'Goal owner/lease, replacement registry, custody or runtime identity is stale', true));
     }
     const prior = await workspaces.getAdmissionReceipt(old.id);
-    const checkpoint = await checkpoints.readForSource(next.id);
+    // The replacement source checkpoint is the HEAD pinned by the same host
+    // fence that pinned retention, not a caller-steerable per-workspace read.
+    const checkpoint = { head: pin.newWorkspaceHead };
     if (prior === null || prior.admissionGeneration !== pin.expectedAdmissionGeneration
       || prior.invalidatedAt !== undefined || prior.goalId !== goal.id
       || prior.workspaceId !== old.id || prior.writeLeaseGeneration > goal.leaseGeneration
       || prior.branchName !== old.branchName
-      || checkpoint === null || checkpoint.workspaceId !== next.id
-      || checkpoint.revision < 1 || !/^[0-9a-f]{40,64}$/.test(checkpoint.head)) {
+      || !/^[0-9a-f]{40,64}$/.test(checkpoint.head)) {
       return err(appError('CONFLICT', 'Goal admission receipt or replacement source checkpoint is missing', true));
     }
 
@@ -274,6 +298,7 @@ export class GoalWorkspaceRelocationOrchestrator {
       leaseGeneration: goal.leaseGeneration, leaseTokenHash: tokenHash,
       ownerClientId: request.actor.clientId, ownerSessionId: request.actor.sessionId,
       expectedOldHead: observed.head, expectedOldBranch: old.branchName,
+      expectedNewHead: checkpoint.head, approval,
       retainedManifestSha256: retained.value.manifestSha256, now,
     });
     if (!prepared) return err(appError('CONFLICT', 'Durable Goal relocation preparation lost CAS ownership', true));
@@ -307,7 +332,9 @@ export class GoalWorkspaceRelocationOrchestrator {
       ...(replacement.mergeBaseSha === undefined ? {} : { mergeBaseSha: replacement.mergeBaseSha }),
       dirtyState: 'clean', dirtyFingerprint: replacement.dirtyFingerprint,
       stagedFingerprint: replacement.stagedFingerprint,
-      checkpointId: checkpoint.id, checkpointRevision: checkpoint.revision,
+      // The replacement admission is anchored to the same pinned source
+      // checkpoint custody attested, not to a fresh caller-chosen read.
+      checkpointId: checkpoint.head, checkpointRevision: 1,
       writeLeaseGeneration: goal.leaseGeneration, ...runtimeIdentity,
       workflowVersion: 1, admissionGeneration: 1, createdAt: now,
     };

@@ -16,6 +16,8 @@ export interface GoalWorkspaceCustodyPin {
   readonly expectedManifestSha256: string;
   readonly expectedHead: string;
   readonly expectedBranch: string;
+  /** Exact replacement worktree HEAD observed under the same host fence. */
+  readonly newWorkspaceHead: string;
   readonly ownerClientId: string;
   readonly ownerSessionId: string;
   readonly expectedRevision: number;
@@ -73,6 +75,7 @@ function validPin(p: GoalWorkspaceCustodyPin): boolean {
     && typeof p.ownerSessionId === 'string' && p.ownerSessionId.length > 0
     && typeof p.expectedBranch === 'string' && p.expectedBranch.length > 0 && p.expectedBranch.length <= 256
     && /^[a-f0-9]{40,64}$/.test(p.expectedHead)
+ && /^[a-f0-9]{40,64}$/.test(p.newWorkspaceHead)
     && /^[a-f0-9]{64}$/.test(p.expectedManifestSha256)
     && typeof p.retentionPath === 'string' && path.isAbsolute(p.retentionPath)
     && path.resolve(p.retentionPath) === p.retentionPath
@@ -94,6 +97,7 @@ function stablePin(request: RecordVerifiedGoalWorkspaceCustodyRequest): GoalWork
     expectedManifestSha256: request.expectedManifestSha256,
     expectedHead: request.expectedHead,
     expectedBranch: request.expectedBranch,
+    newWorkspaceHead: request.newWorkspaceHead,
     ownerClientId: request.ownerClientId,
     ownerSessionId: request.ownerSessionId,
     expectedRevision: request.expectedRevision,

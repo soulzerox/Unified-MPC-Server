@@ -15,6 +15,7 @@ import {
 } from './goal-workspace-custody-attestation-service.js';
 
 const oldHead = 'a'.repeat(40);
+const nextHead = 'd'.repeat(40);
 const rootPaths: string[] = [];
 const now = '2026-10-09T00:00:00.000Z';
 const goalId = 'goal-source-owner';
@@ -151,7 +152,14 @@ async function fixture(): Promise<Fixture> {
       async get(id) { return id === oldId ? old : id === nextId ? next : null; },
       async getAdmissionReceipt(id) { return id === oldId ? admission : null; },
     },
-    git: { async observeWorkspace() { return ok(snapshot); } },
+    git: {
+      async observeWorkspace() { return ok(snapshot); },
+      async observeReplacement() {
+        return ok({ ...snapshot, head: nextHead, branch: 'goal/replacement',
+          worktreeIdentity: 'new-worktree', statusEntries: [],
+          dirtyFingerprint: 'clean', stagedFingerprint: 'none' });
+      },
+    },
     custody: {
       async recordVerified(input) {
         state.recordCount += 1;
@@ -182,6 +190,9 @@ describe('GoalWorkspaceCustodyAttestationService #298', () => {
     expect(f.state.saved).toMatchObject({
       goalId, newWorkspaceId: nextId, ownerClientId: actor.clientId, ownerSessionId: actor.sessionId,
       expectedRevision: 14, expectedAdmissionGeneration: 6, leaseGeneration: 4,
+      // Pinned under the same fence, so the later CAS never re-reads a
+      // caller-steerable replacement HEAD.
+      newWorkspaceHead: nextHead,
     });
     expect(await readFile(path.join(f.originalPath, tracked.path), 'utf8')).toBe('const original = true;\n');
   });

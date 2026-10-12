@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { HostMutationApprovalRequest } from '@unified-mpc/mcp-server';
 import { createTrustedGoalRelocationHostFence } from './goal-relocation-host-fence.js';
+import type { GoalRelocationHostApproval } from '@unified-mpc/application';
 
 const owner = { clientId: 'trusted-owner', sessionId: 'trusted-session' };
 const request = {
@@ -8,6 +9,12 @@ const request = {
   clientId: owner.clientId, sessionId: owner.sessionId,
   fromWorkspaceId: 'goal-original', toWorkspaceId: 'goal-clean',
   action: 'attest_custody' as const,
+};
+const recorded: GoalRelocationHostApproval[] = [];
+/** Stands in for the durable single-use ledger storage will spend at the CAS. */
+const recordApproval = async (approval: GoalRelocationHostApproval): Promise<boolean> => {
+  recorded.push(approval);
+  return true;
 };
 
 describe('first-party Goal relocation Host Approval fence #298', () => {
@@ -24,6 +31,7 @@ describe('first-party Goal relocation Host Approval fence #298', () => {
     const fence = createTrustedGoalRelocationHostFence({
       currentHostActor: () => owner,
       approveExactAction: async (approval): Promise<boolean> => { requests.push(approval); return true; },
+      recordApproval,
     });
     await expect(fence.withAuthorizedOwner({ ...request, sessionId: 'spoofed' }, async () => true))
       .rejects.toThrow('authenticated host actor');
@@ -37,6 +45,7 @@ describe('first-party Goal relocation Host Approval fence #298', () => {
     const fence = createTrustedGoalRelocationHostFence({
       currentHostActor: () => owner,
       approveExactAction: async (approval): Promise<boolean> => { requests.push(approval); return true; },
+      recordApproval,
     });
     expect(await fence.withAuthorizedOwner(request, async () => 'stored')).toBe('stored');
     expect(await fence.withAuthorizedOwner({ ...request, action: 'relocate_goal' }, async () => 'relocated'))
@@ -56,12 +65,14 @@ describe('first-party Goal relocation Host Approval fence #298', () => {
     const denied = createTrustedGoalRelocationHostFence({
       currentHostActor: () => owner,
       approveExactAction: async (): Promise<boolean> => false,
+      recordApproval,
     });
     await expect(denied.withAuthorizedOwner(request, async () => { performed++; }))
       .rejects.toThrow('Host denied');
     const changed = createTrustedGoalRelocationHostFence({
       currentHostActor: () => actor,
       approveExactAction: async (): Promise<boolean> => { actor = null; return true; },
+      recordApproval,
     });
     await expect(changed.withAuthorizedOwner(request, async () => { performed++; }))
       .rejects.toThrow('session changed');
@@ -72,6 +83,7 @@ describe('first-party Goal relocation Host Approval fence #298', () => {
     const fence = createTrustedGoalRelocationHostFence({
       currentHostActor: () => owner,
       approveExactAction: async (): Promise<boolean> => true,
+      recordApproval,
     });
     let release!: () => void;
     let entered!: () => void;

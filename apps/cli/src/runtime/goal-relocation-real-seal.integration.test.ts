@@ -28,7 +28,6 @@ describe('native Goal retention full seal/readback flow #298', () => {
     const nextPath = path.join(root, 'clean-destination');
     const dataPath = path.join(root, 'native-data');
     await mkdir(source);
-    await mkdir(nextPath);
     const git = (cwd: string, ...args: string[]): string =>
       execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
     git(source, 'init', '-q', '-b', 'main');
@@ -38,6 +37,9 @@ describe('native Goal retention full seal/readback flow #298', () => {
     git(source, 'add', 'tracked.txt');
     git(source, 'commit', '-qm', 'base');
     git(source, 'worktree', 'add', '-qb', 'goal/native-retention', oldPath, 'HEAD');
+    // The relocation target must be a real clean worktree: the pin records its
+    // HEAD, so custody attestation refuses anything it cannot observe.
+    git(source, 'worktree', 'add', '-qb', 'goal/native-replacement', nextPath, 'HEAD');
     await writeFile(path.join(oldPath, 'tracked.txt'), 'foreign tracked bytes\n');
     await writeFile(path.join(oldPath, 'foreign-untracked.txt'), 'foreign untracked bytes\n');
 

@@ -9,6 +9,7 @@ import type { Workspace } from '@unified-mpc/workspace';
 import { sealMixedDirtyGoalWorkspace, type GoalWorkspaceRetentionGitPort, type GoalWorkspaceRetentionManifest } from './goal-workspace-retention-service.js';
 import {
   GoalWorkspaceRelocationOrchestrator, type GoalRelocationOrchestratorPorts,
+  type GoalRelocationHostApproval,
 } from './goal-workspace-relocation-orchestrator.js';
 
 const head = 'a'.repeat(40);
@@ -42,6 +43,9 @@ interface Fixture {
     dirtyReplacement: boolean;
     missingCheckpoint: boolean;
     custodyOwnerDrift: boolean;
+    approvalIssued: number;
+    lastApproval: GoalRelocationHostApproval | null;
+    lastExpectedNewHead: string | undefined;
     goal: GoalRecord;
     old: Workspace;
     next: Workspace;
@@ -124,6 +128,9 @@ async function fixture(): Promise<Fixture> {
     allowed: true, prepareCount: 0, commitCount: 0,
     revalidationDrift: false, dirtyReplacement: false, missingCheckpoint: false,
     custodyOwnerDrift: false,
+    approvalIssued: 0,
+    lastApproval: null as GoalRelocationHostApproval | null,
+    lastExpectedNewHead: undefined as string | undefined,
     goal, old, next, oldReceipt: original,
     newReceipt: null as WorkspaceAdmissionReceipt | null,
   };
@@ -134,7 +141,15 @@ async function fixture(): Promise<Fixture> {
         if (!state.allowed || identity.clientId !== actor.clientId || identity.sessionId !== actor.sessionId) {
           throw new Error('Host Approval refused');
         }
-        return run();
+        state.approvalIssued += 1;
+        return run({
+          approvalId: `approval-${state.approvalIssued}`, goalId: identity.goalId,
+          operationId: identity.operationId, action: identity.action,
+          fromWorkspaceId: identity.fromWorkspaceId, toWorkspaceId: identity.toWorkspaceId,
+          ownerClientId: identity.clientId, ownerSessionId: identity.sessionId,
+          issuedAt: Date.parse('2026-10-09T00:00:00.000Z'),
+          expiresAt: Date.parse('2026-10-09T00:02:00.000Z'),
+        });
       },
     },
     goals: { async getById(id) { return id === goalId ? state.goal : null; } },
@@ -161,6 +176,7 @@ async function fixture(): Promise<Fixture> {
           expectedManifestSha256: retained.value.manifestSha256,
           expectedGoalId: goalId, expectedWorkspaceId: oldId, newWorkspaceId: newId,
           expectedHead: head, expectedBranch: 'goal/old',
+          newWorkspaceHead: state.missingCheckpoint ? 'invalid' : nextHead,
           expectedRevision: 33, expectedAdmissionGeneration: 3, leaseGeneration: 3,
           ownerClientId: state.custodyOwnerDrift ? 'other-owner' : actor.clientId,
           ownerSessionId: actor.sessionId,
@@ -168,16 +184,11 @@ async function fixture(): Promise<Fixture> {
         };
       },
     },
-    checkpoints: {
-      async readForSource(id) {
-        return id === newId && !state.missingCheckpoint
-          ? { id: 'trusted-new-checkpoint', workspaceId: newId, head: nextHead, revision: 1 }
-          : null;
-      },
-    },
     transfer: {
       async prepare(input) {
         state.prepareCount += 1;
+        state.lastApproval = input.approval;
+        state.lastExpectedNewHead = input.expectedNewHead;
         return input.goalId === goalId && input.retainedManifestSha256 === retained.value.manifestSha256;
       },
       async commit(input) {
@@ -218,6 +229,13 @@ describe('GoalWorkspaceRelocationOrchestrator #298', () => {
     });
     expect(f.state.prepareCount).toBe(1);
     expect(f.state.commitCount).toBe(1);
+    // The single-use approval minted by the host fence is handed to storage, and
+    // the expected replacement HEAD is the fence-pinned one, never a fresh read.
+    expect(f.state.lastApproval).toMatchObject({
+      goalId, operationId, action: 'relocate_goal', fromWorkspaceId: oldId,
+      toWorkspaceId: newId, ownerClientId: actor.clientId, ownerSessionId: actor.sessionId,
+    });
+    expect(f.state.lastExpectedNewHead).toBe(nextHead);
     expect(await readFile(path.join(f.oldRoot, 'src/dirty.ts'), 'utf8')).toBe('const dirty = 1;\n');
     expect(await readFile(path.join(f.oldRoot, 'tests/new.test.ts'), 'utf8')).toBe('test();\n');
     expect(f.state.old.lifecycleKind).toBe('inspection');
@@ -237,7 +255,7 @@ describe('GoalWorkspaceRelocationOrchestrator #298', () => {
     expect(f.state.prepareCount).toBe(0);
   });
 
-  it('rejects lost checkpoint or dirty replacement without preparing an intent', async () => {
+  it('rejects an unusable pinned replacement HEAD or a dirty replacement without preparing an intent', async () => {
     const f = await fixture();
     f.state.missingCheckpoint = true;
     expect((await f.service.transfer(f.request)).ok).toBe(false);

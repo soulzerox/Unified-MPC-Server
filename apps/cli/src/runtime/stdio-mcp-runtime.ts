@@ -35,6 +35,8 @@ import {
   type FileActor,
   type GoalRelocationHostFence,
   GoalWorkspaceCustodyAttestationService,
+  GoalWorkspaceRelocationOrchestrator,
+  type GoalRelocationCustodyPin,
   GoalWorkspaceRetentionEvidenceSealingService,
 } from '@unified-mpc/application';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
@@ -60,8 +62,10 @@ import {
   SqliteCheckpointRepository,
   SqliteDatabase,
   SqliteGoalRepository,
+  SqliteGoalRelocationApprovalRepository,
   SqliteGoalWorkspaceRetentionCustodyRepository,
   SqliteGoalWorkspaceRetentionEvidenceRepository,
+  SqliteGoalWorkspaceTransferRepository,
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
   SqliteManagedResourceBindingRepository,
@@ -71,7 +75,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
-import { appError, err, ok, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
@@ -95,6 +99,7 @@ export interface StdioMcpRuntime {
   readonly goalRelocationHostFence: GoalRelocationHostFence;
   /** Not installed without trusted native-host actor and exact-action approval. */
   readonly goalCustodyAttestation?: GoalWorkspaceCustodyAttestationService;
+  readonly goalWorkspaceRelocation?: GoalWorkspaceRelocationOrchestrator;
   readonly goalRetentionEvidenceSealing?: GoalWorkspaceRetentionEvidenceSealingService;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
@@ -147,6 +152,10 @@ export function createStdioMcpRuntime(
     currentHostActor: options.trustedGoalRelocationActorProvider ?? ((): null => null),
     ...(options.goalRelocationExactActionApproval === undefined ? {}
       : { approveExactAction: options.goalRelocationExactActionApproval }),
+    // Single-use authority: the capability exists only once the durable ledger
+    // holds it, because storage spends that exact row inside the transfer CAS.
+    recordApproval: async (approval): Promise<boolean> =>
+      new SqliteGoalRelocationApprovalRepository(database).record(approval),
   });
   const databaseFilename = path.join(dataPath, 'unified-mpc.sqlite');
   const database = new SqliteDatabase(databaseFilename, { backupDirectory: path.join(dataPath, 'backups') });
@@ -308,6 +317,26 @@ export function createStdioMcpRuntime(
     }
     return gitService.observeWorkspace(custodyActor, registered.id);
   };
+// The relocation target is a clean temporary workspace, not a Goal one.
+  const observeRegisteredReplacement = async (rootPath: string): ReturnType<GitService['observeWorkspace']> => {
+    const registered = (await workspaceRepository.list()).find((entry) =>
+      entry.realRootPath === rootPath && entry.lifecycleKind === 'temporary') ?? null;
+    if (registered === null) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Goal relocation requires a registered replacement workspace'));
+    }
+    return gitService.observeWorkspace(custodyActor, registered.id);
+  };
+  // Relocation observes both sides: the Goal source and the clean temporary
+  // replacement that becomes the Goal.
+  const observeRegisteredRelocation = async (rootPath: string): ReturnType<GitService['observeWorkspace']> => {
+    const registered = (await workspaceRepository.list()).find((entry) =>
+      entry.realRootPath === rootPath
+      && (entry.lifecycleKind === 'goal' || entry.lifecycleKind === 'temporary')) ?? null;
+    if (registered === null) {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Goal relocation requires a registered Goal or replacement workspace'));
+    }
+    return gitService.observeWorkspace(custodyActor, registered.id);
+  };
   const registeredGitSeal = {
     status: async (rootPath: string): ReturnType<GitService['status']> => {
       const registered = await getRegisteredGoal(rootPath);
@@ -343,14 +372,27 @@ export function createStdioMcpRuntime(
         retentionRoot: path.join(dataPath, 'goal-retention-evidence'),
       })
     : undefined;
+  const goalCustodyPins = new SqliteGoalWorkspaceRetentionCustodyRepository(database);
   const goalCustodyAttestation = trustedGoalHostReady
     ? new GoalWorkspaceCustodyAttestationService({
         host: goalRelocationHostFence,
         trustedEvidence: evidenceLedger,
         goals: goalRepository,
         workspaces: goalWorkspacePorts,
-        git: { observeWorkspace: observeRegisteredGoal },
-        custody: new SqliteGoalWorkspaceRetentionCustodyRepository(database),
+        git: { observeWorkspace: observeRegisteredGoal, observeReplacement: observeRegisteredReplacement },
+        custody: goalCustodyPins,
+      })
+    : undefined;
+  const goalWorkspaceRelocation = trustedGoalHostReady && options.runtimeAdmissionIdentity !== undefined
+    ? new GoalWorkspaceRelocationOrchestrator({
+        host: goalRelocationHostFence,
+        goals: { getById: (goalId: string): Promise<GoalRecord | null> => goalRepository.getById(goalId) },
+        workspaces: goalWorkspacePorts,
+        git: { observeWorkspace: observeRegisteredRelocation },
+        custody: { readPinned: (operationId: string): Promise<GoalRelocationCustodyPin | null> =>
+          goalCustodyPins.readPinned(operationId) },
+        transfer: new SqliteGoalWorkspaceTransferRepository(database),
+        runtimeIdentity: options.runtimeAdmissionIdentity,
       })
     : undefined;
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
@@ -869,6 +911,7 @@ export function createStdioMcpRuntime(
     ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),
     services,
     goalRelocationHostFence,
+    ...(goalWorkspaceRelocation === undefined ? {} : { goalWorkspaceRelocation }),
     ...(goalCustodyAttestation === undefined ? {} : { goalCustodyAttestation }),
     ...(goalRetentionEvidenceSealing === undefined ? {} : { goalRetentionEvidenceSealing }),
     actor,

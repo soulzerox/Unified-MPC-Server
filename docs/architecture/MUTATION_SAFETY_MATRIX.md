@@ -113,7 +113,7 @@ After a dispatched HTTP mutation fails/times out, the error explicitly states th
 
 | Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| list is `read`; create is `create`; run/delete are `opaque`/`delete` | required for create/run/delete | required for mutation | external/unknown Windows Task Scheduler state | no | not a workspace path mutation, but exact host action is mandatory | scheduled command creation remains opaque and cannot use host approval to bypass prohibited execution policy elsewhere | trusted stdio/Desktop providers can approve; providerless HTTP/Web or headless hosts without a human surface deny |
+| list is `read`; create is `create`; run/delete are `opaque`/`delete` | required for create/run/delete | required for mutation | external/unknown Windows Task Scheduler state | no | not a workspace path mutation, but exact host action is mandatory | `scheduler` create enforces the same `prohibitedAgentCommandReason`, `prohibitedUnscopedGitPushReason` and `prohibitedUnscopedPullRequestMergeReason` checks as `shell`, unconditionally and before any `schtasks` dispatch; opacity is never the control | trusted stdio/Desktop providers can approve; providerless HTTP/Web or headless hosts without a human surface deny |
 
 A scheduler mutation dispatches `schtasks.exe` once. If dispatch returns an error or cancellation after launch, the result says the outcome may be unknown, requires inspecting current task state, and says **do not retry automatically**.
 

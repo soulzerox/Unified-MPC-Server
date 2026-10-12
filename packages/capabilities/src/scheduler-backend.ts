@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { appError, err, isApplicationAuthorized, ok, type InvocationAuthorization, type Result } from '@unified-mpc/domain';
 import type { CapabilityBackend } from './local-capability-service.js';
+import { prohibitedAgentCommandReason, prohibitedUnscopedGitPushReason, prohibitedUnscopedPullRequestMergeReason } from './agent-command-policy.js';
 
 const execFileAsync = promisify(execFile);
 const TASK_NAME_PATTERN = /^[\w .-]{1,200}$/;
@@ -57,6 +58,14 @@ export class SchedulerCapabilityBackend implements CapabilityBackend {
           'PERMISSION_REQUIRED',
           'Creating, running, or deleting a scheduled task requires explicit user confirmation',
         ));
+      }
+      if (request.action === 'create') {
+        // ponytail: merge-fence/prohibited checks apply unconditionally here; a scheduled task
+        // runs unattended, so this is strictly stricter than the interactive shell path.
+        const denial = prohibitedUnscopedGitPushReason(request.command, request.arguments ?? [])
+          ?? prohibitedUnscopedPullRequestMergeReason(request.command, request.arguments ?? [])
+          ?? prohibitedAgentCommandReason(request.command, request.arguments ?? []);
+        if (denial !== undefined) return err(appError('PERMISSION_DENIED', denial));
       }
       switch (request.action) {
         case 'list': return ok({ tasks: await this.list(signal) });

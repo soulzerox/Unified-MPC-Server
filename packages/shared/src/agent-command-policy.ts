@@ -13,6 +13,20 @@ const PYTHON_EXECUTABLES = new Set(['python', 'python3']);
 const INLINE_SCRIPT_EXECUTABLES = new Set(['perl', 'ruby']);
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set(['-C', '-c', '-cde', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
 const GH_GLOBAL_OPTIONS_WITH_VALUES = new Set(['--hostname', '--repo', '-r']);
+const ENV_OPTIONS_WITH_VALUES = new Set(['-u', '--unset', '-c', '--chdir', '-s', '--split-string']);
+const XARGS_OPTIONS_WITH_VALUES = new Set(['-n', '-p', '-i', '-s', '-a', '-d', '-e', '-l', '--max-args', '--max-procs', '--replace', '--arg-file', '--delimiter', '--eof', '--max-lines', '--max-chars']);
+/**
+ * Wrappers that hand their remaining argv to a real executable unchanged. Unwrapping them lets the
+ * underlying command be fenced, so `env gh pr merge` cannot route around the merge gate.
+ */
+const TRANSPARENT_WRAPPERS = new Map<string, ReadonlySet<string>>([
+  ['env', ENV_OPTIONS_WITH_VALUES],
+  ['xargs', XARGS_OPTIONS_WITH_VALUES],
+  ['nohup', new Set<string>()],
+  ['command', new Set<string>()],
+  ['stdbuf', new Set(['-i', '-o', '-e', '--input', '--output', '--error'])],
+  ['setsid', new Set(['-f', '-w', '--fork', '--wait'])],
+]);
 
 /**
  * Hard blocks machine-level commands plus terminal-style inline text editing that
@@ -54,23 +68,99 @@ export function prohibitedUnscopedPullRequestMergeReason(
   args: readonly string[],
 ): string | undefined {
   const basename = executableBasename(executable);
-  if (basename === 'gh') {
-    if (hasGhPullRequestMergeArguments(args)) return guardedPullRequestMergeReason();
-    if (hasGhApiPullRequestMergeArguments(args)) return guardedPullRequestMergeReason();
+  const ghArguments = resolveGhArguments(basename, args);
+  if (ghArguments !== undefined) {
+    if (hasGhPullRequestMergeArguments(ghArguments)) return guardedPullRequestMergeReason();
+    if (hasGhApiPullRequestMergeArguments(ghArguments)) return guardedPullRequestMergeReason();
   }
+  if (basename === 'gh' && hasGhMergeAliasDefinition(args)) return guardedPullRequestMergeReason();
+  const scriptText = inlineScriptText(basename, args);
+  if (scriptText !== undefined && hasGhMergeInScriptText(scriptText)) return guardedPullRequestMergeReason();
   if (isOpaqueGitRunner(basename)) {
     const commandText = interpreterCommandText(basename, args);
     if (commandText === undefined) return undefined;
-    const tokens = commandText.split(/\s+/).filter(Boolean)
-      .map((token) => token.replace(/^[('"`]+|[)"'`;|&]+$/g, ''))
-      .filter(Boolean);
+    const tokens = commandTokens(commandText);
     for (let index = 0; index < tokens.length; index += 1) {
-      if (executableBasename(unquote(tokens[index]!)) !== 'gh') continue;
-      const tail = tokens.slice(index + 1).map(unquote);
+      if (executableBasename(tokens[index]!) !== 'gh') continue;
+      const tail = tokens.slice(index + 1);
       if (hasGhPullRequestMergeArguments(tail) || hasGhApiPullRequestMergeArguments(tail)) {
         return guardedPullRequestMergeReason();
       }
     }
+  }
+  return undefined;
+}
+
+/**
+ * Splits opaque command text into fence tokens. Quote characters are separators as well as
+ * whitespace, so an embedded string literal (`exec('gh pr merge 5')`) still exposes the real
+ * command instead of hiding it behind a glued-on prefix.
+ */
+function commandTokens(commandText: string): string[] {
+  return commandText.split(/[\s'"`]+/)
+    .map((token) => token.replace(/^[('`]+|[)'`;|&,]+$/g, ''))
+    .filter(Boolean)
+    .map(unquote);
+}
+
+/** Unwraps transparent argument wrappers so `env gh pr merge` is fenced like a direct `gh` call. */
+function resolveGhArguments(basename: string, args: readonly string[]): readonly string[] | undefined {
+  const wrapperOptions = TRANSPARENT_WRAPPERS.get(basename);
+  if (wrapperOptions === undefined) return basename === 'gh' ? args : undefined;
+  let index = 0;
+  while (index < args.length) {
+    const argument = args[index]!;
+    if (argument === '--') { index += 1; break; }
+    if (argument.startsWith('-') && argument.length > 1) {
+      const flag = argument.split('=')[0]!.toLowerCase();
+      index = wrapperOptions.has(flag) && !argument.includes('=') ? index + 2 : index + 1;
+      continue;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argument)) { index += 1; continue; }
+    break;
+  }
+  return executableBasename(args[index] ?? '') === 'gh' ? args.slice(index + 1) : undefined;
+}
+
+/**
+ * Inline interpreters (`node -e`, `python -c`, `perl -e`) carry their whole program as one opaque
+ * blob, so the token fence cannot be applied to it and the text is searched instead. This
+ * deliberately errs toward blocking: a merge command merely mentioned inside an inline script is
+ * refused, because the fence cannot prove it is not executed.
+ */
+function hasGhMergeInScriptText(scriptText: string): boolean {
+  // Array-style argv hides the tokens behind quotes and commas (`{args:['pr','merge','5']}`),
+  // so separators are flattened to spaces before the token pattern is applied.
+  const text = scriptText.replace(/['"`\\,]+/g, ' ');
+  return /\bgh(?:\.exe)?\b[^\n;]*?\bpr\s+merge\b/i.test(text)
+    || /\bgh(?:\.exe)?\b[^\n;]*?\bapi\b[^\n;]*?(?:pulls\/\d+\/merge|\bmerges\b|mergePullRequest|enablePullRequestAutoMerge)/i.test(text);
+}
+
+/** `gh alias set <name> 'pr merge 5'` defines a merge under a name that later runs unguarded. */
+function hasGhMergeAliasDefinition(args: readonly string[]): boolean {
+  const aliasIndex = args.findIndex((arg) => unquote(arg).toLowerCase() === 'alias');
+  if (aliasIndex < 0) return false;
+  if (unquote(args[aliasIndex + 1] ?? '').toLowerCase() !== 'set') return false;
+  // The alias body is a gh argument list, not a full command line: `gh` is implied by the alias.
+  return args.slice(aliasIndex + 2).some((value) => {
+    const aliasArguments = commandTokens(unquote(value));
+    return hasGhPullRequestMergeArguments(aliasArguments) || hasGhApiPullRequestMergeArguments(aliasArguments);
+  });
+}
+
+/** Returns the program text of an inline-script interpreter, if the invocation carries one. */
+function inlineScriptText(basename: string, args: readonly string[]): string | undefined {
+  const lower = args.map((arg) => arg.toLowerCase());
+  const flags = JAVASCRIPT_EXECUTABLES.has(basename)
+    ? ['-e', '--eval', '-p', '--print', 'eval']
+    : PYTHON_EXECUTABLES.has(basename)
+      ? ['-c']
+      : INLINE_SCRIPT_EXECUTABLES.has(basename)
+        ? ['-e', '-E']
+        : [];
+  for (const flag of flags) {
+    const index = lower.indexOf(flag);
+    if (index >= 0) return args.slice(index + 1).join(' ');
   }
   return undefined;
 }

@@ -98,7 +98,52 @@ describe('reconcileMergeEvidence', () => {
     });
   });
 
-  it('requires inspection when the merge is not observed or the final merge SHA is unavailable', () => {
+  it('surfaces policy breach when a confirmed merge reports no merge method', () => {
+  // A confirmed merge with no reported method is the same fence failure as reporting the
+  // wrong method: nothing proves the required method was used.
+  expect(reconcileMergeEvidence(policy, observation({ mergeMethod: undefined }), receipt(), 'merge')).toMatchObject({
+    status: 'POLICY_BREACH',
+    action: 'surface_policy_breach',
+    reason: 'merge_method_missing',
+    expectedMergeMethod: 'merge',
+    mergeSha: MERGE,
+    blockers: [],
+  });
+});
+
+it('surfaces policy breach for a squash-expected merge that reports no merge method', () => {
+  expect(reconcileMergeEvidence(policy, observation({ mergeMethod: undefined }), receipt(), 'squash')).toMatchObject({
+    status: 'POLICY_BREACH',
+    action: 'surface_policy_breach',
+    reason: 'merge_method_missing',
+    expectedMergeMethod: 'squash',
+  });
+});
+
+it('omits mergeSha from the breach when the confirmed merge reports neither method nor SHA', () => {
+  const decision = reconcileMergeEvidence(
+    policy,
+    observation({ mergeMethod: undefined, mergeSha: undefined }),
+    receipt(),
+    'merge',
+  );
+  expect(decision).toMatchObject({ status: 'POLICY_BREACH', reason: 'merge_method_missing' });
+  expect(decision).not.toHaveProperty('mergeSha');
+});
+
+it('keeps genuinely unproven merge states inspectable rather than breaching', () => {
+  // Only the merge-method fence hardens. Evidence that is merely absent stays inspectable.
+  expect(reconcileMergeEvidence(policy, observation({ merged: false }), receipt(), 'merge'))
+    .toMatchObject({ status: 'INSPECT_REQUIRED', reason: 'merge_not_observed' });
+  expect(reconcileMergeEvidence(policy, observation({ mergeSha: undefined }), receipt(), 'merge'))
+    .toMatchObject({ status: 'INSPECT_REQUIRED', reason: 'merge_sha_missing' });
+  expect(reconcileMergeEvidence(policy, observation({ mergeSha: 'not-a-sha' }), receipt(), 'merge'))
+    .toMatchObject({ status: 'INSPECT_REQUIRED', reason: 'merge_sha_invalid' });
+  expect(reconcileMergeEvidence(policy, observation({ observedAt: 'not-a-date' }), receipt(), 'merge'))
+    .toMatchObject({ status: 'INSPECT_REQUIRED', reason: 'observation_timestamp_invalid' });
+});
+
+it('requires inspection when the merge is not observed or the final merge SHA is unavailable', () => {
     expect(reconcileMergeEvidence(policy, observation({ merged: false, mergeMethod: undefined, mergeSha: undefined }), receipt(), 'merge'))
       .toMatchObject({
         status: 'INSPECT_REQUIRED',

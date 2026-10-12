@@ -92,6 +92,27 @@ export function prohibitedUnscopedPullRequestMergeReason(
 }
 
 /**
+ * Applies the merge-fence to free text that is about to be injected as OS keystrokes.
+ *
+ * `shell`, `wsl_exec` and `scheduler` fence their argv, but `input_event`/`computer_use`
+ * hand raw text to whatever window currently has focus. If that window is a terminal the
+ * text becomes a command line, so the argv fence never sees it. The fence cannot tell a
+ * terminal from a text box, so it errs toward blocking exactly as it already does for a
+ * merge command merely mentioned inside an inline script: a merge command typed anywhere
+ * is refused, because nothing here can prove it is not executed.
+ *
+ * Deliberately narrow: this covers the merge/push fence only. Hard-block executables such
+ * as `shutdown` are ordinary words in notes, documentation and search boxes, and since the
+ * focused target is unknowable, fencing them here would block ordinary typing for no
+ * security gain. Add them if a keystroke sink ever gains reliable focus information.
+ */
+export function prohibitedTypedTextReason(text: string): string | undefined {
+  if (hasGhMergeInScriptText(text)) return guardedPullRequestMergeReason();
+  if (hasGitPushCommand(text)) return guardedGitPushReason();
+  return undefined;
+}
+
+/**
  * Splits opaque command text into fence tokens. Quote characters are separators as well as
  * whitespace, so an embedded string literal (`exec('gh pr merge 5')`) still exposes the real
  * command instead of hiding it behind a glued-on prefix.

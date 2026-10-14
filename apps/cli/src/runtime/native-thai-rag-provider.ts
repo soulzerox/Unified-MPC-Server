@@ -789,6 +789,36 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const monitor = (async (): Promise<Result<void>> => {
       try {
         let indexed: Result<unknown>;
+        // issue-202: trial-first — bounded foreground probe proves the
+        // pipeline before full admission. Trial failure takes the same
+        // fail-closed path below; pending stays set for a later retry.
+        {
+          const trial = this.cancellableIndexJobs
+            ? await this.callAdmissionWorker('code_index', {
+              workspace_path: path.resolve(workspace.realRootPath),
+              workspace_id: workspace.id,
+              force: false,
+              background: false,
+              max_files: 3,
+            })
+            : normalizeWorkerCallResult(
+              'code_index',
+              await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', {
+                workspace_path: path.resolve(workspace.realRootPath),
+                workspace_id: workspace.id,
+                force: false,
+                background: false,
+                max_files: 3,
+              }),
+            );
+          if (!trial.ok) indexed = trial;
+          else indexed = { ok: true as const, value: undefined };
+          if (!trial.ok) {
+            await this.jobs.fail(job.jobId, trial.error.message, ownerId);
+            await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
+            return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${trial.error.message}`, true));
+          }
+        }
         if (this.cancellableIndexJobs) {
           const started = await this.callAdmissionWorker('code_index', {
             workspace_path: path.resolve(workspace.realRootPath),

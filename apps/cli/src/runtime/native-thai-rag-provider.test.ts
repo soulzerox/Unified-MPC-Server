@@ -282,6 +282,7 @@ describe('NativeThaiRagProviderDriver', () => {
         includeCancelIndex: true,
         async onCall(tool, args): Promise<unknown> {
           if (tool === 'code_index') {
+            if (args.max_files !== undefined) return success('ok');
             const providerJobId = ++indexCallCount === 1 ? 'idx_warmup' : 'idx_failure';
             return success('code_index', {
               status: 'ok',
@@ -850,8 +851,32 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(started.ok).toBe(true);
     expect(indexed).toEqual([]);
     await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
-    expect(indexed).toEqual([workspaceId]);
+    expect(indexed).toEqual([workspaceId, workspaceId]);
     await driver.stop();
+  });
+
+  it('trial-indexes a workspace before full admission (issue-202)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const codeIndexArgs: Array<Record<string, unknown>> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') codeIndexArgs.push({ ...args });
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await driver.stop();
+    expect(codeIndexArgs.length).toBeGreaterThan(0);
+    expect(codeIndexArgs[0]).toMatchObject({ workspace_id: workspaceId });
+    expect(codeIndexArgs[0]).toHaveProperty('max_files');
   });
 
   it('serves an already-indexed workspace while another workspace is reindexing', async () => {
@@ -982,9 +1007,9 @@ describe('NativeThaiRagProviderDriver', () => {
       callTimeoutMs: 500,
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory({
-        async onCall(tool): Promise<unknown> {
+        async onCall(tool, args): Promise<unknown> {
           calls.push(tool);
-          if (tool === 'code_index') await new Promise((resolve) => setTimeout(resolve, 900));
+          if (tool === 'code_index' && args.max_files === undefined) await new Promise((resolve) => setTimeout(resolve, 900));
           return success('ok');
         },
       }),
@@ -1001,7 +1026,7 @@ describe('NativeThaiRagProviderDriver', () => {
       ok: false,
       error: { code: 'CONFLICT', details: { reason: 'workspace-indexing' } },
     });
-    expect(calls.filter((tool) => tool === 'code_index')).toHaveLength(1);
+    expect(calls.filter((tool) => tool === 'code_index')).toHaveLength(2);
     const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
       jobs: Array<{ jobId: string; workspaceId: string; status: string }>;
     };
@@ -1033,6 +1058,7 @@ describe('NativeThaiRagProviderDriver', () => {
         async onCall(tool, args): Promise<unknown> {
           calls.push({ tool, args });
           if (tool === 'code_index') {
+            if (args.max_files !== undefined) return success('ok');
             if (args.background !== true) return structuredFailure('background_required');
             return success('code_index', {
               status: 'ok',
@@ -1066,7 +1092,7 @@ describe('NativeThaiRagProviderDriver', () => {
       providerJobId: 'idx_provider_admission',
       reindexReason: 'alias_created_or_repaired',
     });
-    expect(calls.find(({ tool }) => tool === 'code_index')?.args).toMatchObject({
+    expect(calls.find(({ tool, args }) => tool === 'code_index' && args.background === true)?.args).toMatchObject({
       background: true,
       force: false,
     });
@@ -1077,7 +1103,7 @@ describe('NativeThaiRagProviderDriver', () => {
       return status.ok && isRecord(status.value) ? status.value.status : 'unavailable';
     }).toBe('completed');
     await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
-    expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(1);
+    expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(2);
     expect(calls.some(({ tool }) => tool === 'index_status')).toBe(true);
     await driver.stop();
   });
@@ -1104,6 +1130,7 @@ describe('NativeThaiRagProviderDriver', () => {
           const requestedWorkspaceId = args.workspace_id;
           calls.push({ tool, workspaceId: requestedWorkspaceId });
           if (tool === 'code_index') {
+            if (args.max_files !== undefined) return success('ok');
             if (args.background !== true) return structuredFailure('background_required');
             const id = String(requestedWorkspaceId);
             activeProviderWorkspaces.add(id);
@@ -1156,11 +1183,11 @@ describe('NativeThaiRagProviderDriver', () => {
       });
       if (!admission.ok) expect(admission.error.details).not.toHaveProperty('jobId');
     }
-    expect(calls.filter((call) => call.tool === 'code_index').map((call) => call.workspaceId)).toEqual([workspaceId]);
+    expect(calls.filter((call) => call.tool === 'code_index').map((call) => call.workspaceId)).toEqual([workspaceId, workspaceId]);
 
     rootComplete = true;
     await expect.poll(() => calls.filter((call) => call.tool === 'code_index' && call.workspaceId === recoveredWorkspaceId).length)
-      .toBe(1);
+      .toBe(2);
     expect(maxActiveProviderWorkspaces).toBe(1);
 
     const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
@@ -1174,7 +1201,7 @@ describe('NativeThaiRagProviderDriver', () => {
       ok: false,
       error: { code: 'CONFLICT', details: { workspaceId: recoveredWorkspaceId, jobId: goalJob!.jobId, reason: 'workspace-indexing' } },
     });
-    expect(calls.filter((call) => call.tool === 'code_index' && call.workspaceId === recoveredWorkspaceId)).toHaveLength(1);
+    expect(calls.filter((call) => call.tool === 'code_index' && call.workspaceId === recoveredWorkspaceId)).toHaveLength(2);
 
     goalComplete = true;
     await expect.poll(async () => {
@@ -1217,7 +1244,7 @@ describe('NativeThaiRagProviderDriver', () => {
     releaseRootIndex?.();
     await goalEdit;
     expect(admitted).toMatchObject({ ok: true });
-    expect(calls.filter((call) => call.tool === 'code_index').map((call) => call.workspaceId)).toEqual([recoveredWorkspaceId]);
+    expect(calls.filter((call) => call.tool === 'code_index').map((call) => call.workspaceId)).toEqual([recoveredWorkspaceId, recoveredWorkspaceId]);
     await driver.stop();
   });
 

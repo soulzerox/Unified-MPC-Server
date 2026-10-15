@@ -820,11 +820,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           }
         }
         if (this.cancellableIndexJobs) {
+          // issue-202 T8: demand-first — trial already proved the pipeline,
+          // so the remainder runs as background delta (never sync full
+          // force, which fails at tail and blocks the pre-edit gate).
           const started = await this.callAdmissionWorker('code_index', {
             workspace_path: path.resolve(workspace.realRootPath),
             workspace_id: workspace.id,
-            force,
+            force: false,
             background: true,
+            mode: 'delta',
           });
           if (!started.ok) {
             indexed = started;
@@ -848,11 +852,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             }
           }
         } else {
+          // issue-202 T8: demand-first — same treatment on the legacy
+          // path: background delta instead of sync full force.
           const raw = await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', {
             workspace_path: path.resolve(workspace.realRootPath),
             workspace_id: workspace.id,
-            force,
-            background: false,
+            force: false,
+            background: true,
+            mode: 'delta',
           });
           indexed = normalizeWorkerCallResult('code_index', raw);
         }

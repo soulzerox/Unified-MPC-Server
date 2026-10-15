@@ -20,6 +20,11 @@ export type HeavyJobEnqueueResult =
   | { readonly status: 'coalesced'; readonly operationId: string; readonly depth: number }
   | { readonly status: 'rejected'; readonly code: 'QUEUE_FULL'; readonly operationId: string; readonly depth: number };
 
+export type HeavyJobSupersedeResult =
+  | { readonly status: 'superseded'; readonly retired: string; readonly queued: string; readonly depth: number }
+  | { readonly status: 'queued'; readonly queued: string; readonly depth: number }
+  | { readonly status: 'rejected'; readonly code: 'QUEUE_FULL'; readonly queued: string; readonly depth: number };
+
 export interface HeavyJobAdmission {
   readonly lease: ResourceAdmissionLease;
 }
@@ -69,6 +74,32 @@ export class HeavyJobWaiterQueue {
     if (index === -1) return false;
     this.queued.splice(index, 1);
     return true;
+  }
+
+  /**
+   * Replace a stale queued generation with its successor (#145 U4).
+   *
+   * A stale exact-head verification job (H1 replaced by H2) must not waste
+   * resources: H1 is retired in place and H2 inherits its queue position.
+   * When H1 is absent (already drained/cancelled), H2 is enqueued normally.
+   * Queued-only: running leases are never touched — cancellation of running
+   * work stays with exact execution/generation cancellation.
+   */
+  public supersede(
+    staleOperationId: string,
+    replacementOperationId: string,
+    request: Omit<HeavyJobRequest, 'operationId'>,
+  ): HeavyJobSupersedeResult {
+    const index = this.queued.findIndex((entry) => entry.operationId === staleOperationId);
+    if (index === -1) {
+      const enqueued = this.enqueue({ ...request, operationId: replacementOperationId });
+      if (enqueued.status === 'rejected') {
+        return { status: 'rejected', code: 'QUEUE_FULL', queued: replacementOperationId, depth: enqueued.depth };
+      }
+      return { status: 'queued', queued: replacementOperationId, depth: enqueued.depth };
+    }
+    this.queued.splice(index, 1, { ...request, operationId: replacementOperationId });
+    return { status: 'superseded', retired: staleOperationId, queued: replacementOperationId, depth: this.queued.length };
   }
 
   public depth(): number {

@@ -61,3 +61,28 @@ describe('heavy job waiter queue (#145 U3)', () => {
     expect(controller.snapshot()).toMatchObject({ activeOperations: 0 });
   });
 });
+
+describe('heavy job queue supersede (#145 U4)', () => {
+  it('supersedes a stale queued generation when a newer head arrives', async () => {
+    const { HeavyJobWaiterQueue } = await import('./heavy-job-queue.js');
+    const { ResourceAdmissionController } = await import('./resource-admission.js');
+    const controller = new ResourceAdmissionController({ globalCost: 8, workspaceCost: 8, maxOperations: 4 });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    queue.enqueue({ operationId: 'verify-h1', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    const res = queue.supersede('verify-h1', 'verify-h2', { workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    expect(res).toMatchObject({ status: 'superseded', retired: 'verify-h1', queued: 'verify-h2' });
+    expect(queue.depth()).toBe(1);
+    const drained = queue.drain();
+    expect(drained.map((a) => a.lease.operationId)).toEqual(['verify-h2']);
+  });
+
+  it('supersede of a missing operation queues the replacement', async () => {
+    const { HeavyJobWaiterQueue } = await import('./heavy-job-queue.js');
+    const { ResourceAdmissionController } = await import('./resource-admission.js');
+    const controller = new ResourceAdmissionController({ globalCost: 8, workspaceCost: 8, maxOperations: 4 });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    const res = queue.supersede('missing-h1', 'verify-h2', { workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    expect(res).toMatchObject({ status: 'queued', queued: 'verify-h2' });
+    expect(queue.depth()).toBe(1);
+  });
+});

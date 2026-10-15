@@ -2419,3 +2419,37 @@ function pr25Handshake(): Record<string, unknown> {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+describe('startup demand-first reindex (issue-202 T8)', () => {
+  it('follows a passing trial with background delta, never sync full force', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const codeIndexArgs: Array<Record<string, unknown>> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') codeIndexArgs.push({ ...args });
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    // Indexing is deferred until a scoped operation needs the workspace.
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await driver.stop();
+    // Trial first (bounded, sync), then background delta — no sync full-force.
+    expect(codeIndexArgs.length).toBeGreaterThanOrEqual(2);
+    expect(codeIndexArgs[0]).toMatchObject({ workspace_id: workspaceId, force: false, background: false });
+    expect(codeIndexArgs[0]).toHaveProperty('max_files');
+    const followups = codeIndexArgs.slice(1);
+    expect(followups.length).toBeGreaterThan(0);
+    for (const args of followups) {
+      expect(args.background).toBe(true);
+      expect(args.force).not.toBe(true);
+    }
+  });
+});

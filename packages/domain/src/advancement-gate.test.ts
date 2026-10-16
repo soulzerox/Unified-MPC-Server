@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeTreeOid,
   decideCanonicalAdvancement,
+  describeRefState,
   type CanonicalRefState,
 } from './advancement-gate.js';
 
@@ -65,5 +66,12 @@ describe('canonical tree OID (#210 U6)', () => {
     expect(computeTreeOid([a, b])).toBe(computeTreeOid([b, a]));
     expect(computeTreeOid([a])).not.toBe(computeTreeOid([a, b]));
     expect(computeTreeOid([a])).not.toBe(computeTreeOid([{ path: 'a.ts', contentHash: '3'.repeat(64) }]));
+  });
+});
+
+describe('ref state description (#210 U7 fix)', () => {
+  it('renders unset as an explicit marker', () => {
+    expect(describeRefState(null)).toBe('<unset>');
+    expect(describeRefState({ commitSha: 'a'.repeat(40), treeOid: 'b'.repeat(40), manifestId: 'man' })).toContain('aaaaaaaaaaaa');
   });
 });

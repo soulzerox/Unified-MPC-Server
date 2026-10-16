@@ -9,7 +9,7 @@ export interface CanonicalRefState {
 export type AdvancementDecision =
   | { readonly action: 'promote'; readonly target: CanonicalRefState }
   | { readonly action: 'noop'; readonly target: CanonicalRefState }
-  | { readonly action: 'conflict'; readonly current: CanonicalRefState }
+  | { readonly action: 'conflict'; readonly current: CanonicalRefState | null }
   | { readonly action: 'reject_unverified'; readonly target: CanonicalRefState };
 
 function sameState(a: CanonicalRefState, b: CanonicalRefState): boolean {
@@ -44,6 +44,16 @@ export function decideCanonicalAdvancement(input: {
     return { action: 'reject_unverified', target };
   }
   return { action: 'promote', target };
+}
+
+/**
+ * Totally-ordered display helper for conflict evidence: null renders as
+ * `<unset>` so log lines never print an empty object for first-ever
+ * promotion attempts.
+ */
+export function describeRefState(state: CanonicalRefState | null): string {
+  if (state === null) return '<unset>';
+  return `${state.commitSha.slice(0, 12)}/${state.treeOid.slice(0, 12)}/${state.manifestId.slice(0, 16)}`;
 }
 
 /**

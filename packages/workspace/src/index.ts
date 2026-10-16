@@ -10,6 +10,7 @@ export * from './canonical-ref-store.js';
 export * from './goal-overlay-store.js';
 export * from './goal-base-pin.js';
 export * from './goal-admission.js';
+export * from './revision-pin-registry.js';
 export * from './resource-pressure.js';
 export * from './path-containment.js';
 export * from './secret-policy.js';

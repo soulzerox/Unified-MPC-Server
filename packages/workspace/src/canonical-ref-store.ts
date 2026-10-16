@@ -63,7 +63,7 @@ export class CanonicalRefStore {
       return { action: 'promote', target: input.target };
     }
     const decision = decideCanonicalAdvancement({
-      expectedCurrent: input.expectedCurrent,
+      expectedCurrent: input.expectedCurrent ?? effectiveCurrent,
       current: effectiveCurrent,
       target: input.target,
       targetVerified: input.targetVerified,

@@ -6,6 +6,7 @@ export * from './dependency-cache-lifecycle.js';
 export * from './delegated-workspace-contract.js';
 export * from './resource-admission.js';
 export * from './heavy-job-queue.js';
+export * from './canonical-ref-store.js';
 export * from './resource-pressure.js';
 export * from './path-containment.js';
 export * from './secret-policy.js';

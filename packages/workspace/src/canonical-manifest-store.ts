@@ -94,6 +94,28 @@ export class CanonicalManifestStore {
     }
   }
 
+  public async listAll(): Promise<StoredManifest[]> {
+    const manifestsDir = path.join(this.root, 'manifests');
+    let files: string[];
+    try {
+      files = (await readdir(manifestsDir, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+    const manifests: StoredManifest[] = [];
+    for (const file of files) {
+      try {
+        const parsed: unknown = JSON.parse(await readFile(path.join(manifestsDir, file), 'utf8'));
+        if (isManifest(parsed)) manifests.push(parsed);
+      } catch {
+        // Skip unreadable/corrupted manifest files rather than failing the listing.
+      }
+    }
+    return manifests.sort((a, b) => a.manifestId.localeCompare(b.manifestId));
+  }
+
   public async getByCommit(repositoryId: string, commitSha: string): Promise<StoredManifest | null> {
     const sha = requireObjectId('commitSha', commitSha);
     const manifests = await this.listRepository(repositoryId);

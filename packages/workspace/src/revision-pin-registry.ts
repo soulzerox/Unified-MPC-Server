@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -77,6 +77,30 @@ export class RevisionPinRegistry {
     if (!pins.some((pin) => pin.reason === validatedReason)) return false;
     await this.write(id, pins.filter((pin) => pin.reason !== validatedReason));
     return true;
+  }
+
+  public async pinnedManifestIds(): Promise<string[]> {
+    const pinsDir = path.join(this.root, 'pins');
+    let names: string[];
+    try {
+      const entries = await readdir(pinsDir, { withFileTypes: true });
+      names = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const name of names) {
+      try {
+        const raw = await readFile(path.join(pinsDir, name), 'utf8');
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.some(isPin) && MANIFEST_ID.test(name.replace(/\.json$/, ''))) {
+          ids.push(name.replace(/\.json$/, ''));
+        }
+      } catch {
+        // Skip unreadable/corrupted pin files rather than failing the listing.
+      }
+    }
+    return ids.sort();
   }
 
   public async list(manifestId: string): Promise<RevisionPin[]> {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -84,6 +84,28 @@ export class GoalOverlayStore {
     };
     await this.write(id, overlay);
     return overlay;
+  }
+
+  public async listIds(): Promise<string[]> {
+    const overlaysDir = path.join(this.root, 'overlays');
+    let names: string[];
+    try {
+      const entries = await readdir(overlaysDir, { withFileTypes: true });
+      names = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const name of names) {
+      try {
+        const raw = await readFile(path.join(overlaysDir, name), 'utf8');
+        const parsed: unknown = JSON.parse(raw);
+        if (isOverlay(parsed)) ids.push(parsed.goalWorkspaceId);
+      } catch {
+        // Skip unreadable/corrupted overlay files rather than failing the listing.
+      }
+    }
+    return ids.sort();
   }
 
   public async read(goalWorkspaceId: string): Promise<GoalOverlay | null> {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -27,6 +27,27 @@ export interface CanonicalRefPromoteInput {
  */
 export class CanonicalRefStore {
   public constructor(private readonly root: string) {}
+
+  public async list(): Promise<ReadonlyArray<{ readonly ref: string; readonly state: CanonicalRefState }>> {
+    const refsDir = path.join(this.root, 'refs');
+    let files: Array<{ path: string; ref: string }>;
+    try {
+      files = await collectJsonFiles(refsDir, 'refs/');
+    } catch {
+      return [];
+    }
+    const states: Array<{ ref: string; state: CanonicalRefState }> = [];
+    for (const file of files) {
+      try {
+        const raw = await readFile(file.path, 'utf8');
+        const parsed: unknown = JSON.parse(raw);
+        if (isRefState(parsed)) states.push({ ref: file.ref, state: parsed });
+      } catch {
+        // Skip unreadable/corrupted ref files rather than failing the listing.
+      }
+    }
+    return states.sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
+  }
 
   public async read(ref: string): Promise<CanonicalRefState | null> {
     try {
@@ -96,3 +117,17 @@ function isRefState(value: unknown): value is CanonicalRefState {
 }
 
 export { type AdvancementDecision, type CanonicalRefState };
+
+async function collectJsonFiles(dir: string, prefix: string): Promise<Array<{ path: string; ref: string }>> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files: Array<{ path: string; ref: string }> = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectJsonFiles(full, `${prefix}${entry.name}/`)));
+    } else if (entry.isFile() && entry.name.endsWith('.json')) {
+      files.push({ path: full, ref: `${prefix}${entry.name.replace(/\.json$/, '')}` });
+    }
+  }
+  return files;
+}

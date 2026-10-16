@@ -19,6 +19,7 @@ function createHarnessServices(): {
   setThaiRagHealthError(message: string | undefined): void;
   setThaiRagActiveJobs(jobIds: readonly string[]): void;
   setThaiRagPreEditError(message: string | undefined): void;
+  setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void;
 } {
   const writes: string[] = [];
   const childCalls: string[] = [];
@@ -30,6 +31,7 @@ function createHarnessServices(): {
   let thaiRagHealthError: string | undefined;
   let thaiRagActiveJobs: readonly string[] = [];
   let thaiRagPreEditError: string | undefined;
+  let thaiRagPreEditPayload: Record<string, unknown> | undefined;
   const services = {
     file: {
       async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
@@ -74,7 +76,15 @@ function createHarnessServices(): {
         if (tool === 'pre_edit_context' && thaiRagPreEditError !== undefined) {
           return err(appError('CONFLICT', thaiRagPreEditError, true));
         }
-        return ok({ content: [{ type: 'text', text: 'ok' }] });
+        if (tool === 'pre_edit_context' && thaiRagPreEditPayload !== undefined) {
+          return ok({ content: [{ type: 'text', text: JSON.stringify(thaiRagPreEditPayload) }] });
+        }
+        return ok({ content: [{ type: 'text', text: JSON.stringify({
+          status: 'ok',
+          can_proceed: true,
+          evidence_state: 'evidence_available',
+          evidence: { code_index: 'available', storage: 'available', cpg: 'available' },
+        }) }] });
       },
     },
     extensions: {
@@ -113,7 +123,12 @@ function createHarnessServices(): {
       async callMcpTool(input: { server: string; tool: string }) {
         childCalls.push(`${input.server}/${input.tool}`);
         if (input.server === 'memory' && input.tool === 'search_nodes') return ok({ structuredContent: { entities: [], relations: [] } });
-        return ok({ content: [{ type: 'text', text: 'ok' }] });
+        return ok({ content: [{ type: 'text', text: JSON.stringify({
+          status: 'ok',
+          can_proceed: true,
+          evidence_state: 'evidence_available',
+          evidence: { code_index: 'available', storage: 'available', cpg: 'available' },
+        }) }] });
       },
     },
   } as unknown as McpApplicationServices;
@@ -129,6 +144,7 @@ function createHarnessServices(): {
     setThaiRagHealthError(message: string | undefined): void { thaiRagHealthError = message; },
     setThaiRagActiveJobs(jobIds: readonly string[]): void { thaiRagActiveJobs = [...jobIds]; },
     setThaiRagPreEditError(message: string | undefined): void { thaiRagPreEditError = message; },
+    setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void { thaiRagPreEditPayload = payload; },
   };
 }
 
@@ -633,5 +649,31 @@ describe('workspace engineering harness enforcement', () => {
     expect(childCalls).toEqual([]);
     expect(nativeRagCalls).toEqual(['pre_edit_context', 'pre_edit_context']);
     expect(bootstrapEvents.filter((entry) => entry === 'mandatory_mcp')).toHaveLength(2);
+  });
+});
+
+describe('pre-edit readiness gate (#346 U10)', () => {
+  it('refuses to authorize when the provider reports degraded evidence', async () => {
+    const { services, setThaiRagPreEditPayload } = createHarnessServices();
+    setThaiRagPreEditPayload({
+      status: 'degraded',
+      can_proceed: false,
+      evidence_state: 'code_index_unknown',
+      evidence: { code_index: 'unknown', storage: 'available', cpg: 'available' },
+    });
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'readiness-gate-session',
+      activeWorkspaceScopeProvider,
+    });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/gated.ts',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('evidence') } },
+    });
   });
 });

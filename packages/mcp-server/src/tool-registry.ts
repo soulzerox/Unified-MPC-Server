@@ -1267,6 +1267,13 @@ export class ToolRegistry {
         ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
       }, signal);
       if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
+      const readiness = readPreEditReadiness(thaiCheck.value);
+      if (!readiness.ready) {
+        return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${readiness.reason}`, true, {
+          reason: 'pre-edit-evidence-not-ready',
+          evidenceState: readiness.evidenceState,
+        }));
+      }
       checks.push('thai-rag/pre_edit_context');
     }
     if (runGodkillerSafetyCheck) {
@@ -2104,6 +2111,46 @@ function readBackgroundRagJobId(value: unknown): string | undefined {
   return readTrimmedString(value.job_id) ?? readTrimmedString(value.jobId);
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+
+/**
+ * Parse the structured pre-edit readiness envelope (#346 U10).
+ *
+ * Transport success alone never authorizes a write: only an explicit
+ * `can_proceed === true` with a known-good status counts as ready.
+ * Everything else — degraded, review_required, malformed or missing
+ * readiness fields — fails closed so the demand-first loop can prepare
+ * the required scoped evidence instead.
+ */
+function readPreEditReadiness(value: unknown): { ready: boolean; reason: string; evidenceState: string } {
+  const payload = normalizePreEditPayload(value);
+  if (!isRecord(payload)) return { ready: false, reason: 'malformed pre-edit envelope', evidenceState: 'malformed' };
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const status = typeof data.status === 'string' ? data.status : 'missing';
+  const evidenceState = typeof data.evidence_state === 'string' ? data.evidence_state
+    : typeof data.evidenceState === 'string' ? data.evidenceState
+    : status;
+  if (data.can_proceed !== true) {
+    return { ready: false, reason: `can_proceed !== true (status=${status}, evidence=${evidenceState})`, evidenceState };
+  }
+  if (status !== 'ok' && status !== 'ready' && status !== 'available') {
+    return { ready: false, reason: `unexpected ready status=${status} (evidence=${evidenceState})`, evidenceState };
+  }
+  return { ready: true, reason: 'ready', evidenceState };
+}
+
+function normalizePreEditPayload(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  if (isRecord(value.structuredContent)) return value.structuredContent;
+  if (!Array.isArray(value.content)) return value;
+  const first = value.content[0];
+  if (!isRecord(first) || typeof first.text !== 'string') return value;
+  try {
+    const parsed: unknown = JSON.parse(first.text);
+    return isRecord(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
 function rememberBounded(map: Map<string, string>, key: string, value: string, max: number): void {
   if (map.has(key)) map.delete(key);
   map.set(key, value);

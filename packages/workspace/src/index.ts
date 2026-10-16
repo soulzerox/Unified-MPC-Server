@@ -11,6 +11,7 @@ export * from './canonical-manifest-store.js';
 export * from './advance-revision.js';
 export * from './artifact-gc.js';
 export * from './artifact-gc-roots.js';
+export * from './gc-cycle.js';
 export * from './canonical-store-verify.js';
 export * from './revision-prune.js';
 export * from './artifact-quarantine.js';

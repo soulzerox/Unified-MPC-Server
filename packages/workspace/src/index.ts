@@ -9,6 +9,7 @@ export * from './heavy-job-queue.js';
 export * from './canonical-ref-store.js';
 export * from './canonical-manifest-store.js';
 export * from './advance-revision.js';
+export * from './artifact-gc.js';
 export * from './goal-overlay-store.js';
 export * from './goal-base-pin.js';
 export * from './goal-admission.js';

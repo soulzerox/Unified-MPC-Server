@@ -13,6 +13,12 @@ export interface HeavyJobRequest {
   readonly sessionId?: string;
   readonly resourceClass: ResourceAdmissionClass;
   readonly cost: number;
+  /**
+   * Blocking pre-edit work (#145 U12): user-blocking gate evidence that
+   * must jump ahead of background maintenance when promoted. Never
+   * admits over controller limits by itself — drain() still decides.
+   */
+  readonly blocking?: boolean;
 }
 
 export type HeavyJobEnqueueResult =
@@ -67,6 +73,22 @@ export class HeavyJobWaiterQueue {
     }
     this.queued.push({ ...request });
     return { status: 'queued', operationId: request.operationId, depth: this.queued.length };
+  }
+
+  /**
+   * Promote a queued blocking operation to the head (#145 U12).
+   *
+   * A pending background delta that becomes a blocking pre-edit target
+   * jumps ahead of background work; relative order of everything else is
+   * preserved. Returns false only when the operation is not queued.
+   */
+  public promote(operationId: string): boolean {
+    const index = this.queued.findIndex((entry) => entry.operationId === operationId);
+    if (index === -1) return false;
+    if (index === 0) return true;
+    const [entry] = this.queued.splice(index, 1);
+    this.queued.unshift(entry!);
+    return true;
   }
 
   public cancel(operationId: string): boolean {

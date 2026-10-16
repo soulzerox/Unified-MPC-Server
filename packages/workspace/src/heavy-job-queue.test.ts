@@ -86,3 +86,30 @@ describe('heavy job queue supersede (#145 U4)', () => {
     expect(queue.depth()).toBe(1);
   });
 });
+
+describe('heavy job queue promote (#145 U12)', () => {
+  it('promotes a queued blocking operation to the head without disturbing order otherwise', async () => {
+    const { HeavyJobWaiterQueue } = await import('./heavy-job-queue.js');
+    const { ResourceAdmissionController } = await import('./resource-admission.js');
+    const controller = new ResourceAdmissionController({ globalCost: 8, workspaceCost: 8, maxOperations: 4 });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    queue.enqueue({ operationId: 'bg-1', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    queue.enqueue({ operationId: 'block-x', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2, blocking: true } as never);
+    queue.enqueue({ operationId: 'bg-2', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    const promoted = queue.promote('block-x');
+    expect(promoted).toBe(true);
+    const drained = queue.drain();
+    expect(drained.map((a) => a.lease.operationId)).toEqual(['block-x', 'bg-1', 'bg-2']);
+  });
+
+  it('returns false for unknown or already-running operations', async () => {
+    const { HeavyJobWaiterQueue } = await import('./heavy-job-queue.js');
+    const { ResourceAdmissionController } = await import('./resource-admission.js');
+    const controller = new ResourceAdmissionController({ globalCost: 8, workspaceCost: 8, maxOperations: 4 });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    expect(queue.promote('missing')).toBe(false);
+    queue.enqueue({ operationId: 'only', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    expect(queue.promote('only')).toBe(true);
+    expect(queue.promote('only')).toBe(true);
+  });
+});

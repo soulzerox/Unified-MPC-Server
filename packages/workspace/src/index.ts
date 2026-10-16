@@ -13,6 +13,7 @@ export * from './artifact-gc.js';
 export * from './artifact-gc-roots.js';
 export * from './canonical-store-verify.js';
 export * from './revision-prune.js';
+export * from './artifact-quarantine.js';
 export * from './goal-overlay-store.js';
 export * from './goal-base-pin.js';
 export * from './goal-admission.js';

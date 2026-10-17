@@ -2,6 +2,11 @@ import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createPreMigrationBackupSync } from './backup-service.js';
+import {
+  readSqlitePhysicalMetrics,
+  type SqlitePhysicalMetrics,
+  type SqlitePhysicalMetricsOptions,
+} from './sqlite-physical-metrics.js';
 import { AUDIT_MIGRATION_SQL } from './migrations/audit-migration.js';
 import { AUDIT_SCOPE_MIGRATION_SQL } from './migrations/audit-scope-migration.js';
 import { CHECKPOINT_MIGRATION_SQL } from './migrations/checkpoint-migration.js';
@@ -178,6 +183,10 @@ export class SqliteDatabase {
         // Ignored if already closed
       }
     }
+  }
+
+  public physicalMetrics(options?: SqlitePhysicalMetricsOptions): SqlitePhysicalMetrics {
+    return readSqlitePhysicalMetrics(this.connection, this.filename, options);
   }
 
   private hasMigrationId(value: unknown, expectedId: string): boolean {

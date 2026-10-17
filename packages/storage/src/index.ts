@@ -1,6 +1,7 @@
 export * from './audit-repository.js';
 export * from './checkpoint-repository.js';
 export * from './database.js';
+export * from './sqlite-physical-metrics.js';
 export * from './goal-repository.js';
 export * from './goal-workspace-transfer-repository.js';
 export * from './goal-workspace-retention-custody-repository.js';

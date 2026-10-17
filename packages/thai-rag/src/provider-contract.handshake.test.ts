@@ -356,3 +356,54 @@ describe('Thai-RAG provider handshake', () => {
     expect(legacy.ok).toBe(true);
   });
 });
+
+describe('Thai-RAG producer handshake shape (issue #332)', () => {
+  // Captured from the live provider `version` result on thai-rag main
+  // (18231ac): both embedding.profile and generation.embedding carry the
+  // `:latest` suffix and generation.index is 'unknown' until an index run
+  // publishes a generation. Pinned so the contract cannot start rejecting
+  // the shape the producer actually emits.
+  const liveShape: ThaiRagProviderHandshake = {
+    ...baseHandshake,
+    embedding: {
+      ...baseHandshake.embedding,
+      profile: 'nomic-embed-text-v2-moe:latest',
+      model: 'nomic-embed-text-v2-moe:latest',
+    },
+    generation: {
+      contract: THAI_RAG_CONTRACT_FINGERPRINT,
+      embedding: 'nomic-embed-text-v2-moe:latest',
+      index: 'unknown',
+      storage: 'sqlite',
+    },
+  };
+
+  it('accepts the exact shape the producer emits today', () => {
+    const validated = validateThaiRagHandshake(liveShape);
+    expect(validated.ok).toBe(true);
+    // The validator normalizes the `:latest` suffix on both sides, so the
+    // accepted value is the canonical profile name.
+    if (validated.ok) {
+      expect(validated.value.generation.embedding).toBe('nomic-embed-text-v2-moe');
+      expect(validated.value.embedding.profile).toBe('nomic-embed-text-v2-moe');
+    }
+  });
+
+  it('normalizes a one-sided :latest suffix instead of reporting drift', () => {
+    const asymmetric = validateThaiRagHandshake({
+      ...liveShape,
+      generation: { ...liveShape.generation, embedding: 'nomic-embed-text-v2-moe' },
+    });
+    expect(asymmetric.ok).toBe(true);
+    if (asymmetric.ok) expect(asymmetric.value.generation.embedding).toBe('nomic-embed-text-v2-moe');
+  });
+
+  it('still fails closed when the generation names a different embedding', () => {
+    const drifted = validateThaiRagHandshake({
+      ...liveShape,
+      generation: { ...liveShape.generation, embedding: 'some-other-embedder:latest' },
+    });
+    expect(drifted.ok).toBe(false);
+    if (!drifted.ok) expect(drifted.error.details?.reason).toBe('generation-drift');
+  });
+});

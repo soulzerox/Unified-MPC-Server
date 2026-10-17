@@ -126,7 +126,10 @@ describe('native provider admission index status truth', () => {
         status: 'completed', providerJobId: 'idx_provider_same',
         result: { status: 'complete', indexed: 3 },
       } });
-      expect(counts()).toEqual({ connects: 2, indexStarts: 1, statusPolls: 2 });
+      // Demand-first admission (#202 T8): one bounded trial probe (max_files 3)
+      // plus one background delta. A transient status timeout must not start a
+      // replacement index.
+      expect(counts()).toEqual({ connects: 2, indexStarts: 2, statusPolls: 2 });
     } finally { await driver.stop(); }
   });
 
@@ -140,7 +143,9 @@ describe('native provider admission index status truth', () => {
       expect(terminal).toMatchObject({ ok: true, value: {
         status: 'failed', providerJobId: 'idx_provider_same',
       } });
-      expect(counts().indexStarts).toBe(1);
+      // Trial probe + background delta, and no replacement index after the
+      // provider-reported failure.
+      expect(counts().indexStarts).toBe(2);
     } finally { await driver.stop(); }
   });
 });

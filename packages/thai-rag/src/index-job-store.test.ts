@@ -76,7 +76,7 @@ describe('ThaiRagIndexJobStore', () => {
     });
     const job = await first.create(workspaceId, true, 'unified-mpc:424242');
 
-    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'), {
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:30.000Z'), {
       isProcessAlive: (): boolean => true,
       processIdentityProbe: async (): Promise<string> => 'process:same-start',
     });
@@ -115,7 +115,7 @@ describe('ThaiRagIndexJobStore', () => {
     const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:00.000Z'));
     const job = await first.create('11111111-1111-4111-8111-111111111111', true, 'owner-a');
 
-    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T02:00:00.000Z'));
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:30.000Z'));
     await replacement.initialize('owner-b');
 
     await expect(replacement.get(job.jobId, 'owner-a', '11111111-1111-4111-8111-111111111111')).resolves.toMatchObject({
@@ -238,7 +238,7 @@ describe('ThaiRagIndexJobStore', () => {
       }],
     }));
 
-    const store = new ThaiRagIndexJobStore(dataRoot);
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-10-02T01:00:10.000Z'));
     await store.initialize();
     await expect(store.recordProgress('idx_umcp_cache_metrics', {
       indexedFiles: 2,
@@ -372,5 +372,127 @@ describe('ThaiRagIndexJobStore', () => {
     const secondReplacement = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T04:00:00.000Z'));
     await secondReplacement.initialize();
     expect(await readFile(filePath, 'utf8')).toBe(migratedBytes);
+  });
+});
+
+describe('stuck index job reap (issue #202)', () => {
+  const WS = '11111111-1111-4111-8111-111111111111';
+  const T0 = Date.parse('2026-10-17T00:00:00.000Z');
+  const WINDOW_MS = 60_000;
+
+  it('reaps an active job whose owner stopped reporting progress beyond the window', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await store.create(WS, false, 'owner-a');
+
+    clock = T0 + WINDOW_MS + 1_000;
+    // The workspace must not stay blocked by an owner that is alive but wedged.
+    expect(await store.active('owner-a')).toEqual([]);
+    const reaped = await store.get(job.jobId, 'owner-a', WS);
+    expect(reaped).toMatchObject({ status: 'interrupted', finishedAt: '2026-10-17T00:01:01.000Z' });
+    expect(reaped?.error).toMatch(/no progress|stuck/i);
+  });
+
+  it('keeps a job that reported progress inside the window', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await store.create(WS, false, 'owner-a');
+
+    clock = T0 + 30_000;
+    await store.recordProgress(job.jobId, { indexedFiles: 1, skippedFiles: 0, totalFiles: 2 }, 'owner-a');
+
+    clock = T0 + 60_000;
+    const stillActive = await store.active('owner-a');
+    expect(stillActive).toHaveLength(1);
+    expect(stillActive[0]).toMatchObject({ jobId: job.jobId, indexedFiles: 1 });
+  });
+
+  it('never reaps a job whose progress keeps advancing past the window', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await store.create(WS, false, 'owner-a');
+
+    for (let index = 1; index <= 4; index += 1) {
+      clock = T0 + index * 50_000;
+      await store.recordProgress(job.jobId, { indexedFiles: index, skippedFiles: 0, totalFiles: 10 }, 'owner-a');
+    }
+    expect(await store.active('owner-a')).toHaveLength(1);
+  });
+
+  it('carries the progress timestamp across provider restarts', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await first.create(WS, false, 'owner-a');
+    clock = T0 + 10_000;
+    await first.recordProgress(job.jobId, { indexedFiles: 1, skippedFiles: 0, totalFiles: 4 }, 'owner-a');
+
+    clock = T0 + 40_000;
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    expect(await replacement.active('owner-a')).toHaveLength(1);
+  });
+
+  it('falls back to startedAt for a legacy record without a progress timestamp', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    await writeFile(path.join(providerRoot, 'index-jobs.json'), JSON.stringify({
+      schemaVersion: 3,
+      jobs: [{
+        jobId: 'idx_umcp_legacy00000001',
+        workspaceId: WS,
+        ownerId: 'owner-a',
+        status: 'running',
+        force: false,
+        startedAt: '2026-10-17T00:00:00.000Z',
+      }],
+    }), 'utf8');
+
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(T0 + WINDOW_MS + 1_000), { stuckJobTimeoutMs: WINDOW_MS });
+    expect(await store.active('owner-a')).toEqual([]);
+    expect(await store.get('idx_umcp_legacy00000001', 'owner-a', WS)).toMatchObject({ status: 'interrupted' });
+  });
+
+  it('reaps stuck jobs during startup before any admission check', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await store.create(WS, false, 'owner-a');
+
+    clock = T0 + WINDOW_MS + 1_000;
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    // No ownerId: the dead-owner reap is skipped, so only the stuck reap can fire.
+    await replacement.initialize();
+
+    const reaped = await replacement.get(job.jobId, 'owner-a', WS);
+    expect(reaped).toMatchObject({ status: 'interrupted' });
+    expect(reaped?.error).toMatch(/no owner-verified progress/i);
+  });
+
+  it('takes over a live foreign owner that stopped making progress', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const stuckOwner = 'unified-mpc:424242';
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), {
+      stuckJobTimeoutMs: WINDOW_MS,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:same-start',
+    });
+    const job = await first.create(WS, false, stuckOwner);
+
+    clock = T0 + WINDOW_MS + 1_000;
+    const replacement = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), {
+      stuckJobTimeoutMs: WINDOW_MS,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => 'process:same-start',
+    });
+
+    // The foreign runtime is still alive, but a live owner that has produced no
+    // progress for the whole window is wedged; the workspace must be unblocked.
+    await expect(replacement.active(stuckOwner)).resolves.toEqual([]);
+    await expect(replacement.get(job.jobId, stuckOwner, WS)).resolves.toMatchObject({ status: 'interrupted' });
   });
 });

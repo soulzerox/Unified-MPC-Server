@@ -42,6 +42,8 @@ export interface ThaiRagIndexJob {
   readonly force: boolean;
   readonly reindexReason?: ThaiRagReindexReason;
   readonly startedAt: string;
+  /** Last owner-verified provider progress timestamp; absent on legacy records. */
+  readonly progressAt?: string;
   readonly finishedAt?: string;
   readonly result?: unknown;
   readonly error?: string;
@@ -70,7 +72,15 @@ export interface ThaiRagIndexJobStoreOptions {
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly processIdentityProbe?: PosixProcessIdentityProbe;
   readonly platform?: NodeJS.Platform;
+  /**
+   * How long an active job may go without owner-verified provider progress
+   * before the owner is presumed wedged and the job is reaped. Must be > 0;
+   * defaults to 10 minutes.
+   */
+  readonly stuckJobTimeoutMs?: number;
 }
+
+export const DEFAULT_STUCK_INDEX_JOB_TIMEOUT_MS = 10 * 60_000;
 
 export class ThaiRagIndexJobStore {
   private readonly filePath: string;
@@ -79,6 +89,7 @@ export class ThaiRagIndexJobStore {
   private migrated = false;
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly processIdentityProbe: PosixProcessIdentityProbe;
+  private readonly stuckJobTimeoutMs: number;
 
   public constructor(
     dataRoot: string,
@@ -90,6 +101,11 @@ export class ThaiRagIndexJobStore {
     this.filePath = path.join(root.value, 'index-jobs.json');
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
     this.processIdentityProbe = options.processIdentityProbe ?? defaultProcessIdentityProbe(options.platform ?? process.platform);
+    const stuckJobTimeoutMs = options.stuckJobTimeoutMs ?? DEFAULT_STUCK_INDEX_JOB_TIMEOUT_MS;
+    if (!Number.isFinite(stuckJobTimeoutMs) || stuckJobTimeoutMs <= 0) {
+      throw new Error('Thai-RAG stuck index job timeout must be a positive number of milliseconds');
+    }
+    this.stuckJobTimeoutMs = stuckJobTimeoutMs;
   }
 
   public async initialize(ownerId?: string): Promise<void> {
@@ -122,6 +138,7 @@ export class ThaiRagIndexJobStore {
       changed = true;
     }
     this.initialized = true;
+    if (await this.reapStuckJobs()) changed = true;
     if (changed) await this.persist();
   }
 
@@ -137,6 +154,7 @@ export class ThaiRagIndexJobStore {
     if (!REINDEX_REASONS.has(reindexReason)) throw new Error('Thai-RAG index reindex reason is invalid');
     await this.initialize();
     const ownerProcessIdentity = await this.readOwnerProcessIdentity(ownerId);
+    const startedAt = this.now().toISOString();
     const job: ThaiRagIndexJob = {
       jobId: `idx_umcp_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
       workspaceId: parsedWorkspaceId.value,
@@ -145,7 +163,8 @@ export class ThaiRagIndexJobStore {
       status: 'running',
       force,
       reindexReason,
-      startedAt: this.now().toISOString(),
+      startedAt,
+      progressAt: startedAt,
     };
     this.jobs.set(job.jobId, job);
     await this.persist();
@@ -200,6 +219,9 @@ export class ThaiRagIndexJobStore {
       skippedFiles,
       totalFiles,
       ...mergedCache,
+      // Progress that actually advanced proves the owner is alive and talking
+      // to the provider, so it resets the stuck-job clock.
+      progressAt: this.now().toISOString(),
     };
     if (jobsEqualProgress(current, next)) return current;
     this.jobs.set(jobId, next);
@@ -254,7 +276,29 @@ export class ThaiRagIndexJobStore {
 
   public async active(ownerId: string): Promise<readonly ThaiRagIndexJob[]> {
     await this.initialize();
+    // Reap wedged-but-alive owners on every admission check so a stuck job
+    // cannot block the workspace until the provider process restarts.
+    if (await this.reapStuckJobs()) await this.persist();
     return [...this.jobs.values()].filter((job) => ACTIVE_JOB_STATUSES.has(job.status) && job.ownerId === ownerId);
+  }
+
+  private async reapStuckJobs(): Promise<boolean> {
+    const now = this.now().getTime();
+    let changed = false;
+    for (const [id, job] of this.jobs) {
+      if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
+      const lastProgressAt = parseTimestamp(job.progressAt) ?? parseTimestamp(job.startedAt);
+      if (lastProgressAt === null) continue;
+      if (now - lastProgressAt <= this.stuckJobTimeoutMs) continue;
+      this.jobs.set(id, {
+        ...job,
+        status: 'interrupted',
+        finishedAt: this.now().toISOString(),
+        error: `Indexing job produced no owner-verified progress within ${Math.round(this.stuckJobTimeoutMs / 1000)}s; the owning process is presumed stuck`,
+      });
+      changed = true;
+    }
+    return changed;
   }
 
   private async isProvablyDeadRuntimeOwner(job: ThaiRagIndexJob): Promise<boolean> {
@@ -357,6 +401,7 @@ function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndex
       force: typeof value.force === 'boolean' ? value.force : false,
       ...(validReindexReason(value.reindexReason) ? { reindexReason: value.reindexReason } : {}),
       startedAt: typeof value.startedAt === 'string' ? value.startedAt : now().toISOString(),
+      ...(typeof value.progressAt === 'string' && parseTimestamp(value.progressAt) !== null ? { progressAt: value.progressAt } : {}),
       ...(legacy ? { finishedAt: typeof value.finishedAt === 'string' ? value.finishedAt : now().toISOString(), error: 'Legacy index job is unavailable', legacyData: value } : {}),
       ...(typeof value.finishedAt === 'string' ? { finishedAt: value.finishedAt } : {}),
       ...(Object.hasOwn(value, 'result') ? { result: value.result } : {}),
@@ -450,6 +495,12 @@ function jobsEqualProgress(left: ThaiRagIndexJob, right: ThaiRagIndexJob): boole
 
 function validReindexReason(value: unknown): value is ThaiRagReindexReason {
   return typeof value === 'string' && REINDEX_REASONS.has(value as ThaiRagReindexReason);
+}
+
+function parseTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function validCounter(value: unknown): value is number {

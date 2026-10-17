@@ -758,13 +758,15 @@ describe('NativeThaiRagProviderDriver', () => {
     const workspaceRoot = await tempRoot();
     const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
     await mkdir(path.dirname(filePath), { recursive: true });
+    // Fresh progress: a live foreign owner must be respected. A record that has
+    // gone stale past the stuck window is covered by the stuck-job reap tests.
     await writeFile(filePath, JSON.stringify({ schemaVersion: 2, jobs: [{
       jobId: 'idx_umcp_owner_a',
       workspaceId,
       ownerId: 'owner-a',
       status: 'running',
       force: true,
-      startedAt: '2026-09-17T01:00:00.000Z',
+      startedAt: new Date().toISOString(),
     }] }));
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,

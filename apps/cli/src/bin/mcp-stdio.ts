@@ -16,6 +16,7 @@ import {
 import { applyPendingSqliteRestoreSync, assertStorageIdentitySafe, SqliteBackupService, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceRoot, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/stdio-mcp-runtime.js';
+import { startNativeProviderOrDegrade } from '../runtime/native-provider-startup.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
 import { StrictWorkspaceRepository, canonicalizeAllowedRoots, requestedPathInsideAllowedRoot } from '../runtime/strict-workspace-repository.js';
 import { resolveRequestedWorkspacePath } from '../runtime/workspace-selection.js';
@@ -181,13 +182,10 @@ async function main(): Promise<void> {
   });
   await runtime.activityReady;
   await runtime.recoveryReady;
-  if (runtime.authorizationModeProvider() === 'full_bypass') {
-    await runtime.initializeThaiRag().catch((error: unknown) => {
-      process.stderr.write(`Unified-MPC Thai-RAG startup state=degraded bypass=1 error=${error instanceof Error ? error.message : String(error)}\n`);
-    });
-  } else {
-    await runtime.initializeThaiRag();
-  }
+  await startNativeProviderOrDegrade(
+    () => runtime.initializeThaiRag(),
+    (line) => process.stderr.write(line),
+  );
   process.stderr.write(
     `Unified-MPC MCP stdio ready primary=${workspace.id} root=${workspace.realRootPath} profile=${profileName}`
       + `${stdioFullBypassAll ? ' full_bypass=1' : ''}${unrestricted ? ' unrestricted=1' : ''}${strictAllowedRoots === undefined ? '' : ` strict_roots=${strictAllowedRoots.length}`}\n`,

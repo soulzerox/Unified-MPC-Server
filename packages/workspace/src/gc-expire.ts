@@ -3,8 +3,15 @@ import type { CanonicalManifestStore } from './canonical-manifest-store.js';
 import type { GoalOverlayStore } from './goal-overlay-store.js';
 import type { RevisionPinRegistry } from './revision-pin-registry.js';
 import type { ArtifactQuarantineStore } from './artifact-quarantine.js';
+import type { GcLeaseStore } from './gc-lease.js';
 import { assembleGcRoots } from './artifact-gc-roots.js';
 import { planArtifactGc } from './artifact-gc.js';
+
+export interface GcExpireLease {
+  readonly store: GcLeaseStore;
+  readonly ownerId: string;
+  readonly ttlMs: number;
+}
 
 export interface GcExpireInput {
   readonly indexJobManifestIds: readonly string[];
@@ -13,6 +20,11 @@ export interface GcExpireInput {
   readonly dryRun: boolean;
   /** Physical delete of one released artifact; omitted in dry-run. */
   readonly deleteArtifact?: (hash: string) => Promise<void>;
+  /**
+   * Single-owner guard for the destructive pass (#210 §12). Required in
+   * practice for any non-dry-run caller; dry runs never take it.
+   */
+  readonly lease?: GcExpireLease;
 }
 
 export type GcExpireReport =
@@ -38,11 +50,41 @@ export interface GcExpireStores {
  * sets without releasing rows or calling the delete callback. The
  * callback owns the actual storage deletion, so this module never needs
  * to know the artifact backend.
+ *
+ * With a `lease` supplied the whole deletion pass runs under the U28
+ * single-owner fence: a held or unreadable lease refuses the run before
+ * anything is deleted, and the lease is released afterwards even when
+ * the run refuses on unassemblable roots. Dry runs are read-only and
+ * deliberately do not take the lease.
  */
 export async function expireGcQuarantine(
   stores: GcExpireStores,
   input: GcExpireInput,
 ): Promise<GcExpireReport> {
+  const lease = input.dryRun ? undefined : input.lease;
+  let granted: { readonly generation: number } | undefined;
+  if (lease !== undefined) {
+    const acquired = await lease.store.acquire({ ownerId: lease.ownerId, now: input.now, ttlMs: lease.ttlMs });
+    if (acquired.status === 'denied') {
+      return {
+        status: 'refused',
+        reason: acquired.reason === 'held'
+          ? `gc lease held by ${acquired.holder} until ${acquired.expiresAt}`
+          : 'gc lease fence unreadable: refusing to start a destructive pass',
+      };
+    }
+    granted = { generation: acquired.generation };
+  }
+  try {
+    return await runPass(stores, input);
+  } finally {
+    if (lease !== undefined && granted !== undefined) {
+      await lease.store.release({ ownerId: lease.ownerId, generation: granted.generation });
+    }
+  }
+}
+
+async function runPass(stores: GcExpireStores, input: GcExpireInput): Promise<GcExpireReport> {
   let roots;
   try {
     roots = await assembleGcRoots({
@@ -58,7 +100,13 @@ export async function expireGcQuarantine(
 
   const entries = await stores.quarantine.list();
   const plan = planArtifactGc({ roots, candidates: entries.map((entry) => entry.hash) });
-  const reachable = new Set(plan.status === 'planned' ? plan.reachable : []);
+  if (plan.status !== 'planned') {
+    // A refused plan (no roots) means reachability could not be proven; with
+    // nothing proven reachable a delete pass would treat every quarantined
+    // artifact as garbage. Refuse instead.
+    return { status: 'refused', reason: plan.reason };
+  }
+  const reachable = new Set(plan.reachable);
 
   const expired: string[] = [];
   const retained: string[] = [];

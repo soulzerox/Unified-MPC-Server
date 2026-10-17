@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type AppError, type Result, type ResultBudget } from '@unified-mpc/domain';
 import { createPosixProcessIdentityProbe, type PosixProcessIdentityProbe } from '@unified-mpc/process';
@@ -36,10 +36,18 @@ export interface ThaiRagProviderRuntimeOptions {
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly processIdentityProbe?: PosixProcessIdentityProbe;
   readonly platform?: NodeJS.Platform;
+  /** How long an owner may go without a heartbeat before its lock is considered abandoned. */
+  readonly ownerLockTtlMs?: number;
+  /** Heartbeat rewrite interval while this runtime owns the lock. */
+  readonly heartbeatIntervalMs?: number;
 }
 
 export const THAI_RAG_OWNER_LOCK_CONFLICT_REASON = 'owner-lock';
 export const THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON = 'owner-lock-unverified';
+/** A live, version-compatible owner that stopped heartbeating: actionable, never auto-stolen. */
+export const THAI_RAG_UNRESPONSIVE_OWNER_LOCK_REASON = 'owner-lock-unresponsive';
+
+const DEFAULT_OWNER_LOCK_TTL_MS = 30_000;
 
 export function isThaiRagOwnerLockConflict(error: AppError): boolean {
   return error.code === 'CONFLICT' && error.details?.reason === THAI_RAG_OWNER_LOCK_CONFLICT_REASON;
@@ -50,6 +58,9 @@ interface ProviderLockRecord {
   readonly pid: number;
   readonly startedAt: string;
   readonly processIdentity?: string;
+  /** Written by 4.61.0+ owners; absent on older-release locks. */
+  readonly heartbeatAt?: string;
+  readonly providerVersion?: string;
 }
 
 export class ThaiRagProviderRuntime {
@@ -57,6 +68,9 @@ export class ThaiRagProviderRuntime {
   private readonly now: () => Date;
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly processIdentityProbe: PosixProcessIdentityProbe;
+  private readonly ownerLockTtlMs: number;
+  private readonly heartbeatIntervalMs: number;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private healthState: ThaiRagProviderHealth;
   private providerRoot: string | undefined;
   private ownsLock = false;
@@ -68,6 +82,8 @@ export class ThaiRagProviderRuntime {
     this.now = options.now ?? ((): Date => new Date());
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
     this.processIdentityProbe = options.processIdentityProbe ?? defaultProcessIdentityProbe(options.platform ?? process.platform);
+    this.ownerLockTtlMs = options.ownerLockTtlMs ?? DEFAULT_OWNER_LOCK_TTL_MS;
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? Math.max(1_000, Math.floor(this.ownerLockTtlMs / 3));
     this.healthState = createProviderHealth(options.providerVersion, options.embeddingIndexGeneration);
   }
 
@@ -107,7 +123,27 @@ export class ThaiRagProviderRuntime {
     }
 
     this.healthState = healthFromComponents(this.healthState, started.value, this.now().toISOString());
+    this.startHeartbeat();
     return ok(this.healthState);
+  }
+
+  /**
+   * Rewrite the owner lock with a fresh heartbeat while this runtime owns it.
+   *
+   * A running owner must keep proving liveness: the lock TTL is what allows
+   * another runtime to distinguish "owner is alive" from "owner died or is
+   * wedged", which pid liveness alone cannot do for a stopped process (and
+   * never could for an older release that is still running but unreachable).
+   */
+  public async renewOwnerLock(): Promise<boolean> {
+    if (!this.ownsLock || this.providerRoot === undefined) return false;
+    const existing = await this.readLock();
+    if (existing === null
+      || existing.ownerId !== this.options.ownerId
+      || existing.pid !== this.pid
+      || existing.processIdentity !== this.ownedProcessIdentity) return false;
+    await this.writeLock({ ...existing, heartbeatAt: this.now().toISOString() });
+    return true;
   }
 
   public async refresh(signal?: AbortSignal): Promise<Result<ThaiRagProviderHealth>> {
@@ -141,6 +177,7 @@ export class ThaiRagProviderRuntime {
       this.healthState = { ...this.healthState, state: 'degraded', degradation: ['shutdown-failed'] };
       return stopped;
     }
+    this.stopHeartbeat();
     await this.releaseOwnerLock();
     this.healthState = createProviderHealth(this.options.providerVersion, this.options.embeddingIndexGeneration);
     return ok(this.healthState);
@@ -153,10 +190,13 @@ export class ThaiRagProviderRuntime {
         const processIdentity = await this.readProcessIdentity(this.pid);
         const handle = await open(lockPath, 'wx', 0o600);
         try {
+          const stamp = this.now().toISOString();
           const record: ProviderLockRecord = {
             ownerId: this.options.ownerId,
             pid: this.pid,
-            startedAt: this.now().toISOString(),
+            startedAt: stamp,
+            heartbeatAt: stamp,
+            providerVersion: this.options.providerVersion,
             ...(processIdentity === null ? {} : { processIdentity }),
           };
           await handle.writeFile(JSON.stringify(record));
@@ -184,15 +224,21 @@ export class ThaiRagProviderRuntime {
         reason: THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON,
       }));
     }
-    if (this.isProcessAlive(existing.pid)) {
-      const observedIdentity = await this.readProcessIdentity(existing.pid);
-      if (existing.processIdentity === undefined || observedIdentity === null) {
-        return err(appError('CONFLICT', 'Thai-RAG provider owner lock exists but process identity cannot be verified', true, {
-          reason: THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON,
-        }));
-      }
-      if (observedIdentity === existing.processIdentity) return first;
-      // A live PID with a different start identity is a reused PID, not the lock owner.
+    const verdict = await this.classifyExistingLock(existing);
+    if (verdict === 'live') return first;
+    if (verdict === 'unverified') {
+      return err(appError('CONFLICT', 'Thai-RAG provider owner lock exists but process identity cannot be verified', true, {
+        reason: THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON,
+      }));
+    }
+    if (verdict === 'unresponsive') {
+      return err(appError(
+        'CONFLICT',
+        `Thai-RAG provider owner lock is held by an unresponsive owner: pid ${existing.pid} owned by ${existing.ownerId} `
+        + `since ${existing.startedAt}; stop that process or remove ${lockPath} to reclaim it`,
+        true,
+        { reason: THAI_RAG_UNRESPONSIVE_OWNER_LOCK_REASON },
+      ));
     }
     try {
       await unlink(lockPath);
@@ -200,6 +246,60 @@ export class ThaiRagProviderRuntime {
       if (!isNodeError(error) || error.code !== 'ENOENT') return first;
     }
     return create();
+  }
+
+  /**
+   * Decide whether an existing lock may be reclaimed (#210 U32).
+   *
+   * `reclaim` is granted only with evidence the owner is gone: the PID is dead,
+   * the PID was reused by another process, or a heartbeat-aware owner stopped
+   * heartbeating *and* was written by an incompatible provider version (an
+   * older release cannot be a valid owner for this build). A live owner is
+   * never stolen just because it is silent: a heartbeat-less (pre-4.61.0)
+   * owner is respected as live because it can be proven neither dead nor
+   * compatible, and a same-version silent owner is reported as `unresponsive`
+   * with the pid/lock path so an operator can reclaim it deliberately.
+   */
+  private async classifyExistingLock(
+    existing: ProviderLockRecord,
+  ): Promise<'reclaim' | 'live' | 'unresponsive' | 'unverified'> {
+    if (!this.isProcessAlive(existing.pid)) return 'reclaim';
+    const observed = await this.readProcessIdentity(existing.pid);
+    if (existing.processIdentity === undefined || observed === null) {
+      // The owner's liveness cannot be verified at all here; never act on it.
+      return 'unverified';
+    }
+    if (observed !== existing.processIdentity) return 'reclaim';
+    if (existing.heartbeatAt === undefined) {
+      // Verified-live pre-heartbeat owner: it can never prove liveness, but it
+      // also cannot be proven dead, so it keeps its lock.
+      return 'live';
+    }
+    if (this.now().getTime() - Date.parse(existing.heartbeatAt) <= this.ownerLockTtlMs) return 'live';
+    if (existing.providerVersion !== this.options.providerVersion) return 'reclaim';
+    return 'unresponsive';
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer !== undefined) return;
+    this.heartbeatTimer = setInterval(() => {
+      void this.renewOwnerLock().catch(() => undefined);
+    }, this.heartbeatIntervalMs);
+    // A heartbeat must never hold the process open on shutdown.
+    this.heartbeatTimer.unref?.();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer === undefined) return;
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
+  }
+
+  private async writeLock(record: ProviderLockRecord): Promise<void> {
+    const finalPath = this.lockPath();
+    const tmpPath = `${finalPath}.tmp-${this.pid}`;
+    await writeFile(tmpPath, JSON.stringify(record), { mode: 0o600 });
+    await rename(tmpPath, finalPath);
   }
 
   private async releaseOwnerLock(): Promise<void> {
@@ -223,12 +323,16 @@ export class ThaiRagProviderRuntime {
         || !Number.isInteger(parsed.pid)
         || parsed.pid <= 0
         || typeof parsed.startedAt !== 'string'
-        || (parsed.processIdentity !== undefined && (typeof parsed.processIdentity !== 'string' || parsed.processIdentity.length === 0))) return null;
+        || (parsed.processIdentity !== undefined && (typeof parsed.processIdentity !== 'string' || parsed.processIdentity.length === 0))
+        || (parsed.heartbeatAt !== undefined && typeof parsed.heartbeatAt !== 'string')
+        || (parsed.providerVersion !== undefined && typeof parsed.providerVersion !== 'string')) return null;
       return {
         ownerId: parsed.ownerId,
         pid: parsed.pid,
         startedAt: parsed.startedAt,
         ...(parsed.processIdentity === undefined ? {} : { processIdentity: parsed.processIdentity }),
+        ...(parsed.heartbeatAt === undefined ? {} : { heartbeatAt: parsed.heartbeatAt }),
+        ...(parsed.providerVersion === undefined ? {} : { providerVersion: parsed.providerVersion }),
       };
     } catch {
       return null;

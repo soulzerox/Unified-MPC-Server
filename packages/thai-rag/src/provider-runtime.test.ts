@@ -287,3 +287,103 @@ describe('ThaiRagProviderRuntime', () => {
     expect((await runtime.stop()).ok).toBe(true);
   });
 });
+
+describe('ThaiRagProviderRuntime owner-lock heartbeat and version fence (#210 U32)', () => {
+  const make = (dataRoot: string, overrides: Record<string, unknown> = {}): ThaiRagProviderRuntime => new ThaiRagProviderRuntime({
+    dataRoot,
+    ownerId: 'stdio-runtime',
+    providerVersion: '4.61.0',
+    embeddingIndexGeneration: 1,
+    driver: driver(),
+    ...overrides,
+  } as ConstructorParameters<typeof ThaiRagProviderRuntime>[0]);
+
+  it('records the provider version and a heartbeat on the owner lock', async () => {
+    const dataRoot = await root();
+    const now = (): Date => new Date('2026-10-17T00:00:00.000Z');
+    const runtime = make(dataRoot, { now });
+    expect((await runtime.start()).ok).toBe(true);
+    const lock = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'provider.lock'), 'utf8')) as {
+      providerVersion: string; heartbeatAt: string;
+    };
+    expect(lock.providerVersion).toBe('4.61.0');
+    expect(lock.heartbeatAt).toBe('2026-10-17T00:00:00.000Z');
+    await runtime.stop();
+  });
+
+  it('advances the heartbeat while it still owns the lock', async () => {
+    const dataRoot = await root();
+    let clock = Date.parse('2026-10-17T00:00:00.000Z');
+    const runtime = make(dataRoot, { now: () => new Date(clock) });
+    expect((await runtime.start()).ok).toBe(true);
+
+    clock += 5_000;
+    await runtime.renewOwnerLock();
+    const lock = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'provider.lock'), 'utf8')) as { heartbeatAt: string };
+    expect(lock.heartbeatAt).toBe('2026-10-17T00:00:05.000Z');
+    await runtime.stop();
+  });
+
+  it('reclaims a stale lock left by an incompatible release', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(providerRoot, { recursive: true }));
+    // An older release, alive and heartbeating, but from an incompatible version.
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'old-release',
+      pid: 424242,
+      startedAt: '2026-10-16T13:55:21.531Z',
+      processIdentity: '2026-10-16T13:55:05.000Z',
+      providerVersion: '4.60.0',
+      heartbeatAt: '2026-10-16T13:55:21.531Z',
+    }));
+
+    const runtime = make(dataRoot, {
+      now: () => new Date('2026-10-17T00:00:00.000Z'),
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async () => '2026-10-16T13:55:05.000Z',
+    });
+    expect((await runtime.start()).ok).toBe(true);
+    const lock = JSON.parse(await readFile(path.join(providerRoot, 'provider.lock'), 'utf8')) as { ownerId: string; providerVersion: string };
+    expect(lock.ownerId).toBe('stdio-runtime');
+    expect(lock.providerVersion).toBe('4.61.0');
+    await runtime.stop();
+  });
+
+  it('keeps heartbeat-fresh locks and reports a same-version stale owner as unresponsive', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(providerRoot, { recursive: true }));
+    const lockPath = path.join(providerRoot, 'provider.lock');
+    const now = (): Date => new Date('2026-10-17T00:00:00.000Z');
+    const owner = { ownerId: 'live-owner', pid: 424242, startedAt: '2026-10-17T00:00:00.000Z', processIdentity: '2026-10-16T13:55:05.000Z', providerVersion: '4.61.0' };
+    const denyOptions = {
+      now,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string> => '2026-10-16T13:55:05.000Z',
+    };
+
+    // Fresh heartbeat: the owner is live, so the lock is respected.
+    await writeFile(lockPath, JSON.stringify({ ...owner, heartbeatAt: '2026-10-17T00:00:00.000Z' }));
+    const fresh = await make(dataRoot, denyOptions).start();
+    expect(fresh.ok).toBe(false);
+    if (!fresh.ok) expect(fresh.error.message).toContain('already has an active owner');
+
+    // Stale heartbeat, same version: refuse, but name the wedged owner.
+    await writeFile(lockPath, JSON.stringify({ ...owner, heartbeatAt: '2026-10-16T00:00:00.000Z' }));
+    const wedged = await make(dataRoot, denyOptions).start();
+    expect(wedged.ok).toBe(false);
+    if (!wedged.ok) {
+      expect(wedged.error.message).toContain('424242');
+      expect(wedged.error.message).toMatch(/unresponsive/i);
+    }
+
+    // A pre-heartbeat lock is respected even though it can never prove liveness.
+    const { heartbeatAt: _dropped, providerVersion: _dropped2, ...legacy } = owner;
+    void _dropped; void _dropped2;
+    await writeFile(lockPath, JSON.stringify(legacy));
+    const legacyStart = await make(dataRoot, denyOptions).start();
+    expect(legacyStart.ok).toBe(false);
+    if (!legacyStart.ok) expect(legacyStart.error.message).toContain('already has an active owner');
+  });
+});

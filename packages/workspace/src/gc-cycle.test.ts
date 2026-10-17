@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId, computeTreeOid } from '@unified-mpc/domain';
@@ -9,6 +9,7 @@ import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { ArtifactQuarantineStore } from './artifact-quarantine.js';
 import { runGcCycle } from './gc-cycle.js';
+import { GcLeaseStore } from './gc-lease.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -124,6 +125,108 @@ describe('GC cycle orchestrator (#210 U22)', () => {
       const second = await runGcCycle(deps, { ...input, now: new Date(NOW.getTime() + 1000) });
       expect(second.quarantined).toEqual([H('2')]);
       expect((await deps.quarantine.list())[0]).toEqual(before);
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('GC cycle under the cleanup lease (#210 U30)', () => {
+  it('refuses to quarantine while another owner holds the lease', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      await lease.acquire({ ownerId: 'other_gc', now: NOW, ttlMs: GRACE * 10 });
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE },
+      });
+      expect(report).toMatchObject({ status: 'refused' });
+      if (report.status !== 'refused') throw new Error('unexpected');
+      expect(report.reason).toMatch(/other_gc/);
+      expect(await deps.quarantine.list()).toEqual([]);
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('quarantines under a granted lease and releases it afterwards', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE },
+      });
+      expect(report).toMatchObject({ status: 'planned', quarantined: [H('2')] });
+      expect((await deps.quarantine.list()).map((entry) => entry.hash)).toEqual([H('2')]);
+      expect(await lease.read()).toBeNull();
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('releases the lease even when the plan is refused', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-cycle-lease-'));
+    try {
+      const lease = new GcLeaseStore(dir);
+      const report = await runGcCycle({
+        refs: new CanonicalRefStore(dir),
+        manifests: new CanonicalManifestStore(dir),
+        pins: new RevisionPinRegistry(dir),
+        overlays: new GoalOverlayStore(dir),
+        quarantine: new ArtifactQuarantineStore(dir),
+      }, {
+        candidates: [H('1')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE },
+      });
+      expect(report).toMatchObject({ status: 'refused' });
+      expect(await lease.read()).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a dry run unfenced', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      await lease.acquire({ ownerId: 'other_gc', now: NOW, ttlMs: GRACE * 10 });
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: true,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE },
+      });
+      expect(report).toMatchObject({ status: 'planned', quarantined: [], unreachable: [H('2')] });
+      expect((await lease.read())?.ownerId).toBe('other_gc');
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unreadable fence without quarantining', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      await lease.acquire({ ownerId: 'other_gc', now: NOW, ttlMs: GRACE * 10 });
+      await writeFile(path.join(deps.dir, 'gc', 'lease.json'), '{ broken', 'utf8');
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE },
+      });
+      expect(report).toMatchObject({ status: 'refused' });
+      if (report.status !== 'refused') throw new Error('unexpected');
+      expect(report.reason).toMatch(/unreadable|fence/i);
+      expect(await deps.quarantine.list()).toEqual([]);
     } finally {
       await rm(deps.dir, { recursive: true, force: true });
     }

@@ -5,6 +5,13 @@ import type { RevisionPinRegistry } from './revision-pin-registry.js';
 import { planArtifactGc, type GcRootSet } from './artifact-gc.js';
 import { assembleGcRoots } from './artifact-gc-roots.js';
 import type { ArtifactQuarantineStore } from './artifact-quarantine.js';
+import type { GcLeaseStore } from './gc-lease.js';
+
+export interface GcCycleLease {
+  readonly store: GcLeaseStore;
+  readonly ownerId: string;
+  readonly ttlMs: number;
+}
 
 export interface GcCycleInput {
   readonly candidates: readonly string[];
@@ -12,6 +19,8 @@ export interface GcCycleInput {
   readonly now: Date;
   readonly graceMs: number;
   readonly dryRun: boolean;
+  /** Single-owner guard for the quarantine mutation (#210 §12); dry runs take none. */
+  readonly lease?: GcCycleLease;
 }
 
 export type GcCycleReport =
@@ -35,11 +44,40 @@ export interface GcCycleStores {
  * plan and what was quarantined so a caller can distinguish
  * already-quarantined from newly-quarantined hashes. Read-only aside
  * from the quarantine ledger; deletion stays a separate scheduled step.
+ *
+ * A non-dry run holds the U28 cleanup lease for the whole cycle (a held
+ * or unreadable fence refuses before anything is quarantined) and
+ * releases it in a finally, even on refusal. Dry runs are read-only and
+ * deliberately unfenced.
  */
 export async function runGcCycle(
   stores: GcCycleStores,
   input: GcCycleInput,
 ): Promise<GcCycleReport> {
+  const lease = input.dryRun ? undefined : input.lease;
+  let granted: number | undefined;
+  if (lease !== undefined) {
+    const acquired = await lease.store.acquire({ ownerId: lease.ownerId, now: input.now, ttlMs: lease.ttlMs });
+    if (acquired.status === 'denied') {
+      return {
+        status: 'refused',
+        reason: acquired.reason === 'held'
+          ? `gc lease held by ${acquired.holder} until ${acquired.expiresAt}`
+          : 'gc lease fence unreadable: refusing to start a mutating cycle',
+      };
+    }
+    granted = acquired.generation;
+  }
+  try {
+    return await runCycle(stores, input);
+  } finally {
+    if (lease !== undefined && granted !== undefined) {
+      await lease.store.release({ ownerId: lease.ownerId, generation: granted });
+    }
+  }
+}
+
+async function runCycle(stores: GcCycleStores, input: GcCycleInput): Promise<GcCycleReport> {
   let roots: GcRootSet;
   try {
     roots = await assembleGcRoots({

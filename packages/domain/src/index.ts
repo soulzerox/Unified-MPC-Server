@@ -11,6 +11,7 @@ export * from './structural-evidence.js';
 export * from './canonical-revision.js';
 export * from './canonical-manifest.js';
 export * from './revision-delta.js';
+export * from './repository-provenance.js';
 export * from './advancement-gate.js';
 export * from './invocation-authorization.js';
 export * from './issue-closure-evidence.js';

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Client, SSEClientTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { captureChildStderr, withChildStderr } from './child-stderr-capture.js';
 import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { ExternalMcpContractDrift, McpResourceSummary, McpServerLaunchConfig, McpToolSummary } from './types.js';
 
@@ -410,6 +411,7 @@ export class McpSessionManager {
 export const defaultMcpClientFactory: McpClientFactory = {
   async connect(config: McpServerLaunchConfig, signal?: AbortSignal): Promise<McpClientSession> {
     let disposeStderrDrain = (): void => undefined;
+    let childStderrCapture: ReturnType<typeof captureChildStderr> | undefined;
     let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
     if (config.type === 'http' || config.type === 'sse') {
       if (config.url === undefined) throw new Error(`${config.type} MCP transport requires a URL`);
@@ -429,7 +431,8 @@ export const defaultMcpClientFactory: McpClientFactory = {
         },
         stderr: 'pipe',
       });
-      disposeStderrDrain = attachChildStderrDrain(stdio.stderr);
+      childStderrCapture = captureChildStderr(stdio.stderr);
+      disposeStderrDrain = childStderrCapture.drain;
       transport = stdio;
     }
     const client = new Client(
@@ -439,9 +442,10 @@ export const defaultMcpClientFactory: McpClientFactory = {
     try {
       await client.connect(transport, signal === undefined ? undefined : { signal });
     } catch (error: unknown) {
+      const childStderr = childStderrCapture?.tail() ?? '';
       await client.close().catch(() => undefined);
       disposeStderrDrain();
-      throw error;
+      throw withChildStderr(error, childStderr);
     }
     let closed = false;
     return {
@@ -485,29 +489,9 @@ export const defaultMcpClientFactory: McpClientFactory = {
 };
 
 export function attachChildStderrDrain(stderr: unknown): () => void {
-  if (!isDrainableStderr(stderr)) return () => undefined;
-  const ignorePipeError = (): void => undefined;
-  stderr.on('error', ignorePipeError);
-  stderr.resume();
-  let disposed = false;
-  return (): void => {
-    if (disposed) return;
-    disposed = true;
-    stderr.removeListener('error', ignorePipeError);
-  };
+  return captureChildStderr(stderr).drain;
 }
 
-function isDrainableStderr(value: unknown): value is {
-  on(event: 'error', listener: () => void): unknown;
-  removeListener(event: 'error', listener: () => void): unknown;
-  resume(): unknown;
-} {
-  return typeof value === 'object'
-    && value !== null
-    && 'on' in value && typeof value.on === 'function'
-    && 'removeListener' in value && typeof value.removeListener === 'function'
-    && 'resume' in value && typeof value.resume === 'function';
-}
 
 function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs: number, message: string, parentSignal?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {

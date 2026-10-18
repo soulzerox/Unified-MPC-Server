@@ -6,24 +6,33 @@ const actor = { clientId: 'process-boundary', clientName: 'process-boundary-test
 const activeScope = async (): Promise<WorkspaceScope | null> => ({ workspaceId: 'workspace-a', rootPath: 'E:\\project-a' });
 
 describe('process_start gateway boundary', () => {
-  it('requires confirmation for an outside absolute cwd, then allows the exact approved action', async () => {
+  it('fences an outside absolute cwd for the explicit process_start workspace identity', async () => {
     const approvals: unknown[] = [];
     const starts: unknown[] = [];
     const registry = registryWithCapture(starts, approvals);
 
+    // #214: process_start always carries an explicit workspaceId, which is a hard
+    // execution identity; an outside cwd is refused outright rather than escalated
+    // to the host approval boundary, and approval never overrides it.
     const blocked = await registry.invoke('process_start', {
       workspaceId: 'workspace-a', executable: 'node.exe', args: ['script.js'], cwd: 'E:\\project-b',
     });
-    expect(blocked).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_REQUIRED' } } });
+    expect(blocked).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+    });
     expect(approvals).toEqual([]);
     expect(starts).toEqual([]);
 
     const approved = await registry.invoke('process_start', {
       workspaceId: 'workspace-a', executable: 'node.exe', args: ['script.js'], cwd: 'E:\\project-b', userConfirmed: true,
     });
-    expect(approved.isError).not.toBe(true);
-    expect(approvals).toHaveLength(1);
-    expect(starts).toEqual([expect.objectContaining({ cwd: 'E:\\project-b' })]);
+    expect(approved).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+    });
+    expect(approvals).toEqual([]);
+    expect(starts).toEqual([]);
   });
 
   it.each([

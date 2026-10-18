@@ -15,6 +15,7 @@ export * from './gc-cycle.js';
 export * from './canonical-store-verify.js';
 export * from './revision-prune.js';
 export * from './logical-space-report.js';
+export * from './compaction-gate.js';
 export * from './artifact-quarantine.js';
 export * from './gc-expire.js';
 export * from './revision-verify.js';

@@ -12,6 +12,7 @@ export * from './canonical-artifact-store.js';
 export * from './advance-revision.js';
 export * from './artifact-gc.js';
 export * from './artifact-gc-roots.js';
+export * from './artifact-key-gc.js';
 export * from './gc-cycle.js';
 export * from './canonical-store-verify.js';
 export * from './revision-prune.js';

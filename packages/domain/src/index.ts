@@ -10,6 +10,8 @@ export * from './workspace-admission.js';
 export * from './structural-evidence.js';
 export * from './canonical-revision.js';
 export * from './canonical-manifest.js';
+export * from './file-artifact-identity.js';
+export * from './semantic-artifact-identity.js';
 export * from './revision-delta.js';
 export * from './repository-provenance.js';
 export * from './advancement-gate.js';

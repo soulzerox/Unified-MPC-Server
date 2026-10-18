@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { ok, err } from '@unified-mpc/domain';
+import { ok, err, type Result } from '@unified-mpc/domain';
 import type { ExtensionsService } from '@unified-mpc/extensions';
 import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
 
@@ -343,7 +344,26 @@ if (previousHome === undefined) delete process.env.HOME;
     const thaiRagDriver = {
       start: async (): Promise<ReturnType<typeof ok<typeof components>>> => ok(components),
       health: async (): Promise<ReturnType<typeof ok<typeof components>>> => ok(components),
-      call: async (): Promise<ReturnType<typeof ok<{ readonly ready: boolean }>>> => ok({ ready: true }),
+      call: async (tool: string, args: Readonly<Record<string, unknown>>): Promise<Result<unknown>> => {
+        if (tool !== 'pre_edit_context') return ok({ ready: true });
+        // Emulate the provider contract (#346): the ready verdict names the
+        // content it analyzed, so the harness can bind it to the real target.
+        const requested = typeof args.file_path === 'string' ? args.file_path : '';
+        let content = '';
+        try {
+          content = await readFile(path.join(root, requested), 'utf8');
+        } catch {
+          content = '';
+        }
+        return ok({ content: [{ type: 'text', text: JSON.stringify({
+          status: 'ok',
+          can_proceed: true,
+          evidence_state: 'evidence_available',
+          evidence_fresh: true,
+          target_sha256: createHash('sha256').update(content, 'utf8').digest('hex'),
+          evidence: { code_index: 'available', storage: 'available', cpg: 'available' },
+        }) }] });
+      },
       stop: async (): Promise<ReturnType<typeof ok<void>>> => ok(undefined),
     };
     const extensions: ExtensionsService = {
@@ -359,6 +379,8 @@ if (previousHome === undefined) delete process.env.HOME;
     };
     try {
       await writeFile(path.join(root, 'AGENTS.md'), '# CLI harness rules\\n');
+      await mkdir(path.join(root, 'src'), { recursive: true });
+      await writeFile(path.join(root, 'src', 'cli.ts'), 'export const cli = false;\n');
       const dependencies = createDefaultCliDependencies({
         runtimeAdmissionIdentity: sourceRuntimeAdmissionIdentity,
         thaiRagDriver,

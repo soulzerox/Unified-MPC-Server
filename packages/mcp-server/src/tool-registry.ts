@@ -54,7 +54,7 @@ import { hasExplicitUserConfirmation } from './destructive-policy.js';
 import { isScopedAutoApprovalAllowed, type WorkspaceScope } from './destructive-scope.js';
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
-import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext } from './harness-runtime.js';
+import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -1192,7 +1192,7 @@ export class ToolRegistry {
     workspaceId: string,
     filePath: string,
     targetIdentity: string | undefined,
-  ): Promise<Result<undefined>> {
+  ): Promise<Result<string>> {
     if (targetIdentity === undefined) {
       return err(appError('CONFLICT', 'Thai-RAG pre-edit evidence did not identify the target content', true, { reason: 'pre-edit-target-identity-missing' }));
     }
@@ -1207,10 +1207,11 @@ export class ToolRegistry {
     if (typeof loaded.value.content !== 'string') {
       return err(appError('CONFLICT', 'Pre-edit target did not return readable text content for revision binding', true, { reason: 'pre-edit-target-unreadable' }));
     }
-    if (hashHarnessText(loaded.value.content) !== targetIdentity) {
+    const contentHash = hashHarnessText(loaded.value.content);
+    if (contentHash !== targetIdentity) {
       return err(appError('CONFLICT', 'Thai-RAG pre-edit evidence is stale for the current target content; re-request evidence before mutating', true, { reason: 'pre-edit-target-stale' }));
     }
-    return ok(undefined);
+    return ok(contentHash);
   }
 
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
@@ -1323,6 +1324,7 @@ export class ToolRegistry {
     const trustedFullBypass = this.trustedFullBypassActive();
     const checks: string[] = [];
     let thaiRagState: TrustedPreEditBypassState | undefined;
+    let preparationReceipt: PreparationReceipt | undefined;
     if (trustedFullBypass) {
       thaiRagState = await this.observeThaiRagBypassState(signal);
       checks.push('thai-rag/pre_edit_context:bypassed');
@@ -1359,6 +1361,20 @@ export class ToolRegistry {
           return err(appError('CONFLICT', 'The admitted workspace source view changed while pre-edit evidence was prepared; re-request evidence before mutating', true, { reason: 'pre-edit-source-view-changed' }));
         }
       }
+      // #346 behaviour 8: record the exact inputs this authorization rests on.
+      // The ledger drops the receipt when the view, the harness or the target
+      // scope changes, so a mutation can never be justified by a stale input.
+      preparationReceipt = {
+        path: filePath,
+        workspaceId,
+        targetContentHash: bound.value,
+        ...(sourceIdentity.value === undefined ? {} : { sourceIdentity: sourceIdentity.value }),
+        evidenceProviderId: thaiHealth.value.providerId,
+        evidenceIndexGeneration: thaiHealth.value.embeddingIndexGeneration,
+        evidenceState: readiness.evidenceState,
+        checks: [...checks],
+        preparedAt: new Date().toISOString(),
+      };
     }
     if (runGodkillerSafetyCheck) {
       const extensions = this.services.extensions;
@@ -1382,7 +1398,7 @@ export class ToolRegistry {
       checks.push('godkiller/gk_task');
     }
 
-    this.harnessActivation.preparePath(context, filePath);
+    this.harnessActivation.preparePath(context, filePath, preparationReceipt);
     if (trustedFullBypass) {
       const resolvedThaiRagState = thaiRagState ?? 'unknown';
       if (automaticPreflight) {
@@ -1401,7 +1417,7 @@ export class ToolRegistry {
         checks,
       });
     }
-    return ok({ ready: true, filePath, checks });
+    return ok({ ready: true, filePath, checks, ...(preparationReceipt === undefined ? {} : { preparationReceipt }) });
   }
 
   private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {

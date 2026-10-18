@@ -7,11 +7,35 @@ export interface HarnessActivationContext {
   readonly workspaceId: string;
 }
 
+/**
+ * #346 behaviour 8: the bounded exact inputs a prepared path was authorized on.
+ *
+ * The ledger keeps this next to the prepared path so an authorization cannot
+ * outlive the view, target content or harness it was granted for. It carries
+ * fixed-shape metadata only, and is dropped whenever the admitted source view
+ * changes, the path is consumed by a mutation, or the harness is invalidated.
+ *
+ * ponytail: in-process, per session — enough for the current enforcement seam.
+ * Persist it through the #142 durable gate engine when that lands.
+ */
+export interface PreparationReceipt {
+  readonly path: string;
+  readonly workspaceId: string;
+  readonly targetContentHash: string;
+  readonly sourceIdentity?: WorkspaceSourceEvidenceIdentity;
+  readonly evidenceProviderId?: string;
+  readonly evidenceIndexGeneration?: number;
+  readonly evidenceState: string;
+  readonly checks: readonly string[];
+  readonly preparedAt: string;
+}
+
 export interface HarnessActivationState {
   readonly harnessFingerprint: string;
   readonly agentsMdHash: string;
   readonly mandatoryMcp: MandatoryMcpBootstrapResult;
   readonly preparedPaths: ReadonlySet<string>;
+  readonly preparations: ReadonlyMap<string, PreparationReceipt>;
   readonly sourceIdentity?: WorkspaceSourceEvidenceIdentity;
 }
 
@@ -33,20 +57,27 @@ export class HarnessActivationLedger {
       agentsMdHash,
       mandatoryMcp,
       preparedPaths: new Set<string>(),
+      preparations: new Map<string, PreparationReceipt>(),
       ...(sourceIdentity === undefined ? {} : { sourceIdentity }),
     };
     this.states.set(key(context), state);
     return state;
   }
 
-  public preparePath(context: HarnessActivationContext, path: string): HarnessActivationState | undefined {
+  public preparePath(context: HarnessActivationContext, path: string, receipt?: PreparationReceipt): HarnessActivationState | undefined {
     const current = this.state(context);
     if (current === undefined) return undefined;
     const preparedPaths = new Set(current.preparedPaths);
     preparedPaths.add(normalizePath(path));
-    const next = { ...current, preparedPaths };
+    const preparations = new Map(current.preparations);
+    if (receipt !== undefined) preparations.set(normalizePath(path), receipt);
+    const next = { ...current, preparedPaths, preparations };
     this.states.set(key(context), next);
     return next;
+  }
+
+  public preparation(context: HarnessActivationContext, path: string): PreparationReceipt | undefined {
+    return this.state(context)?.preparations.get(normalizePath(path));
   }
 
   public isPathPrepared(context: HarnessActivationContext, path: string): boolean {
@@ -57,7 +88,13 @@ export class HarnessActivationLedger {
     const current = this.state(context);
     if (current === undefined) return false;
     if (classifyWorkspaceSourceEvidence(current.sourceIdentity, sourceIdentity) === 'fresh') return false;
-    this.states.set(key(context), { ...current, sourceIdentity, preparedPaths: new Set<string>() });
+    // A new view invalidates every authorization and receipt granted for the old one.
+    this.states.set(key(context), {
+      ...current,
+      sourceIdentity,
+      preparedPaths: new Set<string>(),
+      preparations: new Map<string, PreparationReceipt>(),
+    });
     return true;
   }
 
@@ -66,7 +103,9 @@ export class HarnessActivationLedger {
     if (current === undefined) return;
     const preparedPaths = new Set(current.preparedPaths);
     preparedPaths.delete(normalizePath(path));
-    this.states.set(key(context), { ...current, preparedPaths });
+    const preparations = new Map(current.preparations);
+    preparations.delete(normalizePath(path));
+    this.states.set(key(context), { ...current, preparedPaths, preparations });
   }
 
   public invalidate(context: HarnessActivationContext): void {

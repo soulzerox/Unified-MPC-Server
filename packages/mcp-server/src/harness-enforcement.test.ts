@@ -884,4 +884,32 @@ describe('pre-edit readiness gate (#346 U10)', () => {
 
     expect(result.isError).not.toBe(true);
   });
+
+  it('returns a bounded exact-input preparation receipt for an authorized path', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/receipt.ts\n'),
+    }, 'src/receipt.ts');
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        ready: true,
+        filePath: 'src/receipt.ts',
+        preparationReceipt: {
+          path: 'src/receipt.ts',
+          workspaceId: 'workspace-1',
+          targetContentHash: hashHarnessText('// src/receipt.ts\n'),
+          sourceIdentity: { workspaceHead: 'a'.repeat(40), dirtyFingerprint: 'dirty-1' },
+          evidenceProviderId: 'thai-rag',
+          evidenceIndexGeneration: 1,
+          evidenceState: 'evidence_available',
+          checks: ['thai-rag/pre_edit_context'],
+          preparedAt: expect.any(String),
+        },
+      },
+    });
+  });
 });

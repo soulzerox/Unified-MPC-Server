@@ -113,6 +113,8 @@ async function depsFor(root: string, overrides: {
   manifests: CanonicalManifestStore;
   pins: RevisionPinRegistry;
   overlays: GoalOverlayStore;
+  controller: ResourceAdmissionController;
+  leaseStore: GcLeaseStore;
   gcCalls: () => number;
   manifestId: string;
 }> {
@@ -142,7 +144,7 @@ async function depsFor(root: string, overrides: {
     runGcQuarantine,
     verifyStore,
   };
-  return { deps, refs, manifests, pins, overlays, gcCalls: () => gcCalls, manifestId };
+  return { deps, refs, manifests, pins, overlays, controller, leaseStore, gcCalls: () => gcCalls, manifestId };
 }
 
 describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
@@ -228,5 +230,46 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     const { deps } = await depsFor(root, { verifyDegraded: true });
     const report = await runMaintenanceCycle(deps);
     expect(report).toEqual({ status: 'refused', reason: 'verify-degraded', tookFence: true, tookAdmission: true });
+  });
+
+  it('releases the fence and admission lease when GC quarantine throws', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore, controller } = await depsFor(root);
+    const runGcQuarantine = async (): Promise<never> => {
+      throw new Error('gc interrupted');
+    };
+
+    await expect(runMaintenanceCycle({ ...deps, runGcQuarantine })).rejects.toThrow('gc interrupted');
+
+    // Interruption must not leak either lock.
+    expect(await leaseStore.read()).toBeNull();
+    expect(controller.snapshot().activeOperations).toBe(0);
+    expect(controller.snapshot().activeCost).toBe(0);
+  });
+
+  it('releases the fence and admission lease when post-maintenance verification throws', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore, controller } = await depsFor(root);
+    const verifyStore = async (): Promise<never> => {
+      throw new Error('verify interrupted');
+    };
+
+    await expect(runMaintenanceCycle({ ...deps, verifyStore })).rejects.toThrow('verify interrupted');
+
+    expect(await leaseStore.read()).toBeNull();
+    expect(controller.snapshot().activeOperations).toBe(0);
+    expect(controller.snapshot().activeCost).toBe(0);
+  });
+
+  it('leaves the fence takeable by a successor after an interrupted run', async () => {
+    const root = await tempRoot();
+    const first = await depsFor(root);
+    const runGcQuarantine = async (): Promise<never> => {
+      throw new Error('gc interrupted');
+    };
+    await expect(runMaintenanceCycle({ ...first.deps, runGcQuarantine })).rejects.toThrow();
+
+    const second = await depsFor(root);
+    expect((await runMaintenanceCycle(second.deps)).status).toBe('completed');
   });
 });

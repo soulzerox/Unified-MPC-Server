@@ -3,7 +3,7 @@ import { appError, err, ok } from '@unified-mpc/domain';
 import { ContextEconomyRuntime } from '../context-economy.js';
 import { ActivityTracker, type ActivitySinkEvent } from '../activity-tracker.js';
 import { ToolRegistry } from '../tool-registry.js';
-import { HarnessActivationLedger } from '../harness-runtime.js';
+import { HarnessActivationLedger, hashHarnessText } from '../harness-runtime.js';
 import { goalTools } from './goal-tools.js';
 import type { McpToolContext, McpToolDefinition } from './tool-types.js';
 
@@ -247,10 +247,15 @@ describe('durable goal MCP tools', () => {
     let received: unknown;
     let recoveries = 0;
     const nativeRagCalls: string[] = [];
+    // The unstaged target must be readable and hash-bindable: prepare_code_change
+    // refuses to authorize a path whose current content it cannot bind to the
+    // provider's pre-edit evidence.
+    const unstagedTargetContent = '# generated lifecycle report\n';
     const services = {
       file: {
         async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
           if (request.path === 'AGENTS.md') return ok({ path: request.path, content: '# Rules\nUse mandatory native pre-edit checks.\n', startLine: 1, endLine: 2 });
+          if (request.path === 'docs/generated.md') return ok({ path: request.path, content: unstagedTargetContent, startLine: 1, endLine: 2 });
           return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
         },
       },
@@ -282,7 +287,14 @@ describe('durable goal MCP tools', () => {
         },
         async call(toolName: string) {
           nativeRagCalls.push(toolName);
-          return ok({ content: [{ type: 'text', text: 'ok' }] });
+          if (toolName !== 'pre_edit_context') return ok({ called: true, tool: toolName });
+          return ok({
+            status: 'ok',
+            evidence_state: 'evidence_available',
+            can_proceed: true,
+            evidence_fresh: true,
+            target_sha256: hashHarnessText(unstagedTargetContent),
+          });
         },
       },
       extensions: {

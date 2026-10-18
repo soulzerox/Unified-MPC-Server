@@ -60,8 +60,8 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       }])),
     },
     workspaceInfo: serviceProxy('workspaceInfo', calls, (method) => method === 'list'
-      ? [{ id: 'workspace-1', path: process.cwd(), realRootPath: process.cwd() }]
-      : { id: 'workspace-1', path: process.cwd(), realRootPath: process.cwd() }),
+      ? [{ id: 'workspace-1', rootPath: process.cwd(), realRootPath: process.cwd() }]
+      : { id: 'workspace-1', rootPath: process.cwd(), realRootPath: process.cwd() }),
     workspaceSelection: serviceProxy('workspaceSelection', calls, () => ({
       primaryWorkspaceId: 'workspace-1',
       activeWorkspaceIds: ['workspace-1'],

@@ -2,6 +2,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { ok } from '@unified-mpc/domain';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ActivityTracker } from './activity-tracker.js';
+import { hashHarnessText } from './harness-runtime.js';
 import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
 import { DEFAULT_LEGACY_SESSION_TTL_MS, LEGACY_SESSION_EVICTION_REASONS, UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
@@ -44,7 +45,16 @@ describe('MCP localhost HTTP transport', () => {
           async health() {
             return ok({ providerId: 'thai-rag' as const, state: 'ready', embeddingIndexGeneration: 1, components: { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] } });
           },
-          async call() { return ok({ content: [{ type: 'text', text: 'ok' }] }); },
+          async call(tool: string) {
+            if (tool !== 'pre_edit_context') return ok({ called: true, tool });
+            return ok({
+              status: 'ok',
+              can_proceed: true,
+              evidence_state: 'evidence_available',
+              evidence_fresh: true,
+              target_sha256: hashHarnessText('# Rules\n'),
+            });
+          },
         },
         extensions: {
           async runtimePolicySnapshot() { return ok({ ready: true, policies: [{ priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true }] }); },

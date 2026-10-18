@@ -1,5 +1,6 @@
 /* global process */
 import { startMcpStdio } from '../../dist/stdio.js';
+import { hashHarnessText } from '../../dist/harness-runtime.js';
 
 const MODERN_TASK_ID = 'modern-stdio-shell-task';
 let taskState = 'running';
@@ -18,11 +19,12 @@ function snapshot() {
 
 process.stderr.write('unified-mpc-stdio-test-diagnostic\n');
 const agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
+const targetContent = 'export const client = true;\n';
 const services = {
   file: {
     async readFile(_actor, _workspaceId, request) {
       if (request.path === 'AGENTS.md') return { ok: true, value: { path: request.path, content: agentsMd, startLine: 1, endLine: 2 } };
-      return { ok: false, error: { code: 'FILE_NOT_FOUND', message: `missing ${request.path}` } };
+      return { ok: true, value: { path: request.path, content: targetContent, startLine: 1, endLine: 2 } };
     },
     async writeFile(_actor, _workspaceId, request) {
       return { ok: true, value: { path: request.path, replacedExisting: false } };
@@ -32,7 +34,10 @@ const services = {
     async health() {
       return { ok: true, value: { providerId: 'thai-rag', state: 'ready', embeddingIndexGeneration: 1, components: { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] } } };
     },
-    async call() { return { ok: true, value: { content: [{ type: 'text', text: 'ok' }] } }; },
+    async call(tool) {
+      if (tool !== 'pre_edit_context') return { ok: true, value: { called: true, tool } };
+      return { ok: true, value: { status: 'ok', can_proceed: true, evidence_state: 'evidence_available', evidence_fresh: true, target_sha256: hashHarnessText(targetContent) } };
+    },
   },
   extensions: {
     async runtimePolicySnapshot() { return { ok: true, value: { ready: true, policies: [{ priority: 'P1', id: 'session-start:ask-matt', resourceId: 'ask-matt', resolvedResourceId: 'agents-skills/ask-matt', resourceType: 'skill', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Load ask-matt.', source: 'configured', available: true }] } }; },

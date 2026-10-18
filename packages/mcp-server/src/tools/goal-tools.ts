@@ -128,7 +128,11 @@ const listGoalsSchema = z.object({
   limit: z.number().int().min(1).max(100).default(50),
 }).strict();
 
-export const GOAL_TOOL_NAMES = ['run_goal', 'get_goal', 'checkpoint_goal', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'list_goals'] as const;
+const reconcileGoalWorktreesSchema = z.object({
+  workspaceId: z.string().min(1).max(128).optional(),
+}).strict();
+
+export const GOAL_TOOL_NAMES = ['run_goal', 'get_goal', 'checkpoint_goal', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'reconcile_goal_worktrees', 'list_goals'] as const;
 
 export function goalTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -358,6 +362,24 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
         apply: input.apply,
         ...(input.supersededByGoalId === undefined ? {} : { supersededByGoalId: input.supersededByGoalId }),
       }) ?? missingService(),
+    }),
+    defineTool({
+      name: 'reconcile_goal_worktrees',
+      description: 'Read-only lifecycle inspection of Unified-owned goal worktrees. Classifies every ledger entry for the caller as safe_to_clean or keep and reports the exact blocker codes (externally_owned, active_lease, path_missing, dirty, unmerged_changes, unintegrated_head, probe_failed) with probe details. Needs no confirmation because it never deletes, archives or rewrites a worktree; removal stays a separate confirmed operation, and an unprovable entry is always kept.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: reconcileGoalWorktreesSchema,
+      handler: async (input) => {
+        const goalWorktrees = context.services.goalWorktrees;
+        if (goalWorktrees === undefined) return missingService();
+        return goalWorktrees.classify({
+          actor: {
+            clientId: context.actor.clientId,
+            ...(context.actor.sessionId === undefined ? {} : { sessionId: context.actor.sessionId }),
+          },
+          ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+        });
+      },
     }),
     defineTool({
       name: 'list_goals',

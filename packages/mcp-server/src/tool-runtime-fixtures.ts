@@ -197,6 +197,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   finish_goal: service({ goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, status: 'completed', summary: 'smoke', evidence: [] }, 'goals.finishGoal'),
   cancel_goal: service({ goalId: 'goal-1', expectedRevision: 0, summary: 'cancel smoke', evidence: [] }, 'goals.cancelGoal'),
   reconcile_goals: service({ workspaceId, goalIds: ['goal-1'], reason: 'abandoned', summary: 'reconcile smoke', apply: false }, 'goals.reconcileGoals'),
+  reconcile_goal_worktrees: service({ workspaceId }, 'goalWorktrees.classify'),
   list_goals: service({}, 'goals.listGoals'),
   prepare_scheduled_continuation: service({
     goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',

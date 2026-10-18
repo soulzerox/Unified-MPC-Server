@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
-import { HarnessActivationLedger } from './harness-runtime.js';
+import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 const activeWorkspaceScopeProvider = async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' });
@@ -20,6 +20,8 @@ function createHarnessServices(): {
   setThaiRagActiveJobs(jobIds: readonly string[]): void;
   setThaiRagPreEditError(message: string | undefined): void;
   setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void;
+  setFileContent(path: string, content: string): void;
+  setFileMissing(path: string): void;
 } {
   const writes: string[] = [];
   const childCalls: string[] = [];
@@ -32,11 +34,17 @@ function createHarnessServices(): {
   let thaiRagActiveJobs: readonly string[] = [];
   let thaiRagPreEditError: string | undefined;
   let thaiRagPreEditPayload: Record<string, unknown> | undefined;
+  const fileContents = new Map<string, string>();
+  const missingPaths = new Set<string>();
+  const fileContent = (path: string): string => fileContents.get(path) ?? `// ${path}\n`;
   const services = {
     file: {
       async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
         if (request.path === 'AGENTS.md') return ok({ path: request.path, content: agentsMd, startLine: 1, endLine: 2 });
-        return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
+        if (missingPaths.has(request.path) || request.path === '.unified-mpc/project-profile.json') {
+          return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
+        }
+        return ok({ path: request.path, content: fileContent(request.path), startLine: 1, endLine: 1 });
       },
       async writeFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
         writes.push(request.path);
@@ -79,12 +87,16 @@ function createHarnessServices(): {
         if (tool === 'pre_edit_context' && thaiRagPreEditPayload !== undefined) {
           return ok({ content: [{ type: 'text', text: JSON.stringify(thaiRagPreEditPayload) }] });
         }
+        // The provider names the content it analyzed; the fixture derives that
+        // identity from the same content the file service serves, so a ready
+        // verdict binds to the target only while the fixture stays consistent.
+        const requested = typeof args.file_path === 'string' ? args.file_path : '';
         return ok({ content: [{ type: 'text', text: JSON.stringify({
           status: 'ok',
           can_proceed: true,
           evidence_state: 'evidence_available',
           evidence_fresh: true,
-          target_sha256: 'a'.repeat(64),
+          target_sha256: tool === 'pre_edit_context' ? hashHarnessText(fileContent(requested)) : 'a'.repeat(64),
           evidence: { code_index: 'available', storage: 'available', cpg: 'available' },
         }) }] });
       },
@@ -147,6 +159,8 @@ function createHarnessServices(): {
     setThaiRagActiveJobs(jobIds: readonly string[]): void { thaiRagActiveJobs = [...jobIds]; },
     setThaiRagPreEditError(message: string | undefined): void { thaiRagPreEditError = message; },
     setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void { thaiRagPreEditPayload = payload; },
+    setFileContent(path: string, content: string): void { fileContents.set(path, content); },
+    setFileMissing(path: string): void { missingPaths.add(path); },
   };
 }
 
@@ -679,10 +693,18 @@ describe('pre-edit readiness gate (#346 U10)', () => {
     });
   });
 
-  async function prepareWithPayload(payload: Record<string, unknown>, filePath: string): Promise<Awaited<ReturnType<ToolRegistry['invoke']>>> {
-    const { services, setThaiRagPreEditPayload } = createHarnessServices();
-    setThaiRagPreEditPayload(payload);
-    const registry = new ToolRegistry(services, actor, {
+  async function prepareWithPayload(
+    payload: Record<string, unknown> | undefined,
+    filePath: string,
+    arrange?: (fixture: {
+      setFileContent(path: string, content: string): void;
+      setFileMissing(path: string): void;
+    }) => void,
+  ): Promise<Awaited<ReturnType<ToolRegistry['invoke']>>> {
+    const fixture = createHarnessServices();
+    fixture.setThaiRagPreEditPayload(payload);
+    arrange?.(fixture);
+    const registry = new ToolRegistry(fixture.services, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       sessionId: 'readiness-gate-session',
       activeWorkspaceScopeProvider,
@@ -740,9 +762,47 @@ describe('pre-edit readiness gate (#346 U10)', () => {
       can_proceed: true,
       evidence_state: 'evidence_available',
       evidence_fresh: true,
-      target_sha256: 'c'.repeat(64),
-    }, 'src/bound.ts');
+      target_sha256: hashHarnessText('bound content'),
+    }, 'src/bound.ts', (fixture) => fixture.setFileContent('src/bound.ts', 'bound content'));
 
     expect(result.isError).not.toBe(true);
+  });
+
+  it('refuses a ready verdict whose identity no longer matches the target content', async () => {
+    const result = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('the content the provider analyzed'),
+    }, 'src/stale-target.ts', (fixture) => fixture.setFileContent('src/stale-target.ts', 'what the target holds now'));
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('stale'),
+        details: { reason: 'pre-edit-target-stale' },
+      } },
+    });
+  });
+
+  it('refuses a ready verdict when the admitted target cannot be read', async () => {
+    const result = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('unreadable content'),
+    }, 'src/gone.ts', (fixture) => fixture.setFileMissing('src/gone.ts'));
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('cannot be read'),
+        details: { reason: 'pre-edit-target-unreadable' },
+      } },
+    });
   });
 });

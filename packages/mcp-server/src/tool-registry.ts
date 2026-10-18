@@ -1145,6 +1145,37 @@ export class ToolRegistry {
     });
   }
 
+  /**
+   * #346 acceptance: a ready verdict must also match the admitted target's
+   * current content. The provider names the content it analyzed, so read the
+   * same path through the workspace-scoped file service and refuse the write
+   * when the bytes no longer hash to that identity, or cannot be read at all.
+   */
+  private async bindPreEditTargetContent(
+    workspaceId: string,
+    filePath: string,
+    targetIdentity: string | undefined,
+  ): Promise<Result<undefined>> {
+    if (targetIdentity === undefined) {
+      return err(appError('CONFLICT', 'Thai-RAG pre-edit evidence did not identify the target content', true, { reason: 'pre-edit-target-identity-missing' }));
+    }
+    const file = this.services.file;
+    if (file?.readFile === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Pre-edit target content cannot be verified because the file service is unavailable', true));
+    }
+    const loaded = await file.readFile(this.actor, workspaceId, { path: filePath });
+    if (!loaded.ok) {
+      return err(appError('CONFLICT', `Pre-edit target cannot be read for revision binding: ${loaded.error.message}`, true, { reason: 'pre-edit-target-unreadable' }));
+    }
+    if (typeof loaded.value.content !== 'string') {
+      return err(appError('CONFLICT', 'Pre-edit target did not return readable text content for revision binding', true, { reason: 'pre-edit-target-unreadable' }));
+    }
+    if (hashHarnessText(loaded.value.content) !== targetIdentity) {
+      return err(appError('CONFLICT', 'Thai-RAG pre-edit evidence is stale for the current target content; re-request evidence before mutating', true, { reason: 'pre-edit-target-stale' }));
+    }
+    return ok(undefined);
+  }
+
   private async bootstrapWorkspaceHarness(workspaceId: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
     const taskContext = await this.bootstrapTaskContext(signal);
     if (!taskContext.ok) return taskContext;
@@ -1274,6 +1305,8 @@ export class ToolRegistry {
           evidenceState: readiness.evidenceState,
         }));
       }
+      const bound = await this.bindPreEditTargetContent(workspaceId, filePath, readiness.targetIdentity);
+      if (!bound.ok) return bound;
       checks.push('thai-rag/pre_edit_context');
     }
     if (runGodkillerSafetyCheck) {
@@ -2126,33 +2159,33 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
  * A claim without that proof is transport-ready but not revision-bound, so it
  * is refused rather than trusted.
  */
-function readPreEditReadiness(value: unknown): { ready: boolean; reason: string; evidenceState: string } {
+function readPreEditReadiness(value: unknown): { ready: boolean; reason: string; evidenceState: string; targetIdentity: string | undefined } {
   const payload = normalizePreEditPayload(value);
-  if (!isRecord(payload)) return { ready: false, reason: 'malformed pre-edit envelope', evidenceState: 'malformed' };
+  if (!isRecord(payload)) return { ready: false, reason: 'malformed pre-edit envelope', evidenceState: 'malformed', targetIdentity: undefined };
   const data = isRecord(payload.data) ? payload.data : payload;
   const status = typeof data.status === 'string' ? data.status : 'missing';
   const evidenceState = typeof data.evidence_state === 'string' ? data.evidence_state
     : typeof data.evidenceState === 'string' ? data.evidenceState
     : status;
   if (data.can_proceed !== true) {
-    return { ready: false, reason: `can_proceed !== true (status=${status}, evidence=${evidenceState})`, evidenceState };
+    return { ready: false, reason: `can_proceed !== true (status=${status}, evidence=${evidenceState})`, evidenceState, targetIdentity: undefined };
   }
   if (status !== 'ok' && status !== 'ready' && status !== 'available') {
-    return { ready: false, reason: `unexpected ready status=${status} (evidence=${evidenceState})`, evidenceState };
+    return { ready: false, reason: `unexpected ready status=${status} (evidence=${evidenceState})`, evidenceState, targetIdentity: undefined };
   }
   // Proven-not-default: only an explicit freshness claim counts, and it must be
   // accompanied by the identity of the target content it refers to.
   if (data.evidence_fresh !== true && data.evidenceFresh !== true) {
-    return { ready: false, reason: `evidence_fresh !== true (status=${status}, evidence=${evidenceState})`, evidenceState };
+    return { ready: false, reason: `evidence_fresh !== true (status=${status}, evidence=${evidenceState})`, evidenceState, targetIdentity: undefined };
   }
   const targetIdentity = typeof data.target_sha256 === 'string' ? data.target_sha256.trim().toLowerCase() : undefined;
   if (targetIdentity === undefined) {
-    return { ready: false, reason: `target identity missing (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_missing' };
+    return { ready: false, reason: `target identity missing (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_missing', targetIdentity: undefined };
   }
   if (!/^[0-9a-f]{64}$/.test(targetIdentity)) {
-    return { ready: false, reason: `target identity malformed (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_malformed' };
+    return { ready: false, reason: `target identity malformed (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_malformed', targetIdentity: undefined };
   }
-  return { ready: true, reason: 'ready', evidenceState };
+  return { ready: true, reason: 'ready', evidenceState, targetIdentity };
 }
 
 function normalizePreEditPayload(value: unknown): unknown {

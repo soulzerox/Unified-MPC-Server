@@ -700,7 +700,10 @@ describe('pre-edit readiness gate (#346 U10)', () => {
       setFileContent(path: string, content: string): void;
       setFileMissing(path: string): void;
     }) => void,
-  ): Promise<Awaited<ReturnType<ToolRegistry['invoke']>>> {
+  ): Promise<{
+    result: Awaited<ReturnType<ToolRegistry['invoke']>>;
+    nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>;
+  }> {
     const fixture = createHarnessServices();
     fixture.setThaiRagPreEditPayload(payload);
     arrange?.(fixture);
@@ -710,11 +713,12 @@ describe('pre-edit readiness gate (#346 U10)', () => {
       activeWorkspaceScopeProvider,
     });
     await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
-    return registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath });
+    const result = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath });
+    return { result, nativeRagArguments: fixture.nativeRagArguments };
   }
 
   it('refuses a transport-ready verdict that does not prove target freshness', async () => {
-    const result = await prepareWithPayload({
+    const { result } = await prepareWithPayload({
       status: 'ok',
       can_proceed: true,
       evidence_state: 'evidence_available',
@@ -728,7 +732,7 @@ describe('pre-edit readiness gate (#346 U10)', () => {
   });
 
   it('refuses a ready verdict that does not name the analyzed target', async () => {
-    const result = await prepareWithPayload({
+    const { result } = await prepareWithPayload({
       status: 'ok',
       can_proceed: true,
       evidence_state: 'evidence_available',
@@ -742,7 +746,7 @@ describe('pre-edit readiness gate (#346 U10)', () => {
   });
 
   it('refuses a ready verdict with a malformed target identity', async () => {
-    const result = await prepareWithPayload({
+    const { result } = await prepareWithPayload({
       status: 'ok',
       can_proceed: true,
       evidence_state: 'evidence_available',
@@ -757,7 +761,7 @@ describe('pre-edit readiness gate (#346 U10)', () => {
   });
 
   it('authorizes a ready verdict that proves freshness for a named target', async () => {
-    const result = await prepareWithPayload({
+    const { result } = await prepareWithPayload({
       status: 'ok',
       can_proceed: true,
       evidence_state: 'evidence_available',
@@ -769,7 +773,7 @@ describe('pre-edit readiness gate (#346 U10)', () => {
   });
 
   it('refuses a ready verdict whose identity no longer matches the target content', async () => {
-    const result = await prepareWithPayload({
+    const { result } = await prepareWithPayload({
       status: 'ok',
       can_proceed: true,
       evidence_state: 'evidence_available',
@@ -788,7 +792,7 @@ describe('pre-edit readiness gate (#346 U10)', () => {
   });
 
   it('refuses a ready verdict when the admitted target cannot be read', async () => {
-    const result = await prepareWithPayload({
+    const { result } = await prepareWithPayload({
       status: 'ok',
       can_proceed: true,
       evidence_state: 'evidence_available',
@@ -804,5 +808,42 @@ describe('pre-edit readiness gate (#346 U10)', () => {
         details: { reason: 'pre-edit-target-unreadable' },
       } },
     });
+  });
+
+  it('refuses an absolute target outside the active workspace root', async () => {
+    const { result, nativeRagArguments } = await prepareWithPayload(undefined, '/tmp/other/outside.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('outside the active workspace'),
+        details: { reason: 'target-outside-workspace' },
+      } },
+    });
+    expect(nativeRagArguments).toEqual([]);
+  });
+
+  it('refuses a relative target that escapes the active workspace root', async () => {
+    const { result, nativeRagArguments } = await prepareWithPayload(undefined, '../../etc/passwd');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('outside the active workspace'),
+        details: { reason: 'target-outside-workspace' },
+      } },
+    });
+    expect(nativeRagArguments).toEqual([]);
+  });
+
+  it('normalizes an absolute target inside the active workspace before asking the provider', async () => {
+    const { result, nativeRagArguments } = await prepareWithPayload(undefined, '/tmp/workspace-1/src/inside.ts');
+
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagArguments).toEqual([
+      { tool: 'pre_edit_context', args: { file_path: 'src/inside.ts', workspace_id: 'workspace-1' } },
+    ]);
   });
 });

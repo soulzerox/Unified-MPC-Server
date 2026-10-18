@@ -1146,6 +1146,43 @@ export class ToolRegistry {
   }
 
   /**
+   * #346: the admitted target must be a workspace-relative path. Unified never
+   * lets the provider resolve a bare name against its own cwd or home, so an
+   * absolute target is accepted only while it stays inside the active workspace
+   * root, and a relative target must not escape that root.
+   */
+  private async normalizePreEditTargetPath(requestedPath: string): Promise<Result<string>> {
+    const trimmed = requestedPath.trim();
+    if (trimmed.length === 0) {
+      return err(appError('CONFLICT', 'prepare_code_change requires a non-empty target path', true, { reason: 'target-path-invalid' }));
+    }
+    const scope = await this.activeWorkspaceScopeProvider();
+    const rootPath = scope === null ? undefined : readTrimmedString(scope.rootPath);
+    const pathApi = rootPath === undefined ? undefined : workspacePathApi(rootPath);
+    if (rootPath === undefined || pathApi === undefined || !pathApi.isAbsolute(rootPath)) {
+      // No usable root: containment cannot be proven, so only the forms that
+      // always escape workspace authority are refused.
+      if (isAbsoluteActivityPath(trimmed)) {
+        return err(appError('CONFLICT', `Target path must stay inside the active workspace: ${trimmed}`, true, { reason: 'target-path-unresolvable' }));
+      }
+      if (trimmed.split(/[\\/]+/).includes('..')) {
+        return err(appError('CONFLICT', `Target path is outside the active workspace: ${trimmed}`, true, { reason: 'target-outside-workspace' }));
+      }
+      return ok(trimmed);
+    }
+    const normalizedRoot = pathApi.resolve(rootPath);
+    const resolved = pathApi.resolve(normalizedRoot, trimmed);
+    if (!scopePathContains(pathApi, normalizedRoot, resolved)) {
+      return err(appError('CONFLICT', `Target path is outside the active workspace: ${trimmed}`, true, { reason: 'target-outside-workspace' }));
+    }
+    const relative = pathApi.relative(normalizedRoot, resolved);
+    if (relative === '') {
+      return err(appError('CONFLICT', 'Target path must name a file inside the active workspace', true, { reason: 'target-path-invalid' }));
+    }
+    return ok(relative);
+  }
+
+  /**
    * #346 acceptance: a ready verdict must also match the admitted target's
    * current content. The provider names the content it analyzed, so read the
    * same path through the workspace-scoped file service and refuse the write
@@ -1259,7 +1296,7 @@ export class ToolRegistry {
 
   private async prepareCodeChange(
     workspaceId: string,
-    filePath: string,
+    requestedPath: string,
     proposedSymbol: string | undefined,
     runGodkillerSafetyCheck: boolean,
     signal: AbortSignal,
@@ -1277,6 +1314,9 @@ export class ToolRegistry {
       this.harnessActivation.invalidate(context);
       return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again', true));
     }
+    const normalizedTarget = await this.normalizePreEditTargetPath(requestedPath);
+    if (!normalizedTarget.ok) return normalizedTarget;
+    const filePath = normalizedTarget.value;
     const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
     if (!sourceIdentity.ok) return sourceIdentity;
     if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);

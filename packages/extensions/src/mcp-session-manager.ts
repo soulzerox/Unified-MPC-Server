@@ -25,6 +25,8 @@ export interface McpSessionManagerOptions {
   readonly validateToolSchemas?: boolean;
   /** Only the dedicated native index session may retain its provider after an idempotent index_status timeout. */
   readonly preserveReadOnlyStatusSessionOnTimeout?: boolean;
+  /** Ceiling for any session close so a wedged child cannot stall teardown lanes (#383). */
+  readonly closeTimeoutMs?: number;
 }
 
 interface ManagedSession {
@@ -46,6 +48,22 @@ interface PendingConnection {
 const MAX_EXTERNAL_MCP_ARGUMENT_BYTES = 1 * 1024 * 1024;
 const MAX_EXTERNAL_MCP_RESULT_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Await a child session close under a ceiling. A wedged child can leave transport close
+ * pending indefinitely; without the ceiling every teardown caller and the work queued
+ * behind it stalls until the child dies (#383). After the ceiling the close keeps running
+ * in the background while teardown proceeds.
+ */
+function closeSessionWithin(session: McpClientSession, closeTimeoutMs: number): Promise<void> {
+  return Promise.race([
+    session.close().catch(() => undefined),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(() => resolve(), closeTimeoutMs);
+      timer.unref?.();
+    }),
+  ]);
+}
+
 export class McpSessionManager {
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly pendingConnections = new Map<string, PendingConnection>();
@@ -57,6 +75,7 @@ export class McpSessionManager {
   private readonly idleTimeoutMs: number;
   private readonly validateToolSchemas: boolean;
   private readonly preserveReadOnlyStatusSessionOnTimeout: boolean;
+  private readonly closeTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
   private closed = false;
 
@@ -66,6 +85,7 @@ export class McpSessionManager {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60_000;
     this.validateToolSchemas = options.validateToolSchemas ?? true;
     this.preserveReadOnlyStatusSessionOnTimeout = options.preserveReadOnlyStatusSessionOnTimeout ?? false;
+    this.closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
   }
 
   public isConnected(server: string): boolean {
@@ -258,7 +278,7 @@ export class McpSessionManager {
     this.pendingConnections.clear();
     const closers = [...this.sessions.entries()].map(async ([name, managed]) => {
       this.sessions.delete(name);
-      await managed.session.close().catch(() => undefined);
+      await closeSessionWithin(managed.session, this.closeTimeoutMs);
     });
     await Promise.all(closers);
   }
@@ -340,13 +360,13 @@ export class McpSessionManager {
       this.lastLaunchFingerprints.set(server, launchFingerprint);
       this.lastCatalogFingerprints.set(server, catalogFingerprint);
       const replaced = this.sessions.get(server);
-      if (replaced !== undefined) await replaced.session.close().catch(() => undefined);
+      if (replaced !== undefined) await closeSessionWithin(replaced.session, this.closeTimeoutMs);
       if (this.closed) throw new Error('Child MCP session manager is closed');
       this.sessions.set(server, managed);
       this.scheduleIdleSweep();
       return managed;
     } catch (error: unknown) {
-      await session.close().catch(() => undefined);
+      await closeSessionWithin(session, this.closeTimeoutMs);
       throw error;
     }
   }
@@ -388,7 +408,7 @@ export class McpSessionManager {
     const managed = this.sessions.get(server);
     if (managed === undefined || (expected !== undefined && managed !== expected)) return;
     this.sessions.delete(server);
-    await managed.session.close().catch(() => undefined);
+    await closeSessionWithin(managed.session, this.closeTimeoutMs);
   }
 
   private scheduleIdleSweep(): void {

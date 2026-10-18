@@ -1345,6 +1345,8 @@ export class ToolRegistry {
         return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${readiness.reason}`, true, {
           reason: 'pre-edit-evidence-not-ready',
           evidenceState: readiness.evidenceState,
+          ...(readiness.evidenceSemantic === undefined ? {} : { evidenceSemantic: readiness.evidenceSemantic }),
+          ...(readiness.evidenceChannels === undefined ? {} : { evidenceChannelStates: channelEvidenceSummary(readiness.evidenceChannels) }),
         }));
       }
       const bound = await this.bindPreEditTargetContent(workspaceId, filePath, readiness.targetIdentity);
@@ -1372,6 +1374,8 @@ export class ToolRegistry {
         evidenceProviderId: thaiHealth.value.providerId,
         evidenceIndexGeneration: thaiHealth.value.embeddingIndexGeneration,
         evidenceState: readiness.evidenceState,
+        ...(readiness.evidenceSemantic === undefined ? {} : { evidenceSemantic: readiness.evidenceSemantic }),
+        ...(readiness.evidenceChannels === undefined ? {} : { evidenceChannels: readiness.evidenceChannels }),
         checks: [...checks],
         preparedAt: new Date().toISOString(),
       };
@@ -2226,7 +2230,53 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
  * A claim without that proof is transport-ready but not revision-bound, so it
  * is refused rather than trusted.
  */
-function readPreEditReadiness(value: unknown): { ready: boolean; reason: string; evidenceState: string; targetIdentity: string | undefined } {
+type PreEditChannelEvidence = {
+  evidenceSemantic?: string;
+  evidenceChannels?: Readonly<Record<string, string>>;
+};
+
+/**
+ * Parses the optional per-channel publication evidence thai-rag providers
+ * expose alongside the readiness verdict (`evidence.semantic` plus the compact
+ * `evidence.channels` map of issue-60 channel states). Channel evidence is a
+ * payload of the provider's word, but it must never contradict the ready
+ * verdict: see `readPreEditReadiness`.
+ */
+function optionalChannelEvidence(evidence: Record<string, unknown> | undefined): PreEditChannelEvidence {
+  if (evidence === undefined) return {};
+  const semantic = typeof evidence.semantic === 'string' ? evidence.semantic : undefined;
+  let channels: Record<string, string> | undefined;
+  if (isRecord(evidence.channels)) {
+    for (const [name, state] of Object.entries(evidence.channels)) {
+      if (typeof state === 'string') (channels ??= {})[name] = state;
+    }
+  }
+  return {
+    ...(semantic === undefined ? {} : { evidenceSemantic: semantic }),
+    ...(channels === undefined ? {} : { evidenceChannels: channels }),
+  };
+}
+
+const CURRENT_SEMANTIC_STATES = new Set(['available', 'ok']);
+
+/**
+ * The error-details contract is flat scalar pairs (`Readonly<Record<string,
+ * string | number>>`), so a refusal describes the per-channel map with a
+ * deterministic summary instead of a nested object. The object map itself stays
+ * available where structured payloads are allowed — the preparation receipt.
+ */
+function channelEvidenceSummary(channels: Readonly<Record<string, string>>): string {
+  return Object.entries(channels).sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, state]) => `${name}=${state}`)
+    .join(',');
+}
+
+function readPreEditReadiness(value: unknown): {
+  ready: boolean;
+  reason: string;
+  evidenceState: string;
+  targetIdentity: string | undefined;
+} & PreEditChannelEvidence {
   const payload = normalizePreEditPayload(value);
   if (!isRecord(payload)) return { ready: false, reason: 'malformed pre-edit envelope', evidenceState: 'malformed', targetIdentity: undefined };
   const data = isRecord(payload.data) ? payload.data : payload;
@@ -2234,25 +2284,70 @@ function readPreEditReadiness(value: unknown): { ready: boolean; reason: string;
   const evidenceState = typeof data.evidence_state === 'string' ? data.evidence_state
     : typeof data.evidenceState === 'string' ? data.evidenceState
     : status;
+  const channelEvidence = optionalChannelEvidence(isRecord(data.evidence) ? data.evidence : undefined);
   if (data.can_proceed !== true) {
-    return { ready: false, reason: `can_proceed !== true (status=${status}, evidence=${evidenceState})`, evidenceState, targetIdentity: undefined };
+    return {
+      ready: false,
+      reason: `can_proceed !== true (status=${status}, evidence=${evidenceState})`,
+      evidenceState,
+      ...channelEvidence,
+      targetIdentity: undefined,
+    };
+  }
+  // A not-current semantic channel must never authorize a mutation even when a
+  // noncompliant provider claims can_proceed — thai-rag issue #60 publishes a
+  // degraded/missing vector channel alongside an explicit refusal, so a
+  // "ready" envelope that still names a degraded channel is a contract
+  // violation and is refused rather than trusted.
+  if (channelEvidence.evidenceSemantic !== undefined && !CURRENT_SEMANTIC_STATES.has(channelEvidence.evidenceSemantic)) {
+    return {
+      ready: false,
+      reason: `semantic evidence is not current (state=${channelEvidence.evidenceSemantic}, status=${status}, evidence=${evidenceState})`,
+      evidenceState,
+      ...channelEvidence,
+      targetIdentity: undefined,
+    };
   }
   if (status !== 'ok' && status !== 'ready' && status !== 'available') {
-    return { ready: false, reason: `unexpected ready status=${status} (evidence=${evidenceState})`, evidenceState, targetIdentity: undefined };
+    return {
+      ready: false,
+      reason: `unexpected ready status=${status} (evidence=${evidenceState})`,
+      evidenceState,
+      ...channelEvidence,
+      targetIdentity: undefined,
+    };
   }
   // Proven-not-default: only an explicit freshness claim counts, and it must be
   // accompanied by the identity of the target content it refers to.
   if (data.evidence_fresh !== true && data.evidenceFresh !== true) {
-    return { ready: false, reason: `evidence_fresh !== true (status=${status}, evidence=${evidenceState})`, evidenceState, targetIdentity: undefined };
+    return {
+      ready: false,
+      reason: `evidence_fresh !== true (status=${status}, evidence=${evidenceState})`,
+      evidenceState,
+      ...channelEvidence,
+      targetIdentity: undefined,
+    };
   }
   const targetIdentity = typeof data.target_sha256 === 'string' ? data.target_sha256.trim().toLowerCase() : undefined;
   if (targetIdentity === undefined) {
-    return { ready: false, reason: `target identity missing (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_missing', targetIdentity: undefined };
+    return {
+      ready: false,
+      reason: `target identity missing (status=${status}, evidence=${evidenceState})`,
+      evidenceState: 'target_identity_missing',
+      ...channelEvidence,
+      targetIdentity: undefined,
+    };
   }
   if (!/^[0-9a-f]{64}$/.test(targetIdentity)) {
-    return { ready: false, reason: `target identity malformed (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_malformed', targetIdentity: undefined };
+    return {
+      ready: false,
+      reason: `target identity malformed (status=${status}, evidence=${evidenceState})`,
+      evidenceState: 'target_identity_malformed',
+      ...channelEvidence,
+      targetIdentity: undefined,
+    };
   }
-  return { ready: true, reason: 'ready', evidenceState, targetIdentity };
+  return { ready: true, reason: 'ready', evidenceState, ...channelEvidence, targetIdentity };
 }
 
 function normalizePreEditPayload(value: unknown): unknown {

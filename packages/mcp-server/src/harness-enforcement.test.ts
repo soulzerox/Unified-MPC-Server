@@ -912,4 +912,98 @@ describe('pre-edit readiness gate (#346 U10)', () => {
       },
     });
   });
+
+  it('surfaces degraded per-channel evidence when refusing an unready verdict', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'degraded',
+      can_proceed: false,
+      evidence_state: 'semantic_missing',
+      evidence: {
+        semantic: 'missing',
+        channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'missing' },
+      },
+    }, 'src/channel-degraded.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('can_proceed'),
+        details: {
+          reason: 'pre-edit-evidence-not-ready',
+          evidenceState: 'semantic_missing',
+          evidenceSemantic: 'missing',
+          evidenceChannelStates: 'lexical=ok,parent=ok,structural=ok,vector=missing',
+        },
+      } },
+    });
+  });
+
+  it('refuses a verdict whose semantic channel is not current even when the envelope claims ready', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/degraded-channel.ts\n'),
+      evidence: {
+        semantic: 'degraded',
+        channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'degraded' },
+      },
+    }, 'src/degraded-channel.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('semantic'),
+        details: {
+          reason: 'pre-edit-evidence-not-ready',
+          evidenceSemantic: 'degraded',
+          evidenceChannelStates: 'lexical=ok,parent=ok,structural=ok,vector=degraded',
+        },
+      } },
+    });
+  });
+
+  it('records per-channel evidence on the preparation receipt when the envelope carries it', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'semantic_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/channel-receipt.ts\n'),
+      evidence: {
+        semantic: 'available',
+        channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'ok' },
+      },
+    }, 'src/channel-receipt.ts');
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        ready: true,
+        filePath: 'src/channel-receipt.ts',
+        preparationReceipt: {
+          evidenceState: 'semantic_available',
+          evidenceSemantic: 'available',
+          evidenceChannels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'ok' },
+        },
+      },
+    });
+  });
+
+  it('keeps the receipt free of per-channel fields when the envelope does not carry them', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/legacy-envelope.ts\n'),
+    }, 'src/legacy-envelope.ts');
+
+    expect(result.isError).not.toBe(true);
+    const receipt = (result.structuredContent as Record<string, unknown>).preparationReceipt as Record<string, unknown>;
+    expect('evidenceSemantic' in receipt).toBe(false);
+    expect('evidenceChannels' in receipt).toBe(false);
+  });
 });

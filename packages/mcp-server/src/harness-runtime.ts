@@ -26,6 +26,8 @@ export interface PreparationReceipt {
   readonly evidenceProviderId?: string;
   readonly evidenceIndexGeneration?: number;
   readonly evidenceState: string;
+  readonly evidenceSemantic?: string;
+  readonly evidenceChannels?: Readonly<Record<string, string>>;
   readonly checks: readonly string[];
   readonly preparedAt: string;
 }

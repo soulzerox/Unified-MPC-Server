@@ -83,6 +83,8 @@ function createHarnessServices(): {
           status: 'ok',
           can_proceed: true,
           evidence_state: 'evidence_available',
+          evidence_fresh: true,
+          target_sha256: 'a'.repeat(64),
           evidence: { code_index: 'available', storage: 'available', cpg: 'available' },
         }) }] });
       },
@@ -675,5 +677,72 @@ describe('pre-edit readiness gate (#346 U10)', () => {
       isError: true,
       structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('evidence') } },
     });
+  });
+
+  async function prepareWithPayload(payload: Record<string, unknown>, filePath: string): Promise<Awaited<ReturnType<ToolRegistry['invoke']>>> {
+    const { services, setThaiRagPreEditPayload } = createHarnessServices();
+    setThaiRagPreEditPayload(payload);
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'readiness-gate-session',
+      activeWorkspaceScopeProvider,
+    });
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+    return registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath });
+  }
+
+  it('refuses a transport-ready verdict that does not prove target freshness', async () => {
+    const result = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      target_sha256: 'b'.repeat(64),
+    }, 'src/stale.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('evidence_fresh') } },
+    });
+  });
+
+  it('refuses a ready verdict that does not name the analyzed target', async () => {
+    const result = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+    }, 'src/unnamed.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('target') } },
+    });
+  });
+
+  it('refuses a ready verdict with a malformed target identity', async () => {
+    const result = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: 'not-a-digest',
+    }, 'src/malformed.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('target') } },
+    });
+  });
+
+  it('authorizes a ready verdict that proves freshness for a named target', async () => {
+    const result = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: 'c'.repeat(64),
+    }, 'src/bound.ts');
+
+    expect(result.isError).not.toBe(true);
   });
 });

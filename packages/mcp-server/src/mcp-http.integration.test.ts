@@ -17,7 +17,12 @@ const TEST_BUILD_PROVENANCE = {
   buildDirty: false,
 } as const;
 
-describe('MCP localhost HTTP transport', () => {
+// These tests drive a real loopback server with the MCP SDK client. Each case is
+// ~0.5s in isolation but can exceed vitest's 5s default when the whole package
+// runs in parallel on a loaded host (observed 5.2-5.4s), which aborts the case
+// mid-connect with a stack-stripped timeout error. The budget is deliberately
+// generous so the signal stays "protocol regression", not "host was busy".
+describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
   let handle: McpHttpServerHandle;
   let workspaceListCalls: number;
   let workspaceListImpl: () => Promise<ReturnType<typeof ok<readonly { id: string; kind: string }[]>>>;

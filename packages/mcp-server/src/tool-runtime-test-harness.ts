@@ -1,4 +1,5 @@
 import { ok } from '@unified-mpc/domain';
+import { hashHarnessText } from './harness-runtime.js';
 import type { McpApplicationServices } from './tools/tool-types.js';
 
 type ServiceResolver = (method: string, args: readonly unknown[]) => unknown;
@@ -13,6 +14,22 @@ function serviceProxy(group: string, calls: string[], resolve: ServiceResolver):
       };
     },
   });
+}
+
+/**
+ * One content source for the file service and the pre-edit provider fixture: the
+ * provider names the target content it analysed, so both stubs must agree or the
+ * readiness gate correctly refuses the admission.
+ */
+function fixtureFileContent(filePath: string, startLine = 1): string {
+  const paged = filePath === 'paged.txt';
+  return filePath === '.unified-mpc/project-profile.json'
+    ? '{"language":"typescript"}\n'
+    : filePath === 'package.json'
+      ? '{"packageManager":"pnpm@10.15.0","scripts":{"benchmark":"vitest bench"}}\n'
+      : filePath.toLowerCase().endsWith('skill.md')
+        ? '---\nname: smoke-skill\ndescription: Smoke skill\n---\n\n# Smoke\n'
+        : paged && startLine === 1 ? 'one\ntwo' : paged ? 'two' : 'export const smoke = true;\n';
 }
 
 export function runtimeRecord(value: unknown): Record<string, unknown> {
@@ -73,9 +90,18 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
           },
         });
       },
-      async call(tool: string) {
+      async call(tool: string, args?: Readonly<Record<string, unknown>>) {
         calls.push(`thaiRag.call:${tool}`);
-        return ok({ called: true, tool });
+        if (tool !== 'pre_edit_context') return ok({ called: true, tool });
+        const target = typeof args?.file_path === 'string' ? args.file_path : 'README.md';
+        return ok({
+          status: 'ok',
+          can_proceed: true,
+          evidence_state: 'evidence_available',
+          evidence_fresh: true,
+          target_sha256: hashHarnessText(fixtureFileContent(target)),
+          evidence: { code_index: 'available', storage: 'available', cpg: 'available' },
+        });
       },
     },
     workspaceQuery: serviceProxy('workspaceQuery', calls, () => ({ entries: [] })),
@@ -87,13 +113,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         const filePath = typeof request.path === 'string' ? request.path : 'README.md';
         const startLine = typeof request.startLine === 'number' ? request.startLine : 1;
         const paged = filePath === 'paged.txt';
-        const content = filePath === '.unified-mpc/project-profile.json'
-          ? '{"language":"typescript"}\n'
-          : filePath === 'package.json'
-            ? '{"packageManager":"pnpm@10.15.0","scripts":{"benchmark":"vitest bench"}}\n'
-            : filePath.toLowerCase().endsWith('skill.md')
-              ? '---\nname: smoke-skill\ndescription: Smoke skill\n---\n\n# Smoke\n'
-              : paged && startLine === 1 ? 'one\ntwo' : paged ? 'two' : 'export const smoke = true;\n';
+        const content = fixtureFileContent(filePath, startLine);
         const endLine = paged ? 2 : startLine + Math.max(0, content.split(/\r?\n/).filter(Boolean).length - 1);
         return { path: filePath, content, startLine, endLine, encoding: 'utf8', mimeType: 'text/plain', byteLength: Buffer.byteLength(content) };
       }

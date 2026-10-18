@@ -70,7 +70,7 @@ describe('MCP tool registry', () => {
       .toEqual(['upper', 'lower', undefined]);
   });
 
-  it('requires approval for a case-distinct POSIX sibling and strips its workspace metadata', async () => {
+  it('requires approval for a case-distinct POSIX sibling, strips its workspace metadata, and still fences an explicit workspace identity', async () => {
     const calls: unknown[] = [];
     const approval = vi.fn(async () => false);
     const registry = new ToolRegistry({ capabilities: { async execute(tool, input): Promise<ReturnType<typeof ok>> {
@@ -79,7 +79,7 @@ describe('MCP tool registry', () => {
       activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-a', rootPath: '/tmp/Project' }),
       hostMutationApprovalProvider: approval,
     });
-    const input = { workspaceId: 'workspace-a', operation: 'run', executable: 'node', arguments: ['--version'],
+    const input = { operation: 'run', executable: 'node', arguments: ['--version'],
       cwd: '/tmp/project', userConfirmed: true, metadata: { 'unified-mpc.activeWorkspaceRoot.v1': '/tmp/Project' } };
     expect((await registry.invoke('shell', input)).isError).toBe(true);
     expect(calls).toHaveLength(0);
@@ -87,6 +87,13 @@ describe('MCP tool registry', () => {
     expect((await registry.invoke('shell', input)).isError).not.toBe(true);
     expect(calls).toEqual([{ tool: 'shell', input: expect.objectContaining({ cwd: '/tmp/project',
       metadata: expect.not.objectContaining({ 'unified-mpc.activeWorkspaceRoot.v1': expect.anything() }) }) }]);
+    // A caller-supplied explicit workspaceId is a hard execution identity (#214):
+    // the case-distinct sibling is refused even after approval, with no dispatch.
+    await expect(registry.invoke('shell', { ...input, workspaceId: 'workspace-a' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PERMISSION_DENIED', message: expect.stringContaining('workspaceId') } },
+    });
+    expect(calls).toHaveLength(1);
   });
 
   it('returns the exact deterministic tool order', () => {
@@ -869,6 +876,13 @@ describe('MCP tool registry', () => {
   it('forces MCP command execution to return immediately and caps follow-up waits', async () => {
     const calls: Array<{ tool: string; input: unknown }> = [];
     const registry = new ToolRegistry({
+      workspaceInfo: {
+        async info(_actor: unknown, workspaceId: string): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+          return workspaceId === 'workspace-1'
+            ? ok({ id: workspaceId, rootPath: process.cwd(), realRootPath: process.cwd() })
+            : err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'));
+        },
+      },
       capabilities: {
         async execute(tool, input): Promise<ReturnType<typeof ok>> {
           calls.push({ tool, input });
@@ -1690,6 +1704,13 @@ describe('MCP tool registry', () => {
   it('blocks parser-bypass Git and interpreter invocations before any backend call', async () => {
     const calls: string[] = [];
     const registry = new ToolRegistry({
+      workspaceInfo: {
+        async info(_actor: unknown, workspaceId: string): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+          return workspaceId === 'workspace-1'
+            ? ok({ id: workspaceId, rootPath: process.cwd(), realRootPath: process.cwd() })
+            : err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'));
+        },
+      },
       git: { async run(): Promise<ReturnType<typeof ok>> { calls.push('git'); return ok({ exitCode: 0, stdout: '', stderr: '' }); } } as McpApplicationServices['git'],
       capabilities: { async execute(tool): Promise<ReturnType<typeof ok>> { calls.push(tool); return ok({ ok: true }); } },
     }, actor);
@@ -1707,6 +1728,13 @@ describe('MCP tool registry', () => {
     const calls: string[] = [];
     const fileCalls: Array<{ readonly tool: string; readonly input: unknown; readonly authorization: unknown }> = [];
     const registry = new ToolRegistry({
+      workspaceInfo: {
+        async info(_actor: unknown, workspaceId: string): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+          return workspaceId === 'workspace-1'
+            ? ok({ id: workspaceId, rootPath: process.cwd(), realRootPath: process.cwd() })
+            : err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'));
+        },
+      },
       file: {
         async writeFile(_actor, _workspaceId, input, _signal, authorization): Promise<ReturnType<typeof ok>> { fileCalls.push({ tool: 'write_file', input, authorization }); return ok({ path: 'a.txt', bytesWritten: 1 }); },
         async applyPatch(_actor, _workspaceId, input, _signal, authorization): Promise<ReturnType<typeof ok>> { fileCalls.push({ tool: 'apply_patch', input, authorization }); return ok({ paths: ['a.txt'] }); },
@@ -2165,7 +2193,10 @@ describe('MCP tool registry', () => {
     });
 
     await expect(registry.invoke('mcp_call', { server: 'child', tool: 'delete_file', arguments: { path: 'x' } })).resolves.not.toMatchObject({ isError: true });
-    await expect(registry.invoke('shell', { workspaceId: 'workspace-a', operation: 'run', executable: 'shutdown.exe', arguments: ['/s'], cwd: 'C:\\Windows' })).resolves.not.toMatchObject({ isError: true });
+    // #214/#220: an explicit workspaceId is a hard execution identity, so the
+    // outside-cwd dispatch below deliberately omits it; the app-owned identity
+    // fence itself is covered by the explicit-workspaceId cases above.
+    await expect(registry.invoke('shell', { operation: 'run', executable: 'shutdown.exe', arguments: ['/s'], cwd: 'C:\\Windows' })).resolves.not.toMatchObject({ isError: true });
     await expect(registry.invoke('hook_register', { name: 'audit', event: 'beforeTool' })).resolves.not.toMatchObject({ isError: true });
     await expect(registry.invoke('hook_remove', { name: 'audit' })).resolves.toMatchObject({ structuredContent: { removed: true } });
     expect(calls).toEqual(['mcp_call', 'shell']);
@@ -2202,7 +2233,6 @@ describe('MCP tool registry', () => {
       });
 
       await expect(registry.invoke('shell', {
-        workspaceId: 'workspace-a',
         operation: 'run',
         executable: 'missing-command',
         arguments: [],
@@ -2222,6 +2252,13 @@ describe('MCP tool registry', () => {
   it('guards opaque execution and UI side-effect boundaries', async () => {
     const calls: string[] = [];
     const registry = new ToolRegistry({
+      workspaceInfo: {
+        async info(_actor: unknown, workspaceId: string): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {
+          return workspaceId === 'workspace-1'
+            ? ok({ id: workspaceId, rootPath: process.cwd(), realRootPath: process.cwd() })
+            : err(appError('WORKSPACE_NOT_FOUND', 'missing workspace'));
+        },
+      },
       capabilities: { async execute(tool): Promise<ReturnType<typeof ok>> { calls.push(tool); return ok({ ok: true }); } },
       process: { async start(): Promise<ReturnType<typeof ok>> { calls.push('process_start'); return ok({ processId: 'p1' }); } } as McpApplicationServices['process'],
       codex: { async run(): Promise<ReturnType<typeof ok>> { calls.push('codex_run'); return ok({ codexTaskId: 'c1' }); } } as McpApplicationServices['codex'],

@@ -171,13 +171,20 @@ export class CanonicalArtifactStore {
   /**
    * Artifact keys referenced by any of the given manifests — the projection a
    * reachability pass consumes to keep artifacts alive while their manifests
-   * are retained (#210 §7).
+   * are retained (#210 §7). Pass `repositoryId` to scope the evidence to one
+   * trust boundary: the same key may legitimately exist in two boundaries and
+   * a binding in one must never make the other boundary's copy look reachable.
    */
-  public async artifactKeysReferencedBy(manifestIds: readonly string[]): Promise<string[]> {
+  public async artifactKeysReferencedBy(
+    manifestIds: readonly string[],
+    repositoryId?: string,
+  ): Promise<string[]> {
     const wanted = new Set(manifestIds.map((manifestId) => requireManifestId(manifestId)));
+    const scoped = repositoryId === undefined ? undefined : requireIdentityPart('repositoryId', repositoryId);
     const keys = new Set<string>();
     for (const artifact of await this.listAll()) {
       if (artifact.kind !== 'file') continue;
+      if (scoped !== undefined && artifact.repositoryId !== scoped) continue;
       if (artifact.bindings.some((binding) => binding.manifestId !== undefined && wanted.has(binding.manifestId))) {
         keys.add(artifact.artifactKey);
       }

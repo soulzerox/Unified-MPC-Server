@@ -2113,13 +2113,18 @@ function readBackgroundRagJobId(value: unknown): string | undefined {
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 
 /**
- * Parse the structured pre-edit readiness envelope (#346 U10).
+ * Parse the structured pre-edit readiness envelope (#346 U10, revision binding #346).
  *
  * Transport success alone never authorizes a write: only an explicit
  * `can_proceed === true` with a known-good status counts as ready.
  * Everything else — degraded, review_required, malformed or missing
  * readiness fields — fails closed so the demand-first loop can prepare
  * the required scoped evidence instead.
+ *
+ * A ready verdict must additionally prove *which* content it analyzed:
+ * `evidence_fresh === true` plus a target content identity (`target_sha256`).
+ * A claim without that proof is transport-ready but not revision-bound, so it
+ * is refused rather than trusted.
  */
 function readPreEditReadiness(value: unknown): { ready: boolean; reason: string; evidenceState: string } {
   const payload = normalizePreEditPayload(value);
@@ -2134,6 +2139,18 @@ function readPreEditReadiness(value: unknown): { ready: boolean; reason: string;
   }
   if (status !== 'ok' && status !== 'ready' && status !== 'available') {
     return { ready: false, reason: `unexpected ready status=${status} (evidence=${evidenceState})`, evidenceState };
+  }
+  // Proven-not-default: only an explicit freshness claim counts, and it must be
+  // accompanied by the identity of the target content it refers to.
+  if (data.evidence_fresh !== true && data.evidenceFresh !== true) {
+    return { ready: false, reason: `evidence_fresh !== true (status=${status}, evidence=${evidenceState})`, evidenceState };
+  }
+  const targetIdentity = typeof data.target_sha256 === 'string' ? data.target_sha256.trim().toLowerCase() : undefined;
+  if (targetIdentity === undefined) {
+    return { ready: false, reason: `target identity missing (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_missing' };
+  }
+  if (!/^[0-9a-f]{64}$/.test(targetIdentity)) {
+    return { ready: false, reason: `target identity malformed (status=${status}, evidence=${evidenceState})`, evidenceState: 'target_identity_malformed' };
   }
   return { ready: true, reason: 'ready', evidenceState };
 }

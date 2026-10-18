@@ -71,6 +71,12 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       async admitRunWorkspace() { calls.push('goalRunWorkspace.admitRunWorkspace'); return ok({ admissionGeneration: 1 }); },
       async recoverRunWorkspace() { calls.push('goalRunWorkspace.recoverRunWorkspace'); return ok({ admissionGeneration: 1 }); },
     },
+    goalWorktrees: serviceProxy('goalWorktrees', calls, () => ({
+      integrationBase: 'origin/main',
+      entries: [],
+      safeToCleanCount: 0,
+      keepCount: 0,
+    })),
     thaiRag: {
       async health() {
         calls.push('thaiRag.health');

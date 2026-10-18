@@ -148,7 +148,7 @@ interface WorktreeDependencyPolicyState {
   readonly integration: 'bounded_runtime_v1' | 'dependency_resource_manager_v1';
 }
 
-interface WorktreeLedgerEntry {
+export interface WorktreeLedgerEntry {
   readonly workspaceId: string;
   readonly worktreePath: string;
   readonly ref: string;
@@ -284,6 +284,16 @@ export class UpgradeRuntimeService {
       plugins: this.plugins.size,
       worktrees: this.worktrees.length,
     };
+  }
+
+  /**
+   * #80 slice 3: the owned-worktree ledger as read-only data for lifecycle
+   * reconciliation. Entries are defensive copies, so a caller can never mutate
+   * runtime state through the returned snapshot.
+   */
+  public async worktreeLedgerEntries(): Promise<readonly WorktreeLedgerEntry[]> {
+    await this.refreshSharedState();
+    return this.worktrees.map((entry) => ({ ...entry }));
   }
 
   public async execute(name: string, input: Record<string, unknown>, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {

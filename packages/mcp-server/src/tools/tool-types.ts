@@ -19,6 +19,7 @@ import type {
   GuardedMergeService,
   ObservedMergeReconciliationService,
   GoalRequestCancellationPort,
+  GoalWorktreeReconciliationPort,
   GoalContinuationService,
   GoalMutationFenceService,
   MoveFileRequest,
@@ -196,6 +197,8 @@ export interface McpApplicationServices {
   readonly workspaceInfo?: WorkspaceInfoPort;
   readonly workspaceAdmissionProjection?: WorkspaceAdmissionProjectionPort;
   readonly goalRunWorkspace?: GoalRunWorkspacePort;
+  /** #80 slice 3: read-only lifecycle classification of owned goal worktrees. */
+  readonly goalWorktrees?: GoalWorktreeReconciliationPort;
   readonly workspaceSelection?: WorkspaceSelectionPort;
   readonly preferredGoal?: PreferredGoalPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;

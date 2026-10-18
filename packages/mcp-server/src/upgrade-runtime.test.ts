@@ -173,6 +173,48 @@ describe('upgrade runtime', () => {
     }
   });
 
+  // #80 slice 3: the lifecycle reconciler needs the owned-worktree ledger as
+  // read-only data; the snapshot must never be a writable handle into state.
+  it('exposes the owned-worktree ledger as a read-only snapshot', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-ledger-'));
+    const runtimeStatePath = path.join(directory, 'upgrade-runtime.json');
+    try {
+      const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+      await store.updateShared(() => ({
+        plugins: [],
+        worktrees: [{
+          workspaceId: 'ws-1',
+          worktreePath: '.worktrees/agent-1',
+          ref: 'main',
+          owner: 'client-a',
+          ownerSessionId: 'session-a',
+          createdAt: '2026-10-05T00:00:00.000Z',
+        }],
+      }));
+
+      const runtime = new UpgradeRuntimeService({ runtimeStatePath, platform: 'linux' }, actor);
+      const entries = await runtime.worktreeLedgerEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        worktreePath: '.worktrees/agent-1',
+        ref: 'main',
+        owner: 'client-a',
+        ownerSessionId: 'session-a',
+      });
+
+      (entries[0] as { worktreePath: string }).worktreePath = 'tampered';
+      expect((await runtime.worktreeLedgerEntries())[0]?.worktreePath).toBe('.worktrees/agent-1');
+      expect((await store.readShared()).worktrees[0]?.worktreePath).toBe('.worktrees/agent-1');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports no owned worktrees when the runtime has no shared state store', async () => {
+    expect(await new UpgradeRuntimeService({}, actor).worktreeLedgerEntries()).toEqual([]);
+  });
+
   // The registry smoke invokes the complete phase catalog through every normal
   // boundary. Keep enough headroom for slower Windows/CI runners while still
   // failing a genuinely stuck registry invocation.

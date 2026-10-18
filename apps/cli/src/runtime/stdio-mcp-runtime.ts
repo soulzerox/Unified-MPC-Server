@@ -38,6 +38,7 @@ import {
   GoalWorkspaceRelocationOrchestrator,
   type GoalRelocationCustodyPin,
   GoalWorkspaceRetentionEvidenceSealingService,
+  createGoalWorktreeReconciliationPort,
 } from '@unified-mpc/application';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
 import {
@@ -52,7 +53,7 @@ import {
   createLocalExtensionsService,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import { ThaiRagProviderCoordinator, type ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
 import {
@@ -850,6 +851,24 @@ export function createStdioMcpRuntime(
       });
     },
   });
+  // #80 slice 3: read-only worktree lifecycle inspection. The ownership ledger
+  // is shared runtime state (read lazily, never cached twice), and a workspace
+  // that still holds a live goal lease can never be reported cleanable, so a
+  // failing lease probe fails the whole call closed.
+  let goalWorktreeLedgerReader: ReturnType<typeof createGoalWorktreeLedgerReader> | undefined;
+  const goalWorktrees: NonNullable<McpApplicationServices['goalWorktrees']> = createGoalWorktreeReconciliationPort({
+    listLedgerEntries: async () => {
+      goalWorktreeLedgerReader ??= createGoalWorktreeLedgerReader({ services, actor });
+      return goalWorktreeLedgerReader();
+    },
+    listActivelyLeasedWorkspaceIds: async () => {
+      const goals = await goalRepository.list({ status: 'active', limit: 200 });
+      const now = new Date().toISOString();
+      return [...new Set(goals
+        .filter((goal) => goal.leaseExpiresAt === undefined || goal.leaseExpiresAt > now)
+        .map((goal) => goal.workspaceId))];
+    },
+  });
   const services: McpApplicationServices = {
     platform: process.platform,
     runtimeStatePath: path.join(dataPath, 'upgrade-runtime.json'),
@@ -875,6 +894,7 @@ export function createStdioMcpRuntime(
     workspaceInfo: new WorkspaceInfoService(workspaceRepository, workspaceService, effectiveUnrestricted),
     workspaceAdmissionProjection: goalRuntimeControlPlane,
     goalRunWorkspace,
+    goalWorktrees,
     workspaceSelection,
     preferredGoal: {
       get: async (workspaceId) => {

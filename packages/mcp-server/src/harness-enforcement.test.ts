@@ -16,6 +16,7 @@ function createHarnessServices(): {
   bootstrapEvents: string[];
   setAgentsMd(content: string): void;
   setHead(value: string): void;
+  setHeadOnPreEdit(value: string | undefined): void;
   setThaiRagHealthError(message: string | undefined): void;
   setThaiRagActiveJobs(jobIds: readonly string[]): void;
   setThaiRagPreEditError(message: string | undefined): void;
@@ -34,6 +35,7 @@ function createHarnessServices(): {
   let thaiRagActiveJobs: readonly string[] = [];
   let thaiRagPreEditError: string | undefined;
   let thaiRagPreEditPayload: Record<string, unknown> | undefined;
+  let headOnPreEdit: string | undefined;
   const fileContents = new Map<string, string>();
   const missingPaths = new Set<string>();
   const fileContent = (path: string): string => fileContents.get(path) ?? `// ${path}\n`;
@@ -81,6 +83,10 @@ function createHarnessServices(): {
       async call(tool: string, args: Readonly<Record<string, unknown>>) {
         nativeRagCalls.push(tool);
         nativeRagArguments.push({ tool, args });
+        if (tool === 'pre_edit_context' && headOnPreEdit !== undefined) {
+          // The admitted source view can move while the provider is thinking.
+          head = headOnPreEdit;
+        }
         if (tool === 'pre_edit_context' && thaiRagPreEditError !== undefined) {
           return err(appError('CONFLICT', thaiRagPreEditError, true));
         }
@@ -155,6 +161,7 @@ function createHarnessServices(): {
     bootstrapEvents,
     setAgentsMd(content: string): void { agentsMd = content; },
     setHead(value: string): void { head = value; },
+    setHeadOnPreEdit(value: string | undefined): void { headOnPreEdit = value; },
     setThaiRagHealthError(message: string | undefined): void { thaiRagHealthError = message; },
     setThaiRagActiveJobs(jobIds: readonly string[]): void { thaiRagActiveJobs = [...jobIds]; },
     setThaiRagPreEditError(message: string | undefined): void { thaiRagPreEditError = message; },
@@ -845,5 +852,36 @@ describe('pre-edit readiness gate (#346 U10)', () => {
     expect(nativeRagArguments).toEqual([
       { tool: 'pre_edit_context', args: { file_path: 'src/inside.ts', workspace_id: 'workspace-1' } },
     ]);
+  });
+
+  it('refuses a ready verdict when the admitted source view moved while evidence was prepared', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/moved.ts\n'),
+    }, 'src/moved.ts', (fixture) => fixture.setHeadOnPreEdit('b'.repeat(40)));
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: {
+        code: 'CONFLICT',
+        message: expect.stringContaining('source view'),
+        details: { reason: 'pre-edit-source-view-changed' },
+      } },
+    });
+  });
+
+  it('authorizes a ready verdict while the admitted source view stays put', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/steady.ts\n'),
+    }, 'src/steady.ts');
+
+    expect(result.isError).not.toBe(true);
   });
 });

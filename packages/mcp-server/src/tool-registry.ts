@@ -1348,6 +1348,17 @@ export class ToolRegistry {
       const bound = await this.bindPreEditTargetContent(workspaceId, filePath, readiness.targetIdentity);
       if (!bound.ok) return bound;
       checks.push('thai-rag/pre_edit_context');
+      // #346: the verdict above belongs to the view observed before the call.
+      // If the admitted source view moved while the provider was working, that
+      // evidence is no longer about the revision being authorized, so refuse
+      // instead of preparing the path on a stale admission.
+      if (sourceIdentity.value !== undefined) {
+        const settledSource = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
+        if (!settledSource.ok) return settledSource;
+        if (classifyWorkspaceSourceEvidence(sourceIdentity.value, settledSource.value) !== 'fresh') {
+          return err(appError('CONFLICT', 'The admitted workspace source view changed while pre-edit evidence was prepared; re-request evidence before mutating', true, { reason: 'pre-edit-source-view-changed' }));
+        }
+      }
     }
     if (runGodkillerSafetyCheck) {
       const extensions = this.services.extensions;

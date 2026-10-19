@@ -9,6 +9,7 @@ export * from './heavy-job-queue.js';
 export * from './canonical-ref-store.js';
 export * from './canonical-manifest-store.js';
 export * from './canonical-artifact-store.js';
+export * from './manifest-artifact-registration.js';
 export * from './advance-revision.js';
 export * from './artifact-gc.js';
 export * from './artifact-gc-roots.js';

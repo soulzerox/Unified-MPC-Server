@@ -10,6 +10,7 @@ export * from './canonical-ref-store.js';
 export * from './canonical-manifest-store.js';
 export * from './canonical-artifact-store.js';
 export * from './manifest-artifact-registration.js';
+export * from './file-artifact-resolution.js';
 export * from './advance-revision.js';
 export * from './artifact-gc.js';
 export * from './artifact-gc-roots.js';

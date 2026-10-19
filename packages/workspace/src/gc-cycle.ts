@@ -4,7 +4,9 @@ import type { GoalOverlayStore } from './goal-overlay-store.js';
 import type { RevisionPinRegistry } from './revision-pin-registry.js';
 import { planArtifactGc, type GcRootSet } from './artifact-gc.js';
 import { assembleGcRoots } from './artifact-gc-roots.js';
-import type { ArtifactQuarantineStore } from './artifact-quarantine.js';
+import type { ArtifactQuarantineStore, QuarantineTarget } from './artifact-quarantine.js';
+import type { CanonicalArtifactStore } from './canonical-artifact-store.js';
+import { collectRetainedManifestIds, planRepositoryArtifactGc } from './artifact-key-gc.js';
 import type { GcLeaseStore } from './gc-lease.js';
 
 export interface GcCycleLease {
@@ -13,8 +15,20 @@ export interface GcCycleLease {
   readonly ttlMs: number;
 }
 
+/** One prunable canonical artifact: a key is only resolvable inside its repository. */
+export interface GcCycleArtifactCandidate {
+  readonly repositoryId: string;
+  readonly artifactKey: string;
+}
+
 export interface GcCycleInput {
   readonly candidates: readonly string[];
+  /**
+   * Canonical-artifact candidates (#210 §1/§7). Which repositories and which
+   * keys a pass may prune stays caller policy; the cycle only plans them
+   * against retained manifests. Requires `stores.artifacts`.
+   */
+  readonly artifactCandidates?: readonly GcCycleArtifactCandidate[];
   readonly indexJobManifestIds: readonly string[];
   readonly now: Date;
   readonly graceMs: number;
@@ -24,7 +38,13 @@ export interface GcCycleInput {
 }
 
 export type GcCycleReport =
-  | { readonly status: 'planned'; readonly reachable: readonly string[]; readonly unreachable: readonly string[]; readonly quarantined: readonly string[] }
+  | {
+    readonly status: 'planned';
+    readonly reachable: readonly string[];
+    readonly unreachable: readonly string[];
+    readonly quarantined: readonly string[];
+    readonly quarantinedArtifacts: readonly GcCycleArtifactCandidate[];
+  }
   | { readonly status: 'refused'; readonly reason: string };
 
 export interface GcCycleStores {
@@ -33,6 +53,8 @@ export interface GcCycleStores {
   readonly pins: RevisionPinRegistry;
   readonly overlays: GoalOverlayStore;
   readonly quarantine: ArtifactQuarantineStore;
+  /** Required as soon as artifact candidates are planned. */
+  readonly artifacts?: CanonicalArtifactStore;
 }
 
 /**
@@ -49,6 +71,11 @@ export interface GcCycleStores {
  * or unreadable fence refuses before anything is quarantined) and
  * releases it in a finally, even on refusal. Dry runs are read-only and
  * deliberately unfenced.
+ *
+ * Artifact candidates (optional) are planned in the same pass with the
+ * repository-scoped artifact-key planner and quarantined under that one
+ * fence: a refused artifact plan refuses the whole cycle before anything
+ * is mutated, exactly like a refused content-hash plan.
  */
 export async function runGcCycle(
   stores: GcCycleStores,
@@ -94,13 +121,63 @@ async function runCycle(stores: GcCycleStores, input: GcCycleInput): Promise<GcC
   if (plan.status !== 'planned') {
     return plan;
   }
-  if (!input.dryRun && plan.unreachable.length > 0) {
-    await stores.quarantine.quarantine(plan.unreachable, { now: input.now, graceMs: input.graceMs });
+
+  const artifactCandidates = input.artifactCandidates ?? [];
+  const unreachableArtifacts: GcCycleArtifactCandidate[] = [];
+  if (artifactCandidates.length > 0) {
+    const artifacts = stores.artifacts;
+    if (artifacts === undefined) {
+      return {
+        status: 'refused',
+        reason: 'artifact candidates supplied but no artifact store is wired: refusing to plan artifact-key GC',
+      };
+    }
+    const retainedManifestIds = await collectRetainedManifestIds({
+      refs: stores.refs,
+      pins: stores.pins,
+      overlays: stores.overlays,
+      indexJobManifestIds: input.indexJobManifestIds,
+    });
+    for (const [repositoryId, keys] of groupByRepository(artifactCandidates)) {
+      const artifactPlan = await planRepositoryArtifactGc({ store: artifacts, repositoryId, retainedManifestIds, candidates: keys });
+      if (artifactPlan.status !== 'planned') {
+        return { status: 'refused', reason: artifactPlan.reason };
+      }
+      for (const artifactKey of artifactPlan.unreachable) unreachableArtifacts.push({ repositoryId, artifactKey });
+    }
+    unreachableArtifacts.sort(compareCandidates);
+  }
+
+  if (!input.dryRun) {
+    const targets: QuarantineTarget[] = [
+      ...plan.unreachable,
+      ...unreachableArtifacts.map((artifact): QuarantineTarget => ({ kind: 'artifact-key', ...artifact })),
+    ];
+    if (targets.length > 0) {
+      await stores.quarantine.quarantine(targets, { now: input.now, graceMs: input.graceMs });
+    }
   }
   return {
     status: 'planned',
     reachable: plan.reachable,
     unreachable: plan.unreachable,
     quarantined: input.dryRun ? [] : [...plan.unreachable],
+    quarantinedArtifacts: input.dryRun ? [] : unreachableArtifacts,
   };
+}
+
+function groupByRepository(candidates: readonly GcCycleArtifactCandidate[]): Map<string, string[]> {
+  const byRepository = new Map<string, string[]>();
+  for (const candidate of candidates) {
+    const keys = byRepository.get(candidate.repositoryId);
+    if (keys === undefined) byRepository.set(candidate.repositoryId, [candidate.artifactKey]);
+    else keys.push(candidate.artifactKey);
+  }
+  return byRepository;
+}
+
+function compareCandidates(a: GcCycleArtifactCandidate, b: GcCycleArtifactCandidate): number {
+  if (a.repositoryId !== b.repositoryId) return a.repositoryId < b.repositoryId ? -1 : 1;
+  if (a.artifactKey === b.artifactKey) return 0;
+  return a.artifactKey < b.artifactKey ? -1 : 1;
 }

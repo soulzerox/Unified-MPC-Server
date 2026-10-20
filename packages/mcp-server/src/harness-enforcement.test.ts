@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { PermissionProfile } from '@unified-mpc/permissions';
+import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
 import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
@@ -1007,3 +1008,175 @@ describe('pre-edit readiness gate (#346 U10)', () => {
     expect('evidenceChannels' in receipt).toBe(false);
   });
 });
+
+/**
+ * Demand-first pre-edit submission (#346 behaviour 5, Slice A).
+ *
+ * When the provider refuses with a refreshable missing/stale/degraded
+ * channel, the registry submits one bounded P0 scoped-delta job through the
+ * #145 waiter queue (promoted to the head) and still fails closed: the path
+ * is not prepared, and the CONFLICT envelope gains flat `submission*`
+ * details describing what was submitted. Undemandable verdicts (malformed
+ * envelopes, permanently unavailable channels) submit nothing.
+ */
+describe('demand-first pre-edit submission (Slice A)', () => {
+  const demandablePayload = (): Record<string, unknown> => ({
+    status: 'degraded',
+    can_proceed: false,
+    evidence_state: 'semantic_missing',
+    evidence: {
+      semantic: 'missing',
+      channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'missing' },
+    },
+  });
+
+  interface DemandContext {
+    readonly deltaArgs: ReadonlyArray<Record<string, unknown>>;
+    readonly settleDeltas: () => void;
+  }
+
+  function createDemandFixture(
+    preEditPayload: Record<string, unknown> | undefined,
+    options: { queueLimit?: number; cost: number } = { cost: 16 },
+  ): {
+    fixture: ReturnType<typeof createHarnessServices>;
+    registry: ToolRegistry;
+    context: DemandContext;
+  } {
+    const fixture = createHarnessServices();
+    const deltaArgs: Array<Record<string, unknown>> = [];
+    const waiters = new Array<(value: unknown) => void>();
+    const thaiRag = fixture.services.thaiRag as unknown as {
+      call(tool: string, args: Record<string, unknown>): Promise<unknown>;
+    };
+    const baseCall = thaiRag.call.bind(fixture.services.thaiRag);
+    thaiRag.call = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+      if (tool === 'code_index') {
+        deltaArgs.push(args);
+        return new Promise((resolve) => { waiters.push(resolve); });
+      }
+      if (tool === 'pre_edit_context' && preEditPayload !== undefined) {
+        return ok({ content: [{ type: 'text', text: JSON.stringify(preEditPayload) }] });
+      }
+      return await baseCall(tool, args);
+    };
+    const controller = new ResourceAdmissionController({
+      globalCost: options.cost,
+      workspaceCost: options.cost,
+      sessionCost: options.cost,
+      maxOperations: 4,
+      resourceClassCost: { rag_indexing: options.cost },
+    });
+    const registry = new ToolRegistry(fixture.services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'demand-first-session',
+      activeWorkspaceScopeProvider,
+      resourceAdmissionController: controller,
+      ragIndexAdmissionCost: options.cost,
+      ...(options.queueLimit === undefined ? {} : { preEditDemandQueueLimit: options.queueLimit }),
+    });
+    const context: DemandContext = {
+      deltaArgs,
+      settleDeltas: () => {
+        for (const resolve of waiters.splice(0)) resolve(ok({ indexed: true }));
+      },
+    };
+    return { fixture, registry, context };
+  }
+
+  function errorDetails(result: { isError?: boolean; structuredContent?: unknown }): Record<string, unknown> {
+    const content = result.structuredContent as { error?: { details?: Record<string, unknown> } };
+    return (content.error?.details ?? {}) as Record<string, unknown>;
+  }
+
+  it('submits a bounded blocked delta for a refreshable channel and stays fail-closed', async () => {
+    const { registry, context } = createDemandFixture(demandablePayload());
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    const result = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/demand-delta.ts' });
+    const details = errorDetails(result as { isError?: boolean; structuredContent?: unknown });
+
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(details).toMatchObject({
+      reason: 'pre-edit-evidence-not-ready',
+      evidenceState: 'semantic_missing',
+      submissionPaths: 'src/demand-delta.ts',
+      submissionMaxFiles: expect.any(Number),
+      submissionQueueState: expect.stringMatching(/^(admitted|queued)$/),
+    });
+    expect(String(details.submissionOperationId)).toMatch(/^pre-edit:workspace-1:/);
+
+    // The demand work actually runs (bounded: target path only, capped).
+    expect(context.deltaArgs.length).toBe(1);
+    expect(context.deltaArgs[0]).toMatchObject({
+      workspace_id: 'workspace-1',
+      paths: ['src/demand-delta.ts'],
+      max_files: expect.any(Number),
+    });
+    context.settleDeltas();
+  });
+
+  it('submits nothing for an undemandable refusal', async () => {
+    const payload = {
+      status: 'degraded',
+      can_proceed: false,
+      evidence_state: 'semantic_missing',
+      evidence: {
+        semantic: 'missing',
+        channels: { parent: 'unavailable', lexical: 'ok', structural: 'ok', vector: 'unavailable' },
+      },
+    };
+    const { registry, context } = createDemandFixture(payload);
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    const result = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/nondemand.ts' });
+    const details = errorDetails(result as { isError?: boolean; structuredContent?: unknown });
+
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(details).toMatchObject({ reason: 'pre-edit-evidence-not-ready', evidenceState: 'semantic_missing' });
+    expect('submissionOperationId' in details).toBe(false);
+    expect(context.deltaArgs.length).toBe(0);
+  });
+
+  it('coalesces a repeat request while the same delta is in flight', async () => {
+    const { registry, context } = createDemandFixture(demandablePayload());
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    const first = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/coalesce.ts' });
+    const firstDetails = errorDetails(first as { isError?: boolean; structuredContent?: unknown });
+    expect(firstDetails.submissionQueueState).toBe('admitted');
+    expect(context.deltaArgs.length).toBe(1);
+
+    const second = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/coalesce.ts' });
+    const secondDetails = errorDetails(second as { isError?: boolean; structuredContent?: unknown });
+
+    expect(secondDetails.submissionOperationId).toEqual(firstDetails.submissionOperationId);
+    expect(secondDetails.submissionQueueState).toBe('coalesced');
+    expect(context.deltaArgs.length).toBe(1); // one bounded delta, not one per attempt
+    context.settleDeltas();
+  });
+
+  it('refuses a submission once the demand queue is full and stays fail-closed', async () => {
+    const { registry, context } = createDemandFixture(demandablePayload(), { queueLimit: 1, cost: 1 });
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    const first = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/full-a.ts' });
+    const firstDetails = errorDetails(first as { isError?: boolean; structuredContent?: unknown });
+    expect(firstDetails.submissionQueueState).toBe('admitted');
+    expect(context.deltaArgs.length).toBe(1);
+
+    const second = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/full-b.ts' });
+    const secondDetails = errorDetails(second as { isError?: boolean; structuredContent?: unknown });
+    expect(secondDetails.submissionQueueState).toBe('queued');
+
+    const third = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/full-c.ts' });
+    const thirdDetails = errorDetails(third as { isError?: boolean; structuredContent?: unknown });
+    expect(thirdDetails.submissionQueueState).toBe('rejected');
+    expect(thirdDetails.reason).toBe('pre-edit-evidence-not-ready');
+
+    expect(context.deltaArgs.length).toBe(1);
+    context.settleDeltas();
+  });
+});
+
+

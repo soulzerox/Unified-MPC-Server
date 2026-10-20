@@ -66,6 +66,14 @@ import { inspectMutationOperation, permissionLevelForMutationDecision, requiresM
 import { mapError, mapResult, type McpToolResponse } from './result-mapper.js';
 import { sharedProcessRagIndexAdmissionTracker, type RagIndexAdmissionTracker } from './rag-index-admission.js';
 import { sharedProcessGoalProcessAdmissionTracker, type GoalProcessAdmissionTracker } from './goal-process-admission.js';
+import {
+  DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT,
+  flatSubmissionDetails,
+  isDemandablePreEditHead,
+  MAX_PRE_EDIT_DELTA_FILES,
+  PreEditDemandRuntime,
+  type PreEditDeltaJob,
+} from './pre-edit-demand.js';
 import { agentSwarmTools } from './tools/agent-swarm-tools.js';
 import { batchTools } from './tools/batch-tools.js';
 import { contextTools } from './tools/context-tools.js';
@@ -151,6 +159,8 @@ export interface ToolRegistryOptions {
   readonly lspProcessAdmissionCost?: number;
   /** Weighted cost charged while one foreground native RAG indexing call is running. */
   readonly ragIndexAdmissionCost?: number;
+  /** Bounded demand-first waiter queue bound (#346 behaviour 5, Slice A). */
+  readonly preEditDemandQueueLimit?: number;
   /** Weighted cost held for the real lifetime of one Goal-owned managed process. */
   readonly goalProcessAdmissionCost?: number;
 }
@@ -257,6 +267,7 @@ export class ToolRegistry {
   private readonly mcpCallAdmissionCost: number;
   private readonly lspProcessAdmissionCost: number;
   private readonly ragIndexAdmissionCost: number;
+  private readonly preEditDemand: PreEditDemandRuntime | undefined;
   private readonly goalProcessAdmissionCost: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
@@ -309,6 +320,18 @@ export class ToolRegistry {
       options.goalProcessAdmissionCost,
       DEFAULT_GOAL_PROCESS_ADMISSION_COST,
     );
+    // Demand-first pre-edit evidence (#346 behaviour 5): the queue runtime is
+    // process-lifetime demand state, so it shares the registry's admission
+    // controller instead of inventing a second scheduler (non-goal).
+    this.preEditDemand = this.resourceAdmissionController === undefined ? undefined : new PreEditDemandRuntime({
+      controller: this.resourceAdmissionController,
+      cost: this.ragIndexAdmissionCost,
+      queueLimit: normalizePositiveInteger(
+        options.preEditDemandQueueLimit,
+        DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT,
+      ),
+      executor: (job: PreEditDeltaJob): Promise<void> => this.runPreEditDelta(job),
+    });
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
       services,
@@ -1342,11 +1365,17 @@ export class ToolRegistry {
       if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
       const readiness = readPreEditReadiness(thaiCheck.value);
       if (!readiness.ready) {
+        // #346 behaviour 5, Slice A: fail closed as before, but additionally
+        // submit one bounded P0 scoped-delta reindex job through the #145
+        // waiter queue when the verdict describes refreshable evidence. The
+        // gate stays closed — a Slice B prepare re-check later decides.
+        const submission = this.submitDemandFirstDelta(workspaceId, filePath, readiness);
         return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${readiness.reason}`, true, {
           reason: 'pre-edit-evidence-not-ready',
           evidenceState: readiness.evidenceState,
           ...(readiness.evidenceSemantic === undefined ? {} : { evidenceSemantic: readiness.evidenceSemantic }),
           ...(readiness.evidenceChannels === undefined ? {} : { evidenceChannelStates: channelEvidenceSummary(readiness.evidenceChannels) }),
+          ...(submission === undefined ? {} : submission),
         }));
       }
       const bound = await this.bindPreEditTargetContent(workspaceId, filePath, readiness.targetIdentity);
@@ -1422,6 +1451,44 @@ export class ToolRegistry {
       });
     }
     return ok({ ready: true, filePath, checks, ...(preparationReceipt === undefined ? {} : { preparationReceipt }) });
+  }
+
+  /**
+   * Submit one bounded demand-first delta for the exact not-ready target
+   * (#346 behaviour 5, Slice A).
+   *
+   * Flat scalar details for the CONFLICT envelope, or `undefined` when the
+   * verdict is not refreshable demand — in which case the fail-closed
+   * envelope is byte-for-byte identical to the pre-demand-first one.
+   */
+  private submitDemandFirstDelta(
+    workspaceId: string,
+    filePath: string,
+    readiness: ReturnType<typeof readPreEditReadiness>,
+  ): Record<string, string | number> | undefined {
+    const runtime = this.preEditDemand;
+    if (runtime === undefined || runtime.enabled() === false) return undefined;
+    if (isDemandablePreEditHead(readiness.evidenceState, readiness.evidenceChannels) === false) return undefined;
+    const submission = runtime.submit({ workspaceId, filePath, evidenceState: readiness.evidenceState, demandable: true });
+    return submission === undefined ? undefined : flatSubmissionDetails(submission);
+  }
+
+  /**
+   * Execute an admitted demand-first delta: one synchronous scoped-delta
+   * `code_index` for the exact target path, capped by
+   * `MAX_PRE_EDIT_DELTA_FILES`.
+   *
+   * The caller's prepare call keeps its own (aborted) signal, so demand
+   * work runs on a detached signal — its outcome is only ever consumed
+   * by a later provider readiness check, never by this call.
+   */
+  private async runPreEditDelta(job: PreEditDeltaJob): Promise<void> {
+    if (this.services.thaiRag === undefined) return;
+    const detached = new AbortController().signal;
+    await this.nativeRagCall(job.workspaceId, 'code_index', {
+      paths: [...job.paths],
+      max_files: MAX_PRE_EDIT_DELTA_FILES,
+    }, detached);
   }
 
   private async workingMemorySearch(workspaceId: string, query: string, signal: AbortSignal): Promise<ReturnType<typeof ok> | ReturnType<typeof err>> {

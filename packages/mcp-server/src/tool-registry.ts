@@ -68,9 +68,11 @@ import { sharedProcessRagIndexAdmissionTracker, type RagIndexAdmissionTracker } 
 import { sharedProcessGoalProcessAdmissionTracker, type GoalProcessAdmissionTracker } from './goal-process-admission.js';
 import {
   DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT,
+  DEFAULT_PRE_EDIT_DEMAND_WAIT_TIMEOUT_MS,
   flatSubmissionDetails,
   isDemandablePreEditHead,
   MAX_PRE_EDIT_DELTA_FILES,
+  preEditOperationId,
   PreEditDemandRuntime,
   type PreEditDeltaJob,
 } from './pre-edit-demand.js';
@@ -161,6 +163,8 @@ export interface ToolRegistryOptions {
   readonly ragIndexAdmissionCost?: number;
   /** Bounded demand-first waiter queue bound (#346 behaviour 5, Slice A). */
   readonly preEditDemandQueueLimit?: number;
+  /** Bounded blocking wait for the target's own demand-first delta (#346 Slice B). */
+  readonly preEditDemandWaitTimeoutMs?: number;
   /** Weighted cost held for the real lifetime of one Goal-owned managed process. */
   readonly goalProcessAdmissionCost?: number;
 }
@@ -268,6 +272,7 @@ export class ToolRegistry {
   private readonly lspProcessAdmissionCost: number;
   private readonly ragIndexAdmissionCost: number;
   private readonly preEditDemand: PreEditDemandRuntime | undefined;
+  private readonly preEditDemandWaitTimeoutMs: number;
   private readonly goalProcessAdmissionCost: number;
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
@@ -332,6 +337,10 @@ export class ToolRegistry {
       ),
       executor: (job: PreEditDeltaJob): Promise<void> => this.runPreEditDelta(job),
     });
+    this.preEditDemandWaitTimeoutMs = normalizePositiveInteger(
+      options.preEditDemandWaitTimeoutMs,
+      DEFAULT_PRE_EDIT_DEMAND_WAIT_TIMEOUT_MS,
+    );
     const contextEconomy = new ContextEconomyRuntime();
     const context: McpToolContext = {
       services,
@@ -1363,22 +1372,55 @@ export class ToolRegistry {
         ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
       }, signal);
       if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
-      const readiness = readPreEditReadiness(thaiCheck.value);
-      if (!readiness.ready) {
+      let verdict: ReturnType<typeof readPreEditReadiness> = readPreEditReadiness(thaiCheck.value);
+      let waitOutcome: 'timeout' | 'aborted' | 'rechecked' | undefined;
+      // #346 behaviour 5, Slice B (D2): when a demand-first delta for exactly
+      // this (workspace, target, evidence state) is already queued or running
+      // from an earlier prepare, wait for it — bounded by the wait timeout and
+      // abort-aware — then re-read evidence once and re-check. A delta that
+      // produced stale evidence can never publish: the ready path below still
+      // binds the re-read verdict to the live target content (U10/behaviour 8)
+      // and re-verifies the admitted source view.
+      if (!verdict.ready && isDemandablePreEditHead(verdict.evidenceState, verdict.evidenceChannels)) {
+        const runtime = this.preEditDemand;
+        if (runtime?.enabled() === true) {
+          const wait = await runtime.waitFor(
+            preEditOperationId(workspaceId, filePath, verdict.evidenceState),
+            { timeoutMs: this.preEditDemandWaitTimeoutMs, signal },
+          );
+          if (wait.aborted) {
+            waitOutcome = 'aborted';
+          } else if (wait.timedOut) {
+            waitOutcome = 'timeout';
+          } else if (wait.waited) {
+            const recheck = await this.nativeRagCall(workspaceId, 'pre_edit_context', {
+              file_path: filePath,
+              ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
+            }, signal);
+            if (recheck.ok) {
+              const rechecked = readPreEditReadiness(recheck.value);
+              if (rechecked.ready) verdict = rechecked;
+            }
+            waitOutcome = 'rechecked';
+          }
+        }
+      }
+      if (!verdict.ready) {
         // #346 behaviour 5, Slice A: fail closed as before, but additionally
         // submit one bounded P0 scoped-delta reindex job through the #145
         // waiter queue when the verdict describes refreshable evidence. The
-        // gate stays closed — a Slice B prepare re-check later decides.
-        const submission = this.submitDemandFirstDelta(workspaceId, filePath, readiness);
-        return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${readiness.reason}`, true, {
+        // gate stays closed — the re-check above (or a later prepare) decides.
+        const submission = this.submitDemandFirstDelta(workspaceId, filePath, verdict);
+        return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${verdict.reason}`, true, {
           reason: 'pre-edit-evidence-not-ready',
-          evidenceState: readiness.evidenceState,
-          ...(readiness.evidenceSemantic === undefined ? {} : { evidenceSemantic: readiness.evidenceSemantic }),
-          ...(readiness.evidenceChannels === undefined ? {} : { evidenceChannelStates: channelEvidenceSummary(readiness.evidenceChannels) }),
+          evidenceState: verdict.evidenceState,
+          ...(verdict.evidenceSemantic === undefined ? {} : { evidenceSemantic: verdict.evidenceSemantic }),
+          ...(verdict.evidenceChannels === undefined ? {} : { evidenceChannelStates: channelEvidenceSummary(verdict.evidenceChannels) }),
           ...(submission === undefined ? {} : submission),
+          ...(waitOutcome === undefined ? {} : { submissionWaitOutcome: waitOutcome }),
         }));
       }
-      const bound = await this.bindPreEditTargetContent(workspaceId, filePath, readiness.targetIdentity);
+      const bound = await this.bindPreEditTargetContent(workspaceId, filePath, verdict.targetIdentity);
       if (!bound.ok) return bound;
       checks.push('thai-rag/pre_edit_context');
       // #346: the verdict above belongs to the view observed before the call.
@@ -1402,9 +1444,9 @@ export class ToolRegistry {
         ...(sourceIdentity.value === undefined ? {} : { sourceIdentity: sourceIdentity.value }),
         evidenceProviderId: thaiHealth.value.providerId,
         evidenceIndexGeneration: thaiHealth.value.embeddingIndexGeneration,
-        evidenceState: readiness.evidenceState,
-        ...(readiness.evidenceSemantic === undefined ? {} : { evidenceSemantic: readiness.evidenceSemantic }),
-        ...(readiness.evidenceChannels === undefined ? {} : { evidenceChannels: readiness.evidenceChannels }),
+        evidenceState: verdict.evidenceState,
+        ...(verdict.evidenceSemantic === undefined ? {} : { evidenceSemantic: verdict.evidenceSemantic }),
+        ...(verdict.evidenceChannels === undefined ? {} : { evidenceChannels: verdict.evidenceChannels }),
         checks: [...checks],
         preparedAt: new Date().toISOString(),
       };

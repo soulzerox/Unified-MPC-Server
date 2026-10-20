@@ -1019,6 +1019,77 @@ describe('pre-edit readiness gate (#346 U10)', () => {
  * details describing what was submitted. Undemandable verdicts (malformed
  * envelopes, permanently unavailable channels) submit nothing.
  */
+interface DemandContext {
+  readonly deltaArgs: ReadonlyArray<Record<string, unknown>>;
+  readonly settleDeltas: () => void;
+  readonly setPayload: (payload: Record<string, unknown> | undefined) => void;
+  readonly preEditStates: string[];
+}
+
+function createDemandFixture(
+  initialPayload: Record<string, unknown> | undefined,
+  options: { queueLimit?: number; cost?: number; waitTimeoutMs?: number } = { cost: 16, waitTimeoutMs: 60 },
+): {
+  fixture: ReturnType<typeof createHarnessServices>;
+  registry: ToolRegistry;
+  context: DemandContext;
+} {
+  const fixture = createHarnessServices();
+  const deltaArgs: Array<Record<string, unknown>> = [];
+  const preEditStates: string[] = [];
+  let currentPayload = initialPayload;
+  const waiters = new Array<(value: unknown) => void>();
+  const thaiRag = fixture.services.thaiRag as unknown as {
+    call(tool: string, args: Record<string, unknown>): Promise<unknown>;
+  };
+  const baseCall = thaiRag.call.bind(fixture.services.thaiRag);
+  thaiRag.call = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+    if (tool === 'code_index') {
+      deltaArgs.push(args);
+      return new Promise((resolve) => { waiters.push(resolve); });
+    }
+    if (tool === 'pre_edit_context') {
+      preEditStates.push(String((currentPayload as { evidence_state?: unknown } | undefined)?.evidence_state ?? 'missing'));
+      if (currentPayload !== undefined) {
+        return ok({ content: [{ type: 'text', text: JSON.stringify(currentPayload) }] });
+      }
+    }
+    return await baseCall(tool, args);
+  };
+  const controller = new ResourceAdmissionController({
+    globalCost: options.cost,
+    workspaceCost: options.cost,
+    sessionCost: options.cost,
+    maxOperations: 4,
+    resourceClassCost: { rag_indexing: options.cost },
+  });
+  const registry = new ToolRegistry(fixture.services, actor, {
+    harnessActivationLedger: new HarnessActivationLedger(),
+    sessionId: 'demand-first-session',
+    activeWorkspaceScopeProvider,
+    resourceAdmissionController: controller,
+    ragIndexAdmissionCost: options.cost ?? 16,
+    ...(options.queueLimit === undefined ? {} : { preEditDemandQueueLimit: options.queueLimit }),
+    ...(options.waitTimeoutMs === undefined ? {} : { preEditDemandWaitTimeoutMs: options.waitTimeoutMs }),
+  });
+  const context: DemandContext = {
+    deltaArgs,
+    settleDeltas: () => {
+      for (const resolve of waiters.splice(0)) resolve(ok({ indexed: true }));
+    },
+    setPayload: (payload) => {
+      currentPayload = payload;
+    },
+    preEditStates,
+  };
+  return { fixture, registry, context };
+}
+
+function errorDetails(result: { isError?: boolean; structuredContent?: unknown }): Record<string, unknown> {
+  const content = result.structuredContent as { error?: { details?: Record<string, unknown> } };
+  return (content.error?.details ?? {}) as Record<string, unknown>;
+}
+
 describe('demand-first pre-edit submission (Slice A)', () => {
   const demandablePayload = (): Record<string, unknown> => ({
     status: 'degraded',
@@ -1029,65 +1100,6 @@ describe('demand-first pre-edit submission (Slice A)', () => {
       channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'missing' },
     },
   });
-
-  interface DemandContext {
-    readonly deltaArgs: ReadonlyArray<Record<string, unknown>>;
-    readonly settleDeltas: () => void;
-  }
-
-  function createDemandFixture(
-    preEditPayload: Record<string, unknown> | undefined,
-    options: { queueLimit?: number; cost: number } = { cost: 16 },
-  ): {
-    fixture: ReturnType<typeof createHarnessServices>;
-    registry: ToolRegistry;
-    context: DemandContext;
-  } {
-    const fixture = createHarnessServices();
-    const deltaArgs: Array<Record<string, unknown>> = [];
-    const waiters = new Array<(value: unknown) => void>();
-    const thaiRag = fixture.services.thaiRag as unknown as {
-      call(tool: string, args: Record<string, unknown>): Promise<unknown>;
-    };
-    const baseCall = thaiRag.call.bind(fixture.services.thaiRag);
-    thaiRag.call = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
-      if (tool === 'code_index') {
-        deltaArgs.push(args);
-        return new Promise((resolve) => { waiters.push(resolve); });
-      }
-      if (tool === 'pre_edit_context' && preEditPayload !== undefined) {
-        return ok({ content: [{ type: 'text', text: JSON.stringify(preEditPayload) }] });
-      }
-      return await baseCall(tool, args);
-    };
-    const controller = new ResourceAdmissionController({
-      globalCost: options.cost,
-      workspaceCost: options.cost,
-      sessionCost: options.cost,
-      maxOperations: 4,
-      resourceClassCost: { rag_indexing: options.cost },
-    });
-    const registry = new ToolRegistry(fixture.services, actor, {
-      harnessActivationLedger: new HarnessActivationLedger(),
-      sessionId: 'demand-first-session',
-      activeWorkspaceScopeProvider,
-      resourceAdmissionController: controller,
-      ragIndexAdmissionCost: options.cost,
-      ...(options.queueLimit === undefined ? {} : { preEditDemandQueueLimit: options.queueLimit }),
-    });
-    const context: DemandContext = {
-      deltaArgs,
-      settleDeltas: () => {
-        for (const resolve of waiters.splice(0)) resolve(ok({ indexed: true }));
-      },
-    };
-    return { fixture, registry, context };
-  }
-
-  function errorDetails(result: { isError?: boolean; structuredContent?: unknown }): Record<string, unknown> {
-    const content = result.structuredContent as { error?: { details?: Record<string, unknown> } };
-    return (content.error?.details ?? {}) as Record<string, unknown>;
-  }
 
   it('submits a bounded blocked delta for a refreshable channel and stays fail-closed', async () => {
     const { registry, context } = createDemandFixture(demandablePayload());
@@ -1175,6 +1187,75 @@ describe('demand-first pre-edit submission (Slice A)', () => {
     expect(thirdDetails.reason).toBe('pre-edit-evidence-not-ready');
 
     expect(context.deltaArgs.length).toBe(1);
+    context.settleDeltas();
+  });
+});
+
+describe('demand-first wait + re-check (Slice B)', () => {
+  const notReadyPayload = (): Record<string, unknown> => ({
+    status: 'degraded',
+    can_proceed: false,
+    evidence_state: 'semantic_missing',
+    evidence: {
+      semantic: 'missing',
+      channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'missing' },
+    },
+  });
+
+  const READY_TARGET = 'bound content';
+
+  it('waits for the target delta, re-checks, and authorizes when evidence becomes ready', async () => {
+    const { fixture, registry, context } = createDemandFixture(notReadyPayload(), { cost: 16, waitTimeoutMs: 400 });
+    fixture.setFileContent('src/demand-wait.ts', READY_TARGET);
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    const first = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/demand-wait.ts' });
+    expect((first as { isError?: boolean }).isError).toBe(true);
+    expect(context.deltaArgs.length).toBe(1);
+
+    // A later prepare for the SAME target waits bounded for only that target's
+    // own delta, then re-reads evidence once and re-checks (D2).
+    const pending = registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/demand-wait.ts' });
+    await new Promise((resolve) => setImmediate(resolve)); // its probe must see the degraded verdict first
+    context.setPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText(READY_TARGET),
+    });
+    context.settleDeltas();
+    const second = await pending;
+
+    expect((second as { isError?: boolean }).isError).not.toBe(true);
+    const body = (second as { structuredContent?: { ready?: boolean; preparationReceipt?: { evidenceState?: string } } }).structuredContent ?? {};
+    expect(body.ready).toBe(true);
+    expect(body.preparationReceipt?.evidenceState).toBe('evidence_available');
+    // Proof of the wait→re-check chain: probe, degraded probe, ready re-check.
+    expect(context.preEditStates).toEqual(['semantic_missing', 'semantic_missing', 'evidence_available']);
+    expect(context.deltaArgs.length).toBe(1); // the success path submits nothing extra
+  });
+
+  it('fails closed with the bounded-wait outcome recorded when the delta does not settle', async () => {
+    const { registry, context } = createDemandFixture(notReadyPayload(), { cost: 16, waitTimeoutMs: 50 });
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    const first = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/wait-timeout.ts' });
+    const firstDetails = errorDetails(first as { isError?: boolean; structuredContent?: unknown });
+    expect(firstDetails.submissionQueueState).toBe('admitted');
+    expect(context.deltaArgs.length).toBe(1);
+
+    const second = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/wait-timeout.ts' });
+    const details = errorDetails(second as { isError?: boolean; structuredContent?: unknown });
+
+    expect((second as { isError?: boolean }).isError).toBe(true);
+    expect(details).toMatchObject({
+      reason: 'pre-edit-evidence-not-ready',
+      submissionOperationId: firstDetails.submissionOperationId,
+      submissionQueueState: 'coalesced',
+      submissionWaitOutcome: 'timeout',
+    });
+    expect(context.deltaArgs.length).toBe(1); // no duplicate delta piled on timeout
     context.settleDeltas();
   });
 });

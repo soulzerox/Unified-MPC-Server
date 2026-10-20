@@ -9,6 +9,23 @@ import {
 export const DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT = 16 as const;
 
 /**
+ * Hard ceiling on how long a later prepare may block inside
+ * `prepare_code_change` waiting for the target's own demand-first delta
+ * (#346 behaviour 5, Slice B / D2). Waiting is always fail-closed: on timeout
+ * the refusal returns exactly as before, with the wait outcome recorded.
+ */
+export const DEFAULT_PRE_EDIT_DEMAND_WAIT_TIMEOUT_MS = 30_000 as const;
+
+/** Outcome of one bounded wait (Slice B): waited, and how it ended. */
+export interface PreEditWaitResult {
+  /** `false` — the operation was not pending when the wait was requested. */
+  readonly waited: boolean;
+  readonly timedOut: boolean;
+  /** The requesting caller's own signal aborted during the bounded wait. */
+  readonly aborted: boolean;
+}
+
+/**
  * The submitted delta never widens past this file cap (#346 behaviour 5:
  * "target plus a deterministic required neighborhood" — Slice A: the
  * envelope names no extra neighborhood yet, so the payload is the target
@@ -97,6 +114,7 @@ export class PreEditDemandRuntime {
   private readonly cost: number;
   private readonly running = new Set<string>();
   private readonly jobRecords = new Map<string, PreEditDeltaJob>();
+  private readonly completions = new Map<string, Array<() => void>>();
 
   public constructor(input: {
     controller?: ResourceAdmissionController;
@@ -141,6 +159,42 @@ export class PreEditDemandRuntime {
     if (this.running.has(operationId)) {
       return { ...base, queueState: 'coalesced' };
     }
+    // D4 (Slice B): a NEWER requirement for the same target replaces an older
+    // queued-not-started generation of that requirement in place (U4 supersede
+    // on the waiter queue). Running generations are never cancelled — they
+    // finish, and the caller's re-read re-checks evidence, so a stale-hash
+    // result can never publish.
+    for (const [staleId, staleJob] of [...this.jobRecords]) {
+      if (staleId === operationId) continue;
+      if (this.running.has(staleId)) continue;
+      if (staleJob.workspaceId !== request.workspaceId || staleJob.filePath !== request.filePath) continue;
+      const superseded = queue.supersede(staleId, operationId, {
+        workspaceId: request.workspaceId,
+        resourceClass: 'rag_indexing',
+        cost: this.cost,
+        blocking: true,
+      });
+      if (superseded.status === 'rejected') {
+        return { ...base, queueState: 'rejected' };
+      }
+      this.jobRecords.delete(staleId);
+      this.jobRecords.set(operationId, {
+        workspaceId: request.workspaceId,
+        filePath: request.filePath,
+        paths,
+        evidenceState: request.evidenceState,
+      });
+      this.releaseWaiters(staleId);
+      // Blocking gate evidence (U12): the freshly described requirement jumps
+      // ahead of background maintenance just like a fresh submission would.
+      queue.promote(operationId);
+      this.executePending();
+      return {
+        ...base,
+        depth: queue.depth(),
+        queueState: this.running.has(operationId) ? 'admitted' : 'queued',
+      };
+    }
     const enqueued = queue.enqueue({
       operationId,
       workspaceId: request.workspaceId,
@@ -172,6 +226,68 @@ export class PreEditDemandRuntime {
 
   public enabled(): boolean {
     return this.queue !== undefined;
+  }
+
+  /**
+   * Whether the operation is still pending, and in which state. `undefined`
+   * means the operation is unknown (never submitted, superseded or settled).
+   */
+  public pendingState(operationId: string): 'queued' | 'running' | undefined {
+    if (this.running.has(operationId)) return 'running';
+    return this.jobRecords.has(operationId) ? 'queued' : undefined;
+  }
+
+  /**
+   * Bounded blocking wait for one queued or running delta to settle
+   * (#346 behaviour 5, Slice B / D2).
+   *
+   * The pending check and the waiter registration happen synchronously in the
+   * same turn, so a delta that settles later always reaches the registered
+   * waiter. Callers waiting on an operation that is not pending (or has been
+   * superseded and released) get `waited: false` immediately — the refusal
+   * path then behaves exactly as a fresh submission.
+   */
+  public waitFor(operationId: string, input: { timeoutMs: number; signal?: AbortSignal }): Promise<PreEditWaitResult> {
+    const pending = this.pendingState(operationId);
+    if (pending === undefined) {
+      return Promise.resolve({ waited: false, timedOut: false, aborted: false });
+    }
+    return new Promise((resolve) => {
+      let done = false;
+      const finishWait = (outcome: Pick<PreEditWaitResult, 'timedOut' | 'aborted'>): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        const list = this.completions.get(operationId);
+        if (list !== undefined) {
+          const index = list.indexOf(waiter);
+          if (index >= 0) list.splice(index, 1);
+          if (list.length === 0) this.completions.delete(operationId);
+        }
+        signal.removeEventListener('abort', onAbort);
+        resolve({ waited: true, ...outcome });
+      };
+      const waiter = (): void => finishWait({ timedOut: false, aborted: false });
+      const timer = setTimeout(() => finishWait({ timedOut: true, aborted: false }), Math.max(1, input.timeoutMs));
+      const signal = input.signal ?? new AbortController().signal;
+      const onAbort = (): void => finishWait({ timedOut: false, aborted: true });
+      let list = this.completions.get(operationId);
+      if (list === undefined) {
+        list = [];
+        this.completions.set(operationId, list);
+      }
+      list.push(waiter);
+      if (signal.aborted) finishWait({ timedOut: false, aborted: true });
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  /** Release every bounded waiter of one operation (settled or superseded). */
+  private releaseWaiters(operationId: string): void {
+    const list = this.completions.get(operationId);
+    if (list === undefined) return;
+    this.completions.delete(operationId);
+    for (const release of list.splice(0)) release();
   }
 
   private executePending(): void {
@@ -210,6 +326,7 @@ export class PreEditDemandRuntime {
     this.running.delete(lease.operationId);
     this.jobRecords.delete(lease.operationId);
     this.controller?.release(lease);
+    this.releaseWaiters(lease.operationId);
   }
 }
 

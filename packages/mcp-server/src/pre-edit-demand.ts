@@ -1,0 +1,225 @@
+import { createHash } from 'node:crypto';
+import {
+  HeavyJobWaiterQueue,
+  type ResourceAdmissionController,
+  type ResourceAdmissionLease,
+} from '@unified-mpc/workspace';
+
+/** Bounded waiter queue for on-demand pre-edit evidence work (#145 U3). */
+export const DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT = 16 as const;
+
+/**
+ * The submitted delta never widens past this file cap (#346 behaviour 5:
+ * "target plus a deterministic required neighborhood" — Slice A: the
+ * envelope names no extra neighborhood yet, so the payload is the target
+ * path alone and the cap is the hard bound).
+ */
+export const MAX_PRE_EDIT_DELTA_FILES = 8 as const;
+
+/**
+ * Channel states a scoped delta can actually refresh (issue-60 channel
+ * vocabulary). `unavailable` is excluded on purpose: a channel that cannot
+ * run on this host will not be fixed by re-indexing the target, and a
+ * poisoned retry loop is not a demand-first improvement.
+ */
+const REFRESHABLE_CHANNEL_STATES = new Set(['missing', 'stale', 'degraded']);
+
+const REFRESHABLE_EVIDENCE_STATES = new Set(['missing', 'stale']);
+
+/**
+ * Whether the not-ready verdict describes refreshable evidence. Outlet
+ * failures (malformed envelopes, target-identity problems, permanently
+ * unavailable channels) submit nothing — the fail-closed envelope stays
+ * exactly as it was before demand-first submission.
+ */
+export function isDemandablePreEditHead(
+  evidenceState: string,
+  evidenceChannels: Readonly<Record<string, string>> | undefined,
+): boolean {
+  const states = Object.values(evidenceChannels ?? {});
+  if (states.length > 0) {
+    return states.some((state) => REFRESHABLE_CHANNEL_STATES.has(state));
+  }
+  return REFRESHABLE_EVIDENCE_STATES.has(evidenceState);
+}
+
+/**
+ * Deterministic per-(workspace, path, evidence-state) operation identity, so
+ * coalescing a repeat prepare attempt lands on the same queue entry instead
+ * of piling unbounded duplicates.
+ */
+export function preEditOperationId(
+  workspaceId: string,
+  filePath: string,
+  evidenceState: string,
+): string {
+  const digest = createHash('sha256')
+    .update(`${workspaceId}\n${filePath}`)
+    .digest('hex')
+    .slice(0, 32);
+  return `pre-edit:${workspaceId}:${digest}:${evidenceState}`;
+}
+
+/** One submitted demand-first delta, as echoed to the refusing caller. */
+export interface PreEditSubmissionRecord {
+  readonly operationId: string;
+  readonly queueState: 'queued' | 'admitted' | 'coalesced' | 'rejected';
+  readonly depth: number;
+  readonly paths: readonly string[];
+  readonly maxFiles: number;
+}
+
+/** The bounded scoped-delta work item an admitted queue slot executes. */
+export interface PreEditDeltaJob {
+  readonly workspaceId: string;
+  readonly filePath: string;
+  readonly paths: readonly string[];
+  readonly evidenceState: string;
+}
+
+export type PreEditDeltaExecutor = (job: PreEditDeltaJob) => Promise<unknown> | unknown;
+
+/**
+ * Demand-first submission runtime (#346 behaviour 5, Slice A).
+ *
+ * The #145 `HeavyJobWaiterQueue` stays the final admission authority: this
+ * runtime enqueues one bounded blocking request per demandable refusal,
+ * promotes it to the queue head (U12), drains what the controller admits,
+ * and executes it through the injected executor. Nothing supervises the
+ * delta's *content* here — a later readiness check re-reads evidence from
+ * the provider, and that check fails closed regardless of how the delta
+ * ran (Slice B adds the waiting/verification).
+ */
+export class PreEditDemandRuntime {
+  private readonly queue: HeavyJobWaiterQueue | undefined;
+  private readonly controller: ResourceAdmissionController | undefined;
+  private readonly executor: PreEditDeltaExecutor | undefined;
+  private readonly cost: number;
+  private readonly running = new Set<string>();
+  private readonly jobRecords = new Map<string, PreEditDeltaJob>();
+
+  public constructor(input: {
+    controller?: ResourceAdmissionController;
+    executor?: PreEditDeltaExecutor;
+    cost: number;
+    queueLimit?: number;
+  }) {
+    this.controller = input.controller;
+    this.executor = input.executor;
+    this.cost = input.cost;
+    this.queue = input.controller === undefined
+      ? undefined
+      : new HeavyJobWaiterQueue(input.controller, {
+        maxQueued: Math.max(1, input.queueLimit ?? DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT),
+      });
+  }
+
+  /**
+   * Submit (or coalesce) a demand-first delta for a demandable refusal.
+   * `undefined` means: nothing demandable happened, no submission echo.
+   */
+  public submit(request: {
+    workspaceId: string;
+    filePath: string;
+    evidenceState: string;
+    demandable: boolean;
+  }): PreEditSubmissionRecord | undefined {
+    const queue = this.queue;
+    if (queue === undefined || !request.demandable) return undefined;
+    const paths = [request.filePath];
+    const operationId = preEditOperationId(
+      request.workspaceId,
+      request.filePath,
+      request.evidenceState,
+    );
+    const base = {
+      operationId,
+      depth: queue.depth(),
+      paths,
+      maxFiles: MAX_PRE_EDIT_DELTA_FILES,
+    };
+    if (this.running.has(operationId)) {
+      return { ...base, queueState: 'coalesced' };
+    }
+    const enqueued = queue.enqueue({
+      operationId,
+      workspaceId: request.workspaceId,
+      resourceClass: 'rag_indexing',
+      cost: this.cost,
+      blocking: true,
+    });
+    if (enqueued.status === 'rejected') {
+      return { ...base, queueState: 'rejected' };
+    }
+    if (enqueued.status === 'coalesced') {
+      return { ...base, queueState: 'coalesced' };
+    }
+    // Blocking gate evidence (U12): jump ahead of background maintenance.
+    queue.promote(operationId);
+    this.jobRecords.set(operationId, {
+      workspaceId: request.workspaceId,
+      filePath: request.filePath,
+      paths,
+      evidenceState: request.evidenceState,
+    });
+    this.executePending();
+    return {
+      ...base,
+      depth: queue.depth(),
+      queueState: this.running.has(operationId) ? 'admitted' : 'queued',
+    };
+  }
+
+  public enabled(): boolean {
+    return this.queue !== undefined;
+  }
+
+  private executePending(): void {
+    const queue = this.queue;
+    const controller = this.controller;
+    if (queue === undefined || controller === undefined) return;
+    for (const admitted of queue.drain()) {
+      const job = this.jobRecords.get(admitted.lease.operationId);
+      if (job === undefined) {
+        controller.release(admitted.lease);
+        continue;
+      }
+      this.running.add(admitted.lease.operationId);
+      const executor = this.executor;
+      if (executor === undefined) {
+        this.finish(admitted.lease);
+        continue;
+      }
+      let started: Promise<unknown> | unknown;
+      try {
+        started = executor(job);
+      } catch {
+        this.finish(admitted.lease);
+        continue;
+      }
+      void Promise.resolve(started)
+        .catch(() => undefined)
+        .finally(() => {
+          this.finish(admitted.lease);
+          this.executePending();
+        });
+    }
+  }
+
+  private finish(lease: ResourceAdmissionLease): void {
+    this.running.delete(lease.operationId);
+    this.jobRecords.delete(lease.operationId);
+    this.controller?.release(lease);
+  }
+}
+
+/** Flat scalar-pair details for the CONFLICT envelope (`error.details`). */
+export function flatSubmissionDetails(submission: PreEditSubmissionRecord): Record<string, string | number> {
+  return {
+    submissionOperationId: submission.operationId,
+    submissionQueueState: submission.queueState,
+    submissionDepth: submission.depth,
+    submissionPaths: submission.paths.join(','),
+    submissionMaxFiles: submission.maxFiles,
+  };
+}

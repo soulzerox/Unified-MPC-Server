@@ -644,6 +644,8 @@ export const ragCodeBlastRadiusSchema = z.object({
   workspaceId: workspaceIdSchema,
   symbolName: z.string().trim().min(1).max(512),
   maxDepth: z.number().int().min(1).max(10).optional(),
+  /** Opt into name-joined edges whose symbol identity is missing or stale. */
+  includeHeuristic: z.boolean().optional(),
 }).strict();
 
 export const ragCodeIndexSchema = z.object({

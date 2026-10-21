@@ -82,3 +82,31 @@ describe('native RAG tool budgets', () => {
     expect(calls.every((call) => call.signal === signal && call.budget === budget)).toBe(true);
   });
 });
+
+describe('native RAG code blast radius identity opt-in', () => {
+  it('forwards includeHeuristic only when the caller asks for heuristic edges', async () => {
+    const seen: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tools = ragTools({
+      nativeRagCall: async (_workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>) => {
+        seen.push({ tool, args });
+        return { ok: true, value: {} };
+      },
+    } as never);
+    const tool = tools.find((candidate) => candidate.name === 'rag_code_blast_radius');
+    if (tool === undefined) throw new Error('rag_code_blast_radius is not registered');
+    const signal = new AbortController().signal;
+
+    expect(tool.parse({ workspaceId: 'workspace-1', symbolName: 'run', includeHeuristic: true }).ok).toBe(true);
+    await tool.execute(
+      { workspaceId: 'workspace-1', symbolName: 'run', includeHeuristic: true },
+      signal,
+      undefined,
+      undefined,
+    );
+    await tool.execute({ workspaceId: 'workspace-1', symbolName: 'run' }, signal, undefined, undefined);
+
+    expect(seen.map((call) => call.tool)).toEqual(['code_blast_radius', 'code_blast_radius']);
+    expect(seen[0].args).toEqual({ symbol_name: 'run', include_heuristic: true });
+    expect(seen[1].args).toEqual({ symbol_name: 'run' });
+  });
+});

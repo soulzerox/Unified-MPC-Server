@@ -115,6 +115,9 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
         : context.nativeRagCall(input.workspaceId, 'code_blast_radius', {
             symbol_name: input.symbolName,
             ...(input.maxDepth === undefined ? {} : { max_depth: input.maxDepth }),
+            ...(input.includeHeuristic === undefined
+              ? {}
+              : { include_heuristic: input.includeHeuristic }),
           }, signal, budget),
     }),
     defineTool({

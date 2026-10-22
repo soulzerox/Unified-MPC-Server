@@ -26,7 +26,10 @@ import {
 } from '@unified-mpc/thai-rag';
 
 const SERVER_NAME = 'thai-rag-native';
-const INDEX_CALL_TIMEOUT_MS = 600_000;
+// Publishing a full generation (CPG resolution + generation copy) can take far
+// longer than a request; the provider answers as soon as the job is created,
+// but the follow-up status/often-blocking calls must survive the publish.
+const INDEX_CALL_TIMEOUT_MS = 3_600_000;
 const INDEX_ADMISSION_WAIT_MS = 5_000;
 const REQUIRED_TOOLS = new Set([
   'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',

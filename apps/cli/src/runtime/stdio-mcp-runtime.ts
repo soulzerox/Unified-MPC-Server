@@ -216,6 +216,15 @@ export function createStdioMcpRuntime(
         ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')
         : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
       args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
+      env: {
+        // The MCP session manager only forwards a safe environment subset
+        // (PATH/HOME/TMP/LANG), so the provider's data-owner wait budget must
+        // be passed explicitly: publishing a full index can hold the owner
+        // busy for minutes, and a follower that gives up early reports
+        // "data-owner unavailable" and restarts the index forever.
+        THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT:
+          process.env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT ?? '900',
+      },
     },
     workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
       .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),

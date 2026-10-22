@@ -26,7 +26,10 @@ import {
 } from '@unified-mpc/thai-rag';
 
 const SERVER_NAME = 'thai-rag-native';
-const INDEX_CALL_TIMEOUT_MS = 600_000;
+// Publishing a full generation (CPG resolution + generation copy) can take far
+// longer than a request; the provider answers as soon as the job is created,
+// but the follow-up status/often-blocking calls must survive the publish.
+const INDEX_CALL_TIMEOUT_MS = 3_600_000;
 const INDEX_ADMISSION_WAIT_MS = 5_000;
 const REQUIRED_TOOLS = new Set([
   'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',
@@ -436,7 +439,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       force,
       background: false,
     };
-    if (!background) return this.callWorker('code_index', childArgs, signal, budget);
+    if (!background) return this.callIndexWorker('code_index', childArgs, signal, budget);
     if (!this.cancellableIndexJobs) return this.legacyBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
     return this.cancellableBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
   }
@@ -454,7 +457,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       force ? 'explicit_force_reindex' : 'explicit_request',
     );
     const operation = this.enqueueWorker(async () => {
-      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
+      const raw = await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
       const result = normalizeWorkerCallResult('code_index', raw);
       if (result.ok) await this.jobs.complete(job.jobId, result.value, this.ownerId ?? '');
       else await this.jobs.fail(job.jobId, result.error.message, this.ownerId ?? '');
@@ -479,7 +482,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ownerId,
       force ? 'explicit_force_reindex' : 'explicit_request',
     );
-    const started = await this.callWorker('code_index', { ...childArgs, background: true }, undefined, budget);
+    const started = await this.callIndexWorker('code_index', { ...childArgs, background: true }, undefined, budget);
     if (!started.ok) {
       await this.jobs.fail(job.jobId, started.error.message, ownerId);
       return started;
@@ -1003,6 +1006,21 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget));
+    return normalizeWorkerCallResult(tool, raw);
+  }
+
+  /**
+   * Index calls use the dedicated index session: the provider has to wait for
+   * the data owner to publish a generation, which can take minutes, and the
+   * default request session timeout would abort the call long before that.
+   */
+  private async callIndexWorker(
+    tool: string,
+    args: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+    budget?: ResultBudget,
+  ): Promise<Result<unknown>> {
+    const raw = await this.enqueueWorker(() => this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget));
     return normalizeWorkerCallResult(tool, raw);
   }
 

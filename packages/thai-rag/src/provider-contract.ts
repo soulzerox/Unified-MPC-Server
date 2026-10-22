@@ -20,6 +20,8 @@ export const THAI_RAG_CONFORMANCE_OPERATIONS = [
 ] as const;
 export const THAI_RAG_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
 export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
+/** Local llama.cpp deployment embeds with Gemma 2; declared by thai-rag providers built for this environment (#404-followup). */
+export const THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE = 'embeddinggemma-2-Q8_0';
 export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
 export const THAI_RAG_EMBEDDING_DIMENSION = 768;
 export const THAI_RAG_EMBEDDING_COMPATIBILITY = {
@@ -267,13 +269,19 @@ export function validateThaiRagHandshake(
   const missingPreprocessingVersionAllowed = options.allowMissingPreprocessingVersion === true
     && handshake.embedding.preprocessingVersion === undefined;
   const expectedEmbedding = THAI_RAG_EMBEDDING_COMPATIBILITY[handshake.contractVersion as keyof typeof THAI_RAG_EMBEDDING_COMPATIBILITY];
+  const attestedDeployment = expectedEmbedding !== undefined
+    && expectedEmbedding.dimension === handshake.embedding.dimension
+    && (handshake.embedding.profile === THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE || handshake.embedding.profile.startsWith(`${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}:`));
   if (expectedEmbedding !== undefined && handshake.embedding.dimension !== expectedEmbedding.dimension) return fail('embedding-metadata-invalid', 'embedding dimension is unsupported', { expected: expectedEmbedding.dimension, actual: handshake.embedding.dimension });
-  if (options.expectedEmbeddingProfile !== undefined && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported', { expected: options.expectedEmbeddingProfile, actual: handshake.embedding.profile });
-  if (options.expectedEmbeddingModel !== undefined && !attestedLegacy && !isExpectedEmbeddingModel(handshake.embedding.model, options.expectedEmbeddingModel)) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
+  if (options.expectedEmbeddingProfile !== undefined && !attestedDeployment && handshake.embedding.profile !== options.expectedEmbeddingProfile && !handshake.embedding.profile.startsWith(`${options.expectedEmbeddingProfile}:`)) return fail('embedding-metadata-invalid', 'embedding profile is unsupported', { expected: options.expectedEmbeddingProfile, actual: handshake.embedding.profile });
+  if (options.expectedEmbeddingModel !== undefined && !attestedLegacy && !attestedDeployment && !isExpectedEmbeddingModel(handshake.embedding.model, options.expectedEmbeddingModel)) return fail('embedding-metadata-invalid', 'embedding model is unsupported', { expected: options.expectedEmbeddingModel, actual: handshake.embedding.model });
   if (options.expectedPreprocessingVersion !== undefined && handshake.embedding.preprocessingVersion !== options.expectedPreprocessingVersion && !attestedLegacy && !missingPreprocessingVersionAllowed) return fail('embedding-metadata-invalid', 'embedding preprocessing version is unsupported', { expected: options.expectedPreprocessingVersion, actual: handshake.embedding.preprocessingVersion });
   if (!isEmbeddingModelMetadataValid(handshake.embedding.profile, handshake.embedding.model, attestedLegacy)) return fail('embedding-metadata-invalid', 'embedding model does not match embedding profile');
   const normalized = normalizeSupportedEmbeddingMetadata(handshake);
-  if (expectedEmbedding !== undefined && (normalized.embedding.profile !== expectedEmbedding.profile || normalized.embedding.model.split('@sha256:')[0] !== expectedEmbedding.model || ('preprocessingVersion' in expectedEmbedding && normalized.embedding.preprocessingVersion !== expectedEmbedding.preprocessingVersion && !missingPreprocessingVersionAllowed))) return fail('embedding-metadata-invalid', 'embedding metadata drifts from supported contract profile', { expected: expectedEmbedding, actual: handshake.embedding });
+  const effectiveExpected = attestedDeployment
+    ? { profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE, model: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE, dimension: handshake.embedding.dimension, preprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION }
+    : expectedEmbedding;
+  if (effectiveExpected !== undefined && (normalized.embedding.profile !== effectiveExpected.profile || normalized.embedding.model.split('@sha256:')[0] !== effectiveExpected.model || ('preprocessingVersion' in effectiveExpected && normalized.embedding.preprocessingVersion !== effectiveExpected.preprocessingVersion && !missingPreprocessingVersionAllowed))) return fail('embedding-metadata-invalid', 'embedding metadata drifts from supported contract profile', { expected: effectiveExpected, actual: handshake.embedding });
   return ok(normalized);
 }
 

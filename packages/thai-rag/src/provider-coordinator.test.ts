@@ -395,7 +395,7 @@ describe('ThaiRagProviderCoordinator', () => {
     if (!started.ok) {
       expect(started.error.code).toBe('CONFLICT');
       expect(started.error.message).toContain('owner is locked but not reachable');
-      expect(started.error.details?.reason).not.toBe('forward-host-unreachable');
+      expect(started.error.details?.reason).toBeUndefined();
     }
   });
 });

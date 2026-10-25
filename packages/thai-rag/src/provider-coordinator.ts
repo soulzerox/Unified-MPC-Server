@@ -27,10 +27,11 @@ export interface ThaiRagProviderCoordinatorOptions {
   readonly followerConnectTimeoutMs?: number;
   /**
    * Designated-peer mode (#407 req 3): acquire ownership never, not even after
-   * an unreachable owner. Startup connects to the owner socket directly and
-   * fails as a follower with the machine-readable `forward-host-unreachable`
-   * reason instead of touching `provider.lock`. Without this option the
-   * try-acquire-then-forward election stays the default.
+   * an unreachable owner. Startup connects to the owner socket directly and,
+   * when it cannot, fails with the machine-readable `forward-host-unreachable`
+   * reason while never touching `provider.lock`; `role` stays unset, so a
+   * later start may retry (see the stdio start-retry cooldown). Without this
+   * option the try-acquire-then-forward election stays the default.
    */
   readonly forwardOnly?: boolean;
 }
@@ -80,9 +81,9 @@ export class ThaiRagProviderCoordinator {
     }
 
     if (this.options.forwardOnly === true) {
-      // Forward-only peers race for ownership from the configuration, not from
-      // a lock fight: connect straight to the designated owner or fail with a
-      // distinct machine reason (#407 req 3).
+      // Ownership is designated by configuration, never contested by lock:
+      // connect straight to the designated owner or fail with a distinct
+      // machine reason (#407 req 3).
       const remoteHealth = await this.waitForFollowerHealth(signal, true);
       if (!remoteHealth.ok) return remoteHealth;
       this.role = 'follower';

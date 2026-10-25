@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
+import { readHostMetrics } from './host-metrics.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
 import { err, ok, type Result } from '@unified-mpc/domain';
@@ -434,7 +435,7 @@ export class ControlPlaneServer {
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const host = req.headers.host;
-    if (!isLoopbackHost(host)) {
+    if (!isLoopbackHost(host) && !this.isAllowedControlPlaneHost(host)) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Host not allowed: loopback only' }));
       return;
@@ -460,7 +461,7 @@ export class ControlPlaneServer {
         const parsed = new URL(origin);
         if (
           (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-          (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost')
+          (!isLoopbackHostname(parsed.hostname) && !this.isAllowedControlPlaneOrigin(parsed))
         ) {
           res.writeHead(403, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Origin not allowed: loopback only' }));
@@ -558,6 +559,19 @@ export class ControlPlaneServer {
         mcpIdentity,
         ...(mcpIdentityError === undefined ? {} : { mcpIdentityError }),
       }));
+      return;
+    }
+
+    if (pathname === '/api/host-metrics' && req.method === 'GET') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      try {
+        res.statusCode = 200;
+        res.end(JSON.stringify({ available: true, scope: 'host', host: await readHostMetrics() }));
+      } catch {
+        res.statusCode = 503;
+        res.end(JSON.stringify({ available: false, scope: 'host', error: 'Host metrics unavailable' }));
+      }
       return;
     }
 
@@ -1064,6 +1078,26 @@ export class ControlPlaneServer {
     // Fallback 404
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Endpoint not found' }));
+  }
+
+  private controlPlaneAllowedHostnames(): readonly string[] {
+    return splitList(this.settingsRepository?.get(SETTING_KEYS.allowedHostnames) ?? null)
+      .map(normalizeAllowlistHostname)
+      .filter((entry) => entry.length > 0);
+  }
+
+  private isAllowedControlPlaneHost(host: string | string[] | undefined): boolean {
+    const hostname = parseHostname(host);
+    return hostname !== null && this.controlPlaneAllowedHostnames().includes(hostname);
+  }
+
+  private isAllowedControlPlaneOrigin(origin: URL): boolean {
+    const hostname = origin.hostname.toLowerCase();
+    if (this.controlPlaneAllowedHostnames().includes(hostname)) return true;
+    const candidate = `${origin.protocol}//${origin.host}`.toLowerCase().replace(/\/$/u, '');
+    return splitList(this.settingsRepository?.get(SETTING_KEYS.allowedOrigins) ?? null)
+      .map((entry) => entry.toLowerCase().replace(/\/$/u, ''))
+      .includes(candidate);
   }
 
   private hasCapability(req: IncomingMessage): boolean {
@@ -2312,10 +2346,29 @@ function isLoopbackHost(value: string | string[] | undefined): boolean {
     const parsed = new URL(`http://${value}`);
     return parsed.username.length === 0
       && parsed.password.length === 0
-      && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost');
+      && isLoopbackHostname(parsed.hostname);
   } catch {
     return false;
   }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === 'localhost';
+}
+
+function parseHostname(value: string | string[] | undefined): string | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  try {
+    const parsed = new URL(`http://${value}`);
+    if (parsed.username.length > 0 || parsed.password.length > 0) return null;
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAllowlistHostname(entry: string): string {
+  return parseHostname(entry) ?? '';
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

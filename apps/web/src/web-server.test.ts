@@ -34,6 +34,25 @@ function fingerprintMcpFixture(value: unknown): string {
   return createHash('sha256').update(stableJson(value), 'utf8').digest('hex');
 }
 
+function requestWithHost(port: number, requestPath: string, headers: Record<string, string>): Promise<{ status: number; body: Record<string, unknown> }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port, path: requestPath, headers },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          let body: Record<string, unknown> = {};
+          try { body = JSON.parse(data) as Record<string, unknown>; } catch { body = {}; }
+          resolve({ status: res.statusCode ?? 0, body });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
   const capabilityToken = 'test-capability-token';
   const gatewayOptions = { localPort: 0, tunnelProvider: async (): Promise<{ url: string; stop(): Promise<void> }> => ({ url: 'https://fixture.example.trycloudflare.com', stop: async (): Promise<void> => {} }), healthProbe: async (): Promise<number> => 200 };
@@ -83,6 +102,105 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/status`);
 
     expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('exposes host machine metrics for the dashboard', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/host-metrics`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const payload = await response.json() as {
+      available: boolean;
+      scope: string;
+      host: {
+        hostname: string;
+        uptimeSeconds: number;
+        cpu: { cores: number };
+        memory: { totalBytes: number; usedBytes: number };
+        swap: { devices: unknown[] };
+        zram: { enabled: boolean; devices: unknown[] };
+        disk: { totalBytes: number; usedPercent: number };
+        disks: Array<{ mount: string; key: string; display: string }>;
+        display: { cpu: string; memory: string; swap: string; disk: string; zram: string; uptime: string };
+      };
+    };
+    expect(payload.available).toBe(true);
+    expect(payload.scope).toBe('host');
+    expect(payload.host.hostname).toBe(os.hostname());
+    expect(payload.host.cpu.cores).toBeGreaterThan(0);
+    expect(payload.host.memory.totalBytes).toBeGreaterThan(0);
+    expect(payload.host.memory.usedBytes).toBeGreaterThanOrEqual(0);
+    expect(payload.host.uptimeSeconds).toBeGreaterThan(0);
+    expect(Array.isArray(payload.host.swap.devices)).toBe(true);
+    expect(Array.isArray(payload.host.zram.devices)).toBe(true);
+    expect(payload.host.disk.totalBytes).toBeGreaterThan(0);
+    expect(payload.host.disks.some((disk) => disk.mount === '/' && disk.key === 'root')).toBe(true);
+    expect(payload.host.display.memory).toContain('/');
+    expect(payload.host.display.zram.length).toBeGreaterThan(0);
+  });
+
+  it('rejects a non-loopback host that is not allowlisted', async () => {
+    const response = await requestWithHost(port, '/', { host: 'dashboard.example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toMatchObject({ error: 'Host not allowed: loopback only' });
+  });
+
+  it('accepts an explicitly allowlisted hostname from settings', async () => {
+    const persisted = new Map<string, string>([['mcp_allowed_hostnames', 'dashboard.example.com']]);
+    const allowServer = new ControlPlaneServer({
+      port: 0,
+      settingsRepository: { get: (key: string): string | null => persisted.get(key) ?? null },
+      mcpIdentityProbe: async (): Promise<null> => null,
+    });
+    await allowServer.listen();
+    try {
+      const response = await requestWithHost(allowServer.port, '/api/status', { host: 'dashboard.example.com' });
+
+      expect(response.status).toBe(200);
+    } finally {
+      await allowServer.close();
+    }
+  });
+
+  it('still rejects non-http(s) origins even with an allowlist', async () => {
+    const persisted = new Map<string, string>([['mcp_allowed_origins', 'https://intranet.example.com']]);
+    const allowServer = new ControlPlaneServer({
+      port: 0,
+      settingsRepository: { get: (key: string): string | null => persisted.get(key) ?? null },
+      mcpIdentityProbe: async (): Promise<null> => null,
+    });
+    await allowServer.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${allowServer.port}/api/status`, { headers: { origin: 'ftp://intranet.example.com' } });
+
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ error: 'Origin not allowed: loopback only' });
+    } finally {
+      await allowServer.close();
+    }
+  });
+
+  it('accepts an allowlisted origin by hostname allowlist and by exact origin URL', async () => {
+    const persisted = new Map<string, string>([
+      ['mcp_allowed_hostnames', 'intranet.example.com'],
+      ['mcp_allowed_origins', 'https://intranet.example.com:8443'],
+    ]);
+    const allowServer = new ControlPlaneServer({
+      port: 0,
+      settingsRepository: { get: (key: string): string | null => persisted.get(key) ?? null },
+      mcpIdentityProbe: async (): Promise<null> => null,
+    });
+    await allowServer.listen();
+    try {
+      const byHostname = await fetch(`http://127.0.0.1:${allowServer.port}/api/status`, { headers: { origin: 'https://intranet.example.com' } });
+      const byExactUrl = await fetch(`http://127.0.0.1:${allowServer.port}/api/status`, { headers: { origin: 'https://intranet.example.com:8443' } });
+
+      expect(byHostname.status).toBe(200);
+      expect(byExactUrl.status).toBe(200);
+    } finally {
+      await allowServer.close();
+    }
   });
 
   it('exposes bounded storage identity diagnostics without secret values', async () => {

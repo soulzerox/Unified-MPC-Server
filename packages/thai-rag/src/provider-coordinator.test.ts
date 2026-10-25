@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -26,6 +27,10 @@ async function root(): Promise<string> {
   const value = await mkdtemp(path.join(os.tmpdir(), 'unified-thai-rag-coordinator-'));
   roots.push(value);
   return value;
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 afterEach(async () => {
@@ -396,6 +401,129 @@ describe('ThaiRagProviderCoordinator', () => {
       expect(started.error.code).toBe('CONFLICT');
       expect(started.error.message).toContain('owner is locked but not reachable');
       expect(started.error.details?.reason).toBeUndefined();
+    }
+  });
+
+  it('reconnects a follower when the owner socket is recreated (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-before-restart',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 2_000,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+
+    await owner.close();
+    expect(existsSync(socketPath)).toBe(false);
+
+    // This call begins while the owner socket is gone: the ENOENT phantom from #418.
+    const pending = follower.call('memory.search', { query: 'survives an owner restart' });
+    await delay(60);
+    const replacement = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-after-restart',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await replacement.start()).ok).toBe(true);
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toMatchObject({ tool: 'memory.search' });
+
+    await follower.close();
+    await replacement.close();
+  });
+
+  it('gives up a follower call within the bounded connect window when the owner never returns (#418)', async () => {
+    const dataRoot = await root();
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-gone-for-good',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 120,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+
+    await owner.close();
+    const startedAt = Date.now();
+    const result = await follower.call('memory.search', { query: 'no owner left' });
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain('socket error');
+    expect(elapsed).toBeGreaterThanOrEqual(80);
+    expect(elapsed).toBeLessThan(5_000);
+
+    await follower.close();
+  });
+
+  it('never replays a follower request that already reached the owner socket (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-replaced-by-stub',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 500,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+    await owner.close();
+
+    let connections = 0;
+    const destructive = createServer((socket) => {
+      connections += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      destructive.once('error', reject);
+      destructive.listen(socketPath, () => resolve());
+    });
+    try {
+      const result = await follower.call('memory.write', { note: 'must not be replayed' });
+      expect(result.ok).toBe(false);
+      expect(connections).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => destructive.close(() => resolve()));
+      await follower.close();
     }
   });
 });

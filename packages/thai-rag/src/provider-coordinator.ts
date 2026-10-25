@@ -111,7 +111,7 @@ export class ThaiRagProviderCoordinator {
   public async health(signal?: AbortSignal): Promise<Result<ThaiRagProviderHealth>> {
     if (this.role === 'owner') return this.runtime.refresh(signal);
     if (this.role === 'follower') {
-      const response = await this.request({
+      const response = await this.requestFollower({
         id: this.requestId(),
         method: 'health',
       }, signal);
@@ -131,7 +131,7 @@ export class ThaiRagProviderCoordinator {
   ): Promise<Result<unknown>> {
     if (this.role === 'owner') return this.runtime.call(tool, args, signal, budget);
     if (this.role === 'follower') {
-      return this.request({ id: this.requestId(), method: 'call', tool, args, ...(budget === undefined ? {} : { budget }) }, signal);
+      return this.requestFollower({ id: this.requestId(), method: 'call', tool, args, ...(budget === undefined ? {} : { budget }) }, signal);
     }
     return err(appError('CONFLICT', 'Thai-RAG provider coordinator is not started', true));
   }
@@ -235,22 +235,46 @@ export class ThaiRagProviderCoordinator {
     return err(appError('CONFLICT', `Thai-RAG provider owner is locked but not reachable: ${lastError}`, true));
   }
 
-  private request(request: ProviderRequest, signal?: AbortSignal): Promise<Result<unknown>> {
+  /**
+   * A follower holds no provider state, so a recreated owner socket (owner restart)
+   * is recoverable. Retry only failures that happened before the request reached the
+   * wire: provider calls mutate state, so an already-written request is never replayed
+   * (#418).
+   */
+  private async requestFollower(request: ProviderRequest, signal?: AbortSignal): Promise<Result<unknown>> {
+    const deadline = Date.now() + this.followerConnectTimeoutMs;
+    for (;;) {
+      const attempt = await this.requestAttempt(request, signal);
+      if (attempt.result.ok || !attempt.wirelessFailure) return attempt.result;
+      if (signal?.aborted === true || Date.now() >= deadline) return attempt.result;
+      await delay(20, signal);
+    }
+  }
+
+  private async request(request: ProviderRequest, signal?: AbortSignal): Promise<Result<unknown>> {
+    return (await this.requestAttempt(request, signal)).result;
+  }
+
+  private requestAttempt(
+    request: ProviderRequest,
+    signal?: AbortSignal,
+  ): Promise<{ result: Result<unknown>; wirelessFailure: boolean }> {
     return new Promise((resolve) => {
       if (signal?.aborted === true) {
-        resolve(err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider request was cancelled', true)));
+        resolve({ result: err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider request was cancelled', true)), wirelessFailure: false });
         return;
       }
       const socket = createConnection(this.socketPath);
       socket.setEncoding('utf8');
       let buffer = '';
       let settled = false;
+      let delivered = false;
       const finish = (result: Result<unknown>): void => {
         if (settled) return;
         settled = true;
         signal?.removeEventListener('abort', onAbort);
         socket.destroy();
-        resolve(result);
+        resolve({ result, wirelessFailure: !delivered });
       };
       const onAbort = (): void => finish(err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider request was cancelled', true)));
       signal?.addEventListener('abort', onAbort, { once: true });
@@ -272,7 +296,10 @@ export class ThaiRagProviderCoordinator {
           ? ok(response.value.value)
           : err(appError('CONFLICT', response.value.error, true)));
       });
-      socket.once('connect', () => socket.write(`${JSON.stringify(request)}\n`));
+      socket.once('connect', () => {
+        delivered = true;
+        socket.write(`${JSON.stringify(request)}\n`);
+      });
     });
   }
 

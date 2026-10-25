@@ -324,6 +324,32 @@ describe('ThaiRagProviderRuntime owner-lock heartbeat and version fence (#210 U3
     await runtime.stop();
   });
 
+  it('keeps proving owner liveness while the driver is still starting (#418)', async () => {
+    const dataRoot = await root();
+    let clock = Date.parse('2026-10-17T00:00:00.000Z');
+    let releaseDriver: (() => void) | undefined;
+    const driverGate = new Promise<void>((resolve) => { releaseDriver = resolve; });
+    const runtime = make(dataRoot, {
+      now: () => new Date(clock),
+      heartbeatIntervalMs: 5,
+      driver: driver({ start: async () => { await driverGate; return ok(healthy); } }),
+    });
+
+    const pending = runtime.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    clock += 5_000;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // A booting owner must not look dead: heartbeat renewal has to start with
+    // the lock, not after the driver is ready (#418).
+    const during = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'provider.lock'), 'utf8')) as { heartbeatAt: string };
+    expect(during.heartbeatAt).toBe('2026-10-17T00:00:05.000Z');
+
+    releaseDriver?.();
+    expect((await pending).ok).toBe(true);
+    await runtime.stop();
+  });
+
   it('reclaims a stale lock left by an incompatible release', async () => {
     const dataRoot = await root();
     const providerRoot = path.join(dataRoot, 'thai-rag');

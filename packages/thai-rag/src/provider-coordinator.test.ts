@@ -502,6 +502,42 @@ describe('ThaiRagProviderCoordinator', () => {
     if (!started.ok) expect(started.error.details?.reason).toBe('forward-host-unreachable');
   });
 
+  it('spends the owner-boot window once instead of on every attach (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'wedged-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'wedged-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'catalog-child',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 200,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'wedged-identity',
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+
+    const firstStartedAt = Date.now();
+    expect((await coordinator.start()).ok).toBe(false);
+    expect(Date.now() - firstStartedAt).toBeGreaterThanOrEqual(180);
+
+    // The same coordinator retries on the next tool call (that is what
+    // `ensureThaiRagStarted` does): it must not pay the boot window again.
+    const secondStartedAt = Date.now();
+    expect((await coordinator.start()).ok).toBe(false);
+    expect(Date.now() - secondStartedAt).toBeLessThan(150);
+  });
+
   it('reconnects a follower when the owner socket is recreated (#418)', async () => {
     const dataRoot = await root();
     const providerRoot = path.join(dataRoot, 'thai-rag');

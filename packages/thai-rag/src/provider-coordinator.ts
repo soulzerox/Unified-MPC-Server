@@ -78,6 +78,12 @@ export class ThaiRagProviderCoordinator {
   private server: Server | undefined;
   private role: 'owner' | 'follower' | undefined;
   private nextRequestId = 0;
+  /**
+   * Set once an attach has already spent the full owner-boot window. A lock
+   * whose owner never listens must not stall every later call by that amount,
+   * so only the first attach gets the long budget.
+   */
+  private bootWaitSpent = false;
 
   public constructor(private readonly options: ThaiRagProviderCoordinatorOptions) {
     const providerRoot = resolveThaiRagProviderRoot(options.dataRoot);
@@ -240,12 +246,15 @@ export class ThaiRagProviderCoordinator {
     signal: AbortSignal | undefined,
     forwardOnly: boolean,
   ): Promise<Result<ThaiRagProviderHealth>> {
-    const bootDeadline = forwardOnly ? undefined : Date.now() + this.ownerBootWaitMs;
+    const bootDeadline = forwardOnly || this.bootWaitSpent ? undefined : Date.now() + this.ownerBootWaitMs;
     const hardDeadline = Date.now() + this.followerConnectTimeoutMs;
     let lastError = 'Thai-RAG provider owner socket is unavailable';
     for (let attempt = 1; ; attempt += 1) {
       const outcome = await this.requestAttempt({ id: this.requestId(), method: 'health' }, signal);
-      if (outcome.result.ok && isProviderHealth(outcome.result.value)) return ok(outcome.result.value);
+      if (outcome.result.ok && isProviderHealth(outcome.result.value)) {
+        this.bootWaitSpent = false;
+        return ok(outcome.result.value);
+      }
       if (!outcome.result.ok) lastError = outcome.result.error.message;
       if (signal?.aborted === true) {
         return err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider follower startup was cancelled', true));
@@ -255,8 +264,14 @@ export class ThaiRagProviderCoordinator {
       // owner legitimately answers `connect ENOENT` for the whole driver start
       // (#418). Connect-level failures therefore use the owner-boot budget;
       // anything else keeps the short startup budget so real faults surface fast.
-      const deadline = outcome.retryableFailure && bootDeadline !== undefined ? bootDeadline : hardDeadline;
-      if (Date.now() >= deadline) break;
+      const onBootBudget = outcome.retryableFailure && bootDeadline !== undefined;
+      const deadline = onBootBudget ? bootDeadline : hardDeadline;
+      if (Date.now() >= deadline) {
+        // Only the first attach gets the full boot window: a lock whose owner
+        // never listens must not stall every later call by the same amount.
+        if (onBootBudget) this.bootWaitSpent = true;
+        break;
+      }
       await delay(Math.min(followerRetryDelayMs(attempt), Math.max(0, deadline - Date.now())), signal);
     }
     if (forwardOnly) {
@@ -424,7 +439,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
  */
 function followerRetryDelayMs(attempt: number): number {
   const base = Math.min(250, 20 * 2 ** Math.min(attempt - 1, 4));
-  return base + Math.floor(Math.random() * 10);
+  return base + Math.floor(Math.random() * (base / 2));
 }
 
 function normalizeBudget(value: number | undefined, fallback: number): number {

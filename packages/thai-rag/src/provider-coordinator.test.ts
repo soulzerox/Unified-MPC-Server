@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -295,6 +296,106 @@ describe('ThaiRagProviderCoordinator', () => {
       expect(started.error.code).toBe('CONFLICT');
       expect(started.error.details?.reason).toBe('owner-lock-unverified');
       expect(started.error.message).not.toContain('owner is locked but not reachable');
+    }
+  });
+
+  it('fails forward-only startup with forward-host-unreachable and never writes the owner lock (#407 req 3)', async () => {
+    const dataRoot = await root();
+    let driverStarts = 0;
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 30,
+      driver: driver({ start: async () => { driverStarts += 1; return ok(healthy); } }),
+    });
+
+    const started = await coordinator.start();
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) {
+      expect(started.error.code).toBe('CONFLICT');
+      expect(started.error.details?.reason).toBe('forward-host-unreachable');
+      expect(started.error.message).toContain('forward host is unreachable');
+    }
+    expect(existsSync(path.join(dataRoot, 'thai-rag', 'provider.lock'))).toBe(false);
+    expect(driverStarts).toBe(0);
+  });
+
+  it('forwards as a peer to a live owner without rewriting its lock (#407 req 3)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    let ownerStarts = 0;
+    let forwardedStarts = 0;
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      ownerLockTtlMs: 3_600_000,
+      driver: driver({ start: async () => { ownerStarts += 1; return ok(healthy); } }),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const lockBefore = await readFile(path.join(providerRoot, 'provider.lock'), 'utf8');
+
+    const forwarder = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      driver: driver({ start: async () => { forwardedStarts += 1; return ok(healthy); } }),
+    });
+    const started = await forwarder.start();
+    expect(started.ok && started.value.role).toBe('follower');
+
+    const forwardedHealth = await forwarder.health();
+    expect(forwardedHealth.ok).toBe(true);
+    if (forwardedHealth.ok) expect(forwardedHealth.value.ownerId).toBe('http-runtime');
+
+    const lockAfter = await readFile(path.join(providerRoot, 'provider.lock'), 'utf8');
+    expect(lockAfter).toBe(lockBefore);
+    expect(ownerStarts).toBe(1);
+    expect(forwardedStarts).toBe(0);
+
+    await forwarder.close();
+    await owner.close();
+  });
+
+  it('keeps the lock-contention CONFLICT without the forward-only reason for the default election path (#407 req 3)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'foreign-runtime',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'foreign-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    await writeFile(path.join(providerRoot, 'provider.sock'), 'stale socket placeholder');
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'peer-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'foreign-identity',
+      driver: driver({ start: async () => { throw new Error('default election with a live owner must not start a driver'); } }),
+    });
+
+    const started = await coordinator.start();
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) {
+      expect(started.error.code).toBe('CONFLICT');
+      expect(started.error.message).toContain('owner is locked but not reachable');
+      expect(started.error.details?.reason).toBeUndefined();
     }
   });
 });

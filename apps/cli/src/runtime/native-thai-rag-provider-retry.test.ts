@@ -51,7 +51,7 @@ function response(tool: string, data: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: tool }], structuredContent: { result: tool, data } };
 }
 
-async function fixture(onStatus: (poll: number) => Promise<unknown>): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -82,6 +82,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>): Promise<{ 
     dataRoot, launchConfig: { command: '/mock/python' },
     workspacesProvider: async (): Promise<Array<{ id: string; realRootPath: string }>> => [{ id: workspaceId, realRootPath: workspaceRoot }],
     clientFactory, indexJobPollMs: 10,
+    ...(options.indexStatusTimeoutCap === undefined ? {} : { indexStatusTimeoutCap: options.indexStatusTimeoutCap }),
   });
   expect((await driver.start({
     providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner',
@@ -145,6 +146,36 @@ describe('native provider admission index status truth', () => {
       } });
       // Trial probe + background delta, and no replacement index after the
       // provider-reported failure.
+      expect(counts().indexStarts).toBe(2);
+    } finally { await driver.stop(); }
+  });
+
+  it('marks the index job failed and clears the admission gate when index_status stays unreachable past the deadline (issue #407)', async () => {
+    const { driver, jobId } = await fixture(async () => {
+      throw new Error('Timed out calling thai-rag-native/index_status');
+    }, { indexStatusTimeoutCap: 3 });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string; error?: string } }).value;
+      // issue #407: a hung provider call fails the job at its deadline; the
+      // admission gate is released instead of holding reads hostage.
+      expect(payload.status).toBe('failed');
+      expect(payload.error ?? '').toContain('index-status-unreachable');
+    } finally { await driver.stop(); }
+  });
+
+  it('still tolerates transient status errors below the deadline without failing the job (issue #407)', async () => {
+    const { driver, jobId, counts } = await fixture(async (poll) => {
+      if (poll <= 2) throw new Error('Timed out calling thai-rag-native/index_status');
+      return response('index_status', {
+        status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 5 },
+      });
+    }, { indexStatusTimeoutCap: 6 });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string } }).value;
+      expect(payload.status).toBe('completed');
       expect(counts().indexStarts).toBe(2);
     } finally { await driver.stop(); }
   });

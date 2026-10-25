@@ -62,6 +62,8 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
   readonly indexJobPollMs?: number;
+  /** Consecutive index_status call timeouts tolerated by the admission monitor before the job is failed and the admission gate released (issue #407 deadline). */
+  readonly indexStatusTimeoutCap?: number;
 }
 
 export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
@@ -70,6 +72,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly jobs: ThaiRagIndexJobStore;
   private readonly healthRefreshMs: number;
   private readonly indexJobPollMs: number;
+  private readonly indexStatusTimeoutCap: number;
   private ownerId: string | undefined;
   private launchConfig: McpServerLaunchConfig | undefined;
   private lastHealth: ThaiRagProviderDriverHealth | undefined;
@@ -141,6 +144,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
+    this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? 30));
   }
 
   public start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
@@ -940,6 +944,20 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             || status.error.message.startsWith('Timed out refreshing tool catalog for '));
         if (!timedOut) return status;
         consecutiveStatusTimeouts += 1;
+        if (consecutiveStatusTimeouts >= this.indexStatusTimeoutCap) {
+          // Issue #407: bound the read gate. A provider whose index_status
+          // stays unreachable past the deadline must not hold admission reads
+          // hostage: fire a non-blocking best-effort cancel, fail the local
+          // job, and surface an actionable CONFLICT so the finally block in
+          // the admission monitor releases the gate deterministically.
+          const deadlineCancel = this.callAdmissionWorker('cancel_index', { job_id: providerJobId, workspace_id: workspaceId });
+          void deadlineCancel.catch(() => undefined);
+          return err(appError('CONFLICT', `Native Thai-RAG index_status stayed unreachable for ${this.indexStatusTimeoutCap} consecutive polls; workspace ${workspaceId} index job marked failed (index-status-unreachable)`, true, {
+            reason: 'index-status-unreachable',
+            workspaceId,
+            providerJobId,
+          }));
+        }
         await delay(Math.min(5_000, 250 * (2 ** Math.min(consecutiveStatusTimeouts, 5))));
         continue;
       }

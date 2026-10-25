@@ -125,8 +125,15 @@ export interface StdioMcpRuntime {
   close(): Promise<void>;
 }
 
-/** Default cooldown before a failed Thai-RAG provider start is retried. */
-const DEFAULT_THAI_RAG_START_RETRY_MS = 30_000;
+/**
+ * Default cooldown before a failed Thai-RAG provider start is retried.
+ *
+ * A failed start stays pinned for the cooldown, so every tool call in that
+ * window returns the cached error in ~1-4 ms. That amplification is what turned
+ * one missed follower attach into multi-minute catalog blackouts in #418, so the
+ * cooldown stays short enough to re-attach during the next owner boot.
+ */
+const DEFAULT_THAI_RAG_START_RETRY_MS = 5_000;
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
@@ -144,6 +151,10 @@ export interface StdioMcpRuntimeOptions {
   readonly thaiRagDriver?: ThaiRagProviderDriver;
   /** Cooldown before re-attempting a failed Thai-RAG provider start so one transient failure does not outlive the process. */
   readonly thaiRagStartRetryMs?: number;
+  /** Steady-state follower retry budget while the owner socket is being recreated (#418). */
+  readonly thaiRagFollowerRequestRetryMs?: number;
+  /** Startup-attach budget for a verified live owner that holds the lock before it listens (#418). */
+  readonly thaiRagOwnerBootWaitMs?: number;
   readonly extensions?: ExtensionsService;
   /** Supplied by the first-party host transport, never by request parameters. */
   readonly trustedGoalRelocationActorProvider?: () => TrustedGoalRelocationHostActor | null;
@@ -248,6 +259,8 @@ export function createStdioMcpRuntime(
     embeddingIndexGeneration: 1,
     driver: thaiRagDriver,
     ...(thaiRagForwardOnly ? { forwardOnly: true } : {}),
+    ...(options.thaiRagFollowerRequestRetryMs === undefined ? {} : { followerRequestRetryMs: options.thaiRagFollowerRequestRetryMs }),
+    ...(options.thaiRagOwnerBootWaitMs === undefined ? {} : { ownerBootWaitMs: options.thaiRagOwnerBootWaitMs }),
   });
   const thaiRagStartRetryMs = options.thaiRagStartRetryMs ?? DEFAULT_THAI_RAG_START_RETRY_MS;
   let thaiRagStart: ReturnType<ThaiRagProviderCoordinator['start']> | undefined;

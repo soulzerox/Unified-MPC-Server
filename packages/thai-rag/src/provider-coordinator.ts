@@ -33,6 +33,19 @@ export interface ThaiRagProviderCoordinatorOptions {
    */
   readonly followerRequestRetryMs?: number;
   /**
+   * How long *startup attach* keeps retrying a verified live owner that already
+   * holds `provider.lock` but has not created `provider.sock` yet. The owner
+   * acquires the lock before it boots the driver and only listens afterwards,
+   * so that gap is expected to last as long as a driver start.
+   *
+   * This gap is the #418 `connect ENOENT` phantom: the lock proves a live owner
+   * while `connect()` reports ENOENT. Only connect-level failures use this
+   * budget; every other startup failure still fails on `followerConnectTimeoutMs`.
+   * Designated-peer (`forwardOnly`) startup never uses it: an unreachable
+   * forward host must fail fast (#407 req 3).
+   */
+  readonly ownerBootWaitMs?: number;
+  /**
    * Designated-peer mode (#407 req 3): acquire ownership never, not even after
    * an unreachable owner. Startup connects to the owner socket directly and,
    * when it cannot, fails with the machine-readable `forward-host-unreachable`
@@ -61,6 +74,7 @@ export class ThaiRagProviderCoordinator {
   private readonly socketPath: string;
   private readonly followerConnectTimeoutMs: number;
   private readonly followerRequestRetryMs: number;
+  private readonly ownerBootWaitMs: number;
   private server: Server | undefined;
   private role: 'owner' | 'follower' | undefined;
   private nextRequestId = 0;
@@ -71,6 +85,7 @@ export class ThaiRagProviderCoordinator {
     this.socketPath = path.join(providerRoot.value, 'provider.sock');
     this.followerConnectTimeoutMs = normalizeBudget(options.followerConnectTimeoutMs, 2_000);
     this.followerRequestRetryMs = normalizeBudget(options.followerRequestRetryMs, 5_000);
+    this.ownerBootWaitMs = normalizeBudget(options.ownerBootWaitMs, 15_000);
     this.runtime = new ThaiRagProviderRuntime({
       dataRoot: options.dataRoot,
       ownerId: options.ownerId,
@@ -225,17 +240,25 @@ export class ThaiRagProviderCoordinator {
     signal: AbortSignal | undefined,
     forwardOnly: boolean,
   ): Promise<Result<ThaiRagProviderHealth>> {
-    const deadline = Date.now() + this.followerConnectTimeoutMs;
+    const bootDeadline = forwardOnly ? undefined : Date.now() + this.ownerBootWaitMs;
+    const hardDeadline = Date.now() + this.followerConnectTimeoutMs;
     let lastError = 'Thai-RAG provider owner socket is unavailable';
-    do {
-      const response = await this.request({ id: this.requestId(), method: 'health' }, signal);
-      if (response.ok && isProviderHealth(response.value)) return ok(response.value);
-      if (!response.ok) lastError = response.error.message;
+    for (let attempt = 1; ; attempt += 1) {
+      const outcome = await this.requestAttempt({ id: this.requestId(), method: 'health' }, signal);
+      if (outcome.result.ok && isProviderHealth(outcome.result.value)) return ok(outcome.result.value);
+      if (!outcome.result.ok) lastError = outcome.result.error.message;
       if (signal?.aborted === true) {
         return err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider follower startup was cancelled', true));
       }
-      await delay(20, signal);
-    } while (Date.now() < deadline);
+      // `provider-runtime` takes the owner lock before it boots the driver and
+      // the socket is only created once the driver is up, so a verified live
+      // owner legitimately answers `connect ENOENT` for the whole driver start
+      // (#418). Connect-level failures therefore use the owner-boot budget;
+      // anything else keeps the short startup budget so real faults surface fast.
+      const deadline = outcome.retryableFailure && bootDeadline !== undefined ? bootDeadline : hardDeadline;
+      if (Date.now() >= deadline) break;
+      await delay(followerRetryDelayMs(attempt), signal);
+    }
     if (forwardOnly) {
       return err(appError('CONFLICT', `Thai-RAG provider forward host is unreachable: ${lastError}`, true, {
         reason: THAI_RAG_FORWARD_HOST_UNREACHABLE_REASON,
@@ -265,12 +288,8 @@ export class ThaiRagProviderCoordinator {
           attempts,
         }));
       }
-      await delay(20, signal);
+      await delay(followerRetryDelayMs(attempts), signal);
     }
-  }
-
-  private async request(request: ProviderRequest, signal?: AbortSignal): Promise<Result<unknown>> {
-    return (await this.requestAttempt(request, signal)).result;
   }
 
   private requestAttempt(
@@ -396,6 +415,16 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/**
+ * Capped exponential backoff with jitter. A booting owner is retried by every
+ * waiting follower at once, so a fixed 20 ms poll turns one owner start into a
+ * reconnect stampede; jitter keeps those attempts from lining up.
+ */
+function followerRetryDelayMs(attempt: number): number {
+  const base = Math.min(250, 20 * 2 ** Math.min(attempt - 1, 4));
+  return base + Math.floor(Math.random() * 10);
 }
 
 function normalizeBudget(value: number | undefined, fallback: number): number {

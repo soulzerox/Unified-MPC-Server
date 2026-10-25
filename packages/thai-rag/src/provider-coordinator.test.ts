@@ -390,6 +390,7 @@ describe('ThaiRagProviderCoordinator', () => {
       providerVersion: '4.61.0',
       embeddingIndexGeneration: 1,
       followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 20,
       isProcessAlive: (): boolean => true,
       processIdentityProbe: async (): Promise<string | null> => 'foreign-identity',
       driver: driver({ start: async () => { throw new Error('default election with a live owner must not start a driver'); } }),
@@ -403,6 +404,102 @@ describe('ThaiRagProviderCoordinator', () => {
       expect(started.error.message).toContain('owner is locked but not reachable');
       expect(started.error.details?.reason).toBeUndefined();
     }
+  });
+
+  it('attaches to a verified owner that holds the lock before it can listen (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    // provider-runtime takes the lock, boots the driver, and only then listens.
+    // For that whole window a live owner answers connect with ENOENT, which is
+    // exactly the `locked but not reachable: connect ENOENT` in #418.
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'booting-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'booting-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const health = {
+      providerId: 'thai-rag',
+      providerVersion: '4.61.0',
+      state: 'ready',
+      embeddingIndexGeneration: 1,
+    };
+    const stub = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        let id = 'unknown';
+        try {
+          const parsed: unknown = JSON.parse(chunk.split('\n')[0] ?? '');
+          if (isRecord(parsed) && typeof parsed.id === 'string') id = parsed.id;
+        } catch { /* the owner echoes whatever id it can read */ }
+        socket.end(`${JSON.stringify({ id, ok: true, value: health })}\n`);
+      });
+    });
+    const bootTimer = setTimeout(() => stub.listen(socketPath), 250);
+
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'catalog-child',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 5_000,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'booting-identity',
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+
+    try {
+      const startedAt = Date.now();
+      const started = await coordinator.start();
+      expect(started.ok && started.value.role).toBe('follower');
+      // The owner only starts listening after 250 ms, far beyond the 20 ms
+      // connect budget: attaching proves the boot window is tolerated.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+    } finally {
+      clearTimeout(bootTimer);
+      await new Promise<void>((resolve) => {
+        if (!stub.listening) { resolve(); return; }
+        stub.close(() => resolve());
+      });
+    }
+  });
+
+  it('never spends the owner-boot budget on designated-peer startup (#407 req 3)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'booting-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'booting-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 5_000,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+
+    const startedAt = Date.now();
+    const started = await coordinator.start();
+
+    expect(started.ok).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    if (!started.ok) expect(started.error.details?.reason).toBe('forward-host-unreachable');
   });
 
   it('reconnects a follower when the owner socket is recreated (#418)', async () => {
@@ -618,4 +715,8 @@ function driver(overrides: Partial<ThaiRagProviderDriver> = {}): ThaiRagProvider
     stop: async () => ok(undefined),
     ...overrides,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

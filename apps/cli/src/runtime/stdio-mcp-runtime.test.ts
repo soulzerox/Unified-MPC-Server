@@ -15,7 +15,7 @@ import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
-import { ok, type ResultBudget } from '@unified-mpc/domain';
+import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
   type ThaiRagProviderDriver,
@@ -381,6 +381,70 @@ describe('stdio MCP runtime', () => {
       const budget: ResultBudget = { maxItems: 2, maxTextBytes: 3, maxStructuredBytes: 4, maxBinaryBytes: 5, maxBase64Bytes: 6 };
       await runtime.services.thaiRag?.call('code_search', { query: 'needle' }, undefined, budget);
       expect(observedBudget).toEqual(budget);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('retries a transient failed Thai-RAG start after the cooldown instead of keeping it for the process lifetime', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-rag-start-retry-'));
+    temporaryRoots.push(dataPath);
+    const healthy = { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] };
+    let startAttempts = 0;
+    const driver: ThaiRagProviderDriver = {
+      start: async () => {
+        startAttempts += 1;
+        if (startAttempts === 1) return err(appError('CONFLICT', 'Thai-RAG provider owner is locked but not reachable: connect ENOENT', true));
+        return ok(healthy);
+      },
+      health: async () => ok(healthy),
+      call: async () => ok({ retrieval: 'worked' }),
+      stop: async () => ok(undefined),
+    };
+    const runtime = createStdioMcpRuntime(dataPath, workspace, false, { thaiRagDriver: driver, thaiRagStartRetryMs: 20 });
+    try {
+      const failed = await runtime.services.thaiRag?.call('code_search', { query: 'needle' });
+      expect(failed).toMatchObject({ ok: false, error: { message: expect.stringContaining('locked but not reachable') } });
+      expect(startAttempts).toBe(1);
+      // Still inside the retry cooldown: the failed start stays cached, no new attempt runs.
+      expect(await runtime.services.thaiRag?.call('code_search', { query: 'needle' })).toMatchObject({ ok: false });
+      expect(startAttempts).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const recovered = await runtime.services.thaiRag?.call('code_search', { query: 'needle' });
+      expect(recovered).toMatchObject({ ok: true, value: { retrieval: 'worked' } });
+      expect(startAttempts).toBe(2);
+      // A settled successful start is kept for the process lifetime, like before.
+      expect(await runtime.services.thaiRag?.call('code_search', { query: 'needle' })).toMatchObject({ ok: true });
+      expect(startAttempts).toBe(2);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('shares one in-flight Thai-RAG start across concurrent callers', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-rag-start-dedupe-'));
+    temporaryRoots.push(dataPath);
+    const healthy = { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] };
+    let startCalls = 0;
+    const driver: ThaiRagProviderDriver = {
+      start: async () => {
+        startCalls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return ok(healthy);
+      },
+      health: async () => ok(healthy),
+      call: async () => ok({ once: startCalls }),
+      stop: async () => ok(undefined),
+    };
+    const runtime = createStdioMcpRuntime(dataPath, workspace, false, { thaiRagDriver: driver });
+    try {
+      const [first, second] = await Promise.all([
+        runtime.services.thaiRag?.call('code_search', { query: 'first' }),
+        runtime.services.thaiRag?.call('code_search', { query: 'second' }),
+      ]);
+      expect(first).toMatchObject({ ok: true, value: { once: 1 } });
+      expect(second).toMatchObject({ ok: true, value: { once: 1 } });
+      expect(startCalls).toBe(1);
     } finally {
       await runtime.close();
     }

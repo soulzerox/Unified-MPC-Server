@@ -125,6 +125,9 @@ export interface StdioMcpRuntime {
   close(): Promise<void>;
 }
 
+/** Default cooldown before a failed Thai-RAG provider start is retried. */
+const DEFAULT_THAI_RAG_START_RETRY_MS = 30_000;
+
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
   readonly runtimeAdmissionIdentity?: UnifiedRuntimeAdmissionIdentity;
@@ -139,6 +142,8 @@ export interface StdioMcpRuntimeOptions {
   readonly thaiRagProviderPath?: string;
   /** Test seam for the parent-owned provider worker. */
   readonly thaiRagDriver?: ThaiRagProviderDriver;
+  /** Cooldown before re-attempting a failed Thai-RAG provider start so one transient failure does not outlive the process. */
+  readonly thaiRagStartRetryMs?: number;
   readonly extensions?: ExtensionsService;
   /** Supplied by the first-party host transport, never by request parameters. */
   readonly trustedGoalRelocationActorProvider?: () => TrustedGoalRelocationHostActor | null;
@@ -237,10 +242,36 @@ export function createStdioMcpRuntime(
     embeddingIndexGeneration: 1,
     driver: thaiRagDriver,
   });
+  const thaiRagStartRetryMs = options.thaiRagStartRetryMs ?? DEFAULT_THAI_RAG_START_RETRY_MS;
   let thaiRagStart: ReturnType<ThaiRagProviderCoordinator['start']> | undefined;
+  let thaiRagStartSettled = false;
+  let thaiRagStartOk = false;
+  let thaiRagStartFailedAtMs = 0;
   const ensureThaiRagStarted = (): ReturnType<ThaiRagProviderCoordinator['start']> => {
-    thaiRagStart ??= thaiRagCoordinator.start();
-    return thaiRagStart;
+    if (thaiRagStart !== undefined) {
+      const canRetry = thaiRagStartSettled
+        && !thaiRagStartOk
+        && Date.now() - thaiRagStartFailedAtMs >= thaiRagStartRetryMs;
+      if (!canRetry) return thaiRagStart;
+      // A failed start may only outlive the retry window if nothing retried it:
+      // pinning the very first failure for the whole process lifetime kept
+      // callers offline forever when a mcp-stdio spawned before the provider
+      // owner was created and the follower connect window expired.
+      void thaiRagStart.catch(() => undefined);
+    }
+    thaiRagStartSettled = false;
+    thaiRagStartOk = false;
+    const attempt = thaiRagCoordinator.start();
+    thaiRagStart = attempt;
+    void attempt.then((start) => {
+      thaiRagStartSettled = true;
+      thaiRagStartOk = start.ok;
+      if (!start.ok) thaiRagStartFailedAtMs = Date.now();
+    }, () => {
+      thaiRagStartSettled = true;
+      thaiRagStartFailedAtMs = Date.now();
+    });
+    return attempt;
   };
   const thaiRagPort: NonNullable<McpApplicationServices['thaiRag']> = {
     async health(signal) {

@@ -119,12 +119,22 @@ export class ThaiRagProviderRuntime {
       ownerId: this.options.ownerId,
       startedAt,
     };
-    const started = await this.options.driver.start({
-      providerRoot: this.providerRoot,
-      ownerId: this.options.ownerId,
-      providerVersion: this.options.providerVersion,
-      embeddingIndexGeneration: this.options.embeddingIndexGeneration,
-    }, signal);
+    let started: Result<ThaiRagProviderDriverHealth>;
+    try {
+      started = await this.options.driver.start({
+        providerRoot: this.providerRoot,
+        ownerId: this.options.ownerId,
+        providerVersion: this.options.providerVersion,
+        embeddingIndexGeneration: this.options.embeddingIndexGeneration,
+      }, signal);
+    } catch (error) {
+      // A rejecting driver must not leave an owned lock behind: the heartbeat
+      // now starts with the lock, so the lock would otherwise keep proving a
+      // liveness that no longer exists and peers would wait for it forever.
+      this.healthState = createProviderHealth(this.options.providerVersion, this.options.embeddingIndexGeneration);
+      await this.releaseOwnerLock();
+      throw error;
+    }
     if (!started.ok) {
       this.healthState = createProviderHealth(this.options.providerVersion, this.options.embeddingIndexGeneration);
       await this.releaseOwnerLock();

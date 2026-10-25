@@ -1,4 +1,4 @@
-import { unlink } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import path from 'node:path';
 import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
@@ -79,11 +79,12 @@ export class ThaiRagProviderCoordinator {
   private role: 'owner' | 'follower' | undefined;
   private nextRequestId = 0;
   /**
-   * Set once an attach has already spent the full owner-boot window. A lock
-   * whose owner never listens must not stall every later call by that amount,
-   * so only the first attach gets the long budget.
+   * Fingerprint (`ownerId:startedAt`) of the owner generation whose boot window
+   * has already been spent. A wedged owner must not stall every later call by
+   * the full window, but a *new* owner legitimately boots again, so the latch is
+   * keyed to the lock it was spent on rather than to this coordinator's lifetime.
    */
-  private bootWaitSpent = false;
+  private bootWaitSpentFor: string | undefined;
 
   public constructor(private readonly options: ThaiRagProviderCoordinatorOptions) {
     const providerRoot = resolveThaiRagProviderRoot(options.dataRoot);
@@ -177,6 +178,7 @@ export class ThaiRagProviderCoordinator {
       await this.runtime.stop(signal).catch(() => undefined);
     }
     this.role = undefined;
+    this.bootWaitSpentFor = undefined;
   }
 
   private async startOwnerServer(signal?: AbortSignal): Promise<Result<void>> {
@@ -246,13 +248,16 @@ export class ThaiRagProviderCoordinator {
     signal: AbortSignal | undefined,
     forwardOnly: boolean,
   ): Promise<Result<ThaiRagProviderHealth>> {
-    const bootDeadline = forwardOnly || this.bootWaitSpent ? undefined : Date.now() + this.ownerBootWaitMs;
+    const currentOwner = await this.ownerLockFingerprint();
+    const bootArmed = !forwardOnly
+      && (this.bootWaitSpentFor === undefined || (currentOwner !== undefined && currentOwner !== this.bootWaitSpentFor));
+    const bootDeadline = bootArmed ? Date.now() + this.ownerBootWaitMs : undefined;
     const hardDeadline = Date.now() + this.followerConnectTimeoutMs;
     let lastError = 'Thai-RAG provider owner socket is unavailable';
     for (let attempt = 1; ; attempt += 1) {
       const outcome = await this.requestAttempt({ id: this.requestId(), method: 'health' }, signal);
       if (outcome.result.ok && isProviderHealth(outcome.result.value)) {
-        this.bootWaitSpent = false;
+        this.bootWaitSpentFor = undefined;
         return ok(outcome.result.value);
       }
       if (!outcome.result.ok) lastError = outcome.result.error.message;
@@ -267,9 +272,9 @@ export class ThaiRagProviderCoordinator {
       const onBootBudget = outcome.retryableFailure && bootDeadline !== undefined;
       const deadline = onBootBudget ? bootDeadline : hardDeadline;
       if (Date.now() >= deadline) {
-        // Only the first attach gets the full boot window: a lock whose owner
+        // Spend the boot window once per owner generation: a lock whose owner
         // never listens must not stall every later call by the same amount.
-        if (onBootBudget) this.bootWaitSpent = true;
+        if (onBootBudget) this.bootWaitSpentFor = currentOwner ?? '';
         break;
       }
       await delay(Math.min(followerRetryDelayMs(attempt), Math.max(0, deadline - Date.now())), signal);
@@ -363,8 +368,24 @@ export class ThaiRagProviderCoordinator {
     });
   }
 
-  private requestId(): string {
-    this.nextRequestId += 1;
+  /**
+   * Identify the current owner generation from the lock the runtime wrote. Used
+   * only to decide whether an already-spent boot window still applies.
+   */
+  private async ownerLockFingerprint(): Promise<string | undefined> {
+    try {
+      const parsed: unknown = JSON.parse(
+        await readFile(path.join(path.dirname(this.socketPath), 'provider.lock'), 'utf8'),
+      );
+      if (!isRecord(parsed)) return undefined;
+      const { ownerId, startedAt } = parsed;
+      return typeof ownerId === 'string' && typeof startedAt === 'string' ? `${ownerId}:${startedAt}` : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private requestId(): string {    this.nextRequestId += 1;
     return `${this.options.ownerId}:${process.pid}:${this.nextRequestId}`;
   }
 }

@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -372,6 +373,23 @@ describe('ThaiRagProviderRuntime owner-lock heartbeat and version fence (#210 U3
     releaseDriver?.();
     expect((await pending).ok).toBe(true);
     await runtime.stop();
+  });
+
+  it('releases the owner lock when the driver start rejects (#418)', async () => {
+    const dataRoot = await root();
+    const lockPath = path.join(dataRoot, 'thai-rag', 'provider.lock');
+    const runtime = make(dataRoot, {
+      heartbeatIntervalMs: 5,
+      driver: driver({ start: async () => { throw new Error('driver exploded'); } }),
+    });
+
+    await expect(runtime.start()).rejects.toThrow('driver exploded');
+    expect(existsSync(lockPath)).toBe(false);
+
+    // The heartbeat must be stopped too, or it would resurrect the abandoned
+    // lock and keep advertising an owner that never came up.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it('reclaims a stale lock left by an incompatible release', async () => {

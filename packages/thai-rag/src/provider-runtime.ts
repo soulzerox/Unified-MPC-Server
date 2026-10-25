@@ -105,6 +105,13 @@ export class ThaiRagProviderRuntime {
     const locked = await this.acquireOwnerLock();
     if (!locked.ok) return locked;
 
+    // Prove liveness for the whole time this runtime holds the lock, not only
+    // once the driver is ready. The owner boot can outlast `ownerLockTtlMs`,
+    // and a silent-but-booting owner would otherwise be classified
+    // `owner-lock-unresponsive` — a verdict peers treat as non-recoverable, so
+    // they never wait for the socket this owner is about to create (#418).
+    this.startHeartbeat();
+
     const startedAt = this.now().toISOString();
     this.healthState = {
       ...this.healthState,
@@ -306,6 +313,7 @@ export class ThaiRagProviderRuntime {
 
   private async releaseOwnerLock(): Promise<void> {
     if (!this.ownsLock) return;
+    this.stopHeartbeat();
     const existing = await this.readLock();
     if (existing?.ownerId === this.options.ownerId
       && existing.pid === this.pid

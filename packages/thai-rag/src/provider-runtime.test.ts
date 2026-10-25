@@ -22,6 +22,16 @@ const healthy: ThaiRagProviderDriverHealth = {
   activeJobs: [],
 };
 
+async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 2_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (value !== undefined) return value;
+    if (Date.now() >= deadline) throw new Error('timed out waiting for the expected state');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function driver(overrides: Partial<ThaiRagProviderDriver> = {}): ThaiRagProviderDriver {
   return {
     start: async () => ok(healthy),
@@ -321,6 +331,46 @@ describe('ThaiRagProviderRuntime owner-lock heartbeat and version fence (#210 U3
     await runtime.renewOwnerLock();
     const lock = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'provider.lock'), 'utf8')) as { heartbeatAt: string };
     expect(lock.heartbeatAt).toBe('2026-10-17T00:00:05.000Z');
+    await runtime.stop();
+  });
+
+  it('keeps proving owner liveness while the driver is still starting (#418)', async () => {
+    const dataRoot = await root();
+    let clock = Date.parse('2026-10-17T00:00:00.000Z');
+    let releaseDriver: (() => void) | undefined;
+    const driverGate = new Promise<void>((resolve) => { releaseDriver = resolve; });
+    const runtime = make(dataRoot, {
+      now: () => new Date(clock),
+      heartbeatIntervalMs: 5,
+      driver: driver({ start: async () => { await driverGate; return ok(healthy); } }),
+    });
+
+    const pending = runtime.start();
+    const lockPath = path.join(dataRoot, 'thai-rag', 'provider.lock');
+    await waitFor(async () => {
+      try {
+        await readFile(lockPath, 'utf8');
+        return true;
+      } catch {
+        return undefined;
+      }
+    });
+    clock += 5_000;
+
+    // A booting owner must not look dead: heartbeat renewal has to start with
+    // the lock, not after the driver is ready (#418).
+    const during = await waitFor(async () => {
+      try {
+        const lock = JSON.parse(await readFile(lockPath, 'utf8')) as { heartbeatAt: string };
+        return lock.heartbeatAt === '2026-10-17T00:00:05.000Z' ? lock : undefined;
+      } catch {
+        return undefined;
+      }
+    });
+    expect(during.heartbeatAt).toBe('2026-10-17T00:00:05.000Z');
+
+    releaseDriver?.();
+    expect((await pending).ok).toBe(true);
     await runtime.stop();
   });
 

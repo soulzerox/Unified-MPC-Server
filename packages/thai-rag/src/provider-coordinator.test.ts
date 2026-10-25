@@ -1,5 +1,7 @@
 import { existsSync } from 'node:fs';
+import { getEventListeners } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -26,6 +28,10 @@ async function root(): Promise<string> {
   const value = await mkdtemp(path.join(os.tmpdir(), 'unified-thai-rag-coordinator-'));
   roots.push(value);
   return value;
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 afterEach(async () => {
@@ -384,6 +390,7 @@ describe('ThaiRagProviderCoordinator', () => {
       providerVersion: '4.61.0',
       embeddingIndexGeneration: 1,
       followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 20,
       isProcessAlive: (): boolean => true,
       processIdentityProbe: async (): Promise<string | null> => 'foreign-identity',
       driver: driver({ start: async () => { throw new Error('default election with a live owner must not start a driver'); } }),
@@ -398,6 +405,380 @@ describe('ThaiRagProviderCoordinator', () => {
       expect(started.error.details?.reason).toBeUndefined();
     }
   });
+
+  it('attaches to a verified owner that holds the lock before it can listen (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    // provider-runtime takes the lock, boots the driver, and only then listens.
+    // For that whole window a live owner answers connect with ENOENT, which is
+    // exactly the `locked but not reachable: connect ENOENT` in #418.
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'booting-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'booting-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const health = {
+      providerId: 'thai-rag',
+      providerVersion: '4.61.0',
+      state: 'ready',
+      embeddingIndexGeneration: 1,
+    };
+    const stub = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        let id = 'unknown';
+        try {
+          const parsed: unknown = JSON.parse(chunk.split('\n')[0] ?? '');
+          if (isRecord(parsed) && typeof parsed.id === 'string') id = parsed.id;
+        } catch { /* the owner echoes whatever id it can read */ }
+        socket.end(`${JSON.stringify({ id, ok: true, value: health })}\n`);
+      });
+    });
+    const bootTimer = setTimeout(() => stub.listen(socketPath), 250);
+
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'catalog-child',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 5_000,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'booting-identity',
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+
+    try {
+      const startedAt = Date.now();
+      const started = await coordinator.start();
+      expect(started.ok && started.value.role).toBe('follower');
+      // The owner only starts listening after 250 ms, far beyond the 20 ms
+      // connect budget: attaching proves the boot window is tolerated.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+    } finally {
+      clearTimeout(bootTimer);
+      await new Promise<void>((resolve) => {
+        if (!stub.listening) { resolve(); return; }
+        stub.close(() => resolve());
+      });
+    }
+  });
+
+  it('never spends the owner-boot budget on designated-peer startup (#407 req 3)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'booting-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'booting-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 5_000,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+
+    const startedAt = Date.now();
+    const started = await coordinator.start();
+
+    expect(started.ok).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    if (!started.ok) expect(started.error.details?.reason).toBe('forward-host-unreachable');
+  });
+
+  it('spends the owner-boot window once instead of on every attach (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'wedged-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'wedged-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'catalog-child',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 20,
+      ownerBootWaitMs: 200,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'wedged-identity',
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+
+    const firstStartedAt = Date.now();
+    expect((await coordinator.start()).ok).toBe(false);
+    expect(Date.now() - firstStartedAt).toBeGreaterThanOrEqual(180);
+
+    // The same coordinator retries on the next tool call (that is what
+    // `ensureThaiRagStarted` does): it must not pay the boot window again.
+    const secondStartedAt = Date.now();
+    expect((await coordinator.start()).ok).toBe(false);
+    expect(Date.now() - secondStartedAt).toBeLessThan(150);
+  });
+
+  it('reconnects a follower when the owner socket is recreated (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-before-restart',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 2_000,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+
+    await owner.close();
+    expect(existsSync(socketPath)).toBe(false);
+
+    // This call begins while the owner socket is gone: the ENOENT phantom from #418.
+    const pending = follower.call('memory.search', { query: 'survives an owner restart' });
+    await delay(60);
+    const replacement = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-after-restart',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await replacement.start()).ok).toBe(true);
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toMatchObject({ tool: 'memory.search' });
+
+    await follower.close();
+    await replacement.close();
+  });
+
+  it('gives up a follower call within the bounded connect window when the owner never returns (#418)', async () => {
+    const dataRoot = await root();
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-gone-for-good',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 120,
+      followerRequestRetryMs: 120,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+
+    await owner.close();
+    const startedAt = Date.now();
+    const result = await follower.call('memory.search', { query: 'no owner left' });
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain('socket error');
+      expect(result.error.details?.reason).toBe('follower-reconnect-exhausted');
+      expect(result.error.details?.attempts).toBeGreaterThan(1);
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(80);
+    expect(elapsed).toBeLessThan(1_000);
+
+    await follower.close();
+  });
+
+  it('never replays a follower request that already reached the owner socket (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-replaced-by-stub',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerConnectTimeoutMs: 500,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+    await owner.close();
+
+    let connections = 0;
+    const destructive = createServer((socket) => {
+      connections += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      destructive.once('error', reject);
+      destructive.listen(socketPath, () => resolve());
+    });
+    try {
+      const result = await follower.call('memory.write', { note: 'must not be replayed' });
+      expect(result.ok).toBe(false);
+      expect(connections).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => destructive.close(() => resolve()));
+      await follower.close();
+    }
+  });
+
+  it('settles instead of hanging when the owner closes after receiving the request (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-closed-cleanly',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerRequestRetryMs: 300,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+    await owner.close();
+
+    let connections = 0;
+    const finServer = createServer((socket) => {
+      connections += 1;
+      socket.once('data', () => socket.end());
+    });
+    await new Promise<void>((resolve, reject) => {
+      finServer.once('error', reject);
+      finServer.listen(socketPath, () => resolve());
+    });
+    try {
+      const startedAt = Date.now();
+      const result = await follower.call('memory.search', { query: 'owner dies mid-request' });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain('closed the connection before responding');
+      expect(connections).toBe(1);
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    } finally {
+      await new Promise<void>((resolve) => finServer.close(() => resolve()));
+      await follower.close();
+    }
+  });
+
+  it('does not leak abort listeners across follower retries (#418)', async () => {
+    const dataRoot = await root();
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-listener-leak',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerRequestRetryMs: 120,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+    await owner.close();
+
+    const controller = new AbortController();
+    const result = await follower.call('memory.search', { query: 'retry loop' }, controller.signal);
+
+    expect(result.ok).toBe(false);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    await follower.close();
+  });
+
+  it('stops waiting for a booting owner once the owner-boot budget is spent (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'booting-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'booting-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'peer-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 50,
+      ownerBootWaitMs: 150,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'booting-identity',
+      driver: driver({ start: async () => { throw new Error('a waiting follower must not start a driver'); } }),
+    });
+
+    const startedAt = Date.now();
+    const started = await coordinator.start();
+    const elapsed = Date.now() - startedAt;
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) {
+      expect(started.error.message).toContain('owner is locked but not reachable');
+      expect(started.error.details?.reason).toBeUndefined();
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(100);
+    expect(elapsed).toBeLessThan(1_000);
+  });
 });
 
 function driver(overrides: Partial<ThaiRagProviderDriver> = {}): ThaiRagProviderDriver {
@@ -408,4 +789,8 @@ function driver(overrides: Partial<ThaiRagProviderDriver> = {}): ThaiRagProvider
     stop: async () => ok(undefined),
     ...overrides,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

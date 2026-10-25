@@ -28,6 +28,34 @@ describe('ThaiRagIndexJobStore', () => {
     expect(restored).toMatchObject({ status: 'completed', result: { indexed: 2 }, ownerId: 'owner-a' });
   });
 
+  it('carries distinct machine-readable owner-state tokens on interrupted paths (issue #407)', async () => {
+    const WS = '11111111-1111-4111-8111-111111111111';
+
+    // Owner lost across a restart: the was-running job is flipped at
+    // initialize and the journal error must name the state with a token.
+    const dataRoot = await root();
+    const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-10-25T01:00:00.000Z'));
+    const running = await first.create(WS, false, 'owner-a');
+    const next = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-10-25T02:00:00.000Z'));
+    await next.initialize('owner-a');
+    expect((await next.get(running.jobId, 'owner-a', WS))?.error ?? '').toContain('owner-lost-restarted');
+
+    // Owner stopped cleanly via the driver stop path (default reason).
+    const stoppedStore = new ThaiRagIndexJobStore(await root());
+    const stopped = await stoppedStore.create(WS, false, 'owner-a');
+    await stoppedStore.interruptRunning('owner-a');
+    expect((await stoppedStore.get(stopped.jobId, 'owner-a', WS))?.error ?? '').toContain('owner-lost-stopped');
+
+    // Owner alive but wedged: reaped for no owner-verified progress.
+    let clock = new Date('2026-10-17T00:00:00.000Z').getTime();
+    const WINDOW_MS = 60_000;
+    const stuckStore = new ThaiRagIndexJobStore(await root(), () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const stuck = await stuckStore.create(WS, false, 'owner-a');
+    clock += WINDOW_MS + 1_000;
+    await stuckStore.active('owner-a');
+    expect((await stuckStore.get(stuck.jobId, 'owner-a', WS))?.error ?? '').toContain('owner-stuck-no-progress');
+  });
+
   it('marks previously running jobs interrupted after a restart instead of pretending they still run', async () => {
     const dataRoot = await root();
     const first = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-09-17T01:00:00.000Z'));

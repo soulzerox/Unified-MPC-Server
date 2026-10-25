@@ -257,7 +257,7 @@ export class ThaiRagProviderCoordinator {
       // anything else keeps the short startup budget so real faults surface fast.
       const deadline = outcome.retryableFailure && bootDeadline !== undefined ? bootDeadline : hardDeadline;
       if (Date.now() >= deadline) break;
-      await delay(followerRetryDelayMs(attempt), signal);
+      await delay(Math.min(followerRetryDelayMs(attempt), Math.max(0, deadline - Date.now())), signal);
     }
     if (forwardOnly) {
       return err(appError('CONFLICT', `Thai-RAG provider forward host is unreachable: ${lastError}`, true, {
@@ -288,7 +288,7 @@ export class ThaiRagProviderCoordinator {
           attempts,
         }));
       }
-      await delay(followerRetryDelayMs(attempts), signal);
+      await delay(Math.min(followerRetryDelayMs(attempts), Math.max(0, deadline - Date.now())), signal);
     }
   }
 

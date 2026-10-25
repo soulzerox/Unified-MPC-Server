@@ -705,6 +705,44 @@ describe('ThaiRagProviderCoordinator', () => {
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     await follower.close();
   });
+
+  it('stops waiting for a booting owner once the owner-boot budget is spent (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'booting-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'booting-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'peer-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 50,
+      ownerBootWaitMs: 150,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'booting-identity',
+      driver: driver({ start: async () => { throw new Error('a waiting follower must not start a driver'); } }),
+    });
+
+    const startedAt = Date.now();
+    const started = await coordinator.start();
+    const elapsed = Date.now() - startedAt;
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) {
+      expect(started.error.message).toContain('owner is locked but not reachable');
+      expect(started.error.details?.reason).toBeUndefined();
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(100);
+    expect(elapsed).toBeLessThan(1_000);
+  });
 });
 
 function driver(overrides: Partial<ThaiRagProviderDriver> = {}): ThaiRagProviderDriver {

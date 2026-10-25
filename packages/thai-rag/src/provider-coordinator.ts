@@ -6,6 +6,7 @@ import type { PosixProcessIdentityProbe } from '@unified-mpc/process';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
   isThaiRagOwnerLockConflict,
+  THAI_RAG_FORWARD_HOST_UNREACHABLE_REASON,
   ThaiRagProviderRuntime,
   type ThaiRagProviderDriver,
 } from './provider-runtime.js';
@@ -24,6 +25,14 @@ export interface ThaiRagProviderCoordinatorOptions {
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly processIdentityProbe?: PosixProcessIdentityProbe;
   readonly followerConnectTimeoutMs?: number;
+  /**
+   * Designated-peer mode (#407 req 3): acquire ownership never, not even after
+   * an unreachable owner. Startup connects to the owner socket directly and
+   * fails as a follower with the machine-readable `forward-host-unreachable`
+   * reason instead of touching `provider.lock`. Without this option the
+   * try-acquire-then-forward election stays the default.
+   */
+  readonly forwardOnly?: boolean;
 }
 
 export interface ThaiRagProviderCoordinatorStartResult {
@@ -70,6 +79,16 @@ export class ThaiRagProviderCoordinator {
       return err(appError('CONFLICT', `Thai-RAG provider coordinator is already ${this.role}`, true));
     }
 
+    if (this.options.forwardOnly === true) {
+      // Forward-only peers race for ownership from the configuration, not from
+      // a lock fight: connect straight to the designated owner or fail with a
+      // distinct machine reason (#407 req 3).
+      const remoteHealth = await this.waitForFollowerHealth(signal, true);
+      if (!remoteHealth.ok) return remoteHealth;
+      this.role = 'follower';
+      return ok({ role: 'follower', health: remoteHealth.value });
+    }
+
     const started = await this.runtime.start(signal);
     if (started.ok) {
       const serving = await this.startOwnerServer(signal);
@@ -82,7 +101,7 @@ export class ThaiRagProviderCoordinator {
     }
 
     if (!isThaiRagOwnerLockConflict(started.error)) return started;
-    const remoteHealth = await this.waitForFollowerHealth(signal);
+    const remoteHealth = await this.waitForFollowerHealth(signal, false);
     if (!remoteHealth.ok) return remoteHealth;
     this.role = 'follower';
     return ok({ role: 'follower', health: remoteHealth.value });
@@ -192,7 +211,10 @@ export class ThaiRagProviderCoordinator {
       : { id: parsed.value.id, ok: false, error: result.error.message };
   }
 
-  private async waitForFollowerHealth(signal?: AbortSignal): Promise<Result<ThaiRagProviderHealth>> {
+  private async waitForFollowerHealth(
+    signal: AbortSignal | undefined,
+    forwardOnly: boolean,
+  ): Promise<Result<ThaiRagProviderHealth>> {
     const deadline = Date.now() + this.followerConnectTimeoutMs;
     let lastError = 'Thai-RAG provider owner socket is unavailable';
     do {
@@ -204,6 +226,11 @@ export class ThaiRagProviderCoordinator {
       }
       await delay(20, signal);
     } while (Date.now() < deadline);
+    if (forwardOnly) {
+      return err(appError('CONFLICT', `Thai-RAG provider forward host is unreachable: ${lastError}`, true, {
+        reason: THAI_RAG_FORWARD_HOST_UNREACHABLE_REASON,
+      }));
+    }
     return err(appError('CONFLICT', `Thai-RAG provider owner is locked but not reachable: ${lastError}`, true));
   }
 

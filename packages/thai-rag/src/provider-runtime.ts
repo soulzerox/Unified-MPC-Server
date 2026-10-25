@@ -46,6 +46,8 @@ export const THAI_RAG_OWNER_LOCK_CONFLICT_REASON = 'owner-lock';
 export const THAI_RAG_UNVERIFIED_OWNER_LOCK_REASON = 'owner-lock-unverified';
 /** A live, version-compatible owner that stopped heartbeating: actionable, never auto-stolen. */
 export const THAI_RAG_UNRESPONSIVE_OWNER_LOCK_REASON = 'owner-lock-unresponsive';
+/** A forward-only peer could not reach the designated owner socket (#407 req 3). */
+export const THAI_RAG_FORWARD_HOST_UNREACHABLE_REASON = 'forward-host-unreachable';
 
 const DEFAULT_OWNER_LOCK_TTL_MS = 30_000;
 

@@ -134,7 +134,7 @@ export class ThaiRagIndexJobStore {
       if (!ACTIVE_JOB_STATUSES.has(job.status) || ownerId === undefined) continue;
       const sameOwner = job.ownerId === ownerId;
       if (!sameOwner && !await this.isProvablyDeadRuntimeOwner(job)) continue;
-      this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: 'Provider restarted before the indexing job completed' });
+      this.jobs.set(id, { ...job, status: 'interrupted', finishedAt, error: 'Provider restarted before the indexing job completed (owner-lost-restarted)' });
       changed = true;
     }
     this.initialized = true;
@@ -249,7 +249,7 @@ export class ThaiRagIndexJobStore {
     return this.finish(jobId, 'failed', { error }, ownerId);
   }
 
-  public async interruptRunning(ownerId: string, reason = 'Provider stopped before the indexing job completed'): Promise<void> {
+  public async interruptRunning(ownerId: string, reason = 'Provider stopped before the indexing job completed (owner-lost-stopped)'): Promise<void> {
     await this.initialize();
     const finishedAt = this.now().toISOString();
     let changed = false;
@@ -294,7 +294,7 @@ export class ThaiRagIndexJobStore {
         ...job,
         status: 'interrupted',
         finishedAt: this.now().toISOString(),
-        error: `Indexing job produced no owner-verified progress within ${Math.round(this.stuckJobTimeoutMs / 1000)}s; the owning process is presumed stuck`,
+        error: `Indexing job produced no owner-verified progress within ${Math.round(this.stuckJobTimeoutMs / 1000)}s; the owning process is presumed stuck (owner-stuck-no-progress)`,
       });
       changed = true;
     }

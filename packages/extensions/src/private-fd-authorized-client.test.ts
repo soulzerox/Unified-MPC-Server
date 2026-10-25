@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createPrivateFdAuthorizedClientFactory } from './private-fd-authorized-client.js';
+import type { McpClientFactory } from './mcp-session-manager.js';
 
 const fixture = fileURLToPath(new URL('../tests/fixtures/private-fd-authorized-mcp-server.mjs', import.meta.url));
 const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
@@ -13,11 +14,16 @@ const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
-function decode(result: unknown) {
+function decode(result: unknown): Record<string, unknown> {
   const r = result as { content: { text: string }[] };
   return JSON.parse(r.content[0]!.text) as Record<string, unknown>;
 }
-async function setup(reuseProof = false, revocationSignal?: AbortSignal) {
+async function setup(reuseProof = false, revocationSignal?: AbortSignal): Promise<{
+  factory: McpClientFactory;
+  launch: { command: string; args: string[] };
+  allowed: Set<string>;
+  created: Array<{ payload: Buffer; disposed: boolean; issued: number; attested: number; challenges: string[] }>;
+}> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'private-fd-authorized-session-'));
   roots.push(root);
   const allowed = new Set([WS]);
@@ -70,7 +76,7 @@ async function setup(reuseProof = false, revocationSignal?: AbortSignal) {
             r.challenge === challenge && r.owner_id === 'unified-worker-1' &&
             r.authority_generation === 9 && r.proof === expected;
         },
-        dispose() { stats.disposed = true; payload.fill(0); secret.fill(0); },
+        dispose(): void { stats.disposed = true; payload.fill(0); secret.fill(0); },
       };
     },
   });

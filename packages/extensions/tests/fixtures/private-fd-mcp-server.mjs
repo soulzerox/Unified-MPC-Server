@@ -1,3 +1,5 @@
+/* global process */
+
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 

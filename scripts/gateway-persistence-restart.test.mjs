@@ -1,6 +1,8 @@
+/* global clearTimeout, fetch, process, setTimeout */
+
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -145,7 +147,7 @@ async function startWebProcess() {
 
   const url = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(`Timed out waiting for Web process. stdout=\${stdout} stderr=\${stderr}`));
+      reject(new Error(`Timed out waiting for Web process. stdout=${stdout} stderr=${stderr}`));
     }, 20_000);
 
     const inspect = () => {
@@ -158,7 +160,7 @@ async function startWebProcess() {
     const exited = (code, signal) => {
       clearTimeout(timeout);
       cleanup();
-      reject(new Error(`Web process exited before readiness (code=\${code}, signal=\${signal}). stdout=\${stdout} stderr=\${stderr}`));
+      reject(new Error(`Web process exited before readiness (code=${code}, signal=${signal}). stdout=${stdout} stderr=${stderr}`));
     };
     const cleanup = () => {
       child.stdout.off('data', inspect);
@@ -264,7 +266,7 @@ async function runCommand(executable, args) {
         resolve();
         return;
       }
-      reject(new Error(`${executable} ${args.join(' ')} failed (code=\${code}, signal=\${signal}). stdout=\${stdout} stderr=\${stderr}`));
+      reject(new Error(`${executable} ${args.join(' ')} failed (code=${code}, signal=${signal}). stdout=${stdout} stderr=${stderr}`));
     });
   });
 }

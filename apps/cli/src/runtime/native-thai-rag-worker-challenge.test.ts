@@ -26,7 +26,9 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-const input = (response: unknown = BASE) => ({
+const input = (response: unknown = BASE): {
+  secret: Buffer; ownerId: string; authorityGeneration: number; challenge: string; response: unknown;
+} => ({
   secret: KEY, ownerId: OWNER, authorityGeneration: GENERATION, challenge: CHALLENGE, response,
 });
 

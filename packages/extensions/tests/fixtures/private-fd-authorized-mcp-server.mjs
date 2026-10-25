@@ -1,3 +1,5 @@
+/* global Buffer, process, setTimeout */
+
 import { readFileSync } from 'node:fs';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createInterface } from 'node:readline';

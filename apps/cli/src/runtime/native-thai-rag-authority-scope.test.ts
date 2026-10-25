@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { issueRegisteredThaiRagWorkspaceProof, type ThaiRagTrustedAuthority } from './native-thai-rag-authority-scope.js';
+import { issueRegisteredThaiRagWorkspaceProof, type ThaiRagRegisteredProofRequest, type ThaiRagTrustedAuthority } from './native-thai-rag-authority-scope.js';
 
 const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
 const FOREIGN = 'ee83c457-0b79-49d7-937e-5c35aa91975d';
@@ -31,7 +31,7 @@ function authority(
   };
 }
 
-function request(workspaceId = WS) {
+function request(workspaceId: string = WS): ThaiRagRegisteredProofRequest {
   return { workspaceId, operation: 'recall' };
 }
 

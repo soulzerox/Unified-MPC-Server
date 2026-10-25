@@ -588,7 +588,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           return;
         }
         if (failedFiles.length > 0 || (resultStatus !== undefined
-          && !['complete', 'completed', 'ok', 'done', 'success'].includes(resultStatus))) {
+          // python contract (issue-#329): 'degraded' is the expected terminal
+          // status of a completed lexical-only default build; the channel
+          // state carries the vector-coverage truth. File-level `errors` are
+          // still rejected above, so degraded-with-errors keeps failing.
+          && !['complete', 'completed', 'ok', 'done', 'success', 'degraded'].includes(resultStatus))) {
           const reason = nestedString(result, 'error') ?? nestedString(result, 'message')
             ?? (failedFiles.length > 0 ? 'one or more indexed files failed'
               : `provider result status: ${resultStatus}`);
@@ -978,7 +982,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           return err(appError('CONFLICT', `Native Thai-RAG provider background index was cancelled: ${providerJobId}`, true));
         }
         if (failedPaths.length > 0 || (resultStatus !== undefined
-          && !['complete', 'completed', 'ok', 'done', 'success'].includes(resultStatus))) {
+          // python contract (issue-#329): 'degraded' is the expected terminal
+          // status of a completed lexical-only default build; the channel
+          // state carries the vector-coverage truth. File-level `errors` are
+          // still rejected above, so degraded-with-errors keeps failing.
+          && !['complete', 'completed', 'ok', 'done', 'success', 'degraded'].includes(resultStatus))) {
           const detail = nestedString(result, 'error') ?? nestedString(result, 'message')
             ?? (failedPaths.length > 0 ? `files with errors: ${failedPaths.slice(0, 3).join(', ')}`
               : `provider result status: ${resultStatus}`);

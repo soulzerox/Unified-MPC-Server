@@ -235,12 +235,19 @@ export function createStdioMcpRuntime(
     strictWorkerRegistryGenerationProvider: (): number => rawWorkspaceRepository.readAuthorityGeneration(),
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
   });
+  // Designated forward-only mode (#407 req 3 phase 1): a peer started with
+  // UNIFIED_THAI_RAG_FORWARD_ONLY truthy never runs the owner election; it
+  // follows the designated owner straight or fails with the machine-readable
+  // forward-host-unreachable reason (locked hosts stay untouched).
+  const thaiRagForwardOnly = process.env.UNIFIED_THAI_RAG_FORWARD_ONLY === '1'
+    || process.env.UNIFIED_THAI_RAG_FORWARD_ONLY === 'true';
   const thaiRagCoordinator = new ThaiRagProviderCoordinator({
     dataRoot: dataPath,
     ownerId: `unified-mpc:${process.pid}`,
     providerVersion: '4.61.0',
     embeddingIndexGeneration: 1,
     driver: thaiRagDriver,
+    ...(thaiRagForwardOnly ? { forwardOnly: true } : {}),
   });
   const thaiRagStartRetryMs = options.thaiRagStartRetryMs ?? DEFAULT_THAI_RAG_START_RETRY_MS;
   let thaiRagStart: ReturnType<ThaiRagProviderCoordinator['start']> | undefined;

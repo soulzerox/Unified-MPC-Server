@@ -16,8 +16,11 @@ import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { ok, type ResultBudget } from '@unified-mpc/domain';
-import type { ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
-import { createStdioMcpRuntime } from './stdio-mcp-runtime.js';
+import {
+  THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+  type ThaiRagProviderDriver,
+} from '@unified-mpc/thai-rag';
+import { createStdioMcpRuntime, thaiRagProviderLaunchEnv } from './stdio-mcp-runtime.js';
 import { sharedActivityLeaseDirectoryPath } from '@unified-mpc/mcp-server';
 
 const temporaryRoots: string[] = [];
@@ -381,6 +384,47 @@ describe('stdio MCP runtime', () => {
     } finally {
       await runtime.close();
     }
+  });
+
+  it('forwards the deployment-attested embedding env to the Thai-RAG data-owner launch (#413)', () => {
+    const env = thaiRagProviderLaunchEnv({});
+    expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
+    expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
+    expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
+    // The Python provider already defaults the llama.cpp base URL; the launcher
+    // must not duplicate that default, it only passes an explicit one through.
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
+  });
+
+  it('keeps an explicitly configured embedding environment authoritative (#413)', () => {
+    const env = thaiRagProviderLaunchEnv({
+      THAI_RAG_EMBEDDING_BACKEND: 'ollama',
+      THAI_RAG_LLAMACPP_BASE_URL: 'http://127.0.0.1:9999',
+      THAI_RAG_LLAMACPP_MODEL_PATH: '/models/custom.gguf',
+      THAI_RAG_LLAMACPP_MODEL: 'custom-model',
+      THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '60',
+    });
+    expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('ollama');
+    expect(env.THAI_RAG_LLAMACPP_BASE_URL).toBe('http://127.0.0.1:9999');
+    expect(env.THAI_RAG_LLAMACPP_MODEL_PATH).toBe('/models/custom.gguf');
+    expect(env.THAI_RAG_LLAMACPP_MODEL).toBe('custom-model');
+    expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('60');
+  });
+
+  it('treats explicitly empty embedding env as unset (#413)', () => {
+    const env = thaiRagProviderLaunchEnv({
+      THAI_RAG_EMBEDDING_BACKEND: '',
+      THAI_RAG_LLAMACPP_BASE_URL: '  ',
+      THAI_RAG_LLAMACPP_MODEL_PATH: '',
+      THAI_RAG_LLAMACPP_MODEL: '',
+      THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '',
+    });
+    expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
+    expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
+    expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
   });
 
   it('defaults Ponytail to OFF and loads a persisted mode for direct STDIO', async () => {

@@ -55,7 +55,11 @@ import {
 } from '@unified-mpc/extensions';
 import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
-import { ThaiRagProviderCoordinator, type ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
+import {
+  ThaiRagProviderCoordinator,
+  THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+  type ThaiRagProviderDriver,
+} from '@unified-mpc/thai-rag';
 import {
   AesGcmCheckpointCipher,
   SqliteAgentSwarmRepository,
@@ -216,15 +220,7 @@ export function createStdioMcpRuntime(
         ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')
         : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
       args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
-      env: {
-        // The MCP session manager only forwards a safe environment subset
-        // (PATH/HOME/TMP/LANG), so the provider's data-owner wait budget must
-        // be passed explicitly: publishing a full index can hold the owner
-        // busy for minutes, and a follower that gives up early reports
-        // "data-owner unavailable" and restarts the index forever.
-        THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT:
-          process.env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT ?? '900',
-      },
+      env: thaiRagProviderLaunchEnv(),
     },
     workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
       .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
@@ -988,6 +984,37 @@ export function createStdioMcpRuntime(
       await workspaceIndex.close().catch(() => undefined);
       database.close();
     },
+  };
+}
+
+/**
+ * Environment forwarded into every Thai-RAG data-owner launch (#413).
+ *
+ * The MCP session manager only passes the safe environment subset
+ * (PATH/HOME/TMP/LANG, see `isSafeExternalEnvironmentKey`), so anything the
+ * provider must know about this node's deployment has to be listed here
+ * explicitly. The node contract attests the deployment embedding profile
+ * (`THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE` via llama.cpp); a host booted
+ * without a backend falls back to the thai-rag ollama/nomic defaults, which can
+ * never satisfy that attestation and keeps every rag/memory call behind
+ * CONFLICT. An explicitly configured host environment stays authoritative.
+ */
+export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  // Empty-string values are treated as unset: Python treats ``""`` for
+  // THAI_RAG_LLAMACPP_BASE_URL as a real override, which breaks requests,
+  // so only non-blank host environment stays authoritative.
+  const authoritative = (key: string): string | undefined => {
+    const value = processEnv[key];
+    return value !== undefined && value.trim().length > 0 ? value : undefined;
+  };
+  return {
+    THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT') ?? '900',
+    THAI_RAG_EMBEDDING_BACKEND: authoritative('THAI_RAG_EMBEDDING_BACKEND') ?? 'llamacpp',
+    THAI_RAG_LLAMACPP_MODEL: authoritative('THAI_RAG_LLAMACPP_MODEL') ?? THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+    // The Python provider already defaults the llama.cpp base URL; the launcher
+    // only passes these two through when the host configured them explicitly.
+    ...(authoritative('THAI_RAG_LLAMACPP_BASE_URL') === undefined ? {} : { THAI_RAG_LLAMACPP_BASE_URL: authoritative('THAI_RAG_LLAMACPP_BASE_URL') as string }),
+    ...(authoritative('THAI_RAG_LLAMACPP_MODEL_PATH') === undefined ? {} : { THAI_RAG_LLAMACPP_MODEL_PATH: authoritative('THAI_RAG_LLAMACPP_MODEL_PATH') as string }),
   };
 }
 

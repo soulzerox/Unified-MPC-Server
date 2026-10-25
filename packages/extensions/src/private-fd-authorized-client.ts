@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { randomBytes } from 'node:crypto';
 import type { McpClientFactory, McpClientSession } from './mcp-session-manager.js';
 import { PrivateFdStdioClientTransport } from './private-fd-stdio-transport.js';
+import type { McpResourceSummary, McpToolSummary } from './types.js';
 
 const CANONICAL_WORKSPACE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SCOPED_OPERATIONS = new Set([
@@ -107,9 +108,19 @@ export function createPrivateFdAuthorizedClientFactory(
 
       let closed = false;
       let closing: Promise<void> | undefined;
-      let sweep: NodeJS.Timeout | undefined;
       const sessionAbort = new AbortController();
       const revocationSignal = bootstrap.revocationSignal;
+      let checking = false;
+      // Host-published revocation is immediate; registry polling remains the
+      // fallback for mutations not yet connected to a trusted event publisher.
+      // The sweep starts before closePrivateSession can run so an abort at boot
+      // always observes and clears the same interval lease.
+      const sweep: NodeJS.Timeout = setInterval(() => {
+        if (checking || closed) return;
+        checking = true;
+        void assertLiveBinding().catch(() => undefined).finally(() => { checking = false; });
+      }, 250);
+      sweep.unref();
       function closePrivateSession(): Promise<void> {
         if (closing !== undefined) return closing;
         // Synchronous admission barrier: no further tool dispatch after this
@@ -117,7 +128,7 @@ export function createPrivateFdAuthorizedClientFactory(
         closed = true;
         sessionAbort.abort(denied());
         revocationSignal?.removeEventListener('abort', onRevoked);
-        if (sweep !== undefined) clearInterval(sweep);
+        clearInterval(sweep);
         closing = client.close().catch(() => undefined).finally(() => bootstrap.dispose());
         return closing;
       }
@@ -134,15 +145,6 @@ export function createPrivateFdAuthorizedClientFactory(
           throw denied();
         }
       }
-      // Host-published revocation is immediate; registry polling remains the
-      // fallback for mutations not yet connected to a trusted event publisher.
-      let checking = false;
-      sweep = setInterval(() => {
-        if (checking || closed) return;
-        checking = true;
-        void assertLiveBinding().catch(() => undefined).finally(() => { checking = false; });
-      }, 250);
-      sweep.unref();
 
       async function guardedArgs(tool: string, args: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
         await assertLiveBinding();
@@ -163,7 +165,7 @@ export function createPrivateFdAuthorizedClientFactory(
       }
 
       return {
-        async listTools(listSignal) {
+        async listTools(listSignal?: AbortSignal): Promise<readonly McpToolSummary[]> {
           await assertLiveBinding();
           const catalog = await client.listTools(undefined, { signal: listSignal === undefined ? sessionAbort.signal : AbortSignal.any([listSignal, sessionAbort.signal]) });
           await assertLiveBinding();
@@ -175,7 +177,7 @@ export function createPrivateFdAuthorizedClientFactory(
             ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
           }));
         },
-        async listResources(listSignal) {
+        async listResources(listSignal?: AbortSignal): Promise<readonly McpResourceSummary[]> {
           await assertLiveBinding();
           const resources = await client.listResources(undefined, { signal: listSignal === undefined ? sessionAbort.signal : AbortSignal.any([listSignal, sessionAbort.signal]) });
           await assertLiveBinding();
@@ -186,7 +188,7 @@ export function createPrivateFdAuthorizedClientFactory(
             ...(resource.mimeType === undefined ? {} : { mimeType: resource.mimeType }),
           }));
         },
-        async callTool(name, args, callSignal, timeoutMs) {
+        async callTool(name: string, args: Readonly<Record<string, unknown>>, callSignal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
           const trusted = await guardedArgs(name, args);
           // Recheck immediately before dispatch; an aborted session must not
           // consume a newly issued proof. Closing the child aborts the pending
@@ -205,7 +207,7 @@ export function createPrivateFdAuthorizedClientFactory(
             throw error;
           }
         },
-        async close() {
+        async close(): Promise<void> {
           await closePrivateSession();
         },
       };

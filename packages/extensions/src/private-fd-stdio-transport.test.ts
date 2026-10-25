@@ -11,7 +11,7 @@ const privateSecret = Buffer.from(JSON.stringify({
   workspace_roots: { '14fc20d1-5836-4faf-aed6-0df6a9633a38': '/tmp/registered' },
 }), 'utf8');
 
-function options(bootstrap: Buffer) {
+function options(bootstrap: Buffer): { command: string; args: string[]; bootstrap: Buffer } {
   return { command: process.execPath, args: [fixture], bootstrap };
 }
 

@@ -26,6 +26,13 @@ export interface ThaiRagProviderCoordinatorOptions {
   readonly processIdentityProbe?: PosixProcessIdentityProbe;
   readonly followerConnectTimeoutMs?: number;
   /**
+   * How long a *steady-state* follower request may keep retrying while the owner
+   * socket is being recreated. Startup uses `followerConnectTimeoutMs`; this budget
+   * is separate because a completed owner restart (driver start -> listen) can take
+   * longer than a startup handshake and must not stall an ordinary tool call forever.
+   */
+  readonly followerRequestRetryMs?: number;
+  /**
    * Designated-peer mode (#407 req 3): acquire ownership never, not even after
    * an unreachable owner. Startup connects to the owner socket directly and,
    * when it cannot, fails with the machine-readable `forward-host-unreachable`
@@ -53,6 +60,7 @@ export class ThaiRagProviderCoordinator {
   private readonly runtime: ThaiRagProviderRuntime;
   private readonly socketPath: string;
   private readonly followerConnectTimeoutMs: number;
+  private readonly followerRequestRetryMs: number;
   private server: Server | undefined;
   private role: 'owner' | 'follower' | undefined;
   private nextRequestId = 0;
@@ -61,7 +69,8 @@ export class ThaiRagProviderCoordinator {
     const providerRoot = resolveThaiRagProviderRoot(options.dataRoot);
     if (!providerRoot.ok) throw new Error(providerRoot.error.message);
     this.socketPath = path.join(providerRoot.value, 'provider.sock');
-    this.followerConnectTimeoutMs = options.followerConnectTimeoutMs ?? 2_000;
+    this.followerConnectTimeoutMs = normalizeBudget(options.followerConnectTimeoutMs, 2_000);
+    this.followerRequestRetryMs = normalizeBudget(options.followerRequestRetryMs, 5_000);
     this.runtime = new ThaiRagProviderRuntime({
       dataRoot: options.dataRoot,
       ownerId: options.ownerId,
@@ -237,16 +246,25 @@ export class ThaiRagProviderCoordinator {
 
   /**
    * A follower holds no provider state, so a recreated owner socket (owner restart)
-   * is recoverable. Retry only failures that happened before the request reached the
-   * wire: provider calls mutate state, so an already-written request is never replayed
-   * (#418).
+   * is recoverable. Only failures that happened before `connect` are retried: provider
+   * calls mutate state, so an already-delivered request is never replayed (#418).
    */
   private async requestFollower(request: ProviderRequest, signal?: AbortSignal): Promise<Result<unknown>> {
-    const deadline = Date.now() + this.followerConnectTimeoutMs;
+    const deadline = Date.now() + this.followerRequestRetryMs;
+    let attempts = 0;
     for (;;) {
+      attempts += 1;
       const attempt = await this.requestAttempt(request, signal);
-      if (attempt.result.ok || !attempt.wirelessFailure) return attempt.result;
-      if (signal?.aborted === true || Date.now() >= deadline) return attempt.result;
+      if (attempt.result.ok || !attempt.retryableFailure) return attempt.result;
+      if (signal?.aborted === true || Date.now() >= deadline) {
+        const failure = attempt.result.ok ? undefined : attempt.result.error;
+        if (failure === undefined || attempts < 2) return attempt.result;
+        return err(appError(failure.code, failure.message, failure.recoverable, {
+          ...(failure.details ?? {}),
+          reason: 'follower-reconnect-exhausted',
+          attempts,
+        }));
+      }
       await delay(20, signal);
     }
   }
@@ -258,10 +276,10 @@ export class ThaiRagProviderCoordinator {
   private requestAttempt(
     request: ProviderRequest,
     signal?: AbortSignal,
-  ): Promise<{ result: Result<unknown>; wirelessFailure: boolean }> {
+  ): Promise<{ result: Result<unknown>; retryableFailure: boolean }> {
     return new Promise((resolve) => {
       if (signal?.aborted === true) {
-        resolve({ result: err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider request was cancelled', true)), wirelessFailure: false });
+        resolve({ result: err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider request was cancelled', true)), retryableFailure: false });
         return;
       }
       const socket = createConnection(this.socketPath);
@@ -269,16 +287,24 @@ export class ThaiRagProviderCoordinator {
       let buffer = '';
       let settled = false;
       let delivered = false;
-      const finish = (result: Result<unknown>): void => {
+      const finish = (result: Result<unknown>, retryableFailure = false): void => {
         if (settled) return;
         settled = true;
         signal?.removeEventListener('abort', onAbort);
         socket.destroy();
-        resolve({ result, wirelessFailure: !delivered });
+        resolve({ result, retryableFailure: retryableFailure });
       };
       const onAbort = (): void => finish(err(appError('PROCESS_TIMEOUT', 'Thai-RAG provider request was cancelled', true)));
       signal?.addEventListener('abort', onAbort, { once: true });
-      socket.once('error', (error) => finish(err(appError('CONFLICT', `Thai-RAG provider owner socket error: ${errorMessage(error)}`, true))));
+      socket.once('error', (error) => {
+        finish(
+          err(appError('CONFLICT', `Thai-RAG provider owner socket error: ${errorMessage(error)}`, true)),
+          !delivered && isRetryableConnectCode(isNodeError(error) ? error.code : undefined),
+        );
+      });
+      socket.once('close', () => {
+        finish(err(appError('CONFLICT', 'Thai-RAG provider owner closed the connection before responding', true)));
+      });
       socket.on('data', (chunk: string) => {
         buffer += chunk;
         const newline = buffer.indexOf('\n');
@@ -358,13 +384,27 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       resolve();
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    // This delay is part of awaited startup/recovery work and must keep the parent alive.
-    signal?.addEventListener('abort', () => {
+    const onAbort = (): void => {
       clearTimeout(timer);
       resolve();
-    }, { once: true });
+      signal?.removeEventListener('abort', onAbort);
+    };
+    // This delay is part of awaited startup/recovery work and must keep the parent alive.
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function normalizeBudget(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, value);
+}
+
+function isRetryableConnectCode(code: string | undefined): boolean {
+  return code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EAGAIN';
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {

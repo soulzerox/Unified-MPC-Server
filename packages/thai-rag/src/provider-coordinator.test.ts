@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { getEventListeners } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import os from 'node:os';
@@ -467,6 +468,7 @@ describe('ThaiRagProviderCoordinator', () => {
       embeddingIndexGeneration: 1,
       forwardOnly: true,
       followerConnectTimeoutMs: 120,
+      followerRequestRetryMs: 120,
       driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
     });
     expect((await follower.start()).ok).toBe(true);
@@ -477,9 +479,13 @@ describe('ThaiRagProviderCoordinator', () => {
     const elapsed = Date.now() - startedAt;
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.message).toContain('socket error');
+    if (!result.ok) {
+      expect(result.error.message).toContain('socket error');
+      expect(result.error.details?.reason).toBe('follower-reconnect-exhausted');
+      expect(result.error.details?.attempts).toBeGreaterThan(1);
+    }
     expect(elapsed).toBeGreaterThanOrEqual(80);
-    expect(elapsed).toBeLessThan(5_000);
+    expect(elapsed).toBeLessThan(1_000);
 
     await follower.close();
   });
@@ -525,6 +531,82 @@ describe('ThaiRagProviderCoordinator', () => {
       await new Promise<void>((resolve) => destructive.close(() => resolve()));
       await follower.close();
     }
+  });
+
+  it('settles instead of hanging when the owner closes after receiving the request (#418)', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-closed-cleanly',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerRequestRetryMs: 300,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+    await owner.close();
+
+    let connections = 0;
+    const finServer = createServer((socket) => {
+      connections += 1;
+      socket.once('data', () => socket.end());
+    });
+    await new Promise<void>((resolve, reject) => {
+      finServer.once('error', reject);
+      finServer.listen(socketPath, () => resolve());
+    });
+    try {
+      const startedAt = Date.now();
+      const result = await follower.call('memory.search', { query: 'owner dies mid-request' });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain('closed the connection before responding');
+      expect(connections).toBe(1);
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    } finally {
+      await new Promise<void>((resolve) => finServer.close(() => resolve()));
+      await follower.close();
+    }
+  });
+
+  it('does not leak abort listeners across follower retries (#418)', async () => {
+    const dataRoot = await root();
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'owner-listener-leak',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-forwarder',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      forwardOnly: true,
+      followerRequestRetryMs: 120,
+      driver: driver({ start: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    expect((await follower.start()).ok).toBe(true);
+    await owner.close();
+
+    const controller = new AbortController();
+    const result = await follower.call('memory.search', { query: 'retry loop' }, controller.signal);
+
+    expect(result.ok).toBe(false);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    await follower.close();
   });
 });
 

@@ -179,4 +179,29 @@ describe('native provider admission index status truth', () => {
       expect(counts().indexStarts).toBe(2);
     } finally { await driver.stop(); }
   });
+
+  it('releases the admission gate when the worker dies mid-run and lets a later read re-admit without a restart (issue #407)', async () => {
+    const worker = { broken: true };
+    const { driver, jobId } = await fixture(async () => {
+      if (worker.broken) throw new Error('Connection closed: index worker session terminated');
+      return response('index_status', {
+        status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 7 },
+      });
+    });
+    try {
+      const first = await terminalJob(driver, jobId);
+      const firstPayload = (first as { ok: true; value: { status: string; error?: string } }).value;
+      // Acceptance "killing the index worker mid-run releases the gate" — a
+      // hard worker death is not a call timeout: the monitor must fail the
+      // job instead of treating it as retryable.
+      expect(firstPayload.status).toBe('failed');
+      // The gate must not survive the failure: the next guarded read
+      // re-admits with a fresh job and succeeds without restarting the
+      // driver runtime.
+      worker.broken = false;
+      const reAdmit = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+      expect(reAdmit.ok).toBe(true);
+    } finally { await driver.stop(); }
+  });
 });

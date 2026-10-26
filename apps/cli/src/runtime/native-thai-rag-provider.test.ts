@@ -314,7 +314,7 @@ describe('NativeThaiRagProviderDriver', () => {
       const admitted = await driver.call('pre_edit_context', {
         workspace_id: workspaceId, file_path: 'src/probe.ts',
       });
-      expect(admitted.ok).toBe(true);
+      expect(admitted).toMatchObject({ ok: true });
       // The cold admission monitor can expose its local job receipt for a
       // short time after the provider reports done. Wait until that exact
       // warmup job is terminal and a distinct normal job has been created.
@@ -1674,7 +1674,10 @@ describe('NativeThaiRagProviderDriver', () => {
     const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId });
 
     expect(status.ok && isRecord(status.value) && status.value.status).toBe('completed');
-    expect(maxInFlight).toBe(1);
+    // Memory recall is deliberately served while a workspace admission pass
+    // holds the indexer slot (#422), so one admission code_index and the
+    // recall may overlap. Code-index calls themselves stay single-flight.
+    expect(maxInFlight).toBeLessThanOrEqual(2);
     const indexCall = calls.find((call) => call.tool === 'code_index');
     expect(indexCall?.args).toMatchObject({
       workspace_path: workspaceRoot,
@@ -2272,6 +2275,123 @@ describe('NativeThaiRagProviderDriver', () => {
     const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as { jobs: Array<{ status: string; workspaceId: string }> };
     expect(persisted.jobs).toContainEqual(expect.objectContaining({ workspaceId, status: 'failed' }));
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
+    await driver.stop();
+  });
+
+  it('skips admission verification when the persisted source identity is unchanged across restarts', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => sourceIdentity,
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    await first.stop();
+
+    calls.length = 0;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index')).toEqual([]);
+    await second.stop();
+  });
+
+  it('re-verifies an unchanged workspace when its source identity changed', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    let head = 'a'.repeat(40);
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => ({
+        repositoryIdentity: 'repo-a',
+        gitCommonDirIdentity: 'git-a',
+        worktreeIdentity: 'worktree-a',
+        workspaceHead: head,
+        dirtyFingerprint: 'clean',
+        stagedFingerprint: 'none',
+      }),
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await first.stop();
+
+    head = 'b'.repeat(40);
+    calls.length = 0;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    await second.stop();
+  });
+
+  it('keeps memory writes usable while another workspace admission is running', async () => {
+    const dataRoot = await tempRoot();
+    const readyRoot = await tempRoot();
+    const busyRoot = await tempRoot();
+    let releaseIndex: (() => void) | undefined;
+    const indexGate = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: recoveredWorkspaceId, realRootPath: readyRoot },
+        { id: workspaceId, realRootPath: busyRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(`${tool}:${String(args.workspace_id ?? '')}`);
+          if (tool === 'code_index' && args.workspace_id === workspaceId) {
+            markIndexStarted?.();
+            await indexGate;
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const busy = driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    await indexStarted;
+    await expect(driver.call('remember', { workspace_id: recoveredWorkspaceId, content: 'memory remains usable' }))
+      .resolves.toMatchObject({ ok: true });
+    expect(calls).toContain(`remember:${recoveredWorkspaceId}`);
+    releaseIndex?.();
+    await busy;
     await driver.stop();
   });
 });

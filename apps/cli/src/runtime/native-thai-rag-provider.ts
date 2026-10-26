@@ -1,6 +1,13 @@
 import { lstat, mkdir, readdir, readlink, rm, symlink, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
+import {
+  appError,
+  err,
+  ok,
+  type Result,
+  type ResultBudget,
+  type WorkspaceSourceEvidenceIdentity,
+} from '@unified-mpc/domain';
 import {
   McpSessionManager,
   createPrivateFdAuthorizedClientFactory,
@@ -10,6 +17,7 @@ import {
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 import {
   ThaiRagIndexJobStore,
+  ThaiRagWorkspaceVerificationStore,
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
@@ -35,6 +43,12 @@ const REQUIRED_TOOLS = new Set([
   'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',
   'forget', 'code_index', 'index_status', 'code_search', 'code_context',
   'health', 'version',
+]);
+// Memory/health operations are backed by their own provider state, not the
+// code-index generation. They must stay usable while a workspace admission
+// verification holds the single-indexer slot (issue #422).
+const INDEX_GATE_EXEMPT_TOOLS = new Set([
+  'remember', 'recall', 'forget', 'record_event', 'health', 'version',
 ]);
 
 export interface NativeThaiRagWorkspace {
@@ -64,12 +78,21 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly indexJobPollMs?: number;
   /** Consecutive index_status call timeouts tolerated by the admission monitor before the job is failed and the admission gate released (issue #407 deadline). */
   readonly indexStatusTimeoutCap?: number;
+  /**
+   * Durable source identity used to make admission verification idempotent
+   * across provider restarts (issue #422). Returning null keeps the
+   * conservative behaviour: the workspace is verified on every admission.
+   */
+  readonly workspaceSourceIdentityProvider?: (
+    workspace: NativeThaiRagWorkspace,
+  ) => Promise<WorkspaceSourceEvidenceIdentity | null>;
 }
 
 export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly sessions: McpSessionManager;
   private readonly indexSessions: McpSessionManager;
   private readonly jobs: ThaiRagIndexJobStore;
+  private readonly verifications: ThaiRagWorkspaceVerificationStore;
   private readonly healthRefreshMs: number;
   private readonly indexJobPollMs: number;
   private readonly indexStatusTimeoutCap: number;
@@ -142,6 +165,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       idleTimeoutMs: 24 * 60 * 60_000,
     });
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
+    this.verifications = new ThaiRagWorkspaceVerificationStore(options.dataRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
     this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? 30));
@@ -332,7 +356,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`))
         : ok(job);
     }
-    const bypassBusyRefresh = tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args);
+    const bypassBusyRefresh = INDEX_GATE_EXEMPT_TOOLS.has(tool)
+      || (tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args));
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : undefined;
     const refreshed = tool === 'cancel_index' || bypassBusyRefresh
       ? ok(undefined)
@@ -734,16 +759,27 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       const pending = new Set(this.pendingReindexIds);
       for (const workspace of workspaces.filter((entry) => pending.has(entry.id)
         && requestedWorkspaceId === entry.id)) {
+        const reason = this.pendingReindexReasons.get(workspace.id) ?? 'startup_verification';
+        const verification = await this.evaluateWorkspaceVerification(workspace, reason);
+        if (verification.skip) {
+          // The persisted verification proves this exact source identity was
+          // already admitted. Drop the pending marker so a restart or another
+          // child cannot re-enqueue the same no-op pass (issue #422).
+          this.pendingReindexIds.delete(workspace.id);
+          this.pendingReindexReasons.delete(workspace.id);
+          continue;
+        }
         return this.startWorkspaceAdmissionIndex(
           workspace,
           false, // Preserve provider-side validated incremental reuse on admission.
-          this.pendingReindexReasons.get(workspace.id) ?? 'startup_verification',
+          reason,
           generation,
           sourcesRoot,
           workspaces,
           previousWorkspaces,
           previousRoots,
           previousRootIds,
+          verification.sourceIdentity,
         );
       }
     }
@@ -762,7 +798,33 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.workspaceRootIds.clear();
     for (const [id, root] of nextRoots) this.workspaceRoots.set(id, root);
     for (const [root, id] of nextRootIds) this.workspaceRootIds.set(root, id);
+    if (requestedWorkspaceId !== undefined && this.queuedAdmissionWorkspaceIds.size > 0) {
+      // A verified workspace releases the admission slot without starting a
+      // monitor, so its finally block will never drain the queue. Continue the
+      // chain here instead of leaving queued workspaces parked forever.
+      queueMicrotask(() => this.scheduleNextQueuedWorkspaceAdmission(generation));
+    }
     return ok(undefined);
+  }
+
+  private async evaluateWorkspaceVerification(
+    workspace: NativeThaiRagWorkspace,
+    reason: ThaiRagReindexReason,
+  ): Promise<{ readonly skip: boolean; readonly sourceIdentity?: WorkspaceSourceEvidenceIdentity }> {
+    if (reason === 'explicit_request' || reason === 'explicit_force_reindex') {
+      return { skip: false };
+    }
+    const provider = this.options.workspaceSourceIdentityProvider;
+    if (provider === undefined) return { skip: false };
+    let sourceIdentity: WorkspaceSourceEvidenceIdentity | null;
+    try {
+      sourceIdentity = await provider(workspace);
+    } catch {
+      return { skip: false };
+    }
+    if (sourceIdentity === null) return { skip: false };
+    const fresh = await this.verifications.isFresh(workspace.id, sourceIdentity);
+    return { skip: fresh.ok && fresh.value, sourceIdentity };
   }
 
   private scheduleNextQueuedWorkspaceAdmission(generation: number): void {
@@ -792,6 +854,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     previousWorkspaces: readonly NativeThaiRagWorkspace[],
     previousRoots: ReadonlyMap<string, string>,
     previousRootIds: ReadonlyMap<string, string>,
+    sourceIdentity?: WorkspaceSourceEvidenceIdentity,
   ): Promise<Result<void>> {
     const ownerId = this.ownerId ?? '';
     const job = await this.jobs.create(workspace.id, force, ownerId, reindexReason);
@@ -894,6 +957,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }
         this.pendingReindexIds.delete(workspace.id);
         this.pendingReindexReasons.delete(workspace.id);
+        await this.recordWorkspaceVerification(workspace.id, sourceIdentity, job.jobId, indexed.value, ownerId);
         return ok(undefined);
       } catch (error: unknown) {
         await this.jobs.fail(job.jobId, errorMessage(error), ownerId).catch(() => undefined);
@@ -920,6 +984,44 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       workspaceId: workspace.id,
       jobId: job.jobId,
     }));
+  }
+
+  private async recordWorkspaceVerification(
+    workspaceId: string,
+    sourceIdentity: WorkspaceSourceEvidenceIdentity | undefined,
+    jobId: string,
+    result: unknown,
+    ownerId: string,
+  ): Promise<void> {
+    if (sourceIdentity === undefined) return;
+    const progress = nativeIndexProgress(result);
+    const localJob = await this.jobs.get(jobId, ownerId, workspaceId).catch(() => null);
+    const indexedFiles = progress?.indexedFiles ?? localJob?.indexedFiles ?? 0;
+    const skippedFiles = progress?.skippedFiles ?? localJob?.skippedFiles ?? 0;
+    const totalFiles = Math.max(progress?.totalFiles ?? localJob?.totalFiles ?? 0, indexedFiles + skippedFiles);
+    const providerStatus = nestedString(result, 'status');
+    const lexicalOnly = nestedValue(result, 'lexical_only') === true;
+    const outcome = providerStatus === 'degraded' || lexicalOnly
+      ? 'degraded' as const
+      : indexedFiles > 0 ? 'changed' as const : 'unchanged' as const;
+    const sourceSnapshotId = nestedString(result, 'source_snapshot_id');
+    const generationId = nestedString(result, 'generation_id');
+    try {
+      await this.verifications.record({
+        workspaceId,
+        sourceIdentity,
+        outcome,
+        ...(providerStatus === undefined ? {} : { providerStatus }),
+        indexedFiles,
+        skippedFiles,
+        totalFiles,
+        ...(sourceSnapshotId === undefined ? {} : { sourceSnapshotId }),
+        ...(generationId === undefined ? {} : { generationId }),
+      });
+    } catch {
+      // Verification persistence is an optimization: a failed write must never
+      // fail an admission that already published a usable generation.
+    }
   }
 
   private async waitForWorkspaceAdmissionIndex(
@@ -1401,7 +1503,15 @@ function nestedValue(value: unknown, key: string, depth = 0): unknown {
     const nested = nestedValue(current.structuredContent, key, depth + 1);
     if (nested !== undefined) return nested;
   }
-  return Object.hasOwn(current, key) ? current[key] : undefined;
+  // Own properties describe the envelope; `result` is the terminal provider
+  // payload. Check the current object first so an envelope status (`done`) is
+  // never shadowed by a result status (`complete`).
+  if (Object.hasOwn(current, key)) return current[key];
+  if (isRecord(current.result)) {
+    const nested = nestedValue(current.result, key, depth + 1);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
 }
 
 function nativeIndexProgress(value: unknown): {
@@ -1416,13 +1526,17 @@ function nativeIndexProgress(value: unknown): {
   readonly newEmbeddedChunks?: number;
   readonly cacheMissReasons?: Readonly<Record<string, number>>;
 } | undefined {
-  const indexedFiles = nestedValue(value, 'indexed_files');
-  const skippedFiles = nestedValue(value, 'skipped_files');
-  const totalFiles = nestedValue(value, 'total_files');
   const valid = (number: unknown): number is number =>
     typeof number === 'number' && Number.isSafeInteger(number) && number >= 0 && number <= 100_000_000;
-  if (!valid(indexedFiles) || !valid(skippedFiles) || !valid(totalFiles)
-    || indexedFiles + skippedFiles > totalFiles) return undefined;
+  // The provider reports final counters as `indexed`/`skipped` inside the
+  // terminal result, while progress envelopes use `indexed_files`. Accept both
+  // so the durable job never records 0 for a pass that actually indexed files.
+  const indexedFiles = nestedValue(value, 'indexed_files') ?? nestedValue(value, 'indexed');
+  const skippedFiles = nestedValue(value, 'skipped_files') ?? nestedValue(value, 'skipped');
+  const reportedTotal = nestedValue(value, 'total_files');
+  if (!valid(indexedFiles) || !valid(skippedFiles)) return undefined;
+  const totalFiles = valid(reportedTotal) ? reportedTotal : indexedFiles + skippedFiles;
+  if (indexedFiles + skippedFiles > totalFiles) return undefined;
   const base = { indexedFiles, skippedFiles, totalFiles };
 
   const cacheHitFiles = nestedValue(value, 'cache_hit_files');

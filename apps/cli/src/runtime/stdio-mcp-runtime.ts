@@ -80,7 +80,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
-import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
@@ -223,6 +223,10 @@ export function createStdioMcpRuntime(
     if (primary === undefined) throw new Error('No active project workspace is available');
     return primary.realRootPath;
   };
+  const gitService = new GitService(workspaceRepository);
+  const custodyActor: FileActor = {
+    clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',
+  };
   const thaiRagInstallRoot = path.resolve(
     options.thaiRagProviderPath?.trim()
       || settingsRepository.get(USER_SETTING_KEYS.thaiRagProviderPath)?.trim()
@@ -240,6 +244,27 @@ export function createStdioMcpRuntime(
     },
     workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
       .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
+    workspaceSourceIdentityProvider: async (workspace): Promise<WorkspaceSourceEvidenceIdentity | null> => {
+      // Admission verification must be idempotent for the exact source the
+      // provider already admitted (issue #422). Git identity is cheap to read
+      // and changes whenever tracked or untracked source content changes.
+      try {
+        const observed = await gitService.observeWorkspace(custodyActor, workspace.id);
+        if (!observed.ok) return null;
+        const source = observed.value;
+        return {
+          repositoryIdentity: source.repositoryIdentity,
+          gitCommonDirIdentity: source.gitCommonDirIdentity,
+          worktreeIdentity: source.worktreeIdentity,
+          ...(source.branch === null ? {} : { branchName: source.branch }),
+          workspaceHead: source.head,
+          dirtyFingerprint: source.dirtyFingerprint,
+          stagedFingerprint: source.stagedFingerprint,
+        };
+      } catch {
+        return null;
+      }
+    },
     strictWorkerAuthorizedWorkspacesProvider: createStrictThaiRagGoalAdmissionProvider(rawWorkspaceRepository),
     strictWorkerRevocationSignalProvider: workspaceAuthorityWatcher.signal,
     strictWorkerAuthorityGenerationProvider: workspaceAuthorityEpoch.currentGeneration,
@@ -359,11 +384,7 @@ export function createStdioMcpRuntime(
     const unsafe = result.value.entries.filter((entry) => entry.state !== 'moved');
     if (unsafe.length > 0) throw new Error(`Recovery reconciliation found unsafe entries: ${unsafe.length}`);
   });
-  const gitService = new GitService(workspaceRepository);
   const evidenceLedger = new SqliteGoalWorkspaceRetentionEvidenceRepository(database);
-  const custodyActor: FileActor = {
-    clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',
-  };
   const getRegisteredGoal = async (rootPath: string): Promise<Workspace | null> =>
     (await workspaceRepository.list()).find((entry) =>
       entry.realRootPath === rootPath && entry.lifecycleKind === 'goal') ?? null;

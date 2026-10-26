@@ -2526,6 +2526,72 @@ describe('NativeThaiRagProviderDriver', () => {
     await second.stop();
   }, 10_000);
 
+  it('re-verifies without dropping the request session when the snapshot probe times out', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const closed = new Set<number>();
+    let probeStarted = false;
+    let hangProbe = false;
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      snapshotProbeTimeoutMs: 25,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async (): Promise<typeof sourceIdentity> => sourceIdentity,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        onClose(connection): void { closed.add(connection); },
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') {
+            if (args.file_path === '.unified-mpc-verification-probe') {
+              probeStarted = true;
+              if (hangProbe) return new Promise<never>(() => undefined);
+              return snapshotPreEdit(workspaceId);
+            }
+            return success('ok');
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await first.stop();
+
+    calls.length = 0;
+    closed.clear();
+    probeStarted = false;
+    hangProbe = true;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+
+    expect(probeStarted).toBe(true);
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    // Connection 1 is the second driver's warm request session; the timed-out
+    // probe must drop only its isolated child, never the request session.
+    expect(closed.has(1)).toBe(false);
+    await second.stop();
+  }, 10_000);
+
   it('re-verifies when the persisted provider snapshot proof is unavailable', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

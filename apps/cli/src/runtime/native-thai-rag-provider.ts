@@ -76,6 +76,8 @@ export interface NativeThaiRagProviderDriverOptions {
   /** Required for strict mode: admission-checked, host-owned workspace scopes; legacy uses workspacesProvider. */
   readonly strictWorkerAuthorizedWorkspacesProvider?: () => Promise<readonly NativeThaiRagWorkspace[]>;
   readonly callTimeoutMs?: number;
+  /** Per-session timeout for the isolated admission snapshot probe (issue #422). */
+  readonly snapshotProbeTimeoutMs?: number;
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
   readonly indexJobPollMs?: number;
@@ -97,6 +99,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   // Isolated session for admission snapshot probes: a timed-out probe drops
   // only this child, never the warm request session or a live index session.
   private readonly probeSessions: McpSessionManager;
+  private readonly snapshotProbeTimeoutMs: number;
   private readonly jobs: ThaiRagIndexJobStore;
   private readonly verifications: ThaiRagWorkspaceVerificationStore;
   private readonly healthRefreshMs: number;
@@ -157,6 +160,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           },
         })
       : options.clientFactory;
+    this.snapshotProbeTimeoutMs = Math.max(1, Math.floor(options.snapshotProbeTimeoutMs ?? 5_000));
     this.sessions = new McpSessionManager({
       ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
       ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
@@ -173,9 +177,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     });
     this.probeSessions = new McpSessionManager({
       ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
-      callTimeoutMs: 5_000,
+      callTimeoutMs: this.snapshotProbeTimeoutMs,
       validateToolSchemas: false,
-      idleTimeoutMs: 24 * 60 * 60_000,
+      // A probe child is not pinned: let it age out instead of keeping a
+      // permanent extra provider child alive for the whole driver lifetime.
+      idleTimeoutMs: 60_000,
     });
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
     this.verifications = new ThaiRagWorkspaceVerificationStore(options.dataRoot);
@@ -864,7 +870,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       const status = await this.probeSessions.call(SERVER_NAME, this.launchConfig, 'pre_edit_context', {
         file_path: record.probeFilePath,
         workspace_id: record.workspaceId,
-      }, undefined, {}, undefined, 5_000);
+      }, undefined, {}, undefined, this.snapshotProbeTimeoutMs);
       const normalized = normalizeWorkerCallResult('pre_edit_context', status);
       if (!normalized.ok) return false;
       const generation = nestedString(normalized.value, 'index_generation_id');

@@ -94,6 +94,9 @@ export interface NativeThaiRagProviderDriverOptions {
 export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly sessions: McpSessionManager;
   private readonly indexSessions: McpSessionManager;
+  // Isolated session for admission snapshot probes: a timed-out probe drops
+  // only this child, never the warm request session or a live index session.
+  private readonly probeSessions: McpSessionManager;
   private readonly jobs: ThaiRagIndexJobStore;
   private readonly verifications: ThaiRagWorkspaceVerificationStore;
   private readonly healthRefreshMs: number;
@@ -166,6 +169,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       callTimeoutMs: Math.max(options.callTimeoutMs ?? 60_000, INDEX_CALL_TIMEOUT_MS),
       validateToolSchemas: false,
       preserveReadOnlyStatusSessionOnTimeout: true,
+      idleTimeoutMs: 24 * 60 * 60_000,
+    });
+    this.probeSessions = new McpSessionManager({
+      ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
+      callTimeoutMs: 5_000,
+      validateToolSchemas: false,
       idleTimeoutMs: 24 * 60 * 60_000,
     });
     this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
@@ -421,6 +430,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.sessions.unpin(SERVER_NAME);
     await this.sessions.close().catch(() => undefined);
     await this.indexSessions.close().catch(() => undefined);
+    await this.probeSessions.close().catch(() => undefined);
     await Promise.allSettled(this.workspaceIndexMonitors.values());
     this.stopped = true;
     return ok(undefined);
@@ -849,7 +859,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return false;
     }
     try {
-      const status = await this.sessions.call(SERVER_NAME, this.launchConfig, 'pre_edit_context', {
+      // The probe has its own short-timeout session, so a slow/hung probe can
+      // never drop the warm request session or the dedicated index session.
+      const status = await this.probeSessions.call(SERVER_NAME, this.launchConfig, 'pre_edit_context', {
         file_path: record.probeFilePath,
         workspace_id: record.workspaceId,
       }, undefined, {}, undefined, 5_000);

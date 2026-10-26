@@ -2305,7 +2305,9 @@ describe('NativeThaiRagProviderDriver', () => {
             return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
           }
           if (tool === 'index_status') return completedIndexStatus(workspaceId);
-          if (tool === 'pre_edit_context') return snapshotPreEdit(workspaceId);
+          if (tool === 'pre_edit_context') {
+            return args.file_path === '.unified-mpc-verification-probe' ? snapshotPreEdit(workspaceId) : success('ok');
+          }
           return success('ok');
         },
       }),
@@ -2351,7 +2353,9 @@ describe('NativeThaiRagProviderDriver', () => {
             return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
           }
           if (tool === 'index_status') return completedIndexStatus(workspaceId);
-          if (tool === 'pre_edit_context') return snapshotPreEdit(workspaceId);
+          if (tool === 'pre_edit_context') {
+            return args.file_path === '.unified-mpc-verification-probe' ? snapshotPreEdit(workspaceId) : success('ok');
+          }
           return success('ok');
         },
       }),
@@ -2451,7 +2455,9 @@ describe('NativeThaiRagProviderDriver', () => {
             return backgroundIndexStart(target);
           }
           if (tool === 'index_status') return completedIndexStatus(target);
-          if (tool === 'pre_edit_context') return snapshotPreEdit(target);
+          if (tool === 'pre_edit_context') {
+            return args.file_path === '.unified-mpc-verification-probe' ? snapshotPreEdit(target) : success('ok');
+          }
           return success('ok');
         },
       }),
@@ -2548,6 +2554,7 @@ describe('NativeThaiRagProviderDriver', () => {
           }
           if (tool === 'index_status') return completedIndexStatus(workspaceId);
           if (tool === 'pre_edit_context') {
+            if (args.file_path !== '.unified-mpc-verification-probe') return success('ok');
             if (failNextSnapshotProbe) {
               failNextSnapshotProbe = false;
               return snapshotPreEdit(workspaceId, 'stale-generation');

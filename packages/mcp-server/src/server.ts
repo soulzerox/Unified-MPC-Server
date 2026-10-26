@@ -9,7 +9,7 @@ import { RunBudgetGuard, type RunBudgetContext } from './run-budget.js';
 import { registerTasksProtocol } from './tasks-protocol.js';
 import { MODERN_TASKS_EXTENSION_ID } from './modern-tasks-protocol.js';
 import { registerModernTasksProtocol } from './modern-tasks-wire.js';
-import { ToolRegistry, type ActiveProjectScope, type AuthorizationMode, type HostMutationApprovalRequest, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
+import { ToolRegistry, type ActiveProjectScope, type AuthorizationMode, type HostMutationApprovalRequest, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
 import type { SetOfMarksObservationStore } from './set-of-marks-service.js';
 import { BUNDLED_PONYTAIL_SKILL_ID, PonytailActivationLedger } from './ponytail-runtime.js';
 import { HarnessActivationLedger } from './harness-runtime.js';
@@ -49,6 +49,8 @@ export interface McpServerOptions {
   readonly activeWorkspaceScopeProvider?: () => WorkspaceScope | null | Promise<WorkspaceScope | null>;
   /** Host-owned active project set. The first scope is the primary/default workspace. */
   readonly activeWorkspaceScopesProvider?: () => readonly WorkspaceScope[] | Promise<readonly WorkspaceScope[]>;
+  /** Why no usable active scope exists, when the host can tell the causes apart (#428). */
+  readonly activeWorkspaceScopeUnavailableProvider?: () => WorkspaceScopeUnavailable | null | Promise<WorkspaceScopeUnavailable | null>;
   readonly hostMutationApprovalProvider?: (request: HostMutationApprovalRequest) => boolean | Promise<boolean>;
   /** @deprecated Request-selected workspace lookup is not an authorization boundary. */
   readonly workspaceScopeResolver?: (workspaceId: string) => WorkspaceScope | null | Promise<WorkspaceScope | null>;
@@ -108,6 +110,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.destructivePolicyProvider === undefined ? {} : { destructivePolicyProvider: options.destructivePolicyProvider }),
     ...(options.activeWorkspaceScopeProvider === undefined ? {} : { activeWorkspaceScopeProvider: options.activeWorkspaceScopeProvider }),
     ...(options.activeWorkspaceScopesProvider === undefined ? {} : { activeWorkspaceScopesProvider: options.activeWorkspaceScopesProvider }),
+    ...(options.activeWorkspaceScopeUnavailableProvider === undefined ? {} : { activeWorkspaceScopeUnavailableProvider: options.activeWorkspaceScopeUnavailableProvider }),
     ...(options.hostMutationApprovalProvider === undefined ? {} : { hostMutationApprovalProvider: options.hostMutationApprovalProvider }),
     ...(options.workspaceScopeResolver === undefined ? {} : { workspaceScopeResolver: options.workspaceScopeResolver }),
     ...(options.activeProjectProvider === undefined ? {} : { activeProjectProvider: options.activeProjectProvider }),

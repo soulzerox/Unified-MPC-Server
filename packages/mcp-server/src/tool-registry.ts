@@ -51,7 +51,7 @@ import { ActivityTracker, describeStructuredResultDetail, summarizeStructuredRes
 import { ContextEngine } from './context-engine.js';
 import { ContextEconomyRuntime } from './context-economy.js';
 import { hasExplicitUserConfirmation } from './destructive-policy.js';
-import { isScopedAutoApprovalAllowed, type WorkspaceScope } from './destructive-scope.js';
+import { isScopedAutoApprovalAllowed, type WorkspaceScope, type WorkspaceScopeUnavailable } from './destructive-scope.js';
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
@@ -107,7 +107,7 @@ const THAI_RAG_EVENT_TYPES = ['decision', 'requirement', 'constraint', 'preferen
 const THAI_RAG_EVENT_TYPE_SET = new Set<string>(THAI_RAG_EVENT_TYPES);
 
 export type { McpApplicationServices } from './tools/tool-types.js';
-export type { ActiveProjectScope, WorkspaceScope } from './destructive-scope.js';
+export type { ActiveProjectScope, WorkspaceScope, WorkspaceScopeUnavailable, WorkspaceScopeUnavailableReason } from './destructive-scope.js';
 export type AuthorizationMode = InvocationAuthorizationMode;
 
 export const MANDATORY_HARNESS_TOOL_NAMES = ['workspace_bootstrap', 'prepare_code_change'] as const;
@@ -130,6 +130,12 @@ export interface ToolRegistryOptions {
   readonly activeWorkspaceScopeProvider?: () => WorkspaceScope | null | Promise<WorkspaceScope | null>;
   /** Host-owned active project set; first entry is the primary/default project. */
   readonly activeWorkspaceScopesProvider?: () => readonly WorkspaceScope[] | Promise<readonly WorkspaceScope[]>;
+  /**
+   * #428: why the host has no usable active scope. Consulted only when a scope
+   * cannot be resolved, so the failure names the real cause instead of claiming
+   * the target path is outside the workspace.
+   */
+  readonly activeWorkspaceScopeUnavailableProvider?: () => WorkspaceScopeUnavailable | null | Promise<WorkspaceScopeUnavailable | null>;
   /** @deprecated Compatibility alias for activeWorkspaceScopeProvider. */
   readonly activeProjectProvider?: () => WorkspaceScope | null;
   /** Host-owned exact-action approval boundary, such as a native desktop confirmation dialog. */
@@ -254,6 +260,7 @@ export class ToolRegistry {
   private readonly harnessActivation: HarnessActivationLedger;
   private readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
   private readonly activeWorkspaceScopesProvider: (() => Promise<readonly WorkspaceScope[]>) | undefined;
+  private readonly activeWorkspaceScopeUnavailableProvider: (() => Promise<WorkspaceScopeUnavailable | null>) | undefined;
   private readonly enforceActiveWorkspaceScope: boolean;
   private readonly hostMutationApprovalProvider: ToolRegistryOptions['hostMutationApprovalProvider'];
   private readonly activityWorkspaceResolver: (cwd: string) => Promise<string | undefined>;
@@ -289,6 +296,9 @@ export class ToolRegistry {
     this.harnessActivation = options.harnessActivationLedger ?? new HarnessActivationLedger();
     this.activeWorkspaceScopeProvider = normalizeActiveWorkspaceScopeProvider(options);
     this.activeWorkspaceScopesProvider = normalizeActiveWorkspaceScopesProvider(options);
+    this.activeWorkspaceScopeUnavailableProvider = options.activeWorkspaceScopeUnavailableProvider === undefined
+      ? undefined
+      : async (): Promise<WorkspaceScopeUnavailable | null> => options.activeWorkspaceScopeUnavailableProvider!();
     this.enforceActiveWorkspaceScope = options.activeWorkspaceScopesProvider !== undefined || options.activeWorkspaceScopeProvider !== undefined || options.activeProjectProvider !== undefined;
     this.hostMutationApprovalProvider = options.hostMutationApprovalProvider;
     this.activityWorkspaceResolver = normalizeActivityWorkspaceResolver(services, actor);
@@ -1188,14 +1198,27 @@ export class ToolRegistry {
     if (trimmed.length === 0) {
       return err(appError('CONFLICT', 'prepare_code_change requires a non-empty target path', true, { reason: 'target-path-invalid' }));
     }
-    const scope = await this.activeWorkspaceScopeProvider();
+    // #428: resolve the scope exactly as the rest of the registry does. Host
+    // transports wire the plural provider (its first entry is the primary
+    // project), so reading the singular provider directly made every absolute
+    // target unresolvable wherever only the plural one was wired.
+    const scope = await this.resolveActiveWorkspaceScope();
     const rootPath = scope === null ? undefined : readTrimmedString(scope.rootPath);
     const pathApi = rootPath === undefined ? undefined : workspacePathApi(rootPath);
     if (rootPath === undefined || pathApi === undefined || !pathApi.isAbsolute(rootPath)) {
       // No usable root: containment cannot be proven, so only the forms that
       // always escape workspace authority are refused.
       if (isAbsoluteActivityPath(trimmed)) {
-        return err(appError('CONFLICT', `Target path must stay inside the active workspace: ${trimmed}`, true, { reason: 'target-path-unresolvable' }));
+        const unavailable = await this.readScopeUnavailable();
+        return err(appError(
+          'CONFLICT',
+          `Absolute target does not resolve against an active workspace${unavailable === null ? '' : `: ${workspaceScopeUnavailableDetail(unavailable)}`}: ${trimmed}`,
+          true,
+          {
+            reason: 'target-path-unresolvable',
+            ...(unavailable === null ? {} : { scopeReason: unavailable.reason }),
+          },
+        ));
       }
       if (trimmed.split(/[\\/]+/).includes('..')) {
         return err(appError('CONFLICT', `Target path is outside the active workspace: ${trimmed}`, true, { reason: 'target-outside-workspace' }));
@@ -1212,6 +1235,20 @@ export class ToolRegistry {
       return err(appError('CONFLICT', 'Target path must name a file inside the active workspace', true, { reason: 'target-path-invalid' }));
     }
     return ok(relative);
+  }
+
+  /**
+   * #428: name the real reason a scope is missing. Without a wired reason
+   * provider the cause is genuinely unknowable, so keep the generic message.
+   */
+  private async readScopeUnavailable(): Promise<WorkspaceScopeUnavailable | null> {
+    const provider = this.activeWorkspaceScopeUnavailableProvider;
+    if (provider === undefined) return null;
+    try {
+      return await provider();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1411,9 +1448,14 @@ export class ToolRegistry {
         // waiter queue when the verdict describes refreshable evidence. The
         // gate stays closed — the re-check above (or a later prepare) decides.
         const submission = this.submitDemandFirstDelta(workspaceId, filePath, verdict);
-        return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${verdict.reason}`, true, {
+        const targetKind = preEditTargetKind(filePath);
+        const documentationHint = targetKind === 'documentation' && verdict.evidenceState.includes('code_index')
+          ? `. Note: ${filePath} is a documentation target that the code index does not cover, so code-index evidence cannot be produced for it`
+          : '';
+        return err(appError('CONFLICT', `Thai-RAG pre-edit evidence is not ready: ${verdict.reason}${documentationHint}`, true, {
           reason: 'pre-edit-evidence-not-ready',
           evidenceState: verdict.evidenceState,
+          ...(targetKind === 'documentation' ? { targetKind } : {}),
           ...(verdict.evidenceSemantic === undefined ? {} : { evidenceSemantic: verdict.evidenceSemantic }),
           ...(verdict.evidenceChannels === undefined ? {} : { evidenceChannelStates: channelEvidenceSummary(verdict.evidenceChannels) }),
           ...(submission === undefined ? {} : submission),
@@ -2294,6 +2336,28 @@ function withActivityWorkspaceId(input: unknown, workspaceId: string | undefined
 }
 
 function isAbsoluteActivityPath(value: string): boolean { return path.win32.isAbsolute(value) || path.posix.isAbsolute(value); }
+
+/** #428: user-facing explanation for a host-reported missing scope. */
+function workspaceScopeUnavailableDetail(unavailable: WorkspaceScopeUnavailable): string {
+  const workspace = unavailable.workspaceId === undefined ? 'the selected workspace' : `the selected workspace (${unavailable.workspaceId})`;
+  switch (unavailable.reason) {
+    case 'no-active-selection': return 'no active project workspace is selected';
+    case 'workspace-row-missing': return `${workspace} no longer exists`;
+    case 'workspace-archived': return `${workspace} is archived`;
+  }
+}
+
+/**
+ * #428: documentation targets are not code, so a code-index verdict about them
+ * is truthful about the index and misleading about the cause. Classify by
+ * extension only; this never changes the gate's readiness decision.
+ */
+const DOCUMENTATION_TARGET_EXTENSIONS = new Set(['.md', '.markdown', '.mdx', '.rst', '.adoc', '.txt']);
+
+function preEditTargetKind(filePath: string): 'code' | 'documentation' {
+  const extension = path.posix.extname(filePath.trim().toLowerCase());
+  return DOCUMENTATION_TARGET_EXTENSIONS.has(extension) ? 'documentation' : 'code';
+}
 
 // win32.isAbsolute also accepts /tmp, so it cannot select a path dialect.
 function workspacePathApi(value: string): typeof path.win32 {

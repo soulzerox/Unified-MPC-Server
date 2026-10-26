@@ -211,6 +211,8 @@ async function main(): Promise<void> {
     authorizationModeProvider: runtime.authorizationModeProvider,
     allowAiDeleteProvider: runtime.allowAiDeleteProvider,
     destructivePolicyProvider: runtime.destructivePolicyProvider,
+    activeWorkspaceScopeProvider: runtime.activeWorkspaceScopeProvider,
+    activeWorkspaceScopeUnavailableProvider: runtime.activeWorkspaceScopeUnavailableProvider,
     activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
     toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),

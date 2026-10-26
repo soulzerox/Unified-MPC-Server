@@ -7,6 +7,19 @@ export interface WorkspaceScope {
   readonly rootPath: string;
 }
 
+/** Why the host could not produce a usable Active Project scope (#428). */
+export type WorkspaceScopeUnavailableReason = 'no-active-selection' | 'workspace-row-missing' | 'workspace-archived';
+
+/**
+ * #428: a transport that can tell the three "no scope" causes apart reports the
+ * cause here instead of collapsing them into `null`, so the pre-edit gate can
+ * fail with a truthful reason rather than "path outside the workspace".
+ */
+export interface WorkspaceScopeUnavailable {
+  readonly reason: WorkspaceScopeUnavailableReason;
+  readonly workspaceId?: string;
+}
+
 /** @deprecated Use WorkspaceScope for request-scoped resolution. */
 export type ActiveProjectScope = WorkspaceScope;
 

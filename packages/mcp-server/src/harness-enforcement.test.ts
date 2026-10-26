@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
-import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
+import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
 import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
@@ -1261,3 +1261,137 @@ describe('demand-first wait + re-check (Slice B)', () => {
 });
 
 
+
+describe('prepare_code_change active scope resolution (#428)', () => {
+  const primaryScope: WorkspaceScope = { workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' };
+
+  async function prepareWithScopeWiring(
+    wiring: {
+      activeWorkspaceScopesProvider?: () => readonly WorkspaceScope[] | Promise<readonly WorkspaceScope[]>;
+      activeWorkspaceScopeUnavailableProvider?: () => WorkspaceScopeUnavailable | null | Promise<WorkspaceScopeUnavailable | null>;
+    },
+    filePath: string,
+    arrange?: (fixture: ReturnType<typeof createHarnessServices>) => void,
+  ): Promise<{
+    result: Awaited<ReturnType<ToolRegistry['invoke']>>;
+    nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>;
+  }> {
+    const fixture = createHarnessServices();
+    arrange?.(fixture);
+    const registry = new ToolRegistry(fixture.services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'scope-wiring-session',
+      ...wiring,
+    });
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+    const result = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath });
+    return { result, nativeRagArguments: fixture.nativeRagArguments };
+  }
+
+  it('normalizes an absolute target inside the primary scope when only the plural provider is wired', async () => {
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope] },
+      '/tmp/workspace-1/src/absolute.ts',
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagArguments[0]).toMatchObject({ tool: 'pre_edit_context', args: { file_path: 'src/absolute.ts' } });
+  });
+
+  it('keeps the relative form working against the same scope', async () => {
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope] },
+      'src/absolute.ts',
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagArguments[0]).toMatchObject({ args: { file_path: 'src/absolute.ts' } });
+  });
+
+  it('refuses an absolute target that escapes the primary scope', async () => {
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope] },
+      '/tmp/elsewhere/src/absolute.ts',
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { reason: 'target-outside-workspace' } } },
+    });
+    expect(nativeRagArguments).toEqual([]);
+  });
+
+  it('refuses a relative target that escapes the primary scope', async () => {
+    const { result } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope] },
+      '../outside.ts',
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { reason: 'target-outside-workspace' } } },
+    });
+  });
+
+  it.each([
+    [{ reason: 'no-active-selection' } as WorkspaceScopeUnavailable, 'no active project workspace is selected'],
+    [{ reason: 'workspace-row-missing', workspaceId: 'workspace-9' } as WorkspaceScopeUnavailable, 'the selected workspace (workspace-9) no longer exists'],
+    [{ reason: 'workspace-archived', workspaceId: 'workspace-9' } as WorkspaceScopeUnavailable, 'the selected workspace (workspace-9) is archived'],
+  ])('names the real cause when no scope exists: %o', async (unavailable, detail) => {
+    const { result } = await prepareWithScopeWiring({
+      activeWorkspaceScopesProvider: async () => [],
+      activeWorkspaceScopeUnavailableProvider: async () => unavailable,
+    }, '/tmp/workspace-1/src/absolute.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          details: { reason: 'target-path-unresolvable', scopeReason: unavailable.reason },
+          message: expect.stringContaining(detail),
+        },
+      },
+    });
+  });
+
+  it('names a documentation target when the code index cannot cover it', async () => {
+    const { result } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope] },
+      'README.md',
+      (fixture) => fixture.setThaiRagPreEditPayload({
+        status: 'degraded',
+        can_proceed: false,
+        evidence_state: 'code_index_missing',
+        evidence: { storage: 'available', code_index: 'missing', cpg: 'available' },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          details: { targetKind: 'documentation', evidenceState: 'code_index_missing' },
+          message: expect.stringContaining('documentation target'),
+        },
+      },
+    });
+  });
+
+  it('keeps the generic message when the host cannot name a cause', async () => {
+    const { result } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [] },
+      '/tmp/workspace-1/src/absolute.ts',
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          details: { reason: 'target-path-unresolvable' },
+          message: expect.stringContaining('Absolute target does not resolve against an active workspace'),
+        },
+      },
+    });
+  });
+});

@@ -45,6 +45,24 @@ describe('dedicated native index status timeout recovery', () => {
     expect(counts.closes).toBe(1);
   });
 
+  it('honors a per-call timeout without dropping the opted-in status session', async () => {
+    const { factory, counts } = mockFactory();
+    const manager = new McpSessionManager({
+      clientFactory: factory,
+      callTimeoutMs: 1_000,
+      validateToolSchemas: false,
+      preserveReadOnlyStatusSessionOnTimeout: true,
+    });
+    const config = { command: '/mock/index-provider' };
+    await expect(manager.call('native', config, 'index_status', { job_id: 'probe' }, undefined, {}, undefined, 20))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    expect(manager.isConnected('native')).toBe(true);
+    await expect(manager.call('native', config, 'index_status', { job_id: 'probe' }))
+      .resolves.toMatchObject({ ok: true });
+    expect(counts).toEqual({ connects: 1, calls: 2, closes: 0 });
+    await manager.close();
+  });
+
   it('retains default drop-on-timeout outside the opt-in index session', async () => {
     const { factory, counts } = mockFactory();
     const manager = new McpSessionManager({ clientFactory: factory, callTimeoutMs: 30, validateToolSchemas: false });

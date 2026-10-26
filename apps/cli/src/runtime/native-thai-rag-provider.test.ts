@@ -2,6 +2,7 @@ import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink,
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '@unified-mpc/extensions';
 import {
   THAI_RAG_CANCEL_CAPABILITY,
@@ -314,7 +315,7 @@ describe('NativeThaiRagProviderDriver', () => {
       const admitted = await driver.call('pre_edit_context', {
         workspace_id: workspaceId, file_path: 'src/probe.ts',
       });
-      expect(admitted.ok).toBe(true);
+      expect(admitted).toMatchObject({ ok: true });
       // The cold admission monitor can expose its local job receipt for a
       // short time after the provider reports done. Wait until that exact
       // warmup job is terminal and a distinct normal job has been created.
@@ -1674,7 +1675,10 @@ describe('NativeThaiRagProviderDriver', () => {
     const status = await driver.call('index_status', { job_id: scheduled.value.job_id, workspace_id: workspaceId });
 
     expect(status.ok && isRecord(status.value) && status.value.status).toBe('completed');
-    expect(maxInFlight).toBe(1);
+    // Memory recall is deliberately served while a workspace admission pass
+    // holds the indexer slot (#422), so one admission code_index and the
+    // recall may overlap. Code-index calls themselves stay single-flight.
+    expect(maxInFlight).toBeLessThanOrEqual(2);
     const indexCall = calls.find((call) => call.tool === 'code_index');
     expect(indexCall?.args).toMatchObject({
       workspace_path: workspaceRoot,
@@ -2274,6 +2278,373 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(realpath(path.join(dataRoot, 'thai-rag', 'sources', workspaceId))).resolves.toBe(await realpath(firstRoot));
     await driver.stop();
   });
+
+  it('skips admission verification when the persisted source identity is unchanged across restarts', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => sourceIdentity,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') {
+            return args.file_path === '.unified-mpc-verification-probe' ? snapshotPreEdit(workspaceId) : success('ok');
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    await first.stop();
+
+    calls.length = 0;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index')).toEqual([]);
+    await second.stop();
+  });
+
+  it('re-verifies an unchanged workspace when its source identity changed', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    let head = 'a'.repeat(40);
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => ({
+        repositoryIdentity: 'repo-a',
+        gitCommonDirIdentity: 'git-a',
+        worktreeIdentity: 'worktree-a',
+        workspaceHead: head,
+        dirtyFingerprint: 'clean',
+        stagedFingerprint: 'none',
+      }),
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') {
+            return args.file_path === '.unified-mpc-verification-probe' ? snapshotPreEdit(workspaceId) : success('ok');
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await first.stop();
+
+    head = 'b'.repeat(40);
+    calls.length = 0;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    await second.stop();
+  });
+
+  it('keeps memory writes usable while another workspace admission is running', async () => {
+    const dataRoot = await tempRoot();
+    const readyRoot = await tempRoot();
+    const busyRoot = await tempRoot();
+    let releaseIndex: (() => void) | undefined;
+    const indexGate = new Promise<void>((resolve) => { releaseIndex = resolve; });
+    let markIndexStarted: (() => void) | undefined;
+    const indexStarted = new Promise<void>((resolve) => { markIndexStarted = resolve; });
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: recoveredWorkspaceId, realRootPath: readyRoot },
+        { id: workspaceId, realRootPath: busyRoot },
+      ],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(`${tool}:${String(args.workspace_id ?? '')}`);
+          if (tool === 'code_index' && args.workspace_id === workspaceId) {
+            markIndexStarted?.();
+            await indexGate;
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const busy = driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    await indexStarted;
+    await expect(driver.call('remember', { workspace_id: recoveredWorkspaceId, content: 'memory remains usable' }))
+      .resolves.toMatchObject({ ok: true });
+    expect(calls).toContain(`remember:${recoveredWorkspaceId}`);
+    releaseIndex?.();
+    await busy;
+    await driver.stop();
+  });
+
+  it('drains two queued workspaces and then stops creating verification jobs', async () => {
+    const dataRoot = await tempRoot();
+    const firstRoot = await tempRoot();
+    const secondRoot = await tempRoot();
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let markFirstStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+        { id: workspaceId, realRootPath: firstRoot },
+        { id: recoveredWorkspaceId, realRootPath: secondRoot },
+      ],
+      workspaceSourceIdentityProvider: async (workspace): Promise<WorkspaceSourceEvidenceIdentity> => ({
+        repositoryIdentity: 'repo-a',
+        gitCommonDirIdentity: 'git-a',
+        worktreeIdentity: workspace.id,
+        workspaceHead: workspace.id === workspaceId ? 'a'.repeat(40) : 'b'.repeat(40),
+        dirtyFingerprint: 'clean',
+        stagedFingerprint: 'none',
+      }),
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          const target = String(args.workspace_id ?? '');
+          calls.push(`${tool}:${target}`);
+          if (tool === 'code_index') {
+            if (args.max_files !== undefined) {
+              if (target === workspaceId) {
+                markFirstStarted?.();
+                await firstGate;
+              }
+              return success('ok');
+            }
+            return backgroundIndexStart(target);
+          }
+          if (tool === 'index_status') return completedIndexStatus(target);
+          if (tool === 'pre_edit_context') {
+            return args.file_path === '.unified-mpc-verification-probe' ? snapshotPreEdit(target) : success('ok');
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const firstCall = driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    await firstStarted;
+    const queued = await driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/index.ts' });
+    expect(queued.ok).toBe(false);
+    releaseFirst?.();
+    await firstCall;
+
+    const verificationFile = (id: string): string => path.join(dataRoot, 'thai-rag', 'workspaces', id, 'verification.json');
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const ready = await access(verificationFile(recoveredWorkspaceId)).then(() => true, () => false);
+      if (ready) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await expect(access(verificationFile(workspaceId))).resolves.toBeUndefined();
+    await expect(access(verificationFile(recoveredWorkspaceId))).resolves.toBeUndefined();
+
+    calls.length = 0;
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await expect(driver.call('pre_edit_context', { workspace_id: recoveredWorkspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((call) => call.startsWith('code_index:'))).toEqual([]);
+    await driver.stop();
+  }, 20_000);
+
+  it('does not persist verification from a legacy 1.0 background start', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let codeIndexCalls = 0;
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => sourceIdentity,
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') codeIndexCalls += 1;
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await expect(access(path.join(dataRoot, 'thai-rag', 'workspaces', workspaceId, 'verification.json'))).rejects.toThrow();
+    await first.stop();
+
+    codeIndexCalls = 0;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(codeIndexCalls).toBeGreaterThan(0);
+    await second.stop();
+  }, 10_000);
+
+  it('re-verifies without dropping the request session when the snapshot probe times out', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const closed = new Set<number>();
+    let probeStarted = false;
+    let hangProbe = false;
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      snapshotProbeTimeoutMs: 25,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async (): Promise<typeof sourceIdentity> => sourceIdentity,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        onClose(connection): void { closed.add(connection); },
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') {
+            if (args.file_path === '.unified-mpc-verification-probe') {
+              probeStarted = true;
+              if (hangProbe) return new Promise<never>(() => undefined);
+              return snapshotPreEdit(workspaceId);
+            }
+            return success('ok');
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await first.stop();
+
+    calls.length = 0;
+    closed.clear();
+    probeStarted = false;
+    hangProbe = true;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+
+    expect(probeStarted).toBe(true);
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    // Connection 1 is the second driver's warm request session; the timed-out
+    // probe must drop only its isolated child, never the request session.
+    expect(closed.has(1)).toBe(false);
+    await second.stop();
+  }, 10_000);
+
+  it('re-verifies when the persisted provider snapshot proof is unavailable', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    let failNextSnapshotProbe = false;
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => sourceIdentity,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') {
+            if (args.file_path !== '.unified-mpc-verification-probe') return success('ok');
+            if (failNextSnapshotProbe) {
+              failNextSnapshotProbe = false;
+              return snapshotPreEdit(workspaceId, 'stale-generation');
+            }
+            return snapshotPreEdit(workspaceId);
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await first.stop();
+
+    calls.length = 0;
+    failNextSnapshotProbe = true;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    await second.stop();
+  }, 10_000);
 });
 
 function clientFactory(options: {
@@ -2339,6 +2710,33 @@ function success(result: string, data?: Record<string, unknown>): unknown {
     content: [{ type: 'text', text: result }],
     structuredContent: data === undefined ? { result } : { result, data },
   };
+}
+
+function backgroundIndexStart(workspace: string): unknown {
+  return success('code_index', {
+    status: 'ok',
+    data: { status: 'running', job_id: `idx_${workspace}`, workspace_id: workspace },
+  });
+}
+
+function completedIndexStatus(workspace: string): unknown {
+  const generation = `gen-${workspace}`;
+  return success('index_status', {
+    status: 'ok',
+    data: {
+      status: 'done',
+      job_id: `idx_${workspace}`,
+      generation_id: generation,
+      result: { status: 'ok', generation_id: generation, indexed: 0, skipped: 0, total_files: 0 },
+    },
+  });
+}
+
+function snapshotPreEdit(workspace: string, generation = `gen-${workspace}`): unknown {
+  return success('pre_edit_context', {
+    index_generation_id: generation,
+    evidence: { storage: 'ready' },
+  });
 }
 
 function defaultHandshake(): Record<string, unknown> {

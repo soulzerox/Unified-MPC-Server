@@ -6,3 +6,4 @@ export * from './legacy-migration.js';
 export * from './migration-journal.js';
 export * from './provider-coordinator.js';
 export * from './index-job-store.js';
+export * from './workspace-verification-store.js';

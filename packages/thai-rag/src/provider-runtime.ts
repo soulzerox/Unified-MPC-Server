@@ -78,6 +78,7 @@ export class ThaiRagProviderRuntime {
   private ownsLock = false;
   private ownedProcessIdentity: string | undefined;
   private callQueue: Promise<unknown> = Promise.resolve();
+  private renewalQueue: Promise<void> = Promise.resolve();
 
   public constructor(private readonly options: ThaiRagProviderRuntimeOptions) {
     this.pid = options.pid ?? process.pid;
@@ -119,12 +120,24 @@ export class ThaiRagProviderRuntime {
       ownerId: this.options.ownerId,
       startedAt,
     };
-    const started = await this.options.driver.start({
-      providerRoot: this.providerRoot,
-      ownerId: this.options.ownerId,
-      providerVersion: this.options.providerVersion,
-      embeddingIndexGeneration: this.options.embeddingIndexGeneration,
-    }, signal);
+    let started: Result<ThaiRagProviderDriverHealth>;
+    try {
+      started = await this.options.driver.start({
+        providerRoot: this.providerRoot,
+        ownerId: this.options.ownerId,
+        providerVersion: this.options.providerVersion,
+        embeddingIndexGeneration: this.options.embeddingIndexGeneration,
+      }, signal);
+    } catch (error) {
+      // A rejecting driver must not leave an owned lock behind: the heartbeat
+      // now starts with the lock, so the lock would otherwise keep proving a
+      // liveness that no longer exists and peers would wait for it forever.
+      // The driver may already own a spawned worker, so stop it before release.
+      this.healthState = createProviderHealth(this.options.providerVersion, this.options.embeddingIndexGeneration);
+      await this.options.driver.stop(signal).catch(() => undefined);
+      await this.releaseOwnerLock();
+      throw error;
+    }
     if (!started.ok) {
       this.healthState = createProviderHealth(this.options.providerVersion, this.options.embeddingIndexGeneration);
       await this.releaseOwnerLock();
@@ -144,10 +157,22 @@ export class ThaiRagProviderRuntime {
    * wedged", which pid liveness alone cannot do for a stopped process (and
    * never could for an older release that is still running but unreachable).
    */
-  public async renewOwnerLock(): Promise<boolean> {
+  public renewOwnerLock(): Promise<boolean> {
+    // Serialise renewals and let release wait them out: an in-flight heartbeat
+    // must never write the lock back after `releaseOwnerLock` unlinked it.
+    const run = this.renewalQueue.then(
+      () => this.renewOwnerLockOnce(),
+      () => this.renewOwnerLockOnce(),
+    );
+    this.renewalQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async renewOwnerLockOnce(): Promise<boolean> {
     if (!this.ownsLock || this.providerRoot === undefined) return false;
     const existing = await this.readLock();
-    if (existing === null
+    if (!this.ownsLock
+      || existing === null
       || existing.ownerId !== this.options.ownerId
       || existing.pid !== this.pid
       || existing.processIdentity !== this.ownedProcessIdentity) return false;
@@ -313,14 +338,19 @@ export class ThaiRagProviderRuntime {
 
   private async releaseOwnerLock(): Promise<void> {
     if (!this.ownsLock) return;
+    const ownerId = this.options.ownerId;
+    const processIdentity = this.ownedProcessIdentity;
+    // Stop new renewals first, then let an in-flight one finish before the lock
+    // is unlinked, so it cannot resurrect the lock we are about to release.
+    this.ownsLock = false;
     this.stopHeartbeat();
+    await this.renewalQueue.catch(() => undefined);
     const existing = await this.readLock();
-    if (existing?.ownerId === this.options.ownerId
+    if (existing?.ownerId === ownerId
       && existing.pid === this.pid
-      && existing.processIdentity === this.ownedProcessIdentity) {
+      && existing.processIdentity === processIdentity) {
       await unlink(this.lockPath()).catch(() => undefined);
     }
-    this.ownsLock = false;
     this.ownedProcessIdentity = undefined;
   }
 

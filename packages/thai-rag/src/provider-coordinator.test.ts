@@ -536,6 +536,21 @@ describe('ThaiRagProviderCoordinator', () => {
     const secondStartedAt = Date.now();
     expect((await coordinator.start()).ok).toBe(false);
     expect(Date.now() - secondStartedAt).toBeLessThan(150);
+
+    // A different owner generation legitimately boots again, so the window is
+    // re-armed instead of being spent for the coordinator's whole lifetime.
+    const nextOwner = new Date(Date.parse(heartbeat) + 60_000).toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'next-booting-owner',
+      pid: process.pid,
+      startedAt: nextOwner,
+      processIdentity: 'wedged-identity',
+      heartbeatAt: nextOwner,
+      providerVersion: '4.61.0',
+    }));
+    const thirdStartedAt = Date.now();
+    expect((await coordinator.start()).ok).toBe(false);
+    expect(Date.now() - thirdStartedAt).toBeGreaterThanOrEqual(180);
   });
 
   it('reconnects a follower when the owner socket is recreated (#418)', async () => {

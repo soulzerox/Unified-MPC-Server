@@ -173,7 +173,9 @@ export class McpSessionManager {
     signal?: AbortSignal,
     expected: { readonly catalogFingerprint?: string } = {},
     budget?: ResultBudget,
+    callTimeoutMs?: number,
   ): Promise<Result<unknown>> {
+    const timeoutMs = callTimeoutMs ?? this.callTimeoutMs;
     let managed: ManagedSession | undefined;
     try {
       if (isAborted(signal)) return cancelledCall();
@@ -196,11 +198,11 @@ export class McpSessionManager {
       const resultLimit = Math.min(MAX_EXTERNAL_MCP_RESULT_BYTES, budget?.maxStructuredBytes ?? MAX_EXTERNAL_MCP_RESULT_BYTES);
       const result = await withTimeout(
         (callSignal) => this.enqueue(activeManaged, () => budget === undefined
-          ? activeManaged.session.callTool(tool, args, callSignal, this.callTimeoutMs)
+          ? activeManaged.session.callTool(tool, args, callSignal, timeoutMs)
           : activeManaged.session.callToolBounded === undefined
-            ? activeManaged.session.callTool(tool, args, callSignal, this.callTimeoutMs)
-            : activeManaged.session.callToolBounded(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal, this.callTimeoutMs), callSignal),
-        this.callTimeoutMs,
+            ? activeManaged.session.callTool(tool, args, callSignal, timeoutMs)
+            : activeManaged.session.callToolBounded(tool, args, { ...budget, maxStructuredBytes: resultLimit }, callSignal, timeoutMs), callSignal),
+        timeoutMs,
         `Timed out calling ${server}/${tool}`,
         signal,
       );

@@ -158,6 +158,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
       ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
       validateToolSchemas: false,
+      preserveReadOnlyStatusSessionOnTimeout: true,
       idleTimeoutMs: 24 * 60 * 60_000,
     });
     this.indexSessions = new McpSessionManager({
@@ -844,23 +845,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   private async workspaceSnapshotIsUsable(record: ThaiRagWorkspaceVerificationRecord): Promise<boolean> {
     if (record.providerJobId === undefined || this.launchConfig === undefined || !this.started) return false;
-    const timedOut = Symbol('snapshot-probe-timeout');
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Use the warm request session with a short per-call timeout. The manager
+    // preserves an index_status session on status timeout instead of dropping
+    // it, so a slow proof cannot tear down the session or a live index job.
     try {
-      // Use the warm request session, never the dedicated index session: an
-      // aborted session is dropped by McpSessionManager, which would kill a
-      // live provider-side indexing job. A timed-out probe is only a failed
-      // proof, so fall through to verification rather than aborting the call.
-      const status = await Promise.race([
-        this.sessions.call(SERVER_NAME, this.launchConfig, 'index_status', {
-          job_id: record.providerJobId,
-          workspace_id: record.workspaceId,
-        }),
-        new Promise<typeof timedOut>((resolve) => {
-          timer = setTimeout(() => resolve(timedOut), 2_000);
-        }),
-      ]);
-      if (status === timedOut) return false;
+      const status = await this.sessions.call(SERVER_NAME, this.launchConfig, 'index_status', {
+        job_id: record.providerJobId,
+        workspace_id: record.workspaceId,
+      }, undefined, {}, undefined, 2_000);
       const normalized = normalizeWorkerCallResult('index_status', status);
       if (!normalized.ok) return false;
       const remote = nestedString(normalized.value, 'status');
@@ -874,8 +866,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return true;
     } catch {
       return false;
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
     }
   }
 

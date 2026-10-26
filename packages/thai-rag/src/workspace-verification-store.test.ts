@@ -35,7 +35,7 @@ function input(overrides: Partial<ThaiRagWorkspaceVerificationInput> = {}): Thai
     skippedFiles: 0,
     totalFiles: 0,
     providerJobId: 'idx_verification',
-    probeFilePath: '/workspace/package.json',
+    probeFilePath: '.unified-mpc-verification-probe',
     ...overrides,
   };
 }
@@ -59,7 +59,7 @@ describe('ThaiRagWorkspaceVerificationStore', () => {
       sourceIdentity: identity,
       verifiedAt: '2026-10-26T00:00:00.000Z',
       providerJobId: 'idx_verification',
-      probeFilePath: '/workspace/package.json',
+      probeFilePath: '.unified-mpc-verification-probe',
     });
 
     const reloaded = await new ThaiRagWorkspaceVerificationStore(dataRoot).get(WORKSPACE);

@@ -1051,8 +1051,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       : indexedFiles > 0 ? 'changed' as const : 'unchanged' as const;
     const sourceSnapshotId = nestedString(result, 'source_snapshot_id');
     const generationId = nestedString(result, 'generation_id');
-    const workspaceRoot = this.workspaceRoots.get(workspaceId);
-    const probeFilePath = workspaceRoot === undefined ? undefined : path.join(workspaceRoot, 'package.json');
+    // A synthetic, non-existent target keeps the proof read-only: pre-edit
+    // overlay refresh has nothing to refresh, so probing cannot mutate the
+    // index (a dirty package.json would otherwise trigger a one-file delta).
+    const probeFilePath = '.unified-mpc-verification-probe';
     try {
       await this.verifications.record({
         workspaceId,
@@ -1065,7 +1067,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ...(sourceSnapshotId === undefined ? {} : { sourceSnapshotId }),
         ...(generationId === undefined ? {} : { generationId }),
         providerJobId,
-        ...(probeFilePath === undefined ? {} : { probeFilePath }),
+        probeFilePath,
       });
     } catch {
       // Verification persistence is an optimization: a failed write must never

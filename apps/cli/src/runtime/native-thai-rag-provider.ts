@@ -41,6 +41,7 @@ const SERVER_NAME = 'thai-rag-native';
 // but the follow-up status/often-blocking calls must survive the publish.
 const INDEX_CALL_TIMEOUT_MS = 3_600_000;
 const INDEX_ADMISSION_WAIT_MS = 5_000;
+const WORKSPACE_VERIFICATION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const REQUIRED_TOOLS = new Set([
   'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',
   'forget', 'code_index', 'index_status', 'code_search', 'code_context',
@@ -828,6 +829,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (sourceIdentity === null) return { skip: false };
     const recorded = await this.verifications.get(workspace.id);
     if (!recorded.ok || recorded.value === null) return { skip: false, sourceIdentity };
+    const verifiedAt = Date.parse(recorded.value.verifiedAt);
+    if (!Number.isFinite(verifiedAt) || Date.now() - verifiedAt > WORKSPACE_VERIFICATION_MAX_AGE_MS) {
+      return { skip: false, sourceIdentity };
+    }
     if (classifyWorkspaceSourceEvidence(recorded.value.sourceIdentity, sourceIdentity) !== 'fresh') {
       return { skip: false, sourceIdentity };
     }
@@ -839,22 +844,38 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   private async workspaceSnapshotIsUsable(record: ThaiRagWorkspaceVerificationRecord): Promise<boolean> {
     if (record.providerJobId === undefined || this.launchConfig === undefined || !this.started) return false;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2_000);
+    const timedOut = Symbol('snapshot-probe-timeout');
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const status = await this.callAdmissionWorker('index_status', {
-        job_id: record.providerJobId,
-        workspace_id: record.workspaceId,
-      }, controller.signal);
-      if (!status.ok) return false;
-      const remote = nestedString(status.value, 'status');
+      // Use the warm request session, never the dedicated index session: an
+      // aborted session is dropped by McpSessionManager, which would kill a
+      // live provider-side indexing job. A timed-out probe is only a failed
+      // proof, so fall through to verification rather than aborting the call.
+      const status = await Promise.race([
+        this.sessions.call(SERVER_NAME, this.launchConfig, 'index_status', {
+          job_id: record.providerJobId,
+          workspace_id: record.workspaceId,
+        }),
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), 2_000);
+        }),
+      ]);
+      if (status === timedOut) return false;
+      const normalized = normalizeWorkerCallResult('index_status', status);
+      if (!normalized.ok) return false;
+      const remote = nestedString(normalized.value, 'status');
       if (remote !== 'done' && remote !== 'complete' && remote !== 'completed') return false;
-      const generation = nestedString(status.value, 'generation_id');
-      return record.generationId === undefined || generation === undefined || generation === record.generationId;
+      const jobId = nestedString(normalized.value, 'job_id');
+      if (jobId !== undefined && jobId !== record.providerJobId) return false;
+      const generation = nestedString(normalized.value, 'generation_id');
+      if (record.generationId !== undefined && (generation === undefined || generation !== record.generationId)) return false;
+      const snapshotId = nestedString(normalized.value, 'source_snapshot_id');
+      if (record.sourceSnapshotId !== undefined && snapshotId !== undefined && snapshotId !== record.sourceSnapshotId) return false;
+      return true;
     } catch {
       return false;
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -1194,8 +1215,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return normalizeWorkerCallResult(tool, raw);
   }
 
-  private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
-    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal));
+  private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>): Promise<Result<unknown>> {
+    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args));
   }
 
   private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {

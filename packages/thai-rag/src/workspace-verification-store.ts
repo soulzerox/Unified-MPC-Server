@@ -36,6 +36,7 @@ export interface ThaiRagWorkspaceVerificationInput {
   readonly sourceSnapshotId?: string;
   readonly generationId?: string;
   readonly providerJobId?: string;
+  readonly probeFilePath?: string;
 }
 
 export interface ThaiRagWorkspaceVerificationRecord {
@@ -50,6 +51,7 @@ export interface ThaiRagWorkspaceVerificationRecord {
   readonly sourceSnapshotId?: string;
   readonly generationId?: string;
   readonly providerJobId?: string;
+  readonly probeFilePath?: string;
 }
 
 interface StoredVerification {
@@ -65,6 +67,7 @@ interface StoredVerification {
   readonly sourceSnapshotId?: string;
   readonly generationId?: string;
   readonly providerJobId?: string;
+  readonly probeFilePath?: string;
 }
 
 /**
@@ -122,7 +125,8 @@ export class ThaiRagWorkspaceVerificationStore {
       || !isCounter(input.skippedFiles)
       || !isCounter(input.totalFiles)
       || input.indexedFiles + input.skippedFiles > input.totalFiles
-      || (input.providerJobId !== undefined && (typeof input.providerJobId !== 'string' || input.providerJobId.trim().length === 0))) {
+      || (input.providerJobId !== undefined && (typeof input.providerJobId !== 'string' || input.providerJobId.trim().length === 0))
+      || (input.probeFilePath !== undefined && (typeof input.probeFilePath !== 'string' || input.probeFilePath.trim().length === 0))) {
       return err(appError('INVALID_INPUT', 'Thai-RAG workspace verification input is invalid'));
     }
     const stored: StoredVerification = {
@@ -138,6 +142,7 @@ export class ThaiRagWorkspaceVerificationStore {
       ...(input.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: input.sourceSnapshotId }),
       ...(input.generationId === undefined ? {} : { generationId: input.generationId }),
       ...(input.providerJobId === undefined ? {} : { providerJobId: input.providerJobId }),
+      ...(input.probeFilePath === undefined ? {} : { probeFilePath: input.probeFilePath }),
     };
     let temporaryPath: string | undefined;
     try {
@@ -185,6 +190,7 @@ function withWorkspaceId(
     ...(stored.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: stored.sourceSnapshotId }),
     ...(stored.generationId === undefined ? {} : { generationId: stored.generationId }),
     ...(stored.providerJobId === undefined ? {} : { providerJobId: stored.providerJobId }),
+    ...(stored.probeFilePath === undefined ? {} : { probeFilePath: stored.probeFilePath }),
   };
 }
 
@@ -203,7 +209,8 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
     || (value.providerStatus !== undefined && typeof value.providerStatus !== 'string')
     || (value.sourceSnapshotId !== undefined && typeof value.sourceSnapshotId !== 'string')
     || (value.generationId !== undefined && typeof value.generationId !== 'string')
-    || (value.providerJobId !== undefined && (typeof value.providerJobId !== 'string' || value.providerJobId.trim().length === 0))) return null;
+    || (value.providerJobId !== undefined && (typeof value.providerJobId !== 'string' || value.providerJobId.trim().length === 0))
+    || (value.probeFilePath !== undefined && (typeof value.probeFilePath !== 'string' || value.probeFilePath.trim().length === 0))) return null;
   return {
     schemaVersion: 1,
     workspaceId: value.workspaceId,
@@ -217,6 +224,7 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
     ...(value.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: value.sourceSnapshotId }),
     ...(value.generationId === undefined ? {} : { generationId: value.generationId }),
     ...(value.providerJobId === undefined ? {} : { providerJobId: value.providerJobId }),
+    ...(value.probeFilePath === undefined ? {} : { probeFilePath: value.probeFilePath }),
   };
 }
 

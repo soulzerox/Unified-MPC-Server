@@ -2305,6 +2305,7 @@ describe('NativeThaiRagProviderDriver', () => {
             return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
           }
           if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') return snapshotPreEdit(workspaceId);
           return success('ok');
         },
       }),
@@ -2350,6 +2351,7 @@ describe('NativeThaiRagProviderDriver', () => {
             return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
           }
           if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') return snapshotPreEdit(workspaceId);
           return success('ok');
         },
       }),
@@ -2449,6 +2451,7 @@ describe('NativeThaiRagProviderDriver', () => {
             return backgroundIndexStart(target);
           }
           if (tool === 'index_status') return completedIndexStatus(target);
+          if (tool === 'pre_edit_context') return snapshotPreEdit(target);
           return success('ok');
         },
       }),
@@ -2543,12 +2546,13 @@ describe('NativeThaiRagProviderDriver', () => {
           if (tool === 'code_index') {
             return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
           }
-          if (tool === 'index_status') {
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          if (tool === 'pre_edit_context') {
             if (failNextSnapshotProbe) {
               failNextSnapshotProbe = false;
-              return success('index_status', { status: 'ok', data: { status: 'failed', job_id: `idx_${workspaceId}` } });
+              return snapshotPreEdit(workspaceId, 'stale-generation');
             }
-            return completedIndexStatus(workspaceId);
+            return snapshotPreEdit(workspaceId);
           }
           return success('ok');
         },
@@ -2652,6 +2656,13 @@ function completedIndexStatus(workspace: string): unknown {
       generation_id: generation,
       result: { status: 'ok', generation_id: generation, indexed: 0, skipped: 0, total_files: 0 },
     },
+  });
+}
+
+function snapshotPreEdit(workspace: string, generation = `gen-${workspace}`): unknown {
+  return success('pre_edit_context', {
+    index_generation_id: generation,
+    evidence: { storage: 'ready' },
   });
 }
 

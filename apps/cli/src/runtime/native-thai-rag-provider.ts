@@ -838,32 +838,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return { skip: false, sourceIdentity };
     }
     // Fresh git identity alone is not proof that the provider still has a
-    // usable snapshot. Re-probe the persisted provider job (issue #422:
-    // "separately prove whether an active usable snapshot exists").
-    return { skip: await this.workspaceSnapshotIsUsable(recorded.value), sourceIdentity };
+    // usable snapshot. Pre-edit evidence resolves the provider's persisted
+    // active generation, which survives provider process restarts; matching it
+    // to the recorded generation proves the snapshot is still active (#422).
+    return { skip: await this.workspaceSnapshotIsCurrent(recorded.value), sourceIdentity };
   }
 
-  private async workspaceSnapshotIsUsable(record: ThaiRagWorkspaceVerificationRecord): Promise<boolean> {
-    if (record.providerJobId === undefined || this.launchConfig === undefined || !this.started) return false;
-    // Use the warm request session with a short per-call timeout. The manager
-    // preserves an index_status session on status timeout instead of dropping
-    // it, so a slow proof cannot tear down the session or a live index job.
+  private async workspaceSnapshotIsCurrent(record: ThaiRagWorkspaceVerificationRecord): Promise<boolean> {
+    if (record.probeFilePath === undefined || record.generationId === undefined || this.launchConfig === undefined || !this.started) {
+      return false;
+    }
     try {
-      const status = await this.sessions.call(SERVER_NAME, this.launchConfig, 'index_status', {
-        job_id: record.providerJobId,
+      const status = await this.sessions.call(SERVER_NAME, this.launchConfig, 'pre_edit_context', {
+        file_path: record.probeFilePath,
         workspace_id: record.workspaceId,
-      }, undefined, {}, undefined, 2_000);
-      const normalized = normalizeWorkerCallResult('index_status', status);
+      }, undefined, {}, undefined, 5_000);
+      const normalized = normalizeWorkerCallResult('pre_edit_context', status);
       if (!normalized.ok) return false;
-      const remote = nestedString(normalized.value, 'status');
-      if (remote !== 'done' && remote !== 'complete' && remote !== 'completed') return false;
-      const jobId = nestedString(normalized.value, 'job_id');
-      if (jobId !== undefined && jobId !== record.providerJobId) return false;
-      const generation = nestedString(normalized.value, 'generation_id');
-      if (record.generationId !== undefined && (generation === undefined || generation !== record.generationId)) return false;
-      const snapshotId = nestedString(normalized.value, 'source_snapshot_id');
-      if (record.sourceSnapshotId !== undefined && snapshotId !== undefined && snapshotId !== record.sourceSnapshotId) return false;
-      return true;
+      const generation = nestedString(normalized.value, 'index_generation_id');
+      return generation === record.generationId;
     } catch {
       return false;
     }
@@ -1058,6 +1051,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       : indexedFiles > 0 ? 'changed' as const : 'unchanged' as const;
     const sourceSnapshotId = nestedString(result, 'source_snapshot_id');
     const generationId = nestedString(result, 'generation_id');
+    const workspaceRoot = this.workspaceRoots.get(workspaceId);
+    const probeFilePath = workspaceRoot === undefined ? undefined : path.join(workspaceRoot, 'package.json');
     try {
       await this.verifications.record({
         workspaceId,
@@ -1070,6 +1065,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ...(sourceSnapshotId === undefined ? {} : { sourceSnapshotId }),
         ...(generationId === undefined ? {} : { generationId }),
         providerJobId,
+        ...(probeFilePath === undefined ? {} : { probeFilePath }),
       });
     } catch {
       // Verification persistence is an optimization: a failed write must never

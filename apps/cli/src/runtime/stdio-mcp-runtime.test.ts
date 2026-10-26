@@ -633,6 +633,11 @@ describe('stdio MCP runtime', () => {
       await new SqliteWorkspaceRepository(externalDatabase).archive(registered.id, '2026-08-24T00:00:00.000Z');
       await expect(runtime.activeWorkspaceScopeProvider()).resolves.toBeNull();
       await expect(runtime.activeWorkspaceScopesProvider()).resolves.toEqual([]);
+      // #428: the pre-edit gate must be able to say why, not just "no scope".
+      await expect(runtime.activeWorkspaceScopeUnavailableProvider()).resolves.toEqual({
+        reason: 'workspace-archived',
+        workspaceId: registered.id,
+      });
     } finally {
       externalDatabase.close();
       await runtime.close();
@@ -655,6 +660,10 @@ describe('stdio MCP runtime', () => {
       await new SqliteWorkspaceRepository(externalDatabase).delete(registered.id);
       await expect(runtime.activeWorkspaceScopeProvider()).resolves.toBeNull();
       await expect(runtime.activeWorkspaceScopesProvider()).resolves.toEqual([]);
+      await expect(runtime.activeWorkspaceScopeUnavailableProvider()).resolves.toEqual({
+        reason: 'workspace-row-missing',
+        workspaceId: registered.id,
+      });
     } finally {
       externalDatabase.close();
       await runtime.close();

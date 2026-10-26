@@ -496,6 +496,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         sessionId: 'cli',
         ...(mcpRuntime === undefined ? {} : {
           activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
+          activeWorkspaceScopeUnavailableProvider: mcpRuntime.activeWorkspaceScopeUnavailableProvider,
           activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,
           profileProvider: mcpRuntime.profileProvider,
           authorizationModeProvider: mcpRuntime.authorizationModeProvider,

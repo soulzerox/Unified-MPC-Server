@@ -53,7 +53,7 @@ import {
   createLocalExtensionsService,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   ThaiRagProviderCoordinator,
@@ -116,6 +116,7 @@ export interface StdioMcpRuntime {
   readonly allowAiDeleteProvider: () => boolean;
   readonly destructivePolicyProvider: () => DestructiveAutoApprovalPolicy;
   readonly activeWorkspaceScopeProvider: () => Promise<WorkspaceScope | null>;
+  readonly activeWorkspaceScopeUnavailableProvider: () => Promise<WorkspaceScopeUnavailable | null>;
   readonly activeWorkspaceScopesProvider: () => Promise<readonly WorkspaceScope[]>;
   readonly codexToolsEnabled: boolean;
   readonly ponytailMode: PonytailMode;
@@ -222,6 +223,33 @@ export function createStdioMcpRuntime(
     const primary = (await activeWorkspaces())[0];
     if (primary === undefined) throw new Error('No active project workspace is available');
     return primary.realRootPath;
+  };
+  // #428: one resolution shared by the scope provider and its failure reason, so
+  // callers can distinguish "nothing selected" from "the row is gone" and "the
+  // row is archived" instead of collapsing all three into a bare null.
+  const resolveActiveScope = async (): Promise<{ readonly scope: WorkspaceScope } | { readonly unavailable: WorkspaceScopeUnavailable }> => {
+    const selected = (await activeWorkspaces())[0];
+    if (selected === undefined) {
+      // No active selection is not the same as no workspace: an archived or
+      // deleted primary disappears from the selection, so inspect its row to
+      // name the cause instead of reporting a bare "nothing active".
+      const primary = rawWorkspaceRepository.getAny === undefined
+        ? await rawWorkspaceRepository.get(workspace.id)
+        : await rawWorkspaceRepository.getAny(workspace.id);
+      if (primary === null) return { unavailable: { reason: 'workspace-row-missing', workspaceId: workspace.id } };
+      if (primary.archivedAt !== undefined && primary.archivedAt !== null) {
+        return { unavailable: { reason: 'workspace-archived', workspaceId: primary.id } };
+      }
+      return { unavailable: { reason: 'no-active-selection' } };
+    }
+    const current = rawWorkspaceRepository.getAny === undefined
+      ? await rawWorkspaceRepository.get(selected.id)
+      : await rawWorkspaceRepository.getAny(selected.id);
+    if (current === null) return { unavailable: { reason: 'workspace-row-missing', workspaceId: selected.id } };
+    if (current.archivedAt !== undefined && current.archivedAt !== null) {
+      return { unavailable: { reason: 'workspace-archived', workspaceId: current.id } };
+    }
+    return { scope: { workspaceId: current.id, rootPath: current.rootPath } };
   };
   const gitService = new GitService(workspaceRepository);
   const custodyActor: FileActor = {
@@ -1028,14 +1056,12 @@ export function createStdioMcpRuntime(
     allowAiDeleteProvider,
     destructivePolicyProvider,
     activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => {
-      const selected = (await activeWorkspaces())[0];
-      if (selected === undefined) return null;
-      const current = rawWorkspaceRepository.getAny === undefined
-        ? await rawWorkspaceRepository.get(selected.id)
-        : await rawWorkspaceRepository.getAny(selected.id);
-      if (current === null) return null;
-      if (current.archivedAt !== undefined && current.archivedAt !== null) return null;
-      return { workspaceId: current.id, rootPath: current.rootPath };
+      const resolved = await resolveActiveScope();
+      return 'scope' in resolved ? resolved.scope : null;
+    },
+    activeWorkspaceScopeUnavailableProvider: async (): Promise<WorkspaceScopeUnavailable | null> => {
+      const resolved = await resolveActiveScope();
+      return 'scope' in resolved ? null : resolved.unavailable;
     },
     activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => (await activeWorkspaces())
       .map((selected) => ({ workspaceId: selected.id, rootPath: selected.rootPath })),

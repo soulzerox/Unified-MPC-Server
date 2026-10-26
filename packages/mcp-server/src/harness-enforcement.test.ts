@@ -1269,6 +1269,7 @@ describe('prepare_code_change active scope resolution (#428)', () => {
     wiring: {
       activeWorkspaceScopesProvider?: () => readonly WorkspaceScope[] | Promise<readonly WorkspaceScope[]>;
       activeWorkspaceScopeUnavailableProvider?: () => WorkspaceScopeUnavailable | null | Promise<WorkspaceScopeUnavailable | null>;
+      workspaceId?: string;
     },
     filePath: string,
     arrange?: (fixture: ReturnType<typeof createHarnessServices>) => void,
@@ -1276,15 +1277,16 @@ describe('prepare_code_change active scope resolution (#428)', () => {
     result: Awaited<ReturnType<ToolRegistry['invoke']>>;
     nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }>;
   }> {
+    const { workspaceId = 'workspace-1', ...providers } = wiring;
     const fixture = createHarnessServices();
     arrange?.(fixture);
     const registry = new ToolRegistry(fixture.services, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       sessionId: 'scope-wiring-session',
-      ...wiring,
+      ...providers,
     });
-    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
-    const result = await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath });
+    await registry.invoke('workspace_bootstrap', { workspaceId });
+    const result = await registry.invoke('prepare_code_change', { workspaceId, filePath });
     return { result, nativeRagArguments: fixture.nativeRagArguments };
   }
 
@@ -1306,6 +1308,64 @@ describe('prepare_code_change active scope resolution (#428)', () => {
 
     expect(result.isError).not.toBe(true);
     expect(nativeRagArguments[0]).toMatchObject({ args: { file_path: 'src/absolute.ts' } });
+  });
+
+  it('normalizes an absolute target against a secondary active project (#430)', async () => {
+    const secondaryScope: WorkspaceScope = { workspaceId: 'workspace-2', rootPath: '/tmp/workspace-2' };
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope, secondaryScope], workspaceId: 'workspace-2' },
+      '/tmp/workspace-2/src/secondary.ts',
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagArguments[0]).toMatchObject({ tool: 'pre_edit_context', args: { file_path: 'src/secondary.ts' } });
+  });
+
+  it('keeps the relative form of a secondary active project target unchanged (#430)', async () => {
+    const secondaryScope: WorkspaceScope = { workspaceId: 'workspace-2', rootPath: '/tmp/workspace-2' };
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope, secondaryScope], workspaceId: 'workspace-2' },
+      'src/secondary.ts',
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(nativeRagArguments[0]).toMatchObject({ args: { file_path: 'src/secondary.ts' } });
+  });
+
+  it('still refuses an absolute target outside the secondary active project root (#430)', async () => {
+    const secondaryScope: WorkspaceScope = { workspaceId: 'workspace-2', rootPath: '/tmp/workspace-2' };
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      { activeWorkspaceScopesProvider: async () => [primaryScope, secondaryScope], workspaceId: 'workspace-2' },
+      '/tmp/elsewhere/src/primary.ts',
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { reason: 'target-outside-workspace' } } },
+    });
+    expect(nativeRagArguments).toEqual([]);
+  });
+
+  it('fails closed instead of falling back to the primary root for a workspace outside the active set (#430)', async () => {
+    const { result, nativeRagArguments } = await prepareWithScopeWiring(
+      {
+        activeWorkspaceScopesProvider: async () => [primaryScope],
+        workspaceId: 'goal-worktree-1',
+      },
+      '/tmp/goal-worktree-1/src/worktree.ts',
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          details: { reason: 'target-path-unresolvable', scopeReason: 'workspace-not-active' },
+          message: expect.stringContaining('the requested workspace (goal-worktree-1) is not an active project'),
+        },
+      },
+    });
+    expect(nativeRagArguments).toEqual([]);
   });
 
   it('refuses an absolute target that escapes the primary scope', async () => {
@@ -1334,14 +1394,15 @@ describe('prepare_code_change active scope resolution (#428)', () => {
   });
 
   it.each([
-    [{ reason: 'no-active-selection' } as WorkspaceScopeUnavailable, 'no active project workspace is selected'],
-    [{ reason: 'workspace-row-missing', workspaceId: 'workspace-9' } as WorkspaceScopeUnavailable, 'the selected workspace (workspace-9) no longer exists'],
-    [{ reason: 'workspace-archived', workspaceId: 'workspace-9' } as WorkspaceScopeUnavailable, 'the selected workspace (workspace-9) is archived'],
-  ])('names the real cause when no scope exists: %o', async (unavailable, detail) => {
+    [{ reason: 'no-active-selection' } as WorkspaceScopeUnavailable, 'no active project workspace is selected', 'workspace-1'],
+    [{ reason: 'workspace-row-missing', workspaceId: 'workspace-9' } as WorkspaceScopeUnavailable, 'the selected workspace (workspace-9) no longer exists', 'workspace-9'],
+    [{ reason: 'workspace-archived', workspaceId: 'workspace-9' } as WorkspaceScopeUnavailable, 'the selected workspace (workspace-9) is archived', 'workspace-9'],
+  ])('names the real cause when no scope exists: %o', async (unavailable, detail, workspaceId) => {
     const { result } = await prepareWithScopeWiring({
       activeWorkspaceScopesProvider: async () => [],
       activeWorkspaceScopeUnavailableProvider: async () => unavailable,
-    }, '/tmp/workspace-1/src/absolute.ts');
+      workspaceId,
+    }, '/tmp/anywhere/src/absolute.ts');
 
     expect(result).toMatchObject({
       isError: true,
@@ -1350,6 +1411,25 @@ describe('prepare_code_change active scope resolution (#428)', () => {
           code: 'CONFLICT',
           details: { reason: 'target-path-unresolvable', scopeReason: unavailable.reason },
           message: expect.stringContaining(detail),
+        },
+      },
+    });
+  });
+
+  it('does not reuse a host reason that describes a different workspace (#430)', async () => {
+    const { result } = await prepareWithScopeWiring({
+      activeWorkspaceScopesProvider: async () => [],
+      activeWorkspaceScopeUnavailableProvider: async () => ({ reason: 'workspace-archived', workspaceId: 'workspace-1' }),
+      workspaceId: 'workspace-9',
+    }, '/tmp/workspace-9/src/absolute.ts');
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          details: { reason: 'target-path-unresolvable', scopeReason: 'workspace-not-active' },
+          message: expect.stringContaining('the requested workspace (workspace-9) is not an active project'),
         },
       },
     });
@@ -1380,7 +1460,7 @@ describe('prepare_code_change active scope resolution (#428)', () => {
 
   it('keeps the generic message when the host cannot name a cause', async () => {
     const { result } = await prepareWithScopeWiring(
-      { activeWorkspaceScopesProvider: async () => [] },
+      {},
       '/tmp/workspace-1/src/absolute.ts',
     );
 
@@ -1392,6 +1472,9 @@ describe('prepare_code_change active scope resolution (#428)', () => {
           message: expect.stringContaining('Absolute target does not resolve against an active workspace'),
         },
       },
+    });
+    expect(result.structuredContent).not.toMatchObject({
+      error: { details: { scopeReason: expect.anything() } },
     });
   });
 });

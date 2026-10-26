@@ -1192,8 +1192,13 @@ export class ToolRegistry {
    * lets the provider resolve a bare name against its own cwd or home, so an
    * absolute target is accepted only while it stays inside the active workspace
    * root, and a relative target must not escape that root.
+   *
+   * #430: the root is the one belonging to the request's workspace, not the
+   * primary project. A host with several active projects routes the request to
+   * a secondary one, and normalizing against the primary root rejected valid
+   * absolute targets there.
    */
-  private async normalizePreEditTargetPath(requestedPath: string): Promise<Result<string>> {
+  private async normalizePreEditTargetPath(workspaceId: string | undefined, requestedPath: string): Promise<Result<string>> {
     const trimmed = requestedPath.trim();
     if (trimmed.length === 0) {
       return err(appError('CONFLICT', 'prepare_code_change requires a non-empty target path', true, { reason: 'target-path-invalid' }));
@@ -1202,14 +1207,14 @@ export class ToolRegistry {
     // transports wire the plural provider (its first entry is the primary
     // project), so reading the singular provider directly made every absolute
     // target unresolvable wherever only the plural one was wired.
-    const scope = await this.resolveActiveWorkspaceScope();
+    const scope = await this.resolveActiveWorkspaceScope(workspaceId);
     const rootPath = scope === null ? undefined : readTrimmedString(scope.rootPath);
     const pathApi = rootPath === undefined ? undefined : workspacePathApi(rootPath);
     if (rootPath === undefined || pathApi === undefined || !pathApi.isAbsolute(rootPath)) {
       // No usable root: containment cannot be proven, so only the forms that
       // always escape workspace authority are refused.
       if (isAbsoluteActivityPath(trimmed)) {
-        const unavailable = await this.readScopeUnavailable();
+        const unavailable = await this.resolvePreEditScopeUnavailable(workspaceId, scope);
         return err(appError(
           'CONFLICT',
           `Absolute target does not resolve against an active workspace${unavailable === null ? '' : `: ${workspaceScopeUnavailableDetail(unavailable)}`}: ${trimmed}`,
@@ -1249,6 +1254,24 @@ export class ToolRegistry {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * #430: name the cause for *this request*. A host-reported reason that names
+   * a different workspace describes the primary project, not the workspace the
+   * caller asked about, so it is only reused when it is about the request or is
+   * globally true. A present-but-unusable scope root is not a selection
+   * problem either, so it keeps the generic message.
+   */
+  private async resolvePreEditScopeUnavailable(
+    workspaceId: string | undefined,
+    scope: WorkspaceScope | null,
+  ): Promise<WorkspaceScopeUnavailable | null> {
+    const reported = await this.readScopeUnavailable();
+    if (scope !== null) return null;
+    if (workspaceId === undefined) return reported;
+    if (reported !== null && (reported.workspaceId === undefined || reported.workspaceId === workspaceId)) return reported;
+    return this.enforceActiveWorkspaceScope ? { reason: 'workspace-not-active', workspaceId } : reported;
   }
 
   /**
@@ -1384,7 +1407,7 @@ export class ToolRegistry {
       this.harnessActivation.invalidate(context);
       return err(appError('CONFLICT', 'Workspace harness changed; run workspace_bootstrap again', true));
     }
-    const normalizedTarget = await this.normalizePreEditTargetPath(requestedPath);
+    const normalizedTarget = await this.normalizePreEditTargetPath(workspaceId, requestedPath);
     if (!normalizedTarget.ok) return normalizedTarget;
     const filePath = normalizedTarget.value;
     const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, signal);
@@ -2337,11 +2360,14 @@ function withActivityWorkspaceId(input: unknown, workspaceId: string | undefined
 
 function isAbsoluteActivityPath(value: string): boolean { return path.win32.isAbsolute(value) || path.posix.isAbsolute(value); }
 
-/** #428: user-facing explanation for a host-reported missing scope. */
+/** #428, #430: user-facing explanation for a host-reported missing scope. */
 function workspaceScopeUnavailableDetail(unavailable: WorkspaceScopeUnavailable): string {
   const workspace = unavailable.workspaceId === undefined ? 'the selected workspace' : `the selected workspace (${unavailable.workspaceId})`;
   switch (unavailable.reason) {
     case 'no-active-selection': return 'no active project workspace is selected';
+    case 'workspace-not-active': return unavailable.workspaceId === undefined
+      ? 'the requested workspace is not an active project'
+      : `the requested workspace (${unavailable.workspaceId}) is not an active project`;
     case 'workspace-row-missing': return `${workspace} no longer exists`;
     case 'workspace-archived': return `${workspace} is archived`;
   }

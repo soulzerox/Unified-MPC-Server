@@ -385,7 +385,8 @@ export class ThaiRagProviderCoordinator {
     }
   }
 
-  private requestId(): string {    this.nextRequestId += 1;
+  private requestId(): string {
+    this.nextRequestId += 1;
     return `${this.options.ownerId}:${process.pid}:${this.nextRequestId}`;
   }
 }

@@ -392,6 +392,21 @@ describe('ThaiRagProviderRuntime owner-lock heartbeat and version fence (#210 U3
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it('does not resurrect a released lock from an in-flight heartbeat (#418)', async () => {
+    const dataRoot = await root();
+    const lockPath = path.join(dataRoot, 'thai-rag', 'provider.lock');
+    const runtime = make(dataRoot, {});
+    expect((await runtime.start()).ok).toBe(true);
+
+    const renewals = Array.from({ length: 5 }, () => runtime.renewOwnerLock());
+    await runtime.stop();
+    await Promise.all(renewals);
+
+    expect(existsSync(lockPath)).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it('reclaims a stale lock left by an incompatible release', async () => {
     const dataRoot = await root();
     const providerRoot = path.join(dataRoot, 'thai-rag');

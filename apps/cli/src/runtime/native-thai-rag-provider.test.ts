@@ -2297,8 +2297,14 @@ describe('NativeThaiRagProviderDriver', () => {
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       workspaceSourceIdentityProvider: async () => sourceIdentity,
       clientFactory: clientFactory({
-        async onCall(tool): Promise<unknown> {
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
           calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
           return success('ok');
         },
       }),
@@ -2336,8 +2342,14 @@ describe('NativeThaiRagProviderDriver', () => {
         stagedFingerprint: 'none',
       }),
       clientFactory: clientFactory({
-        async onCall(tool): Promise<unknown> {
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
           calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
           return success('ok');
         },
       }),
@@ -2421,12 +2433,22 @@ describe('NativeThaiRagProviderDriver', () => {
         stagedFingerprint: 'none',
       }),
       clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
         async onCall(tool, args): Promise<unknown> {
-          calls.push(`${tool}:${String(args.workspace_id ?? '')}`);
-          if (tool === 'code_index' && args.workspace_id === workspaceId && args.max_files !== undefined) {
-            markFirstStarted?.();
-            await firstGate;
+          const target = String(args.workspace_id ?? '');
+          calls.push(`${tool}:${target}`);
+          if (tool === 'code_index') {
+            if (args.max_files !== undefined) {
+              if (target === workspaceId) {
+                markFirstStarted?.();
+                await firstGate;
+              }
+              return success('ok');
+            }
+            return backgroundIndexStart(target);
           }
+          if (tool === 'index_status') return completedIndexStatus(target);
           return success('ok');
         },
       }),
@@ -2455,6 +2477,97 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(calls.filter((call) => call.startsWith('code_index:'))).toEqual([]);
     await driver.stop();
   }, 20_000);
+
+  it('does not persist verification from a legacy 1.0 background start', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let codeIndexCalls = 0;
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => sourceIdentity,
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          if (tool === 'code_index') codeIndexCalls += 1;
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await expect(access(path.join(dataRoot, 'thai-rag', 'workspaces', workspaceId, 'verification.json'))).rejects.toThrow();
+    await first.stop();
+
+    codeIndexCalls = 0;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(codeIndexCalls).toBeGreaterThan(0);
+    await second.stop();
+  }, 10_000);
+
+  it('re-verifies when the persisted provider snapshot proof is unavailable', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    let failNextSnapshotProbe = false;
+    const sourceIdentity = {
+      repositoryIdentity: 'repo-a',
+      gitCommonDirIdentity: 'git-a',
+      worktreeIdentity: 'worktree-a',
+      workspaceHead: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      stagedFingerprint: 'none',
+    };
+    const createDriver = (): NativeThaiRagProviderDriver => new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      workspaceSourceIdentityProvider: async () => sourceIdentity,
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') {
+            if (failNextSnapshotProbe) {
+              failNextSnapshotProbe = false;
+              return success('index_status', { status: 'ok', data: { status: 'failed', job_id: `idx_${workspaceId}` } });
+            }
+            return completedIndexStatus(workspaceId);
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    const first = createDriver();
+    expect((await first.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(first.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    await first.stop();
+
+    calls.length = 0;
+    failNextSnapshotProbe = true;
+    const second = createDriver();
+    expect((await second.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(second.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter((tool) => tool === 'code_index').length).toBeGreaterThan(0);
+    await second.stop();
+  }, 10_000);
 });
 
 function clientFactory(options: {
@@ -2520,6 +2633,26 @@ function success(result: string, data?: Record<string, unknown>): unknown {
     content: [{ type: 'text', text: result }],
     structuredContent: data === undefined ? { result } : { result, data },
   };
+}
+
+function backgroundIndexStart(workspace: string): unknown {
+  return success('code_index', {
+    status: 'ok',
+    data: { status: 'running', job_id: `idx_${workspace}`, workspace_id: workspace },
+  });
+}
+
+function completedIndexStatus(workspace: string): unknown {
+  const generation = `gen-${workspace}`;
+  return success('index_status', {
+    status: 'ok',
+    data: {
+      status: 'done',
+      job_id: `idx_${workspace}`,
+      generation_id: generation,
+      result: { status: 'ok', generation_id: generation, indexed: 0, skipped: 0, total_files: 0 },
+    },
+  });
 }
 
 function defaultHandshake(): Record<string, unknown> {

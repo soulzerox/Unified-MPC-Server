@@ -34,6 +34,7 @@ function input(overrides: Partial<ThaiRagWorkspaceVerificationInput> = {}): Thai
     indexedFiles: 0,
     skippedFiles: 0,
     totalFiles: 0,
+    providerJobId: 'idx_verification',
     ...overrides,
   };
 }
@@ -56,6 +57,7 @@ describe('ThaiRagWorkspaceVerificationStore', () => {
       outcome: 'unchanged',
       sourceIdentity: identity,
       verifiedAt: '2026-10-26T00:00:00.000Z',
+      providerJobId: 'idx_verification',
     });
 
     const reloaded = await new ThaiRagWorkspaceVerificationStore(dataRoot).get(WORKSPACE);

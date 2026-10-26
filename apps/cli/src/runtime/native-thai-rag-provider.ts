@@ -2,6 +2,7 @@ import { lstat, mkdir, readdir, readlink, rm, symlink, unlink } from 'node:fs/pr
 import path from 'node:path';
 import {
   appError,
+  classifyWorkspaceSourceEvidence,
   err,
   ok,
   type Result,
@@ -20,6 +21,7 @@ import {
   ThaiRagWorkspaceVerificationStore,
   parseCanonicalWorkspaceId,
   resolveThaiRagProviderRoot,
+  type ThaiRagWorkspaceVerificationRecord,
   THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES,
   THAI_RAG_CANCEL_CAPABILITY,
   THAI_RAG_EMBEDDING_COMPATIBILITY,
@@ -769,6 +771,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           this.pendingReindexReasons.delete(workspace.id);
           continue;
         }
+        if (!this.refreshIsCurrent(generation) || !this.started) return ok(undefined);
         return this.startWorkspaceAdmissionIndex(
           workspace,
           false, // Preserve provider-side validated incremental reuse on admission.
@@ -823,8 +826,36 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return { skip: false };
     }
     if (sourceIdentity === null) return { skip: false };
-    const fresh = await this.verifications.isFresh(workspace.id, sourceIdentity);
-    return { skip: fresh.ok && fresh.value, sourceIdentity };
+    const recorded = await this.verifications.get(workspace.id);
+    if (!recorded.ok || recorded.value === null) return { skip: false, sourceIdentity };
+    if (classifyWorkspaceSourceEvidence(recorded.value.sourceIdentity, sourceIdentity) !== 'fresh') {
+      return { skip: false, sourceIdentity };
+    }
+    // Fresh git identity alone is not proof that the provider still has a
+    // usable snapshot. Re-probe the persisted provider job (issue #422:
+    // "separately prove whether an active usable snapshot exists").
+    return { skip: await this.workspaceSnapshotIsUsable(recorded.value), sourceIdentity };
+  }
+
+  private async workspaceSnapshotIsUsable(record: ThaiRagWorkspaceVerificationRecord): Promise<boolean> {
+    if (record.providerJobId === undefined || this.launchConfig === undefined || !this.started) return false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    try {
+      const status = await this.callAdmissionWorker('index_status', {
+        job_id: record.providerJobId,
+        workspace_id: record.workspaceId,
+      }, controller.signal);
+      if (!status.ok) return false;
+      const remote = nestedString(status.value, 'status');
+      if (remote !== 'done' && remote !== 'complete' && remote !== 'completed') return false;
+      const generation = nestedString(status.value, 'generation_id');
+      return record.generationId === undefined || generation === undefined || generation === record.generationId;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private scheduleNextQueuedWorkspaceAdmission(generation: number): void {
@@ -957,7 +988,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }
         this.pendingReindexIds.delete(workspace.id);
         this.pendingReindexReasons.delete(workspace.id);
-        await this.recordWorkspaceVerification(workspace.id, sourceIdentity, job.jobId, indexed.value, ownerId);
+        // A legacy 1.0 provider returns from the background-start call before
+        // the pass is terminal. Recording freshness there would authorize a
+        // permanent skip while the pass may still fail or be running.
+        if (this.cancellableIndexJobs) {
+          await this.recordWorkspaceVerification(workspace.id, sourceIdentity, job.jobId, indexed.value, ownerId);
+        }
         return ok(undefined);
       } catch (error: unknown) {
         await this.jobs.fail(job.jobId, errorMessage(error), ownerId).catch(() => undefined);
@@ -996,6 +1032,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (sourceIdentity === undefined) return;
     const progress = nativeIndexProgress(result);
     const localJob = await this.jobs.get(jobId, ownerId, workspaceId).catch(() => null);
+    const providerJobId = localJob?.providerJobId;
+    // Without a provider job id there is no way to re-prove that the snapshot
+    // is still usable after a restart. Recording would authorize a skip we
+    // cannot justify, so leave the workspace unverified.
+    if (providerJobId === undefined) return;
     const indexedFiles = progress?.indexedFiles ?? localJob?.indexedFiles ?? 0;
     const skippedFiles = progress?.skippedFiles ?? localJob?.skippedFiles ?? 0;
     const totalFiles = Math.max(progress?.totalFiles ?? localJob?.totalFiles ?? 0, indexedFiles + skippedFiles);
@@ -1017,6 +1058,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         totalFiles,
         ...(sourceSnapshotId === undefined ? {} : { sourceSnapshotId }),
         ...(generationId === undefined ? {} : { generationId }),
+        providerJobId,
       });
     } catch {
       // Verification persistence is an optimization: a failed write must never
@@ -1152,8 +1194,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return normalizeWorkerCallResult(tool, raw);
   }
 
-  private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>): Promise<Result<unknown>> {
-    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args));
+  private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<Result<unknown>> {
+    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal));
   }
 
   private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {

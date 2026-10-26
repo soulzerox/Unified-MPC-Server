@@ -35,6 +35,7 @@ export interface ThaiRagWorkspaceVerificationInput {
   readonly totalFiles: number;
   readonly sourceSnapshotId?: string;
   readonly generationId?: string;
+  readonly providerJobId?: string;
 }
 
 export interface ThaiRagWorkspaceVerificationRecord {
@@ -48,6 +49,7 @@ export interface ThaiRagWorkspaceVerificationRecord {
   readonly totalFiles: number;
   readonly sourceSnapshotId?: string;
   readonly generationId?: string;
+  readonly providerJobId?: string;
 }
 
 interface StoredVerification {
@@ -62,6 +64,7 @@ interface StoredVerification {
   readonly totalFiles: number;
   readonly sourceSnapshotId?: string;
   readonly generationId?: string;
+  readonly providerJobId?: string;
 }
 
 /**
@@ -118,7 +121,8 @@ export class ThaiRagWorkspaceVerificationStore {
       || !isCounter(input.indexedFiles)
       || !isCounter(input.skippedFiles)
       || !isCounter(input.totalFiles)
-      || input.indexedFiles + input.skippedFiles > input.totalFiles) {
+      || input.indexedFiles + input.skippedFiles > input.totalFiles
+      || (input.providerJobId !== undefined && (typeof input.providerJobId !== 'string' || input.providerJobId.trim().length === 0))) {
       return err(appError('INVALID_INPUT', 'Thai-RAG workspace verification input is invalid'));
     }
     const stored: StoredVerification = {
@@ -133,15 +137,18 @@ export class ThaiRagWorkspaceVerificationStore {
       totalFiles: input.totalFiles,
       ...(input.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: input.sourceSnapshotId }),
       ...(input.generationId === undefined ? {} : { generationId: input.generationId }),
+      ...(input.providerJobId === undefined ? {} : { providerJobId: input.providerJobId }),
     };
+    let temporaryPath: string | undefined;
     try {
-      await mkdir(namespace.value.root, { recursive: true });
+      await mkdir(namespace.value.root, { recursive: true, mode: 0o700 });
       const filePath = verificationPath(namespace.value.root);
-      const temporaryPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+      temporaryPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
       await writeFile(temporaryPath, `${JSON.stringify(stored, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
       await rename(temporaryPath, filePath);
       return ok(withWorkspaceId(stored, namespace.value.workspaceId));
     } catch {
+      if (temporaryPath !== undefined) await rm(temporaryPath, { force: true }).catch(() => undefined);
       return err(appError('INTERNAL_ERROR', 'Unable to persist Thai-RAG workspace verification', true));
     }
   }
@@ -177,6 +184,7 @@ function withWorkspaceId(
     totalFiles: stored.totalFiles,
     ...(stored.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: stored.sourceSnapshotId }),
     ...(stored.generationId === undefined ? {} : { generationId: stored.generationId }),
+    ...(stored.providerJobId === undefined ? {} : { providerJobId: stored.providerJobId }),
   };
 }
 
@@ -194,7 +202,8 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
     || value.indexedFiles + value.skippedFiles > value.totalFiles
     || (value.providerStatus !== undefined && typeof value.providerStatus !== 'string')
     || (value.sourceSnapshotId !== undefined && typeof value.sourceSnapshotId !== 'string')
-    || (value.generationId !== undefined && typeof value.generationId !== 'string')) return null;
+    || (value.generationId !== undefined && typeof value.generationId !== 'string')
+    || (value.providerJobId !== undefined && (typeof value.providerJobId !== 'string' || value.providerJobId.trim().length === 0))) return null;
   return {
     schemaVersion: 1,
     workspaceId: value.workspaceId,
@@ -207,6 +216,7 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
     totalFiles: value.totalFiles,
     ...(value.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: value.sourceSnapshotId }),
     ...(value.generationId === undefined ? {} : { generationId: value.generationId }),
+    ...(value.providerJobId === undefined ? {} : { providerJobId: value.providerJobId }),
   };
 }
 

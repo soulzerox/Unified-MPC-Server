@@ -382,7 +382,7 @@ async function readProcessStat(pid: number, pidText: string): Promise<ProcessSta
   }
 }
 
-async function readProcessSamples(): Promise<{ readonly total: number; readonly samples: readonly RawProcessSample[] }> {
+async function sampleProcesses(): Promise<{ readonly total: number; readonly samples: readonly RawProcessSample[] }> {
   let entries: string[];
   try {
     entries = await readdir('/proc');
@@ -424,6 +424,24 @@ async function readProcessSamples(): Promise<{ readonly total: number; readonly 
 
   previousProcessSampling = { totalJiffies, processes: nextState };
   return { total: pids.length, samples };
+}
+
+let inFlightProcessSampling: Promise<{ readonly total: number; readonly samples: readonly RawProcessSample[] }> | null = null;
+
+/**
+ * Concurrent dashboard polls share one snapshot: a second sample a few
+ * milliseconds later would compute percentages over a near-zero window and
+ * report wildly inflated CPU values.
+ */
+async function readProcessSamples(): Promise<{ readonly total: number; readonly samples: readonly RawProcessSample[] }> {
+  if (inFlightProcessSampling !== null) return inFlightProcessSampling;
+  const sampling = sampleProcesses();
+  inFlightProcessSampling = sampling;
+  try {
+    return await sampling;
+  } finally {
+    inFlightProcessSampling = null;
+  }
 }
 
 function summarizeProcesses(samples: readonly RawProcessSample[], totalMemoryBytes: number): HostProcessMetrics {

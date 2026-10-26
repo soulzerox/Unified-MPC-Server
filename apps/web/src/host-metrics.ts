@@ -41,6 +41,23 @@ export interface HostDiskMetrics {
   readonly usedPercent: number;
 }
 
+export interface HostProcessEntry {
+  readonly pid: number;
+  readonly name: string;
+  /** Share of one CPU core (100 = one saturated core), like `top`'s default Irix mode. */
+  readonly cpuPercent: number;
+  readonly memoryBytes: number;
+  readonly memoryPercent: number;
+}
+
+export interface HostProcessMetrics {
+  readonly total: number;
+  /** Heaviest processes since the previous snapshot, already truncated for display. */
+  readonly topCpu: readonly HostProcessEntry[];
+  /** Largest resident sets, already truncated for display. */
+  readonly topMemory: readonly HostProcessEntry[];
+}
+
 /** Pre-formatted one-line strings so dashboard widgets (e.g. Homepage customapi) need no client-side math. */
 export interface HostDisplayMetrics {
   readonly cpu: string;
@@ -51,6 +68,8 @@ export interface HostDisplayMetrics {
   readonly disk: string;
   readonly zram: string;
   readonly uptime: string;
+  readonly top_cpu: string;
+  readonly top_ram: string;
   /** Per-mount strings, keyed `disk_<mount>` (e.g. `disk_root`, `disk_data`). */
   readonly [diskField: string]: string;
 }
@@ -82,6 +101,7 @@ export interface HostMetricsSnapshot {
   };
   readonly disk: HostDiskMetrics;
   readonly disks: readonly HostDiskEntry[];
+  readonly processes: HostProcessMetrics;
   readonly display: HostDisplayMetrics;
 }
 
@@ -277,15 +297,164 @@ async function readMountedDisks(): Promise<readonly HostDiskEntry[]> {
   return disks.sort((left, right) => (left.mount === '/' ? -1 : right.mount === '/' ? 1 : left.mount.localeCompare(right.mount)));
 }
 
+// Linux USER_HZ is fixed at 100 by the kernel ABI; PAGE_SIZE is 4096 on this x86_64 target.
+const CLOCK_TICKS_PER_SECOND = 100;
+const PAGE_SIZE_BYTES = 4096;
+const PROCESS_READ_BATCH = 32;
+const TOP_PROCESS_LIMIT = 3;
+const PROCESS_NAME_MAX = 28;
+
+interface ProcessStatSample {
+  readonly pid: number;
+  readonly name: string;
+  readonly jiffies: number;
+  readonly startTime: number;
+  readonly memoryBytes: number;
+}
+
+interface RawProcessSample {
+  readonly pid: number;
+  readonly name: string;
+  readonly cpuPercent: number;
+  readonly memoryBytes: number;
+}
+
+interface ProcessSamplingState {
+  readonly totalJiffies: number;
+  readonly processes: ReadonlyMap<number, number>;
+}
+
+let previousProcessSampling: ProcessSamplingState | null = null;
+
+async function readTotalCpuJiffies(): Promise<number> {
+  try {
+    const text = await readFile('/proc/stat', 'utf8');
+    const line = text.split('\n', 1)[0] ?? '';
+    // user nice system idle iowait irq softirq steal; guest time is already folded into user/nice.
+    const values = line.trim().split(/\s+/).slice(1, 9).map((value) => Number.parseInt(value, 10));
+    return values.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+  } catch {
+    return 0;
+  }
+}
+
+function processDisplayName(comm: string, commandLine: string): string {
+  const args = commandLine.split(/\s+/).filter(Boolean);
+  // The first non-flag argument after argv[0] disambiguates e.g. many `node` processes.
+  const script = args.slice(1).find((arg) => !arg.startsWith('-'));
+  const base = script?.split('/').pop()?.replace(/[^\w.@+-]/g, '_') ?? '';
+  const name = base === '' || base === comm ? comm : `${comm}:${base}`;
+  return name.length > PROCESS_NAME_MAX ? `${name.slice(0, PROCESS_NAME_MAX - 1)}…` : name;
+}
+
+async function readProcessStat(pid: number, pidText: string): Promise<ProcessStatSample | null> {
+  try {
+    const stat = await readFile(`/proc/${pidText}/stat`, 'utf8');
+    const open = stat.indexOf('(');
+    // `comm` may contain spaces and parentheses, so anchor on the final closing paren.
+    const close = stat.lastIndexOf(')');
+    if (open < 0 || close <= open) return null;
+    const comm = stat.slice(open + 1, close);
+    const fields = stat.slice(close + 2).trim().split(/\s+/);
+    // fields[0] is field 3 (state); utime/stime/starttime are fields 14/15/22 -> indexes 11/12/19.
+    const utime = Number.parseInt(fields[11] ?? '', 10);
+    const stime = Number.parseInt(fields[12] ?? '', 10);
+    const startTime = Number.parseInt(fields[19] ?? '', 10);
+    if (!Number.isFinite(utime) || !Number.isFinite(stime) || !Number.isFinite(startTime)) return null;
+    const [statm, cmdline] = await Promise.all([
+      readFile(`/proc/${pidText}/statm`, 'utf8').catch(() => ''),
+      readFile(`/proc/${pidText}/cmdline`, 'utf8').catch(() => ''),
+    ]);
+    const commandLine = cmdline.replace(/\0/g, ' ').trim();
+    // Kernel threads expose an empty cmdline and are not useful on a dashboard.
+    if (commandLine === '') return null;
+    const rssPages = Number.parseInt(statm.trim().split(/\s+/)[1] ?? '', 10);
+    return {
+      pid,
+      name: processDisplayName(comm, commandLine),
+      jiffies: utime + stime,
+      startTime,
+      memoryBytes: Number.isFinite(rssPages) && rssPages > 0 ? rssPages * PAGE_SIZE_BYTES : 0,
+    };
+  } catch {
+    // The process exited between readdir and read; skip it.
+    return null;
+  }
+}
+
+async function readProcessSamples(): Promise<{ readonly total: number; readonly samples: readonly RawProcessSample[] }> {
+  let entries: string[];
+  try {
+    entries = await readdir('/proc');
+  } catch {
+    return { total: 0, samples: [] };
+  }
+  const pids = entries.filter((name) => /^[0-9]+$/.test(name));
+  const totalJiffies = await readTotalCpuJiffies();
+  const cores = os.cpus().length || 1;
+  const uptimeSeconds = os.uptime();
+  const previous = previousProcessSampling;
+  const totalDelta = previous === null ? 0 : totalJiffies - previous.totalJiffies;
+  const samples: RawProcessSample[] = [];
+  const nextState = new Map<number, number>();
+
+  for (let offset = 0; offset < pids.length; offset += PROCESS_READ_BATCH) {
+    const batch = pids.slice(offset, offset + PROCESS_READ_BATCH);
+    const parsed = await Promise.all(batch.map((pidText) => readProcessStat(Number.parseInt(pidText, 10), pidText)));
+    for (const sample of parsed) {
+      if (sample === null) continue;
+      const before = previous?.processes.get(sample.pid);
+      let cpuPercent: number;
+      if (totalDelta > 0 && before !== undefined && sample.jiffies >= before) {
+        cpuPercent = ((sample.jiffies - before) / totalDelta) * cores * 100;
+      } else {
+        // First snapshot after boot/restart: fall back to the process lifetime average, like `ps`.
+        const ageSeconds = Math.max(1, uptimeSeconds - sample.startTime / CLOCK_TICKS_PER_SECOND);
+        cpuPercent = (sample.jiffies / CLOCK_TICKS_PER_SECOND / ageSeconds) * 100;
+      }
+      samples.push({
+        pid: sample.pid,
+        name: sample.name,
+        cpuPercent: Math.round(Math.min(cores * 100, Math.max(0, cpuPercent)) * 10) / 10,
+        memoryBytes: sample.memoryBytes,
+      });
+      nextState.set(sample.pid, sample.jiffies);
+    }
+  }
+
+  previousProcessSampling = { totalJiffies, processes: nextState };
+  return { total: pids.length, samples };
+}
+
+function summarizeProcesses(samples: readonly RawProcessSample[], totalMemoryBytes: number): HostProcessMetrics {
+  const enrich = (sample: RawProcessSample): HostProcessEntry => ({
+    ...sample,
+    memoryPercent: totalMemoryBytes > 0 ? Math.round((sample.memoryBytes / totalMemoryBytes) * 1000) / 10 : 0,
+  });
+  const active = samples.filter((sample) => sample.cpuPercent > 0.05 || sample.memoryBytes > 0);
+  return {
+    total: samples.length,
+    topCpu: [...active].sort((left, right) => right.cpuPercent - left.cpuPercent).slice(0, TOP_PROCESS_LIMIT).map(enrich),
+    topMemory: [...active].sort((left, right) => right.memoryBytes - left.memoryBytes).slice(0, TOP_PROCESS_LIMIT).map(enrich),
+  };
+}
+
+function formatProcessSummary(entries: readonly HostProcessEntry[], format: (entry: HostProcessEntry) => string): string {
+  if (entries.length === 0) return 'n/a';
+  return entries.map((entry) => `${entry.name} ${format(entry)}`).join(' · ');
+}
+
 export async function readHostMetrics(): Promise<HostMetricsSnapshot> {
-  const [memInfo, swapDevices, zramDevices, disk, mountedDisks] = await Promise.all([
+  const [memInfo, swapDevices, zramDevices, disk, mountedDisks, processSamples] = await Promise.all([
     readMemInfo(),
     readSwapDevices(),
     readZramDevices(),
     statfs('/'),
     readMountedDisks(),
+    readProcessSamples(),
   ]);
   const memory = memInfo;
+  const processes = summarizeProcesses(processSamples.samples, memory.total);
   const diskTotal = disk.blocks * disk.bsize;
   const diskAvailable = disk.bavail * disk.bsize;
   const diskUsed = diskTotal - disk.bfree * disk.bsize;
@@ -338,11 +507,14 @@ export async function readHostMetrics(): Promise<HostMetricsSnapshot> {
       usedPercent: diskTotal > 0 ? Math.round((diskUsed / diskTotal) * 1000) / 10 : 0,
     },
     disks: mountedDisks,
+    processes,
     display: {
       ...Object.fromEntries(mountedDisks.map((entry) => [`disk_${entry.key}`, entry.display])),
       cpu: `${usagePercent === null ? 'n/a' : `${usagePercent}%`} · load ${(loaded[0] ?? 0).toFixed(2)}`,
       cpu_load: (loaded[0] ?? 0).toFixed(2),
       cpu_temp: cpuTempC === null ? 'n/a' : `${cpuTempC.toFixed(1)}°C`,
+      top_cpu: formatProcessSummary(processes.topCpu, (entry) => `${entry.cpuPercent}%`),
+      top_ram: formatProcessSummary(processes.topMemory, (entry) => formatBytes(entry.memoryBytes)),
       memory: `${formatBytes(memoryUsedBytes)} / ${formatBytes(memory.total)} (${formatPercent(memoryUsedBytes, memory.total)})`,
       swap: `${formatBytes(swapUsedBytes)} / ${formatBytes(swapTotalBytes)} (${formatPercent(swapUsedBytes, swapTotalBytes)})`,
       disk: `${formatPercent(diskUsed, diskTotal)} of ${formatBytes(diskTotal)}`,

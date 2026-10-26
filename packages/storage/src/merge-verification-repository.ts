@@ -150,6 +150,24 @@ export class SqliteMergeVerificationReceiptRepository {
     return rows.map((row) => this.toRecord(this.requireRow(row)));
   }
 
+  public async listForPullRequest(
+    request: { readonly repository: string; readonly pullRequest: number; readonly limit?: number },
+  ): Promise<readonly MergeVerificationReceiptRecord[]> {
+    const repository = requiredBounded(request.repository, 'repository', MAX_REPOSITORY_CHARS);
+    positiveInteger(request.pullRequest, 'pullRequest');
+    const limit = boundedLimit(request.limit ?? 20);
+
+    const rows = this.database.connection.prepare(`
+      SELECT *
+      FROM merge_verification_receipts
+      WHERE repository = ? AND pull_request = ?
+      ORDER BY sequence DESC
+      LIMIT ?
+    `).all(repository, request.pullRequest, limit);
+
+    return rows.map((row) => this.toRecord(this.requireRow(row)));
+  }
+
   private requireByRef(receiptRef: string): MergeVerificationReceiptRecord {
     const row = this.database.connection.prepare(
       'SELECT * FROM merge_verification_receipts WHERE receipt_ref = ?',

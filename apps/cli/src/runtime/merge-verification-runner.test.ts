@@ -4,6 +4,7 @@ import type { WorkspaceRepository } from '@unified-mpc/workspace';
 import {
   createMergeVerificationRunPort,
   type ExactHeadWorkspaceVerifier,
+  type MergeVerificationAttemptRecorder,
   type MergeVerificationReceiptWriter,
   type VerificationCommandRunner,
 } from './merge-verification-runner.js';
@@ -362,4 +363,196 @@ describe('createMergeVerificationRunPort', () => {
     });
     expect(runner.run).not.toHaveBeenCalled();
   });
+
+  it('records a durable running attempt and closes it with the persisted receipt ref', async () => {
+    const attempts = attemptRecorder();
+    const service = createMergeVerificationRunPort({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: '511 passed', stderr: '' }) },
+      attempts: attempts.recorder,
+      now: () => new Date('2026-10-27T10:00:00Z'),
+      randomId: () => 'receipt-id',
+      randomAttemptId: () => 'attempt-id',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { decision: { status: 'MERGE_ALLOWED' } } });
+    expect(attempts.calls.begin).toEqual([{
+      attemptId: 'attempt-id',
+      repository: REPOSITORY,
+      pullRequest: 17,
+      headSha: HEAD,
+      baseBranch: 'main',
+      workspaceId: 'workspace-1',
+      startedAt: '2026-10-27T10:00:00.000Z',
+    }]);
+    expect(attempts.calls.heartbeat[0]).toMatchObject({
+      attemptId: 'attempt-id',
+      request: { gateName: 'pytest default suite' },
+    });
+    expect(attempts.calls.finish).toEqual([{
+      attemptId: 'attempt-id',
+      request: {
+        status: 'completed',
+        finishedAt: '2026-10-27T10:00:00.000Z',
+        receiptRef: `merge-verification:17@${HEAD}:receipt-id`,
+      },
+    }]);
+  });
+
+  it('closes a blocked verdict as a completed attempt and a gate failure as failed', async () => {
+    const completed = attemptRecorder();
+    const blocked = await createMergeVerificationRunPort({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run: async () => ({ exitCode: 1, stdout: '1 failed', stderr: '' }) },
+      attempts: completed.recorder,
+      randomAttemptId: () => 'attempt-blocked',
+    }).run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(blocked).toMatchObject({ ok: true, value: { decision: { status: 'MERGE_BLOCKED' } } });
+    expect(completed.calls.finish[0]).toMatchObject({ request: { status: 'completed' } });
+
+    const failed = attemptRecorder();
+    const rejected = await createMergeVerificationRunPort({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(vi.fn()
+        .mockResolvedValueOnce({ ok: true, value: { rootPath: '/workspace' } })
+        .mockResolvedValueOnce(err(appError('CONFLICT', 'head changed')))),
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
+      attempts: failed.recorder,
+      randomAttemptId: () => 'attempt-failed',
+    }).run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(failed.calls.finish[0]).toMatchObject({
+      attemptId: 'attempt-failed',
+      request: { status: 'failed', detail: expect.stringContaining('workspace changed') },
+    });
+  });
+
+  it('refuses a duplicate concurrent verification instead of running the heavy gates twice', async () => {
+    const attempts = attemptRecorder({ live: { attemptId: 'already-running' } });
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createMergeVerificationRunPort({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(result.ok === false ? result.error.message : '').toContain('already-running');
+    expect(attempts.calls.begin).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('marks the attempt interrupted when the runner itself throws', async () => {
+    const attempts = attemptRecorder();
+    const service = createMergeVerificationRunPort({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: {
+        run: async () => {
+          throw new Error('gate runner crashed');
+        },
+      },
+      attempts: attempts.recorder,
+      randomAttemptId: () => 'attempt-crashed',
+    });
+
+    await expect(service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    })).rejects.toThrow('gate runner crashed');
+
+    expect(attempts.calls.interrupted).toEqual([{
+      attemptId: 'attempt-crashed',
+      request: {
+        finishedAt: expect.any(String),
+        detail: 'Verification runner failed before a verdict was recorded',
+      },
+    }]);
+  });
 });
+
+function attemptRecorder(options: { live?: { attemptId: string } } = {}): {
+  recorder: MergeVerificationAttemptRecorder;
+  calls: {
+    begin: unknown[];
+    heartbeat: Array<{ attemptId: string; request: unknown }>;
+    finish: Array<{ attemptId: string; request: unknown }>;
+    interrupted: Array<{ attemptId: string; request: unknown }>;
+  };
+} {
+  const calls = {
+    begin: [] as unknown[],
+    heartbeat: [] as Array<{ attemptId: string; request: unknown }>,
+    finish: [] as Array<{ attemptId: string; request: unknown }>,
+    interrupted: [] as Array<{ attemptId: string; request: unknown }>,
+  };
+  return {
+    calls,
+    recorder: {
+      begin: async (request): Promise<unknown> => {
+        calls.begin.push(request);
+        return request;
+      },
+      heartbeat: async (attemptId, request): Promise<boolean> => {
+        calls.heartbeat.push({ attemptId, request });
+        return true;
+      },
+      finish: async (attemptId, request): Promise<unknown> => {
+        calls.finish.push({ attemptId, request });
+        return {};
+      },
+      markInterrupted: async (attemptId, request): Promise<unknown> => {
+        calls.interrupted.push({ attemptId, request });
+        return {};
+      },
+      findLive: async (): Promise<{ attemptId: string } | undefined> => options.live,
+      reapStale: async (): Promise<readonly string[]> => [],
+    },
+  };
+}

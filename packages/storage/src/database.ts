@@ -36,6 +36,8 @@ import { WORKSPACE_BASE_REF_MIGRATION_SQL } from './migrations/workspace-base-re
 import { WORKSPACE_BASE_REBASE_MIGRATION_SQL } from './migrations/workspace-base-rebase-migration.js';
 import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations/goal-runtime-integration-observation-migration.js';
 import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
+import { MERGE_VERIFICATION_ATTEMPT_MIGRATION_SQL } from './migrations/merge-verification-attempt-migration.js';
+import { MERGE_VERIFICATION_ATTEMPT_BASE_BRANCH_MIGRATION_SQL } from './migrations/merge-verification-attempt-base-branch-migration.js';
 import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconciliation-migration.js';
 import { GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL } from './migrations/goal-workspace-transfer-intent-migration.js';
 import { GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL } from './migrations/goal-workspace-retention-custody-migration.js';
@@ -62,7 +64,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '037_goal_relocation_approvals' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '039_merge_verification_attempt_base_branch' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -127,7 +129,9 @@ export class SqliteDatabase {
     this.applyMigration({ id: '034_goal_workspace_retention_evidence', sql: GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL });
     this.applyMigration({ id: '035_workspace_authority_epoch', sql: WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL });
     this.applyMigration({ id: '036_workspace_admission_authority', sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: GOAL_RELOCATION_APPROVAL_MIGRATION_SQL });
+    this.applyMigration({ id: '037_goal_relocation_approvals', sql: GOAL_RELOCATION_APPROVAL_MIGRATION_SQL });
+    this.applyMigration({ id: '038_merge_verification_attempts', sql: MERGE_VERIFICATION_ATTEMPT_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: MERGE_VERIFICATION_ATTEMPT_BASE_BRANCH_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

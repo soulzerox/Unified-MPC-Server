@@ -205,6 +205,18 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         });
       },
     },
+    mergeVerificationStatus: {
+      async get(request: Parameters<NonNullable<McpApplicationServices['mergeVerificationStatus']>['get']>[0]) {
+        calls.push('mergeVerificationStatus.get');
+        return {
+          repository: request.repository,
+          pullRequest: request.pullRequest,
+          ...(request.headSha === undefined ? {} : { headSha: request.headSha }),
+          attempts: [],
+          receipts: [],
+        };
+      },
+    },
     guardedMerge: {
       async dispatch(request: Parameters<NonNullable<McpApplicationServices['guardedMerge']>['dispatch']>[0]) {
         calls.push('guardedMerge.dispatch');

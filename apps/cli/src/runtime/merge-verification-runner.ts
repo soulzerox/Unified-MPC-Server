@@ -14,6 +14,7 @@ import {
   type MergeReviewOutcome,
   type MergeVerificationReceipt,
   type RepositoryMergePolicy,
+  type RequiredMergeGate,
   type Result,
 } from '@unified-mpc/domain';
 import type { WorkspaceRepository } from '@unified-mpc/workspace';
@@ -24,6 +25,12 @@ const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_EVIDENCE_CHARS = 3_500;
 const SHA_PATTERN = /^[a-f0-9]{40,64}$/i;
 const CLEAN_LLM_REVIEW_MARKER = '[merge-review:clean]';
+/**
+ * Local gates can run for up to 20 minutes, so the attempt row is kept live by a timer
+ * rather than by gate boundaries. Six missed beats are treated as a dead runner.
+ */
+const ATTEMPT_HEARTBEAT_INTERVAL_MS = 15_000;
+const ATTEMPT_STALE_AFTER_MS = 90_000;
 
 export interface MergeVerificationRunRequest {
   readonly policy: RepositoryMergePolicy;
@@ -85,8 +92,55 @@ export interface MergeVerificationRunDependencies {
   readonly workspaces: WorkspaceRepository;
   readonly commandRunner?: VerificationCommandRunner;
   readonly workspaceVerifier?: ExactHeadWorkspaceVerifier;
+  readonly attempts?: MergeVerificationAttemptRecorder;
   readonly now?: () => Date;
   readonly randomId?: () => string;
+  readonly randomAttemptId?: () => string;
+}
+
+/**
+ * Narrow durable-attempt port. `SqliteMergeVerificationAttemptRepository` satisfies it
+ * structurally, so this package keeps no storage dependency.
+ */
+export interface MergeVerificationAttemptRecorder {
+  begin(request: {
+    readonly attemptId: string;
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly headSha: string;
+    readonly baseBranch?: string;
+    readonly workspaceId?: string;
+    readonly startedAt: string;
+  }): Promise<unknown>;
+  heartbeat(
+    attemptId: string,
+    request: { readonly heartbeatAt: string; readonly gateName?: string },
+  ): Promise<boolean>;
+  finish(attemptId: string, request: {
+    readonly status: 'completed' | 'failed';
+    readonly finishedAt: string;
+    readonly detail?: string;
+    readonly receiptRef?: string;
+  }): Promise<unknown>;
+  markInterrupted(
+    attemptId: string,
+    request: { readonly finishedAt: string; readonly detail: string },
+  ): Promise<unknown>;
+  findLive(request: {
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly headSha: string;
+    readonly now: string;
+    readonly staleAfterMs: number;
+  }): Promise<LiveMergeVerificationAttempt | undefined>;
+  reapStale(request: {
+    readonly now: string;
+    readonly staleAfterMs: number;
+  }): Promise<readonly string[]>;
+}
+
+export interface LiveMergeVerificationAttempt {
+  readonly attemptId: string;
 }
 
 export function createMergeVerificationRunPort(
@@ -96,6 +150,9 @@ export function createMergeVerificationRunPort(
   const workspaceVerifier = deps.workspaceVerifier ?? createExactHeadWorkspaceVerifier(deps.workspaces);
   const now = deps.now ?? ((): Date => new Date());
   const randomId = deps.randomId ?? randomUUID;
+  const randomAttemptId = deps.randomAttemptId ?? randomUUID;
+  const attempts = deps.attempts;
+  const context: VerifyContext = { deps, commandRunner, workspaceVerifier, now, randomId, attempts };
 
   return {
     async run(request, signal): Promise<Result<MergeVerificationRunResult>> {
@@ -108,121 +165,247 @@ export function createMergeVerificationRunPort(
       }
 
       const localGates = request.policy.requiredGates.filter((gate) => gate.source === 'local_command');
-      let workspaceRoot: string | undefined;
-      if (localGates.length > 0) {
-        if (request.workspaceId === undefined) {
-          return err(appError('INVALID_INPUT', 'workspaceId is required for local exact-head verification gates'));
-        }
-        const inspected = await workspaceVerifier.inspect({
-          workspaceId: request.workspaceId,
-          repository: request.repository,
-          headSha: subject.headSha,
-        });
-        if (!inspected.ok) return inspected;
-        workspaceRoot = inspected.value.rootPath;
+      if (attempts === undefined || localGates.length === 0) {
+        return verify(context, request, subject, localGates, signal, undefined);
       }
 
-      const githubRuns = request.policy.requiredGates.some((gate) => gate.source === 'github_check')
-        ? await readGitHubWorkflowRuns(deps.github, request.repository, subject.headSha)
-        : ok<readonly GitHubWorkflowRun[]>([]);
-      if (!githubRuns.ok) return githubRuns;
+      const startedAt = now().toISOString();
+      await attempts.reapStale({ now: startedAt, staleAfterMs: ATTEMPT_STALE_AFTER_MS }).catch(() => []);
+      let live: LiveMergeVerificationAttempt | undefined;
+      try {
+        live = await attempts.findLive({
+          repository: request.repository,
+          pullRequest: request.pullRequest,
+          headSha: subject.headSha,
+          now: startedAt,
+          staleAfterMs: ATTEMPT_STALE_AFTER_MS,
+        });
+      } catch {
+        return err(appError('INTERNAL_ERROR', 'Merge verification attempt state could not be read', true));
+      }
+      if (live !== undefined) {
+        return err(appError(
+          'CONFLICT',
+          `Merge verification is already running for this exact head (attempt ${live.attemptId}); `
+          + 'wait for it to finish and query merge_verification_status instead of starting a duplicate run',
+          true,
+        ));
+      }
 
-      const gates: MergeGateReceipt[] = [];
-      for (const gate of request.policy.requiredGates) {
-        if (gate.source === 'local_command') {
-          if (workspaceRoot === undefined) {
-            return err(appError('INTERNAL_ERROR', 'Local merge verification workspace was not resolved'));
-          }
-          if (gate.command === undefined) {
-            gates.push({
-              name: gate.name,
-              source: gate.source,
-              headSha: subject.headSha,
-              outcome: 'unavailable',
-              evidence: 'Authoritative merge policy does not define a host-owned command for this local gate.',
-            });
-            continue;
-          }
-
-          const cwdResult = await resolveCommandCwd(workspaceRoot, gate.command.cwdRelative);
-          if (!cwdResult.ok) return cwdResult;
-          const commandResult = await commandRunner.run(gate.command, cwdResult.value, signal);
-          const outcome: MergeGateOutcome = commandResult.unavailable === true || commandResult.exitCode === null
-            ? 'unavailable'
-            : commandResult.exitCode === 0 ? 'passed' : 'failed';
-          gates.push({
-            name: gate.name,
-            source: gate.source,
-            headSha: subject.headSha,
-            outcome,
-            evidence: commandEvidence(gate.command, commandResult),
-          });
-
-          const rechecked = await workspaceVerifier.inspect({
-            workspaceId: request.workspaceId!,
-            repository: request.repository,
-            headSha: subject.headSha,
-          });
-          if (!rechecked.ok) {
-            return err(appError(
-              'CONFLICT',
-              `Exact-head verification workspace changed while running gate '${gate.name}'; receipt was not persisted`,
-              true,
-            ));
-          }
-          continue;
+      const attemptId = randomAttemptId();
+      try {
+        await attempts.begin({
+          attemptId,
+          repository: request.repository,
+          pullRequest: request.pullRequest,
+          headSha: subject.headSha,
+          baseBranch: subject.baseBranch,
+          ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
+          startedAt,
+        });
+      } catch {
+        // The partial unique index allows one live attempt per exact head, so a losing
+        // race lands here rather than in the guard above. Re-check before blaming storage.
+        const raced = await attempts.findLive({
+          repository: request.repository,
+          pullRequest: request.pullRequest,
+          headSha: subject.headSha,
+          now: now().toISOString(),
+          staleAfterMs: ATTEMPT_STALE_AFTER_MS,
+        }).catch(() => undefined);
+        if (raced !== undefined) {
+          return err(appError(
+            'CONFLICT',
+            `Merge verification is already running for this exact head (attempt ${raced.attemptId})`,
+            true,
+          ));
         }
+        return err(appError('INTERNAL_ERROR', 'Merge verification attempt could not be recorded', true));
+      }
 
-        if (gate.source === 'github_check') {
-          gates.push(githubGateReceipt(gate.name, subject.headSha, githubRuns.value));
-          continue;
-        }
+      let result: Result<MergeVerificationRunResult>;
+      try {
+        result = await verify(context, request, subject, localGates, signal, attemptId);
+      } catch (error) {
+        await attempts.markInterrupted(attemptId, {
+          finishedAt: now().toISOString(),
+          detail: 'Verification runner failed before a verdict was recorded',
+        }).catch(() => undefined);
+        throw error;
+      }
 
+      const finishedAt = now().toISOString();
+      try {
+        await attempts.finish(attemptId, result.ok
+          ? { status: 'completed', finishedAt, receiptRef: result.value.receiptRef }
+          : { status: 'failed', finishedAt, detail: result.error.message });
+      } catch {
+        // The attempt row is already terminal (for example reaped as interrupted).
+        // The receipt table remains authoritative for the verdict either way.
+      }
+      return result;
+    },
+  };
+}
+
+interface VerifyContext {
+  readonly deps: MergeVerificationRunDependencies;
+  readonly commandRunner: VerificationCommandRunner;
+  readonly workspaceVerifier: ExactHeadWorkspaceVerifier;
+  readonly now: () => Date;
+  readonly randomId: () => string;
+  readonly attempts: MergeVerificationAttemptRecorder | undefined;
+}
+
+async function verify(
+  context: VerifyContext,
+  request: MergeVerificationRunRequest,
+  subject: OpenPullRequestSubject,
+  localGates: readonly RequiredMergeGate[],
+  signal: AbortSignal | undefined,
+  attemptId: string | undefined,
+): Promise<Result<MergeVerificationRunResult>> {
+  const { deps, workspaceVerifier, now, randomId } = context;
+
+  let workspaceRoot: string | undefined;
+  if (localGates.length > 0) {
+    if (request.workspaceId === undefined) {
+      return err(appError('INVALID_INPUT', 'workspaceId is required for local exact-head verification gates'));
+    }
+    const inspected = await workspaceVerifier.inspect({
+      workspaceId: request.workspaceId,
+      repository: request.repository,
+      headSha: subject.headSha,
+    });
+    if (!inspected.ok) return inspected;
+    workspaceRoot = inspected.value.rootPath;
+  }
+
+  const githubRuns = request.policy.requiredGates.some((gate) => gate.source === 'github_check')
+    ? await readGitHubWorkflowRuns(deps.github, request.repository, subject.headSha)
+    : ok<readonly GitHubWorkflowRun[]>([]);
+  if (!githubRuns.ok) return githubRuns;
+
+  const gates: MergeGateReceipt[] = [];
+  for (const gate of request.policy.requiredGates) {
+    if (gate.source === 'local_command') {
+      if (workspaceRoot === undefined) {
+        return err(appError('INTERNAL_ERROR', 'Local merge verification workspace was not resolved'));
+      }
+      if (gate.command === undefined) {
         gates.push({
           name: gate.name,
           source: gate.source,
           headSha: subject.headSha,
           outcome: 'unavailable',
-          evidence: 'No host-owned external verifier adapter is configured for this gate.',
+          evidence: 'Authoritative merge policy does not define a host-owned command for this local gate.',
         });
+        continue;
       }
 
-      const reviewResult = await resolveReviewReceipt(deps.github, request, subject.headSha);
-      if (!reviewResult.ok) return reviewResult;
-
-      const createdAt = now().toISOString();
-      const receipt: MergeVerificationReceipt = {
-        repository: request.repository,
-        pullRequest: request.pullRequest,
+      const cwdResult = await resolveCommandCwd(workspaceRoot, gate.command.cwdRelative);
+      if (!cwdResult.ok) return cwdResult;
+      const commandResult = await runLocalGate(context, gate.name, gate.command, cwdResult.value, signal, attemptId);
+      const outcome: MergeGateOutcome = commandResult.unavailable === true || commandResult.exitCode === null
+        ? 'unavailable'
+        : commandResult.exitCode === 0 ? 'passed' : 'failed';
+      gates.push({
+        name: gate.name,
+        source: gate.source,
         headSha: subject.headSha,
-        baseSha: subject.baseSha,
-        verificationMode: request.policy.verificationMode,
-        gates,
-        review: reviewResult.value,
-        createdAt,
-      };
-      const decision = evaluateMergeEvidence(request.policy, {
-        repository: request.repository,
-        pullRequest: request.pullRequest,
-        headSha: subject.headSha,
-        baseBranch: subject.baseBranch,
-        baseSha: subject.baseSha,
-      }, receipt);
-      const receiptRef = `merge-verification:${request.pullRequest}@${subject.headSha}:${randomId()}`;
+        outcome,
+        evidence: commandEvidence(gate.command, commandResult),
+      });
 
-      try {
-        const appended = await deps.receipts.append({ receiptRef, receipt, recordedAt: createdAt });
-        return ok({
-          receiptRef,
-          receipt,
-          decision,
-          sequence: appended.record.sequence,
-        });
-      } catch {
-        return err(appError('INTERNAL_ERROR', 'Merge verification receipt could not be persisted', true));
+      const rechecked = await workspaceVerifier.inspect({
+        workspaceId: request.workspaceId!,
+        repository: request.repository,
+        headSha: subject.headSha,
+      });
+      if (!rechecked.ok) {
+        return err(appError(
+          'CONFLICT',
+          `Exact-head verification workspace changed while running gate '${gate.name}'; receipt was not persisted`,
+          true,
+        ));
       }
-    },
+      continue;
+    }
+
+    if (gate.source === 'github_check') {
+      gates.push(githubGateReceipt(gate.name, subject.headSha, githubRuns.value));
+      continue;
+    }
+
+    gates.push({
+      name: gate.name,
+      source: gate.source,
+      headSha: subject.headSha,
+      outcome: 'unavailable',
+      evidence: 'No host-owned external verifier adapter is configured for this gate.',
+    });
+  }
+
+  const reviewResult = await resolveReviewReceipt(deps.github, request, subject.headSha);
+  if (!reviewResult.ok) return reviewResult;
+
+  const createdAt = now().toISOString();
+  const receipt: MergeVerificationReceipt = {
+    repository: request.repository,
+    pullRequest: request.pullRequest,
+    headSha: subject.headSha,
+    baseSha: subject.baseSha,
+    verificationMode: request.policy.verificationMode,
+    gates,
+    review: reviewResult.value,
+    createdAt,
   };
+  const decision = evaluateMergeEvidence(request.policy, {
+    repository: request.repository,
+    pullRequest: request.pullRequest,
+    headSha: subject.headSha,
+    baseBranch: subject.baseBranch,
+    baseSha: subject.baseSha,
+  }, receipt);
+  const receiptRef = `merge-verification:${request.pullRequest}@${subject.headSha}:${randomId()}`;
+
+  try {
+    const appended = await deps.receipts.append({ receiptRef, receipt, recordedAt: createdAt });
+    return ok({
+      receiptRef,
+      receipt,
+      decision,
+      sequence: appended.record.sequence,
+    });
+  } catch {
+    return err(appError('INTERNAL_ERROR', 'Merge verification receipt could not be persisted', true));
+  }
+}
+
+async function runLocalGate(
+  context: VerifyContext,
+  gateName: string,
+  command: CommandSpec,
+  cwd: string,
+  signal: AbortSignal | undefined,
+  attemptId: string | undefined,
+): Promise<VerificationCommandResult> {
+  const { attempts, now, commandRunner } = context;
+  if (attempts === undefined || attemptId === undefined) {
+    return commandRunner.run(command, cwd, signal);
+  }
+
+  const beat = (): void => {
+    void attempts.heartbeat(attemptId, { heartbeatAt: now().toISOString(), gateName }).catch(() => false);
+  };
+  beat();
+  const timer = setInterval(beat, ATTEMPT_HEARTBEAT_INTERVAL_MS);
+  timer.unref();
+  try {
+    return await commandRunner.run(command, cwd, signal);
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 interface OpenPullRequestSubject {

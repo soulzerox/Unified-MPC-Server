@@ -169,6 +169,48 @@ export interface MergeVerificationRunPort {
   }>>;
 }
 
+export interface MergeVerificationStatusAttemptView {
+  readonly attemptId: string;
+  readonly headSha: string;
+  readonly status: 'running' | 'completed' | 'failed' | 'interrupted';
+  readonly baseBranch?: string;
+  readonly workspaceId?: string;
+  readonly gateName?: string;
+  readonly startedAt: string;
+  readonly heartbeatAt: string;
+  readonly finishedAt?: string;
+  readonly detail?: string;
+  readonly receiptRef?: string;
+}
+
+export interface MergeVerificationStatusReceiptView {
+  readonly receiptRef: string;
+  readonly sequence: number;
+  readonly headSha: string;
+  readonly createdAt: string;
+  readonly recordedAt: string;
+}
+
+export interface MergeVerificationStatusView {
+  readonly repository: string;
+  readonly pullRequest: number;
+  readonly headSha?: string;
+  readonly attempts: readonly MergeVerificationStatusAttemptView[];
+  readonly receipts: readonly MergeVerificationStatusReceiptView[];
+  readonly latestReceiptRef?: string;
+  /** Present only when an exact head and an authoritative policy were both available. */
+  readonly decision?: MergeEvidenceDecision;
+}
+
+export interface MergeVerificationStatusPort {
+  get(request: {
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly headSha?: string;
+    readonly limit?: number;
+  }): Promise<MergeVerificationStatusView>;
+}
+
 export interface McpApplicationServices {
   /** Host platform selected by the composition root; tests may inject a deterministic profile. */
   readonly platform?: NodeJS.Platform;
@@ -189,6 +231,7 @@ export interface McpApplicationServices {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };
   readonly mergeVerificationRun?: MergeVerificationRunPort;
+  readonly mergeVerificationStatus?: MergeVerificationStatusPort;
   readonly guardedMerge?: Pick<GuardedMergeService, 'dispatch'>;
   readonly mergeReconciliation?: Pick<ObservedMergeReconciliationService, 'reconcile'>;
   /** Parent-owned native Thai-RAG provider. Repository-local child MCP configuration cannot replace this port. */

@@ -33,6 +33,40 @@ describe('mergeTools', () => {
     expect(result).toEqual({ ok: true, value: { configured: true, policy } });
   });
 
+  it('reports durable verification status without running any gate', async () => {
+    const get = vi.fn(async () => ({
+      repository: policy.repository,
+      pullRequest: 305,
+      headSha: '1'.repeat(40),
+      attempts: [{
+        attemptId: 'attempt-1',
+        headSha: '1'.repeat(40),
+        status: 'interrupted' as const,
+        startedAt: '2026-10-27T10:00:00Z',
+        heartbeatAt: '2026-10-27T10:00:00Z',
+        finishedAt: '2026-10-27T10:05:00Z',
+      }],
+      receipts: [],
+    }));
+    const tool = mergeTools(context({
+      mergeVerificationStatus: { get },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'merge_verification_status');
+    if (tool === undefined) throw new Error('missing merge_verification_status');
+
+    const result = await tool.execute({
+      repository: policy.repository,
+      pullRequest: 305,
+      headSha: '1'.repeat(40),
+    }, new AbortController().signal);
+
+    expect(get).toHaveBeenCalledWith({
+      repository: policy.repository,
+      pullRequest: 305,
+      headSha: '1'.repeat(40),
+    });
+    expect(result).toMatchObject({ ok: true, value: { attempts: [{ status: 'interrupted' }], receipts: [] } });
+  });
+
   it('runs verification only with the host-owned policy and caller cannot supply gate outcomes', async () => {
     const run = vi.fn(async () => ({
       ok: true as const,

@@ -51,7 +51,7 @@ function response(tool: string, data: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: tool }], structuredContent: { result: tool, data } };
 }
 
-async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -69,6 +69,8 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
           if (name === 'health' || name === 'version') return response(name, handshake());
           if (name === 'code_index') {
             indexStarts += 1;
+            const custom = options.onCodeIndex?.(indexStarts);
+            if (custom !== undefined) return custom;
             return response(name, { status: 'running', job_id: 'idx_provider_same', workspace_id: workspaceId });
           }
           if (name === 'index_status') return onStatus(++statusPolls);
@@ -248,6 +250,49 @@ describe('native provider admission index status truth', () => {
       // clock the stuck-job reaper reads.
       expect(row?.indexedFiles).toBe(0);
       expect(Date.parse(row?.progressAt ?? '')).toBeGreaterThan(Date.parse(row?.startedAt ?? ''));
+    } finally { await driver.stop(); }
+  });
+
+  it('retries an index start the provider rejected for a contended SQLite write', async () => {
+    const busy = response('code_index', {
+      status: 'unavailable',
+      errors: [{
+        code: 'storage_unavailable',
+        message: 'database is locked',
+        details: { retryable: true, reason: 'sqlite_busy' },
+      }],
+    });
+    const { driver, jobId, counts } = await fixture(async () => response('index_status', {
+      status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+      result: { status: 'complete', indexed: 1 },
+    }), { mode: 'explicit', onCodeIndex: (call) => (call === 1 ? busy : undefined) });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      expect((terminal as { ok: true; value: { status: string } }).value.status).toBe('completed');
+      // The rejected start was re-asked rather than failed. The exact count
+      // also includes any concurrent admission probe, so only the lower bound
+      // is meaningful here.
+      expect(counts().indexStarts).toBeGreaterThanOrEqual(2);
+    } finally { await driver.stop(); }
+  });
+
+  it('retries a busy admission trial instead of abandoning the workspace generation', async () => {
+    const busy = response('code_index', {
+      status: 'unavailable',
+      errors: [{
+        code: 'storage_unavailable',
+        message: 'database is locked',
+        details: { retryable: true, reason: 'sqlite_busy' },
+      }],
+    });
+    const { driver, jobId, counts } = await fixture(async () => response('index_status', {
+      status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+      result: { status: 'complete', indexed: 1 },
+    }), { onCodeIndex: (call) => (call === 1 ? busy : undefined) });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      expect((terminal as { ok: true; value: { status: string } }).value.status).toBe('completed');
+      expect(counts().indexStarts).toBeGreaterThanOrEqual(2);
     } finally { await driver.stop(); }
   });
 

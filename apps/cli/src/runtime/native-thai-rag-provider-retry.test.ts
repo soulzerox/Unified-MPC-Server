@@ -176,6 +176,49 @@ describe('native provider admission index status truth', () => {
     } finally { await driver.stop(); }
   });
 
+  it('keeps a healthy explicit background index running while the provider reports queued (issue #441)', async () => {
+    const { driver, jobId, indexStartsAtStart, counts } = await fixture(async (poll) => {
+      if (poll <= 2) return response('index_status', { status: 'queued', job_id: 'idx_provider_same', workspace_id: workspaceId });
+      return response('index_status', {
+        status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 924 },
+      });
+    }, { mode: 'explicit' });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string; result?: { indexed?: number } } }).value;
+      // The python provider answers `queued` until its runner picks the job up.
+      // That is in-progress, not an unknown status to fail on.
+      expect(payload.status).toBe('completed');
+      expect(payload.result?.indexed).toBe(924);
+      expect(counts().indexStarts).toBe(indexStartsAtStart);
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps the admission index running while the provider reports queued (issue #441)', async () => {
+    const { driver, jobId, counts } = await fixture(async (poll) => {
+      if (poll <= 2) return response('index_status', { status: 'queued', job_id: 'idx_provider_same', workspace_id: workspaceId });
+      return response('index_status', {
+        status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 3 },
+      });
+    });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string } }).value;
+      expect(payload.status).toBe('completed');
+      expect(counts().indexStarts).toBe(2);
+    } finally { await driver.stop(); }
+  });
+
+  it('still fails an index job whose provider reports an unrecognized status (issue #441)', async () => {
+    // A genuinely unknown status is still terminal: only the documented
+    // in-progress statuses keep the job alive.
+    await expect(fixture(async () => response('index_status', {
+      status: 'quantum-entangled', job_id: 'idx_provider_same', workspace_id: workspaceId,
+    }), { mode: 'explicit' })).rejects.toThrow(/unknown index status/);
+  });
+
   it('keeps a transient read timeout from failing an explicit background index (issue #439)', async () => {
     const { driver, jobId, indexStartsAtStart, counts } = await fixture(async (poll) => {
       if (poll === 1) throw new Error('Timed out calling thai-rag-native/index_status');

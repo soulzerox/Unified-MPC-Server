@@ -694,6 +694,13 @@ export const mergeVerificationRunSchema = z.object({
   }).strict(),
 }).strict();
 
+export const mergeVerificationStatusSchema = z.object({
+  repository: z.string().trim().min(1).max(512),
+  pullRequest: z.number().int().positive(),
+  headSha: mergeShaSchema.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).strict();
+
 export const mergeReconcileSchema = z.object({
   repository: z.string().trim().min(1).max(512),
   pullRequest: z.number().int().positive(),

@@ -1,6 +1,6 @@
 import { appError, err, ok } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { guardedPrMergeSchema, mergePolicyGetSchema, mergeReconcileSchema, mergeVerificationRunSchema } from './schemas.js';
+import { guardedPrMergeSchema, mergePolicyGetSchema, mergeReconcileSchema, mergeVerificationRunSchema, mergeVerificationStatusSchema } from './schemas.js';
 
 export function mergeTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -62,6 +62,26 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
             ...(input.review.evidence === undefined ? {} : { evidence: input.review.evidence }),
           },
         }, signal);
+      },
+    }),
+    defineTool({
+      name: 'merge_verification_status',
+      description: 'Read durable exact-head merge verification state without running any gate: recorded attempts (running, completed, failed, interrupted) plus persisted receipts for a pull request. A running attempt whose heartbeat expired is reported as interrupted, never as still working, and no verdict is implied unless a receipt exists.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: mergeVerificationStatusSchema,
+      handler: async (input) => {
+        if (context.services.mergeVerificationStatus === undefined) return missingService();
+        try {
+          return ok(await context.services.mergeVerificationStatus.get({
+            repository: input.repository,
+            pullRequest: input.pullRequest,
+            ...(input.headSha === undefined ? {} : { headSha: input.headSha }),
+            ...(input.limit === undefined ? {} : { limit: input.limit }),
+          }));
+        } catch {
+          return err(appError('INTERNAL_ERROR', 'Merge verification status could not be read', true));
+        }
       },
     }),
     defineTool({

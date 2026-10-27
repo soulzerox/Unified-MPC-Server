@@ -75,6 +75,7 @@ import {
   SqliteGoalRuntimeSnapshotRepository,
   SqliteManagedResourceBindingRepository,
   SqliteMergeReconciliationRepository,
+  SqliteMergeVerificationAttemptRepository,
   SqliteMergeVerificationReceiptRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
@@ -88,6 +89,7 @@ import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort } from './github-merge-observer.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
+import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
 import {
   createGitHubClosedPullRequestFeed,
@@ -503,6 +505,7 @@ export function createStdioMcpRuntime(
     idleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
   });
   const mergeReceiptRepository = new SqliteMergeVerificationReceiptRepository(database);
+  const mergeAttemptRepository = new SqliteMergeVerificationAttemptRepository(database);
   const mergeReconciliationRepository = new SqliteMergeReconciliationRepository(database);
   const githubApi = createGitHubApiReader();
   const mergeObserver = createGitHubMergeObservationPort(githubApi);
@@ -510,6 +513,7 @@ export function createStdioMcpRuntime(
     github: githubApi,
     receipts: mergeReceiptRepository,
     workspaces: workspaceRepository,
+    attempts: mergeAttemptRepository,
   });
   const mergeReconciliationCore = new MergeReconciliationService(
     mergeReceiptRepository,
@@ -523,6 +527,11 @@ export function createStdioMcpRuntime(
       );
     },
   };
+  const mergeVerificationStatus = createMergeVerificationStatusPort({
+    attempts: mergeAttemptRepository,
+    receipts: mergeReceiptRepository,
+    policy: mergePolicy,
+  });
   const guardedMerge = new GuardedMergeService(
     mergeReceiptRepository,
     createGuardedMergeDispatchPort(
@@ -989,6 +998,7 @@ export function createStdioMcpRuntime(
     extensions,
     mergePolicy,
     mergeVerificationRun,
+    mergeVerificationStatus,
     guardedMerge,
     mergeReconciliation,
     thaiRag: thaiRagPort,

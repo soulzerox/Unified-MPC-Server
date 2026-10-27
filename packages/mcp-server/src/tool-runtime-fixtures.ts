@@ -156,6 +156,11 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
     pullRequest: 278,
     review: { outcome: 'missing' },
   }, 'mergeVerificationRun.run'),
+  merge_verification_status: service({
+    repository: 'soulzerox/Unified-MPC-Server',
+    pullRequest: 278,
+    headSha: '1'.repeat(40),
+  }, 'mergeVerificationStatus.get'),
   guarded_pr_merge: service({
     repository: 'soulzerox/Unified-MPC-Server',
     pullRequest: 278,

@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   findNegatedClosingKeywordHazards,
   pullRequestMetadataFromEvent,
+  pullRequestMetadataFromJson,
 } from './check-issue-closing-keywords.mjs';
 
 test('flags negated native closing keywords even when Markdown wraps the negation', () => {
@@ -101,6 +102,70 @@ test('flags negated prefixed closing tokens that GitHub still interprets as clos
       excerpt: 'does not auto-close #99',
     },
   ]);
+});
+
+test('flags a positive closing keyword retracted by a following question and No', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'feat(queue): persist heavy-job queue state across restart (#145)',
+    body: 'Closes #145? No — detached workers and cross-process wait/wakeup remain in #305.',
+  });
+
+  assert.deepEqual(hazards, [
+    {
+      source: 'body',
+      keyword: 'close',
+      issueRef: '#145',
+      excerpt: 'Closes #145? No',
+    },
+  ]);
+});
+
+test('flags dash, colon and parenthetical retractions of positive closing keywords', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'docs',
+    body: [
+      'Closes #10 — no, the parent stays open.',
+      'Fixes #11: not yet.',
+      'Resolves owner/repo#12 (not really).',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    hazards.map(({ keyword, issueRef }) => ({ keyword, issueRef })),
+    [
+      { keyword: 'close', issueRef: '#10' },
+      { keyword: 'fix', issueRef: '#11' },
+      { keyword: 'resolve', issueRef: 'owner/repo#12' },
+    ],
+  );
+});
+
+test('does not flag legitimate closures or comma-separated negated references', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'feat: complete bounded work',
+    body: [
+      'Closes #20',
+      'Closes #21: no further action is needed.',
+      'Closes #22, not #23.',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('accepts compact gh pr view metadata as well as a GitHub event payload', () => {
+  assert.deepEqual(
+    pullRequestMetadataFromJson({ title: 'feat: partial slice', body: null }),
+    { title: 'feat: partial slice', body: '' },
+  );
+  assert.deepEqual(
+    pullRequestMetadataFromJson({ pull_request: { title: 'feat: partial slice', body: 'Refs #80' } }),
+    { title: 'feat: partial slice', body: 'Refs #80' },
+  );
+  assert.throws(
+    () => pullRequestMetadataFromJson({}),
+    /title\/body metadata/,
+  );
 });
 
 test('extracts pull request title/body from the GitHub event payload conservatively', () => {

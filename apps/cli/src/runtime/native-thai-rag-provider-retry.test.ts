@@ -51,7 +51,7 @@ function response(tool: string, data: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: tool }], structuredContent: { result: tool, data } };
 }
 
-async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit' } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -83,6 +83,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
     workspacesProvider: async (): Promise<Array<{ id: string; realRootPath: string }>> => [{ id: workspaceId, realRootPath: workspaceRoot }],
     clientFactory, indexJobPollMs: 10,
     ...(options.indexStatusTimeoutCap === undefined ? {} : { indexStatusTimeoutCap: options.indexStatusTimeoutCap }),
+    ...(options.indexJobStuckTimeoutMs === undefined ? {} : { indexJobStuckTimeoutMs: options.indexJobStuckTimeoutMs }),
   });
   expect((await driver.start({
     providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner',
@@ -109,7 +110,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
   const indexJob = persisted.jobs.find((job) => job.workspaceId === workspaceId
     && job.providerJobId === 'idx_provider_same');
   if (indexJob === undefined) throw new Error('Missing native admission job');
-  return { driver, jobId: indexJob.jobId, indexStartsAtStart, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
+  return { driver, jobId: indexJob.jobId, indexStartsAtStart, dataRoot, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
 }
 
 async function terminalJob(driver: NativeThaiRagProviderDriver, jobId: string): Promise<unknown> {
@@ -217,6 +218,37 @@ describe('native provider admission index status truth', () => {
     await expect(fixture(async () => response('index_status', {
       status: 'quantum-entangled', job_id: 'idx_provider_same', workspace_id: workspaceId,
     }), { mode: 'explicit' })).rejects.toThrow(/unknown index status/);
+  });
+
+  it('refreshes the durable stuck-job clock while the provider is still embedding (issue #445)', async () => {
+    const { driver, jobId, dataRoot } = await fixture(async (poll) => {
+      // A semantic build reports the same counters for a long stretch while it
+      // embeds. Successful polls are the only liveness evidence available.
+      if (poll <= 12) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return response('index_status', {
+          status: 'running', job_id: 'idx_provider_same', workspace_id: workspaceId,
+          indexed_files: 0, skipped_files: 0, total_files: 10,
+        });
+      }
+      return response('index_status', {
+        status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 10 },
+      });
+    }, { mode: 'explicit', indexJobStuckTimeoutMs: 600_000 });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string } }).value;
+      expect(payload.status).toBe('completed');
+      const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+        jobs: Array<{ jobId: string; progressAt?: string; startedAt?: string; indexedFiles?: number }>;
+      };
+      const row = persisted.jobs.find((job) => job.jobId === jobId);
+      // The counters never moved, so only the heartbeat can have advanced the
+      // clock the stuck-job reaper reads.
+      expect(row?.indexedFiles).toBe(0);
+      expect(Date.parse(row?.progressAt ?? '')).toBeGreaterThan(Date.parse(row?.startedAt ?? ''));
+    } finally { await driver.stop(); }
   });
 
   it('keeps a transient read timeout from failing an explicit background index (issue #439)', async () => {

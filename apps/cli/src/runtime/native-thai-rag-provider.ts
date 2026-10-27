@@ -93,6 +93,8 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly indexJobPollMs?: number;
   /** Consecutive index_status call timeouts tolerated by the admission monitor before the job is failed and the admission gate released (issue #407 deadline). */
   readonly indexStatusTimeoutCap?: number;
+  /** Stuck-job reaper window for mirrored index jobs (issue #445 exposes it so a test can prove an embedding-phase heartbeat keeps a build alive). */
+  readonly indexJobStuckTimeoutMs?: number;
   /**
    * Durable source identity used to make admission verification idempotent
    * across provider restarts (issue #422). Returning null keeps the
@@ -193,7 +195,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // permanent extra provider child alive for the whole driver lifetime.
       idleTimeoutMs: 60_000,
     });
-    this.jobs = new ThaiRagIndexJobStore(options.dataRoot);
+    this.jobs = new ThaiRagIndexJobStore(
+      options.dataRoot,
+      undefined,
+      options.indexJobStuckTimeoutMs === undefined ? undefined : { stuckJobTimeoutMs: options.indexJobStuckTimeoutMs },
+    );
     this.verifications = new ThaiRagWorkspaceVerificationStore(options.dataRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
@@ -667,6 +673,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         continue;
       }
       consecutiveStatusTimeouts = 0;
+      // Issue #445: a healthy poll proves the owner is alive even while the
+      // embedding phase reports no file progress; keep the reaper off it.
+      await this.jobs.recordHeartbeat(jobId, ownerId);
       const progress = nativeIndexProgress(status.value);
       if (progress !== undefined) {
         await this.jobs.recordProgress(jobId, progress, ownerId);
@@ -1187,6 +1196,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         continue;
       }
       consecutiveStatusTimeouts = 0;
+      // Issue #445: a healthy poll proves the owner is alive even while the
+      // embedding phase reports no file progress; keep the reaper off it.
+      await this.jobs.recordHeartbeat(jobId, ownerId);
       const progress = nativeIndexProgress(status.value);
       if (progress !== undefined) {
         await this.jobs.recordProgress(jobId, progress, ownerId);

@@ -229,6 +229,28 @@ export class ThaiRagIndexJobStore {
     return next;
   }
 
+  /**
+   * Issue #445: a successful provider poll proves the owner process is alive
+   * even when the counters have not moved. A semantic build spends most of its
+   * wall-clock time in the embedding phase, which emits no file progress, so the
+   * stuck-job reaper used to kill healthy builds. Refresh the stuck-job clock
+   * without touching counters or cache metrics.
+   */
+  public async recordHeartbeat(jobId: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
+    await this.initialize();
+    const current = this.jobs.get(jobId);
+    if (current === undefined || current.ownerId !== ownerId || !ACTIVE_JOB_STATUSES.has(current.status)) return null;
+    const now = this.now();
+    const last = parseTimestamp(current.progressAt) ?? parseTimestamp(current.startedAt);
+    // Keep the durable write rate bounded: the monitor polls far faster than
+    // the reaper window, so only persist once the clock moved by a second.
+    if (last !== null && now.getTime() - last < 1_000) return current;
+    const next: ThaiRagIndexJob = { ...current, progressAt: now.toISOString() };
+    this.jobs.set(jobId, next);
+    await this.persist();
+    return next;
+  }
+
   public async requestCancellation(jobId: string, ownerId: string): Promise<ThaiRagIndexJob | null> {
     await this.initialize();
     const current = this.jobs.get(jobId);

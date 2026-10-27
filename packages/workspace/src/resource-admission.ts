@@ -1,7 +1,7 @@
 import { ProcessMemoryPressureProbe } from './resource-pressure.js';
 import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
 
-export type ResourceAdmissionClass = 'dependency_bootstrap' | 'context_scan' | 'child_mcp_call' | 'lsp_process' | 'rag_indexing' | 'goal_process' | 'delegated_agent';
+export type ResourceAdmissionClass = 'dependency_bootstrap' | 'context_scan' | 'child_mcp_call' | 'lsp_process' | 'rag_indexing' | 'goal_process' | 'delegated_agent' | 'verification_heavy';
 
 export interface ResourceAdmissionLimits {
   readonly globalCost: number;
@@ -55,6 +55,10 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
     // one 8-cost child per workspace/session while allowing independent
     // workspaces to use the remaining global capacity.
     delegated_agent: 16,
+    // Exact-head merge verification runs full build/test/lint suites. Keep one
+    // verification per class so two heavy verdicts cannot overlap on a
+    // constrained host (#305/#145).
+    verification_heavy: 8,
   }),
 }) satisfies ResourceAdmissionLimits;
 
@@ -64,6 +68,7 @@ export const DEFAULT_LSP_PROCESS_ADMISSION_COST = 8;
 export const DEFAULT_RAG_INDEX_ADMISSION_COST = 8;
 export const DEFAULT_GOAL_PROCESS_ADMISSION_COST = 8;
 export const DEFAULT_DELEGATED_AGENT_ADMISSION_COST = 8;
+export const DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST = 8;
 
 export interface ResourceAdmissionRequest {
   readonly operationId: string;
@@ -167,6 +172,7 @@ export class ResourceAdmissionController {
         rag_indexing: limits.resourceClassCost?.rag_indexing ?? limits.globalCost,
         goal_process: limits.resourceClassCost?.goal_process ?? limits.globalCost,
         delegated_agent: limits.resourceClassCost?.delegated_agent ?? limits.globalCost,
+        verification_heavy: limits.resourceClassCost?.verification_heavy ?? limits.globalCost,
       },
     };
 
@@ -266,6 +272,7 @@ export class ResourceAdmissionController {
       rag_indexing: 0,
       goal_process: 0,
       delegated_agent: 0,
+      verification_heavy: 0,
     };
     const activeCostByWorkspace: Record<string, number> = {};
     const activeCostBySession: Record<string, number> = {};
@@ -369,6 +376,13 @@ export function tryAdmitDelegatedAgent(
   return controller.tryAcquire({ ...request, resourceClass: 'delegated_agent' });
 }
 
+export function tryAdmitVerificationHeavy(
+  controller: ResourceAdmissionController,
+  request: Omit<ResourceAdmissionRequest, 'resourceClass'>,
+): ResourceAdmissionDecision {
+  return controller.tryAcquire({ ...request, resourceClass: 'verification_heavy' });
+}
+
 let processResourceAdmissionController: ResourceAdmissionController | undefined;
 
 /**
@@ -407,7 +421,7 @@ function effectiveGlobalCost(
   return Math.max(1, Math.floor(configuredGlobalCost * ratio));
 }
 
-const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'context_scan', 'child_mcp_call', 'lsp_process', 'rag_indexing', 'goal_process', 'delegated_agent'] as const;
+const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'context_scan', 'child_mcp_call', 'lsp_process', 'rag_indexing', 'goal_process', 'delegated_agent', 'verification_heavy'] as const;
 
 function validateRequest(request: ResourceAdmissionRequest): 'invalid_request' | undefined {
   if (!isBoundedId(request.operationId)
@@ -426,7 +440,7 @@ function isBoundedId(value: unknown): value is string {
 }
 
 function isResourceClass(value: unknown): value is ResourceAdmissionClass {
-  return value === 'dependency_bootstrap' || value === 'context_scan' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing' || value === 'goal_process' || value === 'delegated_agent';
+  return value === 'dependency_bootstrap' || value === 'context_scan' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing' || value === 'goal_process' || value === 'delegated_agent' || value === 'verification_heavy';
 }
 
 function normalizeSessionId(value: string | undefined): string {

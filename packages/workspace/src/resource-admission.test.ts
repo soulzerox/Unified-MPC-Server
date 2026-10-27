@@ -6,6 +6,8 @@ import {
   DEFAULT_RAG_INDEX_ADMISSION_COST,
   DEFAULT_GOAL_PROCESS_ADMISSION_COST,
   DEFAULT_DELEGATED_AGENT_ADMISSION_COST,
+  DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+  DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
   ResourceAdmissionController,
   sharedProcessResourceAdmissionController,
   tryAdmitChildMcpCall,
@@ -15,6 +17,7 @@ import {
   tryAdmitRagIndex,
   tryAdmitGoalProcess,
   tryAdmitDelegatedAgent,
+  tryAdmitVerificationHeavy,
 } from './resource-admission.js';
 import type { ResourcePressureProbe } from './resource-pressure.js';
 
@@ -507,6 +510,36 @@ describe('resource admission contract', () => {
       reason: 'memory_pressure',
       snapshot: { pressureState: 'critical', effectiveGlobalCost: 0, activeOperations: 0 },
     });
+  });
+
+  it('keeps exactly one default heavy verification in flight per class', () => {
+    expect(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS.resourceClassCost.verification_heavy).toBe(8);
+    const controller = new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
+
+    const first = tryAdmitVerificationHeavy(controller, {
+      operationId: 'verification-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+    const second = tryAdmitVerificationHeavy(controller, {
+      operationId: 'verification-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+
+    expect(first).toMatchObject({
+      admitted: true,
+      lease: { resourceClass: 'verification_heavy', cost: 8 },
+    });
+    expect(second).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'resource_class_cost_exhausted',
+    });
+    if (!first.admitted) throw new Error('expected first verification to be admitted');
+    expect(controller.release(first.lease)).toBe(true);
   });
 
 });

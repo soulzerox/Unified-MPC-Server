@@ -1,17 +1,36 @@
 import { describe, expect, it, vi } from 'vitest';
 import { err, appError, type RepositoryMergePolicy } from '@unified-mpc/domain';
 import type { WorkspaceRepository } from '@unified-mpc/workspace';
+import { ResourceAdmissionController, tryAdmitVerificationHeavy } from '@unified-mpc/workspace';
 import {
   createMergeVerificationRunPort,
   type ExactHeadWorkspaceVerifier,
+  type MergeVerificationAdmissionPort,
   type MergeVerificationAttemptRecorder,
   type MergeVerificationReceiptWriter,
+  type MergeVerificationRunDependencies,
   type VerificationCommandRunner,
 } from './merge-verification-runner.js';
 
 const REPOSITORY = 'soulzerox/thai-rag-mcp';
 const HEAD = '1111111111111111111111111111111111111111';
 const BASE = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+function permissiveAdmission(): ResourceAdmissionController {
+  return new ResourceAdmissionController({
+    globalCost: 100,
+    workspaceCost: 100,
+    sessionCost: 100,
+    maxOperations: 100,
+    resourceClassCost: { verification_heavy: 100 },
+  });
+}
+
+function createService(
+  deps: Omit<MergeVerificationRunDependencies, 'admission'> & { readonly admission?: MergeVerificationAdmissionPort },
+): ReturnType<typeof createMergeVerificationRunPort> {
+  return createMergeVerificationRunPort({ admission: permissiveAdmission(), ...deps });
+}
 
 function localPolicy(): RepositoryMergePolicy {
   return {
@@ -43,6 +62,16 @@ function hybridPolicy(): RepositoryMergePolicy {
         command: { executable: 'corepack', args: ['pnpm', 'test'] },
       },
     ],
+    reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
+  };
+}
+
+function githubOnlyPolicy(): RepositoryMergePolicy {
+  return {
+    repository: REPOSITORY,
+    defaultBranch: 'main',
+    verificationMode: 'hybrid',
+    requiredGates: [{ name: 'Runtime Parity', source: 'github_check' }],
     reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
   };
 }
@@ -106,7 +135,7 @@ describe('createMergeVerificationRunPort', () => {
     const receipts = receiptWriter();
     const run = vi.fn(async () => ({ exitCode: 0, stdout: '511 passed', stderr: '' }));
     const verifier = workspaceVerifier();
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github,
       receipts: receipts.writer,
       workspaces,
@@ -163,7 +192,7 @@ describe('createMergeVerificationRunPort', () => {
     const inspect = vi.fn()
       .mockResolvedValueOnce({ ok: true, value: { rootPath: '/workspace' } })
       .mockResolvedValueOnce(err(appError('CONFLICT', 'head changed')));
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(),
       receipts: receipts.writer,
       workspaces,
@@ -185,7 +214,7 @@ describe('createMergeVerificationRunPort', () => {
 
   it('persists failed local gate evidence so guarded merge can reject it inspectably', async () => {
     const receipts = receiptWriter();
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(),
       receipts: receipts.writer,
       workspaces,
@@ -234,7 +263,7 @@ describe('createMergeVerificationRunPort', () => {
       }],
     });
     const receipts = receiptWriter();
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github,
       receipts: receipts.writer,
       workspaces,
@@ -267,7 +296,7 @@ describe('createMergeVerificationRunPort', () => {
 
   it('rejects stale GitHub review evidence without persisting a receipt', async () => {
     const receipts = receiptWriter();
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(REPOSITORY, { reviewCommit: '2222222222222222222222222222222222222222' }),
       receipts: receipts.writer,
       workspaces,
@@ -305,7 +334,7 @@ describe('createMergeVerificationRunPort', () => {
       }
       throw new Error(`unexpected GitHub API path: ${apiPath}`);
     });
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github,
       receipts: receipts.writer,
       workspaces,
@@ -332,7 +361,7 @@ describe('createMergeVerificationRunPort', () => {
     };
     const receipts = receiptWriter();
     const runner: VerificationCommandRunner = { run: vi.fn() };
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(),
       receipts: receipts.writer,
       workspaces,
@@ -366,7 +395,7 @@ describe('createMergeVerificationRunPort', () => {
 
   it('records a durable running attempt and closes it with the persisted receipt ref', async () => {
     const attempts = attemptRecorder();
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(),
       receipts: receiptWriter().writer,
       workspaces,
@@ -412,7 +441,7 @@ describe('createMergeVerificationRunPort', () => {
 
   it('closes a blocked verdict as a completed attempt and a gate failure as failed', async () => {
     const completed = attemptRecorder();
-    const blocked = await createMergeVerificationRunPort({
+    const blocked = await createService({
       github: githubFor(),
       receipts: receiptWriter().writer,
       workspaces,
@@ -432,7 +461,7 @@ describe('createMergeVerificationRunPort', () => {
     expect(completed.calls.finish[0]).toMatchObject({ request: { status: 'completed' } });
 
     const failed = attemptRecorder();
-    const rejected = await createMergeVerificationRunPort({
+    const rejected = await createService({
       github: githubFor(),
       receipts: receiptWriter().writer,
       workspaces,
@@ -460,7 +489,7 @@ describe('createMergeVerificationRunPort', () => {
   it('refuses a duplicate concurrent verification instead of running the heavy gates twice', async () => {
     const attempts = attemptRecorder({ live: { attemptId: 'already-running' } });
     const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(),
       receipts: receiptWriter().writer,
       workspaces,
@@ -485,7 +514,7 @@ describe('createMergeVerificationRunPort', () => {
 
   it('marks the attempt interrupted when the runner itself throws', async () => {
     const attempts = attemptRecorder();
-    const service = createMergeVerificationRunPort({
+    const service = createService({
       github: githubFor(),
       receipts: receiptWriter().writer,
       workspaces,
@@ -514,6 +543,295 @@ describe('createMergeVerificationRunPort', () => {
         detail: 'Verification runner failed before a verdict was recorded',
       },
     }]);
+  });
+
+  it('fails closed with RESOURCE_PRESSURE before recording an attempt or running a gate', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 16,
+      sessionCost: 16,
+      maxOperations: 8,
+      resourceClassCost: { verification_heavy: 8 },
+    });
+    expect(tryAdmitVerificationHeavy(controller, {
+      operationId: 'other-verification',
+      workspaceId: 'workspace-2',
+      cost: 8,
+    }).admitted).toBe(true);
+    const attempts = attemptRecorder();
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      admission: controller,
+      randomAttemptId: () => 'attempt-denied',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'RESOURCE_PRESSURE',
+        details: {
+          reason: 'resource_class_cost_exhausted',
+          operationId: 'attempt-denied',
+          requestedCost: 8,
+          retryable: 1,
+        },
+      },
+    });
+    expect(attempts.calls.begin).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+  });
+
+  it('releases the heavy admission lease after a successful, blocked and thrown run', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 8,
+      resourceClassCost: { verification_heavy: 8 },
+    });
+    const args = {
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review' as const, reviewId: 55 },
+    };
+    const build = (commandRunner: VerificationCommandRunner, attempts = attemptRecorder()): ReturnType<typeof createMergeVerificationRunPort> => createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner,
+      attempts: attempts.recorder,
+      admission: controller,
+      randomAttemptId: () => 'attempt-admitted',
+    });
+
+    let heldDuringRun = -1;
+    await build({
+      run: async () => {
+        heldDuringRun = controller.snapshot().activeCostByClass.verification_heavy;
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    }).run(args);
+    expect(heldDuringRun).toBe(8);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+
+    await build({ run: async () => ({ exitCode: 1, stdout: '1 failed', stderr: '' }) }).run(args);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+
+    const attempts = attemptRecorder();
+    await expect(build({
+      run: async () => {
+        throw new Error('gate runner crashed after admission');
+      },
+    }, attempts).run(args)).rejects.toThrow('gate runner crashed after admission');
+    expect(attempts.calls.interrupted).toHaveLength(1);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('checks the duplicate live attempt before asking for a heavy admission slot', async () => {
+    const attempts = attemptRecorder({ live: { attemptId: 'already-running' } });
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 8,
+      resourceClassCost: { verification_heavy: 8 },
+    });
+    const tryAcquire = vi.spyOn(controller, 'tryAcquire');
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run: vi.fn() },
+      attempts: attempts.recorder,
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(tryAcquire).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing workspace before spending a heavy admission slot', async () => {
+    const attempts = attemptRecorder();
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const controller = permissiveAdmission();
+    const tryAcquire = vi.spyOn(controller, 'tryAcquire');
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(tryAcquire).not.toHaveBeenCalled();
+    expect(attempts.calls.begin).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('releases the lease when the attempt cannot be recorded', async () => {
+    const controller = permissiveAdmission();
+    const attempts = attemptRecorder();
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: {
+        ...attempts.recorder,
+        begin: async () => {
+          expect(controller.snapshot().activeCostByClass.verification_heavy).toBe(8);
+          throw new Error('storage unavailable');
+        },
+        findLive: async () => undefined,
+      },
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    expect(run).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('releases the lease when a begin race loses to a live attempt', async () => {
+    const controller = permissiveAdmission();
+    const tryAcquire = vi.spyOn(controller, 'tryAcquire');
+    const attempts = attemptRecorder();
+    const findLive = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ attemptId: 'race-winner' });
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: {
+        ...attempts.recorder,
+        begin: async () => {
+          throw new Error('unique index');
+        },
+        findLive,
+      },
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', message: expect.stringContaining('race-winner') },
+    });
+    expect(findLive).toHaveBeenCalledTimes(2);
+    expect(tryAcquire).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('leaves CI-only verification runs outside the attempt and admission ledgers', async () => {
+    const attempts = attemptRecorder();
+    const controller = permissiveAdmission();
+    const tryAcquire = vi.spyOn(controller, 'tryAcquire');
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: githubOnlyPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(attempts.calls.begin).toEqual([]);
+    expect(tryAcquire).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('admits and releases heavy gates even without an attempt recorder', async () => {
+    const controller = permissiveAdmission();
+    const tryAcquire = vi.spyOn(controller, 'tryAcquire');
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run: vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' })) },
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(tryAcquire).toHaveBeenCalledTimes(1);
+    expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
   });
 });
 

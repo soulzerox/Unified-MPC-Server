@@ -51,7 +51,25 @@ function response(tool: string, data: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: tool }], structuredContent: { result: tool, data } };
 }
 
-async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+/** The provider's structured answer when its in-memory job registry dropped a job. */
+function lostProviderJob(tool: string): unknown {
+  return {
+    content: [{ type: 'text', text: tool }],
+    structuredContent: {
+      result: tool,
+      data: {
+        status: 'unavailable',
+        errors: [{
+          code: 'workspace_not_found',
+          message: 'index job is unknown',
+          details: { reason: 'provider_restart_or_retention_expiry' },
+        }],
+      },
+    },
+  };
+}
+
+async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -65,7 +83,7 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
           name, description: name, inputSchema: { type: 'object' },
         })),
         listResources: async () => [],
-        callTool: async (name): Promise<unknown> => {
+        callTool: async (name, args): Promise<unknown> => {
           if (name === 'health' || name === 'version') return response(name, handshake());
           if (name === 'code_index') {
             indexStarts += 1;
@@ -73,7 +91,9 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
             if (custom !== undefined) return custom;
             return response(name, { status: 'running', job_id: 'idx_provider_same', workspace_id: workspaceId });
           }
-          if (name === 'index_status') return onStatus(++statusPolls);
+          if (name === 'index_status') {
+            return onStatus(++statusPolls, typeof args?.job_id === 'string' ? args.job_id : undefined);
+          }
           return response(name, { status: 'ok' });
         },
         close: async () => undefined,
@@ -109,8 +129,9 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
   const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
     jobs: Array<{ jobId: string; workspaceId: string; providerJobId?: string }>;
   };
+  const mirroredProviderJobId = options.mirroredProviderJobId ?? 'idx_provider_same';
   const indexJob = persisted.jobs.find((job) => job.workspaceId === workspaceId
-    && job.providerJobId === 'idx_provider_same');
+    && job.providerJobId === mirroredProviderJobId);
   if (indexJob === undefined) throw new Error('Missing native admission job');
   return { driver, jobId: indexJob.jobId, indexStartsAtStart, dataRoot, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
 }
@@ -355,6 +376,77 @@ describe('native provider admission index status truth', () => {
       worker.broken = false;
       const reAdmit = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
       expect(reAdmit.ok).toBe(true);
+    } finally { await driver.stop(); }
+  });
+});
+
+describe('native provider lost index job recovery (issue #449)', () => {
+  it('restarts an explicit background job the provider no longer knows', async () => {
+    const { driver, jobId, counts } = await fixture(async (_poll, providerJobId) => {
+      if (providerJobId === 'idx_explicit_start') return lostProviderJob('index_status');
+      return response('index_status', {
+        status: 'done', job_id: providerJobId ?? 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 7 },
+      });
+    }, {
+      mode: 'explicit',
+      // 1-2: admission trial + delta, 3: the explicit start, 4: its restart.
+      onCodeIndex: (call) => {
+        if (call <= 2) return undefined;
+        return response('code_index', {
+          status: 'running',
+          job_id: call === 3 ? 'idx_explicit_start' : 'idx_explicit_restart',
+          workspace_id: workspaceId,
+        });
+      },
+      mirroredProviderJobId: 'idx_explicit_start',
+    });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      // The provider's own contract for a dropped registry entry is "re-run
+      // code_index": the mirrored row follows the replacement instead of
+      // reporting a dead workspace.
+      expect(terminal).toMatchObject({ ok: true, value: {
+        status: 'completed', providerJobId: 'idx_explicit_restart',
+      } });
+      expect(counts().indexStarts).toBe(4);
+    } finally { await driver.stop(); }
+  });
+
+  it('restarts the admission job the provider no longer knows and keeps the gate', async () => {
+    const { driver, jobId, counts } = await fixture(async (_poll, providerJobId) => (providerJobId === 'idx_provider_same'
+      ? lostProviderJob('index_status')
+      : response('index_status', {
+        status: 'done', job_id: 'idx_provider_restart', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 3 },
+      })), {
+      onCodeIndex: (call) => {
+        // 1 = bounded trial probe, 2 = background delta, 3 = the restart.
+        if (call <= 2) return undefined;
+        return response('code_index', { status: 'running', job_id: 'idx_provider_restart', workspace_id: workspaceId });
+      },
+      // The guarded read waits for admission, so the mirrored row has already
+      // followed the restart by the time the fixture reads the store.
+      mirroredProviderJobId: 'idx_provider_restart',
+    });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      expect(terminal).toMatchObject({ ok: true, value: {
+        status: 'completed', providerJobId: 'idx_provider_restart',
+      } });
+      expect(counts().indexStarts).toBe(3);
+    } finally { await driver.stop(); }
+  });
+
+  it('stops restarting once the provider keeps dropping the job', async () => {
+    const { driver, jobId, counts } = await fixture(async () => lostProviderJob('index_status'));
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string; error?: string } }).value;
+      expect(payload.status).toBe('failed');
+      expect(payload.error ?? '').toContain('index job is unknown');
+      // Trial + delta plus the bounded restarts, never an endless loop.
+      expect(counts().indexStarts).toBe(5);
     } finally { await driver.stop(); }
   });
 });

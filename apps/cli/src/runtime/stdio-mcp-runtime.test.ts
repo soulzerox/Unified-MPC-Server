@@ -532,6 +532,17 @@ describe('stdio MCP runtime', () => {
     // must not duplicate that default, it only passes an explicit one through.
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
+    // Server arguments stay the provider's default unless the host tuned them.
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_SERVER_ARGS')).toBe(false);
+  });
+
+  it('forwards tuned llama.cpp server arguments so long chunks are not rejected (#438)', () => {
+    // llama.cpp rejects any single input longer than its physical batch, so a
+    // host that tuned `-b`/`-ub` must keep that tuning across the data-owner
+    // launch; otherwise a cold start regresses to the 512-token default and the
+    // vector channel degrades to zero vectors.
+    const env = thaiRagProviderLaunchEnv({ THAI_RAG_LLAMACPP_SERVER_ARGS: '-b 2048 -ub 2048 --parallel 1' });
+    expect(env.THAI_RAG_LLAMACPP_SERVER_ARGS).toBe('-b 2048 -ub 2048 --parallel 1');
   });
 
   it('keeps an explicitly configured embedding environment authoritative (#413)', () => {
@@ -542,6 +553,7 @@ describe('stdio MCP runtime', () => {
       THAI_RAG_LLAMACPP_MODEL: 'custom-model',
       THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '60',
       THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: '900',
+      THAI_RAG_LLAMACPP_SERVER_ARGS: '-b 1024 -ub 1024',
     });
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('ollama');
     expect(env.THAI_RAG_LLAMACPP_BASE_URL).toBe('http://127.0.0.1:9999');
@@ -549,6 +561,7 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe('custom-model');
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('60');
     expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('900');
+    expect(env.THAI_RAG_LLAMACPP_SERVER_ARGS).toBe('-b 1024 -ub 1024');
   });
 
   it('treats explicitly empty embedding env as unset (#413)', () => {
@@ -559,6 +572,7 @@ describe('stdio MCP runtime', () => {
       THAI_RAG_LLAMACPP_MODEL: '',
       THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '',
       THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: '',
+      THAI_RAG_LLAMACPP_SERVER_ARGS: '   ',
     });
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
@@ -566,6 +580,7 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('300');
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_SERVER_ARGS')).toBe(false);
   });
 
   it('defaults Ponytail to OFF and loads a persisted mode for direct STDIO', async () => {

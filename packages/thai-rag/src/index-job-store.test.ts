@@ -437,6 +437,40 @@ describe('stuck index job reap (issue #202)', () => {
     expect(stillActive[0]).toMatchObject({ jobId: job.jobId, indexedFiles: 1 });
   });
 
+  it('keeps an embedding-phase build alive while the owner keeps polling (issue #445)', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await store.create(WS, false, 'owner-a');
+
+    // A semantic build spends most of its wall clock embedding: the provider
+    // reports the same file counters on every poll. Successful polls are the
+    // only liveness evidence, so they must reset the stuck-job clock.
+    for (let index = 1; index <= 4; index += 1) {
+      clock = T0 + index * 40_000;
+      await store.recordProgress(job.jobId, { indexedFiles: 0, skippedFiles: 0, totalFiles: 10 }, 'owner-a');
+      await store.recordHeartbeat(job.jobId, 'owner-a');
+      expect(await store.active('owner-a')).toHaveLength(1);
+    }
+    expect(await store.get(job.jobId, 'owner-a', WS)).toMatchObject({ status: 'running' });
+  });
+
+  it('still reaps a job whose identical polls carry no heartbeat (issue #445)', async () => {
+    const dataRoot = await root();
+    let clock = T0;
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock), { stuckJobTimeoutMs: WINDOW_MS });
+    const job = await store.create(WS, false, 'owner-a');
+
+    // Without a heartbeat the unchanged counters cannot distinguish a busy
+    // embedder from a wedged owner, so the reaper still fires.
+    clock = T0 + 40_000;
+    await store.recordProgress(job.jobId, { indexedFiles: 0, skippedFiles: 0, totalFiles: 10 }, 'owner-a');
+    clock = T0 + 40_000 + WINDOW_MS + 1_000;
+    await store.recordProgress(job.jobId, { indexedFiles: 0, skippedFiles: 0, totalFiles: 10 }, 'owner-a');
+    expect(await store.active('owner-a')).toEqual([]);
+    expect(await store.get(job.jobId, 'owner-a', WS)).toMatchObject({ status: 'interrupted' });
+  });
+
   it('never reaps a job whose progress keeps advancing past the window', async () => {
     const dataRoot = await root();
     let clock = T0;

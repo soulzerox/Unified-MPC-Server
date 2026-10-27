@@ -87,7 +87,7 @@ import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
-import { createGitHubApiReader, createGitHubMergeObservationPort } from './github-merge-observer.js';
+import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApiReader } from './github-merge-observer.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
@@ -164,6 +164,8 @@ export interface StdioMcpRuntimeOptions {
   readonly goalRelocationExactActionApproval?: (request: HostMutationApprovalRequest) => Promise<boolean> | boolean;
   /** Pure Node development only; packaged STDIO is hosted by Electron. */
   readonly checkpointEncryptionKey?: Uint8Array;
+  /** Test seam for the read-only GitHub surface; production uses the credential-backed CLI reader. */
+  readonly githubApi?: GitHubApiReader;
 }
 
 export function createStdioMcpRuntime(
@@ -507,13 +509,14 @@ export function createStdioMcpRuntime(
   const mergeReceiptRepository = new SqliteMergeVerificationReceiptRepository(database);
   const mergeAttemptRepository = new SqliteMergeVerificationAttemptRepository(database);
   const mergeReconciliationRepository = new SqliteMergeReconciliationRepository(database);
-  const githubApi = createGitHubApiReader();
+  const githubApi = options.githubApi ?? createGitHubApiReader();
   const mergeObserver = createGitHubMergeObservationPort(githubApi);
   const mergeVerificationRun = createMergeVerificationRunPort({
     github: githubApi,
     receipts: mergeReceiptRepository,
     workspaces: workspaceRepository,
     attempts: mergeAttemptRepository,
+    admission: resourceAdmissionController,
   });
   const mergeReconciliationCore = new MergeReconciliationService(
     mergeReceiptRepository,

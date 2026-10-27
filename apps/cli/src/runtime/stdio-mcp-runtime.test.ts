@@ -23,6 +23,11 @@ import {
 } from '@unified-mpc/thai-rag';
 import { createStdioMcpRuntime, thaiRagProviderLaunchEnv } from './stdio-mcp-runtime.js';
 import { sharedActivityLeaseDirectoryPath } from '@unified-mpc/mcp-server';
+import {
+  DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+  sharedProcessResourceAdmissionController,
+  tryAdmitVerificationHeavy,
+} from '@unified-mpc/workspace';
 
 const temporaryRoots: string[] = [];
 const TEST_CHECKPOINT_KEY = Buffer.alloc(32, 0x46).toString('base64');
@@ -1064,6 +1069,77 @@ describe('stdio MCP runtime', () => {
         metadata: ownerMetadata,
       });
       await replacementRuntime.close();
+    }
+  }, 15_000);
+
+  it('admits merge verification through the shared process controller', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-merge-admission-'));
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-merge-admission-project-'));
+    temporaryRoots.push(dataPath, rootPath);
+    const project = {
+      id: 'merge-admission-project',
+      displayName: 'Merge admission',
+      rootPath,
+      realRootPath: rootPath,
+      createdAt: '2026-10-27T00:00:00.000Z',
+    };
+    const db = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    await new SqliteWorkspaceRepository(db).insert(project);
+    const head = '1'.repeat(40);
+    const base = '2'.repeat(40);
+    const repository = 'soulzerox/Webtrans';
+    const github = {
+      get: async (): Promise<unknown> => ({
+        number: 17,
+        state: 'open',
+        merged: false,
+        head: { sha: head },
+        base: { ref: 'main', sha: base, repo: { full_name: repository } },
+      }),
+    };
+    const controller = sharedProcessResourceAdmissionController();
+    const runtime = createStdioMcpRuntime(dataPath, project, false, { githubApi: github });
+    if (controller.snapshot().pressureState === 'critical') {
+      // A critically pressured host denies even the occupant, so the wiring
+      // cannot be discriminated without turning this into a pressure test.
+      await runtime.close();
+      return;
+    }
+    const occupant = tryAdmitVerificationHeavy(controller, {
+      operationId: 'merge-admission-occupant',
+      workspaceId: 'merge-admission-occupant',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+    expect(occupant.admitted).toBe(true);
+    if (!occupant.admitted) {
+      await runtime.close();
+      return;
+    }
+    try {
+      const result = await runtime.services.mergeVerificationRun?.run({
+        policy: {
+          repository,
+          defaultBranch: 'main',
+          verificationMode: 'local_exact_head',
+          requiredGates: [{
+            name: 'noop',
+            source: 'local_command',
+            command: { executable: '/usr/bin/env', args: ['true'] },
+          }],
+          reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
+        },
+        repository,
+        pullRequest: 17,
+        workspaceId: project.id,
+        review: { outcome: 'clean_llm_review' },
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: 'RESOURCE_PRESSURE' },
+      });
+    } finally {
+      controller.release(occupant.lease);
+      await runtime.close();
     }
   }, 15_000);
 });

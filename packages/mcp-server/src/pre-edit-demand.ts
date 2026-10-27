@@ -213,15 +213,20 @@ export class PreEditDemandRuntime {
         // locally pending, and no duplicate execution is started here.
         return { ...base, depth: queue.depth(), queueState: 'coalesced' };
       }
+      // Blocking gate evidence (U12): the freshly described requirement jumps
+      // ahead of background maintenance just like a fresh submission would.
+      if (!queue.promote(operationId)) {
+        // The durable slot vanished between claim and promote (retired by
+        // recovery or another owner). Fail closed instead of tracking work
+        // that can never execute.
+        return { ...base, depth: queue.depth(), queueState: 'rejected' };
+      }
       this.jobRecords.set(operationId, {
         workspaceId: request.workspaceId,
         filePath: request.filePath,
         paths,
         evidenceState: request.evidenceState,
       });
-      // Blocking gate evidence (U12): the freshly described requirement jumps
-      // ahead of background maintenance just like a fresh submission would.
-      queue.promote(operationId);
       this.executePending();
       return {
         ...base,
@@ -239,7 +244,9 @@ export class PreEditDemandRuntime {
       return { ...base, depth: enqueued.depth, queueState: 'coalesced' };
     }
     // Blocking gate evidence (U12): jump ahead of background maintenance.
-    queue.promote(operationId);
+    if (!queue.promote(operationId)) {
+      return { ...base, depth: queue.depth(), queueState: 'rejected' };
+    }
     this.jobRecords.set(operationId, {
       workspaceId: request.workspaceId,
       filePath: request.filePath,

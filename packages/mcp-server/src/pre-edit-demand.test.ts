@@ -132,6 +132,7 @@ class RecordingHeavyJobStore implements HeavyJobQueueStore {
   public nextClaim: HeavyJobClaimResult = { status: 'queued', operationId: 'unset', position: 1, depth: 1 };
   public nextSupersede: HeavyJobSupersedeStoreResult = { status: 'queued', operationId: 'unset', position: 1, depth: 1 };
   public startResult = true;
+  public promoteResult: number | undefined = 0;
   public failClaim = false;
   public failSettle = false;
 
@@ -143,7 +144,7 @@ class RecordingHeavyJobStore implements HeavyJobQueueStore {
 
   public promote(operationId: string): number | undefined {
     this.promoted.push(operationId);
-    return 0;
+    return this.promoteResult;
   }
 
   public cancel(): boolean {
@@ -284,6 +285,20 @@ describe('PreEditDemandRuntime durable queue authority (#145 U5)', () => {
 
     expect(harness.executed).toEqual([]);
     expect(store.settled).toEqual([]);
+  });
+
+  it('rejects instead of tracking work whose durable slot vanished before promotion', async () => {
+    const store = new RecordingHeavyJobStore();
+    store.promoteResult = undefined;
+    const harness = createHarness({ store });
+
+    const submitted = submit(harness.runtime);
+    expect(submitted?.queueState).toBe('rejected');
+    expect(harness.runtime.pendingState(submitted!.operationId)).toBeUndefined();
+    await flush();
+
+    expect(harness.executed).toEqual([]);
+    expect(store.started).toEqual([]);
   });
 
   it('keeps the refusal fail-closed when the durable store is unavailable', async () => {

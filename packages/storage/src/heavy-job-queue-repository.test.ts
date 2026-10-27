@@ -163,6 +163,23 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
     }
   });
 
+  it('never retires a live foreign owner row through supersede', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const owner = repository(database, 'owner-a');
+      const foreign = repository(database, 'owner-b');
+      foreign.claim(entry('foreign'), 8);
+      owner.claim(entry('replacement'), 8);
+      owner.start('replacement', '2026-10-27T10:01:00.000Z');
+
+      expect(owner.supersede('foreign', entry('replacement'), 8))
+        .toMatchObject({ status: 'coalesced', operationId: 'replacement' });
+      expect(foreign.get('foreign')).toMatchObject({ state: 'queued', ownerId: 'owner-b' });
+    } finally {
+      database.close();
+    }
+  });
+
   it('starts only queued rows owned by this repository and settles only running ones', () => {
     const database = new SqliteDatabase(':memory:');
     try {

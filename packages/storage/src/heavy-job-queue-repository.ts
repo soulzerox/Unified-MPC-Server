@@ -91,8 +91,8 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
     private readonly database: SqliteDatabase,
     options: SqliteHeavyJobQueueRepositoryOptions = {},
   ) {
-    requireIdentifier(options.ownerId ?? randomUUID(), 'ownerId');
     this.ownerId = options.ownerId ?? randomUUID();
+    requireIdentifier(this.ownerId, 'ownerId');
     this.now = options.now ?? ((): Date => new Date());
     const interval = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     if (!Number.isSafeInteger(interval) || interval < 0) {
@@ -241,14 +241,16 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
 
     return this.transaction((): HeavyJobSupersedeStoreResult => {
       const replacement = this.find(normalized.operationId);
-      if (replacement !== undefined && LIVE_STATES.has(replacement.state as HeavyJobLiveState)) {
-        this.retireQueued(staleOperationId, 'superseded', now);
-        return { status: 'coalesced', operationId: normalized.operationId, depth: this.depth() };
-      }
-
       const stale = this.find(staleOperationId);
       const staleQueued = stale !== undefined && stale.state === 'queued'
         && (stale.owner_id === null || stale.owner_id === this.ownerId);
+      if (replacement !== undefined && LIVE_STATES.has(replacement.state as HeavyJobLiveState)) {
+        // Only this owner's queued generation is retired in place; a live
+        // foreign owner's row is never touched by another owner's supersede.
+        if (staleQueued) this.retireQueued(staleOperationId, 'superseded', now);
+        return { status: 'coalesced', operationId: normalized.operationId, depth: this.depth() };
+      }
+
       if (!staleQueued) {
         const depth = this.depth();
         if (depth >= maxQueued) {

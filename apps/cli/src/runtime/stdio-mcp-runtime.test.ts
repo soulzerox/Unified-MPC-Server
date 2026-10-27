@@ -525,6 +525,9 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
+    // One index batch embeds a whole file at once, so the deployment default
+    // has to outlast the provider's 60s per-request default (#439).
+    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('300');
     // The Python provider already defaults the llama.cpp base URL; the launcher
     // must not duplicate that default, it only passes an explicit one through.
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
@@ -538,12 +541,14 @@ describe('stdio MCP runtime', () => {
       THAI_RAG_LLAMACPP_MODEL_PATH: '/models/custom.gguf',
       THAI_RAG_LLAMACPP_MODEL: 'custom-model',
       THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '60',
+      THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: '900',
     });
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('ollama');
     expect(env.THAI_RAG_LLAMACPP_BASE_URL).toBe('http://127.0.0.1:9999');
     expect(env.THAI_RAG_LLAMACPP_MODEL_PATH).toBe('/models/custom.gguf');
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe('custom-model');
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('60');
+    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('900');
   });
 
   it('treats explicitly empty embedding env as unset (#413)', () => {
@@ -553,10 +558,12 @@ describe('stdio MCP runtime', () => {
       THAI_RAG_LLAMACPP_MODEL_PATH: '',
       THAI_RAG_LLAMACPP_MODEL: '',
       THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '',
+      THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: '',
     });
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
+    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('300');
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
   });

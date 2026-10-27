@@ -628,6 +628,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }
 
   private async monitorIndexJob(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): Promise<void> {
+    let consecutiveStatusTimeouts = 0;
     while (!this.shuttingDown) {
       await delay(this.indexJobPollMs);
       if (this.shuttingDown) return;
@@ -640,9 +641,32 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       });
       if (this.shuttingDown) return;
       if (!status.ok) {
-        await this.jobs.fail(jobId, status.error.message, ownerId);
-        return;
+        // Issue #439: the worker answers index_status from the same session
+        // that is busy embedding, so a heavy batch starves the read. A
+        // timed-out read is not evidence that the provider-owned job failed;
+        // keep the provider job, the local running row and the same
+        // providerJobId, and retry with backoff until the same bounded cap the
+        // admission monitor uses (issue #407) turns an unreachable provider
+        // into an actionable failure.
+        if (!isIndexStatusPollTimeout(status.error)) {
+          await this.jobs.fail(jobId, status.error.message, ownerId);
+          return;
+        }
+        consecutiveStatusTimeouts += 1;
+        if (consecutiveStatusTimeouts >= this.indexStatusTimeoutCap) {
+          const deadlineCancel = this.callWorker('cancel_index', { job_id: providerJobId, workspace_id: workspaceId });
+          void deadlineCancel.catch(() => undefined);
+          await this.jobs.fail(
+            jobId,
+            `Native Thai-RAG index_status stayed unreachable for ${this.indexStatusTimeoutCap} consecutive polls (index-status-unreachable)`,
+            ownerId,
+          );
+          return;
+        }
+        await delay(Math.min(5_000, 250 * (2 ** Math.min(consecutiveStatusTimeouts, 5))));
+        continue;
       }
+      consecutiveStatusTimeouts = 0;
       const progress = nativeIndexProgress(status.value);
       if (progress !== undefined) {
         await this.jobs.recordProgress(jobId, progress, ownerId);
@@ -1143,11 +1167,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // A timed-out read is not evidence that the provider-owned background
         // job failed. Keep the same providerJobId, dedicated stdio session, and
         // local running job instead of starting another full index generation.
-        const timedOut = status.error.code === 'INTERNAL_ERROR'
-          && (status.error.message.startsWith('Timed out calling ')
-            && status.error.message.endsWith('/index_status')
-            || status.error.message.startsWith('Timed out refreshing tool catalog for '));
-        if (!timedOut) return status;
+        if (!isIndexStatusPollTimeout(status.error)) return status;
         consecutiveStatusTimeouts += 1;
         if (consecutiveStatusTimeouts >= this.indexStatusTimeoutCap) {
           // Issue #407: bound the read gate. A provider whose index_status
@@ -1426,6 +1446,18 @@ async function rollbackWorkspaceAliases(changed: readonly { readonly alias: stri
     }
   }
   return restored;
+}
+
+/**
+ * `index_status` is read over the same worker session that runs the embedding
+ * batch, so a busy index starves the poll instead of failing it. A timed-out
+ * read therefore keeps the provider job (issues #407, #439); every other
+ * worker error still fails the job.
+ */
+function isIndexStatusPollTimeout(error: { readonly code: string; readonly message: string }): boolean {
+  if (error.code !== 'INTERNAL_ERROR') return false;
+  if (error.message.startsWith('Timed out refreshing tool catalog for ')) return true;
+  return error.message.startsWith('Timed out calling ') && error.message.endsWith('/index_status');
 }
 
 function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake> {

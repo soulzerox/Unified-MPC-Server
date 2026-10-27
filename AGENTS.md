@@ -29,4 +29,16 @@ When a GitHub Actions workflow must be monitored until completion, use one autho
 
 This policy is platform-native for Linux Ubuntu environments.
 
+## Pull request closure safety
+
+GitHub parses closing keywords even when the surrounding prose retracts them. Before creating or updating a PR body, run the check against the exact title and body:
+
+```sh
+gh pr view <number> --json title,body | node scripts/check-issue-closing-keywords.mjs -
+# before the PR exists
+node scripts/check-issue-closing-keywords.mjs --title "<title>" --body-file /tmp/pr-body.md
+```
+
+Never write `Closes/Fixes/Resolves #N` for an issue that must stay open, not even as a rhetorical question such as `Closes #145? No`. Use `Refs #N`, `Parent #N remains open`, or `Partial scope for #N` instead.
+
 `Full Bypass` is an explicit runtime exception to application approval and scope enforcement: while a Full profile has the relevant Desktop or STDIO Full Bypass toggle enabled, permission prompts, Active Project scope, and other unified-mpc approval gates may be skipped. Durable-goal ownership is different: if a workspace has a live rolling scheduled-goal mutation fence, `ToolRegistry` must still require and validate the current `goalLease` before mutation, even under Full Bypass. This prevents a stale worker from mutating after handoff. Ordinary unscheduled Full Bypass calls remain lease-free when no live rolling-goal fence exists.

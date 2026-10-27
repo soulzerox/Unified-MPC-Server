@@ -672,7 +672,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         await this.jobs.recordProgress(jobId, progress, ownerId);
       }
       const remoteStatus = nestedString(status.value, 'status');
-      if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
+      if (remoteStatus !== undefined && NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
       if (remoteStatus === 'done') {
         const result = nestedValue(status.value, 'result') ?? status.value;
         const resultStatus = nestedString(result, 'status');
@@ -1192,7 +1192,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         await this.jobs.recordProgress(jobId, progress, ownerId);
       }
       const remoteStatus = nestedString(status.value, 'status');
-      if (remoteStatus === 'running' || remoteStatus === 'cancelling') continue;
+      if (remoteStatus !== undefined && NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
       if (remoteStatus === 'done') {
         const result = nestedValue(status.value, 'result') ?? status.value;
         const resultStatus = nestedString(result, 'status');
@@ -1454,6 +1454,18 @@ async function rollbackWorkspaceAliases(changed: readonly { readonly alias: stri
  * read therefore keeps the provider job (issues #407, #439); every other
  * worker error still fails the job.
  */
+/**
+ * Provider index statuses that mean "still in progress". The python provider
+ * answers `queued` between job admission and the first runner step (#441), so a
+ * monitor that accepted only `running` failed a healthy job on its first poll.
+ */
+const NON_TERMINAL_INDEX_STATUSES: ReadonlySet<string> = new Set([
+  'queued',
+  'pending',
+  'running',
+  'cancelling',
+]);
+
 function isIndexStatusPollTimeout(error: { readonly code: string; readonly message: string }): boolean {
   if (error.code !== 'INTERNAL_ERROR') return false;
   if (error.message.startsWith('Timed out refreshing tool catalog for ')) return true;

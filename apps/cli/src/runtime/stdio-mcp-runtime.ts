@@ -1162,9 +1162,14 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
     // default abandons those requests (`AbandonedRequest: embedding request
     // exceeded 60s`), the index job then fails as a whole, no semantic
     // generation is published, and the mandatory pre-edit gate stays shut
-    // (issue #439). The deployment default is generous enough for one large
-    // file; an explicitly configured host environment stays authoritative.
-    THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: authoritative('THAI_RAG_LLAMACPP_REQUEST_TIMEOUT') ?? '300',
+    // (issue #439). 300s was still short: measured on a CPU-only host at
+    // ~5.9s per chunk, a 1874-line file needs ~660s and a 3195-line file
+    // ~1120s, so a 300s deadline failed the largest files of the very
+    // workspace this default exists for. 1800s covers ~300 chunks (~12k
+    // lines) at that rate; a hung batch is still bounded by the monitor's
+    // consecutive index_status timeout cap, not by this deadline.
+    // An explicitly configured host environment stays authoritative.
+    THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: authoritative('THAI_RAG_LLAMACPP_REQUEST_TIMEOUT') ?? '1800',
     THAI_RAG_EMBEDDING_BACKEND: authoritative('THAI_RAG_EMBEDDING_BACKEND') ?? 'llamacpp',
     THAI_RAG_LLAMACPP_MODEL: authoritative('THAI_RAG_LLAMACPP_MODEL') ?? THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
     // The Python provider already defaults the llama.cpp base URL; the launcher

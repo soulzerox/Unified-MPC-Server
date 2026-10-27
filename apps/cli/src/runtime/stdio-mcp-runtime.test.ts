@@ -526,14 +526,29 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
     // One index batch embeds a whole file at once, so the deployment default
-    // has to outlast the provider's 60s per-request default (#439).
-    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('300');
+    // has to outlast the provider's 60s per-request default (#439) and the
+    // whole-file time of the largest file on a slow CPU host (~1120s measured).
+    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('1800');
     // The Python provider already defaults the llama.cpp base URL; the launcher
     // must not duplicate that default, it only passes an explicit one through.
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
     // Server arguments stay the provider's default unless the host tuned them.
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_SERVER_ARGS')).toBe(false);
+  });
+
+  it('sizes the deployment embedding deadline for a whole large file (#439)', () => {
+    // A single abandoned file abandons the whole generation, so the default has
+    // to cover the largest file in one `embed_documents` call. Measured on a
+    // CPU-only host: ~5.9s per ~530-token chunk, i.e. ~660s for a 1874-line file
+    // and ~1120s for a 3195-line one.
+    const env = thaiRagProviderLaunchEnv({});
+    const seconds = Number(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT);
+    expect(Number.isFinite(seconds)).toBe(true);
+    expect(seconds).toBeGreaterThanOrEqual(1_200);
+    // A host that sized the deadline for its own hardware stays authoritative.
+    const hostSized = thaiRagProviderLaunchEnv({ THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: '42' });
+    expect(hostSized.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('42');
   });
 
   it('forwards tuned llama.cpp server arguments so long chunks are not rejected (#438)', () => {
@@ -577,7 +592,7 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
-    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('300');
+    expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('1800');
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_BASE_URL')).toBe(false);
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_SERVER_ARGS')).toBe(false);

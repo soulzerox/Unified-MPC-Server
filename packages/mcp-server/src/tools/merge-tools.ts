@@ -24,7 +24,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'merge_verification_run',
-      description: 'Produce and persist a host-owned exact-head merge verification receipt for one open pull request. The repository policy is authoritative: local command argv and GitHub check requirements come from host configuration, never caller-supplied gate outcomes. Local gates require a clean registered workspace whose origin and HEAD exactly match the PR head. Review evidence is bound to the exact head before a receipt is persisted.',
+      description: 'Produce and persist a host-owned exact-head merge verification receipt for one open pull request. The repository policy is authoritative: local command argv and GitHub check requirements come from host configuration, never caller-supplied gate outcomes. Local gates require a clean registered workspace whose origin and HEAD exactly match the PR head. Review evidence is bound to the exact head before a receipt is persisted. If the client request ends after the durable attempt begins, local verification continues; do not blindly retry a duplicate (it returns CONFLICT) and use merge_verification_status to read the running/completed state and receipt.',
       permission: 'EXECUTE',
       annotations: {
         readOnlyHint: false,

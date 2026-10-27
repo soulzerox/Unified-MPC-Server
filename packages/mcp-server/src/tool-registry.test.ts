@@ -1079,6 +1079,61 @@ describe('MCP tool registry', () => {
     expect(backendSettled).toBe(true);
   });
 
+  it('keeps admitted merge verification running after the client request is lost (#305)', async () => {
+    let abortObserved = false;
+    let verificationFinished = false;
+    let finishRun: (() => void) | undefined;
+    const run = vi.fn((_request: unknown, signal?: AbortSignal) => new Promise<ReturnType<typeof ok>>((resolve) => {
+      signal?.addEventListener('abort', () => { abortObserved = true; }, { once: true });
+      finishRun = (): void => {
+        verificationFinished = true;
+        resolve(ok({
+          receiptRef: 'merge-verification:305@head:receipt',
+          receipt: {},
+          decision: { status: 'MERGE_ALLOWED', blockers: [] },
+          sequence: 1,
+        }));
+      };
+    }));
+    const services = {
+      mergePolicy: {
+        async getByRepository() {
+          return {
+            repository: 'soulzerox/Unified-MPC-Server',
+            defaultBranch: 'main',
+            verificationMode: 'local_exact_head',
+            requiredGates: [{ name: 'test', source: 'local_command' }],
+            reviewPolicy: { required: true, acceptedOutcomes: ['clean_llm_review'] },
+          };
+        },
+      },
+      mergeVerificationRun: { run },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, { maxToolDurationMs: 10 });
+
+    const response = await registry.invoke('merge_verification_run', {
+      repository: 'soulzerox/Unified-MPC-Server',
+      pullRequest: 305,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'PROCESS_TIMEOUT', recoverable: true } },
+    });
+    expect(response.structuredContent).toMatchObject({
+      error: { message: expect.stringContaining('continues') },
+    });
+    expect(abortObserved).toBe(false);
+    expect(verificationFinished).toBe(false);
+
+    finishRun?.();
+    await Promise.resolve();
+    expect(verificationFinished).toBe(true);
+    expect(abortObserved).toBe(false);
+  });
+
   it('aborts a timed-out invocation before allowing the next MCP call to succeed', async () => {
     let firstInvocationAborted = false;
     const services: McpApplicationServices = { search: {

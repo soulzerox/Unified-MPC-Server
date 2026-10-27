@@ -200,6 +200,13 @@ export interface HostMutationApprovalRequest {
 
 const HEAVY_CONTEXT_ADMISSION_TOOLS = new Set(['workspace_context', 'workspace_full_scan', 'search_all', 'read_many_files']);
 const GOAL_PROCESS_ADMISSION_TOOLS = new Set(['process_start', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build']);
+/**
+ * #305: these tools own a durable attempt/receipt before their expensive work
+ * starts. Losing the client request must not cancel the run; the caller can
+ * inspect the durable status and the registry reports the detached
+ * continuation instead of pretending the work stopped.
+ */
+const DETACHED_PARENT_LOSS_TOOLS = new Set(['merge_verification_run']);
 
 const DEFAULT_MCP_TOOL_RESPONSE_BUDGET_MS: number | null = null;
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024;
@@ -920,7 +927,7 @@ export class ToolRegistry {
         parentSignal,
         goalLease === undefined ? undefined : goalLease.goalId,
         callId,
-        durableGoalExecutionAdmitted,
+        durableGoalExecutionAdmitted || DETACHED_PARENT_LOSS_TOOLS.has(tool.name),
       );
       if (
         goalProcessAdmissionWorkspaceId !== undefined
@@ -2237,7 +2244,7 @@ export class ToolRegistry {
           finish(mapError(appError(
             'PROCESS_TIMEOUT',
             detachExecutionFromParent
-              ? `MCP tool ${tool.name} lost its parent request after durable goal dispatch; the response observer detached while the admitted operation continues. Inspect the durable goal before retrying.`
+              ? `MCP tool ${tool.name} lost its parent request after durable admission; the response observer detached while the admitted operation continues. Inspect the durable status before retrying.`
               : `MCP tool ${tool.name} was cancelled because its parent request ended; cancellation was requested, but an underlying operation may still be finishing. Check task/process status before retrying.`,
             true,
           )));
@@ -2260,7 +2267,7 @@ export class ToolRegistry {
             finish(mapError(appError(
               'PROCESS_TIMEOUT',
               detachExecutionFromParent
-                ? `MCP tool ${tool.name} exceeded the ${Math.ceil(responseBudgetMs / 1000)}s response budget after durable goal dispatch; the response observer detached while the admitted operation continues. Inspect the durable goal before retrying.`
+                ? `MCP tool ${tool.name} exceeded the ${Math.ceil(responseBudgetMs / 1000)}s response budget after durable admission; the response observer detached while the admitted operation continues. Inspect the durable status before retrying.`
                 : `MCP tool ${tool.name} exceeded the ${Math.ceil(responseBudgetMs / 1000)}s response budget; cancellation was requested, but an underlying operation may still be finishing. Check task/process status before retrying.`,
               true,
             )));

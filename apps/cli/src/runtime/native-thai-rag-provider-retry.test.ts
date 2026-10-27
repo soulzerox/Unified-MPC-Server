@@ -51,7 +51,7 @@ function response(tool: string, data: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: tool }], structuredContent: { result: tool, data } };
 }
 
-async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit' } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -90,14 +90,26 @@ async function fixture(onStatus: (poll: number) => Promise<unknown>, options: { 
   })).ok).toBe(true);
   // First guarded edit starts one native admission index. Do not call code_index
   // again: that would start a second, unrelated public background job.
-  await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+  if (options.mode === 'explicit') {
+    // An explicit `rag_code_index` background job uses the public monitor
+    // instead of the admission monitor.
+    const started = await driver.call('code_index', {
+      workspace_path: workspaceRoot, workspace_id: workspaceId, background: true, force: true,
+    });
+    if (!started.ok) throw new Error(`explicit code_index start failed: ${started.error.code}: ${started.error.message}`);
+  } else {
+    await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+  }
+  // No replacement index may start once the job exists: the same provider job
+  // must be read through its transient failures.
+  const indexStartsAtStart = indexStarts;
   const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
     jobs: Array<{ jobId: string; workspaceId: string; providerJobId?: string }>;
   };
   const indexJob = persisted.jobs.find((job) => job.workspaceId === workspaceId
     && job.providerJobId === 'idx_provider_same');
   if (indexJob === undefined) throw new Error('Missing native admission job');
-  return { driver, jobId: indexJob.jobId, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
+  return { driver, jobId: indexJob.jobId, indexStartsAtStart, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
 }
 
 async function terminalJob(driver: NativeThaiRagProviderDriver, jobId: string): Promise<unknown> {
@@ -161,6 +173,27 @@ describe('native provider admission index status truth', () => {
       // admission gate is released instead of holding reads hostage.
       expect(payload.status).toBe('failed');
       expect(payload.error ?? '').toContain('index-status-unreachable');
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps a transient read timeout from failing an explicit background index (issue #439)', async () => {
+    const { driver, jobId, indexStartsAtStart, counts } = await fixture(async (poll) => {
+      if (poll === 1) throw new Error('Timed out calling thai-rag-native/index_status');
+      return response('index_status', {
+        status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 924 },
+      });
+    }, { mode: 'explicit' });
+    try {
+      const terminal = await terminalJob(driver, jobId);
+      const payload = (terminal as { ok: true; value: { status: string; result?: { indexed?: number } } }).value;
+      // The explicit rag_code_index monitor answers a starved poll the same way
+      // the admission monitor does instead of failing the whole build.
+      expect(payload.status).toBe('completed');
+      expect(payload.result?.indexed).toBe(924);
+      // The same provider job is read through its transient failure: no
+      // replacement index is started.
+      expect(counts().indexStarts).toBe(indexStartsAtStart);
     } finally { await driver.stop(); }
   });
 

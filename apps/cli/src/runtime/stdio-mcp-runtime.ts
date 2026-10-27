@@ -1156,6 +1156,15 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
   };
   return {
     THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT') ?? '900',
+    // One code-index batch embeds every chunk of a single file in one
+    // `embed_documents` request, so the deadline has to cover the largest file
+    // of a real repository, not one average chunk. The provider's own 60s
+    // default abandons those requests (`AbandonedRequest: embedding request
+    // exceeded 60s`), the index job then fails as a whole, no semantic
+    // generation is published, and the mandatory pre-edit gate stays shut
+    // (issue #439). The deployment default is generous enough for one large
+    // file; an explicitly configured host environment stays authoritative.
+    THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: authoritative('THAI_RAG_LLAMACPP_REQUEST_TIMEOUT') ?? '300',
     THAI_RAG_EMBEDDING_BACKEND: authoritative('THAI_RAG_EMBEDDING_BACKEND') ?? 'llamacpp',
     THAI_RAG_LLAMACPP_MODEL: authoritative('THAI_RAG_LLAMACPP_MODEL') ?? THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
     // The Python provider already defaults the llama.cpp base URL; the launcher

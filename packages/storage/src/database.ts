@@ -45,6 +45,7 @@ import { GOAL_WORKSPACE_RETENTION_EVIDENCE_MIGRATION_SQL } from './migrations/go
 import { WORKSPACE_AUTHORITY_EPOCH_MIGRATION_SQL } from './migrations/workspace-authority-epoch-migration.js';
 import { GOAL_RELOCATION_APPROVAL_MIGRATION_SQL } from './migrations/goal-relocation-approval-migration.js';
 import { WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL } from './migrations/workspace-admission-authority-migration.js';
+import { HEAVY_JOB_QUEUE_MIGRATION_SQL } from './migrations/heavy-job-queue-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -64,7 +65,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '039_merge_verification_attempt_base_branch' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '040_heavy_job_queue' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -131,7 +132,8 @@ export class SqliteDatabase {
     this.applyMigration({ id: '036_workspace_admission_authority', sql: WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL });
     this.applyMigration({ id: '037_goal_relocation_approvals', sql: GOAL_RELOCATION_APPROVAL_MIGRATION_SQL });
     this.applyMigration({ id: '038_merge_verification_attempts', sql: MERGE_VERIFICATION_ATTEMPT_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: MERGE_VERIFICATION_ATTEMPT_BASE_BRANCH_MIGRATION_SQL });
+    this.applyMigration({ id: '039_merge_verification_attempt_base_branch', sql: MERGE_VERIFICATION_ATTEMPT_BASE_BRANCH_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: HEAVY_JOB_QUEUE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

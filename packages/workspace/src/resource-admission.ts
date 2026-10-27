@@ -1,7 +1,18 @@
 import { ProcessMemoryPressureProbe } from './resource-pressure.js';
 import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
 
-export type ResourceAdmissionClass = 'dependency_bootstrap' | 'context_scan' | 'child_mcp_call' | 'lsp_process' | 'rag_indexing' | 'goal_process' | 'delegated_agent' | 'verification_heavy';
+export const RESOURCE_ADMISSION_CLASSES = [
+  'dependency_bootstrap',
+  'context_scan',
+  'child_mcp_call',
+  'lsp_process',
+  'rag_indexing',
+  'goal_process',
+  'delegated_agent',
+  'verification_heavy',
+] as const;
+
+export type ResourceAdmissionClass = (typeof RESOURCE_ADMISSION_CLASSES)[number];
 
 export interface ResourceAdmissionLimits {
   readonly globalCost: number;
@@ -421,8 +432,6 @@ function effectiveGlobalCost(
   return Math.max(1, Math.floor(configuredGlobalCost * ratio));
 }
 
-const RESOURCE_ADMISSION_CLASSES = ['dependency_bootstrap', 'context_scan', 'child_mcp_call', 'lsp_process', 'rag_indexing', 'goal_process', 'delegated_agent', 'verification_heavy'] as const;
-
 function validateRequest(request: ResourceAdmissionRequest): 'invalid_request' | undefined {
   if (!isBoundedId(request.operationId)
     || !isBoundedId(request.workspaceId)
@@ -440,7 +449,7 @@ function isBoundedId(value: unknown): value is string {
 }
 
 function isResourceClass(value: unknown): value is ResourceAdmissionClass {
-  return value === 'dependency_bootstrap' || value === 'context_scan' || value === 'child_mcp_call' || value === 'lsp_process' || value === 'rag_indexing' || value === 'goal_process' || value === 'delegated_agent' || value === 'verification_heavy';
+  return typeof value === 'string' && (RESOURCE_ADMISSION_CLASSES as readonly string[]).includes(value);
 }
 
 function normalizeSessionId(value: string | undefined): string {

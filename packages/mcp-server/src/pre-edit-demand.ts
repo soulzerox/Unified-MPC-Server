@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto';
 import {
   HeavyJobWaiterQueue,
+  type HeavyJobQueueStore,
+  type HeavyJobRequest,
   type ResourceAdmissionController,
   type ResourceAdmissionLease,
 } from '@unified-mpc/workspace';
 
 /** Bounded waiter queue for on-demand pre-edit evidence work (#145 U3). */
 export const DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT = 16 as const;
+
+/** Durable queue kind for demand-first pre-edit deltas (#145 U5). */
+export const PRE_EDIT_DELTA_JOB_KIND = 'pre_edit_delta' as const;
 
 /**
  * Hard ceiling on how long a later prepare may block inside
@@ -112,6 +117,7 @@ export class PreEditDemandRuntime {
   private readonly controller: ResourceAdmissionController | undefined;
   private readonly executor: PreEditDeltaExecutor | undefined;
   private readonly cost: number;
+  private readonly now: () => Date;
   private readonly running = new Set<string>();
   private readonly jobRecords = new Map<string, PreEditDeltaJob>();
   private readonly completions = new Map<string, Array<() => void>>();
@@ -121,14 +127,20 @@ export class PreEditDemandRuntime {
     executor?: PreEditDeltaExecutor;
     cost: number;
     queueLimit?: number;
+    /** Durable queue authority (#145 U5); omitted keeps process-local behavior. */
+    store?: HeavyJobQueueStore;
+    now?: () => Date;
   }) {
     this.controller = input.controller;
     this.executor = input.executor;
     this.cost = input.cost;
+    this.now = input.now ?? ((): Date => new Date());
     this.queue = input.controller === undefined
       ? undefined
       : new HeavyJobWaiterQueue(input.controller, {
         maxQueued: Math.max(1, input.queueLimit ?? DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT),
+        ...(input.store === undefined ? {} : { store: input.store }),
+        now: this.now,
       });
   }
 
@@ -144,12 +156,33 @@ export class PreEditDemandRuntime {
   }): PreEditSubmissionRecord | undefined {
     const queue = this.queue;
     if (queue === undefined || !request.demandable) return undefined;
-    const paths = [request.filePath];
     const operationId = preEditOperationId(
       request.workspaceId,
       request.filePath,
       request.evidenceState,
     );
+    try {
+      return this.submitToQueue(queue, request, operationId);
+    } catch {
+      // Durable state is an optimization for later evidence reads, never a
+      // prerequisite for failing closed: an unavailable store must not turn
+      // the refusal envelope into an INTERNAL_ERROR.
+      return {
+        operationId,
+        queueState: 'rejected',
+        depth: 0,
+        paths: [request.filePath],
+        maxFiles: MAX_PRE_EDIT_DELTA_FILES,
+      };
+    }
+  }
+
+  private submitToQueue(
+    queue: HeavyJobWaiterQueue,
+    request: { workspaceId: string; filePath: string; evidenceState: string },
+    operationId: string,
+  ): PreEditSubmissionRecord {
+    const paths = [request.filePath];
     const base = {
       operationId,
       depth: queue.depth(),
@@ -168,26 +201,32 @@ export class PreEditDemandRuntime {
       if (staleId === operationId) continue;
       if (this.running.has(staleId)) continue;
       if (staleJob.workspaceId !== request.workspaceId || staleJob.filePath !== request.filePath) continue;
-      const superseded = queue.supersede(staleId, operationId, {
-        workspaceId: request.workspaceId,
-        resourceClass: 'rag_indexing',
-        cost: this.cost,
-        blocking: true,
-      });
+      const superseded = queue.supersede(staleId, operationId, this.jobRequest(request));
       if (superseded.status === 'rejected') {
         return { ...base, queueState: 'rejected' };
       }
       this.jobRecords.delete(staleId);
+      this.releaseWaiters(staleId);
+      if (superseded.status === 'coalesced') {
+        // Another owner (or an already-queued generation) holds the exact
+        // replacement. Fail closed: this caller may wait only when the work is
+        // locally pending, and no duplicate execution is started here.
+        return { ...base, depth: queue.depth(), queueState: 'coalesced' };
+      }
+      // Blocking gate evidence (U12): the freshly described requirement jumps
+      // ahead of background maintenance just like a fresh submission would.
+      if (!queue.promote(operationId)) {
+        // The durable slot vanished between claim and promote (retired by
+        // recovery or another owner). Fail closed instead of tracking work
+        // that can never execute.
+        return { ...base, depth: queue.depth(), queueState: 'rejected' };
+      }
       this.jobRecords.set(operationId, {
         workspaceId: request.workspaceId,
         filePath: request.filePath,
         paths,
         evidenceState: request.evidenceState,
       });
-      this.releaseWaiters(staleId);
-      // Blocking gate evidence (U12): the freshly described requirement jumps
-      // ahead of background maintenance just like a fresh submission would.
-      queue.promote(operationId);
       this.executePending();
       return {
         ...base,
@@ -195,21 +234,19 @@ export class PreEditDemandRuntime {
         queueState: this.running.has(operationId) ? 'admitted' : 'queued',
       };
     }
-    const enqueued = queue.enqueue({
-      operationId,
-      workspaceId: request.workspaceId,
-      resourceClass: 'rag_indexing',
-      cost: this.cost,
-      blocking: true,
-    });
+    const enqueued = queue.enqueue(this.jobRequest(request));
     if (enqueued.status === 'rejected') {
       return { ...base, queueState: 'rejected' };
     }
-    if (enqueued.status === 'coalesced') {
-      return { ...base, queueState: 'coalesced' };
+    if (enqueued.status === 'coalesced' && !enqueued.queued) {
+      // Live foreign owner or an already-running generation: report the
+      // coalesce without claiming execution that this runtime does not own.
+      return { ...base, depth: enqueued.depth, queueState: 'coalesced' };
     }
     // Blocking gate evidence (U12): jump ahead of background maintenance.
-    queue.promote(operationId);
+    if (!queue.promote(operationId)) {
+      return { ...base, depth: queue.depth(), queueState: 'rejected' };
+    }
     this.jobRecords.set(operationId, {
       workspaceId: request.workspaceId,
       filePath: request.filePath,
@@ -221,6 +258,20 @@ export class PreEditDemandRuntime {
       ...base,
       depth: queue.depth(),
       queueState: this.running.has(operationId) ? 'admitted' : 'queued',
+    };
+  }
+
+  private jobRequest(
+    request: { workspaceId: string; filePath: string; evidenceState: string },
+  ): HeavyJobRequest {
+    return {
+      operationId: preEditOperationId(request.workspaceId, request.filePath, request.evidenceState),
+      workspaceId: request.workspaceId,
+      resourceClass: 'rag_indexing',
+      cost: this.cost,
+      blocking: true,
+      jobKind: PRE_EDIT_DELTA_JOB_KIND,
+      requestedAt: this.now().toISOString(),
     };
   }
 
@@ -303,28 +354,52 @@ export class PreEditDemandRuntime {
       this.running.add(admitted.lease.operationId);
       const executor = this.executor;
       if (executor === undefined) {
-        this.finish(admitted.lease);
+        this.finish(admitted.lease, 'failed', 'no executor configured');
         continue;
       }
       let started: Promise<unknown> | unknown;
       try {
         started = executor(job);
-      } catch {
-        this.finish(admitted.lease);
+      } catch (cause) {
+        this.finish(admitted.lease, 'failed', describeCause(cause));
         continue;
       }
+      let failed = false;
       void Promise.resolve(started)
-        .catch(() => undefined)
+        .catch((cause: unknown) => {
+          failed = true;
+          this.finish(admitted.lease, 'failed', describeCause(cause));
+        })
         .finally(() => {
-          this.finish(admitted.lease);
-          this.executePending();
+          if (!failed) this.finish(admitted.lease, 'completed');
+          try {
+            this.executePending();
+          } catch {
+            // Drain failures are retried on the next submission; they must not
+            // escape as an unhandled rejection from detached executor work.
+          }
         });
     }
   }
 
-  private finish(lease: ResourceAdmissionLease): void {
+  /**
+   * Release the admission lease and record the durable terminal outcome in
+   * one step (#145 U5). Fail-closed: every exit path settles exactly once,
+   * and a losing duplicate settle is a no-op in the durable store.
+   */
+  private finish(
+    lease: ResourceAdmissionLease,
+    outcome: 'completed' | 'failed',
+    detail?: string,
+  ): void {
     this.running.delete(lease.operationId);
     this.jobRecords.delete(lease.operationId);
+    try {
+      this.queue?.settle(lease.operationId, outcome, detail);
+    } catch {
+      // A queue-store failure must never strand the admission lease or the
+      // bounded waiters; restart recovery reconciles the durable row.
+    }
     this.controller?.release(lease);
     this.releaseWaiters(lease.operationId);
   }
@@ -339,4 +414,14 @@ export function flatSubmissionDetails(submission: PreEditSubmissionRecord): Reco
     submissionPaths: submission.paths.join(','),
     submissionMaxFiles: submission.maxFiles,
   };
+}
+
+/** Bounded human-readable failure reason for the durable job receipt. */
+function describeCause(cause: unknown): string {
+  const message = cause instanceof Error
+    ? cause.message
+    : typeof cause === 'string'
+      ? cause
+      : 'unknown failure';
+  return message.slice(0, 500);
 }

@@ -71,6 +71,9 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId, force: true }))
       .resolves.toMatchObject({ ok: true });
     expect(calls.some(({ tool, args }) => tool === 'code_index' && args.force === true)).toBe(true);
+    // Vectors are an explicit per-call opt-in; Unified always opts in so the
+    // pre-edit gate can observe a current semantic channel.
+    expect(calls.filter(({ tool }) => tool === 'code_index').every(({ args }) => args.vectors === true)).toBe(true);
     await expect(driver.call('record_event', { event: 'missing-scope' })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(calls.map(({ tool }) => tool)).toEqual(expect.arrayContaining(['remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius', 'code_index']));
     expect(calls.filter(({ tool }) => THAI_RAG_CONFORMANCE_FIXTURE.operations[tool as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations].scope === 'workspace_id').every(({ args }) => args.workspace_id === workspaceId)).toBe(true);
@@ -880,6 +883,79 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(codeIndexArgs.length).toBeGreaterThan(0);
     expect(codeIndexArgs[0]).toMatchObject({ workspace_id: workspaceId });
     expect(codeIndexArgs[0]).toHaveProperty('max_files');
+    // The pre-edit gate only authorizes a current semantic channel, so every
+    // admission pass must opt in to vectors (thai-rag-mcp #329 default is off).
+    expect(codeIndexArgs.every((args) => args.vectors === true)).toBe(true);
+  });
+
+  it('forwards a scoped pre-edit delta (paths + max_files) to the provider', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const codeIndexArgs: Array<Record<string, unknown>> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') {
+            codeIndexArgs.push({ ...args });
+            return success('indexed');
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('code_index', {
+      workspace_path: workspaceRoot,
+      workspace_id: workspaceId,
+      paths: ['apps/cli/src/runtime/native-thai-rag-provider.ts', '  packages/mcp-server/src/tool-registry.ts  '],
+      max_files: 8,
+    })).resolves.toMatchObject({ ok: true });
+    await driver.stop();
+
+    expect(codeIndexArgs.at(-1)).toMatchObject({
+      workspace_id: workspaceId,
+      paths: [
+        'apps/cli/src/runtime/native-thai-rag-provider.ts',
+        'packages/mcp-server/src/tool-registry.ts',
+      ],
+      max_files: 8,
+      vectors: true,
+    });
+  });
+
+  it('omits empty scope instead of sending a malformed paths payload', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const codeIndexArgs: Array<Record<string, unknown>> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') codeIndexArgs.push({ ...args });
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('code_index', {
+      workspace_path: workspaceRoot,
+      workspace_id: workspaceId,
+      paths: ['   ', 7],
+      max_files: 0,
+    })).resolves.toMatchObject({ ok: true });
+    await driver.stop();
+
+    const args = codeIndexArgs.at(-1);
+    expect(args).not.toHaveProperty('paths');
+    expect(args).not.toHaveProperty('max_files');
+    expect(args).toMatchObject({ vectors: true });
   });
 
   it('serves an already-indexed workspace while another workspace is reindexing', async () => {

@@ -36,6 +36,16 @@ import {
 } from '@unified-mpc/thai-rag';
 
 const SERVER_NAME = 'thai-rag-native';
+/**
+ * The provider treats code-index vectors as opt-in (thai-rag-mcp #329), but
+ * Unified's pre-edit gate refuses any verdict whose semantic channel is not
+ * current (`readPreEditReadiness`). A lexical-only generation therefore makes
+ * `prepare_code_change` permanently unready, so Unified — the owner of this
+ * deployment and its fixed embedding profile — always opts in. A host without
+ * a reachable embedder still degrades to a lexical-only generation instead of
+ * failing the pass (thai-rag-mcp #261).
+ */
+const CODE_INDEX_VECTORS = true;
 // Publishing a full generation (CPG resolution + generation copy) can take far
 // longer than a request; the provider answers as soon as the job is created,
 // but the follow-up status/often-blocking calls must survive the publish.
@@ -482,11 +492,27 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const force = args.force === true;
     const background = args.background === true;
+    // Scoped demand-first deltas (#346 U10) are described by the caller as
+    // `paths` + `max_files`. They must reach the provider verbatim: dropping
+    // them silently turns a bounded 8-file delta into a full-workspace pass.
+    const requestedPaths = Array.isArray(args.paths)
+      ? args.paths
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value) => value.trim())
+      : [];
+    const maxFiles = typeof args.max_files === 'number'
+      && Number.isInteger(args.max_files)
+      && args.max_files > 0
+      ? args.max_files
+      : undefined;
     const childArgs = {
       workspace_path: workspace.value.rootPath,
       workspace_id: workspace.value.workspaceId,
       force,
       background: false,
+      vectors: CODE_INDEX_VECTORS,
+      ...(requestedPaths.length === 0 ? {} : { paths: requestedPaths }),
+      ...(maxFiles === undefined ? {} : { max_files: maxFiles }),
     };
     if (!background) return this.callIndexWorker('code_index', childArgs, signal, budget);
     if (!this.cancellableIndexJobs) return this.legacyBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
@@ -927,6 +953,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
               force: false,
               background: false,
               max_files: 3,
+              vectors: CODE_INDEX_VECTORS,
             })
             : normalizeWorkerCallResult(
               'code_index',
@@ -936,6 +963,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
                 force: false,
                 background: false,
                 max_files: 3,
+                vectors: CODE_INDEX_VECTORS,
               }),
             );
           if (!trial.ok) indexed = trial;
@@ -956,6 +984,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             force: false,
             background: true,
             mode: 'delta',
+            vectors: CODE_INDEX_VECTORS,
           });
           if (!started.ok) {
             indexed = started;
@@ -987,6 +1016,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             force: false,
             background: true,
             mode: 'delta',
+            vectors: CODE_INDEX_VECTORS,
           });
           indexed = normalizeWorkerCallResult('code_index', raw);
         }

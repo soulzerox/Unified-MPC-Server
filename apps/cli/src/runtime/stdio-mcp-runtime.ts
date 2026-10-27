@@ -1168,9 +1168,18 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
     THAI_RAG_EMBEDDING_BACKEND: authoritative('THAI_RAG_EMBEDDING_BACKEND') ?? 'llamacpp',
     THAI_RAG_LLAMACPP_MODEL: authoritative('THAI_RAG_LLAMACPP_MODEL') ?? THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
     // The Python provider already defaults the llama.cpp base URL; the launcher
-    // only passes these two through when the host configured them explicitly.
+    // only passes these through when the host configured them explicitly.
     ...(authoritative('THAI_RAG_LLAMACPP_BASE_URL') === undefined ? {} : { THAI_RAG_LLAMACPP_BASE_URL: authoritative('THAI_RAG_LLAMACPP_BASE_URL') as string }),
     ...(authoritative('THAI_RAG_LLAMACPP_MODEL_PATH') === undefined ? {} : { THAI_RAG_LLAMACPP_MODEL_PATH: authoritative('THAI_RAG_LLAMACPP_MODEL_PATH') as string }),
+    // llama.cpp's own `-b`/`-ub` defaults (512) are a deployment property: a
+    // chunk longer than the physical batch is rejected with HTTP 500
+    // ("input (1600 tokens) is too large to process ... current batch size:
+    // 512"), the adapter raises, the coordinator falls back to an embedding
+    // backend that is not running, the vector channel degrades to zero vectors
+    // and the pre-edit gate stays shut (issue #438). The provider hands this
+    // verbatim to the llama-server it launches, so a tuned host must reach it
+    // or every cold start silently regresses to the unusable default.
+    ...(authoritative('THAI_RAG_LLAMACPP_SERVER_ARGS') === undefined ? {} : { THAI_RAG_LLAMACPP_SERVER_ARGS: authoritative('THAI_RAG_LLAMACPP_SERVER_ARGS') as string }),
   };
 }
 

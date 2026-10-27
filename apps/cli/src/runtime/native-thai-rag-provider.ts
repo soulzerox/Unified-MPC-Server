@@ -538,8 +538,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       force ? 'explicit_force_reindex' : 'explicit_request',
     );
     const operation = this.enqueueWorker(async () => {
-      const raw = await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget);
-      const result = normalizeWorkerCallResult('code_index', raw);
+      const result = await this.retryStorageBusy(async () => normalizeWorkerCallResult(
+        'code_index',
+        await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget),
+      ));
       if (result.ok) await this.jobs.complete(job.jobId, result.value, this.ownerId ?? '');
       else await this.jobs.fail(job.jobId, result.error.message, this.ownerId ?? '');
       return result;
@@ -563,7 +565,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ownerId,
       force ? 'explicit_force_reindex' : 'explicit_request',
     );
-    const started = await this.callIndexWorker('code_index', { ...childArgs, background: true }, undefined, budget);
+    const started = await this.retryStorageBusy(
+      () => this.callIndexWorker('code_index', { ...childArgs, background: true }, undefined, budget),
+    );
     if (!started.ok) {
       await this.jobs.fail(job.jobId, started.error.message, ownerId);
       return started;
@@ -979,7 +983,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // pipeline before full admission. Trial failure takes the same
         // fail-closed path below; pending stays set for a later retry.
         {
-          const trial = this.cancellableIndexJobs
+          const trial = await this.retryStorageBusy(async () => (this.cancellableIndexJobs
             ? await this.callAdmissionWorker('code_index', {
               workspace_path: path.resolve(workspace.realRootPath),
               workspace_id: workspace.id,
@@ -998,7 +1002,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
                 max_files: 3,
                 vectors: CODE_INDEX_VECTORS,
               }),
-            );
+            )));
           if (!trial.ok) indexed = trial;
           else indexed = { ok: true as const, value: undefined };
           if (!trial.ok) {
@@ -1011,14 +1015,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           // issue-202 T8: demand-first — trial already proved the pipeline,
           // so the remainder runs as background delta (never sync full
           // force, which fails at tail and blocks the pre-edit gate).
-          const started = await this.callAdmissionWorker('code_index', {
+          const started = await this.retryStorageBusy(() => this.callAdmissionWorker('code_index', {
             workspace_path: path.resolve(workspace.realRootPath),
             workspace_id: workspace.id,
             force: false,
             background: true,
             mode: 'delta',
             vectors: CODE_INDEX_VECTORS,
-          });
+          }));
           if (!started.ok) {
             indexed = started;
           } else {
@@ -1285,6 +1289,21 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>): Promise<Result<unknown>> {
     return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args));
+  }
+
+  /**
+   * Retry an index **start** that the provider rejected because another
+   * session held the SQLite write lock. Only the start is retried: once the
+   * provider admits the job, its own job id owns the work and a second start
+   * would create a competing generation.
+   */
+  private async retryStorageBusy<T>(operation: () => Promise<Result<T>>, attempts = 4): Promise<Result<T>> {
+    let result = await operation();
+    for (let attempt = 1; attempt < attempts && !result.ok && isRetryableStorageBusy(result.error); attempt += 1) {
+      await delay(Math.min(5_000, 250 * (2 ** attempt)));
+      result = await operation();
+    }
+    return result;
   }
 
   private canonicalPreEditArgs(args: Readonly<Record<string, unknown>>): Result<Readonly<Record<string, unknown>>> {
@@ -1590,7 +1609,14 @@ function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Resul
       mapProviderErrorCode(structuredError.code),
       `Native Thai-RAG ${tool} failed: ${structuredError.message}`,
       true,
-      { reason: structuredError.code, providerStatus: structuredError.status },
+      {
+        reason: structuredError.code,
+        providerStatus: structuredError.status,
+        // The provider's own retry classification must survive this mapping:
+        // dropping it makes a contended write look terminal to the caller.
+        ...(structuredError.retryable ? { retryable: 1 } : {}),
+        ...(structuredError.reason === undefined ? {} : { providerReason: structuredError.reason }),
+      },
     ));
   }
   const text = toolResultText(result.value)?.trim();
@@ -1599,18 +1625,38 @@ function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Resul
     : result;
 }
 
-function structuredProviderError(value: unknown): { readonly code: string; readonly message: string; readonly status: string } | undefined {
+function structuredProviderError(value: unknown): {
+  readonly code: string;
+  readonly message: string;
+  readonly status: string;
+  readonly retryable: boolean;
+  readonly reason?: string;
+} | undefined {
   const payload = normalizeWorkerPayload(value);
   if (!isRecord(payload)) return undefined;
   const data = isRecord(payload.data) ? payload.data : payload;
   if (!Array.isArray(data.errors) || data.errors.length === 0 || !isRecord(data.errors[0])) return undefined;
   const error = data.errors[0];
   if (typeof error.code !== 'string' || typeof error.message !== 'string') return undefined;
+  const details = isRecord(error.details) ? error.details : {};
   return {
     code: error.code,
     message: error.message,
     status: typeof data.status === 'string' ? data.status : 'unavailable',
+    retryable: details.retryable === true,
+    ...(typeof details.reason === 'string' ? { reason: details.reason } : {}),
   };
+}
+
+/**
+ * A provider-owner SQLite write is single-writer: a code_index start that
+ * arrives while another session is committing answers `database is locked`
+ * and marks itself retryable. The start is idempotent until the provider
+ * admits a job, so retrying is correct; failing it abandons the workspace's
+ * generation and restarts the whole build (issue #445 churn).
+ */
+function isRetryableStorageBusy(error: { readonly details?: Readonly<Record<string, string | number>> }): boolean {
+  return error.details?.providerReason === 'sqlite_busy';
 }
 
 function normalizeWorkerPayload(value: unknown): unknown {

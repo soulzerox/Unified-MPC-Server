@@ -626,6 +626,40 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return next === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(next);
   }
 
+  /**
+   * Re-issue the index for a mirrored job whose provider-side registry entry
+   * vanished (issue #449). The provider stays the authority for the job id, so
+   * the durable row keeps its identity and only the provider binding moves.
+   * Returns undefined when no replacement could be bound; the caller then
+   * falls back to its terminal failure path.
+   */
+  private async restartIndexJobAfterProviderLoss(
+    jobId: string,
+    workspaceId: string,
+    ownerId: string,
+    session: 'index' | 'admission',
+  ): Promise<string | undefined> {
+    const rootPath = this.workspaceRoots.get(workspaceId);
+    if (rootPath === undefined) return undefined;
+    const args = {
+      workspace_path: path.resolve(rootPath),
+      workspace_id: workspaceId,
+      // A lost job is resumable: published chunk embeddings are reused, so the
+      // restart continues the generation instead of rebuilding it.
+      force: false,
+      background: true,
+      vectors: CODE_INDEX_VECTORS,
+    };
+    const started = await this.retryStorageBusy(() => (session === 'admission'
+      ? this.callAdmissionWorker('code_index', args)
+      : this.callIndexWorker('code_index', args)));
+    if (!started.ok) return undefined;
+    const providerJobId = nestedString(started.value, 'job_id');
+    if (providerJobId === undefined) return undefined;
+    const rebound = await this.jobs.bindProviderJob(jobId, providerJobId, ownerId);
+    return rebound === null ? undefined : providerJobId;
+  }
+
   private startIndexJobMonitor(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): void {
     const monitor = this.monitorIndexJob(jobId, providerJobId, workspaceId, ownerId)
       .catch(async (error: unknown) => {
@@ -637,7 +671,13 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.indexJobMonitors.set(jobId, monitor);
   }
 
-  private async monitorIndexJob(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): Promise<void> {
+  private async monitorIndexJob(
+    jobId: string,
+    providerJobId: string,
+    workspaceId: string,
+    ownerId: string,
+    restarts = 0,
+  ): Promise<void> {
     let consecutiveStatusTimeouts = 0;
     while (!this.shuttingDown) {
       await delay(this.indexJobPollMs);
@@ -659,6 +699,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // admission monitor uses (issue #407) turns an unreachable provider
         // into an actionable failure.
         if (!isIndexStatusPollTimeout(status.error)) {
+          // Issue #449: the provider lost its in-memory job registry entry.
+          // Its contract is "re-run code_index", so restart and rebind the
+          // same mirrored job instead of abandoning the generation.
+          if (isLostProviderIndexJob(status.error) && restarts < PROVIDER_JOB_LOSS_RESTART_LIMIT) {
+            const replacement = await this.restartIndexJobAfterProviderLoss(jobId, workspaceId, ownerId, 'index');
+            if (replacement !== undefined) {
+              await this.monitorIndexJob(jobId, replacement, workspaceId, ownerId, restarts + 1);
+              return;
+            }
+          }
           await this.jobs.fail(jobId, status.error.message, ownerId);
           return;
         }
@@ -1165,6 +1215,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     providerJobId: string,
     workspaceId: string,
     ownerId: string,
+    restarts = 0,
   ): Promise<Result<unknown>> {
     let consecutiveStatusTimeouts = 0;
     while (!this.shuttingDown) {
@@ -1180,7 +1231,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // A timed-out read is not evidence that the provider-owned background
         // job failed. Keep the same providerJobId, dedicated stdio session, and
         // local running job instead of starting another full index generation.
-        if (!isIndexStatusPollTimeout(status.error)) return status;
+        if (!isIndexStatusPollTimeout(status.error)) {
+          // Issue #449: a provider-lost job (registry dropped on provider or
+          // data-owner rebind) is restartable, not a dead workspace. Re-run
+          // the delta on the same admission session and keep waiting.
+          if (isLostProviderIndexJob(status.error) && restarts < PROVIDER_JOB_LOSS_RESTART_LIMIT) {
+            const replacement = await this.restartIndexJobAfterProviderLoss(jobId, workspaceId, ownerId, 'admission');
+            if (replacement !== undefined) {
+              return this.waitForWorkspaceAdmissionIndex(jobId, replacement, workspaceId, ownerId, restarts + 1);
+            }
+          }
+          return status;
+        }
         consecutiveStatusTimeouts += 1;
         if (consecutiveStatusTimeouts >= this.indexStatusTimeoutCap) {
           // Issue #407: bound the read gate. A provider whose index_status
@@ -1496,6 +1558,24 @@ const NON_TERMINAL_INDEX_STATUSES: ReadonlySet<string> = new Set([
   'running',
   'cancelling',
 ]);
+
+/**
+ * The provider keeps its index job registry in memory and only prunes
+ * terminal rows, so a mirrored job can disappear when the provider process or
+ * its data owner re-binds. Its contract for that case is "re-run code_index",
+ * which makes a lost job a restart instead of a permanent workspace failure
+ * (issue #449). The bound stops a provider that keeps dropping its registry
+ * from restarting the generation forever.
+ */
+const PROVIDER_JOB_LOSS_RESTART_LIMIT = 3;
+
+function isLostProviderIndexJob(error: {
+  readonly message: string;
+  readonly details?: Readonly<Record<string, string | number>>;
+}): boolean {
+  if (error.details?.providerReason === 'provider_restart_or_retention_expiry') return true;
+  return /index job is unknown/i.test(error.message);
+}
 
 function isIndexStatusPollTimeout(error: { readonly code: string; readonly message: string }): boolean {
   if (error.code !== 'INTERNAL_ERROR') return false;

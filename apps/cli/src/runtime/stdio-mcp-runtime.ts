@@ -22,6 +22,7 @@ import {
   GoalWorkspaceTruthReader,
   ManagedResourceRecoveryService,
   ScheduledContinuationService,
+  HeavyJobQueueRecoveryService,
   ProcessService,
   ProjectService,
   ProjectSnapshotService,
@@ -73,6 +74,7 @@ import {
   SqliteGoalWorkspaceTransferRepository,
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
+  SqliteHeavyJobQueueRepository,
   SqliteManagedResourceBindingRepository,
   SqliteMergeReconciliationRepository,
   SqliteMergeVerificationAttemptRepository,
@@ -137,6 +139,17 @@ export interface StdioMcpRuntime {
  * cooldown stays short enough to re-attach during the next owner boot.
  */
 const DEFAULT_THAI_RAG_START_RETRY_MS = 5_000;
+
+/**
+ * How often a live owner re-reconciles durable heavy-job queue state (#145 U5).
+ *
+ * Startup recovery alone cannot distinguish "this process restarted 5 s ago"
+ * from "another process is still alive", so the 90 s heartbeat grace keeps a
+ * freshly dead owner's rows retained on the first sweep. Re-running the sweep
+ * on a bounded cadence guarantees those rows are eventually orphaned or
+ * interrupted instead of holding queue capacity forever.
+ */
+const HEAVY_JOB_QUEUE_RECOVERY_INTERVAL_MS = 60_000;
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
@@ -923,10 +936,30 @@ export function createStdioMcpRuntime(
     }
   })();
   const managedResourceRecoveryReady = managedResourceRecovery.start().then(() => undefined);
+  // #145 U5: durable heavy-job queue state. This process owns its rows through
+  // a per-process owner id, proves liveness with heartbeats, and reconciles
+  // stale rows so a dead owner can never hold queue capacity forever.
+  const heavyJobQueue = new SqliteHeavyJobQueueRepository(database);
+  const heavyJobQueueRecovery = new HeavyJobQueueRecoveryService(heavyJobQueue, {
+    currentOwnerId: heavyJobQueue.ownerId,
+  });
+  heavyJobQueue.startHeartbeat();
+  const heavyJobQueueRecoveryTimer = setInterval(() => {
+    try {
+      heavyJobQueueRecovery.reconcileOnce();
+    } catch {
+      // A failed sweep must not take the runtime down; the next sweep retries.
+    }
+  }, HEAVY_JOB_QUEUE_RECOVERY_INTERVAL_MS);
+  heavyJobQueueRecoveryTimer.unref?.();
+  const heavyJobQueueRecoveryReady = (async (): Promise<void> => {
+    heavyJobQueueRecovery.reconcileOnce();
+  })();
   const recoveryReady = Promise.all([
     fileRecoveryReady,
     goalRuntimeRecoveryReady,
     managedResourceRecoveryReady,
+    heavyJobQueueRecoveryReady,
   ]).then(() => undefined);
   const actor: FileActor = { clientId: 'cli-mcp-stdio', clientName: 'Unified-MPC-Server CLI' };
   const sharedActivityLease = createSharedActivityLease(process.env.TUNNEL_CLIENT_PROFILE_DIR);
@@ -999,6 +1032,7 @@ export function createStdioMcpRuntime(
     }),
     capabilities: capabilityRuntime.service,
     extensions,
+    heavyJobQueue,
     mergePolicy,
     mergeVerificationRun,
     mergeVerificationStatus,
@@ -1088,6 +1122,8 @@ export function createStdioMcpRuntime(
       stopToolAvailabilityWatch();
       await recoveryReady.catch(() => undefined);
       managedResourceRecovery.close();
+      clearInterval(heavyJobQueueRecoveryTimer);
+      heavyJobQueue.close();
       mergeReconciliationPoller.close();
       await thaiRagCoordinator.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();

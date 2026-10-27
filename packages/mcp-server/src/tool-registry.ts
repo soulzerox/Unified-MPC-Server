@@ -346,6 +346,7 @@ export class ToolRegistry {
         DEFAULT_PRE_EDIT_DEMAND_QUEUE_LIMIT,
       ),
       executor: (job: PreEditDeltaJob): Promise<void> => this.runPreEditDelta(job),
+      ...(services.heavyJobQueue === undefined ? {} : { store: services.heavyJobQueue }),
     });
     this.preEditDemandWaitTimeoutMs = normalizePositiveInteger(
       options.preEditDemandWaitTimeoutMs,

@@ -2,6 +2,7 @@ import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
+  HeavyJobQueueStore,
   ResourceAdmissionController,
   ResourceAdmissionLease,
   RuntimeDeploymentReferenceOptions,
@@ -227,6 +228,8 @@ export interface McpApplicationServices {
   readonly localProviders?: () => { readonly pdfProvider?: string; readonly lspCommands?: Readonly<Record<string, string>> };
   readonly capabilities?: CapabilityService;
   readonly extensions?: ExtensionsService;
+  /** Durable heavy-job queue authority (#145 U5); omitted keeps process-local queue state. */
+  readonly heavyJobQueue?: HeavyJobQueueStore;
   readonly mergePolicy?: {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };

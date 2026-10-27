@@ -7,6 +7,7 @@ export * from './harness-runtime.js';
 export * from './incremental-verifier.js';
 export * from './origin-policy.js';
 export * from './parallel-tool-executor.js';
+export * from './pre-edit-demand.js';
 export * from './progress-heartbeat.js';
 export * from './result-mapper.js';
 export * from './server.js';

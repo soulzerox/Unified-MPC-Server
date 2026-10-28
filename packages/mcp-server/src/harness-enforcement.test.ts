@@ -993,6 +993,32 @@ describe('pre-edit readiness gate (#346 U10)', () => {
     });
   });
 
+  it('accepts a lexical-only code view as current evidence (issue #463)', async () => {
+    const { result } = await prepareWithPayload({
+      status: 'ok',
+      can_proceed: true,
+      evidence_state: 'evidence_available',
+      evidence_fresh: true,
+      target_sha256: hashHarnessText('// src/lexical-only.ts\n'),
+      evidence: {
+        semantic: 'lexical_only',
+        channels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'lexical_only' },
+      },
+    }, 'src/lexical-only.ts');
+
+    // Code indexing is FTS5-first: a view that never requested vectors is
+    // current for the channel it claims. Only `missing`/`degraded` refuse.
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      ready: true,
+      preparationReceipt: {
+        evidenceState: 'evidence_available',
+        evidenceSemantic: 'lexical_only',
+        evidenceChannels: { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'lexical_only' },
+      },
+    });
+  });
+
   it('keeps the receipt free of per-channel fields when the envelope does not carry them', async () => {
     const { result } = await prepareWithPayload({
       status: 'ok',

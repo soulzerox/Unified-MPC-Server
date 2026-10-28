@@ -37,15 +37,17 @@ import {
 
 const SERVER_NAME = 'thai-rag-native';
 /**
- * The provider treats code-index vectors as opt-in (thai-rag-mcp #329), but
- * Unified's pre-edit gate refuses any verdict whose semantic channel is not
- * current (`readPreEditReadiness`). A lexical-only generation therefore makes
- * `prepare_code_change` permanently unready, so Unified — the owner of this
- * deployment and its fixed embedding profile — always opts in. A host without
- * a reachable embedder still degrades to a lexical-only generation instead of
- * failing the pass (thai-rag-mcp #261).
+ * Code indexing is FTS5-first (thai-rag-mcp #356): Unified indexes code
+ * lexically and does not require an embedding backend for it, so a code pass
+ * costs minutes instead of the 12 h CPU baseline it used to force. Embeddings
+ * stay for chat/memory, which is a separate, small-volume pipeline.
+ *
+ * This policy needs the provider to answer a lexical-only publication as a
+ * positive state (`evidence.semantic = "lexical_only"`, thai-rag-mcp #392);
+ * `readPreEditReadiness` accepts that state as current, so `prepare_code_change`
+ * no longer needs to force vectors to keep the gate open (issue #463).
  */
-const CODE_INDEX_VECTORS = true;
+const CODE_INDEX_VECTORS = false;
 // Publishing a full generation (CPG resolution + generation copy) can take far
 // longer than a request; the provider answers as soon as the job is created,
 // but the follow-up status/often-blocking calls must survive the publish.

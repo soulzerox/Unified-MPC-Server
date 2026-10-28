@@ -43,7 +43,7 @@ describe('mapResult image payloads', () => {
       onTruncated: (event) => truncations.push(event),
     });
 
-    expect(response.structuredContent).toBeUndefined();
+    expect(response.structuredContent).toMatchObject({ truncated: true, toolName: 'mcp_call' });
     expect(response.content).toHaveLength(1);
     const envelope = JSON.parse(response.content[0]?.type === 'text' ? response.content[0].text : '{}') as Record<string, unknown>;
     expect(envelope).toMatchObject({
@@ -72,7 +72,7 @@ describe('mapResult image payloads', () => {
     });
 
     expect(JSON.parse(text.content[0]?.type === 'text' ? text.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'text' });
-    expect(structured.structuredContent).toBeUndefined();
+    expect(structured.structuredContent).toMatchObject({ truncated: true, limitType: 'structured' });
     expect(JSON.parse(structured.content[0]?.type === 'text' ? structured.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'structured' });
     expect(image.content).toHaveLength(1);
     expect(JSON.parse(image.content[0]?.type === 'text' ? image.content[0].text : '{}')).toMatchObject({ truncated: true, limitType: 'binary' });
@@ -85,7 +85,7 @@ describe('mapResult image payloads', () => {
 
     const envelope = JSON.parse(response.content[0]?.type === 'text' ? response.content[0].text : '{}') as Record<string, unknown>;
     expect(envelope).toMatchObject({ truncated: true, limitType: 'binary', maxBytes: 128 });
-    expect(response.structuredContent).toBeUndefined();
+    expect(response.structuredContent).toMatchObject({ truncated: true, limitType: 'binary', maxBytes: 128 });
   });
 
   it('enforces an aggregate budget across structured and text representations', () => {
@@ -135,6 +135,38 @@ describe('mapResult image payloads', () => {
           replacementRecoveryPath: 'E:\\recovery\\recovery-123\\payload',
         },
       },
+    });
+  });
+});
+
+describe('mapResult MCP output-schema contract', () => {
+  it('always carries structured content for a successful result that a declared output schema can validate', () => {
+    // Every tool declares an output schema (`defineTool` defaults to a catchall
+    // object) and the MCP SDK rejects a successful call that sends none. An
+    // oversized result used to leave the client with
+    // "Output validation error: Tool <name> has an output schema but no
+    // structured content was provided" instead of the budget envelope, which is
+    // how `workspace_index` broke on a 3.4 MB snapshot.
+    const oversized = mapResult(
+      { ok: true as const, value: { entries: Array.from({ length: 40 }, (_, index) => ({ path: `f${index}.ts`, body: 'x'.repeat(200) })) } },
+      { maxBytes: 1_024, toolName: 'workspace_index' },
+    );
+    const oversizedImage = mapResult(
+      { ok: true as const, value: { content: 'iVBORw0KGgo=', encoding: 'base64', mimeType: 'image/png', note: 'x'.repeat(2_000) } },
+      { budget: { maxTextBytes: 128 } },
+    );
+
+    for (const response of [oversized, oversizedImage]) {
+      expect(response.isError).toBeUndefined();
+      expect(response.structuredContent).toBeDefined();
+      expect(typeof response.structuredContent).toBe('object');
+      expect(response.structuredContent).not.toBeNull();
+      expect(Array.isArray(response.structuredContent)).toBe(false);
+    }
+    expect(oversized.structuredContent).toMatchObject({
+      truncated: true,
+      toolName: 'workspace_index',
+      reason: 'tool_result_exceeds_output_budget',
     });
   });
 });

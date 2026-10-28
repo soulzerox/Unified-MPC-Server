@@ -128,12 +128,15 @@ describe('skills and mcp bridge tools', () => {
       .resolves.toMatchObject({ structuredContent: { content: [{ type: 'text', text: 'pong' }] } });
 
     const child = await registry.invoke('mcp_call', { server: 'mock', tool: 'huge', arguments: {}, userConfirmed: true });
-    expect(child.structuredContent).toBeUndefined();
+    // The budget envelope is the result, so it must also be structured content:
+    // MCP rejects a successful call whose tool declares an output schema and
+    // sends none.
+    expect(child.structuredContent).toMatchObject({ truncated: true, toolName: 'mcp_call', maxBytes: 1_024 });
     const childEnvelope = JSON.parse(child.content[0]?.type === 'text' ? child.content[0].text : '{}') as Record<string, unknown>;
     expect(childEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_call', maxBytes: 1_024 });
 
     const global = await registry.invoke('mcp_list', {});
-    expect(global.structuredContent).toBeUndefined();
+    expect(global.structuredContent).toMatchObject({ truncated: true, toolName: 'mcp_list', maxBytes: 2_048 });
     const globalEnvelope = JSON.parse(global.content[0]?.type === 'text' ? global.content[0].text : '{}') as Record<string, unknown>;
     expect(globalEnvelope).toMatchObject({ truncated: true, toolName: 'mcp_list', maxBytes: 2_048 });
 

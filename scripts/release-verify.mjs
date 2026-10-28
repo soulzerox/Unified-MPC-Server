@@ -51,6 +51,8 @@ const rustPreflight = () => {
 const commands = [
   ['corepack', ['pnpm', 'version:check']],
   ['corepack', ['pnpm', 'typecheck']],
+  // The gate above must never touch a deployed dist; prove it before building.
+  ['corepack', ['pnpm', 'provenance:check']],
   ['corepack', ['pnpm', 'lint']],
   // Run the destructive clean-build guard before recursive workspace tests.
   [process.execPath, ['scripts/verify-native-rag-migration.mjs']],

@@ -1,0 +1,35 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../.typecheck/packages/mcp-server",
+    "tsBuildInfoFile": "../../.typecheck/packages/mcp-server/tsconfig.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../application/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../audit/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../capabilities/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../domain/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../extensions/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../permissions/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../search/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../shared/tsconfig.typecheck.json"
+    }
+  ]
+}

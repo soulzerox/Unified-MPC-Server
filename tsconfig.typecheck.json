@@ -1,0 +1,68 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/cli/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./apps/cf-gateway/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./apps/web/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/domain/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/capabilities/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/extensions/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/shared/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/workspace/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/permissions/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/audit/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/storage/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/filesystem/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/git/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/project/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/process/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/codex/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/application/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/mcp-server/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/ipc-contracts/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/search/tsconfig.typecheck.json"
+    },
+    {
+      "path": "./packages/thai-rag/tsconfig.typecheck.json"
+    }
+  ]
+}

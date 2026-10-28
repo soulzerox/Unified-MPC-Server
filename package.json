@@ -9,7 +9,8 @@
   "type": "module",
   "scripts": {
     "lint": "eslint .",
-    "typecheck": "node scripts/check-workspace-dependencies.mjs && tsc --build",
+    "typecheck": "node scripts/check-workspace-dependencies.mjs && node scripts/generate-typecheck-configs.mjs --check && tsc --build tsconfig.typecheck.json",
+    "provenance:check": "node scripts/check-dist-provenance-freshness.mjs",
     "test": "corepack pnpm -r --if-present test",
     "build": "corepack pnpm -r --if-present build",
     "version:check": "node scripts/check-version-consistency.mjs",

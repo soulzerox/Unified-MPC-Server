@@ -5,6 +5,7 @@ node_modules/
 # Build & Compilation
 dist/
 build/
+.typecheck/
 native/linux-host/target/
 *.tsbuildinfo
 *.tsbuildinfo.*

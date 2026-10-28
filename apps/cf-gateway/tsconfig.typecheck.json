@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../.typecheck/apps/cf-gateway",
+    "tsBuildInfoFile": "../../.typecheck/apps/cf-gateway/tsconfig.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../../packages/domain/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../../packages/shared/tsconfig.typecheck.json"
+    }
+  ]
+}

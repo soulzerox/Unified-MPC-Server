@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../.typecheck/packages/storage",
+    "tsBuildInfoFile": "../../.typecheck/packages/storage/tsconfig.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../audit/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../domain/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../shared/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../workspace/tsconfig.typecheck.json"
+    }
+  ]
+}

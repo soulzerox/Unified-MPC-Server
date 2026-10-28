@@ -1091,6 +1091,7 @@ describe('NativeThaiRagProviderDriver', () => {
       callTimeoutMs: 500,
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory({
+        includeReconcileTools: true,
         async onCall(tool, args): Promise<unknown> {
           calls.push({ tool, args });
           if (tool === 'code_index') {
@@ -1132,6 +1133,12 @@ describe('NativeThaiRagProviderDriver', () => {
       error: { code: 'CONFLICT', details: { reason: 'workspace-indexing', workspaceId, jobId: admissionJobId } },
     });
     expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(1);
+
+    // Memory repair is backed by provider memory state, not the code
+    // generation the admission holds, so it must still reach the provider
+    // instead of inheriting the CONFLICT (issue #470).
+    await expect(driver.call('memory_reconcile', { workspace_id: workspaceId, dry_run: true })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter(({ tool }) => tool === 'memory_reconcile')).toHaveLength(1);
 
     releaseAdmission?.();
     await driver.stop();
@@ -2795,6 +2802,7 @@ function clientFactory(options: {
   readonly jsonTextResponses?: boolean;
   readonly includeCancelIndex?: boolean;
   readonly includeAdoptLegacyIndex?: boolean;
+  readonly includeReconcileTools?: boolean;
 } = {}): McpClientFactory {
   let connections = 0;
   return {
@@ -2807,6 +2815,7 @@ function clientFactory(options: {
             ...productionToolNames,
             ...(options.includeCancelIndex ? ['cancel_index'] : []),
             ...(options.includeAdoptLegacyIndex ? ['adopt_legacy_index'] : []),
+            ...(options.includeReconcileTools ? ['memory_reconcile', 'code_reconcile'] : []),
           ];
           return advertisedTools.map((name) => ({
             name,

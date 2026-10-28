@@ -438,7 +438,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       : await this.refreshWorkspaceRoots(this.lifecycleGeneration, workspaceId);
     if (!refreshed.ok) {
       const details = refreshed.error.details;
-      if (tool === 'code_index' && isRecord(details)
+      // Reusing the running job is an idempotent answer only for a plain
+      // refresh: a cold-start admission runs `force: false`, so reporting it as
+      // the receipt for a forced rebuild would tell the caller a rebuild was
+      // enqueued when it was not (issue #460). A forced request keeps the
+      // truthful CONFLICT and its blocking job id.
+      if (tool === 'code_index' && args.force !== true && isRecord(details)
         && details.reason === 'workspace-indexing'
         && typeof details.jobId === 'string'
         && typeof details.workspaceId === 'string'

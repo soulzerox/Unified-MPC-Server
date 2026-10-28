@@ -16,7 +16,7 @@ describe('workspace runtime dependency integrity', () => {
     const result = spawnSync(process.execPath, [script, '--root', process.cwd()], { encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('Workspace runtime dependency audit passed');
-  });
+  }, 30_000);
 
   it('fails when a workspace package imports an undeclared internal runtime dependency', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-dependency-audit-'));

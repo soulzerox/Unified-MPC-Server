@@ -132,6 +132,14 @@ export function inspectMutationOperation(
       return boundedWrite('rag_cancel_index requests cancellation of one parent-owned native background index job');
     case 'rag_resolve_constraint':
       return boundedWrite('rag_resolve_constraint closes one recorded constraint turn without deleting it or editing the workspace');
+    case 'rag_memory_reconcile':
+      return value.dryRun === false
+        ? boundedWrite('rag_memory_reconcile replays the durable vector outbox for one registered workspace without editing the workspace')
+        : read('rag_memory_reconcile dry-run reports pending vector operations without mutating them');
+    case 'rag_code_reconcile':
+      return value.dryRun === false
+        ? boundedWrite('rag_code_reconcile repairs safe drift in the active native code generation for one registered workspace')
+        : read('rag_code_reconcile dry-run reports code-index drift without mutating it');
     case 'rag_forget':
       return opaque('rag_forget deletes a persistent native Thai-RAG memory and remains explicitly approval-guarded');
     case 'write_file':

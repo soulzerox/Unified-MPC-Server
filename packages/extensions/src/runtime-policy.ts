@@ -16,6 +16,8 @@ const NATIVE_CAPABILITIES = new Set([
   'rag_cancel_index',
   'rag_resolve_constraint',
   'rag_get_event',
+  'rag_memory_reconcile',
+  'rag_code_reconcile',
 ]);
 
 export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([

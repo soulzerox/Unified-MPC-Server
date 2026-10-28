@@ -71,9 +71,10 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId, force: true }))
       .resolves.toMatchObject({ ok: true });
     expect(calls.some(({ tool, args }) => tool === 'code_index' && args.force === true)).toBe(true);
-    // Vectors are an explicit per-call opt-in; Unified always opts in so the
-    // pre-edit gate can observe a current semantic channel.
-    expect(calls.filter(({ tool }) => tool === 'code_index').every(({ args }) => args.vectors === true)).toBe(true);
+    // Code indexing is lexical-only by policy (issue #463): the provider
+    // publishes `lexical_only` and the pre-edit gate accepts it, so Unified
+    // never opts a code pass into the embedding backend.
+    expect(calls.filter(({ tool }) => tool === 'code_index').every(({ args }) => args.vectors === false)).toBe(true);
     await expect(driver.call('record_event', { event: 'missing-scope' })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(calls.map(({ tool }) => tool)).toEqual(expect.arrayContaining(['remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius', 'code_index']));
     expect(calls.filter(({ tool }) => THAI_RAG_CONFORMANCE_FIXTURE.operations[tool as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations].scope === 'workspace_id').every(({ args }) => args.workspace_id === workspaceId)).toBe(true);
@@ -883,9 +884,9 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(codeIndexArgs.length).toBeGreaterThan(0);
     expect(codeIndexArgs[0]).toMatchObject({ workspace_id: workspaceId });
     expect(codeIndexArgs[0]).toHaveProperty('max_files');
-    // The pre-edit gate only authorizes a current semantic channel, so every
-    // admission pass must opt in to vectors (thai-rag-mcp #329 default is off).
-    expect(codeIndexArgs.every((args) => args.vectors === true)).toBe(true);
+    // A lexical-only generation is a current semantic channel for the gate
+    // (thai-rag-mcp #392), so admission passes stay lexical by policy.
+    expect(codeIndexArgs.every((args) => args.vectors === false)).toBe(true);
   });
 
   it('forwards a scoped pre-edit delta (paths + max_files) to the provider', async () => {
@@ -923,7 +924,7 @@ describe('NativeThaiRagProviderDriver', () => {
         'packages/mcp-server/src/tool-registry.ts',
       ],
       max_files: 8,
-      vectors: true,
+      vectors: false,
     });
   });
 
@@ -955,7 +956,7 @@ describe('NativeThaiRagProviderDriver', () => {
     const args = codeIndexArgs.at(-1);
     expect(args).not.toHaveProperty('paths');
     expect(args).not.toHaveProperty('max_files');
-    expect(args).toMatchObject({ vectors: true });
+    expect(args).toMatchObject({ vectors: false });
   });
 
   it('serves an already-indexed workspace while another workspace is reindexing', async () => {

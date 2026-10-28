@@ -2464,7 +2464,13 @@ function optionalChannelEvidence(evidence: Record<string, unknown> | undefined):
   };
 }
 
-const CURRENT_SEMANTIC_STATES = new Set(['available', 'ok']);
+/**
+ * Semantic evidence that means "this view is current for the channel it
+ * claims". `lexical_only` (thai-rag-mcp #392 / #463) is a published policy
+ * state: the code view is lexical by design, so it is current — only an
+ * explicit `missing`/`degraded` channel refuses the mutation.
+ */
+const CURRENT_SEMANTIC_STATES = new Set(['available', 'ok', 'lexical_only']);
 
 /**
  * The error-details contract is flat scalar pairs (`Readonly<Record<string,

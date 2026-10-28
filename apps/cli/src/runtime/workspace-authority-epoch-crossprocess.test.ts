@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { createPrivateFdAuthorizedClientFactory } from '@unified-mpc/extensions';
@@ -50,7 +51,10 @@ describe('cross-process committed registry epoch watcher', () => {
     const writerRegistry = new SqliteWorkspaceRepository(peer);
     const local = new LocalWorkspaceAuthorityEpoch();
     const watch = new CrossProcessWorkspaceAuthorityWatcher((): number => hostRegistry.readAuthorityGeneration(), local, 20);
-    const fixture = path.resolve(process.cwd(), '../../packages/extensions/tests/fixtures/private-fd-authorized-mcp-server.mjs');
+    // Resolve the fixture from this file, not the process cwd: the repo gate is
+    // local-only, so the same file must pass from the package directory and
+    // from the repo root (`vitest --root apps/cli`).
+    const fixture = fileURLToPath(new URL('../../../../packages/extensions/tests/fixtures/private-fd-authorized-mcp-server.mjs', import.meta.url));
     try {
       await writerRegistry.insert({ id: WS, displayName: 'Workspace', rootPath: project, realRootPath: project,
         createdAt: new Date(0).toISOString() });

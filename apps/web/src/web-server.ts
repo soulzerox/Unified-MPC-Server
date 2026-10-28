@@ -4,7 +4,6 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import path from 'node:path';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { CloudflareTunnelReconciler, type CloudflareTunnelSetup } from './cloudflare-client.js';
-import { readHostMetrics } from './host-metrics.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import type { GatewayTunnelConfiguration } from '@unified-mpc/cf-gateway';
 import { err, ok, type Result } from '@unified-mpc/domain';
@@ -559,19 +558,6 @@ export class ControlPlaneServer {
         mcpIdentity,
         ...(mcpIdentityError === undefined ? {} : { mcpIdentityError }),
       }));
-      return;
-    }
-
-    if (pathname === '/api/host-metrics' && req.method === 'GET') {
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Content-Type', 'application/json');
-      try {
-        res.statusCode = 200;
-        res.end(JSON.stringify({ available: true, scope: 'host', host: await readHostMetrics() }));
-      } catch {
-        res.statusCode = 503;
-        res.end(JSON.stringify({ available: false, scope: 'host', error: 'Host metrics unavailable' }));
-      }
       return;
     }
 

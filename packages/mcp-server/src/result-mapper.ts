@@ -61,7 +61,13 @@ export function mapResult<T>(result: Result<T>, options: MapResultOptions = {}):
   const textBytes = estimateJsonBytesBounded(result.value, budget.maxTextBytes);
   if (textBytes > budget.maxTextBytes) {
     if (image === undefined) return truncatedResponse(options, textBytes, budget.maxTextBytes, 'text');
-    return { content: [image] };
+    // The image is the payload; the text representation is what did not fit.
+    // `structuredContent` was already bounded above, so keep it: MCP rejects a
+    // successful result whose tool declares an output schema and sends none.
+    return {
+      content: [image],
+      ...(structuredContent === undefined ? {} : { structuredContent }),
+    };
   }
   const aggregateBudget = maxBytes ?? budget.maxStructuredBytes;
   if (hasStructuredPayload && structuredBytes + textBytes > aggregateBudget) {
@@ -124,7 +130,7 @@ function truncatedResponse(options: MapResultOptions, originalBytes: number, max
     limitType,
   };
   try { options.onTruncated?.(event); } catch { /* diagnostics must not affect the response */ }
-  return { content: [{ type: 'text', text: JSON.stringify({
+  const envelope = {
     truncated: true,
     reason: 'tool_result_exceeds_output_budget',
     ...(options.toolName === undefined ? {} : { toolName: options.toolName }),
@@ -132,7 +138,17 @@ function truncatedResponse(options: MapResultOptions, originalBytes: number, max
     maxBytes,
     limitType,
     hint: 'Retry with a narrower query, pagination, or a smaller response target.',
-  }) }] };
+  };
+  // The envelope is the result, so it must be present in both representations.
+  // Every MCP tool declares an output schema (`defineTool` defaults to a catchall
+  // object), and the SDK rejects a successful result that carries no
+  // `structuredContent`: the client would otherwise see
+  // "Output validation error: Tool <name> has an output schema but no structured
+  // content was provided" instead of this honest budget notice.
+  return {
+    content: [{ type: 'text', text: JSON.stringify(envelope) }],
+    structuredContent: envelope,
+  };
 }
 
 function toText(value: unknown): string {

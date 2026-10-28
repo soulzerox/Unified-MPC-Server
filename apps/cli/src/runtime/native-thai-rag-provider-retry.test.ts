@@ -69,7 +69,7 @@ function lostProviderJob(tool: string): unknown {
   };
 }
 
-async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: () => unknown } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -93,6 +93,9 @@ async function fixture(onStatus: (poll: number, providerJobId?: string) => Promi
           }
           if (name === 'index_status') {
             return onStatus(++statusPolls, typeof args?.job_id === 'string' ? args.job_id : undefined);
+          }
+          if (name === 'cancel_index' && options.onCancel !== undefined) {
+            return options.onCancel();
           }
           return response(name, { status: 'ok' });
         },
@@ -197,6 +200,32 @@ describe('native provider admission index status truth', () => {
       // admission gate is released instead of holding reads hostage.
       expect(payload.status).toBe('failed');
       expect(payload.error ?? '').toContain('index-status-unreachable');
+    } finally { await driver.stop(); }
+  });
+
+  it('marks the mirrored job failed when the provider no longer knows it at cancel time (issue #445)', async () => {
+    const { driver } = await fixture(async () => response('index_status', {
+      status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+      result: { status: 'complete', indexed: 3 },
+    }), { onCancel: () => lostProviderJob('cancel_index') });
+    try {
+      // A mirrored running row whose provider entry vanished: nothing can
+      // cancel it, and the old code returned the raw CONFLICT leaving the row
+      // `running` forever (health kept advertising a job that no longer
+      // existed and stopped refreshing while it did).
+      const store = (driver as unknown as { jobs: {
+        create(workspaceId: string, force: boolean, ownerId: string, reason: string): Promise<{ jobId: string }>;
+        bindProviderJob(jobId: string, providerJobId: string, ownerId: string): Promise<unknown>;
+      } }).jobs;
+      const job = await store.create(workspaceId, false, 'owner', 'explicit_request');
+      await store.bindProviderJob(job.jobId, 'idx_provider_same', 'owner');
+      const cancelled = await driver.call('cancel_index', { workspace_id: workspaceId, job_id: job.jobId });
+      expect(cancelled.ok).toBe(true);
+      const payload = (cancelled as { ok: true; value: { status: string; error?: string } }).value;
+      expect(payload.status).toBe('failed');
+      expect(payload.error ?? '').toContain('provider-job-lost');
+      const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: job.jobId });
+      expect(status).toMatchObject({ ok: true, value: { status: 'failed' } });
     } finally { await driver.stop(); }
   });
 

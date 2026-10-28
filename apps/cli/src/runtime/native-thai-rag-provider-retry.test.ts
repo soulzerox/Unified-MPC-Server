@@ -1,10 +1,10 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { McpClientFactory, McpClientSession } from '@unified-mpc/extensions';
 import { THAI_RAG_CANCEL_CAPABILITY, THAI_RAG_CANCEL_CONTRACT_FINGERPRINT } from '@unified-mpc/thai-rag';
-import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
+import { NativeThaiRagProviderDriver, runWithHeartbeat } from './native-thai-rag-provider.js';
 
 const workspaceId = '11111111-1111-4111-8111-111111111111';
 const tools = ['remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search',
@@ -641,5 +641,41 @@ describe('native provider read for a provider-owned job (issue #445)', () => {
       expect(read.ok).toBe(false);
       expect((read as { ok: false; error: { code: string } }).error.code).not.toBe('FILE_NOT_FOUND');
     } finally { await driver.stop(); }
+  });
+});
+
+describe('synchronous provider call heartbeat (issue #445)', () => {
+  it('ticks while a synchronous call is in flight and stops once it settles', async () => {
+    vi.useFakeTimers();
+    try {
+      let beats = 0;
+      let release: (value: string) => void = () => undefined;
+      const work = new Promise<string>((resolve) => { release = resolve; });
+      const run = runWithHeartbeat(work, 1_000, () => { beats += 1; });
+
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(beats).toBe(3);
+
+      release('done');
+      await expect(run).resolves.toBe('done');
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(beats).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops ticking when the synchronous call rejects', async () => {
+    vi.useFakeTimers();
+    try {
+      let beats = 0;
+      const run = runWithHeartbeat(Promise.reject(new Error('provider call failed')), 1_000, () => { beats += 1; });
+      await expect(run).rejects.toThrow('provider call failed');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(beats).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

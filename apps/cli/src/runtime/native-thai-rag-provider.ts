@@ -51,6 +51,33 @@ const CODE_INDEX_VECTORS = true;
 // but the follow-up status/often-blocking calls must survive the publish.
 const INDEX_CALL_TIMEOUT_MS = 3_600_000;
 const INDEX_ADMISSION_WAIT_MS = 5_000;
+/** Heartbeat cadence for synchronous provider calls that carry no provider job id. */
+const SYNC_CALL_HEARTBEAT_MS = 60_000;
+
+/**
+ * Runs `work` while ticking `beat` on `intervalMs`, then stops ticking.
+ *
+ * A synchronous provider call (the bounded admission trial) carries no provider
+ * job id, so the monitor has nothing to poll and the poll-driven heartbeat in
+ * `waitForWorkspaceAdmissionIndex` never runs. Without this tick a multi-minute
+ * trial is indistinguishable from a wedged owner and the stuck-job reaper
+ * interrupts it (issue #445).
+ */
+export async function runWithHeartbeat<T>(
+  work: Promise<T>,
+  intervalMs: number,
+  beat: () => unknown,
+): Promise<T> {
+  const timer = setInterval(() => {
+    void beat();
+  }, intervalMs);
+  timer.unref?.();
+  try {
+    return await work;
+  } finally {
+    clearInterval(timer);
+  }
+}
 const WORKSPACE_VERIFICATION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const REQUIRED_TOOLS = new Set([
   'remember', 'recall', 'record_event', 'pre_edit_context', 'code_blast_radius',
@@ -95,6 +122,13 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly indexStatusTimeoutCap?: number;
   /** Stuck-job reaper window for mirrored index jobs (issue #445 exposes it so a test can prove an embedding-phase heartbeat keeps a build alive). */
   readonly indexJobStuckTimeoutMs?: number;
+  /**
+   * Heartbeat cadence used while a synchronous provider call is in flight. The
+   * bounded admission trial runs with `background: false`, so it has no provider
+   * job id and the poll-driven heartbeat cannot fire; without this tick a long
+   * trial is indistinguishable from a wedged owner (issue #445).
+   */
+  readonly indexJobHeartbeatMs?: number;
   /**
    * Durable source identity used to make admission verification idempotent
    * across provider restarts (issue #422). Returning null keeps the
@@ -1141,6 +1175,19 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     });
   }
 
+  /** Keeps the durable job row alive while a synchronous provider call is in flight (issue #445). */
+  private async withJobHeartbeat<T>(
+    jobId: string,
+    ownerId: string,
+    work: Promise<T>,
+  ): Promise<T> {
+    return runWithHeartbeat(
+      work,
+      this.options.indexJobHeartbeatMs ?? SYNC_CALL_HEARTBEAT_MS,
+      () => this.jobs.recordHeartbeat(jobId, ownerId).catch(() => undefined),
+    );
+  }
+
   private async startWorkspaceAdmissionIndex(
     workspace: NativeThaiRagWorkspace,
     force: boolean,
@@ -1164,7 +1211,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // pipeline before full admission. Trial failure takes the same
         // fail-closed path below; pending stays set for a later retry.
         {
-          const trial = await this.retryStorageBusy(async () => (this.cancellableIndexJobs
+          const trial = await this.withJobHeartbeat(job.jobId, ownerId, this.retryStorageBusy(async () => (this.cancellableIndexJobs
             ? await this.callAdmissionWorker('code_index', {
               workspace_path: path.resolve(workspace.realRootPath),
               workspace_id: workspace.id,
@@ -1183,7 +1230,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
                 max_files: 3,
                 vectors: CODE_INDEX_VECTORS,
               }),
-            )));
+            ))));
           if (!trial.ok) indexed = trial;
           else indexed = { ok: true as const, value: undefined };
           if (!trial.ok) {

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../.typecheck/packages/audit",
+    "tsBuildInfoFile": "../../.typecheck/packages/audit/tsconfig.tsbuildinfo"
+  }
+}

@@ -224,14 +224,19 @@ journalctl --user -u unified-mpc.service -f
 # 1. ตรวจสอบ Lint (ESLint 9 + TypeScript-ESLint)
 pnpm lint
 
-# 2. ตรวจสอบ Type Safety ทั้งหมด (TypeScript 5.8 Project References)
+# 2. ตรวจสอบ Type Safety ทั้งหมด (TypeScript Project References)
 pnpm typecheck
+
+# 2.1 ตรวจสอบว่า dist ที่ deploy อยู่ไม่ถูกเขียนทับหลัง build
+pnpm provenance:check
 
 # 3. รันชุดทดสอบทั้งหมด (Vitest Monorepo Test Runner)
 pnpm test
 ```
 
 ทุกคำสั่งจะต้องเสร็จสิ้นโดยมีผลลัพธ์ผ่าน 100% (Exit code 0, Zero errors, Zero warnings)
+
+`pnpm typecheck` ใช้ config ที่สร้างจาก `scripts/generate-typecheck-configs.mjs` และเขียนผลลัพธ์แบบ declaration-only ลง `.typecheck/` เท่านั้น ไม่แตะ `apps/*/dist` หรือ `packages/*/dist` ของ runtime ที่ deploy อยู่ และไม่ทำให้ `build-provenance.json` คลาดเคลื่อน (ดู #456) ถ้าเพิ่ม package ใหม่ใน `tsconfig.json` ให้รัน `node scripts/generate-typecheck-configs.mjs` เพื่ออัปเดต config ก่อน
 
 
 ---

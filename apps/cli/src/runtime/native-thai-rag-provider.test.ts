@@ -1076,6 +1076,66 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('never answers a forced code-index request with the running admission job (issue #460)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let releaseAdmission: (() => void) | undefined;
+    const admissionBlocked = new Promise<void>((resolve) => { releaseAdmission = resolve; });
+    let markAdmissionStarted: (() => void) | undefined;
+    const admissionStarted = new Promise<void>((resolve) => { markAdmissionStarted = resolve; });
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 500,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index') {
+            markAdmissionStarted?.();
+            await admissionBlocked;
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'workspace-indexing' } },
+    });
+    await admissionStarted;
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; workspaceId: string; status: string }>;
+    };
+    const admissionJobId = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running')!.jobId;
+
+    // An idempotent refresh is still allowed to point at the running job.
+    await expect(driver.call('code_index', {
+      workspace_path: workspaceRoot,
+      workspace_id: workspaceId,
+      background: true,
+    })).resolves.toMatchObject({ ok: true, value: { job_id: admissionJobId, status: 'running' } });
+
+    // A forced rebuild is not what that admission runs, so it must not be
+    // reported as a receipt for it.
+    await expect(driver.call('code_index', {
+      workspace_path: workspaceRoot,
+      workspace_id: workspaceId,
+      background: true,
+      force: true,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'workspace-indexing', workspaceId, jobId: admissionJobId } },
+    });
+    expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(1);
+
+    releaseAdmission?.();
+    await driver.stop();
+  });
+
   it('keeps pre-edit fail-closed while a cold workspace index runs as a durable job', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

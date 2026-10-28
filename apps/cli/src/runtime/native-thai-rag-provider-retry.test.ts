@@ -69,12 +69,13 @@ function lostProviderJob(tool: string): unknown {
   };
 }
 
-async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: () => unknown } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number } }> {
+async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: (args: Record<string, unknown>) => unknown } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number; cancels: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
   let indexStarts = 0;
   let statusPolls = 0;
+  let cancels = 0;
   const clientFactory: McpClientFactory = {
     async connect(): Promise<McpClientSession> {
       connects += 1;
@@ -94,8 +95,11 @@ async function fixture(onStatus: (poll: number, providerJobId?: string) => Promi
           if (name === 'index_status') {
             return onStatus(++statusPolls, typeof args?.job_id === 'string' ? args.job_id : undefined);
           }
-          if (name === 'cancel_index' && options.onCancel !== undefined) {
-            return options.onCancel();
+          if (name === 'cancel_index') {
+            cancels += 1;
+            const custom = options.onCancel?.(args ?? {});
+            if (custom !== undefined) return custom;
+            return response(name, { status: 'cancelling' });
           }
           return response(name, { status: 'ok' });
         },
@@ -136,7 +140,7 @@ async function fixture(onStatus: (poll: number, providerJobId?: string) => Promi
   const indexJob = persisted.jobs.find((job) => job.workspaceId === workspaceId
     && job.providerJobId === mirroredProviderJobId);
   if (indexJob === undefined) throw new Error('Missing native admission job');
-  return { driver, jobId: indexJob.jobId, indexStartsAtStart, dataRoot, counts: (): { connects: number; indexStarts: number; statusPolls: number } => ({ connects, indexStarts, statusPolls }) };
+  return { driver, jobId: indexJob.jobId, indexStartsAtStart, dataRoot, counts: (): { connects: number; indexStarts: number; statusPolls: number; cancels: number } => ({ connects, indexStarts, statusPolls, cancels }) };
 }
 
 async function terminalJob(driver: NativeThaiRagProviderDriver, jobId: string): Promise<unknown> {
@@ -169,7 +173,7 @@ describe('native provider admission index status truth', () => {
       // Demand-first admission (#202 T8): one bounded trial probe (max_files 3)
       // plus one background delta. A transient status timeout must not start a
       // replacement index.
-      expect(counts()).toEqual({ connects: 2, indexStarts: 2, statusPolls: 2 });
+      expect(counts()).toEqual({ connects: 2, indexStarts: 2, statusPolls: 2, cancels: 0 });
     } finally { await driver.stop(); }
   });
 
@@ -476,6 +480,73 @@ describe('native provider lost index job recovery (issue #449)', () => {
       expect(payload.error ?? '').toContain('index job is unknown');
       // Trial + delta plus the bounded restarts, never an endless loop.
       expect(counts().indexStarts).toBe(5);
+    } finally { await driver.stop(); }
+  });
+});
+
+describe('native provider cancel for a provider-owned job (issue #445)', () => {
+  const completed = (): unknown => response('index_status', {
+    status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+    result: { status: 'complete', indexed: 2 },
+  });
+
+  it('forwards a cancellation for a provider job id the mirror never recorded', async () => {
+    const forwarded: Array<Record<string, unknown>> = [];
+    const { driver, jobId } = await fixture(async () => completed(), {
+      onCancel: (args) => {
+        forwarded.push(args);
+        return response('cancel_index', { status: 'cancelled', job_id: 'idx_abcd1234', workspace_id: workspaceId });
+      },
+    });
+    try {
+      // The provider drained its own durable desired-work queue after a restart,
+      // so no mirror row exists for this job: owner-scoped lookups can never
+      // resolve it and the only stop button used to be killing the provider.
+      const cancelled = await driver.call('cancel_index', {
+        workspace_id: workspaceId, job_id: 'idx_abcd1234',
+      });
+      expect(cancelled).toMatchObject({ ok: true, value: {
+        jobId: 'idx_abcd1234',
+        providerJobId: 'idx_abcd1234',
+        workspaceId,
+        status: 'cancelled',
+        source: 'provider',
+      } });
+      expect(forwarded).toEqual([{ job_id: 'idx_abcd1234', workspace_id: workspaceId }]);
+      // Nothing local is written for a job this runtime never owned.
+      const stored = await driver.call('index_status', { workspace_id: workspaceId, job_id: 'idx_abcd1234' });
+      expect(stored.ok).toBe(false);
+      expect(jobId).toContain('idx_umcp_');
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps the owner fence for a unified job id that is not mirrored', async () => {
+    const { driver, counts } = await fixture(async () => completed());
+    try {
+      const cancelled = await driver.call('cancel_index', {
+        workspace_id: workspaceId, job_id: 'idx_umcp_missingjob',
+      });
+      expect(cancelled.ok).toBe(false);
+      expect((cancelled as { ok: false; error: { code: string } }).error.code).toBe('FILE_NOT_FOUND');
+      expect(counts().cancels).toBe(0);
+    } finally { await driver.stop(); }
+  });
+
+  it('reports not-found when the provider does not know the forwarded id', async () => {
+    const { driver, counts } = await fixture(async () => completed(), {
+      onCancel: () => response('cancel_index', {
+        status: 'unknown', error: 'index job is unknown', job_id: 'idx_deadbeef', workspace_id: workspaceId,
+      }),
+    });
+    try {
+      const cancelled = await driver.call('cancel_index', {
+        workspace_id: workspaceId, job_id: 'idx_deadbeef',
+      });
+      expect(cancelled.ok).toBe(false);
+      const error = (cancelled as { ok: false; error: { code: string; message: string } }).error;
+      expect(error.code).toBe('FILE_NOT_FOUND');
+      expect(error.message).toContain('index job is unknown');
+      expect(counts().cancels).toBe(1);
     } finally { await driver.stop(); }
   });
 });

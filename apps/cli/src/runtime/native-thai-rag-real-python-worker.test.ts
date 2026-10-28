@@ -12,11 +12,37 @@ import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } f
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 
+/**
+ * Opt-in cross-repository E2E against the real Python FD3 worker. Every case is
+ * skipped unless both variables below point at a real provider checkout:
+ *
+ *   THAI_RAG_REAL_PYTHON=/path/to/thai-rag-mcp/venv/bin/python3 \
+ *   THAI_RAG_REAL_SOURCE=/path/to/thai-rag-mcp \
+ *   corepack pnpm --filter @unified-mpc/cli exec vitest run \
+ *     src/runtime/native-thai-rag-real-python-worker.test.ts
+ *
+ * Nothing in the default gates sets them, so a green default run proves nothing
+ * about this file: run it explicitly before claiming #407 cross-runtime/
+ * real-worker acceptance.
+ */
 const WS = '14fc20d1-5836-4faf-aed6-0df6a9633a38';
 const OTHER = 'ee83c457-0b79-49d7-937e-5c35aa91975d';
 const python = process.env.THAI_RAG_REAL_PYTHON;
 const source = process.env.THAI_RAG_REAL_SOURCE;
 const execFileAsync = promisify(execFile);
+
+/**
+ * The strict admission provider evaluates the Goal lease/receipt window against
+ * its own clock, so a fixture window written as a literal must be read at a
+ * literal instant inside it. Reading the real clock instead made this suite rot:
+ * once `2026-10-10T08:00:00Z` passed, every "admission is current" assertion
+ * started failing as an expired lease, far from the drift/invalidation
+ * behaviour these tests exist to pin. Keep the clock and the window derived
+ * from one constant so they can never disagree.
+ */
+const ADMISSION_CLOCK = Date.parse('2026-10-09T09:00:00.000Z');
+const LEASE_STARTED_AT = new Date(ADMISSION_CLOCK - 60 * 60 * 1_000).toISOString();
+const LEASE_EXPIRES_AT = new Date(ADMISSION_CLOCK + 23 * 60 * 60 * 1_000).toISOString();
 
 describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)', () => {
   it.skipIf(!python || !source)(
@@ -122,7 +148,7 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           realRootPath: goalRoot, createdAt: new Date(0).toISOString(),
           lifecycleKind: 'goal', goalWorkspaceKind: 'snapshot', goalId: 'goal-1' });
         const lease = await writer.acquireGoalWriterLease(
-          WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+          WS, 'lease-1', 'owner-1', LEASE_STARTED_AT, LEASE_EXPIRES_AT,
         );
         expect(lease).not.toBeNull();
         const admission: WorkspaceAdmissionReceipt = {
@@ -134,11 +160,11 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
           runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
           runtimeBuildDirty: false, runtimeProtocolGeneration: 1,
-          runtimeStartedAt: '2026-10-09T08:00:00.000Z', workflowVersion: 1,
-          admissionGeneration: 1, createdAt: '2026-10-09T08:00:00.000Z',
+          runtimeStartedAt: LEASE_STARTED_AT, workflowVersion: 1,
+          admissionGeneration: 1, createdAt: LEASE_STARTED_AT,
         };
         expect(await writer.compareAndSwapAdmissionReceipt(WS, 0, lease!.generation, admission)).toBe(true);
-        const allowed = createStrictThaiRagGoalAdmissionProvider(hostRegistry);
+        const allowed = createStrictThaiRagGoalAdmissionProvider(hostRegistry, () => ADMISSION_CLOCK);
         expect((await allowed()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
         const factory = createPrivateFdAuthorizedClientFactory({
           createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
@@ -221,7 +247,7 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           realRootPath: goalRoot, createdAt: new Date(0).toISOString(), lifecycleKind: 'goal',
           goalWorkspaceKind: 'git_worktree', goalId: 'goal-1', branchName: 'goal/1' });
         const lease = await writer.acquireGoalWriterLease(
-          WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+          WS, 'lease-1', 'owner-1', LEASE_STARTED_AT, LEASE_EXPIRES_AT,
         );
         expect(lease).not.toBeNull();
         const admission: WorkspaceAdmissionReceipt = {
@@ -234,11 +260,11 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           dirtyState: 'clean', dirtyFingerprint: 'clean', writeLeaseGeneration: lease!.generation,
           runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
           runtimeBuildDirty: false, runtimeProtocolGeneration: 1,
-          runtimeStartedAt: '2026-10-09T08:00:00.000Z', workflowVersion: 1,
-          admissionGeneration: 1, createdAt: '2026-10-09T08:00:00.000Z',
+          runtimeStartedAt: LEASE_STARTED_AT, workflowVersion: 1,
+          admissionGeneration: 1, createdAt: LEASE_STARTED_AT,
         };
         expect(await writer.compareAndSwapAdmissionReceipt(WS, 0, lease!.generation, admission)).toBe(true);
-        const authorized = createStrictThaiRagGoalAdmissionProvider(hostRegistry);
+        const authorized = createStrictThaiRagGoalAdmissionProvider(hostRegistry, () => ADMISSION_CLOCK);
         expect((await authorized()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
         const factory = createPrivateFdAuthorizedClientFactory({
           createBootstrap: () => createThaiRagPrivateWorkerBootstrap({
@@ -337,7 +363,7 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           lifecycleKind: 'goal', goalWorkspaceKind: 'git_worktree',
           goalId: 'goal-1', branchName: 'goal/1' });
         const lease = await peerRegistry.acquireGoalWriterLease(
-          WS, 'lease-1', 'owner-1', '2026-10-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z',
+          WS, 'lease-1', 'owner-1', LEASE_STARTED_AT, LEASE_EXPIRES_AT,
         );
         expect(lease).not.toBeNull();
         const admission: WorkspaceAdmissionReceipt = {
@@ -351,13 +377,13 @@ describe('real Python strict FD3 worker cross-repository E2E (explicit opt-in)',
           writeLeaseGeneration: lease!.generation, runtimeDeploymentId: 'deploy-1',
           runtimeGeneration: 'gen-1', runtimeBuildVersion: '4.61.0',
           runtimeBuildDirty: false, runtimeProtocolGeneration: 1,
-          runtimeStartedAt: '2026-10-09T08:00:00.000Z', workflowVersion: 1,
-          admissionGeneration: 1, createdAt: '2026-10-09T08:00:00.000Z',
+          runtimeStartedAt: LEASE_STARTED_AT, workflowVersion: 1,
+          admissionGeneration: 1, createdAt: LEASE_STARTED_AT,
         };
         expect(await peerRegistry.compareAndSwapAdmissionReceipt(
           WS, 0, lease!.generation, admission,
         )).toBe(true);
-        const scopes = createStrictThaiRagGoalAdmissionProvider(hostRegistry);
+        const scopes = createStrictThaiRagGoalAdmissionProvider(hostRegistry, () => ADMISSION_CLOCK);
         expect((await scopes()).map(x => x.id).sort()).toEqual([OTHER, WS].sort());
         const factory = createPrivateFdAuthorizedClientFactory({
           createBootstrap: () => createThaiRagPrivateWorkerBootstrap({

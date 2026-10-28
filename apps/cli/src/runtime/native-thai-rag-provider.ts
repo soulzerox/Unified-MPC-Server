@@ -382,14 +382,19 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     if (tool === 'adopt_legacy_index') return this.adoptLegacyIndex(args, signal, budget);
     if (tool === 'index_status') {
-      const jobId = typeof args.job_id === 'string' ? args.job_id : '';
+      const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
       const workspaceValue = typeof args.workspace_id === 'string' ? args.workspace_id : '';
       const workspace = parseCanonicalWorkspaceId(workspaceValue);
-      if (jobId.trim().length === 0 || !workspace.ok) return err(appError('INVALID_INPUT', 'Thai-RAG index_status requires job_id and workspace_id'));
+      if (jobId.length === 0 || !workspace.ok) return err(appError('INVALID_INPUT', 'Thai-RAG index_status requires job_id and workspace_id'));
       const job = await this.jobs.get(jobId, this.ownerId ?? '', workspace.value);
-      return job === null
-        ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`))
-        : ok(job);
+      if (job !== null) return ok(job);
+      // Issue #445: a provider-owned build has no mirror row, so the owner
+      // fence has nothing to return. Mirrored ids stay fenced exactly as
+      // before; an id the mirror can never hold is read from its authority.
+      if (!isProviderOwnedIndexJobId(jobId)) {
+        return err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`));
+      }
+      return this.readProviderOwnedIndexJob(jobId, workspace.value, budget);
     }
     const bypassBusyRefresh = INDEX_GATE_EXEMPT_TOOLS.has(tool)
       || (tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args));
@@ -698,6 +703,57 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       providerJobId,
       status,
       source: 'provider',
+    });
+  }
+
+  /**
+   * Read a provider-owned index job that has no mirror row (issue #445). The
+   * provider is the only authority for a build it drained from its own durable
+   * queue, so its snapshot is returned as-is instead of inventing a local row.
+   * A job the provider cannot resolve maps to FILE_NOT_FOUND, matching the
+   * mirrored lookup contract.
+   */
+  private async readProviderOwnedIndexJob(
+    providerJobId: string,
+    workspaceId: string,
+    budget?: ResultBudget,
+  ): Promise<Result<unknown>> {
+    const status = await this.callWorker(
+      'index_status',
+      { job_id: providerJobId, workspace_id: workspaceId },
+      undefined,
+      budget,
+    );
+    if (!status.ok) {
+      if (!isLostProviderIndexJob(status.error)) return status;
+      return err(appError('FILE_NOT_FOUND', status.error.message, false, {
+        reason: 'provider-job-unknown',
+        jobId: providerJobId,
+        workspaceId,
+      }));
+    }
+    const state = nestedString(status.value, 'status');
+    if (state === undefined || state === 'unknown' || state === 'scope_denied') {
+      const message = nestedString(status.value, 'error')
+        ?? `Native Thai-RAG provider does not know index job ${providerJobId}`;
+      return err(appError('FILE_NOT_FOUND', message, false, {
+        reason: 'provider-job-unknown',
+        jobId: providerJobId,
+        workspaceId,
+      }));
+    }
+    const progress = nativeIndexProgress(status.value);
+    const error = nestedString(status.value, 'error');
+    const result = nestedValue(status.value, 'result');
+    return ok({
+      jobId: providerJobId,
+      workspaceId,
+      providerJobId,
+      status: state,
+      source: 'provider',
+      ...(progress === undefined ? {} : progress),
+      ...(error === undefined ? {} : { error }),
+      ...(result === undefined ? {} : { result }),
     });
   }
 

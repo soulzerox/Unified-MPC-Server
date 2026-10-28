@@ -26,6 +26,47 @@ describe('native Thai-RAG generation health', () => {
     expect(result.stdout).toContain('health passed for 1 workspace');
   });
 
+  it('passes when the vector channel is the published policy opt-out', async () => {
+    const database = await fixtureDatabase();
+    insertGeneration(database, { generationId: 'gen-policy', status: 'active' });
+    insertChannels(
+      database,
+      'gen-policy',
+      { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'lexical_only' },
+      { vector: 'vectors_skipped:disabled' },
+    );
+
+    const result = run(database);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('vector=lexical_only');
+    expect(result.stdout).toContain('health passed for 1 workspace');
+  });
+
+  it('fails when a requested vector channel is missing rather than opted out', async () => {
+    const database = await fixtureDatabase();
+    insertGeneration(database, { generationId: 'gen-missing', status: 'active' });
+    insertChannels(
+      database,
+      'gen-missing',
+      { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'missing' },
+      { vector: 'vectors_skipped:embeddings_unavailable' },
+    );
+
+    const result = run(database);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('unhealthy-channel: channel vector is missing');
+  });
+
+  it('does not accept the policy state on a materialized channel', async () => {
+    const database = await fixtureDatabase();
+    insertGeneration(database, { generationId: 'gen-materialized', status: 'active' });
+    insertChannels(database, 'gen-materialized', { parent: 'ok', lexical: 'lexical_only', structural: 'ok', vector: 'ok' });
+
+    const result = run(database);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('unhealthy-channel: channel lexical is lexical_only');
+  });
+
   it('fails when the vector channel is degraded, which is the state that keeps the gate shut', async () => {
     const database = await fixtureDatabase();
     insertGeneration(database, { generationId: 'gen-degraded', status: 'active' });
@@ -123,13 +164,19 @@ function insertGeneration(databasePath: string, options: { generationId: string;
   database.close();
 }
 
-function insertChannels(databasePath: string, generationId: string, channels: Record<string, string>): void {
+function insertChannels(
+  databasePath: string,
+  generationId: string,
+  channels: Record<string, string>,
+  details: Record<string, string> = {},
+): void {
   const database = new DatabaseSync(databasePath);
   const statement = database.prepare(
     'INSERT INTO index_generation_channels (workspace_id, generation_id, channel, state, detail, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
   );
   for (const [channel, state] of Object.entries(channels)) {
-    statement.run(workspace, generationId, channel, state, state === 'ok' ? null : '{"detail":"partial_vectors:1/10722"}', 1_761_600_000);
+    const detail = details[channel] ?? (state === 'ok' ? null : '{"detail":"partial_vectors:1/10722"}');
+    statement.run(workspace, generationId, channel, state, detail, 1_761_600_000);
   }
   database.close();
 }

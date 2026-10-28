@@ -22,6 +22,27 @@ import { fileURLToPath } from 'node:url';
 
 export const REQUIRED_CHANNELS = ['parent', 'lexical', 'structural', 'vector'];
 
+/**
+ * Channel states that are a *published policy* state, not a failure.
+ *
+ * `vector=lexical_only` means the generation was built with the code index
+ * opted out of embeddings (thai-rag-mcp #329 / #392, Unified #463): the lexical
+ * and structural channels are authoritative for code, so `prepare_code_change`
+ * accepts the view (`CURRENT_SEMANTIC_STATES` in `tool-registry.ts`) and
+ * `pre_edit_context` serves it. Only `missing`/`degraded` mean "requested but
+ * not written" and must keep refusing the mutation. Before the policy state
+ * existed the provider published the same view as `missing`, which is why this
+ * check used to agree with a permanently shut gate (#438).
+ */
+export const POLICY_CHANNEL_STATES = Object.freeze({
+  vector: Object.freeze(['lexical_only']),
+});
+
+export function channelIsHealthy(channel, state) {
+  if (state === 'ok') return true;
+  return POLICY_CHANNEL_STATES[channel]?.includes(state) ?? false;
+}
+
 export function defaultDatabasePath(environment = process.env, home = os.homedir()) {
   const xdgDataHome = environment.XDG_DATA_HOME?.trim();
   const dataHome = xdgDataHome === undefined || xdgDataHome.length === 0 ? path.join(home, '.local', 'share') : xdgDataHome;
@@ -72,7 +93,7 @@ function readWorkspaceHealth(database, workspaceId) {
     const recorded = channels.find((entry) => entry.channel === channel);
     if (recorded === undefined) {
       violations.push({ kind: 'missing-channel', detail: `channel ${channel} was never published` });
-    } else if (recorded.state !== 'ok') {
+    } else if (!channelIsHealthy(channel, recorded.state)) {
       violations.push({
         kind: 'unhealthy-channel',
         detail: `channel ${channel} is ${recorded.state}${recorded.detail === undefined ? '' : ` (${recorded.detail})`}`,

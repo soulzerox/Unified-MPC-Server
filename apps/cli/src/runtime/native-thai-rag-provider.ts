@@ -606,7 +606,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const cancelled = this.workspaceIndexJobIds.get(workspace.value) === jobId
       ? await this.callAdmissionWorker('cancel_index', { job_id: job.providerJobId, workspace_id: workspace.value })
       : await this.callWorker('cancel_index', { job_id: job.providerJobId, workspace_id: workspace.value }, undefined, budget);
-    if (!cancelled.ok) return cancelled;
+    if (!cancelled.ok) {
+      // Issue #445: the provider can forget a job it accepted (restart or
+      // retention expiry). Cancellation can then never succeed, and returning
+      // the raw CONFLICT left the mirrored row `running` forever: health kept
+      // advertising a job that no longer exists, and `healthStarted` kept
+      // serving its cached snapshot instead of refreshing while it did.
+      // Nothing can cancel an unknown provider job, so record the truth.
+      if (isLostProviderIndexJob(cancelled.error)) {
+        const terminal = await this.jobs.fail(
+          jobId,
+          `Native Thai-RAG provider no longer knows index job ${job.providerJobId ?? jobId} (provider-job-lost); it cannot be cancelled`,
+          ownerId,
+        );
+        return terminal === null
+          ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`))
+          : ok(terminal);
+      }
+      return cancelled;
+    }
 
     const remoteStatus = nestedString(cancelled.value, 'status');
     if (remoteStatus === 'cancelled') {

@@ -69,7 +69,7 @@ function lostProviderJob(tool: string): unknown {
   };
 }
 
-async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: (args: Record<string, unknown>) => unknown } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number; cancels: number } }> {
+async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: (args: Record<string, unknown>) => unknown; admit?: false } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number; cancels: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -120,6 +120,9 @@ async function fixture(onStatus: (poll: number, providerJobId?: string) => Promi
   })).ok).toBe(true);
   // First guarded edit starts one native admission index. Do not call code_index
   // again: that would start a second, unrelated public background job.
+  if (options.admit === false) {
+    return { driver, jobId: '', indexStartsAtStart: indexStarts, dataRoot, counts: (): { connects: number; indexStarts: number; statusPolls: number; cancels: number } => ({ connects, indexStarts, statusPolls, cancels }) };
+  }
   if (options.mode === 'explicit') {
     // An explicit `rag_code_index` background job uses the public monitor
     // instead of the admission monitor.
@@ -409,6 +412,76 @@ describe('native provider admission index status truth', () => {
       worker.broken = false;
       const reAdmit = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
       expect(reAdmit.ok).toBe(true);
+    } finally { await driver.stop(); }
+  });
+
+  it('releases an admission gate whose durable job row disappeared (issue #407)', async () => {
+    const { driver } = await fixture(async () => response('index_status', {
+      status: 'running', job_id: 'idx_provider_same', workspace_id: workspaceId,
+    }), { admit: false });
+    const internals = driver as unknown as {
+      indexingWorkspaceId?: string;
+      workspaceIndexJobIds: Map<string, string>;
+      workspaceIndexMonitors: Map<string, Promise<unknown>>;
+    };
+    try {
+      // A boolean left behind by a monitor that no longer exists must not hold
+      // reads hostage: no durable row, nothing that can ever finish it.
+      internals.indexingWorkspaceId = workspaceId;
+      internals.workspaceIndexJobIds.set(workspaceId, 'idx_umcp_orphaned');
+      const health = await driver.health();
+      expect(health.ok).toBe(true);
+      expect(internals.indexingWorkspaceId).toBeUndefined();
+      expect(internals.workspaceIndexJobIds.has(workspaceId)).toBe(false);
+    } finally { await driver.stop(); }
+  });
+
+  it('releases an admission gate whose mirrored job is already terminal (issue #407)', async () => {
+    const { driver } = await fixture(async () => response('index_status', {
+      status: 'running', job_id: 'idx_provider_same', workspace_id: workspaceId,
+    }), { admit: false });
+    const internals = driver as unknown as {
+      indexingWorkspaceId?: string;
+      workspaceIndexJobIds: Map<string, string>;
+      workspaceIndexMonitors: Map<string, Promise<unknown>>;
+      jobs: {
+        create(workspaceId: string, force: boolean, ownerId: string, reason: string): Promise<{ jobId: string }>;
+        fail(jobId: string, error: string, ownerId: string): Promise<unknown>;
+      };
+    };
+    try {
+      // Another runtime's reaper (or a deadline failure) closed the durable row
+      // while this process still held the gate open.
+      const job = await internals.jobs.create(workspaceId, false, 'owner', 'explicit_request');
+      await internals.jobs.fail(job.jobId, 'Indexing job produced no owner-verified progress (owner-stuck-no-progress)', 'owner');
+      internals.indexingWorkspaceId = workspaceId;
+      internals.workspaceIndexJobIds.set(workspaceId, job.jobId);
+      internals.workspaceIndexMonitors.set(job.jobId, Promise.resolve({ ok: true, value: undefined }));
+      const health = await driver.health();
+      expect(health.ok).toBe(true);
+      expect(internals.indexingWorkspaceId).toBeUndefined();
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps the gate while the durable row is still running (issue #407)', async () => {
+    const { driver } = await fixture(async () => response('index_status', {
+      status: 'running', job_id: 'idx_provider_same', workspace_id: workspaceId,
+    }), { admit: false });
+    const internals = driver as unknown as {
+      indexingWorkspaceId?: string;
+      workspaceIndexJobIds: Map<string, string>;
+      workspaceIndexMonitors: Map<string, Promise<unknown>>;
+      jobs: { create(workspaceId: string, force: boolean, ownerId: string, reason: string): Promise<{ jobId: string }> };
+    };
+    try {
+      const job = await internals.jobs.create(workspaceId, false, 'owner', 'explicit_request');
+      internals.indexingWorkspaceId = workspaceId;
+      internals.workspaceIndexJobIds.set(workspaceId, job.jobId);
+      internals.workspaceIndexMonitors.set(job.jobId, Promise.resolve({ ok: true, value: undefined }));
+      const health = await driver.health();
+      expect(health.ok).toBe(true);
+      // Live indexing still holds the gate: the heal only drops leftovers.
+      expect(internals.indexingWorkspaceId).toBe(workspaceId);
     } finally { await driver.stop(); }
   });
 });

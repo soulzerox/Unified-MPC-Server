@@ -378,6 +378,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (!this.started || this.launchConfig === undefined) {
       return err(appError('CONFLICT', 'Native Thai-RAG worker is not started', true));
     }
+    await this.releaseGateWithoutLiveJob();
     const refreshed = this.indexingWorkspaceId === undefined ? await this.refreshWorkspaceRoots() : ok(undefined);
     if (!refreshed.ok) return refreshed;
     const activeJobs = await this.jobs.active(this.ownerId ?? '');
@@ -1004,6 +1005,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       workspaces.push({ ...workspace, id: parsedId.value });
     }
 
+    // Issue #407: the gate is only trustworthy while it still names a durable
+    // job this process is driving. Heal a leftover gate before answering, so a
+    // read never waits on a job that already ended elsewhere.
+    await this.releaseGateWithoutLiveJob();
     if (this.indexingWorkspaceId !== undefined) {
       const activeWorkspaceId = this.indexingWorkspaceId;
       if (requestedWorkspaceId !== undefined && requestedWorkspaceId !== activeWorkspaceId) {
@@ -1164,6 +1169,38 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       const generation = nestedString(normalized.value, 'index_generation_id');
       return generation === record.generationId;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Issue #407: the admission gate must describe the provider's durable index
+   * job, not "this process happens to hold a pending monitor promise". A gate
+   * whose mirror row is gone, already terminal (another runtime's reaper, a
+   * deadline failure, an owner loss), or no longer backed by a local monitor is
+   * a leftover: release it so reads answer against the active generation
+   * without a runtime restart. A live row still holds the gate.
+   */
+  private async releaseGateWithoutLiveJob(): Promise<void> {
+    const workspaceId = this.indexingWorkspaceId;
+    if (workspaceId === undefined) return;
+    const jobId = this.workspaceIndexJobIds.get(workspaceId);
+    if (jobId !== undefined && await this.indexJobIsLive(jobId, workspaceId)) return;
+    this.indexingWorkspaceId = undefined;
+    if (jobId !== undefined) this.workspaceIndexJobIds.delete(workspaceId);
+    this.scheduleNextQueuedWorkspaceAdmission(this.lifecycleGeneration);
+  }
+
+  private async indexJobIsLive(jobId: string, workspaceId: string): Promise<boolean> {
+    // No monitor means nothing in this process can ever finish or fail the row,
+    // so the boolean cannot be trusted as evidence of live indexing.
+    if (!this.workspaceIndexMonitors.has(jobId)) return false;
+    try {
+      const job = await this.jobs.get(jobId, this.ownerId ?? '', workspaceId);
+      return job !== null && (job.status === 'running' || job.status === 'cancelling');
+    } catch {
+      // An unreadable mirror is not proof of a live job. Reads serve the active
+      // generation, so releasing the gate is the safe direction.
       return false;
     }
   }

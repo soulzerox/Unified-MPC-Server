@@ -25,6 +25,8 @@ const inputs: Readonly<Record<string, unknown>> = {
   rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },
   rag_resolve_constraint: { workspaceId: 'workspace-1', turnId: 'event-1', resolution: 'condition retired' },
   rag_get_event: { workspaceId: 'workspace-1', turnId: 'event-1' },
+  rag_memory_reconcile: { workspaceId: 'workspace-1', dryRun: true },
+  rag_code_reconcile: { workspaceId: 'workspace-1', dryRun: true },
 };
 
 describe('legacy adoption tool', () => {
@@ -167,5 +169,51 @@ describe('native RAG constraint closure', () => {
     await tool.execute({ workspaceId: 'workspace-1', turnId: 'event-1' }, signal, undefined, undefined);
 
     expect(seen).toEqual([{ tool: 'get_event', args: { turn_id: 'event-1' } }]);
+  });
+});
+
+describe('native RAG vector and index repair', () => {
+  it('defaults memory reconcile to dry-run and forwards an explicit replay', async () => {
+    const seen: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tools = ragTools({
+      nativeRagCall: async (_workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>) => {
+        seen.push({ tool, args });
+        return { ok: true, value: { status: 'ok', pending: 0 } };
+      },
+    } as never);
+    const tool = tools.find((candidate) => candidate.name === 'rag_memory_reconcile');
+    if (tool === undefined) throw new Error('rag_memory_reconcile is not registered');
+    const signal = new AbortController().signal;
+
+    const defaults = tool.parse({ workspaceId: 'workspace-1' });
+    expect(defaults.ok).toBe(true);
+    await tool.execute({ workspaceId: 'workspace-1' }, signal, undefined, undefined);
+
+    await tool.execute({ workspaceId: 'workspace-1', dryRun: false, limit: 25 }, signal, undefined, undefined);
+
+    expect(seen.map((call) => call.tool)).toEqual(['memory_reconcile', 'memory_reconcile']);
+    expect(seen[0].args).toEqual({ dry_run: true });
+    expect(seen[1].args).toEqual({ dry_run: false, limit: 25 });
+  });
+
+  it('defaults code reconcile to dry-run and forwards an explicit repair', async () => {
+    const seen: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tools = ragTools({
+      nativeRagCall: async (_workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>) => {
+        seen.push({ tool, args });
+        return { ok: true, value: { status: 'ok' } };
+      },
+    } as never);
+    const tool = tools.find((candidate) => candidate.name === 'rag_code_reconcile');
+    if (tool === undefined) throw new Error('rag_code_reconcile is not registered');
+    const signal = new AbortController().signal;
+
+    await tool.execute({ workspaceId: 'workspace-1' }, signal, undefined, undefined);
+    await tool.execute({ workspaceId: 'workspace-1', dryRun: false }, signal, undefined, undefined);
+    expect(tool.parse({ workspaceId: 'workspace-1', limit: 5 }).ok).toBe(false);
+
+    expect(seen.map((call) => call.tool)).toEqual(['code_reconcile', 'code_reconcile']);
+    expect(seen[0].args).toEqual({ dry_run: true });
+    expect(seen[1].args).toEqual({ dry_run: false });
   });
 });

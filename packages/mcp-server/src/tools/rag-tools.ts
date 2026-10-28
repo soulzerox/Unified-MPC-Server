@@ -5,10 +5,12 @@ import {
   ragCodeBlastRadiusSchema,
   ragCodeContextSchema,
   ragCodeIndexSchema,
+  ragCodeReconcileSchema,
   ragCodeSearchSchema,
   ragForgetSchema,
   ragGetEventSchema,
   ragIndexStatusSchema,
+  ragMemoryReconcileSchema,
   ragPreEditContextSchema,
   ragRecallSchema,
   ragRememberSchema,
@@ -191,6 +193,27 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
         ? missingService()
         : context.nativeRagCall(input.workspaceId, 'get_event', { turn_id: input.turnId }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_memory_reconcile',
+      description: 'Report or replay the durable vector outbox for one canonical workspace, so a memory or recorded event whose vector write never completed becomes vector-searchable again. Defaults to dry-run.',
+      ...safeWrite,
+      inputSchema: ragMemoryReconcileSchema,
+      handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
+        ? missingService()
+        : context.nativeRagCall(input.workspaceId, 'memory_reconcile', {
+            dry_run: input.dryRun !== false,
+            ...(input.limit === undefined ? {} : { limit: input.limit }),
+          }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_code_reconcile',
+      description: 'Report or repair safe drift in the active native Thai-RAG code-index generation for one canonical workspace. Defaults to dry-run.',
+      ...safeWrite,
+      inputSchema: ragCodeReconcileSchema,
+      handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
+        ? missingService()
+        : context.nativeRagCall(input.workspaceId, 'code_reconcile', { dry_run: input.dryRun !== false }, signal, budget),
     }),
   ];
 }

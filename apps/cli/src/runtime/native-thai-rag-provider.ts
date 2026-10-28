@@ -91,6 +91,9 @@ const REQUIRED_TOOLS = new Set([
 // verification holds the single-indexer slot (issue #422).
 const INDEX_GATE_EXEMPT_TOOLS = new Set([
   'remember', 'recall', 'forget', 'record_event', 'resolve_event', 'health', 'version',
+  // The vector outbox belongs to the memory pipeline, so replaying it never
+  // touches the code generation the indexer owns (issue #470).
+  'memory_reconcile',
 ]);
 
 export interface NativeThaiRagWorkspace {

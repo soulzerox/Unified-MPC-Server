@@ -633,6 +633,17 @@ export const ragGetEventSchema = z.object({
   turnId: z.string().trim().min(1).max(256),
 }).strict();
 
+export const ragMemoryReconcileSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  dryRun: z.boolean().optional(),
+  limit: z.number().int().min(1).max(1_000).optional(),
+}).strict();
+
+export const ragCodeReconcileSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  dryRun: z.boolean().optional(),
+}).strict();
+
 export const ragPreEditContextSchema = z.object({
   workspaceId: workspaceIdSchema,
   filePath: pathSchema,

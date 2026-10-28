@@ -228,6 +228,8 @@ const TRUSTED_INTERNAL_MEMORY_RAG_TOOLS = new Set([
   'rag_code_index',
   'rag_index_status',
   'rag_cancel_index',
+  'rag_resolve_constraint',
+  'rag_get_event',
 ]);
 
 interface BudgetedToolExecution {

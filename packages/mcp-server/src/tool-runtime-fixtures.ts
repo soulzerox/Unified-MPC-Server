@@ -148,6 +148,8 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   rag_code_index: service({ workspaceId, force: false, background: false }, 'thaiRag.call:code_index'),
   rag_index_status: service({ workspaceId, jobId: 'job-1' }, 'thaiRag.call:index_status'),
   rag_cancel_index: service({ workspaceId, jobId: 'job-1' }, 'thaiRag.call:cancel_index'),
+  rag_resolve_constraint: service({ workspaceId, turnId: 'event-1', resolution: 'condition retired', evidence: 'gen 1' }, 'thaiRag.call:resolve_event'),
+  rag_get_event: service({ workspaceId, turnId: 'event-1' }, 'thaiRag.call:get_event'),
   mcp_install: service({ name: 'smoke-server', transport: 'stdio', command: 'node' }, 'installer.installServer'),
   mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, descriptorFingerprint: '0'.repeat(64), catalogFingerprint: '0'.repeat(64), userConfirmed: true }, 'extensions.callMcpTool'),
   merge_policy_get: service({ repository: 'soulzerox/Unified-MPC-Server' }, 'mergePolicy.getByRepository'),

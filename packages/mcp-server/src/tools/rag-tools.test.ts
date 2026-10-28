@@ -23,6 +23,8 @@ const inputs: Readonly<Record<string, unknown>> = {
   rag_code_index: { workspaceId: 'workspace-1' },
   rag_index_status: { workspaceId: 'workspace-1', jobId: 'job-1' },
   rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },
+  rag_resolve_constraint: { workspaceId: 'workspace-1', turnId: 'event-1', resolution: 'condition retired' },
+  rag_get_event: { workspaceId: 'workspace-1', turnId: 'event-1' },
 };
 
 describe('legacy adoption tool', () => {
@@ -108,5 +110,62 @@ describe('native RAG code blast radius identity opt-in', () => {
     expect(seen.map((call) => call.tool)).toEqual(['code_blast_radius', 'code_blast_radius']);
     expect(seen[0].args).toEqual({ symbol_name: 'run', include_heuristic: true });
     expect(seen[1].args).toEqual({ symbol_name: 'run' });
+  });
+});
+
+describe('native RAG constraint closure', () => {
+  it('forwards a resolution with its audit fields and omits absent ones', async () => {
+    const seen: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tools = ragTools({
+      nativeRagCall: async (_workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>) => {
+        seen.push({ tool, args });
+        return { ok: true, value: { status: 'resolved' } };
+      },
+    } as never);
+    const tool = tools.find((candidate) => candidate.name === 'rag_resolve_constraint');
+    if (tool === undefined) throw new Error('rag_resolve_constraint is not registered');
+    const signal = new AbortController().signal;
+
+    expect(tool.parse({ workspaceId: 'workspace-1', turnId: 'event-1', resolution: '   ' }).ok).toBe(false);
+    expect(tool.parse({ workspaceId: 'workspace-1', turnId: 'event-1' }).ok).toBe(false);
+
+    await tool.execute({
+      workspaceId: 'workspace-1',
+      turnId: 'event-1',
+      resolution: 'condition retired',
+      evidence: 'generation 30b4d9bbe316',
+      resolvedBy: 'operator',
+    }, signal, undefined, undefined);
+    await tool.execute({
+      workspaceId: 'workspace-1',
+      turnId: 'event-1',
+      resolution: 'condition retired',
+    }, signal, undefined, undefined);
+
+    expect(seen.map((call) => call.tool)).toEqual(['resolve_event', 'resolve_event']);
+    expect(seen[0].args).toEqual({
+      turn_id: 'event-1',
+      resolution: 'condition retired',
+      evidence: 'generation 30b4d9bbe316',
+      resolved_by: 'operator',
+    });
+    expect(seen[1].args).toEqual({ turn_id: 'event-1', resolution: 'condition retired' });
+  });
+
+  it('reads a closure trail by id through get_event', async () => {
+    const seen: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const tools = ragTools({
+      nativeRagCall: async (_workspaceId: string, tool: string, args: Readonly<Record<string, unknown>>) => {
+        seen.push({ tool, args });
+        return { ok: true, value: { status: 'ok', resolved_by: 'operator' } };
+      },
+    } as never);
+    const tool = tools.find((candidate) => candidate.name === 'rag_get_event');
+    if (tool === undefined) throw new Error('rag_get_event is not registered');
+    const signal = new AbortController().signal;
+
+    await tool.execute({ workspaceId: 'workspace-1', turnId: 'event-1' }, signal, undefined, undefined);
+
+    expect(seen).toEqual([{ tool: 'get_event', args: { turn_id: 'event-1' } }]);
   });
 });

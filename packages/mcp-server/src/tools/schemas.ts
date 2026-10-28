@@ -620,6 +620,19 @@ export const ragForgetSchema = z.object({
   userConfirmed: z.boolean().optional(),
 }).strict();
 
+export const ragResolveConstraintSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  turnId: z.string().trim().min(1).max(256),
+  resolution: z.string().trim().min(1).max(8_192),
+  evidence: z.string().trim().max(8_192).optional(),
+  resolvedBy: z.string().trim().min(1).max(256).optional(),
+}).strict();
+
+export const ragGetEventSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  turnId: z.string().trim().min(1).max(256),
+}).strict();
+
 export const ragPreEditContextSchema = z.object({
   workspaceId: workspaceIdSchema,
   filePath: pathSchema,

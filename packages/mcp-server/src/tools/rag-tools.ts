@@ -7,10 +7,12 @@ import {
   ragCodeIndexSchema,
   ragCodeSearchSchema,
   ragForgetSchema,
+  ragGetEventSchema,
   ragIndexStatusSchema,
   ragPreEditContextSchema,
   ragRecallSchema,
   ragRememberSchema,
+  ragResolveConstraintSchema,
   workspaceMemoryRecordSchema,
 } from './schemas.js';
 
@@ -166,6 +168,29 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
         ? missingService()
         : context.nativeRagCall(input.workspaceId, 'cancel_index', { job_id: input.jobId }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_resolve_constraint',
+      description: 'Close one recorded native Thai-RAG constraint whose condition no longer holds, with who/when/why/evidence. The turn stays recallable with its closure trail; other still-open constraints on the same file keep blocking.',
+      ...safeWrite,
+      inputSchema: ragResolveConstraintSchema,
+      handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
+        ? missingService()
+        : context.nativeRagCall(input.workspaceId, 'resolve_event', {
+            turn_id: input.turnId,
+            resolution: input.resolution,
+            ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+            ...(input.resolvedBy === undefined ? {} : { resolved_by: input.resolvedBy }),
+          }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_get_event',
+      description: 'Read one recorded native Thai-RAG event and its constraint-closure trail by id, including who closed it, when, why and with what evidence.',
+      ...readOnly,
+      inputSchema: ragGetEventSchema,
+      handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
+        ? missingService()
+        : context.nativeRagCall(input.workspaceId, 'get_event', { turn_id: input.turnId }, signal, budget),
     }),
   ];
 }

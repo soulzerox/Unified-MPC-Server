@@ -104,6 +104,7 @@ export function inspectMutationOperation(
     case 'rag_code_context':
     case 'rag_code_blast_radius':
     case 'rag_index_status':
+    case 'rag_get_event':
       return read('structured read-only operation');
     case 'tool_batch':
       return read('batch dispatcher applies mutation policy independently to every child call');
@@ -129,6 +130,8 @@ export function inspectMutationOperation(
       return boundedWrite('rag_code_index refreshes only the parent-owned native code index for one registered workspace');
     case 'rag_cancel_index':
       return boundedWrite('rag_cancel_index requests cancellation of one parent-owned native background index job');
+    case 'rag_resolve_constraint':
+      return boundedWrite('rag_resolve_constraint closes one recorded constraint turn without deleting it or editing the workspace');
     case 'rag_forget':
       return opaque('rag_forget deletes a persistent native Thai-RAG memory and remains explicitly approval-guarded');
     case 'write_file':

@@ -6,7 +6,7 @@ import type { McpResourceSummary, McpToolSummary } from './types.js';
 
 const CANONICAL_WORKSPACE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SCOPED_OPERATIONS = new Set([
-  'remember', 'remember_turn', 'recall', 'record_event', 'forget',
+  'remember', 'remember_turn', 'recall', 'record_event', 'resolve_event', 'forget',
   'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius',
   'code_index', 'adopt_legacy_index', 'index_status', 'cancel_index',
   'memory_reconcile', 'code_reconcile', 'health', 'version',

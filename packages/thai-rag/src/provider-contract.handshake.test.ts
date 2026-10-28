@@ -5,6 +5,8 @@ import {
   THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
   THAI_RAG_CONTRACT_FINGERPRINT,
   THAI_RAG_CONTRACT_VERSION,
+  THAI_RAG_CONSTRAINT_RESOLUTION_CAPABILITY,
+  THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT,
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
   THAI_RAG_PRODUCTION_BRIDGE,
@@ -89,6 +91,46 @@ describe('Thai-RAG provider handshake', () => {
     };
 
     expect(validateThaiRagHandshake(adoption)).toEqual({ ok: true, value: adoption });
+  });
+
+  it('accepts the additive constraint-resolution contract during rolling upgrades', () => {
+    const resolution = {
+      ...baseHandshake,
+      contractFingerprint: THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+      capabilities: [
+        ...baseHandshake.capabilities,
+        THAI_RAG_CANCEL_CAPABILITY,
+        THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+        THAI_RAG_CONSTRAINT_RESOLUTION_CAPABILITY,
+      ],
+      generation: {
+        ...baseHandshake.generation,
+        contract: THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT,
+      },
+    };
+
+    expect(validateThaiRagHandshake(resolution)).toEqual({ ok: true, value: resolution });
+  });
+
+  it('rejects the constraint-resolution fingerprint when resolve_event is missing', () => {
+    const result = validateThaiRagHandshake({
+      ...baseHandshake,
+      contractFingerprint: THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT,
+      indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+      capabilities: [
+        ...baseHandshake.capabilities,
+        THAI_RAG_CANCEL_CAPABILITY,
+        THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+      ],
+      generation: {
+        ...baseHandshake.generation,
+        contract: THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('missing-capability');
   });
 
   it('rejects the legacy-adoption fingerprint when adopt_legacy_index is missing', () => {

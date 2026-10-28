@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "typecheck": "node scripts/check-workspace-dependencies.mjs && node scripts/generate-typecheck-configs.mjs --check && tsc --build tsconfig.typecheck.json",
     "provenance:check": "node scripts/check-dist-provenance-freshness.mjs",
+    "rag:generation:check": "node scripts/check-native-rag-generation.mjs",
     "test": "corepack pnpm -r --if-present test",
     "build": "corepack pnpm -r --if-present build",
     "version:check": "node scripts/check-version-consistency.mjs",

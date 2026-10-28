@@ -230,6 +230,10 @@ pnpm typecheck
 # 2.1 ตรวจสอบว่า dist ที่ deploy อยู่ไม่ถูกเขียนทับหลัง build
 pnpm provenance:check
 
+# 2.2 ตรวจสอบว่า generation ที่ active ของ Native Thai-RAG สมบูรณ์ทุก channel
+# (parent/lexical/structural/vector) — ถ้า vector degraded pre-edit gate จะไม่เปิด
+pnpm rag:generation:check
+
 # 3. รันชุดทดสอบทั้งหมด (Vitest Monorepo Test Runner)
 pnpm test
 ```

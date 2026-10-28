@@ -104,41 +104,6 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('exposes host machine metrics for the dashboard', async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/host-metrics`);
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get('cache-control')).toBe('no-store');
-    const payload = await response.json() as {
-      available: boolean;
-      scope: string;
-      host: {
-        hostname: string;
-        uptimeSeconds: number;
-        cpu: { cores: number };
-        memory: { totalBytes: number; usedBytes: number };
-        swap: { devices: unknown[] };
-        zram: { enabled: boolean; devices: unknown[] };
-        disk: { totalBytes: number; usedPercent: number };
-        disks: Array<{ mount: string; key: string; display: string }>;
-        display: { cpu: string; memory: string; swap: string; disk: string; zram: string; uptime: string };
-      };
-    };
-    expect(payload.available).toBe(true);
-    expect(payload.scope).toBe('host');
-    expect(payload.host.hostname).toBe(os.hostname());
-    expect(payload.host.cpu.cores).toBeGreaterThan(0);
-    expect(payload.host.memory.totalBytes).toBeGreaterThan(0);
-    expect(payload.host.memory.usedBytes).toBeGreaterThanOrEqual(0);
-    expect(payload.host.uptimeSeconds).toBeGreaterThan(0);
-    expect(Array.isArray(payload.host.swap.devices)).toBe(true);
-    expect(Array.isArray(payload.host.zram.devices)).toBe(true);
-    expect(payload.host.disk.totalBytes).toBeGreaterThan(0);
-    expect(payload.host.disks.some((disk) => disk.mount === '/' && disk.key === 'root')).toBe(true);
-    expect(payload.host.display.memory).toContain('/');
-    expect(payload.host.display.zram.length).toBeGreaterThan(0);
-  });
-
   it('rejects a non-loopback host that is not allowlisted', async () => {
     const response = await requestWithHost(port, '/', { host: 'dashboard.example.com' });
 

@@ -492,7 +492,7 @@ describe('native provider cancel for a provider-owned job (issue #445)', () => {
 
   it('forwards a cancellation for a provider job id the mirror never recorded', async () => {
     const forwarded: Array<Record<string, unknown>> = [];
-    const { driver, jobId } = await fixture(async () => completed(), {
+    const { driver, jobId, dataRoot } = await fixture(async () => completed(), {
       onCancel: (args) => {
         forwarded.push(args);
         return response('cancel_index', { status: 'cancelled', job_id: 'idx_abcd1234', workspace_id: workspaceId });
@@ -513,9 +513,12 @@ describe('native provider cancel for a provider-owned job (issue #445)', () => {
         source: 'provider',
       } });
       expect(forwarded).toEqual([{ job_id: 'idx_abcd1234', workspace_id: workspaceId }]);
-      // Nothing local is written for a job this runtime never owned.
-      const stored = await driver.call('index_status', { workspace_id: workspaceId, job_id: 'idx_abcd1234' });
-      expect(stored.ok).toBe(false);
+      // Nothing local is written for a job this runtime never owned: the
+      // durable mirror still has no row for it.
+      const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+        jobs: Array<{ jobId: string }>;
+      };
+      expect(persisted.jobs.some((job) => job.jobId === 'idx_abcd1234')).toBe(false);
       expect(jobId).toContain('idx_umcp_');
     } finally { await driver.stop(); }
   });
@@ -547,6 +550,96 @@ describe('native provider cancel for a provider-owned job (issue #445)', () => {
       expect(error.code).toBe('FILE_NOT_FOUND');
       expect(error.message).toContain('index job is unknown');
       expect(counts().cancels).toBe(1);
+    } finally { await driver.stop(); }
+  });
+});
+
+describe('native provider read for a provider-owned job (issue #445)', () => {
+  const completed = (): unknown => response('index_status', {
+    status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+    result: { status: 'complete', indexed: 2 },
+  });
+
+  it('reports provider progress for a job id the mirror never recorded', async () => {
+    const polled: string[] = [];
+    const { driver } = await fixture(async (_poll, providerJobId) => {
+      polled.push(providerJobId ?? '');
+      if (providerJobId === 'idx_provider_same') return completed();
+      return response('index_status', {
+        status: 'running', job_id: providerJobId, workspace_id: workspaceId,
+        indexed_files: 900, skipped_files: 4, total_files: 924,
+        cache_hit_files: 12, cache_hit_chunks: 1800,
+        cache_miss_files: 3, cache_miss_chunks: 220,
+        new_embedded_files: 3, new_embedded_chunks: 220,
+        cache_miss_reasons: { artifact_missing: 220 },
+      });
+    });
+    try {
+      // A provider-owned build has no mirror row, so the status call used to
+      // answer FILE_NOT_FOUND while the build was actively embedding.
+      const read = await driver.call('index_status', {
+        workspace_id: workspaceId, job_id: 'idx_abcd1234',
+      });
+      expect(read).toMatchObject({ ok: true, value: {
+        jobId: 'idx_abcd1234',
+        providerJobId: 'idx_abcd1234',
+        workspaceId,
+        status: 'running',
+        source: 'provider',
+        indexedFiles: 900,
+        skippedFiles: 4,
+        totalFiles: 924,
+        cacheHitChunks: 1800,
+        newEmbeddedChunks: 220,
+      } });
+      expect(polled).toContain('idx_abcd1234');
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps the owner fence for a unified job id that is not mirrored', async () => {
+    const polled: string[] = [];
+    const { driver } = await fixture(async (_poll, providerJobId) => {
+      polled.push(providerJobId ?? '');
+      return completed();
+    });
+    try {
+      const read = await driver.call('index_status', {
+        workspace_id: workspaceId, job_id: 'idx_umcp_missingjob',
+      });
+      expect(read.ok).toBe(false);
+      expect((read as { ok: false; error: { code: string } }).error.code).toBe('FILE_NOT_FOUND');
+      expect(polled).not.toContain('idx_umcp_missingjob');
+    } finally { await driver.stop(); }
+  });
+
+  it('reports not-found when the provider does not know the forwarded id', async () => {
+    const { driver } = await fixture(async (_poll, providerJobId) => providerJobId === 'idx_provider_same'
+      ? completed()
+      : response('index_status', {
+        status: 'unknown', error: 'index job is unknown', job_id: providerJobId, workspace_id: workspaceId,
+      }));
+    try {
+      const read = await driver.call('index_status', {
+        workspace_id: workspaceId, job_id: 'idx_deadbeef',
+      });
+      expect(read.ok).toBe(false);
+      const error = (read as { ok: false; error: { code: string; message: string } }).error;
+      expect(error.code).toBe('FILE_NOT_FOUND');
+      expect(error.message).toContain('index job is unknown');
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps a timed-out provider read retryable instead of calling it not-found', async () => {
+    const { driver } = await fixture(async (_poll, providerJobId) => {
+      if (providerJobId === 'idx_provider_same') return completed();
+      throw new Error('Timed out calling thai-rag-native/index_status');
+    });
+    try {
+      const read = await driver.call('index_status', {
+        workspace_id: workspaceId, job_id: 'idx_slowjob1',
+      });
+      expect(read.ok).toBe(false);
+      expect((read as { ok: false; error: { code: string } }).error.code).not.toBe('FILE_NOT_FOUND');
     } finally { await driver.stop(); }
   });
 });

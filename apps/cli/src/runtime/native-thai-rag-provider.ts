@@ -592,7 +592,27 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const ownerId = this.ownerId ?? '';
     const job = await this.jobs.get(jobId, ownerId, workspace.value);
-    if (job === null) return err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`));
+    if (job === null) {
+      // Issue #445: the provider can be running an index job this mirror never
+      // recorded. Its own durable "desired work" queue drains straight into
+      // `code_index` after a restart, while the previous owner's row is already
+      // `interrupted`, so no mirror row exists to resolve. Owner-scoped rows
+      // stay fenced, but a provider job id the store can never hold is a
+      // different case: the provider is its authority, and without forwarding
+      // the only way to stop a runaway build was killing the provider.
+      if (!isProviderOwnedIndexJobId(jobId)) {
+        return err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`));
+      }
+      if (!this.cancellableIndexJobs) {
+        return err(appError(
+          'CONFLICT',
+          'Native Thai-RAG index job cannot be cancelled because the active provider uses the legacy job contract',
+          true,
+          { reason: 'cancellation-unavailable', jobId },
+        ));
+      }
+      return this.cancelProviderOwnedIndexJob(jobId, workspace.value, budget);
+    }
     if (job.status !== 'running' && job.status !== 'cancelling') return ok(job);
     if (!this.cancellableIndexJobs || job.providerJobId === undefined) {
       return err(appError(
@@ -642,6 +662,43 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
     const next = await this.jobs.requestCancellation(jobId, ownerId);
     return next === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(next);
+  }
+
+  /**
+   * Forward a cancellation for a provider job that has no mirror row (issue
+   * #445). Nothing local is written: the provider owns the job, and its own
+   * answer is the only truthful status. Mirror rows keep their owner fence —
+   * this path is reachable only for ids the mirror can never hold.
+   */
+  private async cancelProviderOwnedIndexJob(
+    providerJobId: string,
+    workspaceId: string,
+    budget?: ResultBudget,
+  ): Promise<Result<unknown>> {
+    const cancelled = await this.callWorker(
+      'cancel_index',
+      { job_id: providerJobId, workspace_id: workspaceId },
+      undefined,
+      budget,
+    );
+    if (!cancelled.ok) return cancelled;
+    const status = nestedString(cancelled.value, 'status');
+    if (status === undefined || status === 'unknown' || status === 'scope_denied') {
+      const message = nestedString(cancelled.value, 'error')
+        ?? `Native Thai-RAG provider does not know index job ${providerJobId}`;
+      return err(appError('FILE_NOT_FOUND', message, false, {
+        reason: 'provider-job-unknown',
+        jobId: providerJobId,
+        workspaceId,
+      }));
+    }
+    return ok({
+      jobId: providerJobId,
+      workspaceId,
+      providerJobId,
+      status,
+      source: 'provider',
+    });
   }
 
   /**
@@ -1593,6 +1650,15 @@ function isLostProviderIndexJob(error: {
 }): boolean {
   if (error.details?.providerReason === 'provider_restart_or_retention_expiry') return true;
   return /index job is unknown/i.test(error.message);
+}
+
+/**
+ * True for a provider-side index job id (`idx_<token>`). Mirrored jobs are
+ * `idx_umcp_<token>`, so the store can never hold one of these; that is what
+ * makes forwarding a cancellation to the provider safe (issue #445).
+ */
+function isProviderOwnedIndexJobId(jobId: string): boolean {
+  return /^idx_(?!umcp_)[0-9a-z]{6,}$/i.test(jobId);
 }
 
 function isIndexStatusPollTimeout(error: { readonly code: string; readonly message: string }): boolean {

@@ -90,7 +90,7 @@ const REQUIRED_TOOLS = new Set([
 // code-index generation. They must stay usable while a workspace admission
 // verification holds the single-indexer slot (issue #422).
 const INDEX_GATE_EXEMPT_TOOLS = new Set([
-  'remember', 'recall', 'forget', 'record_event', 'health', 'version',
+  'remember', 'recall', 'forget', 'record_event', 'resolve_event', 'health', 'version',
 ]);
 
 export interface NativeThaiRagWorkspace {

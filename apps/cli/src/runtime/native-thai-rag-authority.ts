@@ -10,7 +10,7 @@ import { createHmac, randomBytes } from 'node:crypto';
  */
 const DOMAIN = 'thai-rag-external-workspace-authority-v1\0';
 const OPERATIONS = new Set<string>([
-  'remember', 'remember_turn', 'recall', 'record_event', 'forget',
+  'remember', 'remember_turn', 'recall', 'record_event', 'resolve_event', 'forget',
   'pre_edit_context', 'code_search', 'code_context', 'code_blast_radius',
   'code_index', 'adopt_legacy_index', 'index_status', 'cancel_index',
   'memory_reconcile', 'code_reconcile', 'health', 'version',

@@ -9,6 +9,14 @@ export const THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION = '1.1';
 export const THAI_RAG_CONTRACT_FINGERPRINT = 'c271073944e379a4932a3377a351dc7d45f421f4866e404eda277ec0f0bfa1bc';
 export const THAI_RAG_CANCEL_CONTRACT_FINGERPRINT = 'e9861eb3df0176f7843860448b37899b04edb50a12d51c10c09cd5186a742afe';
 export const THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT = 'e12fb2cd03ea12fea28b623c83982c84ccbf579deb40714755df4fd1f34e341e';
+/**
+ * thai-rag-mcp issue #395 adds `resolve_event` and the `constraint_resolution`
+ * capability flag: a recorded `constraint` can be closed with an audit trail
+ * instead of blocking `pre_edit_context` forever. The provider advertises the
+ * new operation, so its `_CONTRACT_SHAPE` fingerprint moves; both fingerprints
+ * are accepted here so a rolling upgrade can update either side first.
+ */
+export const THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT = '579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f';
 export const THAI_RAG_PRODUCTION_BRIDGE = 'thai-rag-provider-1.0-production-bridge';
 export const THAI_RAG_LEGACY_ADAPTERS = {
   [THAI_RAG_PRODUCTION_BRIDGE]: { sourceContractVersion: '0.9', targetContractVersion: THAI_RAG_CONTRACT_VERSION },
@@ -51,6 +59,7 @@ export const THAI_RAG_CONFORMANCE_FIXTURE = {
 export const THAI_RAG_REQUIRED_CAPABILITIES = [...THAI_RAG_CONFORMANCE_OPERATIONS];
 export const THAI_RAG_CANCEL_CAPABILITY = 'cancel_index';
 export const THAI_RAG_LEGACY_ADOPTION_CAPABILITY = 'adopt_legacy_index';
+export const THAI_RAG_CONSTRAINT_RESOLUTION_CAPABILITY = 'resolve_event';
 
 const SUPPORTED_INDEX_JOB_CONTRACTS = new Map<string, {
   readonly indexJobContractVersion: string;
@@ -70,6 +79,15 @@ const SUPPORTED_INDEX_JOB_CONTRACTS = new Map<string, {
       ...THAI_RAG_REQUIRED_CAPABILITIES,
       THAI_RAG_CANCEL_CAPABILITY,
       THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+    ],
+  }],
+  [THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT, {
+    indexJobContractVersion: THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
+    requiredCapabilities: [
+      ...THAI_RAG_REQUIRED_CAPABILITIES,
+      THAI_RAG_CANCEL_CAPABILITY,
+      THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
+      THAI_RAG_CONSTRAINT_RESOLUTION_CAPABILITY,
     ],
   }],
 ]);

@@ -20,4 +20,6 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
    Production deployment on Ubuntu 24.04 LTS, XDG filesystem standards, and systemd user-unit service setup.
 7. **[คู่มือการใช้งานภาษาไทย (Thai User Manual)](USAGE_TH.md)**:
    คู่มือการใช้งานระบบ Unified-MPC-Server ฉบับสมบูรณ์เป็นภาษาไทย
+8. **[Guarded Pull-Request Merge](GUARDED_MERGE.md)**:
+   Exact-head evidence chain, the built-in GitHub merge provider and the optional child MCP provider.
 

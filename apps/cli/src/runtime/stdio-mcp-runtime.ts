@@ -88,7 +88,13 @@ import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
-import { createGuardedMergeDispatchPort } from './guarded-merge-provider.js';
+import {
+  createBuiltinGuardedMergeDispatchPort,
+  createGitHubMergeApi,
+  createGuardedMergeDispatchPort,
+  resolveGuardedMergeProviderServer,
+  type GitHubMergeApi,
+} from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApiReader } from './github-merge-observer.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
@@ -179,6 +185,8 @@ export interface StdioMcpRuntimeOptions {
   readonly checkpointEncryptionKey?: Uint8Array;
   /** Test seam for the read-only GitHub surface; production uses the credential-backed CLI reader. */
   readonly githubApi?: GitHubApiReader;
+  /** Test seam for the built-in exact-head merge executor; production uses the authenticated `gh` CLI. */
+  readonly githubMergeApi?: GitHubMergeApi;
 }
 
 export function createStdioMcpRuntime(
@@ -552,7 +560,10 @@ export function createStdioMcpRuntime(
     mergeReceiptRepository,
     createGuardedMergeDispatchPort(
       extensions,
-      () => settingsRepository.get(USER_SETTING_KEYS.guardedMergeProviderServer)?.trim() || 'github',
+      () => resolveGuardedMergeProviderServer(
+        settingsRepository.get(USER_SETTING_KEYS.guardedMergeProviderServer),
+      ),
+      createBuiltinGuardedMergeDispatchPort(options.githubMergeApi ?? createGitHubMergeApi()),
     ),
   );
   const mergeReconciliation = new ObservedMergeReconciliationService(

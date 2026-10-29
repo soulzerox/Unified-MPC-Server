@@ -345,6 +345,90 @@ describe('RipgrepAdapter', () => {
     }
   });
 
+  it('skips binary files in the fallback like ripgrep instead of decoding them', async () => {
+    const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const rootPath = await mkdtemp(path.join(tmpdir(), 'unified-mpc-search-binary-'));
+    const resolver: ExecutableResolver = {
+      resolve: async (): Promise<Result<string>> => ({
+        ok: false,
+        error: { code: 'EXECUTABLE_NOT_FOUND', message: "Executable 'rg' was not found", recoverable: true },
+      }),
+    };
+    const adapter = new RipgrepAdapter(resolver);
+
+    try {
+      await writeFile(path.join(rootPath, 'notes.txt'), 'needle in text\n', 'utf8');
+      await writeFile(path.join(rootPath, 'blob.txt'), Buffer.concat([Buffer.from([0x00, 0x01, 0x02]), Buffer.from('needle in binary\n', 'utf8')]));
+      await writeFile(path.join(rootPath, 'huge.txt'), Buffer.alloc(4 * 1024 * 1024, 0));
+
+      const result = await adapter.searchText({ rootPath, query: 'needle' });
+      expect(result).toEqual({
+        ok: true,
+        value: {
+          matches: [{ path: 'notes.txt', line: 1, text: 'needle in text' }],
+          truncated: false,
+        },
+      });
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it('does not report a truncated result just because a large binary file was skipped', async () => {
+    const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const rootPath = await mkdtemp(path.join(tmpdir(), 'unified-mpc-search-skip-'));
+    const resolver: ExecutableResolver = {
+      resolve: async (): Promise<Result<string>> => ({
+        ok: false,
+        error: { code: 'EXECUTABLE_NOT_FOUND', message: "Executable 'rg' was not found", recoverable: true },
+      }),
+    };
+    const adapter = new RipgrepAdapter(resolver);
+
+    try {
+      const { stat } = await import('node:fs/promises');
+      const hugePath = path.join(rootPath, 'huge.txt');
+      await writeFile(hugePath, Buffer.alloc(12 * 1024 * 1024, 0));
+      await writeFile(path.join(rootPath, 'notes.txt'), 'needle in text\n', 'utf8');
+
+      const result = await adapter.searchText({ rootPath, query: 'needle' });
+      expect(result).toMatchObject({ ok: true, value: { truncated: false } });
+      if (result.ok) expect(result.value.matches.map((match) => match.path)).toEqual(['notes.txt']);
+      // The bytes on disk must not be decoded just to discover the file is binary.
+      expect((await stat(hugePath)).size).toBe(12 * 1024 * 1024);
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it('matches a NUL byte only in the sniff window, not later in the file', async () => {
+    const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const rootPath = await mkdtemp(path.join(tmpdir(), 'unified-mpc-search-nul-'));
+    const resolver: ExecutableResolver = {
+      resolve: async (): Promise<Result<string>> => ({
+        ok: false,
+        error: { code: 'EXECUTABLE_NOT_FOUND', message: "Executable 'rg' was not found", recoverable: true },
+      }),
+    };
+    const adapter = new RipgrepAdapter(resolver);
+
+    try {
+      const prefix = Buffer.from(`${'a'.repeat(64)}\n`.repeat(200), 'utf8');
+      await writeFile(path.join(rootPath, 'late-nul.txt'), Buffer.concat([prefix, Buffer.from([0x00]), Buffer.from('\nneedle after nul\n', 'utf8')]));
+      const result = await adapter.searchText({ rootPath, query: 'needle' });
+      expect(result).toMatchObject({ ok: true, value: { truncated: false } });
+      if (result.ok) expect(result.value.matches.map((match) => match.line)).toEqual([202]);
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
   it('applies context-economy filters to automatic discovery and allows explicit enumeration', async () => {
     let receivedArgs: readonly string[] = [];
     const runner: ProcessRunner = {

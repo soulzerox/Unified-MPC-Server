@@ -29,6 +29,12 @@ shell run (admission_class declared)
                               +-- cancel --> queue row cancelled, no process
 ```
 
+## Implementation status
+
+Slice 1 is merged as the declaration seam only: `admission_class` is validated against `SHELL_HEAVY_ADMISSION_CLASSES`, an opted-in runtime takes the heavy slot **before** spawning, and the slot is settled on the durable task's verified terminal state (or immediately on cancel). A denied declaration returns `RESOURCE_PRESSURE` with the reason and creates no task.
+
+Deliberate divergence from the lifecycle below: slice 1 does **not** park a queued run as a durable `waiting_resource` record. Parking needs a new durable task state and restart re-attachment, and the shell backend must not change its task-store contract in the same step as its admission seam. Until that lands, a caller either starts now or retries after the reason clears - which is strictly better than starting over a running heavy job, and never leaves a task id for work that was never accepted.
+
 ## Existing seams to extend
 
 - `packages/capabilities/src/shell-backend.ts` owns the run lifecycle: policy gate, `DurableShellTaskStore`, worker spawn, terminator, `tasks` map.

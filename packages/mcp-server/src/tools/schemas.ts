@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MAX_SEARCH_RESULTS, MAX_TREE_DEPTH, MAX_TREE_ENTRIES, MAX_MULTI_FILE_BYTES } from '@unified-mpc/domain';
+import { SHELL_HEAVY_ADMISSION_CLASSES } from '@unified-mpc/capabilities';
 
 const MAX_PATH_LENGTH = 4096;
 const MAX_WORKSPACE_ID_LENGTH = 128;
@@ -273,6 +274,10 @@ export const shellCapabilitySchema = z.object({
   tail_lines: z.number().int().min(0).max(10_000).optional(),
   include_stdout: z.boolean().default(true),
   include_stderr: z.boolean().default(true),
+  // Declared heavy class (#145). Omitted keeps an ordinary unqueued run; the
+  // vocabulary mirrors HEAVY_ADMISSION_CLASSES so a declaration always means
+  // something the queue can enforce.
+  admission_class: z.enum(SHELL_HEAVY_ADMISSION_CLASSES).optional(),
   approval: capabilityApprovalSchema,
   ...capabilityRequestSchema,
 }).strict();

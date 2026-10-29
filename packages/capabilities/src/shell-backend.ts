@@ -25,6 +25,52 @@ import { capabilityTaskOwnerMatches, legacyCapabilityTaskOwner, readCapabilityAc
 type ShellOperation = 'run' | 'list' | 'status' | 'wait' | 'logs' | 'result' | 'cancel' | 'resume' | 'approve' | 'deny';
 type ShellExecution = 'foreground' | 'background' | 'auto';
 type ShellPrivilege = 'user' | 'admin';
+
+/**
+ * Heavy admission classes a `shell` run may declare (#145). Declaration is
+ * the only way cost enters this path: no executable, argument, script or cwd
+ * is ever inspected to guess it. These names mirror
+ * `HEAVY_ADMISSION_CLASSES` in `@unified-mpc/workspace`; a parity test pins
+ * the two lists together.
+ */
+export const SHELL_HEAVY_ADMISSION_CLASSES = ['rag_indexing', 'verification_heavy'] as const;
+
+export type ShellHeavyAdmissionClass = (typeof SHELL_HEAVY_ADMISSION_CLASSES)[number];
+
+export interface ShellHeavyAdmissionRequest {
+  /** Deterministic per task, so a queue row can never be claimed twice. */
+  readonly operationId: string;
+  readonly workspaceId?: string;
+  /** Requesting session, so per-session ceilings account the declared run. */
+  readonly sessionId?: string;
+  readonly resourceClass: ShellHeavyAdmissionClass;
+  /**
+   * Bounded wait for a busy heavy slot. `0` means start-or-fail-now; the
+   * caller keeps its own retry policy.
+   */
+  readonly waitMs: number;
+}
+
+export interface ShellHeavyAdmissionLease {
+  /**
+   * Release the heavy slot once the task is terminal. Idempotent: a duplicate
+   * settle must not release twice or wake the queue.
+   */
+  settle(outcome: 'completed' | 'failed' | 'cancelled'): void;
+}
+
+export type ShellHeavyAdmissionResult =
+  | { readonly admitted: true; readonly lease: ShellHeavyAdmissionLease }
+  | { readonly admitted: false; readonly reason: string; readonly position?: number };
+
+/**
+ * Admission seam for declared heavy shell work. The runtime adapter owns the
+ * durable queue and the resource controller; this backend only asks whether a
+ * process may start and reports the terminal outcome back through the lease.
+ */
+export interface ShellHeavyAdmissionPort {
+  acquire(request: ShellHeavyAdmissionRequest): Promise<ShellHeavyAdmissionResult>;
+}
 type TaskState = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
 
 interface ShellRequest {
@@ -44,6 +90,8 @@ interface ShellRequest {
   readonly dryRun: boolean;
   readonly userConfirmed: boolean;
   readonly owner: CapabilityTaskOwner;
+  /** Declared heavy class (#145); absent means an ordinary, unqueued run. */
+  readonly admissionClass?: ShellHeavyAdmissionClass;
 }
 
 
@@ -76,6 +124,12 @@ export interface ShellCapabilityOptions {
    * Delete-like commands are policy-gated; exact scoped destructive families may be auto-approved when the saved user policy enables them.
    */
   readonly unrestricted?: boolean;
+  /** When omitted, a declared heavy run fails closed instead of starting unqueued. */
+  readonly heavyAdmission?: ShellHeavyAdmissionPort;
+  /** Bounded wait passed to the port for a busy heavy slot; defaults to 0. */
+  readonly heavyAdmissionWaitMs?: number;
+  /** Settlement poll interval for admitted heavy tasks (tests shorten it). */
+  readonly heavyAdmissionWatchIntervalMs?: number;
 }
 
 interface ShellTaskRecord {
@@ -110,6 +164,9 @@ const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TIMEOUT_SECONDS = 604_800;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const FOREGROUND_CANCELLATION_RETRY_MS = 250;
+const DEFAULT_HEAVY_ADMISSION_WAIT_MS = 0;
+const DEFAULT_HEAVY_ADMISSION_WATCH_INTERVAL_MS = 2_000;
+const HEAVY_SETTLE_READ_FAILURE_LIMIT = 3;
 
 export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly tasks = new Map<string, ShellTaskRecord>();
@@ -126,6 +183,13 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly maxOutputBytes: number;
   private readonly unrestricted: boolean;
   private readonly durableTaskReconciliation: DurableShellTaskReconciliationProvider | undefined;
+  private readonly heavyAdmission: ShellHeavyAdmissionPort | undefined;
+  private readonly heavyAdmissionWaitMs: number;
+  private readonly heavyAdmissionWatchIntervalMs: number;
+  private readonly heavyWatches = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly heavyLeases = new Map<string, ShellHeavyAdmissionLease>();
+  private readonly heavySettling = new Set<string>();
+  private readonly heavySettleFailures = new Map<string, number>();
 
   public constructor(options: ShellCapabilityOptions) {
     if (options.allowedRoots.length === 0) throw new Error('At least one local capability root is required');
@@ -144,6 +208,9 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.maxSynchronousWaitSecondsProvider = options.maxSynchronousWaitSecondsProvider;
     this.maxOutputBytes = Math.floor(clampNumber(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES, 1, MAX_OUTPUT_BYTES));
     this.unrestricted = options.unrestricted === true;
+    this.heavyAdmission = options.heavyAdmission;
+    this.heavyAdmissionWaitMs = Math.max(0, Math.floor(options.heavyAdmissionWaitMs ?? DEFAULT_HEAVY_ADMISSION_WAIT_MS));
+    this.heavyAdmissionWatchIntervalMs = Math.max(10, Math.floor(options.heavyAdmissionWatchIntervalMs ?? DEFAULT_HEAVY_ADMISSION_WATCH_INTERVAL_MS));
   }
 
   public async execute(input: unknown, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
@@ -158,9 +225,18 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       case 'wait': return this.wait(parsed.value);
       case 'logs': return this.taskSnapshot(parsed.value.taskId, parsed.value.tailLines, parsed.value.owner);
       case 'result': return this.taskSnapshot(parsed.value.taskId, undefined, parsed.value.owner);
-      case 'cancel':
+      case 'cancel': {
         if (!isApplicationAuthorized(authorization, parsed.value.userConfirmed)) return err(appError('PERMISSION_REQUIRED', 'Cancelling a task requires explicit user confirmation'));
-        return this.cancel(parsed.value.taskId, false, parsed.value.owner);
+        const cancelled = await this.cancel(parsed.value.taskId, false, parsed.value.owner);
+        // A declared heavy task that is already terminal must release its slot
+        // now: waiting for the next poll would keep a cancelled build holding it.
+        const cancelledState = cancelled.ok && isRecord(cancelled.value) ? cancelled.value.state : undefined;
+        const outcome = heavyLeaseOutcome(cancelledState);
+        if (outcome !== undefined && parsed.value.taskId !== undefined && this.heavyLeases.has(parsed.value.taskId)) {
+          this.settleHeavyTaskOnce(parsed.value.taskId, outcome);
+        }
+        return cancelled;
+      }
       case 'resume':
       case 'approve':
       case 'deny':
@@ -238,6 +314,10 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     const invocation = toSpawnInvocation(executable.value, request.arguments, { allowMetacharacters: this.unrestricted || fullBypass });
     if (!invocation.ok) return invocation;
     if (signal?.aborted) return err(appError('PROCESS_TIMEOUT', 'Shell request was cancelled before launch', true));
+
+    if (request.admissionClass !== undefined) {
+      return this.runDeclaredHeavy(request, cwd.value, invocation.value);
+    }
 
     if (this.durableStore !== undefined && request.execution !== 'foreground') {
       // Durable tasks intentionally outlive the originating MCP request. Goal
@@ -441,13 +521,130 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     return task === undefined ? err(appError('PROCESS_NOT_FOUND', 'Task was not found')) : ok(task);
   }
 
-  private async runDurable(
+  /**
+   * Declared heavy run (#145): ask admission before any process could start, then
+   * launch through the durable store and settle the slot when the task is
+   * terminal. Only the declaration opts in - an undeclared run never reaches here.
+   */
+  private async runDeclaredHeavy(
     request: ShellRequest,
     cwd: string,
     invocation: { readonly executable: string; readonly args: readonly string[]; readonly windowsVerbatimArguments?: boolean },
   ): Promise<Result<unknown>> {
-    if (this.durableStore === undefined) return err(appError('INTERNAL_ERROR', 'Durable task store is unavailable', true));
+    const admissionClass = request.admissionClass;
+    if (admissionClass === undefined) return err(appError('INVALID_INPUT', 'Heavy admission class is required'));
+    const admission = this.heavyAdmission;
+    if (admission === undefined) {
+      return err(appError(
+        'INVALID_INPUT',
+        'Heavy admission is not configured on this runtime; remove admission_class or route the run through a runtime that owns the heavy-job queue',
+        false,
+      ));
+    }
+    if (request.execution === 'foreground') {
+      return err(appError('INVALID_INPUT', 'admission_class requires background execution; a foreground run cannot hold a heavy slot', false));
+    }
+    if (this.durableStore === undefined) {
+      return err(appError('INVALID_INPUT', 'admission_class requires the durable task store', false));
+    }
     const taskId = randomUUID();
+    const workspaceId = request.owner.workspaceId;
+    const acquired = await admission.acquire({
+      operationId: `shell:${taskId}`,
+      ...(workspaceId === undefined ? {} : { workspaceId }),
+      ...(request.owner.sessionId === undefined ? {} : { sessionId: request.owner.sessionId }),
+      resourceClass: admissionClass,
+      waitMs: this.heavyAdmissionWaitMs,
+    });
+    if (!acquired.admitted) {
+      // No task record, no process: the caller never holds a task id for work
+      // that was never accepted.
+      return err(appError(
+        'RESOURCE_PRESSURE',
+        `Heavy shell work was not admitted (${acquired.reason}); wait for the running heavy job to finish, then retry`,
+        true,
+        {
+          reason: acquired.reason,
+          resourceClass: admissionClass,
+          ...(acquired.position === undefined ? {} : { position: acquired.position }),
+        },
+      ));
+    }
+    const launched = await this.runDurable(request, cwd, invocation, taskId);
+    if (!launched.ok) {
+      // Spawn refused or store unavailable: never leak the slot.
+      acquired.lease.settle('failed');
+      return launched;
+    }
+    this.watchHeavyTask(taskId, acquired.lease);
+    return launched;
+  }
+
+  /**
+   * Settle the heavy slot once the durable worker reaches a verified terminal
+   * state. `termination_unverified` deliberately keeps the slot: the process may
+   * still be alive, so starting other heavy work would overlap it.
+   */
+  private watchHeavyTask(taskId: string, lease: ShellHeavyAdmissionLease): void {
+    if (this.heavyWatches.has(taskId)) return;
+    this.heavyLeases.set(taskId, lease);
+    const timer = setInterval(() => {
+      void this.settleHeavyTask(taskId);
+    }, this.heavyAdmissionWatchIntervalMs);
+    timer.unref?.();
+    this.heavyWatches.set(taskId, timer);
+  }
+
+  private async settleHeavyTask(taskId: string): Promise<void> {
+    // Two ticks can await the same snapshot; only one may settle the slot.
+    if (this.heavySettling.has(taskId)) return;
+    this.heavySettling.add(taskId);
+    try {
+      const store = this.durableStore;
+      if (store === undefined) {
+        this.settleHeavyTaskOnce(taskId, 'failed');
+        return;
+      }
+      const snapshot = await store.snapshot(taskId);
+      if (!snapshot.ok) {
+        const failures = (this.heavySettleFailures.get(taskId) ?? 0) + 1;
+        this.heavySettleFailures.set(taskId, failures);
+        if (failures < HEAVY_SETTLE_READ_FAILURE_LIMIT) return;
+        // A task that cannot be read back is not provably finished; holding the
+        // slot forever is worse than one fail-closed release.
+        this.settleHeavyTaskOnce(taskId, 'failed');
+        return;
+      }
+      const outcome = heavyLeaseOutcome(snapshot.value.state);
+      if (outcome === undefined) return;
+      this.settleHeavyTaskOnce(taskId, outcome);
+    } finally {
+      this.heavySettling.delete(taskId);
+    }
+  }
+
+  /** Terminal settle is idempotent: the lease leaves the table before it is called. */
+  private settleHeavyTaskOnce(taskId: string, outcome: 'completed' | 'failed' | 'cancelled'): void {
+    const lease = this.heavyLeases.get(taskId);
+    this.stopHeavyWatch(taskId);
+    lease?.settle(outcome);
+  }
+
+  private stopHeavyWatch(taskId: string): void {
+    const timer = this.heavyWatches.get(taskId);
+    if (timer !== undefined) clearInterval(timer);
+    this.heavyWatches.delete(taskId);
+    this.heavyLeases.delete(taskId);
+    this.heavySettleFailures.delete(taskId);
+  }
+
+  private async runDurable(
+    request: ShellRequest,
+    cwd: string,
+    invocation: { readonly executable: string; readonly args: readonly string[]; readonly windowsVerbatimArguments?: boolean },
+    taskId: string = randomUUID(),
+  ): Promise<Result<unknown>> {
+    if (this.durableStore === undefined) return err(appError('INTERNAL_ERROR', 'Durable task store is unavailable', true));
     const environment = createSafeEnvironment(process.env, this.unrestricted);
     const externalReconciliation = this.durableTaskReconciliation?.describe({
       executable: invocation.executable,
@@ -640,10 +837,26 @@ function parseShellRequest(value: unknown, defaultTimeoutSeconds: number, defaul
   const includeStderr = value.include_stderr === undefined ? true : value.include_stderr;
   const dryRun = value.dry_run === undefined ? false : value.dry_run;
   const userConfirmed = value.userConfirmed === true;
+  const rawAdmissionClass = value.admission_class === undefined ? undefined : value.admission_class;
+  if (rawAdmissionClass !== undefined && !isShellHeavyAdmissionClass(rawAdmissionClass)) {
+    return err(appError('INVALID_INPUT', `admission_class must be one of ${SHELL_HEAVY_ADMISSION_CLASSES.join(', ')}`));
+  }
   const owner = readCapabilityTaskOwner(value);
   const activeWorkspaceRoot = readCapabilityActiveWorkspaceRoot(value);
   if (typeof includeStdout !== 'boolean' || typeof includeStderr !== 'boolean' || typeof dryRun !== 'boolean') return err(appError('INVALID_INPUT', 'Shell flags are invalid'));
-  return ok({ operation, ...(executable === undefined ? {} : { executable: executable.trim() }), arguments: rawArguments, privilege, ...(cwd === undefined ? {} : { cwd }), ...(activeWorkspaceRoot === undefined ? {} : { activeWorkspaceRoot }), execution, ...(taskId === undefined ? {} : { taskId }), timeoutSeconds, maxOutputBytes: requestedMaxBytes, ...(tailLines === undefined ? {} : { tailLines }), includeStdout, includeStderr, dryRun, userConfirmed, owner });
+  return ok({ operation, ...(executable === undefined ? {} : { executable: executable.trim() }), arguments: rawArguments, privilege, ...(cwd === undefined ? {} : { cwd }), ...(activeWorkspaceRoot === undefined ? {} : { activeWorkspaceRoot }), execution, ...(taskId === undefined ? {} : { taskId }), timeoutSeconds, maxOutputBytes: requestedMaxBytes, ...(tailLines === undefined ? {} : { tailLines }), includeStdout, includeStderr, dryRun, userConfirmed, owner, ...(rawAdmissionClass === undefined ? {} : { admissionClass: rawAdmissionClass }) });
+}
+
+function heavyLeaseOutcome(state: unknown): 'completed' | 'failed' | 'cancelled' | undefined {
+  if (state === 'completed') return 'completed';
+  if (state === 'failed' || state === 'timed_out') return 'failed';
+  if (state === 'cancelled') return 'cancelled';
+  // running / termination_unverified / unknown: keep holding the slot.
+  return undefined;
+}
+
+function isShellHeavyAdmissionClass(value: unknown): value is ShellHeavyAdmissionClass {
+  return typeof value === 'string' && (SHELL_HEAVY_ADMISSION_CLASSES as readonly string[]).includes(value);
 }
 
 function isShellOperation(value: unknown): value is ShellOperation {

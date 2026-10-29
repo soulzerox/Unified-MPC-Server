@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
+import type {
+  HeavyJobClaimResult,
+  HeavyJobLiveEntry,
+  HeavyJobQueueStore,
+  HeavyJobSupersedeStoreResult,
+} from '@unified-mpc/workspace';
 import type { ShellHeavyAdmissionLease } from '@unified-mpc/capabilities';
 import {
   createShellHeavyAdmissionPort,
@@ -84,6 +90,37 @@ describe('shell heavy admission port (#145)', () => {
     first?.lease.settle('completed');
 
     expect(woke).toEqual([]);
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
+  });
+
+  it('treats an adopted durable row as queued instead of a foreign duplicate', () => {
+    const admission = controller();
+    let claims = 0;
+    const store: HeavyJobQueueStore = {
+      claim: (entry): HeavyJobClaimResult => (claims++ === 0
+        ? { status: 'queued', operationId: entry.operationId, position: 3, depth: 1 }
+        : { status: 'coalesced', operationId: entry.operationId, depth: 1 }),
+      promote: (): number | undefined => 3,
+      cancel: (): boolean => true,
+      supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      start: (): boolean => true,
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => 1,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const port = createShellHeavyAdmissionPort(() => admission, () => store);
+
+    expect(port.enqueue({ operationId: 'shell:reattached', resourceClass: 'verification_heavy' }))
+      .toMatchObject({ status: 'queued', position: 3 });
+    // The second claim coalesces, but this queue already owns the local row:
+    // that is an adopted row for restart re-attachment, not a foreign duplicate.
+    expect(port.enqueue({ operationId: 'shell:reattached', resourceClass: 'verification_heavy' }))
+      .toMatchObject({ status: 'queued', position: 3 });
+
+    const grant = port.pump()[0];
+    expect(grant?.operationId).toBe('shell:reattached');
+    grant?.lease.settle('completed');
     expect(admission.snapshot().activeHeavyOperations).toBe(0);
   });
 

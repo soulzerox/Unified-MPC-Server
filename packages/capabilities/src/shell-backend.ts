@@ -180,6 +180,8 @@ const MAX_TIMEOUT_SECONDS = 604_800;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const FOREGROUND_CANCELLATION_RETRY_MS = 250;
 const DEFAULT_HEAVY_ADMISSION_WATCH_INTERVAL_MS = 2_000;
+/** Parked declared work older than this is not revived after a restart. */
+const DEFAULT_HEAVY_PARKED_RETENTION_MS = 60 * 60_000;
 const HEAVY_SETTLE_READ_FAILURE_LIMIT = 3;
 
 export class ShellCapabilityBackend implements CapabilityBackend {
@@ -691,6 +693,98 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     if (admission === undefined) return;
     const grants = admission.pump();
     await Promise.all(grants.map((grant) => this.startAdmittedHeavy(grant)));
+  }
+
+  /**
+   * Re-attach parked declared runs after a restart (#145). The durable task is
+   * the payload, so a fresh runtime only re-claims its queue row: an orphaned
+   * row is adopted, a row still owned by a live runtime is left to it, and
+   * parked work older than the retention window fails truthfully instead of
+   * being revived indefinitely.
+   */
+  public async recoverParkedHeavy(options: {
+    readonly maxAgeMs?: number;
+    readonly now?: () => number;
+  } = {}): Promise<{ reattached: number; failed: number; skipped: number }> {
+    const admission = this.heavyAdmission;
+    const store = this.durableStore;
+    if (admission === undefined || store === undefined) return { reattached: 0, failed: 0, skipped: 0 };
+    const maxAgeMs = Math.max(1, Math.floor(options.maxAgeMs ?? DEFAULT_HEAVY_PARKED_RETENTION_MS));
+    const cutoff = (options.now ?? Date.now)() - maxAgeMs;
+    let reattached = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const task of await store.listWaiting()) {
+      const taskId = typeof task.task_id === 'string' ? task.task_id : undefined;
+      const admissionClass = task.admission_class;
+      if (taskId === undefined || !isShellHeavyAdmissionClass(admissionClass)) {
+        skipped += 1;
+        continue;
+      }
+      // Already owned by this backend: queued locally, starting, or running.
+      if (this.heavyPending.has(taskId) || this.heavyStarting.has(taskId) || this.heavyLeases.has(taskId)) {
+        skipped += 1;
+        continue;
+      }
+      // Trust boundary: a runtime may only revive work whose cwd it would
+      // accept today. A profile that cannot serve it must leave the task for
+      // the runtime that can, not fail it or spawn outside its roots.
+      const cwd = typeof task.cwd === 'string' ? task.cwd : undefined;
+      if (!(await this.recoveryCwdAllowed(cwd))) {
+        skipped += 1;
+        continue;
+      }
+      this.heavyPending.add(taskId);
+      const workspaceId = typeof task.workspace_id === 'string' ? task.workspace_id : undefined;
+      const enqueued = admission.enqueue({
+        operationId: shellOperationId(taskId),
+        ...(workspaceId === undefined ? {} : { workspaceId }),
+        resourceClass: admissionClass,
+      });
+      if (enqueued.status !== 'queued') {
+        this.abandonHeavyReservation(taskId);
+        // Full/unavailable is transient (the next sweep retries); coalesced
+        // means a live foreign runtime owns the row and its work is never
+        // expired by this process.
+        skipped += 1;
+        continue;
+      }
+      // We own the row now, so age is ours to judge. Checked after the claim
+      // so a peer runtime's healthy, long-queued work is never expired here.
+      const reservedAt = typeof task.started_at === 'string' ? Date.parse(task.started_at) : Number.NaN;
+      if (!Number.isFinite(reservedAt) || reservedAt <= cutoff) {
+        admission.cancel(shellOperationId(taskId));
+        this.abandonHeavyReservation(taskId);
+        await store.failWaiting(taskId, 'Parked heavy task expired before a runtime re-attached it');
+        failed += 1;
+        continue;
+      }
+      reattached += 1;
+    }
+    await this.pumpHeavy();
+    return { reattached, failed, skipped };
+  }
+
+  private async recoveryCwdAllowed(cwd: string | undefined): Promise<boolean> {
+    if (cwd === undefined) return false;
+    try {
+      if (this.unrestricted) return (await stat(cwd)).isDirectory();
+      const configuredRoots = this.allowedRootsProvider === undefined ? this.allowedRoots : await this.allowedRootsProvider();
+      const canonicalRoots: string[] = [];
+      for (const root of configuredRoots) {
+        try {
+          if ((await stat(root)).isDirectory()) canonicalRoots.push(await realpath(root));
+        } catch {
+          continue;
+        }
+      }
+      if (canonicalRoots.length === 0) return false;
+      const canonicalCwd = await realpath(cwd);
+      if (!(await stat(canonicalCwd)).isDirectory()) return false;
+      return canonicalRoots.some((root) => isWithin(root, canonicalCwd));
+    } catch {
+      return false;
+    }
   }
 
   private async startAdmittedHeavy(grant: ShellHeavyAdmissionGrant): Promise<void> {

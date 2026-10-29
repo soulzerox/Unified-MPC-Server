@@ -307,6 +307,24 @@ export class DurableShellTaskStore {
     return snapshots.sort((left, right) => String(right.started_at ?? '').localeCompare(String(left.started_at ?? '')));
   }
 
+  /**
+   * Parked declared tasks only (#145 restart re-attachment). Filters before
+   * reading output files, so a periodic sweep does not scan every finished
+   * task's stdout/stderr.
+   */
+  public async listWaiting(): Promise<Record<string, unknown>[]> {
+    await mkdir(this.rootDirectory, { recursive: true });
+    const entries = await readdir(this.rootDirectory, { withFileTypes: true }).catch(() => []);
+    const waiting: Record<string, unknown>[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const metadata = await this.readMetadata(entry.name);
+      if (!metadata.ok || metadata.value.state !== 'waiting_resource') continue;
+      waiting.push(await this.snapshotFromMetadata(metadata.value));
+    }
+    return waiting.sort((left, right) => String(left.started_at ?? '').localeCompare(String(right.started_at ?? '')));
+  }
+
   public async snapshot(taskId: string, tailLines?: number, owner?: CapabilityTaskOwner): Promise<Result<Record<string, unknown>>> {
     const metadata = await this.readMetadata(taskId);
     if (!metadata.ok) return metadata;

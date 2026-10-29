@@ -278,6 +278,116 @@ describe('declared heavy shell admission (#145)', () => {
     expect(fake.settled).toEqual([]);
   });
 
+  it('re-attaches a parked run after a restart and starts it on admission', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
+    temporaryRoots.push(root);
+    const first = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+    });
+    const run = await first.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+    expect(run).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    const fake = new FakeAdmission();
+    const restarted = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
+    });
+    const recovered = await restarted.recoverParkedHeavy();
+    expect(recovered).toEqual({ reattached: 1, failed: 0, skipped: 0 });
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]).toMatchObject({ operationId: `shell:${taskId}`, resourceClass: 'verification_heavy' });
+
+    // A second sweep must not enqueue the same task twice.
+    expect(await restarted.recoverParkedHeavy()).toEqual({ reattached: 0, failed: 0, skipped: 1 });
+    expect(fake.requests).toHaveLength(1);
+
+    fake.admitAll();
+    await expect.poll(async () => {
+      const status = await restarted.execute({ operation: 'status', task_id: taskId });
+      return status.ok ? (status.value as Record<string, unknown>).state : 'error';
+    }, { timeout: 5000 }).toBe('completed');
+    await expect.poll(() => fake.settled, { timeout: 5000 })
+      .toEqual([{ operationId: `shell:${taskId}`, outcome: 'completed' }]);
+  });
+
+  it('fails a parked run that outlived the re-attachment window', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
+    temporaryRoots.push(root);
+    const first = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+    });
+    const run = await first.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    const fake = new FakeAdmission();
+    const restarted = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
+    });
+    const recovered = await restarted.recoverParkedHeavy({ maxAgeMs: 60_000, now: () => Date.now() + 3_600_000 });
+
+    expect(recovered).toEqual({ reattached: 0, failed: 1, skipped: 0 });
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.cancelled.has(`shell:${taskId}`)).toBe(true);
+    const status = await restarted.execute({ operation: 'status', task_id: taskId });
+    expect(status).toMatchObject({ ok: true, value: { state: 'failed', error: expect.stringContaining('expired') } });
+  });
+
+  it('leaves a parked run to a live foreign runtime instead of double-queuing it', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
+    temporaryRoots.push(root);
+    const first = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+    });
+    const run = await first.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    const fake = new FakeAdmission();
+    fake.coalesce = true;
+    const restarted = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
+    });
+    // Even far past the age window, a row owned by a live foreign runtime is
+    // never expired by this process.
+    expect(await restarted.recoverParkedHeavy({ maxAgeMs: 60_000, now: () => Date.now() + 3_600_000 }))
+      .toEqual({ reattached: 0, failed: 0, skipped: 1 });
+    const status = await restarted.execute({ operation: 'status', task_id: taskId });
+    expect(status).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
+  });
+
+  it('does not revive a parked run outside its allowed roots', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
+    const otherRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
+    temporaryRoots.push(root, otherRoot);
+    const first = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+    });
+    const run = await first.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    // A workspace-scoped profile sharing the task root must not spawn work
+    // whose cwd its own resolveCwd would reject.
+    const fake = new FakeAdmission();
+    const scoped = new ShellCapabilityBackend({
+      allowedRoots: [otherRoot], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
+    });
+    expect(await scoped.recoverParkedHeavy()).toEqual({ reattached: 0, failed: 0, skipped: 1 });
+    expect(fake.requests).toEqual([]);
+    const status = await scoped.execute({ operation: 'status', task_id: taskId });
+    expect(status).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
+  });
+
   it('settles a failed run as failed so the slot is not leaked', async () => {
     const fake = new FakeAdmission();
     fake.autoAdmit = true;

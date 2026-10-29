@@ -94,7 +94,13 @@ export function createShellHeavyAdmissionPort(
         if (enqueued.status === 'queued') {
           return { status: 'queued', position: target.position(request.operationId) ?? 0, depth: enqueued.depth, cost };
         }
-        if (enqueued.status === 'coalesced') return { status: 'coalesced', depth: enqueued.depth, cost };
+        if (enqueued.status === 'coalesced') {
+          // `queued` means this queue adopted the durable row (restart
+          // re-attachment); a row held by a live foreign owner stays skipped.
+          return enqueued.queued
+            ? { status: 'queued', position: target.position(request.operationId) ?? 0, depth: enqueued.depth, cost }
+            : { status: 'coalesced', depth: enqueued.depth, cost };
+        }
         return { status: 'full', depth: enqueued.depth, cost };
       } catch {
         return { status: 'failed', depth: 0, cost };

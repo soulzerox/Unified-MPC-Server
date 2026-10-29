@@ -997,6 +997,10 @@ export function createStdioMcpRuntime(
   const heavyJobQueueRecoveryTimer = setInterval(() => {
     try {
       heavyJobQueueRecovery.reconcileOnce();
+      // Parked declared shell runs follow the same sweep: once a dead owner's
+      // queue row is orphaned, this runtime adopts it and starts the reserved
+      // worker without a caller retry (#145 restart re-attachment).
+      void capabilityRuntime.shell.recoverParkedHeavy().catch(() => undefined);
     } catch {
       // A failed sweep must not take the runtime down; the next sweep retries.
     }
@@ -1004,6 +1008,7 @@ export function createStdioMcpRuntime(
   heavyJobQueueRecoveryTimer.unref?.();
   const heavyJobQueueRecoveryReady = (async (): Promise<void> => {
     heavyJobQueueRecovery.reconcileOnce();
+    await capabilityRuntime.shell.recoverParkedHeavy().catch(() => undefined);
   })();
   const recoveryReady = Promise.all([
     fileRecoveryReady,

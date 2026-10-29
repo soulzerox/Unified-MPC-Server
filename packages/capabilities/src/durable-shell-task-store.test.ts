@@ -632,6 +632,51 @@ describe('durable shell task parking (#145)', () => {
     await store.cancel('waiting-three', owner);
   });
 
+  it('lists only parked tasks for restart re-attachment', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    await store.reserve({
+      taskId: 'parked-one',
+      executable: process.execPath,
+      arguments: ['-e', ''],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+      admissionClass: 'verification_heavy',
+      admissionCost: 8,
+    });
+    const running = await store.launch({
+      taskId: 'running-one',
+      executable: process.execPath,
+      arguments: ['-e', 'setTimeout(() => {}, 5000)'],
+      cwd: root,
+      environment: process.env,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+    expect(running.ok).toBe(true);
+
+    const waiting = await store.listWaiting();
+    expect(waiting).toMatchObject([{
+      task_id: 'parked-one',
+      state: 'waiting_resource',
+      admission_class: 'verification_heavy',
+      admission_cost: 8,
+      workspace_id: 'workspace-a',
+    }]);
+
+    await store.cancel('parked-one', owner);
+    await store.cancel('running-one', owner);
+  });
+
   it('refuses to start a task that is not parked', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
     temporaryRoots.push(root);

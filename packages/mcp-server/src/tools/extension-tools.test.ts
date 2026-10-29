@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
+import { ContextEconomyRuntime } from '../context-economy.js';
 import { ToolRegistry } from '../tool-registry.js';
+import { skillTools } from './skill-tools.js';
+import type { McpToolContext } from './tool-types.js';
 import type { ExtensionsService } from '@unified-mpc/extensions';
 
 describe('skills and mcp bridge tools', () => {
@@ -198,5 +201,98 @@ describe('skills and mcp bridge tools', () => {
 
     expect(observed).toHaveLength(2);
     for (const signal of observed) expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('lists skills as bounded summaries and keeps the full catalog behind detail=full', async () => {
+    const longDescription = 'Use when the user asks for this '.repeat(30);
+    const exactDescription = 'd'.repeat(200);
+    const catalog = [
+      { id: 'a/long', name: 'long', description: longDescription, source: 'a', trustTier: 'trusted' as const, rootPath: '/root', skillPath: '/root/a/SKILL.md', canonicalSkillPath: '/canonical/a/SKILL.md' },
+      { id: 'a/short', name: 'short', description: 'Short one.', source: 'a', trustTier: 'trusted' as const, rootPath: '/root', skillPath: '/root/a/SKILL.md' },
+      { id: 'a/exact', name: 'exact', description: exactDescription, source: 'a', trustTier: 'trusted' as const, rootPath: '/root', skillPath: '/root/a/SKILL.md' },
+    ];
+    const requests: unknown[] = [];
+    const context = {
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        extensions: {
+          async listSkills(input: unknown) {
+            requests.push(input);
+            return ok({ skills: catalog });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+    const tool = skillTools(context).find((entry) => entry.name === 'skills_list');
+    if (tool === undefined) throw new Error('skills_list is not registered');
+
+    const summary = await tool.execute({ query: 'long', source: 'a' }, new AbortController().signal);
+    expect(requests).toEqual([{ query: 'long', source: 'a' }]);
+    expect(tool.parse({ query: 'long' })).toMatchObject({ ok: true, value: { query: 'long', detail: 'summary' } });
+    expect(tool.parse({ detail: 'full' })).toMatchObject({ ok: true, value: { detail: 'full' } });
+    expect(tool.parse({ detail: 'everything' })).toMatchObject({ ok: false });
+    if (!summary.ok) throw new Error('expected a summary listing');
+    expect(summary.value).toMatchObject({
+      total: 3,
+      detail: 'summary',
+      omittedFields: ['rootPath', 'skillPath', 'canonicalSkillPath'],
+    });
+    const rows = (summary.value as { skills: Record<string, unknown>[] }).skills;
+    expect(Object.keys(rows[0] ?? {}).sort()).toEqual(['description', 'descriptionTruncated', 'id', 'name', 'source', 'trustTier']);
+    expect(rows[0]).toMatchObject({ id: 'a/long', descriptionTruncated: true });
+    expect((rows[0]?.description as string)).toHaveLength(201);
+    expect(rows[1]).toMatchObject({ id: 'a/short', description: 'Short one.', descriptionTruncated: false });
+    // Exactly the preview length is not truncation: `>` is strict, so the text survives whole.
+    expect(rows[2]).toMatchObject({ id: 'a/exact', description: exactDescription, descriptionTruncated: false });
+    expect(JSON.stringify(summary.value)).not.toContain('/root/a/SKILL.md');
+    expect(JSON.stringify(summary.value)).not.toContain(longDescription);
+
+    const full = await tool.execute({ detail: 'full' }, new AbortController().signal);
+    expect(full).toEqual(ok({ skills: catalog }));
+
+    const failed = await skillTools({
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { extensions: { async listSkills() { return err(appError('INTERNAL_ERROR', 'catalog failed')); } } },
+    } as unknown as McpToolContext).find((entry) => entry.name === 'skills_list')!.execute({}, new AbortController().signal);
+    expect(failed).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+
+    const missing = await skillTools({
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {},
+    } as unknown as McpToolContext).find((entry) => entry.name === 'skills_list')!.execute({}, new AbortController().signal);
+    expect(missing).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+  });
+
+  it('keeps a large skill catalog well inside the registry tool-result budget', async () => {
+    const skills = Array.from({ length: 136 }, (_, index) => ({
+      id: `unified-mpc-skills/skill-${index}`,
+      name: `skill-${index}`,
+      description: `Use when the user asks about capability ${index}. `.repeat(20),
+      source: 'unified-mpc-skills',
+      trustTier: 'trusted' as const,
+      rootPath: '/home/user/.local/share/unified-mpc/skills',
+      skillPath: `/home/user/.local/share/unified-mpc/skills/skill-${index}/SKILL.md`,
+      canonicalSkillPath: `/home/user/.local/share/unified-mpc/canonical/skills/skill-${index}/SKILL.md`,
+    }));
+    const context = {
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { extensions: { async listSkills() { return ok({ skills }); } } },
+    } as unknown as McpToolContext;
+    const tool = skillTools(context).find((entry) => entry.name === 'skills_list');
+    if (tool === undefined) throw new Error('skills_list is not registered');
+
+    const summary = await tool.execute({}, new AbortController().signal);
+    if (!summary.ok) throw new Error('expected a summary listing');
+    const summaryBytes = Buffer.byteLength(JSON.stringify(summary.value));
+    const unprojectedBytes = Buffer.byteLength(JSON.stringify({ skills }));
+    expect(unprojectedBytes).toBeGreaterThan(140 * 1024);
+    // The registry truncates around 512 KiB (`DEFAULT_MAX_TOOL_RESULT_BYTES` in
+    // tool-registry.ts); a listing must not sit anywhere near that cliff, so this
+    // pins an eighth of it.
+    expect(summaryBytes).toBeLessThan(64 * 1024);
   });
 });

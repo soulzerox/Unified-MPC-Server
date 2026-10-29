@@ -57,6 +57,16 @@ function projectAdmission(snapshot: ResourceAdmissionSnapshot): Record<string, u
     rejected: snapshot.rejected,
     activeCostByClass: snapshot.activeCostByClass,
     ...(snapshot.pressure === undefined ? {} : { pressure: snapshot.pressure }),
+    ...(snapshot.cpu === undefined
+      ? {}
+      : {
+        cpu: {
+          loadAverage1m: snapshot.cpu.loadAverage1m,
+          cpuCount: snapshot.cpu.cpuCount,
+          loadPerCore: snapshot.cpu.loadAverage1m / snapshot.cpu.cpuCount,
+          sampledAtMs: snapshot.cpu.sampledAtMs,
+        },
+      }),
   };
 }
 
@@ -83,7 +93,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
   return [
     defineTool({
       name: 'heavy_job_queue_status',
-      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, configured and measured-effective heavy cap, pressure state, memory sample) and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the response labels that projection as runtime-local; durable position remains the audit order.',
+      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, configured and measured-effective heavy cap, pressure state, memory and CPU samples) and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the response labels that projection as runtime-local; durable position remains the audit order.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: heavyJobQueueStatusSchema,

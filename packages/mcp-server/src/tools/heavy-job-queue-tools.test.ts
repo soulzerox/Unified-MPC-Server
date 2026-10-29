@@ -168,6 +168,7 @@ describe('heavyJobQueueTools', () => {
           processRssBytes: 50,
           sampledAtMs: now,
         },
+        cpu: { loadAverage1m: 3, cpuCount: 4, sampledAtMs: now },
       }),
     } as unknown as ResourceAdmissionController;
     const tool = queueTool({
@@ -189,6 +190,7 @@ describe('heavyJobQueueTools', () => {
           pressureState: 'elevated',
           rejected: 2,
           pressure: { availableMemoryBytes: 150, processRssBytes: 50 },
+          cpu: { loadAverage1m: 3, cpuCount: 4, loadPerCore: 0.75 },
         },
         entries: [
           expect.objectContaining({ state: 'queued' }),

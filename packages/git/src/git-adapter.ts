@@ -592,45 +592,81 @@ export class GitAdapter {
     const executableEnvironmentKeys = [
       'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_PROXY_COMMAND', 'GIT_EXEC_PATH',
     ];
-    if (executableEnvironmentKeys.some((key) => (process.env[key] ?? '').trim().length > 0)) {
-      return err(appError('PERMISSION_DENIED', 'Git push cannot use executable transport or credential environment overrides'));
+    const offendingEnvironmentKeys = executableEnvironmentKeys.filter((key) => (process.env[key] ?? '').trim().length > 0);
+    if (offendingEnvironmentKeys.length > 0) {
+      // Issue #297: the denial reason travels with the error so callers can
+      // tell a policy allow from a runtime transport configuration block.
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Git push cannot use executable transport or credential environment overrides',
+        false,
+        { reason: 'push-environment-override', keys: offendingEnvironmentKeys.join(',') },
+      ));
     }
     const executableConfigKeys = [
-      `remote.${remote}.receivepack`,
-      `remote.${remote}.uploadpack`,
-      `remote.${remote}.proxy`,
-      `remote.${remote}.vcs`,
-      'core.sshCommand',
-      'core.askPass',
-      'core.gitProxy',
-      'credential.helper',
-      'push.gpgSign',
-      'push.recurseSubmodules',
-      'submodule.recurse',
-      'protocol.allow',
+      { key: `remote.${remote}.receivepack`, fallback: 'remote.<name>.receivepack' },
+      { key: `remote.${remote}.uploadpack`, fallback: 'remote.<name>.uploadpack' },
+      { key: `remote.${remote}.proxy`, fallback: 'remote.<name>.proxy' },
+      { key: `remote.${remote}.vcs`, fallback: 'remote.<name>.vcs' },
+      { key: 'core.sshCommand', fallback: 'core.sshCommand' },
+      { key: 'core.askPass', fallback: 'core.askPass' },
+      { key: 'core.gitProxy', fallback: 'core.gitProxy' },
+      { key: 'credential.helper', fallback: 'credential.helper' },
+      { key: 'push.gpgSign', fallback: 'push.gpgSign' },
+      { key: 'push.recurseSubmodules', fallback: 'push.recurseSubmodules' },
+      { key: 'submodule.recurse', fallback: 'submodule.recurse' },
+      { key: 'protocol.allow', fallback: 'protocol.allow' },
     ];
-    for (const key of executableConfigKeys) {
+    for (const { key, fallback } of executableConfigKeys) {
       const configured = await this.runner.run(['config', '--get-all', key], cwd, this.signalOptions(signal));
-      if (configured.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured executable transport or credential helpers'));
+      if (configured.exitCode === 0) {
+        return err(appError(
+          'PERMISSION_DENIED',
+          'Git push cannot use configured executable transport or credential helpers',
+          false,
+          { reason: 'push-config-override', key: diagnosticConfigKey(key, fallback) },
+        ));
+      }
       if (configured.exitCode !== 1) {
         const error = this.mapError(configured);
         if (error !== null) return error;
       }
     }
     const protocolAllow = await this.runner.run(['config', '--get-regexp', '^protocol\\..*\\.allow$'], cwd, this.signalOptions(signal));
-    if (protocolAllow.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot enable external transport protocols'));
+    if (protocolAllow.exitCode === 0) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Git push cannot enable external transport protocols',
+        false,
+        { reason: 'push-protocol-override', key: firstConfigKey(protocolAllow.stdout, 'protocol.<name>.allow') },
+      ));
+    }
     if (protocolAllow.exitCode !== 1) {
       const error = this.mapError(protocolAllow);
       if (error !== null) return error;
     }
     const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
-    if (credentialHelpers.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured credential helpers'));
+    if (credentialHelpers.exitCode === 0) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Git push cannot use configured credential helpers',
+        false,
+        { reason: 'push-credential-helper', key: firstConfigKey(credentialHelpers.stdout, 'credential.<url>.helper') },
+      ));
+    }
     if (credentialHelpers.exitCode !== 1) {
       const error = this.mapError(credentialHelpers);
       if (error !== null) return error;
     }
     const signingPrograms = await this.runner.run(['config', '--get-regexp', '^gpg(\\..+)?\\.program$'], cwd, this.signalOptions(signal));
-    if (signingPrograms.exitCode === 0) return err(appError('PERMISSION_DENIED', 'Git push cannot use configured signing programs'));
+    if (signingPrograms.exitCode === 0) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Git push cannot use configured signing programs',
+        false,
+        { reason: 'push-signing-program', key: firstConfigKey(signingPrograms.stdout, 'gpg.program') },
+      ));
+    }
     if (signingPrograms.exitCode !== 1) {
       const error = this.mapError(signingPrograms);
       if (error !== null) return error;
@@ -640,10 +676,24 @@ export class GitAdapter {
     const hooksError = this.mapError(hooks);
     if (hooksError !== null) return hooksError;
     const hooksPath = hooks.stdout.trim();
-    if (hooksPath.length === 0) return err(appError('PERMISSION_DENIED', 'Git push hook location could not be resolved safely'));
+    if (hooksPath.length === 0) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Git push hook location could not be resolved safely',
+        false,
+        { reason: 'push-hook-location-unresolved' },
+      ));
+    }
     try {
       const hook = await stat(path.join(path.resolve(cwd, hooksPath), 'pre-push'));
-      if (hook.isFile()) return err(appError('PERMISSION_DENIED', 'Git push cannot run a configured pre-push hook'));
+      if (hook.isFile()) {
+        return err(appError(
+          'PERMISSION_DENIED',
+          'Git push cannot run a configured pre-push hook',
+          false,
+          { reason: 'push-pre-push-hook' },
+        ));
+      }
     } catch (error: unknown) {
       if (!isMissingFile(error)) return err(appError('INTERNAL_ERROR', 'Git push hook safety could not be verified', true));
     }
@@ -743,6 +793,28 @@ export class GitAdapter {
 
 function isMissingFile(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+const SAFE_DIAGNOSTIC_CONFIG_KEY = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/;
+
+/**
+ * Keep only config keys whose dotted segments are plain names. A subsection is
+ * free-form, so a credential helper scoped to a URL could otherwise echo a
+ * username, password, or token from the key itself.
+ */
+function diagnosticConfigKey(key: string, fallback: string): string {
+  return SAFE_DIAGNOSTIC_CONFIG_KEY.test(key) ? key : fallback;
+}
+
+/**
+ * `git config --get-regexp` prints `<key> <value>` per match. Only the key is
+ * diagnostic and safe to echo; values may contain credentials.
+ */
+function firstConfigKey(output: string, fallback: string): string {
+  const line = output.split(/\r?\n/).find((entry) => entry.trim().length > 0);
+  if (line === undefined) return fallback;
+  const key = line.trim().split(/\s+/)[0] ?? '';
+  return diagnosticConfigKey(key, fallback);
 }
 
 function isSupportedRemoteTarget(target: string): boolean {

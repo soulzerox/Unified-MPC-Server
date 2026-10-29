@@ -222,4 +222,82 @@ describe('heavyJobQueueTools', () => {
 
     expect(result).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
   });
+
+  it('annotates queued entries from the runtime-local fair-order provider', async () => {
+    const live: HeavyJobLiveEntry[] = [
+      entry({ operationId: 'job-a', workspaceId: 'workspace-a' }),
+      entry({ operationId: 'job-b', workspaceId: 'workspace-b', position: 2 }),
+      entry({ operationId: 'job-running', state: 'running', position: 0 }),
+    ];
+    const tool = queueTool({
+      heavyJobQueue: { listLive: () => live, depth: () => 2 },
+      heavyJobFairness: {
+        fairnessSnapshot: () => ({
+          agingMs: 1_800_000,
+          entries: [
+            { operationId: 'job-b', effectiveRank: 0, aged: false },
+            { operationId: 'job-a', effectiveRank: 1, aged: true },
+            // A running row is never in the fair order; if a provider says so
+            // anyway, the tool must not present it as queued work.
+            { operationId: 'job-running', effectiveRank: 2, aged: false },
+          ],
+        }),
+      },
+    } as unknown as McpToolContext['services']);
+
+    const result = await tool.execute({}, new AbortController().signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        fairness: { scope: 'runtime-local', agingMs: 1_800_000 },
+        entries: [
+          expect.objectContaining({ operationId: 'job-a', effectiveRank: 1, aged: true }),
+          expect.objectContaining({ operationId: 'job-b', effectiveRank: 0, aged: false }),
+          expect.objectContaining({ operationId: 'job-running' }),
+        ],
+      },
+    });
+    const value = (result as {
+      ok: true;
+      value: { entries: Array<Record<string, unknown>> };
+    }).value;
+    expect(value.entries[2]).not.toHaveProperty('effectiveRank');
+    expect(value.entries[2]).not.toHaveProperty('aged');
+  });
+
+  it('omits fair-order fields when the runtime has no fairness provider', async () => {
+    const tool = queueTool({
+      heavyJobQueue: { listLive: () => [entry()], depth: () => 1 },
+    } as unknown as McpToolContext['services']);
+
+    const result = await tool.execute({}, new AbortController().signal);
+    const value = (result as {
+      ok: true;
+      value: { entries: Array<Record<string, unknown>> } & Record<string, unknown>;
+    }).value;
+
+    expect(value).not.toHaveProperty('fairness');
+    expect(value.entries[0]).not.toHaveProperty('effectiveRank');
+    expect(value.entries[0]).not.toHaveProperty('aged');
+  });
+
+  it('keeps reporting queue state when the fairness projection fails', async () => {
+    const tool = queueTool({
+      heavyJobQueue: { listLive: () => [entry()], depth: () => 1 },
+      heavyJobFairness: {
+        fairnessSnapshot: () => {
+          throw new Error('projection failed');
+        },
+      },
+    } as unknown as McpToolContext['services']);
+
+    const result = await tool.execute({}, new AbortController().signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { entries: [expect.objectContaining({ operationId: 'pre-edit:workspace-1:abc' })] },
+    });
+    expect((result as { ok: true; value: Record<string, unknown> }).value).not.toHaveProperty('fairness');
+  });
 });

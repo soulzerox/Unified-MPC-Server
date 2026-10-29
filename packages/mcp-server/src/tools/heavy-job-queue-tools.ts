@@ -1,6 +1,12 @@
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { HeavyJobLiveEntry, ResourceAdmissionSnapshot } from '@unified-mpc/workspace';
-import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
+import {
+  defineTool,
+  missingService,
+  type McpApplicationServices,
+  type McpToolContext,
+  type McpToolDefinition,
+} from './tool-types.js';
 import { heavyJobQueueStatusSchema } from './schemas.js';
 
 const DEFAULT_LIMIT = 20;
@@ -53,11 +59,30 @@ function projectAdmission(snapshot: ResourceAdmissionSnapshot): Record<string, u
   };
 }
 
+interface FairnessAnnotation {
+  readonly info: Record<string, unknown>;
+  readonly ranks: ReadonlyMap<string, { readonly effectiveRank: number; readonly aged: boolean }>;
+}
+
+/** Fairness is diagnostic-only: a broken projection must not hide queue state. */
+function projectFairness(provider: McpApplicationServices['heavyJobFairness']): FairnessAnnotation | undefined {
+  if (provider === undefined) return undefined;
+  try {
+    const snapshot = provider.fairnessSnapshot();
+    return {
+      info: { scope: 'runtime-local', agingMs: snapshot.agingMs },
+      ranks: new Map(snapshot.entries.map((entry) => [entry.operationId, entry])),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'heavy_job_queue_status',
-      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, pressure state, memory sample) and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue.',
+      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, pressure state, memory sample) and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the response labels that projection as runtime-local; durable position remains the audit order.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: heavyJobQueueStatusSchema,
@@ -71,7 +96,15 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
             : live.filter((entry) => entry.workspaceId === input.workspaceId);
           const limit = input.limit ?? DEFAULT_LIMIT;
           const nowMs = Date.now();
-          const entries = filtered.slice(0, limit).map((entry) => projectEntry(entry, nowMs));
+          const fairness = projectFairness(context.services.heavyJobFairness);
+          const entries = filtered.slice(0, limit).map((entry) => {
+            const projected = projectEntry(entry, nowMs);
+            if (entry.state !== 'queued' || fairness === undefined) return projected;
+            const rank = fairness.ranks.get(entry.operationId);
+            return rank === undefined
+              ? projected
+              : { ...projected, effectiveRank: rank.effectiveRank, aged: rank.aged };
+          });
           const admission = context.resourceAdmissionController?.snapshot();
           return ok({
             queueDepth: store.depth(),
@@ -80,6 +113,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
             running: filtered.filter((entry) => entry.state === 'running').length,
             truncated: filtered.length > entries.length,
             ...(admission === undefined ? {} : { admission: projectAdmission(admission) }),
+            ...(fairness === undefined ? {} : { fairness: fairness.info }),
             entries,
           });
         } catch {

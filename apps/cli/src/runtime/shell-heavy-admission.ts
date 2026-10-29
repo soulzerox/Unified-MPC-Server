@@ -1,4 +1,5 @@
 import {
+  DEFAULT_HEAVY_JOB_AGING_MS,
   DEFAULT_RAG_INDEX_ADMISSION_COST,
   DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
   HeavyJobWaiterQueue,
@@ -13,6 +14,7 @@ import type {
   ShellHeavyAdmissionPort,
   ShellHeavyAdmissionReattachResult,
   ShellHeavyAdmissionRequest,
+  ShellHeavyFairnessSnapshot,
 } from '@unified-mpc/capabilities';
 
 const ADMISSION_COST: Readonly<Record<ShellHeavyAdmissionRequest['resourceClass'], number>> = {
@@ -155,6 +157,8 @@ export function createShellHeavyAdmissionPort(
       }
     },
     position: (operationId: string): number | undefined => queue?.position(operationId),
+    fairnessSnapshot: (): ShellHeavyFairnessSnapshot => queue?.fairnessSnapshot()
+      ?? { agingMs: DEFAULT_HEAVY_JOB_AGING_MS, entries: [] },
     onAdmitted: (listener: (grant: ShellHeavyAdmissionGrant) => void): (() => void) => {
       listeners.add(listener);
       return (): void => {

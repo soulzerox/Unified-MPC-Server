@@ -8,6 +8,7 @@ import {
   type ShellHeavyAdmissionGrant,
   type ShellHeavyAdmissionPort,
   type ShellHeavyAdmissionRequest,
+  type ShellHeavyFairnessSnapshot,
 } from './shell-backend.js';
 
 const temporaryRoots: string[] = [];
@@ -94,6 +95,15 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
     if (this.cancelled.has(operationId) || this.granted.has(operationId)) return undefined;
     const index = this.requests.findIndex((request) => request.operationId === operationId);
     return index === -1 ? undefined : index + 1;
+  }
+
+  public fairnessSnapshot(): ShellHeavyFairnessSnapshot {
+    return {
+      agingMs: 30 * 60_000,
+      entries: this.requests
+        .filter((request) => !this.cancelled.has(request.operationId) && !this.granted.has(request.operationId))
+        .map((request, effectiveRank) => ({ operationId: request.operationId, effectiveRank, aged: false })),
+    };
   }
 
   public onAdmitted(listener: (grant: ShellHeavyAdmissionGrant) => void): () => void {

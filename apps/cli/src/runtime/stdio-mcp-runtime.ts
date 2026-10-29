@@ -629,10 +629,13 @@ export function createStdioMcpRuntime(
     auditService,
     profileProvider,
   });
+  // #145 step 3: keep the port reference so diagnostics can project the same
+  // fair order the shell queue actually drains, not a second reconstruction.
+  const shellHeavyAdmission = createShellHeavyAdmissionPort(() => resourceAdmissionController, () => heavyJobQueue);
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
   createRuntimePromotionTaskReconciliation(),
-  createShellHeavyAdmissionPort(() => resourceAdmissionController, () => heavyJobQueue));
+  shellHeavyAdmission);
   const requestCancellation = new GoalRequestCancellationService();
   const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
   const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
@@ -1093,6 +1096,7 @@ export function createStdioMcpRuntime(
     capabilities: capabilityRuntime.service,
     extensions,
     heavyJobQueue,
+    heavyJobFairness: shellHeavyAdmission,
     mergePolicy,
     mergeVerificationRun,
     mergeVerificationStatus,

@@ -66,7 +66,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'merge_verification_status',
-      description: 'Read durable exact-head merge verification state without running any gate: recorded attempts (queued, running, completed, failed, interrupted) plus persisted receipts for a pull request. A running attempt whose heartbeat expired is reported as interrupted, never as still working, and no verdict is implied unless a receipt exists. A queued attempt means heavy admission was denied: nothing ran, and a later merge_verification_run for the same head claims it.',
+      description: 'Read durable exact-head merge verification state without running any gate: recorded attempts (queued, running, completed, failed, interrupted) plus persisted receipts for a pull request. A running attempt whose heartbeat expired is reported as interrupted, never as still working, unless a receipt for the exact head was recorded after the attempt started: then its verdict survived the dead runner and the attempt is reported as completed with that receiptRef. No verdict is implied unless a receipt exists. A queued attempt means heavy admission was denied: nothing ran, and a later merge_verification_run for the same head claims it.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: mergeVerificationStatusSchema,

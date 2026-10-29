@@ -256,6 +256,84 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
     }
   });
 
+  it('counts terminal outcomes inside a bounded window and ignores live rows', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const queue = repository(database);
+      const start = NOW.toISOString();
+      const later = '2026-10-27T12:00:00.000Z';
+
+      queue.claim(entry('job-completed'), 8);
+      queue.start('job-completed', start);
+      queue.settle('job-completed', 'completed', start);
+
+      queue.claim(entry('job-failed'), 8);
+      queue.start('job-failed', start);
+      queue.settle('job-failed', 'failed', start, 'exit 1');
+
+      queue.claim(entry('job-interrupted'), 8);
+      queue.start('job-interrupted', start);
+      queue.recover('job-interrupted', 'interrupt', { at: later });
+
+      queue.claim(entry('job-cancelled'), 8);
+      queue.cancel('job-cancelled', start);
+
+      queue.claim(entry('job-superseded'), 8);
+      queue.supersede('job-superseded', entry('job-superseded-next'), 8);
+
+      queue.claim(entry('job-live'), 8);
+
+      expect(queue.outcomes('2026-10-27T00:00:00.000Z')).toEqual({
+        completed: 1,
+        failed: 1,
+        interrupted: 1,
+        cancelled: 1,
+        superseded: 1,
+        total: 5,
+      });
+      expect(queue.outcomes(later)).toEqual({
+        completed: 0,
+        failed: 0,
+        interrupted: 1,
+        cancelled: 0,
+        superseded: 0,
+        total: 1,
+      });
+
+      // A re-claimed identity reuses its row, so only its latest outcome counts.
+      queue.claim(entry('job-completed'), 8);
+      expect(queue.outcomes('2026-10-27T00:00:00.000Z')).toMatchObject({ completed: 0, total: 4 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('compares the outcome window as instants, not strings', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const queue = repository(database);
+      queue.claim(entry('job-offset'), 8);
+      // 05:00+07:00 is 2026-10-26T22:00Z: lexicographically "after" the window
+      // start but an earlier instant, so a string comparison would miscount it.
+      queue.cancel('job-offset', '2026-10-27T05:00:00.000+07:00');
+
+      expect(queue.outcomes('2026-10-27T00:00:00.000Z')).toMatchObject({ cancelled: 0, total: 0 });
+      expect(queue.outcomes('2026-10-26T00:00:00.000Z')).toMatchObject({ cancelled: 1, total: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects an invalid outcome window', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      expect(() => repository(database).outcomes('not-a-date'))
+        .toThrow(HeavyJobQueueStoreError);
+    } finally {
+      database.close();
+    }
+  });
+
   it('keeps queue state and ordering across a database reopen', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-heavy-job-queue-'));
     roots.push(root);

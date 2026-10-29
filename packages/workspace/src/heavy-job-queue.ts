@@ -108,6 +108,22 @@ export interface HeavyJobLiveEntry extends HeavyJobQueueEntry {
 
 export type HeavyJobTerminalOutcome = 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'superseded';
 
+/**
+ * Terminal outcomes finished inside one bounded window (#145 observability).
+ *
+ * Rows are one per exact operation identity and a re-claimed identity reuses
+ * its row, so these are counts of distinct inputs whose *latest* terminal
+ * outcome landed in the window, not a lifetime event log.
+ */
+export interface HeavyJobOutcomeCounts {
+  readonly completed: number;
+  readonly failed: number;
+  readonly interrupted: number;
+  readonly cancelled: number;
+  readonly superseded: number;
+  readonly total: number;
+}
+
 export type HeavyJobRecoveryAction = 'orphan' | 'interrupt' | 'expire';
 
 /**
@@ -147,6 +163,13 @@ export interface HeavyJobQueueStore {
   ): boolean;
   depth(): number;
   listLive(): readonly HeavyJobLiveEntry[];
+  /**
+   * Terminal outcomes finished at or after `since` (#145 observability).
+   *
+   * Optional: a store without history support reports nothing instead of
+   * failing queue status. Implementations must not scan live rows.
+   */
+  outcomes?(since: string): HeavyJobOutcomeCounts;
 }
 
 export interface HeavyJobWaiterQueueOptions {

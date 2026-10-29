@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { err, appError, type RepositoryMergePolicy } from '@unified-mpc/domain';
+import { err, appError, type MergeVerificationReceipt, type RepositoryMergePolicy } from '@unified-mpc/domain';
 import type { WorkspaceRepository } from '@unified-mpc/workspace';
 import { ResourceAdmissionController, tryAdmitVerificationHeavy } from '@unified-mpc/workspace';
 import {
@@ -7,6 +7,7 @@ import {
   type ExactHeadWorkspaceVerifier,
   type MergeVerificationAdmissionPort,
   type MergeVerificationAttemptRecorder,
+  type MergeVerificationReceiptRecord,
   type MergeVerificationReceiptWriter,
   type MergeVerificationRunDependencies,
   type VerificationCommandRunner,
@@ -125,6 +126,29 @@ function receiptWriter(): { writer: MergeVerificationReceiptWriter; append: Retu
     writer: { append } as MergeVerificationReceiptWriter,
     append,
   };
+}
+
+const REVIEW_EVIDENCE = 'GitHub review 55: [merge-review:clean] Exact-head LLM review: no blockers.';
+
+function storedReceipt(overrides: Partial<MergeVerificationReceipt> = {}): MergeVerificationReceipt {
+  return {
+    repository: REPOSITORY,
+    pullRequest: 17,
+    headSha: HEAD,
+    baseSha: BASE,
+    verificationMode: 'local_exact_head',
+    gates: [{ name: 'pytest default suite', source: 'local_command', headSha: HEAD, outcome: 'passed' }],
+    review: { outcome: 'clean_llm_review', headSha: HEAD, evidence: REVIEW_EVIDENCE },
+    createdAt: '2026-10-07T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function storedVerdict(
+  receipt: MergeVerificationReceipt,
+  receiptRef = `merge-verification:17@${HEAD}:stored`,
+): MergeVerificationReceiptRecord {
+  return { receiptRef, sequence: 3, receipt, recordedAt: receipt.createdAt };
 }
 
 const workspaces = {} as WorkspaceRepository;
@@ -1097,6 +1121,182 @@ describe('createMergeVerificationRunPort', () => {
     expect(result).toMatchObject({ ok: true });
     expect(tryAcquire).toHaveBeenCalledTimes(1);
     expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
+  });
+
+  it('reuses an identical persisted verdict instead of re-running local gates', async () => {
+    const stored = storedReceipt();
+    const listForExactHead = vi.fn(async () => [storedVerdict(stored)]);
+    const append = vi.fn(async () => ({ appended: true, record: { sequence: 7 } }));
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: { append, listForExactHead },
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      now: () => new Date('2026-10-07T11:00:00Z'),
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        status: 'completed',
+        receiptRef: `merge-verification:17@${HEAD}:stored`,
+        sequence: 3,
+        receipt: stored,
+        decision: { status: 'MERGE_ALLOWED' },
+      },
+    });
+    expect(listForExactHead).toHaveBeenCalledWith({
+      repository: REPOSITORY,
+      pullRequest: 17,
+      headSha: HEAD,
+      limit: 10,
+    });
+    expect(run).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it('reuses a persisted GitHub-check verdict without a workspace or admission', async () => {
+    const stored = storedReceipt({
+      verificationMode: 'hybrid',
+      gates: [{ name: 'Runtime Parity', source: 'github_check', headSha: HEAD, outcome: 'passed' }],
+    });
+    const controller = permissiveAdmission();
+    const tryAcquire = vi.spyOn(controller, 'tryAcquire');
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: { append: vi.fn(), listForExactHead: vi.fn(async () => [storedVerdict(stored)]) },
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: githubOnlyPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { receiptRef: `merge-verification:17@${HEAD}:stored` } });
+    expect(run).not.toHaveBeenCalled();
+    expect(tryAcquire).not.toHaveBeenCalled();
+  });
+
+  it('re-runs gates when the requested review evidence differs from the receipt', async () => {
+    const stored = storedReceipt({
+      review: { outcome: 'clean_llm_review', headSha: HEAD, evidence: 'GitHub review 54: [merge-review:clean] older review' },
+    });
+    const append = vi.fn(async () => ({ appended: true, record: { sequence: 8 } }));
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: { append, listForExactHead: vi.fn(async () => [storedVerdict(stored)]) },
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      now: () => new Date('2026-10-07T11:00:00Z'),
+      randomId: () => 'fresh-id',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { receiptRef: `merge-verification:17@${HEAD}:fresh-id`, sequence: 8 } });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-runs gates when the current policy requires a gate the receipt lacks', async () => {
+    const stored = storedReceipt({ gates: [] });
+    const append = vi.fn(async () => ({ appended: true, record: { sequence: 8 } }));
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: { append, listForExactHead: vi.fn(async () => [storedVerdict(stored)]) },
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      now: () => new Date('2026-10-07T11:00:00Z'),
+      randomId: () => 'fresh-id',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { receiptRef: `merge-verification:17@${HEAD}:fresh-id` } });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-runs gates when the base moved or the ledger read fails', async () => {
+    const movedBase = storedReceipt({ baseSha: 'b'.repeat(40) });
+    const append = vi.fn(async () => ({ appended: true, record: { sequence: 8 } }));
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const movedBaseService = createService({
+      github: githubFor(),
+      receipts: { append, listForExactHead: vi.fn(async () => [storedVerdict(movedBase)]) },
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      now: () => new Date('2026-10-07T11:00:00Z'),
+      randomId: () => 'fresh-id',
+    });
+
+    await expect(movedBaseService.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    })).resolves.toMatchObject({ ok: true, value: { receiptRef: `merge-verification:17@${HEAD}:fresh-id` } });
+    expect(run).toHaveBeenCalledTimes(1);
+
+    const failingReadService = createService({
+      github: githubFor(),
+      receipts: {
+        append,
+        listForExactHead: vi.fn(async () => {
+          throw new Error('ledger unavailable');
+        }),
+      },
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      now: () => new Date('2026-10-07T11:00:00Z'),
+      randomId: () => 'fresh-id',
+    });
+
+    await expect(failingReadService.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    })).resolves.toMatchObject({ ok: true, value: { receiptRef: `merge-verification:17@${HEAD}:fresh-id` } });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(append).toHaveBeenCalledTimes(2);
   });
 });
 

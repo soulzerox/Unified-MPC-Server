@@ -78,6 +78,13 @@ export interface MergeVerificationRunPort {
   run(request: MergeVerificationRunRequest, signal?: AbortSignal): Promise<Result<MergeVerificationRunResult>>;
 }
 
+export interface MergeVerificationReceiptRecord {
+  readonly receiptRef: string;
+  readonly sequence: number;
+  readonly receipt: MergeVerificationReceipt;
+  readonly recordedAt: string;
+}
+
 export interface MergeVerificationReceiptWriter {
   append(request: {
     readonly receiptRef: string;
@@ -87,6 +94,17 @@ export interface MergeVerificationReceiptWriter {
     readonly appended: boolean;
     readonly record: { readonly sequence: number };
   }>;
+  /**
+   * Optional read side (#305). When present, a request identical to the evidence that
+   * produced a persisted receipt reuses that verdict instead of re-running the gates.
+   * A writer without this method always re-runs.
+   */
+  listForExactHead?(request: {
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly headSha: string;
+    readonly limit?: number;
+  }): Promise<readonly MergeVerificationReceiptRecord[]>;
 }
 
 export interface VerificationCommandResult {
@@ -215,6 +233,13 @@ export function createMergeVerificationRunPort(
       if (subject.repository !== request.policy.repository) {
         return err(appError('PERMISSION_DENIED', 'Requested repository does not match the authoritative merge policy'));
       }
+
+      // A client that reconnects after a transport drop re-sends the same exact-head
+      // request. When the durable table already holds a receipt that still satisfies the
+      // current policy for that identical request, re-running up to 20 minutes of gates
+      // is wasted work; anything that differs still runs them.
+      const reused = await reusePersistedVerdict(context, request, subject);
+      if (reused !== undefined) return reused;
 
       const localGates = request.policy.requiredGates.filter((gate) => gate.source === 'local_command');
       const admission = deps.admission;
@@ -508,6 +533,64 @@ interface VerifyContext {
   readonly now: () => Date;
   readonly randomId: () => string;
   readonly attempts: MergeVerificationAttemptRecorder | undefined;
+}
+
+/**
+ * Reuse a persisted verdict only for a byte-for-byte identical request: same exact head,
+ * base SHA, verification mode and review evidence, and a receipt the current policy still
+ * accepts. A new review, a moved base, or a stricter policy all force a fresh gate run,
+ * so reuse can never merge evidence the caller did not just ask to verify.
+ */
+async function reusePersistedVerdict(
+  context: VerifyContext,
+  request: MergeVerificationRunRequest,
+  subject: OpenPullRequestSubject,
+): Promise<Result<MergeVerificationVerdictResult> | undefined> {
+  const listForExactHead = context.deps.receipts.listForExactHead;
+  if (typeof listForExactHead !== 'function') return undefined;
+
+  let records: readonly MergeVerificationReceiptRecord[];
+  try {
+    records = await listForExactHead.call(context.deps.receipts, {
+      repository: request.repository,
+      pullRequest: request.pullRequest,
+      headSha: subject.headSha,
+      limit: 10,
+    });
+  } catch {
+    return undefined;
+  }
+  if (records.length === 0) return undefined;
+
+  const reviewResult = await resolveReviewReceipt(context.deps.github, request, subject.headSha);
+  if (!reviewResult.ok) return reviewResult;
+  const review = reviewResult.value;
+
+  for (const record of records) {
+    const receipt = record.receipt;
+    if (receipt.baseSha !== subject.baseSha) continue;
+    if (receipt.verificationMode !== request.policy.verificationMode) continue;
+    if (!sameReviewEvidence(receipt.review, review)) continue;
+    const decision = evaluateMergeEvidence(request.policy, subject, receipt);
+    if (decision.status !== 'MERGE_ALLOWED') continue;
+    return ok({
+      status: 'completed' as const,
+      receiptRef: record.receiptRef,
+      receipt,
+      decision,
+      sequence: record.sequence,
+    });
+  }
+  return undefined;
+}
+
+function sameReviewEvidence(
+  left: MergeVerificationReceipt['review'],
+  right: MergeVerificationReceipt['review'],
+): boolean {
+  return left.outcome === right.outcome
+    && left.headSha.toLowerCase() === right.headSha.toLowerCase()
+    && left.evidence === right.evidence;
 }
 
 async function verify(

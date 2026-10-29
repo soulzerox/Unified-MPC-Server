@@ -283,11 +283,38 @@ describe('GitAdapter integration', () => {
       ok: false,
       error: {
         code: 'PERMISSION_DENIED',
-        details: { reason: 'push-credential-helper', key: 'credential.https://example.invalid.helper' },
+        details: { reason: 'push-credential-helper', key: 'credential.<url>.helper' },
       },
     });
-    // The diagnostic names the blocking config key but never its value.
+    // The diagnostic names the blocking key pattern but never its value or URL scope.
     expect(JSON.stringify(denied)).not.toContain(wrapper);
+    expect(JSON.stringify(denied)).not.toContain('example.invalid');
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
+  it('does not echo credentials embedded in a URL-scoped credential helper key', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    const marker = path.join(root, 'credential-wrapper-ran');
+    const wrapper = path.join(root, 'credential-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'credential.https://user:secret@example.invalid.helper', `!${wrapper}`], { cwd: root, windowsHide: true });
+
+    const denied = await new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin');
+    expect(denied).toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.<url>.helper' },
+      },
+    });
+    const serialized = JSON.stringify(denied);
+    expect(serialized).not.toContain(wrapper);
+    expect(serialized).not.toContain('user:secret');
+    expect(serialized).not.toContain('secret@example.invalid');
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 

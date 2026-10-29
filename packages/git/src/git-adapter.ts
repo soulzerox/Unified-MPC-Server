@@ -604,27 +604,27 @@ export class GitAdapter {
       ));
     }
     const executableConfigKeys = [
-      `remote.${remote}.receivepack`,
-      `remote.${remote}.uploadpack`,
-      `remote.${remote}.proxy`,
-      `remote.${remote}.vcs`,
-      'core.sshCommand',
-      'core.askPass',
-      'core.gitProxy',
-      'credential.helper',
-      'push.gpgSign',
-      'push.recurseSubmodules',
-      'submodule.recurse',
-      'protocol.allow',
+      { key: `remote.${remote}.receivepack`, fallback: 'remote.<name>.receivepack' },
+      { key: `remote.${remote}.uploadpack`, fallback: 'remote.<name>.uploadpack' },
+      { key: `remote.${remote}.proxy`, fallback: 'remote.<name>.proxy' },
+      { key: `remote.${remote}.vcs`, fallback: 'remote.<name>.vcs' },
+      { key: 'core.sshCommand', fallback: 'core.sshCommand' },
+      { key: 'core.askPass', fallback: 'core.askPass' },
+      { key: 'core.gitProxy', fallback: 'core.gitProxy' },
+      { key: 'credential.helper', fallback: 'credential.helper' },
+      { key: 'push.gpgSign', fallback: 'push.gpgSign' },
+      { key: 'push.recurseSubmodules', fallback: 'push.recurseSubmodules' },
+      { key: 'submodule.recurse', fallback: 'submodule.recurse' },
+      { key: 'protocol.allow', fallback: 'protocol.allow' },
     ];
-    for (const key of executableConfigKeys) {
+    for (const { key, fallback } of executableConfigKeys) {
       const configured = await this.runner.run(['config', '--get-all', key], cwd, this.signalOptions(signal));
       if (configured.exitCode === 0) {
         return err(appError(
           'PERMISSION_DENIED',
           'Git push cannot use configured executable transport or credential helpers',
           false,
-          { reason: 'push-config-override', key },
+          { reason: 'push-config-override', key: diagnosticConfigKey(key, fallback) },
         ));
       }
       if (configured.exitCode !== 1) {
@@ -638,7 +638,7 @@ export class GitAdapter {
         'PERMISSION_DENIED',
         'Git push cannot enable external transport protocols',
         false,
-        { reason: 'push-protocol-override', key: firstConfigKey(protocolAllow.stdout) ?? 'protocol.*.allow' },
+        { reason: 'push-protocol-override', key: firstConfigKey(protocolAllow.stdout, 'protocol.<name>.allow') },
       ));
     }
     if (protocolAllow.exitCode !== 1) {
@@ -651,7 +651,7 @@ export class GitAdapter {
         'PERMISSION_DENIED',
         'Git push cannot use configured credential helpers',
         false,
-        { reason: 'push-credential-helper', key: firstConfigKey(credentialHelpers.stdout) ?? 'credential.helper' },
+        { reason: 'push-credential-helper', key: firstConfigKey(credentialHelpers.stdout, 'credential.<url>.helper') },
       ));
     }
     if (credentialHelpers.exitCode !== 1) {
@@ -664,7 +664,7 @@ export class GitAdapter {
         'PERMISSION_DENIED',
         'Git push cannot use configured signing programs',
         false,
-        { reason: 'push-signing-program', key: firstConfigKey(signingPrograms.stdout) ?? 'gpg.program' },
+        { reason: 'push-signing-program', key: firstConfigKey(signingPrograms.stdout, 'gpg.program') },
       ));
     }
     if (signingPrograms.exitCode !== 1) {
@@ -795,15 +795,26 @@ function isMissingFile(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
+const SAFE_DIAGNOSTIC_CONFIG_KEY = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/;
+
+/**
+ * Keep only config keys whose dotted segments are plain names. A subsection is
+ * free-form, so a credential helper scoped to a URL could otherwise echo a
+ * username, password, or token from the key itself.
+ */
+function diagnosticConfigKey(key: string, fallback: string): string {
+  return SAFE_DIAGNOSTIC_CONFIG_KEY.test(key) ? key : fallback;
+}
+
 /**
  * `git config --get-regexp` prints `<key> <value>` per match. Only the key is
  * diagnostic and safe to echo; values may contain credentials.
  */
-function firstConfigKey(output: string): string | undefined {
+function firstConfigKey(output: string, fallback: string): string {
   const line = output.split(/\r?\n/).find((entry) => entry.trim().length > 0);
-  if (line === undefined) return undefined;
-  const key = line.trim().split(/\s+/)[0];
-  return key === undefined || key.length === 0 ? undefined : key;
+  if (line === undefined) return fallback;
+  const key = line.trim().split(/\s+/)[0] ?? '';
+  return diagnosticConfigKey(key, fallback);
 }
 
 function isSupportedRemoteTarget(target: string): boolean {

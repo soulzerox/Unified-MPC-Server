@@ -85,7 +85,11 @@ import {
 } from '@unified-mpc/storage';
 import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
-import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
+import {
+  DEFAULT_INDEX_STATUS_TIMEOUT_MS,
+  DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
+  NativeThaiRagProviderDriver,
+} from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -333,6 +337,21 @@ export function createStdioMcpRuntime(
     strictWorkerAuthorityGenerationProvider: workspaceAuthorityEpoch.currentGeneration,
     strictWorkerRegistryGenerationProvider: (): number => rawWorkspaceRepository.readAuthorityGeneration(),
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
+    // #407 deadline: status polls get their own bounded call timeout instead
+    // of the one-hour index-session budget, so `polls * timeout` is the real
+    // upper bound on how long a wedged worker can hold the read gate.
+    indexStatusTimeoutMs: parseIntegerSetting(
+      process.env.UNIFIED_MPC_THAI_RAG_INDEX_STATUS_TIMEOUT_MS,
+      DEFAULT_INDEX_STATUS_TIMEOUT_MS,
+      1_000,
+      60 * 60_000,
+    ),
+    indexStatusTimeoutCap: parseIntegerSetting(
+      process.env.UNIFIED_MPC_THAI_RAG_INDEX_STATUS_TIMEOUT_POLLS,
+      DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
+      1,
+      600,
+    ),
   });
   // Designated forward-only mode (#407 req 3): a peer never runs the owner
   // election; it follows the designated owner straight or fails with the

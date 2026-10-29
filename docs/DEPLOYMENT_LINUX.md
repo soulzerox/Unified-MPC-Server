@@ -75,6 +75,26 @@ If you run a standalone stdio server without the HTTP runtime, set
 `UNIFIED_THAI_RAG_FORWARD_ONLY=0` in that process environment to restore local
 election. `1`/`true`/`yes`/`on` forces follow mode for any runtime.
 
+### Thai-RAG index-status deadline (#407)
+
+A worker that accepts the socket but stops answering `index_status` must not
+hold the read gate open. Each status poll has its own bounded call timeout
+instead of inheriting the one-hour index-session budget:
+
+```sh
+# Per-poll deadline in milliseconds (1000-3600000, default 30000).
+UNIFIED_MPC_THAI_RAG_INDEX_STATUS_TIMEOUT_MS=30000
+# Consecutive timed-out polls before the mirrored job fails (1-600, default 30).
+UNIFIED_MPC_THAI_RAG_INDEX_STATUS_TIMEOUT_POLLS=30
+```
+
+The worst-case gate hold is roughly `polls * timeout` plus backoff (15 minutes
+with the defaults). When it expires the durable job is marked `failed` with the
+machine-readable `index-status-unreachable` reason, the admission gate is
+released, and later reads re-admit against the active generation without a
+runtime restart. Lower the values only if your provider answers status reads
+quickly; a stale index is safer than a gate that never clears.
+
 ### Runtime-root safety
 
 `UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. The recommended production value is the stable `runtime/current` pointer. The validator also permits a durable canonical checkout for controlled recovery/development use, but its lifecycle must remain independent of issue/goal cleanup. Never point it at:

@@ -185,7 +185,7 @@ export class McpSessionManager {
       managed = await this.ensure(server, config, signal);
       const activeManaged = managed;
       if (isAborted(signal)) return cancelledCall();
-      await this.refreshCatalog(server, activeManaged, signal);
+      await this.refreshCatalog(server, activeManaged, signal, timeoutMs);
       if (expected.catalogFingerprint !== undefined && expected.catalogFingerprint !== activeManaged.catalogFingerprint) {
         return err(appError('CONFLICT', `External MCP contract fingerprint changed for ${server}; describe the server again before calling it`));
       }
@@ -377,10 +377,14 @@ export class McpSessionManager {
     server: string,
     managed: ManagedSession,
     signal?: AbortSignal,
+    callTimeoutMs?: number,
   ): Promise<{ readonly detected: boolean; readonly previousCatalogFingerprint?: string }> {
+    // A per-call deadline must bound the whole call, catalog refresh included.
+    // Otherwise a worker that stops answering hangs here for the session-wide
+    // budget (up to an hour for index sessions) before the tool call starts.
     const listedTools = await withTimeout(
       (callSignal) => this.enqueue(managed, () => managed.session.listTools(callSignal), callSignal),
-      this.callTimeoutMs,
+      callTimeoutMs ?? this.callTimeoutMs,
       `Timed out refreshing tool catalog for ${server}`,
       signal,
     );

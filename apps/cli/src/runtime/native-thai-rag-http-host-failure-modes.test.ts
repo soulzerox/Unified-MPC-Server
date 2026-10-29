@@ -19,8 +19,8 @@ import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage'
  * after the owner lock is written makes `driver.start` fail before the socket
  * exists, so both the lock acquisition and its release are observable.
  *
- * Cases 2 and 3 are opt-in with the same switch as the other real-worker
- * suites. Case 3 kills the provider worker through POSIX `ps --ppid`, so it is
+ * Cases 2-4 are opt-in with the same switch as the other real-worker suites.
+ * Cases 3-4 signal the provider worker through POSIX `ps --ppid`, so they are
  * Linux-only:
  *
  *   THAI_RAG_REAL_PYTHON=/path/to/thai-rag-mcp/venv/bin/python3 \
@@ -98,13 +98,18 @@ function requireBuild(bin: string): void {
   );
 }
 
-function startHost(fixture: Fixture, providerPath: string | undefined = source): StderrSession {
+function startHost(
+  fixture: Fixture,
+  providerPath: string | undefined = source,
+  extraEnv: NodeJS.ProcessEnv = {},
+): StderrSession {
   requireBuild(HTTP_BIN);
   const child = spawn(process.execPath, [HTTP_BIN], {
     env: {
       ...spawnEnv(fixture, providerPath),
       UNIFIED_MPC_WORKSPACE: fixture.workspacePath,
       UNIFIED_MPC_PORT: '0',
+      ...extraEnv,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -286,7 +291,7 @@ async function waitForJournal(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`${label} was not reached within ${timeoutMs / 1_000}s; journal=${JSON.stringify(rows)}`);
+  throw new Error(`${label} was not reached within ${timeoutMs / 1_000}s; journal=${JSON.stringify(rows)}; stderr=${session.stderr()}`);
 }
 
 function parseEndpoint(stderr: string): URL {
@@ -592,6 +597,111 @@ describe('real HTTP host failure modes (#407 addendum)', () => {
       const afterRows = await readJournal(fixture);
       expect(afterRows.some((job) => job.jobId !== running?.jobId)).toBe(true);
 
+      const lock = await readLock(fixture);
+      expect(lock?.pid).toBe(host.child.pid);
+      expect(lock?.pid).not.toBe(follower.child.pid);
+    },
+    300_000,
+  );
+
+  it.skipIf(python === undefined || source === undefined)(
+    'fails a hung index-status job at the configured deadline and re-admits reads',
+    async () => {
+      // The status deadline is the contract under test, so the host runs with
+      // the shipped knobs tightened instead of the 30 x 30s default: three
+      // consecutive 1.5s status timeouts must fail the mirrored job.
+      const fixture = await createFixture(FILE_COUNT);
+      const host = startHost(fixture, source, {
+        UNIFIED_MPC_THAI_RAG_INDEX_STATUS_TIMEOUT_MS: '1500',
+        UNIFIED_MPC_THAI_RAG_INDEX_STATUS_TIMEOUT_POLLS: '3',
+      });
+      await waitFor(() => host.stderr().includes('Thai-RAG startup state=ready'), host, 'HTTP host ready');
+      const workspaceId = await readWorkspaceId(fixture);
+
+      const follower = startFollower(fixture);
+      await waitFor(() => follower.stderr().includes('MCP stdio ready'), follower, 'stdio follower ready');
+      await initialize(follower);
+
+      // The cold read starts the admission index; stop the worker right after
+      // the provider job id is bound so the job is live but unanswerable.
+      const firstSearch = search(follower, workspaceId, 'area perimeter');
+      const rows = await waitForJournal(
+        fixture,
+        host,
+        'running admission job with provider id',
+        (jobs) => jobs.some((job) => job.workspaceId === workspaceId
+          && (job.status === 'running' || job.status === 'cancelling')
+          && job.providerJobId !== undefined),
+      );
+      const running = rows.find((job) => job.workspaceId === workspaceId
+        && (job.status === 'running' || job.status === 'cancelling')
+        && job.providerJobId !== undefined);
+
+      const workers = await providerWorkerPids(host.child.pid);
+      expect(workers.length).toBeGreaterThan(0);
+
+      // A stopped worker cannot be reaped by the host, so every exit path must
+      // release it before the suite tears the host down.
+      const releaseWorkers = (signal: NodeJS.Signals): void => {
+        for (const pid of workers) {
+          try {
+            process.kill(pid, signal);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+          }
+        }
+      };
+
+      try {
+        releaseWorkers('SIGSTOP');
+        // A worker that accepts the socket but never answers is the hung-call
+        // case: every poll times out instead of failing fast. The foreground
+        // read only waits INDEX_ADMISSION_WAIT_MS and reports the queued state;
+        // the deadline is proven on the durable row below.
+        const queued = await firstSearch;
+        expect(queued.isError).toBe(true);
+        expect(queued.text).toMatch(/indexing started|workspace indexing is still running|workspace-indexing/);
+
+        // The durable row is terminal with the machine-readable reason, which
+        // is exactly the fact the read gate re-proves before serving.
+        const terminal = await waitForJournal(
+          fixture,
+          host,
+          'deadline-failed admission job',
+          (jobs) => jobs.some((job) => job.jobId === running?.jobId
+            && job.status === 'failed'
+            && (job.error ?? '').includes('index-status-unreachable')),
+          60_000,
+        );
+        expect(terminal.find((job) => job.jobId === running?.jobId)?.error)
+          .toMatch(/index-status-unreachable/);
+      } finally {
+        releaseWorkers('SIGKILL');
+      }
+
+      // The gate must clear without restarting the host or the follower: a
+      // later read re-admits a fresh job and eventually serves.
+      const deadline = Date.now() + 180_000;
+      let recovered: Awaited<ReturnType<typeof search>> | undefined;
+      while (Date.now() < deadline) {
+        const attempt = await search(follower, workspaceId, 'add function');
+        if (!attempt.isError) {
+          recovered = attempt;
+          break;
+        }
+        expect(attempt.text).toMatch(/indexing started|workspace indexing is still running|workspace-indexing|not connected|connection closed/i);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      expect(recovered, 'search did not recover after the status deadline').toBeDefined();
+      expect(recovered?.payload?.status).toBe('ok');
+      // The recovered read is a real lexical hit, not an empty success: code
+      // indexing is FTS5-first and needs no embedding backend (#407 addendum).
+      expect(recovered?.payload?.data?.items?.some((item) => item.file_path?.endsWith('math.ts'))).toBe(true);
+
+      const afterRows = await readJournal(fixture);
+      expect(afterRows.some((job) => job.jobId !== running?.jobId)).toBe(true);
+
+      // Ownership never moved to the follower while the host was degraded.
       const lock = await readLock(fixture);
       expect(lock?.pid).toBe(host.child.pid);
       expect(lock?.pid).not.toBe(follower.child.pid);

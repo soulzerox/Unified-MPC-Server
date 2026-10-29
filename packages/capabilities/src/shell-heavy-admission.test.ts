@@ -27,9 +27,11 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
   public coalesce = false;
   public autoAdmit = false;
   public enqueueFailure = false;
+  public grantOnEnqueue = false;
   private readonly admitted = new Set<string>();
   private readonly granted = new Set<string>();
   private readonly listeners = new Set<(grant: ShellHeavyAdmissionGrant) => void>();
+  private readonly retiredListeners = new Set<(operationId: string) => void>();
 
   public enqueue(request: ShellHeavyAdmissionRequest): ShellHeavyAdmissionEnqueueResult {
     this.requests.push(request);
@@ -37,6 +39,11 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
     if (this.full) return { status: 'full', depth: 16, cost: COST };
     if (this.coalesce) return { status: 'coalesced', depth: 1, cost: COST };
     if (this.autoAdmit) this.admitted.add(request.operationId);
+    if (this.grantOnEnqueue) {
+      // Deliver the capacity release while the backend is still writing its
+      // reservation: the grant must wait, not be mistaken for a stale one.
+      queueMicrotask(() => this.grantNow(request.operationId));
+    }
     return { status: 'queued', position: this.requests.length, depth: this.requests.length, cost: COST };
   }
 
@@ -76,6 +83,28 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
     return (): void => {
       this.listeners.delete(listener);
     };
+  }
+
+  public onRetired(listener: (operationId: string) => void): () => void {
+    this.retiredListeners.add(listener);
+    return (): void => {
+      this.retiredListeners.delete(listener);
+    };
+  }
+
+  /** Simulate a capacity release that admits one queued operation now. */
+  public grantNow(operationId: string): void {
+    this.admitted.add(operationId);
+    for (const grant of this.pump()) {
+      for (const listener of [...this.listeners]) listener(grant);
+    }
+  }
+
+  /** Simulate durable queue recovery retiring a row this runtime still held. */
+  public retire(operationId: string): void {
+    this.cancelled.add(operationId);
+    this.admitted.delete(operationId);
+    for (const listener of [...this.retiredListeners]) listener(operationId);
   }
 
   /** Simulate capacity release: admit everything still queued and notify the backend. */
@@ -201,6 +230,52 @@ describe('declared heavy shell admission (#145)', () => {
     const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
     await expect.poll(() => fake.settled, { timeout: 5000 })
       .toEqual([{ operationId: `shell:${taskId}`, outcome: 'completed' }]);
+  });
+
+  it('starts a run whose grant arrives while its reservation is still being written', async () => {
+    const fake = new FakeAdmission();
+    fake.grantOnEnqueue = true;
+    const { root, backend } = await backendWith(fake);
+
+    const run = await backend.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+
+    expect(run.ok).toBe(true);
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+    // Without the reservation gate this task would stay `waiting_resource`
+    // forever: the early grant would be settled as stale and never re-issued.
+    await expect.poll(async () => {
+      const status = await backend.execute({ operation: 'status', task_id: taskId });
+      return status.ok ? (status.value as Record<string, unknown>).state : 'error';
+    }, { timeout: 5000 }).toBe('completed');
+    await expect.poll(() => fake.settled, { timeout: 5000 })
+      .toEqual([{ operationId: `shell:${taskId}`, outcome: 'completed' }]);
+  });
+
+  it('fails a parked run when its queue row is retired before admission', async () => {
+    const fake = new FakeAdmission();
+    const { root, backend } = await backendWith(fake);
+
+    const run = await backend.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', LONG_RUN], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+    expect(run).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    fake.retire(`shell:${taskId}`);
+
+    // The row is gone, so no grant can ever arrive; the durable record must
+    // become terminal instead of claiming it is still queued.
+    await expect.poll(async () => {
+      const status = await backend.execute({ operation: 'status', task_id: taskId });
+      return status.ok ? (status.value as Record<string, unknown>).state : 'error';
+    }, { timeout: 5000 }).toBe('failed');
+    const status = await backend.execute({ operation: 'status', task_id: taskId });
+    expect(status).toMatchObject({ ok: true, value: { error: expect.stringContaining('retired') } });
+    expect(fake.settled).toEqual([]);
   });
 
   it('settles a failed run as failed so the slot is not leaked', async () => {

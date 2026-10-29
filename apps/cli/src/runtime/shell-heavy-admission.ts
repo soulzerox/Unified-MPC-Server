@@ -39,6 +39,17 @@ export function createShellHeavyAdmissionPort(
   let queue: HeavyJobWaiterQueue | undefined;
   let controller: ResourceAdmissionController | undefined;
   const listeners = new Set<(grant: ShellHeavyAdmissionGrant) => void>();
+  const retiredListeners = new Set<(operationId: string) => void>();
+
+  const notifyRetired = (operationId: string): void => {
+    for (const listener of [...retiredListeners]) {
+      try {
+        listener(operationId);
+      } catch {
+        // A failing owner must not block the rest of the retired batch.
+      }
+    }
+  };
 
   const ensureQueue = (): HeavyJobWaiterQueue => {
     if (queue !== undefined) return queue;
@@ -47,6 +58,7 @@ export function createShellHeavyAdmissionPort(
     queue = new HeavyJobWaiterQueue(controller, {
       maxQueued: SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
       ...(store === undefined ? {} : { store }),
+      onRetired: notifyRetired,
     });
     controller.onRelease(() => { wake(); });
     return queue;
@@ -109,6 +121,12 @@ export function createShellHeavyAdmissionPort(
       listeners.add(listener);
       return (): void => {
         listeners.delete(listener);
+      };
+    },
+    onRetired: (listener: (operationId: string) => void): (() => void) => {
+      retiredListeners.add(listener);
+      return (): void => {
+        retiredListeners.delete(listener);
       };
     },
   };

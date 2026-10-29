@@ -280,7 +280,11 @@ export class DurableShellTaskStore {
     }
   }
 
-  private async failWaiting(taskId: string, message: string): Promise<void> {
+  /**
+   * Mark a still-parked task failed when admission can never start it
+   * (retired queue row, exhausted capacity). A non-waiting task is untouched.
+   */
+  public async failWaiting(taskId: string, message: string): Promise<void> {
     const metadataResult = await this.readMetadata(taskId);
     if (!metadataResult.ok || metadataResult.value.state !== 'waiting_resource') return;
     const metadata = metadataResult.value;

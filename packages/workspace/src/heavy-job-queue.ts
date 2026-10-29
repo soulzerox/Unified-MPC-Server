@@ -133,6 +133,12 @@ export interface HeavyJobWaiterQueueOptions {
   /** Durable state authority; omitted for the process-local queue. */
   readonly store?: HeavyJobQueueStore;
   readonly now?: () => Date;
+  /**
+   * Called when drain() drops a local row because its durable row is no longer
+   * claimable (retired by recovery or another owner). The owner must retire the
+   * work it parked for that operation; no admission will ever follow.
+   */
+  readonly onRetired?: (operationId: string) => void;
 }
 
 interface LocalHeavyJob {
@@ -158,6 +164,7 @@ export class HeavyJobWaiterQueue {
   private readonly maxQueued: number;
   private readonly store: HeavyJobQueueStore | undefined;
   private readonly now: () => Date;
+  private readonly onRetired: ((operationId: string) => void) | undefined;
   private nextPosition = 1;
 
   public constructor(
@@ -171,6 +178,7 @@ export class HeavyJobWaiterQueue {
     this.maxQueued = max;
     this.store = options.store;
     this.now = options.now ?? ((): Date => new Date());
+    this.onRetired = options.onRetired;
   }
 
   public enqueue(request: HeavyJobRequest): HeavyJobEnqueueResult {
@@ -356,6 +364,7 @@ export class HeavyJobWaiterQueue {
         // work that no longer owns a durable slot.
         this.controller.release(decision.lease);
         this.removeLocal(queued.entry.operationId);
+        this.onRetired?.(queued.entry.operationId);
         continue;
       }
       this.removeLocal(queued.entry.operationId);

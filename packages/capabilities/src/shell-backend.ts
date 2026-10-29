@@ -81,6 +81,12 @@ export interface ShellHeavyAdmissionPort {
   position(operationId: string): number | undefined;
   /** Register the executor that starts an admitted task; returns unsubscribe. */
   onAdmitted(listener: (grant: ShellHeavyAdmissionGrant) => void): () => void;
+  /**
+   * Register the listener for rows the durable queue retired before admission
+   * (recovery took them over, or the row was cancelled out of band). The
+   * backend must fail the parked task; no grant will ever arrive for it.
+   */
+  onRetired(listener: (operationId: string) => void): () => void;
 }
 type TaskState = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
 
@@ -197,6 +203,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly heavyLeases = new Map<string, ShellHeavyAdmissionLease>();
   private readonly heavyPending = new Set<string>();
   private readonly heavyStarting = new Map<string, Promise<void>>();
+  private readonly heavyReservations = new Map<string, { readonly promise: Promise<void>; resolve: () => void }>();
   private readonly heavySettling = new Set<string>();
   private readonly heavySettleFailures = new Map<string, number>();
 
@@ -221,6 +228,9 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.heavyAdmissionWatchIntervalMs = Math.max(10, Math.floor(options.heavyAdmissionWatchIntervalMs ?? DEFAULT_HEAVY_ADMISSION_WATCH_INTERVAL_MS));
     this.heavyAdmission?.onAdmitted((grant) => {
       void this.startAdmittedHeavy(grant);
+    });
+    this.heavyAdmission?.onRetired((operationId) => {
+      void this.retireHeavyTask(operationId);
     });
   }
 
@@ -255,7 +265,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
             // Queued work has no lease yet; its durable row is removed here so a
             // later wake can never spawn a task the caller cancelled.
             this.heavyAdmission?.cancel(shellOperationId(taskId));
-            this.heavyPending.delete(taskId);
+            this.abandonHeavyReservation(taskId);
             if (this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
           }
         }
@@ -310,7 +320,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       if (cancelled.ok) {
         // A queued declared task owns no process; retire its queue row too.
         this.heavyAdmission?.cancel(shellOperationId(taskId));
-        this.heavyPending.delete(taskId);
+        this.abandonHeavyReservation(taskId);
         const outcome = cancelled.value.state === 'cancelled'
           ? 'cancelled' as const
           : cancelled.value.state === 'already_terminal' ? heavyLeaseOutcome(cancelled.value.detail) : undefined;
@@ -595,13 +605,24 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     const taskId = randomUUID();
     const operationId = shellOperationId(taskId);
     const workspaceId = request.owner.workspaceId;
-    const enqueued = admission.enqueue({
-      operationId,
-      ...(workspaceId === undefined ? {} : { workspaceId }),
-      ...(request.owner.sessionId === undefined ? {} : { sessionId: request.owner.sessionId }),
-      resourceClass: admissionClass,
-    });
+    // Own the task before its durable queue row can be admitted. A capacity
+    // release may land while reserve() is still writing, and that grant must
+    // wait for this reservation instead of being mistaken for a stale one.
+    this.beginHeavyReservation(taskId);
+    let enqueued: ShellHeavyAdmissionEnqueueResult;
+    try {
+      enqueued = admission.enqueue({
+        operationId,
+        ...(workspaceId === undefined ? {} : { workspaceId }),
+        ...(request.owner.sessionId === undefined ? {} : { sessionId: request.owner.sessionId }),
+        resourceClass: admissionClass,
+      });
+    } catch (error: unknown) {
+      this.abandonHeavyReservation(taskId);
+      throw error;
+    }
     if (enqueued.status === 'full') {
+      this.abandonHeavyReservation(taskId);
       // No task record, no process: the caller never holds a task id for work
       // that was never accepted.
       return err(appError(
@@ -612,6 +633,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       ));
     }
     if (enqueued.status === 'coalesced') {
+      this.abandonHeavyReservation(taskId);
       return err(appError(
         'RESOURCE_PRESSURE',
         'Heavy shell work with this identity is already owned by another runtime; retry with a fresh request',
@@ -620,6 +642,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       ));
     }
     if (enqueued.status === 'failed') {
+      this.abandonHeavyReservation(taskId);
       return err(appError(
         'INTERNAL_ERROR',
         'The heavy-job queue is unavailable; retry the run',
@@ -651,10 +674,12 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     });
     if (!reserved.ok) {
       // The durable record could not be written: give the queue row back.
+      this.abandonHeavyReservation(taskId);
       admission.cancel(operationId);
       return reserved;
     }
-    this.heavyPending.add(taskId);
+    // The record exists, so an admitted grant may start it from here on.
+    this.releaseHeavyReservation(taskId);
     await this.pumpHeavy();
     const snapshot = await store.snapshot(taskId, undefined, request.owner);
     return snapshot.ok ? ok(this.decorateTaskResult(snapshot.value, taskId)) : snapshot;
@@ -670,8 +695,14 @@ export class ShellCapabilityBackend implements CapabilityBackend {
 
   private async startAdmittedHeavy(grant: ShellHeavyAdmissionGrant): Promise<void> {
     const taskId = shellTaskIdFromOperationId(grant.operationId);
-    if (taskId === undefined || !this.heavyPending.has(taskId)) {
-      // Cancelled or already started while the grant was in flight: never
+    if (taskId === undefined) {
+      grant.lease.settle('failed');
+      return;
+    }
+    const reservation = this.heavyReservations.get(taskId);
+    if (reservation !== undefined) await reservation.promise;
+    if (!this.heavyPending.has(taskId)) {
+      // Cancelled, retired, or failed before the reservation completed: never
       // spawn a process for work this backend no longer owns.
       grant.lease.settle('failed');
       return;
@@ -685,24 +716,59 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     }
   }
 
+  /** Mark the task owned before its queue row exists; grants wait on this. */
+  private beginHeavyReservation(taskId: string): void {
+    let resolve!: () => void;
+    const promise = new Promise<void>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    this.heavyPending.add(taskId);
+    this.heavyReservations.set(taskId, { promise, resolve });
+  }
+
+  /** Publish the reserved record so a grant that arrived early may start it. */
+  private releaseHeavyReservation(taskId: string): void {
+    const reservation = this.heavyReservations.get(taskId);
+    if (reservation === undefined) return;
+    this.heavyReservations.delete(taskId);
+    reservation.resolve();
+  }
+
+  /** Drop ownership and unblock any grant that arrived during the reservation. */
+  private abandonHeavyReservation(taskId: string): void {
+    this.heavyPending.delete(taskId);
+    this.releaseHeavyReservation(taskId);
+  }
+
+  /**
+   * A durable queue row was retired before admission, so no grant will ever
+   * arrive. Fail the parked task instead of leaving a non-terminal record.
+   */
+  private async retireHeavyTask(operationId: string): Promise<void> {
+    const taskId = shellTaskIdFromOperationId(operationId);
+    if (taskId === undefined || !this.heavyPending.has(taskId)) return;
+    this.abandonHeavyReservation(taskId);
+    await this.durableStore?.failWaiting(taskId, 'Heavy-job queue ownership was retired before admission');
+  }
+
   private async startHeavyTask(taskId: string, lease: ShellHeavyAdmissionLease): Promise<void> {
     const store = this.durableStore;
     if (store === undefined) {
-      this.heavyPending.delete(taskId);
+      this.abandonHeavyReservation(taskId);
       lease.settle('failed');
       return;
     }
     try {
       const started = await store.startReserved(taskId, createSafeEnvironment(process.env, this.unrestricted));
       if (!started.ok) {
-        this.heavyPending.delete(taskId);
+        this.abandonHeavyReservation(taskId);
         lease.settle('failed');
         return;
       }
-      this.heavyPending.delete(taskId);
+      this.abandonHeavyReservation(taskId);
       this.watchHeavyTask(taskId, lease);
     } catch {
-      this.heavyPending.delete(taskId);
+      this.abandonHeavyReservation(taskId);
       lease.settle('failed');
     }
   }

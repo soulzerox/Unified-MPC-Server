@@ -203,6 +203,14 @@ export const workspaceIndexWatchSchema = z.object({
   workspaceId: workspaceIdSchema,
   debounceMs: z.number().int().min(0).max(60_000).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
+  /**
+   * Starting a watcher is a control action, so it answers with the watcher and
+   * index metadata and ships no entries unless the caller asks. The underlying
+   * status carries the whole snapshot; returning it verbatim made this call
+   * exceed the 512 KiB tool-result budget and the caller saw only the envelope,
+   * never `started`/`watcher` telemetry.
+   */
+  entryLimit: z.number().int().min(0).max(5_000).optional(),
 }).strict();
 export const workspaceIndexStopSchema = workspaceInfoSchema;
 

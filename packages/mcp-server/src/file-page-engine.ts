@@ -112,17 +112,9 @@ export class FilePageEngine {
         });
       }
 
-      let content = result.value.content;
-      let returnedLineCount = countLines(content);
-      if (returnedLineCount > input.pageSize) {
-        content = takeLines(content, input.pageSize);
-        returnedLineCount = countLines(content);
-      }
-      if (input.responseTargetBytes !== undefined && Buffer.byteLength(content, 'utf8') > input.responseTargetBytes) {
-        const targeted = takeLinesToBytes(content, input.responseTargetBytes);
-        content = targeted.content;
-        returnedLineCount = targeted.lineCount;
-      }
+      const page = clampPageContent(result.value.content, input.pageSize, input.responseTargetBytes);
+      const content = page.content;
+      const returnedLineCount = page.lineCount;
       const startLine = input.nextStartLine;
       const endLine = returnedLineCount === 0 ? startLine : startLine + returnedLineCount - 1;
       const hasMore = result.value.endLine > endLine;
@@ -162,24 +154,43 @@ function validateRequest(request: FilePageRequest): Result<void> {
   return ok(undefined);
 }
 
-function countLines(content: string): number {
-  return content.length === 0 ? 0 : content.split(/\r?\n/).length;
-}
-
-function takeLines(content: string, count: number): string {
-  return content.split(/\r?\n/).slice(0, count).join('\n');
-}
-
-function takeLinesToBytes(content: string, targetBytes: number): { readonly content: string; readonly lineCount: number } {
+/**
+ * Clamp one page to the requested line count and byte target in a single pass.
+ *
+ * The previous shape split the page once per stage and then rebuilt the
+ * selected prefix with `selected = selected + '\n' + line` inside the loop,
+ * re-measuring every candidate. That is O(n^2) bytes copied for a large page
+ * and three full splits for one result. One split, one running byte count and
+ * one join keeps the same output without the copies.
+ */
+function clampPageContent(
+  content: string,
+  maxLines: number,
+  targetBytes: number | undefined,
+): { readonly content: string; readonly lineCount: number } {
+  if (content.length === 0) return { content, lineCount: 0 };
   const lines = content.split(/\r?\n/);
-  let selected = '';
-  let lineCount = 0;
-  for (const line of lines) {
-    const next = selected.length === 0 ? line : `${selected}\n${line}`;
-    if (lineCount > 0 && Buffer.byteLength(next, 'utf8') > targetBytes) break;
-    selected = next;
-    lineCount += 1;
-    if (Buffer.byteLength(selected, 'utf8') >= targetBytes) break;
+  const lineLimit = Math.min(lines.length, maxLines);
+  let take = lineLimit;
+  if (targetBytes !== undefined) {
+    let bytes = 0;
+    take = 0;
+    for (let index = 0; index < lineLimit; index += 1) {
+      const line = lines[index];
+      if (line === undefined) break;
+      const lineBytes = Buffer.byteLength(line, 'utf8') + (index === 0 ? 0 : 1);
+      // The first line is always returned, even when it alone exceeds the target.
+      if (index > 0 && bytes + lineBytes > targetBytes) break;
+      bytes += lineBytes;
+      take = index + 1;
+      if (bytes >= targetBytes) break;
+    }
   }
-  return { content: selected, lineCount };
+  if (take === lines.length) {
+    // Rebuilding normalizes CRLF to LF, which can be the only reason the page
+    // fits the byte target. Returning the raw content would exceed the budget
+    // the caller set.
+    if (targetBytes === undefined || Buffer.byteLength(content, 'utf8') <= targetBytes) return { content, lineCount: lines.length };
+  }
+  return { content: lines.slice(0, take).join('\n'), lineCount: take };
 }

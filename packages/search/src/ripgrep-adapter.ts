@@ -29,10 +29,25 @@ export interface ProcessRunOptions {
    * This keeps high-volume tools such as ripgrep from flooding Electron's main loop.
    */
   readonly stopAfterStdoutLine?: (line: string) => boolean;
+  /**
+   * Keep observed lines out of `stdout`. A caller that consumes matches through
+   * `stopAfterStdoutLine` does not need the raw stream, and ripgrep's `--json`
+   * emits begin/end records for every scanned file -- retaining them means
+   * buffering megabytes of lines whose only consumer is the observer.
+   */
+  readonly retainStdout?: boolean;
   readonly maxStdoutBytes?: number;
 }
 
 export interface ProcessRunner {
+  /**
+   * Run a child and resolve with its outcome.
+   *
+   * Implementations must invoke `stopAfterStdoutLine` for every complete stdout
+   * line when the option is supplied: the search adapter builds its results from
+   * that callback, not from the returned `stdout`, which is empty whenever
+   * `retainStdout` is false.
+   */
   run(command: string, args: readonly string[], cwd: string, options?: ProcessRunOptions): Promise<ProcessRunResult>;
 }
 
@@ -113,6 +128,7 @@ export class DirectProcessRunner implements ProcessRunner {
           return;
         }
         if (stoppedEarly || timedOut) return;
+        const retainStdout = options.retainStdout !== false;
         stdoutLinePending += chunk.toString('utf8');
         if (Buffer.byteLength(stdoutLinePending, 'utf8') > stdoutLimit) {
           requestStop('early');
@@ -121,7 +137,7 @@ export class DirectProcessRunner implements ProcessRunner {
         const lines = stdoutLinePending.split(/\r?\n/);
         stdoutLinePending = lines.pop() ?? '';
         for (const line of lines) {
-          stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, Buffer.from(`${line}\n`, 'utf8'), stdoutLimit);
+          if (retainStdout) stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, Buffer.from(`${line}\n`, 'utf8'), stdoutLimit);
           if (observer(line)) {
             stdoutLinePending = '';
             requestStop('early');
@@ -223,37 +239,33 @@ export class RipgrepAdapter {
     if (discovery === 'automatic') this.appendDefaultGlobs(args);
     if (request.glob !== undefined) args.push('--glob', request.glob);
     args.push('--', request.query, '.');
-    let observedMatches = 0;
+    const matches: SearchMatch[] = [];
+    const maxStructuredBytes = request.resultBudget?.maxStructuredBytes ?? Number.MAX_SAFE_INTEGER;
+    let resultBytes = 0;
+    let hasAdditionalMatch = false;
+    const collect = (line: string): boolean => {
+      const match = this.parseMatch(line);
+      if (match === null) return false;
+      if (discovery === 'automatic' && !classifyContextPath(match.path, discovery).discoverable) return false;
+      const matchBytes = Buffer.byteLength(JSON.stringify(match), 'utf8');
+      if (matches.length >= maxResults || resultBytes + matchBytes > maxStructuredBytes) {
+        hasAdditionalMatch = true;
+        return true;
+      }
+      matches.push(match);
+      resultBytes += matchBytes;
+      return false;
+    };
     const processResult = await this.runner.run(executable.value, args, request.rootPath, {
       timeoutMs: SEARCH_PROCESS_TIMEOUT_MS,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       ...(request.resultBudget === undefined ? {} : { maxStdoutBytes: request.resultBudget.maxStructuredBytes }),
-      stopAfterStdoutLine: (line) => {
-        const match = this.parseMatch(line);
-        if (match === null) return false;
-        if (discovery === 'automatic' && !classifyContextPath(match.path, discovery).discoverable) return false;
-        observedMatches += 1;
-        return observedMatches > maxResults;
-      },
+      retainStdout: false,
+      stopAfterStdoutLine: collect,
     });
     if (!processResult.timedOut && !processResult.stoppedEarly && processResult.exitCode !== 0 && processResult.exitCode !== 1) {
       if (processResult.exitCode === 2) return err({ code: 'INVALID_INPUT', message: searchArgumentError(processResult.stderr), recoverable: false });
       return err({ code: 'INTERNAL_ERROR', message: searchProcessError(processResult.stderr), recoverable: true });
-    }
-    const matches: SearchMatch[] = [];
-    let resultBytes = 0;
-    let hasAdditionalMatch = false;
-    for (const line of processResult.stdout.split(/\r?\n/)) {
-      const match = this.parseMatch(line);
-      if (match === null) continue;
-      if (discovery === 'automatic' && !classifyContextPath(match.path, discovery).discoverable) continue;
-      const matchBytes = Buffer.byteLength(JSON.stringify(match), 'utf8');
-      if (matches.length >= maxResults || resultBytes + matchBytes > (request.resultBudget?.maxStructuredBytes ?? Number.MAX_SAFE_INTEGER)) {
-        hasAdditionalMatch = true;
-        break;
-      }
-      matches.push(match);
-      resultBytes += matchBytes;
     }
     return ok({ matches, truncated: processResult.timedOut === true || processResult.stoppedEarly === true || hasAdditionalMatch });
   }
@@ -273,28 +285,29 @@ export class RipgrepAdapter {
     if (discovery === 'automatic') this.appendDefaultGlobs(args);
     if (request.glob !== undefined) args.push('--glob', request.glob);
     args.push('--');
-    let observedPaths = 0;
+    const paths: string[] = [];
+    let hasAdditionalPath = false;
     const processResult = await this.runner.run(executable.value, args, request.rootPath, {
       timeoutMs: SEARCH_PROCESS_TIMEOUT_MS,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       ...(request.resultBudget === undefined ? {} : { maxStdoutBytes: request.resultBudget.maxStructuredBytes }),
+      retainStdout: false,
       stopAfterStdoutLine: (line) => {
         if (line.length === 0) return false;
         if (discovery === 'automatic' && !classifyContextPath(line, discovery).discoverable) return false;
-        observedPaths += 1;
-        return observedPaths > maxResults;
+        if (paths.length >= maxResults) {
+          hasAdditionalPath = true;
+          return true;
+        }
+        paths.push(line);
+        return false;
       },
     });
     if (!processResult.timedOut && !processResult.stoppedEarly && processResult.exitCode !== 0 && processResult.exitCode !== 1) {
       if (processResult.exitCode === 2) return err({ code: 'INVALID_INPUT', message: searchArgumentError(processResult.stderr), recoverable: false });
       return err({ code: 'INTERNAL_ERROR', message: searchProcessError(processResult.stderr), recoverable: true });
     }
-    const discoveredPaths = processResult.stdout
-      .split(/\r?\n/)
-      .filter((entry) => entry.length > 0)
-      .filter((entry) => discovery === 'explicit' || classifyContextPath(entry, discovery).discoverable);
-    const paths = discoveredPaths.slice(0, maxResults);
-    return ok({ paths, truncated: processResult.timedOut === true || processResult.stoppedEarly === true || discoveredPaths.length > maxResults });
+    return ok({ paths, truncated: processResult.timedOut === true || processResult.stoppedEarly === true || hasAdditionalPath });
   }
 
   private async searchTextFallback(request: SearchTextRequest, maxResults: number): Promise<Result<SearchTextResult>> {

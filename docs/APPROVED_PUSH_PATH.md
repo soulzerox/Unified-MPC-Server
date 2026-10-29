@@ -9,9 +9,11 @@ This document defines the supported alternative for issue #297: a host-mediated
 publish path that a leased Goal can use after explicit human authorization, with
 credentials that never reach the model, the transcript, or a log.
 
-Status: **preflight implemented, publish not implemented.** `git_publish_preflight`
-(read-only) ships the diagnostics half described in section 6. Nothing in this
-repository can publish yet; `git push` remains denied for every caller.
+Status: **preflight and receipt store implemented, publish not implemented.**
+`git_publish_preflight` (read-only) ships the diagnostics half described in section
+6, and migration `042_publish_approvals` ships the durable approval ledger described
+in section 5. Nothing writes or consumes an approval yet, and nothing in this
+repository can publish; `git push` remains denied for every caller.
 
 ---
 
@@ -107,6 +109,16 @@ publish_approvals(
 - Bound to the exact `expected_sha`; a new commit requires a new receipt.
 - Single use: `consumed_at` is set inside the same transaction that authorizes the spawn.
 - Short expiry (default 15 minutes) so a stale approval cannot publish unrelated work later.
+
+Implemented in migration `042_publish_approvals` and
+`SqlitePublishApprovalRepository` (`packages/storage`). Recording is idempotent per
+exact binding and cannot widen a row that already exists; `consumePublishApproval`
+spends a receipt exactly once on the caller's open transaction, so authorization and
+consumption roll back together. The table rejects a non-hex or short SHA, an empty or
+option-shaped branch, and `expires_at <= approved_at` at the schema level, and a
+receipt may only reference a registered workspace. No tool, host surface, or test
+fixture writes a receipt outside the repository tests, and `git_publish_preflight`
+still reports `approval: "missing"` because it does not consult the store yet.
 
 ## 6. Preflight
 

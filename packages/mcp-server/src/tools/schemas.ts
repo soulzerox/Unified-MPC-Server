@@ -58,6 +58,12 @@ export const gitRunSchema = z.object({
   timeoutSeconds: z.number().min(0.1).max(300).optional(),
   userConfirmed: z.boolean().optional(),
 }).strict();
+export const gitPublishPreflightSchema = z.object({
+  workspaceId: optionalWorkspaceIdSchema,
+  cwd: pathSchema.optional(),
+  remote: z.string().min(1).max(128),
+  branch: z.string().min(1).max(1024),
+}).strict();
 export const writeFileSchema = z.object({
   workspaceId: optionalWorkspaceIdSchema,
   path: pathSchema,

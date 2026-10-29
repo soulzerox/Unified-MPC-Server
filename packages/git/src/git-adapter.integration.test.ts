@@ -452,4 +452,87 @@ describe('GitAdapter integration', () => {
       },
     });
   }, 15_000);
+
+  it('reports a ready publish preflight and resolves the protected default branch', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    const remoteRoot = path.join(root, 'remote.git');
+    const workRoot = path.join(root, 'work');
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', remoteRoot], { cwd: root, windowsHide: true });
+    await mkdir(workRoot, { recursive: true });
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: workRoot, windowsHide: true });
+    await writeFile(path.join(workRoot, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', remoteRoot], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: workRoot, windowsHide: true });
+
+    const adapter = new GitAdapter(new DirectGitRunner());
+    const feature = await adapter.publishPreflight(workRoot, 'origin', 'goal/publish');
+    expect(feature).toMatchObject({
+      ok: true,
+      value: {
+        remote: 'origin',
+        branch: 'goal/publish',
+        defaultBranches: ['main'],
+        protectedBranch: false,
+        targets: ['file'],
+        runtime: { ready: true },
+        approval: 'missing',
+      },
+    });
+    const head = await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: workRoot, windowsHide: true });
+    expect(feature.ok && feature.value.head).toBe(head.stdout.trim().toLowerCase());
+
+    await expect(adapter.publishPreflight(workRoot, 'origin', 'main')).resolves.toMatchObject({
+      ok: true,
+      value: { protectedBranch: true },
+    });
+  }, 20_000);
+
+  it('reports a credential-helper runtime block without attempting a push', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: root, windowsHide: true });
+    await writeFile(path.join(root, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'https://example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.https://example.invalid.helper', '!true'], { cwd: root, windowsHide: true });
+
+    const preflight = await new GitAdapter(new DirectGitRunner()).publishPreflight(root, 'origin', 'goal/publish');
+    expect(preflight).toMatchObject({
+      ok: true,
+      value: {
+        runtime: { ready: false, reason: 'push-credential-helper', key: 'credential.<url>.helper' },
+        approval: 'missing',
+      },
+    });
+    expect(JSON.stringify(preflight)).not.toContain('!true');
+  }, 15_000);
+
+  it('never echoes credentials embedded in a publish remote URL', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: root, windowsHide: true });
+    await writeFile(path.join(root, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'https://publisher:super-secret-token@example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+
+    const preflight = await new GitAdapter(new DirectGitRunner()).publishPreflight(root, 'origin', 'goal/publish');
+    expect(preflight).toMatchObject({ ok: true, value: { targets: ['https://example.invalid'] } });
+    expect(JSON.stringify(preflight)).not.toContain('super-secret-token');
+    expect(JSON.stringify(preflight)).not.toContain('publisher');
+  }, 15_000);
 });

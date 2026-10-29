@@ -9,7 +9,9 @@ This document defines the supported alternative for issue #297: a host-mediated
 publish path that a leased Goal can use after explicit human authorization, with
 credentials that never reach the model, the transcript, or a log.
 
-Status: **design only.** No tool in this repository implements it yet.
+Status: **preflight implemented, publish not implemented.** `git_publish_preflight`
+(read-only) ships the diagnostics half described in section 6. Nothing in this
+repository can publish yet; `git push` remains denied for every caller.
 
 ---
 
@@ -107,16 +109,27 @@ publish_approvals(
 ## 6. Preflight
 
 `git_publish` with `dryRun: true` answers "would this succeed, and if not, why"
-without writing:
+without writing. That half is implemented as the read-only
+`git_publish_preflight` tool. It returns the runtime verdict, approval state,
+head, sanitized targets, default branches and `protectedBranch`:
 
 ```json
 {
-  "policy": "allow",
+  "remote": "origin",
+  "branch": "goal/publish",
+  "head": "<sha>",
+  "targets": ["https://github.com"],
+  "defaultBranches": ["main"],
+  "protectedBranch": false,
   "runtime": { "ready": false, "reason": "push-credential-helper", "key": "credential.<url>.helper" },
-  "approval": "missing",
-  "head": "<sha>"
+  "approval": "missing"
 }
 ```
+
+It does not return a `policy` field: reaching the tool already means policy allowed
+the action, and the tool cannot publish anything. When the `ls-remote` lookup for
+default branches fails, `defaultBranches` is `[]` and `protectedBranch` is not
+authoritative.
 
 This is what requirement 3 of #297 asks for: a caller can tell a policy-level allow
 from a runtime authentication/credential block *before* attempting to publish.

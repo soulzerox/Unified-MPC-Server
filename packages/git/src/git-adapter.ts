@@ -90,6 +90,25 @@ export type GitGuardedRebaseResult =
       readonly reason?: string;
     };
 
+/** Runtime half of a publish preflight: why a push would fail even when policy allows it. */
+export interface GitPublishRuntimeStatus {
+  readonly ready: boolean;
+  readonly reason?: string;
+  readonly key?: string;
+}
+
+export interface GitPublishPreflight {
+  readonly remote: string;
+  readonly branch: string;
+  readonly head: string;
+  readonly defaultBranches: readonly string[];
+  readonly protectedBranch: boolean;
+  /** Sanitized transport targets: scheme and host only, never userinfo or path. */
+  readonly targets: readonly string[];
+  readonly runtime: GitPublishRuntimeStatus;
+  readonly approval: 'missing';
+}
+
 const MAX_GIT_ARGS = 128;
 const MAX_GIT_ARG_LENGTH = 32_768;
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
@@ -355,7 +374,7 @@ export class GitAdapter {
     branchName: string,
     signal?: AbortSignal,
   ): Promise<Result<string | null>> {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(remote)
+    if (!isValidRemoteName(remote)
       || branchName.length === 0 || branchName.length > 1024
       || branchName.includes('..') || branchName.includes('//') || branchName.endsWith('/')) {
       return err(appError('INVALID_INPUT', 'Git remote branch is invalid'));
@@ -700,6 +719,74 @@ export class GitAdapter {
     return ok(undefined);
   }
 
+  /**
+   * Issue #297: report whether a publish would be blocked by runtime transport
+   * or credential configuration, without attempting one. Policy is decided
+   * before this runs, so a reached preflight means the caller is allowed to ask.
+   */
+  public async publishPreflight(
+    cwd: string,
+    remote: string,
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<Result<GitPublishPreflight>> {
+    if (!isValidRemoteName(remote)) return err(appError('INVALID_INPUT', 'Git publish remote is invalid'));
+    const ref = `refs/heads/${branch}`;
+    if (branch.length === 0 || branch.length > 1024 || branch.includes('..') || branch.includes('//') || branch.endsWith('/')) {
+      return err(appError('INVALID_INPUT', 'Git publish branch is invalid'));
+    }
+    const validRef = await this.runner.run(['check-ref-format', ref], cwd, this.signalOptions(signal));
+    if (validRef.exitCode !== 0) return err(appError('INVALID_INPUT', 'Git publish branch is invalid'));
+
+    const headResult = await this.runner.run(['rev-parse', '--verify', 'HEAD^{commit}'], cwd, this.signalOptions(signal));
+    const headError = this.mapError(headResult);
+    if (headError !== null) return headError;
+    const head = headResult.stdout.trim().toLowerCase();
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(head)) {
+      return err(appError('INTERNAL_ERROR', 'Git publish head did not resolve to a commit', true));
+    }
+
+    const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd, this.signalOptions(signal));
+    const pushUrlError = this.mapError(pushUrls);
+    if (pushUrlError !== null) return pushUrlError;
+    const rawTargets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (rawTargets.length === 0) return err(appError('CONFLICT', 'Git publish remote could not be resolved', true));
+    const targets: string[] = [];
+    for (const target of rawTargets) {
+      if (!isSupportedRemoteTarget(target)) {
+        return err(appError('PERMISSION_DENIED', 'Git publish remote uses an unsupported transport', false, {
+          reason: 'publish-remote-unsupported',
+        }));
+      }
+      targets.push(describeRemoteTarget(target));
+    }
+
+    const defaults = await this.defaultBranches(cwd, remote);
+    if (!defaults.ok) return defaults;
+
+    const safety = await this.validatePushSafety(cwd, remote, signal);
+    const reason = safety.ok ? undefined : safety.error.details?.reason;
+    const blockingKey = safety.ok ? undefined : safety.error.details?.key;
+    const runtime: GitPublishRuntimeStatus = safety.ok
+      ? { ready: true }
+      : {
+        ready: false,
+        ...(typeof reason === 'string' ? { reason } : {}),
+        ...(typeof blockingKey === 'string' ? { key: blockingKey } : {}),
+      };
+
+    return ok({
+      remote,
+      branch,
+      head,
+      defaultBranches: defaults.value,
+      protectedBranch: defaults.value.includes(branch),
+      targets,
+      runtime,
+      approval: 'missing',
+    });
+  }
+
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {
     const maxBytes = request.maxBytes ?? 1024 * 1024;
     if (!this.isLimit(maxBytes, 4 * 1024 * 1024)) return err(appError('INVALID_INPUT', 'Git diff byte limit is invalid'));
@@ -815,6 +902,30 @@ function firstConfigKey(output: string, fallback: string): string {
   if (line === undefined) return fallback;
   const key = line.trim().split(/\s+/)[0] ?? '';
   return diagnosticConfigKey(key, fallback);
+}
+
+function isValidRemoteName(remote: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(remote);
+}
+
+/**
+ * Publish diagnostics may name the transport but never the path, query, or
+ * userinfo of a push URL; any of those can carry a token.
+ */
+function describeRemoteTarget(target: string): string {
+  if (/^[a-z][a-z0-9+.-]*::/i.test(target)) return 'ext';
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\//i.exec(target);
+  if (schemeMatch !== null) {
+    const scheme = schemeMatch[1]?.toLowerCase() ?? 'unknown';
+    const rest = target.slice(schemeMatch[0].length);
+    const authority = rest.split(/[/?#]/, 1)[0] ?? '';
+    const host = authority.slice(authority.lastIndexOf('@') + 1);
+    return host.length === 0 ? scheme : `${scheme}://${host}`;
+  }
+  // scp-like `user@host:path`
+  const scpMatch = /^(?:[^@/\s]+@)?([^:/\s]+):/i.exec(target);
+  const scpHost = scpMatch?.[1];
+  return scpHost === undefined ? 'file' : `ssh://${scpHost}`;
 }
 
 function isSupportedRemoteTarget(target: string): boolean {

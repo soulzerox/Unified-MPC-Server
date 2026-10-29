@@ -1,5 +1,5 @@
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { gitDiffSchema, gitLogSchema, gitRunSchema, gitStatusSchema } from './schemas.js';
+import { gitDiffSchema, gitLogSchema, gitPublishPreflightSchema, gitRunSchema, gitStatusSchema } from './schemas.js';
 
 export function gitTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -55,6 +55,21 @@ export function gitTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.timeoutSeconds === undefined ? {} : { timeoutMs: Math.floor(input.timeoutSeconds * 1000) }),
           ...(input.userConfirmed === undefined ? {} : { userConfirmed: input.userConfirmed }),
         }, signal, authorization),
+    }),
+    defineTool({
+      name: 'git_publish_preflight',
+      description: 'Report whether a Git publish would be blocked by runtime transport or credential configuration, without pushing and without changing anything. Returns the resolved head commit, sanitized push targets (scheme and host only), default branches, whether the branch is protected, and runtime.ready plus runtime.reason (a push safety code such as push-credential-helper) when configuration would block a push. Policy is decided before this runs, so reaching this tool means the caller may ask; approval is always reported as missing until the host-mediated publish path exists.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: gitPublishPreflightSchema,
+      handler: async (input, signal) => context.services.git === undefined
+        ? missingService()
+        : context.services.git.publishPreflight(context.actor, {
+          ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          remote: input.remote,
+          branch: input.branch,
+        }, signal),
     }),
   ];
 }

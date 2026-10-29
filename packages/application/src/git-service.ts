@@ -19,6 +19,7 @@ import {
   type GitGuardedRebaseResult,
   type GitLogRequest,
   type GitLogResult,
+  type GitPublishPreflight,
   type GitStatusResult,
   type GitWorkspaceSnapshot,
   type GitWorkspaceSnapshotOptions,
@@ -39,6 +40,13 @@ export interface GitRunRequest {
 export interface RefreshedAdmissionRef {
   readonly ref: string;
   readonly sha: string;
+}
+
+export interface GitPublishPreflightRequest {
+  readonly workspaceId?: string;
+  readonly cwd?: string;
+  readonly remote: string;
+  readonly branch: string;
 }
 
 export class GitService {
@@ -102,6 +110,17 @@ export class GitService {
     const workspace = await this.getWorkspace(workspaceId);
     if (!workspace.ok) return workspace;
     return this.adapter.remoteBranchSha(workspace.value.realRootPath, remote, branchName, signal);
+  }
+
+  public async publishPreflight(
+    actor: FileActor,
+    request: GitPublishPreflightRequest,
+    signal?: AbortSignal,
+  ): Promise<Result<GitPublishPreflight>> {
+    void actor;
+    const cwd = await this.resolveCwd(request.workspaceId, request.cwd);
+    if (!cwd.ok) return cwd;
+    return this.adapter.publishPreflight(cwd.value, request.remote, request.branch, signal);
   }
 
   public async isAncestor(

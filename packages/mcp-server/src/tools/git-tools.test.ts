@@ -28,6 +28,19 @@ describe('gitTools', () => {
             observedSignals.push(signal);
             return ok({ exitCode: 0, stdout: '', stderr: '' });
           },
+          async publishPreflight(_actor: unknown, _request: unknown, signal?: AbortSignal) {
+            observedSignals.push(signal);
+            return ok({
+              remote: 'origin',
+              branch: 'goal/publish',
+              head: '0'.repeat(40),
+              defaultBranches: [],
+              protectedBranch: false,
+              targets: ['https://example.invalid'],
+              runtime: { ready: true },
+              approval: 'missing',
+            });
+          },
         },
       },
     } as unknown as McpToolContext;
@@ -38,6 +51,7 @@ describe('gitTools', () => {
       ['git_diff', { workspaceId: 'workspace-1' }],
       ['git_log', { workspaceId: 'workspace-1' }],
       ['git', { args: ['status'], workspaceId: 'workspace-1', userConfirmed: true }],
+      ['git_publish_preflight', { remote: 'origin', branch: 'goal/publish', workspaceId: 'workspace-1' }],
     ];
 
     for (const [name, input] of calls) {
@@ -46,6 +60,6 @@ describe('gitTools', () => {
       await tool.execute(input, signal);
     }
 
-    expect(observedSignals).toEqual([signal, signal, signal, signal]);
+    expect(observedSignals).toEqual([signal, signal, signal, signal, signal]);
   });
 });

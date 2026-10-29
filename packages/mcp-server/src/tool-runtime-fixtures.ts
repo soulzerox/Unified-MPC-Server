@@ -76,6 +76,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   git_diff: service({ workspaceId }, 'git.diff'),
   git_log: service({ workspaceId }, 'git.log'),
   git: service({ workspaceId, args: ['status', '--short'] }, 'git.run'),
+  git_publish_preflight: service({ workspaceId, remote: 'origin', branch: 'goal/publish' }, 'git.publishPreflight'),
   write_file: service({ workspaceId, path: 'tmp-smoke.txt', content: 'smoke' }, 'file.writeFile'),
   apply_patch: service({ workspaceId, files: [{ path: 'tmp-smoke.txt', content: 'smoke' }] }, 'file.applyPatch'),
   edit_file: service({ workspaceId, path: 'tmp-smoke.txt', oldText: 'before', newText: 'after' }, 'file.editFile'),

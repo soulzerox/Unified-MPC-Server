@@ -67,7 +67,9 @@ Full Bypass does not disable schema/input validation, existence checks, task/pro
 
 ### 5. Git mutation and worktree ownership
 
-**Covered tools:** `git`, `git_worktree_spawn`, `git_worktree_remove`.
+**Covered tools:** `git`, `git_publish_preflight`, `git_worktree_spawn`, `git_worktree_remove`.
+
+`git_publish_preflight` is read-only: it resolves the head, sanitizes push targets to scheme and host, and reports whether runtime configuration would block a push. It never writes or pushes; the only remote access is `ls-remote` to resolve default branches, and an empty `defaultBranches` means that lookup failed, so `protectedBranch` is not authoritative in that case.
 
 | Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
 | --- | --- | --- | --- | --- | --- | --- | --- |

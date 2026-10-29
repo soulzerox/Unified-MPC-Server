@@ -128,7 +128,8 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
           return err(appError('PERMISSION_DENIED', 'Guarded merge was blocked by verification or review policy'));
         }
         if (result.status === 'inspect_required') {
-          return err(appError('CONFLICT', `Guarded merge requires inspection: ${result.reason}`, true));
+          const detail = result.detail === undefined ? '' : ` (${result.detail})`;
+          return err(appError('CONFLICT', `Guarded merge requires inspection: ${result.reason}${detail}`, true));
         }
         return ok(result);
       },

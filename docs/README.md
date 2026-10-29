@@ -22,4 +22,6 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
    คู่มือการใช้งานระบบ Unified-MPC-Server ฉบับสมบูรณ์เป็นภาษาไทย
 8. **[Guarded Pull-Request Merge](GUARDED_MERGE.md)**:
    Exact-head evidence chain, the built-in GitHub merge provider and the optional child MCP provider.
+9. **[Approved Git Push Path](APPROVED_PUSH_PATH.md)**:
+   Host-mediated publish for a leased Goal: approval receipts, credential handling, preflight and the tests required before it ships (design, #297).
 

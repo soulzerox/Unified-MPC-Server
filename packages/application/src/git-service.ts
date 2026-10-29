@@ -8,6 +8,8 @@ import {
   isFullBypassAuthorization,
   ok,
   type InvocationAuthorization,
+  type PublishApprovalLookupPort,
+  type PublishApprovalState,
   type Result,
 } from '@unified-mpc/domain';
 import {
@@ -49,11 +51,24 @@ export interface GitPublishPreflightRequest {
   readonly branch: string;
 }
 
+/** Read-only preflight answer: transport/policy diagnostics plus the ledger state for this exact head. */
+export type GitPublishPreflightView = Omit<GitPublishPreflight, 'approval'> & {
+  readonly approval: PublishApprovalState;
+};
+
+export interface GitServiceOptions {
+  /** Host-owned approval ledger. Omitted keeps `approval: "missing"`. */
+  readonly publishApprovals?: PublishApprovalLookupPort;
+  /** Test seam for a deterministic preflight clock. */
+  readonly now?: () => number;
+}
+
 export class GitService {
   public constructor(
     private readonly workspaces: WorkspaceRepository,
     private readonly guard: WorkspacePathGuard = new WorkspacePathGuard(),
     private readonly adapter: GitAdapter = new GitAdapter(),
+    private readonly options: GitServiceOptions = {},
   ) {}
 
   public async status(actor: FileActor, workspaceId: string, signal?: AbortSignal): Promise<Result<GitStatusResult>> {
@@ -116,11 +131,57 @@ export class GitService {
     actor: FileActor,
     request: GitPublishPreflightRequest,
     signal?: AbortSignal,
-  ): Promise<Result<GitPublishPreflight>> {
+  ): Promise<Result<GitPublishPreflightView>> {
     void actor;
+    const workspace = await this.resolvePublishWorkspace(request.workspaceId, request.cwd);
+    if (!workspace.ok) return workspace;
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd);
     if (!cwd.ok) return cwd;
-    return this.adapter.publishPreflight(cwd.value, request.remote, request.branch, signal);
+    const preflight = await this.adapter.publishPreflight(cwd.value, request.remote, request.branch, signal);
+    if (!preflight.ok) return preflight;
+    const approval = await this.inspectPublishApproval(
+      workspace.value.id,
+      request.remote,
+      request.branch,
+      preflight.value.head,
+    );
+    return ok({ ...preflight.value, approval });
+  }
+
+  /**
+   * The preflight reports the ledger state for the exact head it just resolved.
+   * A missing port, a failed lookup, or a malformed clock reports `missing`:
+   * diagnostics never claim an approval they could not read, and the publish
+   * path must still spend a receipt in its own transaction.
+   */
+  private async inspectPublishApproval(
+    workspaceId: string,
+    remote: string,
+    branch: string,
+    expectedSha: string,
+  ): Promise<PublishApprovalState> {
+    const lookup = this.options.publishApprovals;
+    if (lookup === undefined) return 'missing';
+    try {
+      const now = this.options.now?.() ?? Date.now();
+      return await lookup.inspect({ workspaceId, remote, branch, expectedSha }, now);
+    } catch {
+      return 'missing';
+    }
+  }
+
+  /** Resolve the workspace that owns the preflight target without repeating cwd checks. */
+  private async resolvePublishWorkspace(
+    workspaceId: string | undefined,
+    requestedCwd: string | undefined,
+  ): Promise<Result<Workspace>> {
+    if (requestedCwd !== undefined && isAbsoluteFsPath(requestedCwd)) {
+      return resolveWorkspaceForPath(this.workspaces, workspaceId, requestedCwd);
+    }
+    if (workspaceId === undefined || workspaceId.trim().length === 0) {
+      return err(appError('INVALID_INPUT', 'workspaceId is required unless cwd is an absolute path'));
+    }
+    return this.getWorkspace(workspaceId);
   }
 
   public async isAncestor(

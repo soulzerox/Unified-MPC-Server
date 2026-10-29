@@ -79,6 +79,7 @@ import {
   SqliteMergeReconciliationRepository,
   SqliteMergeVerificationAttemptRepository,
   SqliteMergeVerificationReceiptRepository,
+  SqlitePublishApprovalRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
@@ -276,7 +277,9 @@ export function createStdioMcpRuntime(
     }
     return { scope: { workspaceId: current.id, rootPath: current.rootPath } };
   };
-  const gitService = new GitService(workspaceRepository);
+  const gitService = new GitService(workspaceRepository, undefined, undefined, {
+    publishApprovals: new SqlitePublishApprovalRepository(database),
+  });
   const custodyActor: FileActor = {
     clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',
   };

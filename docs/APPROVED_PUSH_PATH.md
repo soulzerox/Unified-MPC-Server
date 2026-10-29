@@ -116,9 +116,11 @@ exact binding and cannot widen a row that already exists; `consumePublishApprova
 spends a receipt exactly once on the caller's open transaction, so authorization and
 consumption roll back together. The table rejects a non-hex or short SHA, an empty or
 option-shaped branch, and `expires_at <= approved_at` at the schema level, and a
-receipt may only reference a registered workspace. No tool, host surface, or test
-fixture writes a receipt outside the repository tests, and `git_publish_preflight`
-still reports `approval: "missing"` because it does not consult the store yet.
+receipt may only reference a registered workspace. No tool or host surface writes or
+spends a receipt outside the repository tests. `git_publish_preflight` reads the
+ledger and reports `approval` as `missing`, `pending`, `expired`, or `consumed` for
+the exact workspace, remote, branch and head; with no host surface writing receipts
+it still reports `missing` in production.
 
 ## 6. Preflight
 
@@ -141,9 +143,13 @@ head, sanitized targets, default branches and `protectedBranch`:
 ```
 
 It does not return a `policy` field: reaching the tool already means policy allowed
-the action, and the tool cannot publish anything. When the `ls-remote` lookup for
-default branches fails, `defaultBranches` is `[]` and `protectedBranch` is not
-authoritative.
+the action, and the tool cannot publish anything. `approval` is read from
+`publish_approvals` for the exact workspace, remote, branch and resolved head, so
+`missing` means no receipt exists, `pending` means a live unconsumed receipt exists,
+and `expired`/`consumed` mean a new approval is required. A lookup failure reports
+`missing`, because a diagnostic must never claim an approval it could not read.
+When the `ls-remote` lookup for default branches fails, `defaultBranches` is `[]`
+and `protectedBranch` is not authoritative.
 
 This is what requirement 3 of #297 asks for: a caller can tell a policy-level allow
 from a runtime authentication/credential block *before* attempting to publish.

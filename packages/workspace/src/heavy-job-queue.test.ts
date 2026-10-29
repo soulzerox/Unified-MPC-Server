@@ -62,6 +62,88 @@ describe('heavy job waiter queue (#145 U3)', () => {
   });
 });
 
+describe('heavy job queue scoped backfill (#145 fairness)', () => {
+  it('backfills another workspace when the queue head is blocked by its own workspace ceiling', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 4,
+      sessionCost: 4,
+      maxOperations: 4,
+    });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    const running = controller.tryAcquire({
+      operationId: 'running-a',
+      workspaceId: 'ws-a',
+      sessionId: 'session-a',
+      resourceClass: 'rag_indexing',
+      cost: 4,
+    });
+    expect(running.admitted).toBe(true);
+
+    queue.enqueue({
+      operationId: 'head-a',
+      workspaceId: 'ws-a',
+      sessionId: 'session-a',
+      resourceClass: 'rag_indexing',
+      cost: 4,
+    });
+    queue.enqueue({
+      operationId: 'backfill-b',
+      workspaceId: 'ws-b',
+      sessionId: 'session-b',
+      resourceClass: 'rag_indexing',
+      cost: 4,
+    });
+
+    const first = queue.drain();
+    expect(first.map((admission) => admission.lease.operationId)).toEqual(['backfill-b']);
+    expect(queue.depth()).toBe(1);
+
+    for (const admission of first) controller.release(admission.lease);
+    if (running.admitted) controller.release(running.lease);
+    const second = queue.drain();
+    expect(second.map((admission) => admission.lease.operationId)).toEqual(['head-a']);
+    for (const admission of second) controller.release(admission.lease);
+  });
+
+  it('stops at a global denial instead of probing every later job', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+    });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    const running = controller.tryAcquire({
+      operationId: 'running-a',
+      workspaceId: 'ws-a',
+      sessionId: 'session-a',
+      resourceClass: 'rag_indexing',
+      cost: 8,
+    });
+    expect(running.admitted).toBe(true);
+    queue.enqueue({
+      operationId: 'queued-b',
+      workspaceId: 'ws-b',
+      sessionId: 'session-b',
+      resourceClass: 'rag_indexing',
+      cost: 8,
+    });
+    queue.enqueue({
+      operationId: 'queued-c',
+      workspaceId: 'ws-c',
+      sessionId: 'session-c',
+      resourceClass: 'rag_indexing',
+      cost: 8,
+    });
+
+    expect(queue.drain()).toEqual([]);
+    expect(queue.depth()).toBe(2);
+    expect(controller.snapshot().rejected).toBe(1);
+    if (running.admitted) controller.release(running.lease);
+  });
+});
+
 describe('heavy job queue supersede (#145 U4)', () => {
   it('supersedes a stale queued generation when a newer head arrives', async () => {
     const { HeavyJobWaiterQueue } = await import('./heavy-job-queue.js');

@@ -188,7 +188,17 @@ export const workspaceIndexSchema = z.object({
   rebuild: z.boolean().default(false),
   includeIgnored: z.boolean().default(false),
 }).strict();
-export const workspaceIndexStatusSchema = workspaceInfoSchema;
+export const workspaceIndexStatusSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  /**
+   * How many snapshot entries the metadata response may carry. The status tool
+   * is an introspection surface, not a dump: an unbounded entry list made it
+   * exceed the 512 KiB tool-result budget on a ~950-file workspace, so callers
+   * received only the truncation envelope and never the metadata they asked
+   * for. Paged entry access stays on `workspace_full_scan`.
+   */
+  entryLimit: z.number().int().min(0).max(5_000).optional(),
+}).strict();
 export const workspaceIndexWatchSchema = z.object({
   workspaceId: workspaceIdSchema,
   debounceMs: z.number().int().min(0).max(60_000).optional(),

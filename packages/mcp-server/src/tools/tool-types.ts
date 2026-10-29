@@ -1,5 +1,5 @@
 import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type MergeReviewOutcome, type MergeVerificationRunOutcome, type RepositoryMergePolicy, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
-import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
+import type { CapabilityService, EventLogBackendOptions, ShellHeavyAdmissionPort } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
   HeavyJobQueueStore,
@@ -225,6 +225,8 @@ export interface McpApplicationServices {
   readonly extensions?: ExtensionsService;
   /** Durable heavy-job queue authority (#145 U5); omitted keeps process-local queue state. */
   readonly heavyJobQueue?: HeavyJobQueueStore;
+  /** Runtime-local fair-order projection (#145 step 3); omitted when the runtime has no shell admission queue. */
+  readonly heavyJobFairness?: Pick<ShellHeavyAdmissionPort, 'fairnessSnapshot'>;
   readonly mergePolicy?: {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };

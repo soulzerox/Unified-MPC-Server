@@ -8,7 +8,9 @@ import {
 } from './resource-admission.js';
 import {
   orderHeavyJobs,
+  projectHeavyJobFairness,
   type HeavyJobFairnessCandidate,
+  type HeavyJobFairnessSnapshot,
 } from './heavy-job-fairness.js';
 
 export const HEAVY_JOB_QUEUE_VERSION = 1 as const;
@@ -399,17 +401,7 @@ export class HeavyJobWaiterQueue {
   public drain(): HeavyJobAdmission[] {
     const admitted: HeavyJobAdmission[] = [];
     const nowMs = this.now().getTime();
-    // Prune before ordering: history for a workspace with no local row can no
-    // longer influence this pass and would only grow the map.
-    this.pruneFairnessHistory();
-    const candidates: HeavyJobFairnessCandidate[] = this.queued.map((queued) => ({
-      operationId: queued.entry.operationId,
-      workspaceId: queued.entry.workspaceId,
-      requestedAt: queued.entry.requestedAt,
-      blocking: queued.entry.blocking,
-      position: queued.position,
-    }));
-    const ordered = orderHeavyJobs(candidates, {
+    const ordered = orderHeavyJobs(this.fairnessCandidates(), {
       now: nowMs,
       agingMs: this.agingMs,
       lastServedAt: this.lastServedAt,
@@ -447,6 +439,32 @@ export class HeavyJobWaiterQueue {
       admitted.push({ lease: decision.lease });
     }
     return admitted;
+  }
+
+  /**
+   * Runtime-local projection of the order drain() would try queued work now.
+   * Derived from the same candidates and fairness history as drain(); it never
+   * rewrites durable positions and is not durable state itself.
+   */
+  public fairnessSnapshot(): HeavyJobFairnessSnapshot {
+    return projectHeavyJobFairness(this.fairnessCandidates(), {
+      now: this.now().getTime(),
+      agingMs: this.agingMs,
+      lastServedAt: this.lastServedAt,
+    });
+  }
+
+  private fairnessCandidates(): HeavyJobFairnessCandidate[] {
+    // Prune before ordering: history for a workspace with no local row can no
+    // longer influence this pass and would only grow the map.
+    this.pruneFairnessHistory();
+    return this.queued.map((queued) => ({
+      operationId: queued.entry.operationId,
+      workspaceId: queued.entry.workspaceId,
+      requestedAt: queued.entry.requestedAt,
+      blocking: queued.entry.blocking,
+      position: queued.position,
+    }));
   }
 
   /** Drop fairness history for workspaces with no work left in this queue. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ResourceAdmissionController } from '@unified-mpc/workspace';
+import { DEFAULT_HEAVY_JOB_AGING_MS, ResourceAdmissionController } from '@unified-mpc/workspace';
 import type {
   HeavyJobClaimResult,
   HeavyJobLiveEntry,
@@ -164,5 +164,28 @@ describe('shell heavy admission port (#145)', () => {
     }
     expect(port.enqueue({ operationId: 'shell:overflow', resourceClass: 'verification_heavy' }))
       .toMatchObject({ status: 'full' });
+  });
+
+  it('projects an empty local queue before any shell work is queued', () => {
+    const port = createShellHeavyAdmissionPort(() => controller());
+
+    expect(port.fairnessSnapshot()).toEqual({
+      agingMs: DEFAULT_HEAVY_JOB_AGING_MS,
+      entries: [],
+    });
+  });
+
+  it('projects the fair order of queued shell runs', () => {
+    const port = createShellHeavyAdmissionPort(() => controller());
+    port.enqueue({ operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy' });
+    port.enqueue({ operationId: 'shell:b', workspaceId: 'workspace-b', resourceClass: 'verification_heavy' });
+
+    expect(port.fairnessSnapshot()).toEqual({
+      agingMs: DEFAULT_HEAVY_JOB_AGING_MS,
+      entries: [
+        { operationId: 'shell:a', effectiveRank: 0, aged: false },
+        { operationId: 'shell:b', effectiveRank: 1, aged: false },
+      ],
+    });
   });
 });

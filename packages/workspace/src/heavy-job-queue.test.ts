@@ -4,6 +4,7 @@ import {
   tryAdmitGoalProcess,
 } from './resource-admission.js';
 import {
+  DEFAULT_HEAVY_JOB_AGING_MS,
   HeavyJobWaiterQueue,
   type HeavyJobClaimResult,
   type HeavyJobLiveEntry,
@@ -489,6 +490,48 @@ describe('heavy job queue fairness wiring (#145 step 2)', () => {
     }
 
     expect(drainAndRelease(controller, queue)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('projects the same order drain will try without rewriting positions', () => {
+    const controller = heavyController();
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    for (const [operationId, workspaceId] of [['a1', 'ws-a'], ['a2', 'ws-a'], ['b1', 'ws-b']] as const) {
+      queue.enqueue({ operationId, workspaceId, resourceClass: 'verification_heavy', cost: 8, blocking: true });
+    }
+
+    const snapshot = queue.fairnessSnapshot();
+    expect(snapshot).toEqual({
+      agingMs: DEFAULT_HEAVY_JOB_AGING_MS,
+      entries: [
+        { operationId: 'a1', effectiveRank: 0, aged: false },
+        { operationId: 'b1', effectiveRank: 1, aged: false },
+        { operationId: 'a2', effectiveRank: 2, aged: false },
+      ],
+    });
+    // The projection is an overlay: the durable/local position is unchanged.
+    expect(queue.position('a1')).toBe(1);
+    expect(queue.position('a2')).toBe(2);
+
+    const drained: string[] = [];
+    while (queue.depth() > 0) drained.push(...drainAndRelease(controller, queue));
+    expect(drained).toEqual(snapshot.entries.map((entry) => entry.operationId));
+  });
+
+  it('marks aged background work while keeping blocking work ahead of it', () => {
+    let nowMs = Date.parse('2026-10-30T12:00:00.000Z');
+    const controller = heavyController();
+    const queue = new HeavyJobWaiterQueue(controller, {
+      maxQueued: 8,
+      now: (): Date => new Date(nowMs),
+    });
+    queue.enqueue({ operationId: 'background', workspaceId: 'ws-a', resourceClass: 'rag_indexing', cost: 4 });
+    queue.enqueue({ operationId: 'gate', workspaceId: 'ws-b', resourceClass: 'verification_heavy', cost: 8, blocking: true });
+    nowMs += DEFAULT_HEAVY_JOB_AGING_MS;
+
+    expect(queue.fairnessSnapshot().entries).toEqual([
+      { operationId: 'gate', effectiveRank: 0, aged: false },
+      { operationId: 'background', effectiveRank: 1, aged: true },
+    ]);
   });
 
   it('rejects a non-positive aging window', () => {

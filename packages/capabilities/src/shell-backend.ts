@@ -69,6 +69,17 @@ export interface ShellHeavyAdmissionGrant {
   readonly lease: ShellHeavyAdmissionLease;
 }
 
+/** Bounded, runtime-local projection of the heavy-job fair order (#145). */
+export interface ShellHeavyFairnessSnapshot {
+  readonly agingMs: number;
+  /** `effectiveRank` is 0-based: rank 0 is the next candidate tried. */
+  readonly entries: readonly {
+    readonly operationId: string;
+    readonly effectiveRank: number;
+    readonly aged: boolean;
+  }[];
+}
+
 /**
  * Admission seam for declared heavy shell work. The runtime adapter owns the
  * durable queue and the resource controller; the backend reserves the durable
@@ -89,6 +100,11 @@ export interface ShellHeavyAdmissionPort {
   cancel(operationId: string): boolean;
   /** Current queue position, or undefined when not queued. */
   position(operationId: string): number | undefined;
+  /**
+   * Runtime-local projection of the order queued work will be tried in, for
+   * diagnostics. Derived from the same state as pump(); not durable state.
+   */
+  fairnessSnapshot(): ShellHeavyFairnessSnapshot;
   /** Register the executor that starts an admitted task; returns unsubscribe. */
   onAdmitted(listener: (grant: ShellHeavyAdmissionGrant) => void): () => void;
   /**

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { orderHeavyJobs, type HeavyJobFairnessCandidate } from './heavy-job-fairness.js';
+import {
+  orderHeavyJobs,
+  projectHeavyJobFairness,
+  type HeavyJobFairnessCandidate,
+} from './heavy-job-fairness.js';
 
 const NOW = Date.parse('2026-10-30T12:00:00.000Z');
 
@@ -142,6 +146,59 @@ describe('heavy job fairness policy (#145)', () => {
 
   it('rejects a non-positive aging window', () => {
     expect(() => orderHeavyJobs([], { now: NOW, agingMs: 0, lastServedAt: new Map() }))
+      .toThrow(RangeError);
+  });
+});
+
+describe('heavy job fairness projection (#145 step 3)', () => {
+  it('ranks candidates in drain order and marks only aged background work', () => {
+    const candidates = [
+      job('a1', 'a', minutesAgo(9), { position: 1 }),
+      job('a-old', 'a', minutesAgo(40), { position: 2 }),
+      job('b1', 'b', minutesAgo(8), { position: 3 }),
+      job('blocking-b', 'b', minutesAgo(1), { position: 4, blocking: true }),
+    ];
+    const context = {
+      now: NOW,
+      agingMs: 30 * 60_000,
+      lastServedAt: new Map([['a', NOW - 1_000]]),
+    };
+
+    const snapshot = projectHeavyJobFairness(candidates, context);
+
+    expect(snapshot.agingMs).toBe(30 * 60_000);
+    expect(snapshot.entries).toEqual([
+      { operationId: 'blocking-b', effectiveRank: 0, aged: false },
+      { operationId: 'a-old', effectiveRank: 1, aged: true },
+      { operationId: 'b1', effectiveRank: 2, aged: false },
+      // ws-a was served most recently, so it rotates behind never-served ws-b.
+      { operationId: 'a1', effectiveRank: 3, aged: false },
+    ]);
+  });
+
+  it('agrees with orderHeavyJobs for the same candidates', () => {
+    const candidates = [
+      job('a1', 'a', minutesAgo(9), { position: 1 }),
+      job('b1', 'b', minutesAgo(8), { position: 2 }),
+      job('a2', 'a', minutesAgo(7), { position: 3, blocking: true }),
+    ];
+    const context = { now: NOW, agingMs: 30 * 60_000, lastServedAt: new Map<string, number>() };
+
+    expect(projectHeavyJobFairness(candidates, context).entries.map((entry) => entry.operationId))
+      .toEqual(orderHeavyJobs(candidates, context));
+  });
+
+  it('never marks blocking work as aged even past the bound', () => {
+    const snapshot = projectHeavyJobFairness(
+      [job('blocking-old', 'a', minutesAgo(90), { position: 1, blocking: true })],
+      { now: NOW, agingMs: 30 * 60_000, lastServedAt: new Map() },
+    );
+
+    expect(snapshot.entries).toEqual([{ operationId: 'blocking-old', effectiveRank: 0, aged: false }]);
+  });
+
+  it('rejects a non-positive aging window', () => {
+    expect(() => projectHeavyJobFairness([], { now: NOW, agingMs: 0, lastServedAt: new Map() }))
       .toThrow(RangeError);
   });
 });

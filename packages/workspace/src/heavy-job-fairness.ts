@@ -40,6 +40,25 @@ export interface HeavyJobFairnessContext {
   readonly lastServedAt: ReadonlyMap<string, number>;
 }
 
+/** One candidate with its position in the order drain() would try it. */
+export interface HeavyJobFairnessEntry {
+  readonly operationId: string;
+  /** 0-based: rank 0 is the next candidate drain() tries. */
+  readonly effectiveRank: number;
+  /** Past the aging bound; blocking work is never aged. */
+  readonly aged: boolean;
+}
+
+/**
+ * Bounded, runtime-local projection of the fair order. It is derived from the
+ * same candidates and history as drain(), so it cannot disagree with the order
+ * that is actually tried; it is not durable state.
+ */
+export interface HeavyJobFairnessSnapshot {
+  readonly agingMs: number;
+  readonly entries: readonly HeavyJobFairnessEntry[];
+}
+
 const NEVER_SERVED = Number.NEGATIVE_INFINITY;
 
 /**
@@ -51,6 +70,17 @@ export function orderHeavyJobs(
   candidates: readonly HeavyJobFairnessCandidate[],
   context: HeavyJobFairnessContext,
 ): readonly string[] {
+  return projectHeavyJobFairness(candidates, context).entries.map((entry) => entry.operationId);
+}
+
+/**
+ * Project the fair order once, so selection and diagnostics share one ordering
+ * and cannot drift apart.
+ */
+export function projectHeavyJobFairness(
+  candidates: readonly HeavyJobFairnessCandidate[],
+  context: HeavyJobFairnessContext,
+): HeavyJobFairnessSnapshot {
   if (!Number.isSafeInteger(context.agingMs) || context.agingMs < 1) {
     throw new RangeError('agingMs must be a positive safe integer');
   }
@@ -62,12 +92,20 @@ export function orderHeavyJobs(
     .sort((left, right) => compareFifo(left, right, context.now));
   const agedIds = new Set(aged.map((candidate) => candidate.operationId));
   const rotating = nonBlocking.filter((candidate) => !agedIds.has(candidate.operationId));
-
-  return [
+  const ordered = [
     ...rotateByWorkspace(blocking, context),
-    ...aged.map((candidate) => candidate.operationId),
+    ...aged,
     ...rotateByWorkspace(rotating, context),
   ];
+
+  return {
+    agingMs: context.agingMs,
+    entries: ordered.map((candidate, effectiveRank) => ({
+      operationId: candidate.operationId,
+      effectiveRank,
+      aged: agedIds.has(candidate.operationId),
+    })),
+  };
 }
 
 /**
@@ -79,7 +117,7 @@ export function orderHeavyJobs(
 function rotateByWorkspace(
   candidates: readonly HeavyJobFairnessCandidate[],
   context: HeavyJobFairnessContext,
-): readonly string[] {
+): readonly HeavyJobFairnessCandidate[] {
   const groups = new Map<string, HeavyJobFairnessCandidate[]>();
   for (const candidate of candidates) {
     const existing = groups.get(candidate.workspaceId);
@@ -100,11 +138,11 @@ function rotateByWorkspace(
       return compareIds(left.workspaceId, right.workspaceId);
     });
 
-  const ordered: string[] = [];
+  const ordered: HeavyJobFairnessCandidate[] = [];
   while (batches.length > 0) {
     const batch = batches.shift()!;
     const next = batch.entries.shift()!;
-    ordered.push(next.operationId);
+    ordered.push(next);
     if (batch.entries.length > 0) batches.push(batch);
   }
   return ordered;

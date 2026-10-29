@@ -42,6 +42,7 @@ export {
   type ShellHeavyAdmissionPort,
   type ShellHeavyAdmissionReattachResult,
   type ShellHeavyAdmissionRequest,
+  type ShellHeavyFairnessSnapshot,
 } from './shell-backend.js';
 export {
   type DurableShellReserveRequest,

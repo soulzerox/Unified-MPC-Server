@@ -29,6 +29,12 @@ The evidence evaluation lives inside `GuardedMergeService`; it is not a registry
 approval that Trusted Full Bypass can skip. Missing, stale, rejected or
 mismatched evidence keeps the result `blocked` before any provider call.
 
+An identical repeat request — same head, base, verification mode and review
+evidence — returns the persisted receipt with its original `receiptRef` instead of
+re-running the gates, provided the current policy still accepts it. Any difference
+(a new review, a moved base, a stricter policy) forces a fresh run, so reuse never
+inherits evidence the caller did not ask to verify.
+
 ---
 
 ## 2. Provider Paths

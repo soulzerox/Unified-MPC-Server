@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
+import type { AppErrorCode } from '@unified-mpc/domain';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
@@ -18,9 +19,12 @@ function createHarnessServices(): {
   setAgentsMd(content: string): void;
   setHead(value: string): void;
   setHeadOnPreEdit(value: string | undefined): void;
-  setThaiRagHealthError(message: string | undefined): void;
+  setThaiRagHealthError(message: string | undefined, options?: { code?: AppErrorCode }): void;
   setThaiRagActiveJobs(jobIds: readonly string[]): void;
-  setThaiRagPreEditError(message: string | undefined): void;
+  setThaiRagPreEditError(
+    message: string | undefined,
+    options?: { code?: AppErrorCode; details?: Readonly<Record<string, string | number>> },
+  ): void;
   setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void;
   setFileContent(path: string, content: string): void;
   setFileMissing(path: string): void;
@@ -33,8 +37,11 @@ function createHarnessServices(): {
   let agentsMd = '# Rules\nUse mandatory child MCP preflight.\n';
   let head = 'a'.repeat(40);
   let thaiRagHealthError: string | undefined;
+  let thaiRagHealthCode: AppErrorCode = 'CONFLICT';
   let thaiRagActiveJobs: readonly string[] = [];
   let thaiRagPreEditError: string | undefined;
+  let thaiRagPreEditCode: AppErrorCode = 'CONFLICT';
+  let thaiRagPreEditDetails: Readonly<Record<string, string | number>> | undefined;
   let thaiRagPreEditPayload: Record<string, unknown> | undefined;
   let headOnPreEdit: string | undefined;
   const fileContents = new Map<string, string>();
@@ -64,7 +71,7 @@ function createHarnessServices(): {
     },
     thaiRag: {
       async health() {
-        if (thaiRagHealthError !== undefined) return err(appError('CONFLICT', thaiRagHealthError, true));
+        if (thaiRagHealthError !== undefined) return err(appError(thaiRagHealthCode, thaiRagHealthError, true));
         return ok({
           providerId: 'thai-rag' as const,
           state: 'ready',
@@ -89,7 +96,7 @@ function createHarnessServices(): {
           head = headOnPreEdit;
         }
         if (tool === 'pre_edit_context' && thaiRagPreEditError !== undefined) {
-          return err(appError('CONFLICT', thaiRagPreEditError, true));
+          return err(appError(thaiRagPreEditCode, thaiRagPreEditError, true, thaiRagPreEditDetails));
         }
         if (tool === 'pre_edit_context' && thaiRagPreEditPayload !== undefined) {
           return ok({ content: [{ type: 'text', text: JSON.stringify(thaiRagPreEditPayload) }] });
@@ -163,9 +170,16 @@ function createHarnessServices(): {
     setAgentsMd(content: string): void { agentsMd = content; },
     setHead(value: string): void { head = value; },
     setHeadOnPreEdit(value: string | undefined): void { headOnPreEdit = value; },
-    setThaiRagHealthError(message: string | undefined): void { thaiRagHealthError = message; },
+    setThaiRagHealthError(message, options): void {
+      thaiRagHealthError = message;
+      thaiRagHealthCode = options?.code ?? 'CONFLICT';
+    },
     setThaiRagActiveJobs(jobIds: readonly string[]): void { thaiRagActiveJobs = [...jobIds]; },
-    setThaiRagPreEditError(message: string | undefined): void { thaiRagPreEditError = message; },
+    setThaiRagPreEditError(message, options): void {
+      thaiRagPreEditError = message;
+      thaiRagPreEditCode = options?.code ?? 'CONFLICT';
+      thaiRagPreEditDetails = options?.details;
+    },
     setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void { thaiRagPreEditPayload = payload; },
     setFileContent(path: string, content: string): void { fileContents.set(path, content); },
     setFileMissing(path: string): void { missingPaths.add(path); },
@@ -286,7 +300,9 @@ describe('workspace engineering harness enforcement', () => {
 
   it('keeps standard mode fail-closed when native pre-edit is queued behind another workspace', async () => {
     const { services, nativeRagCalls, setThaiRagPreEditError } = createHarnessServices();
-    setThaiRagPreEditError('workspace-a is queued behind active indexing for workspace-b');
+    setThaiRagPreEditError('workspace-a is queued behind active indexing for workspace-b', {
+      details: { reason: 'workspace-indexing-busy', blockingWorkspaceId: 'workspace-b' },
+    });
     const registry = new ToolRegistry(services, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       sessionId: 'standard-pre-edit-session',
@@ -299,9 +315,67 @@ describe('workspace engineering harness enforcement', () => {
       filePath: 'src/standard.ts',
     })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('queued behind active indexing') } },
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('queued behind active indexing'),
+          details: { reason: 'workspace-indexing-busy', blockingWorkspaceId: 'workspace-b' },
+        },
+      },
     });
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
+  });
+
+  it('forwards a typed pre-edit provider failure instead of rewriting it into a CONFLICT', async () => {
+    const { services, setThaiRagPreEditError } = createHarnessServices();
+    setThaiRagPreEditError('native provider read timed out before the pre-edit verdict', {
+      code: 'PROCESS_TIMEOUT',
+      details: { reason: 'pre-edit-provider-timeout', attempt: 2 },
+    });
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'typed-provider-failure-session',
+      activeWorkspaceScopeProvider,
+    });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/typed-failure.ts',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'PROCESS_TIMEOUT',
+          message: expect.stringContaining('Thai-RAG pre-edit check failed: native provider read timed out'),
+          details: { reason: 'pre-edit-provider-timeout', attempt: 2 },
+        },
+      },
+    });
+  });
+
+  it('forwards a typed provider health failure instead of rewriting it into a CONFLICT', async () => {
+    const { services, setThaiRagHealthError } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      sessionId: 'typed-health-failure-session',
+      activeWorkspaceScopeProvider,
+    });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    setThaiRagHealthError('provider worker is under resource pressure', { code: 'RESOURCE_PRESSURE' });
+    await expect(registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1',
+      filePath: 'src/typed-health.ts',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'RESOURCE_PRESSURE',
+          message: expect.stringContaining('Native Thai-RAG provider is not ready for pre-edit diagnostics'),
+        },
+      },
+    });
   });
 
   it('lets Trusted Full Bypass skip a queued native pre-edit without touching the unrelated index', async () => {

@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { heavyJobQueueTools } from './heavy-job-queue-tools.js';
-import type { HeavyJobLiveEntry } from '@unified-mpc/workspace';
+import type { HeavyJobLiveEntry, ResourceAdmissionController } from '@unified-mpc/workspace';
 import type { McpToolContext, McpToolDefinition } from './tool-types.js';
 
-function context(services: McpToolContext['services']): McpToolContext {
+function context(
+  services: McpToolContext['services'],
+  controller?: ResourceAdmissionController,
+): McpToolContext {
   return {
     actor: { clientId: 'test', clientName: 'test' },
     contextEconomy: {} as McpToolContext['contextEconomy'],
     services,
+    ...(controller === undefined ? {} : { resourceAdmissionController: controller }),
   } as McpToolContext;
 }
 
@@ -28,8 +32,11 @@ function entry(overrides: Partial<HeavyJobLiveEntry> = {}): HeavyJobLiveEntry {
   };
 }
 
-function queueTool(services: McpToolContext['services']): McpToolDefinition {
-  const tool = heavyJobQueueTools(context(services)).find((candidate) => candidate.name === 'heavy_job_queue_status');
+function queueTool(
+  services: McpToolContext['services'],
+  controller?: ResourceAdmissionController,
+): McpToolDefinition {
+  const tool = heavyJobQueueTools(context(services, controller)).find((candidate) => candidate.name === 'heavy_job_queue_status');
   if (tool === undefined) throw new Error('missing heavy_job_queue_status');
   return tool;
 }
@@ -117,6 +124,84 @@ describe('heavyJobQueueTools', () => {
       ok: true,
       value: { live: 5, truncated: true, entries: [{ operationId: 'job-0' }, { operationId: 'job-1' }] },
     });
+  });
+
+  it('adds bounded admission state and wait/run durations without leaking other owners', async () => {
+    const now = Date.now();
+    const live: HeavyJobLiveEntry[] = [
+      entry({ requestedAt: new Date(now - 90_000).toISOString() }),
+      entry({
+        operationId: 'job-running',
+        state: 'running',
+        position: 0,
+        requestedAt: new Date(now - 120_000).toISOString(),
+        startedAt: new Date(now - 30_000).toISOString(),
+      }),
+    ];
+    const controller = {
+      snapshot: () => ({
+        activeCost: 3,
+        activeOperations: 1,
+        activeCostByClass: {
+          dependency_bootstrap: 0,
+          context_scan: 0,
+          child_mcp_call: 0,
+          lsp_process: 0,
+          rag_indexing: 3,
+          goal_process: 0,
+          delegated_agent: 0,
+          verification_heavy: 0,
+        },
+        activeCostByWorkspace: { 'workspace-secret': 3 },
+        activeCostBySession: { 'session-secret': 3 },
+        rejected: 2,
+        pressureState: 'elevated',
+        effectiveGlobalCost: 6,
+        pressure: {
+          state: 'elevated',
+          totalMemoryBytes: 1_000,
+          availableMemoryBytes: 150,
+          availableRatio: 0.15,
+          processRssBytes: 50,
+          sampledAtMs: now,
+        },
+      }),
+    } as unknown as ResourceAdmissionController;
+    const tool = queueTool({
+      heavyJobQueue: { listLive: () => live, depth: () => 2 },
+    } as unknown as McpToolContext['services'], controller);
+
+    const result = await tool.execute({}, new AbortController().signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        admission: {
+          activeCost: 3,
+          activeOperations: 1,
+          effectiveGlobalCost: 6,
+          pressureState: 'elevated',
+          rejected: 2,
+          pressure: { availableMemoryBytes: 150, processRssBytes: 50 },
+        },
+        entries: [
+          expect.objectContaining({ state: 'queued' }),
+          expect.objectContaining({ state: 'running' }),
+        ],
+      },
+    });
+    const value = (result as {
+      ok: true;
+      value: {
+        admission: Record<string, unknown>;
+        entries: Array<{ waitedMs?: number; runningMs?: number }>;
+      };
+    }).value;
+    expect(value.entries[0]?.waitedMs).toBeGreaterThanOrEqual(89_000);
+    expect(value.entries[1]?.runningMs).toBeGreaterThanOrEqual(29_000);
+    expect(value.admission).not.toHaveProperty('activeCostByWorkspace');
+    expect(value.admission).not.toHaveProperty('activeCostBySession');
+    expect(JSON.stringify(result)).not.toMatch(/workspace-secret|session-secret/);
   });
 
   it('reports a storage failure as a bounded internal error', async () => {

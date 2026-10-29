@@ -542,4 +542,35 @@ describe('resource admission contract', () => {
     expect(controller.release(first.lease)).toBe(true);
   });
 
+  it('notifies release listeners only for releases that free real capacity (#145 wake-on-release)', () => {
+    const controller = new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
+    const wakes: string[] = [];
+    const first = tryAdmitRagIndex(controller, { operationId: 'index-a', workspaceId: 'workspace-a', sessionId: 'session-a', cost: DEFAULT_RAG_INDEX_ADMISSION_COST });
+    if (!first.admitted) throw new Error('expected admission');
+    const unsubscribe = controller.onRelease(() => wakes.push('first'));
+
+    // A rejected or duplicate release frees nothing, so no waiter may wake.
+    expect(controller.release({ ...first.lease, operationId: 'unknown' })).toBe(false);
+    expect(controller.release(first.lease)).toBe(true);
+    expect(wakes).toEqual(['first']);
+    expect(controller.release(first.lease)).toBe(false);
+    expect(wakes).toEqual(['first']);
+
+    // Unsubscribed listeners never fire again, and a throwing listener cannot
+    // fail the caller that is releasing capacity.
+    unsubscribe();
+    const second = tryAdmitRagIndex(controller, { operationId: 'index-b', workspaceId: 'workspace-a', sessionId: 'session-a', cost: DEFAULT_RAG_INDEX_ADMISSION_COST });
+    if (!second.admitted) throw new Error('expected admission');
+    expect(controller.release(second.lease)).toBe(true);
+    expect(wakes).toEqual(['first']);
+
+    const third = tryAdmitRagIndex(controller, { operationId: 'index-c', workspaceId: 'workspace-a', sessionId: 'session-a', cost: DEFAULT_RAG_INDEX_ADMISSION_COST });
+    if (!third.admitted) throw new Error('expected admission');
+    controller.onRelease(() => {
+      throw new Error('listener failure');
+    });
+    expect(controller.release(third.lease)).toBe(true);
+    expect(controller.snapshot()).toMatchObject({ activeOperations: 0 });
+  });
+
 });

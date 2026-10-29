@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  MergeReconciliationRefConflictError,
+  reconcileMergeEvidence,
   type MergeObservation,
   type MergeReconciliationRecord,
   type MergeVerificationReceipt,
   type RepositoryMergePolicy,
 } from '@unified-mpc/domain';
+import { SqliteDatabase, SqliteMergeReconciliationRepository } from '@unified-mpc/storage';
 import {
   AutomaticMergeReconciliationService,
   MergeReconciliationService,
@@ -219,6 +222,76 @@ describe('MergeReconciliationService', () => {
       },
     });
     expect(records).toHaveLength(1);
+  });
+
+  it('surfaces a persisted evidence conflict as a distinct inspect reason with the stored record', async () => {
+    const persisted: MergeReconciliationRecord = {
+      reconciliationRef: 'merge-reconciliation:279@bbbbbbbb',
+      receiptRef: RECEIPT_REF,
+      receipt,
+      policy,
+      expectedMergeMethod: 'merge',
+      observation,
+      decision: reconcileMergeEvidence(policy, observation, receipt, 'merge'),
+      recordedAt: '2026-10-07T01:30:30.000Z',
+    };
+    const conflictWriter: MergeReconciliationHistoryWriter = {
+      async append(): Promise<never> {
+        throw new MergeReconciliationRefConflictError(persisted);
+      },
+    };
+    const service = new MergeReconciliationService(
+      reader({ receiptRef: RECEIPT_REF, receipt }),
+      conflictWriter,
+      () => new Date('2026-10-07T01:31:00.000Z'),
+    );
+
+    await expect(service.reconcile({
+      policy,
+      expectedMergeMethod: 'merge',
+      observation,
+      receiptRef: RECEIPT_REF,
+    })).resolves.toEqual({
+      status: 'inspect_required',
+      reason: 'reconciliation_ref_conflict',
+      receiptRef: RECEIPT_REF,
+      record: persisted,
+    });
+  });
+
+  it('reconciles a repeated observation of the same merge against the persisted record', async () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const history = new SqliteMergeReconciliationRepository(database);
+      const service = new MergeReconciliationService(
+        reader({ receiptRef: RECEIPT_REF, receipt }),
+        history,
+        () => new Date('2026-10-07T01:31:00.000Z'),
+      );
+
+      const first = await service.reconcile({
+        policy,
+        expectedMergeMethod: 'merge',
+        observation,
+        receiptRef: RECEIPT_REF,
+      });
+      const repeated = await service.reconcile({
+        policy,
+        expectedMergeMethod: 'merge',
+        observation: { ...observation, observedAt: '2026-10-07T01:40:00.000Z' },
+        receiptRef: RECEIPT_REF,
+      });
+
+      expect(first).toMatchObject({ status: 'reconciled' });
+      expect(repeated).toEqual(first);
+      expect(await history.listForPullRequest({
+        repository: policy.repository,
+        pullRequest: 279,
+        limit: 10,
+      })).toHaveLength(1);
+    } finally {
+      database.close();
+    }
   });
 
   it('never claims reconciliation when durable history persistence fails', async () => {

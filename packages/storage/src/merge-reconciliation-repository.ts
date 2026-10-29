@@ -1,4 +1,5 @@
 import {
+  MergeReconciliationRefConflictError,
   reconcileMergeEvidence,
   type MergeMethod,
   type MergeObservation,
@@ -47,7 +48,7 @@ interface MergeReconciliationRow {
 
 export class MergeReconciliationStoreError extends Error {
   public constructor(
-    public readonly reason: 'invalid_record' | 'reconciliation_ref_conflict' | 'corrupt',
+    public readonly reason: 'invalid_record' | 'corrupt',
     message: string,
   ) {
     super(message);
@@ -69,16 +70,10 @@ export class SqliteMergeReconciliationRepository {
       try {
         normalizedIncoming = parseRecord(record, 'invalid_record');
       } catch {
-        throw new MergeReconciliationStoreError(
-          'reconciliation_ref_conflict',
-          `Merge reconciliation ref '${incomingRef}' already identifies different evidence`,
-        );
+        throw new MergeReconciliationRefConflictError(persisted);
       }
       if (!hasSameReconciliationEvidence(persisted, normalizedIncoming)) {
-        throw new MergeReconciliationStoreError(
-          'reconciliation_ref_conflict',
-          `Merge reconciliation ref '${incomingRef}' already identifies different evidence`,
-        );
+        throw new MergeReconciliationRefConflictError(persisted);
       }
       return { appended: false, record: persisted };
     }
@@ -122,10 +117,7 @@ export class SqliteMergeReconciliationRepository {
     }
 
     if (!hasSameReconciliationEvidence(persisted, normalized)) {
-      throw new MergeReconciliationStoreError(
-        'reconciliation_ref_conflict',
-        `Merge reconciliation ref '${normalized.reconciliationRef}' already identifies different evidence`,
-      );
+      throw new MergeReconciliationRefConflictError(persisted);
     }
 
     return { appended: false, record: persisted };
@@ -271,19 +263,37 @@ function hasSameReconciliationEvidence(
   persisted: MergeReconciliationHistoryRecord,
   incoming: MergeReconciliationRecord,
 ): boolean {
+  return canonicalStringify(immutableEvidence(persisted))
+    === canonicalStringify(immutableEvidence(incoming));
+}
+
+function immutableEvidence(record: MergeReconciliationRecord): Record<string, unknown> {
   const {
-    sequence,
-    recordedAt: persistedRecordedAt,
-    ...persistedEvidence
-  } = persisted;
+    reconciliationRef,
+    receiptRef,
+    receipt,
+    policy,
+    expectedMergeMethod,
+    observation,
+    decision,
+  } = record;
   const {
-    recordedAt: incomingRecordedAt,
-    ...incomingEvidence
-  } = incoming;
-  void sequence;
-  void persistedRecordedAt;
-  void incomingRecordedAt;
-  return canonicalStringify(persistedEvidence) === canonicalStringify(incomingEvidence);
+    observedAt,
+    ...observedEvidence
+  } = observation;
+  void observedAt;
+
+  // recordedAt and observation.observedAt describe a particular observation
+  // attempt. A repeated observation of the same merge facts must be idempotent.
+  return {
+    reconciliationRef,
+    receiptRef,
+    receipt,
+    policy,
+    expectedMergeMethod,
+    observation: observedEvidence,
+    decision,
+  };
 }
 
 function parseRecord(

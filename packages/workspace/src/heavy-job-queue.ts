@@ -3,6 +3,7 @@ import {
   type ResourceAdmissionClass,
   type ResourceAdmissionController,
   type ResourceAdmissionLease,
+  type ResourceAdmissionRejectionReason,
   type ResourceAdmissionRequest,
 } from './resource-admission.js';
 
@@ -320,31 +321,39 @@ export class HeavyJobWaiterQueue {
   }
 
   /**
-   * Admit queued jobs FIFO while the controller allows. Stops at the first
-   * still-pressured head so ordering is preserved across drains.
+   * Admit queued jobs in position order while the controller allows.
+   *
+   * A scoped denial (workspace, session or resource-class ceiling) only
+   * blocks that scope, so a later job from another scope may still run:
+   * backfill it instead of letting one project's saturated workspace hold
+   * the whole queue. Global denials (memory pressure, global cost or the
+   * operation limit) stop the drain because no later job can fit either.
+   * Within the admitted scopes, position order is preserved.
    */
   public drain(): HeavyJobAdmission[] {
     const admitted: HeavyJobAdmission[] = [];
-    while (this.queued.length > 0) {
-      const head = this.queued[0] as LocalHeavyJob;
+    for (const queued of [...this.queued]) {
       const candidate: ResourceAdmissionRequest = {
-        operationId: head.entry.operationId,
-        workspaceId: head.entry.workspaceId,
-        ...(head.entry.sessionId === undefined ? {} : { sessionId: head.entry.sessionId }),
-        resourceClass: head.entry.resourceClass,
-        cost: head.entry.cost,
+        operationId: queued.entry.operationId,
+        workspaceId: queued.entry.workspaceId,
+        ...(queued.entry.sessionId === undefined ? {} : { sessionId: queued.entry.sessionId }),
+        resourceClass: queued.entry.resourceClass,
+        cost: queued.entry.cost,
       };
       const decision = this.controller.tryAcquire(candidate);
-      if (!decision.admitted) break;
-      if (this.store !== undefined && !this.store.start(head.entry.operationId, this.now().toISOString())) {
+      if (!decision.admitted) {
+        if (decision.code === 'RESOURCE_PRESSURE' && isGlobalAdmissionDenial(decision.reason)) break;
+        continue;
+      }
+      if (this.store !== undefined && !this.store.start(queued.entry.operationId, this.now().toISOString())) {
         // The durable row was retired (recovery, cancellation, or another
         // owner) while this queue still held a stale local view. Never run
         // work that no longer owns a durable slot.
         this.controller.release(decision.lease);
-        this.queued.shift();
+        this.removeLocal(queued.entry.operationId);
         continue;
       }
-      this.queued.shift();
+      this.removeLocal(queued.entry.operationId);
       admitted.push({ lease: decision.lease });
     }
     return admitted;
@@ -361,6 +370,24 @@ export class HeavyJobWaiterQueue {
   private minimumPosition(): number {
     return this.queued.length === 0 ? 0 : Math.min(...this.queued.map((entry) => entry.position));
   }
+
+  private removeLocal(operationId: string): void {
+    const index = this.queued.findIndex((candidate) => candidate.entry.operationId === operationId);
+    if (index !== -1) this.queued.splice(index, 1);
+  }
+}
+
+/**
+ * Denials that apply to every queued job, not a single workspace, session or
+ * resource class. Costs are positive and the operation limit is global, so a
+ * later job cannot fit once one of these is hit.
+ */
+function isGlobalAdmissionDenial(
+  reason: Exclude<ResourceAdmissionRejectionReason, 'invalid_request' | 'duplicate_operation'>,
+): boolean {
+  return reason === 'memory_pressure'
+    || reason === 'global_cost_exhausted'
+    || reason === 'operation_limit_exhausted';
 }
 
 function normalizeEntry(request: HeavyJobRequest, fallbackRequestedAt: string): HeavyJobQueueEntry {

@@ -381,6 +381,10 @@ export class HeavyJobWaiterQueue {
  * Denials that apply to every queued job, not a single workspace, session or
  * resource class. Costs are positive and the operation limit is global, so a
  * later job cannot fit once one of these is hit.
+ *
+ * `heavy_capacity_exhausted` is deliberately absent (#145): it denies only the
+ * heavy classes, so a queued light job behind it may still be backfilled into
+ * the remaining capacity.
  */
 function isGlobalAdmissionDenial(
   reason: Exclude<ResourceAdmissionRejectionReason, 'invalid_request' | 'duplicate_operation'>,

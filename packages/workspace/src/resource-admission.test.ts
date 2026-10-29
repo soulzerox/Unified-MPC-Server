@@ -573,4 +573,93 @@ describe('resource admission contract', () => {
     expect(controller.snapshot()).toMatchObject({ activeOperations: 0 });
   });
 
+  it('serializes different heavy classes across workspaces on the default profile (#145)', () => {
+    expect(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS.maxHeavyOperations).toBe(1);
+    const controller = new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
+
+    // 8 + 8 fits the default 16 global ceiling, so only the heavy-capacity
+    // policy can keep a build/test verification and an index batch apart.
+    const index = tryAdmitRagIndex(controller, {
+      operationId: 'index-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_RAG_INDEX_ADMISSION_COST,
+    });
+    const verification = tryAdmitVerificationHeavy(controller, {
+      operationId: 'verification-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+
+    expect(index.admitted).toBe(true);
+    expect(verification).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'heavy_capacity_exhausted',
+      requestedCost: 8,
+      retryable: true,
+      snapshot: { activeHeavyOperations: 1, maxHeavyOperations: 1 },
+    });
+
+    if (!index.admitted) throw new Error('expected index admission');
+    expect(controller.release(index.lease)).toBe(true);
+    // Capacity comes back on release: the next heavy job is admitted then.
+    const next = tryAdmitVerificationHeavy(controller, {
+      operationId: 'verification-c',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+    expect(next).toMatchObject({ admitted: true, lease: { resourceClass: 'verification_heavy' } });
+  });
+
+  it('lets a light job run while the heavy slot is busy (#145)', () => {
+    const controller = new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
+    const heavy = tryAdmitVerificationHeavy(controller, {
+      operationId: 'verification-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+    if (!heavy.admitted) throw new Error('expected heavy admission');
+
+    const light = tryAdmitContextScan(controller, {
+      operationId: 'scan-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_CONTEXT_SCAN_ADMISSION_COST,
+    });
+
+    expect(light).toMatchObject({ admitted: true, lease: { resourceClass: 'context_scan' } });
+    expect(controller.snapshot()).toMatchObject({ activeHeavyOperations: 1, activeOperations: 2 });
+  });
+
+  it('allows a configured second heavy slot only when limits say so (#145)', () => {
+    const limited = new ResourceAdmissionController({ ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS, maxHeavyOperations: 2 });
+    const index = tryAdmitRagIndex(limited, {
+      operationId: 'index-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      cost: DEFAULT_RAG_INDEX_ADMISSION_COST,
+    });
+    const verification = tryAdmitVerificationHeavy(limited, {
+      operationId: 'verification-b',
+      workspaceId: 'workspace-b',
+      sessionId: 'session-b',
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    });
+
+    expect(index.admitted).toBe(true);
+    expect(verification).toMatchObject({ admitted: true, lease: { resourceClass: 'verification_heavy' } });
+    expect(limited.snapshot()).toMatchObject({ activeHeavyOperations: 2, maxHeavyOperations: 2 });
+  });
+
+  it('rejects a non-positive heavy-slot limit instead of silently disabling it', () => {
+    expect(() => new ResourceAdmissionController({
+      ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
+      maxHeavyOperations: 0,
+    })).toThrow('maxHeavyOperations must be a positive integer');
+  });
+
 });

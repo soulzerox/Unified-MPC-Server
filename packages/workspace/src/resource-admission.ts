@@ -14,12 +14,38 @@ export const RESOURCE_ADMISSION_CLASSES = [
 
 export type ResourceAdmissionClass = (typeof RESOURCE_ADMISSION_CLASSES)[number];
 
+/**
+ * Classes that consume the same constrained machine budget (#145): a full
+ * build/test/lint verification and an embedding/index batch must not overlap
+ * on a small host even though they are different classes whose weighted costs
+ * (8 + 8) still fit the default global ceiling of 16.
+ *
+ * Long-lived process classes (`lsp_process`, `goal_process`, `delegated_agent`)
+ * and cheap probes stay outside the set: they are bounded by their own class
+ * ceiling and by memory pressure, not by the heavy-job concurrency policy.
+ */
+export const HEAVY_ADMISSION_CLASSES = ['rag_indexing', 'verification_heavy'] as const;
+
+export type HeavyAdmissionClass = (typeof HEAVY_ADMISSION_CLASSES)[number];
+
+const HEAVY_ADMISSION_CLASS_SET: ReadonlySet<ResourceAdmissionClass> = new Set(HEAVY_ADMISSION_CLASSES);
+
+/** One heavy job at a time on the default constrained profile (#145). */
+export const DEFAULT_MAX_HEAVY_OPERATIONS = 1;
+
 export interface ResourceAdmissionLimits {
   readonly globalCost: number;
   readonly workspaceCost: number;
   /** Optional for backwards-compatible callers; defaults to the global ceiling. */
   readonly sessionCost?: number;
   readonly maxOperations: number;
+  /**
+   * Optional ceiling on concurrently active `HEAVY_ADMISSION_CLASSES`
+   * operations, independent of class and workspace. Defaults to
+   * `DEFAULT_MAX_HEAVY_OPERATIONS`; raise it only when measured headroom
+   * proves the host can run more than one heavy job safely.
+   */
+  readonly maxHeavyOperations?: number;
   /** Optional per-class ceilings; unspecified classes default to the global ceiling. */
   readonly resourceClassCost?: Readonly<Partial<Record<ResourceAdmissionClass, number>>>;
 }
@@ -29,6 +55,7 @@ interface NormalizedResourceAdmissionLimits {
   readonly workspaceCost: number;
   readonly sessionCost: number;
   readonly maxOperations: number;
+  readonly maxHeavyOperations: number;
   readonly resourceClassCost: Readonly<Record<ResourceAdmissionClass, number>>;
 }
 
@@ -48,6 +75,9 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
   workspaceCost: 8,
   sessionCost: 8,
   maxOperations: 8,
+  // #145: build/test/lint verification and embedding/index work share one
+  // constrained budget, so the default profile runs at most one of them.
+  maxHeavyOperations: DEFAULT_MAX_HEAVY_OPERATIONS,
   resourceClassCost: Object.freeze({
     dependency_bootstrap: 8,
     context_scan: 8,
@@ -107,6 +137,10 @@ export interface ResourceAdmissionSnapshot {
   readonly activeCostByClass: Readonly<Record<ResourceAdmissionClass, number>>;
   readonly activeCostByWorkspace: Readonly<Record<string, number>>;
   readonly activeCostBySession: Readonly<Record<string, number>>;
+  /** Live `HEAVY_ADMISSION_CLASSES` operations, regardless of workspace. */
+  readonly activeHeavyOperations: number;
+  /** Ceiling that `activeHeavyOperations` is compared against. */
+  readonly maxHeavyOperations: number;
   readonly rejected: number;
   readonly pressureState: ResourcePressureState;
   readonly effectiveGlobalCost: number;
@@ -122,6 +156,7 @@ export type ResourceAdmissionRejectionReason =
   | 'workspace_cost_exhausted'
   | 'session_cost_exhausted'
   | 'resource_class_cost_exhausted'
+  | 'heavy_capacity_exhausted'
   | 'operation_limit_exhausted';
 
 export type ResourceAdmissionDecision =
@@ -168,6 +203,7 @@ export class ResourceAdmissionController {
     validateLimit(limits.workspaceCost, 'workspaceCost');
     validateLimit(limits.sessionCost ?? limits.globalCost, 'sessionCost');
     validateLimit(limits.maxOperations, 'maxOperations');
+    validateLimit(limits.maxHeavyOperations ?? DEFAULT_MAX_HEAVY_OPERATIONS, 'maxHeavyOperations');
     for (const resourceClass of RESOURCE_ADMISSION_CLASSES) {
       validateLimit(limits.resourceClassCost?.[resourceClass] ?? limits.globalCost, `resourceClassCost.${resourceClass}`);
     }
@@ -176,6 +212,7 @@ export class ResourceAdmissionController {
       workspaceCost: limits.workspaceCost,
       sessionCost: limits.sessionCost ?? limits.globalCost,
       maxOperations: limits.maxOperations,
+      maxHeavyOperations: limits.maxHeavyOperations ?? DEFAULT_MAX_HEAVY_OPERATIONS,
       resourceClassCost: {
         dependency_bootstrap: limits.resourceClassCost?.dependency_bootstrap ?? limits.globalCost,
         context_scan: limits.resourceClassCost?.context_scan ?? limits.globalCost,
@@ -211,6 +248,12 @@ export class ResourceAdmissionController {
     const sessionCost = snapshot.activeCostBySession[sessionId] ?? 0;
     const classCost = snapshot.activeCostByClass[request.resourceClass];
     const exceedsEffectiveGlobalCost = snapshot.activeCost + request.cost > snapshot.effectiveGlobalCost;
+    // #145 one-heavy-at-a-time: heavy classes share one machine budget, so the
+    // cross-class ceiling sits after the class ceiling. Global/pressure denials
+    // still win (they hold for every later job), and a same-workspace or
+    // same-class denial keeps its more specific reason.
+    const heavyCapacityExhausted = isHeavyAdmissionClass(request.resourceClass)
+      && snapshot.activeHeavyOperations >= this.limits.maxHeavyOperations;
     const reason = exceedsEffectiveGlobalCost
       ? snapshot.pressureState === 'normal'
         ? 'global_cost_exhausted'
@@ -221,9 +264,11 @@ export class ResourceAdmissionController {
           ? 'session_cost_exhausted'
           : classCost + request.cost > this.limits.resourceClassCost[request.resourceClass]
             ? 'resource_class_cost_exhausted'
-            : snapshot.activeOperations >= this.limits.maxOperations
-              ? 'operation_limit_exhausted'
-              : undefined;
+            : heavyCapacityExhausted
+              ? 'heavy_capacity_exhausted'
+              : snapshot.activeOperations >= this.limits.maxOperations
+                ? 'operation_limit_exhausted'
+                : undefined;
     if (reason !== undefined) {
       this.rejected += 1;
       return {
@@ -313,9 +358,11 @@ export class ResourceAdmissionController {
     const activeCostByWorkspace: Record<string, number> = {};
     const activeCostBySession: Record<string, number> = {};
     let activeCost = 0;
+    let activeHeavyOperations = 0;
     for (const lease of this.active.values()) {
       activeCost += lease.cost;
       activeCostByClass[lease.resourceClass] += lease.cost;
+      if (isHeavyAdmissionClass(lease.resourceClass)) activeHeavyOperations += 1;
       activeCostByWorkspace[lease.workspaceId] = (activeCostByWorkspace[lease.workspaceId] ?? 0) + lease.cost;
       activeCostBySession[lease.sessionId] = (activeCostBySession[lease.sessionId] ?? 0) + lease.cost;
     }
@@ -327,6 +374,8 @@ export class ResourceAdmissionController {
       activeCostByClass,
       activeCostByWorkspace,
       activeCostBySession,
+      activeHeavyOperations,
+      maxHeavyOperations: this.limits.maxHeavyOperations,
       rejected: this.rejected,
       pressureState,
       effectiveGlobalCost: effectiveGlobalCost(
@@ -455,6 +504,10 @@ function effectiveGlobalCost(
   const ratio = state === 'critical' ? criticalRatio : elevatedRatio;
   if (ratio <= 0) return 0;
   return Math.max(1, Math.floor(configuredGlobalCost * ratio));
+}
+
+function isHeavyAdmissionClass(resourceClass: ResourceAdmissionClass): boolean {
+  return HEAVY_ADMISSION_CLASS_SET.has(resourceClass);
 }
 
 function validateRequest(request: ResourceAdmissionRequest): 'invalid_request' | undefined {

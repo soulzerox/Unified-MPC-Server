@@ -64,6 +64,8 @@ describe('heavy job waiter queue (#145 U3)', () => {
 
 describe('heavy job queue scoped backfill (#145 fairness)', () => {
   it('backfills another workspace when the queue head is blocked by its own workspace ceiling', () => {
+    // dependency_bootstrap stays outside HEAVY_ADMISSION_CLASSES (#145), so this
+    // case is about workspace-scoped denial only, not the one-heavy-at-a-time cap.
     const controller = new ResourceAdmissionController({
       globalCost: 8,
       workspaceCost: 4,
@@ -75,7 +77,7 @@ describe('heavy job queue scoped backfill (#145 fairness)', () => {
       operationId: 'running-a',
       workspaceId: 'ws-a',
       sessionId: 'session-a',
-      resourceClass: 'rag_indexing',
+      resourceClass: 'dependency_bootstrap',
       cost: 4,
     });
     expect(running.admitted).toBe(true);
@@ -84,14 +86,14 @@ describe('heavy job queue scoped backfill (#145 fairness)', () => {
       operationId: 'head-a',
       workspaceId: 'ws-a',
       sessionId: 'session-a',
-      resourceClass: 'rag_indexing',
+      resourceClass: 'dependency_bootstrap',
       cost: 4,
     });
     queue.enqueue({
       operationId: 'backfill-b',
       workspaceId: 'ws-b',
       sessionId: 'session-b',
-      resourceClass: 'rag_indexing',
+      resourceClass: 'dependency_bootstrap',
       cost: 4,
     });
 
@@ -104,6 +106,33 @@ describe('heavy job queue scoped backfill (#145 fairness)', () => {
     const second = queue.drain();
     expect(second.map((admission) => admission.lease.operationId)).toEqual(['head-a']);
     for (const admission of second) controller.release(admission.lease);
+  });
+
+  it('keeps draining past a heavy-capacity denial so a light job still runs (#145)', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 8,
+    });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    const running = controller.tryAcquire({
+      operationId: 'running-verification',
+      workspaceId: 'ws-a',
+      sessionId: 'session-a',
+      resourceClass: 'verification_heavy',
+      cost: 8,
+    });
+    expect(running.admitted).toBe(true);
+
+    queue.enqueue({ operationId: 'queued-index', workspaceId: 'ws-b', sessionId: 'session-b', resourceClass: 'rag_indexing', cost: 8 });
+    queue.enqueue({ operationId: 'queued-scan', workspaceId: 'ws-c', sessionId: 'session-c', resourceClass: 'context_scan', cost: 4 });
+
+    // The index job is denied by the heavy slot only, so the light job behind
+    // it is backfilled instead of stalling the whole queue.
+    expect(queue.drain().map((admission) => admission.lease.operationId)).toEqual(['queued-scan']);
+    expect(queue.depth()).toBe(1);
+    if (running.admitted) controller.release(running.lease);
   });
 
   it('stops at a global denial instead of probing every later job', () => {

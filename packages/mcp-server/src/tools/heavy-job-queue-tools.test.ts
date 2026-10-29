@@ -154,6 +154,8 @@ describe('heavyJobQueueTools', () => {
         },
         activeCostByWorkspace: { 'workspace-secret': 3 },
         activeCostBySession: { 'session-secret': 3 },
+        activeHeavyOperations: 1,
+        maxHeavyOperations: 1,
         rejected: 2,
         pressureState: 'elevated',
         effectiveGlobalCost: 6,
@@ -179,6 +181,8 @@ describe('heavyJobQueueTools', () => {
         admission: {
           activeCost: 3,
           activeOperations: 1,
+          activeHeavyOperations: 1,
+          maxHeavyOperations: 1,
           effectiveGlobalCost: 6,
           pressureState: 'elevated',
           rejected: 2,

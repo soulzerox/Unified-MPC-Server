@@ -43,6 +43,8 @@ function projectAdmission(snapshot: ResourceAdmissionSnapshot): Record<string, u
   return {
     activeCost: snapshot.activeCost,
     activeOperations: snapshot.activeOperations,
+    activeHeavyOperations: snapshot.activeHeavyOperations,
+    maxHeavyOperations: snapshot.maxHeavyOperations,
     effectiveGlobalCost: snapshot.effectiveGlobalCost,
     pressureState: snapshot.pressureState,
     rejected: snapshot.rejected,

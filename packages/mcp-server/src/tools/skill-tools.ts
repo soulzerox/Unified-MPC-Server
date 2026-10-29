@@ -52,7 +52,7 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'skills_install',
-      description: 'Install a validated local or HTTPS Git SKILL.md source into the canonical Unified MCP skill store. This does not write Cursor, Cline, Claude, Codex, Antigravity, or OpenCode skill catalogs. Remote repositories are materialized without running install scripts and are rejected when unsafe symlinks are present.',
+      description: 'Install a validated local or HTTPS Git SKILL.md source into the canonical Unified MCP skill store. The install name must equal the name declared in SKILL.md frontmatter: a mismatch is rejected with CONFLICT (reason skill-name-conflict) so one logical Skill cannot be advertised under two IDs. This does not write Cursor, Cline, Claude, Codex, Antigravity, or OpenCode skill catalogs. Remote repositories are materialized without running install scripts and are rejected when unsafe symlinks are present.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       inputSchema: skillInstallSchema,

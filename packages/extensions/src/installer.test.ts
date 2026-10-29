@@ -607,6 +607,79 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
     const wsOpenCode = path.join(workspace, '.opencode', 'skills', 'ws-tool', 'SKILL.md');
     expect(await readFile(wsOpenCode, 'utf8')).toContain('# WS Tool');
   });
+
+  it('rejects a Skill install whose declared name would advertise an existing Skill under a second ID (#294)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-skill-name-collision-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const canonicalDir = path.join(root, 'ui-ux-pro-max-source');
+    const duplicateDir = path.join(root, 'ux-ui-promax-skill-source');
+    await mkdir(canonicalDir, { recursive: true });
+    await mkdir(duplicateDir, { recursive: true });
+    const skillMarkdown = '---\nname: ui-ux-pro-max\ndescription: UI/UX design intelligence\n---\n# UI UX Pro Max\n';
+    await writeFile(path.join(canonicalDir, 'SKILL.md'), skillMarkdown, 'utf8');
+    await writeFile(path.join(duplicateDir, 'SKILL.md'), skillMarkdown, 'utf8');
+
+    const installer = new InstallerService({ dataDir });
+    const first = await installer.installSkill({
+      name: 'ui-ux-pro-max',
+      source: canonicalDir,
+      targets: ['unified-mpc'],
+    });
+    expect(first.ok).toBe(true);
+
+    const duplicate = await installer.installSkill({
+      name: 'ux-ui-promax-skill',
+      source: duplicateDir,
+      targets: ['unified-mpc'],
+    });
+
+    expect(duplicate.ok).toBe(false);
+    if (duplicate.ok) return;
+    expect(duplicate.error.code).toBe('CONFLICT');
+    expect(duplicate.error.message).toContain('ui-ux-pro-max');
+    expect(duplicate.error.details).toMatchObject({
+      reason: 'skill-name-conflict',
+      skillName: 'ux-ui-promax-skill',
+      declaredName: 'ui-ux-pro-max',
+    });
+    await expect(readFile(
+      path.join(dataDir, 'extensions', 'skills', 'ux-ui-promax-skill', 'SKILL.md'),
+      'utf8',
+    )).rejects.toThrow();
+  });
+
+  it('keeps the catalog free of an alias ID when the declared Skill name differs from the install name (#294)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-skill-name-mismatch-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const sourceDir = path.join(root, 'renamed-source');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, 'SKILL.md'),
+      '---\nname: canonical-skill\ndescription: Canonical name\n---\n# Canonical\n',
+      'utf8',
+    );
+
+    const result = await new InstallerService({ dataDir }).installSkill({
+      name: 'legacy-alias',
+      source: sourceDir,
+      targets: ['unified-mpc'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('CONFLICT');
+    expect(result.error.details).toMatchObject({
+      reason: 'skill-name-conflict',
+      skillName: 'legacy-alias',
+      declaredName: 'canonical-skill',
+    });
+    await expect(readFile(
+      path.join(dataDir, 'extensions', 'skills', 'legacy-alias', 'SKILL.md'),
+      'utf8',
+    )).rejects.toThrow();
+  });
 });
 
 describe('InstallerService - Server Ingestion Pipeline', () => {

@@ -307,3 +307,192 @@ describe('heavy job queue promote (#145 U12)', () => {
     expect(queue.promote('only')).toBe(true);
   });
 });
+
+describe('heavy job queue fairness wiring (#145 step 2)', () => {
+  function heavyController(): ResourceAdmissionController {
+    return new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 8,
+    });
+  }
+
+  function drainAndRelease(
+    controller: ResourceAdmissionController,
+    queue: HeavyJobWaiterQueue,
+  ): string[] {
+    const grants = queue.drain();
+    for (const grant of grants) controller.release(grant.lease);
+    return grants.map((grant) => grant.lease.operationId);
+  }
+
+  it('alternates workspaces across separate drains on one heavy slot', () => {
+    const controller = heavyController();
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    const jobs = [
+      ['a1', 'ws-a'],
+      ['a2', 'ws-a'],
+      ['b1', 'ws-b'],
+      ['b2', 'ws-b'],
+    ] as const;
+    for (const [operationId, workspaceId] of jobs) {
+      // Declared heavy shell runs are blocking (#145 U12), so this is the
+      // production shape: rotation has to apply inside the blocking tier.
+      queue.enqueue({ operationId, workspaceId, resourceClass: 'verification_heavy', cost: 8, blocking: true });
+    }
+
+    // One heavy slot: each drain admits one job, and the next drain must give
+    // the other workspace its turn instead of draining ws-a's burst first.
+    expect([
+      drainAndRelease(controller, queue),
+      drainAndRelease(controller, queue),
+      drainAndRelease(controller, queue),
+      drainAndRelease(controller, queue),
+    ]).toEqual([['a1'], ['b1'], ['a2'], ['b2']]);
+  });
+
+  it('records a workspace as served only when its durable row starts', () => {
+    let nowMs = Date.parse('2026-10-30T12:00:00.000Z');
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 8,
+    });
+    const started: string[] = [];
+    let position = 0;
+    const store: HeavyJobQueueStore = {
+      claim: (entry): HeavyJobClaimResult => {
+        position += 1;
+        return { status: 'queued', operationId: entry.operationId, position, depth: position };
+      },
+      claimExisting: (entry): HeavyJobReattachResult => ({
+        status: 'missing', operationId: entry.operationId, depth: 0,
+      }),
+      promote: (): number | undefined => 1,
+      cancel: (): boolean => true,
+      supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      start: (operationId): boolean => {
+        if (operationId === 'a1') return false;
+        started.push(operationId);
+        return true;
+      },
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => position,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const queue = new HeavyJobWaiterQueue(controller, {
+      maxQueued: 8,
+      store,
+      now: (): Date => new Date(nowMs),
+    });
+
+    // b1 is admitted; b2 waits behind b's workspace ceiling so the ws-b
+    // fairness history stays alive while ws-a is still never served.
+    queue.enqueue({
+      operationId: 'b1', workspaceId: 'ws-b', sessionId: 'session-b',
+      resourceClass: 'verification_heavy', cost: 8,
+    });
+    queue.enqueue({
+      operationId: 'b2', workspaceId: 'ws-b', sessionId: 'session-b',
+      resourceClass: 'verification_heavy', cost: 8,
+    });
+    expect(drainAndRelease(controller, queue)).toEqual(['b1']);
+
+    // At t+10 the never-served ws-a is tried first. Its durable row refuses to
+    // start, so it must not count as served; b2 is denied by b's ceiling.
+    nowMs += 10 * 60_000;
+    const blocker = controller.tryAcquire({
+      operationId: 'running-b',
+      workspaceId: 'ws-b',
+      sessionId: 'session-b',
+      resourceClass: 'dependency_bootstrap',
+      cost: 8,
+    });
+    expect(blocker.admitted).toBe(true);
+    queue.enqueue({
+      operationId: 'a1', workspaceId: 'ws-a', sessionId: 'session-a',
+      resourceClass: 'verification_heavy', cost: 8,
+    });
+    expect(queue.drain()).toEqual([]);
+
+    // At t+20 ws-a still has no service history, so a2 must outrank the ws-b
+    // row that was served at t0. The heavy slot keeps the drain to one job.
+    nowMs += 10 * 60_000;
+    if (blocker.admitted) controller.release(blocker.lease);
+    queue.enqueue({
+      operationId: 'a2', workspaceId: 'ws-a', sessionId: 'session-a',
+      resourceClass: 'verification_heavy', cost: 8,
+    });
+    expect(drainAndRelease(controller, queue)).toEqual(['a2']);
+    expect(started).toEqual(['b1', 'a2']);
+  });
+
+  it('tries aged work before rotation but never before blocking work', () => {
+    const nowMs = Date.parse('2026-10-30T12:00:00.000Z');
+    const controller = heavyController();
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8, now: (): Date => new Date(nowMs) });
+    const longAgo = new Date(nowMs - 40 * 60_000).toISOString();
+    const recent = new Date(nowMs - 5 * 60_000).toISOString();
+
+    queue.enqueue({
+      operationId: 'block-old', workspaceId: 'ws-a', resourceClass: 'verification_heavy',
+      cost: 8, blocking: true, requestedAt: longAgo,
+    });
+    queue.enqueue({
+      operationId: 'aged-b', workspaceId: 'ws-b', resourceClass: 'verification_heavy',
+      cost: 8, requestedAt: longAgo,
+    });
+    queue.enqueue({
+      operationId: 'fresh-c', workspaceId: 'ws-c', resourceClass: 'verification_heavy',
+      cost: 8, requestedAt: recent,
+    });
+
+    expect([
+      drainAndRelease(controller, queue),
+      drainAndRelease(controller, queue),
+      drainAndRelease(controller, queue),
+    ]).toEqual([['block-old'], ['aged-b'], ['fresh-c']]);
+  });
+
+  it('keeps blocking work ahead of aged background work', () => {
+    const nowMs = Date.parse('2026-10-30T12:00:00.000Z');
+    const controller = heavyController();
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8, now: (): Date => new Date(nowMs) });
+
+    queue.enqueue({
+      operationId: 'bg-old', workspaceId: 'ws-a', sessionId: 'session-a',
+      resourceClass: 'verification_heavy', cost: 8,
+      requestedAt: new Date(nowMs - 40 * 60_000).toISOString(),
+    });
+    queue.enqueue({
+      operationId: 'gate', workspaceId: 'ws-b', sessionId: 'session-b',
+      resourceClass: 'verification_heavy', cost: 8, blocking: true,
+      requestedAt: new Date(nowMs - 60_000).toISOString(),
+    });
+
+    expect(drainAndRelease(controller, queue)).toEqual(['gate']);
+  });
+
+  it('keeps FIFO for a single workspace', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+    });
+    const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });
+    for (const operationId of ['first', 'second', 'third']) {
+      queue.enqueue({ operationId, workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
+    }
+
+    expect(drainAndRelease(controller, queue)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('rejects a non-positive aging window', () => {
+    const controller = heavyController();
+    expect(() => new HeavyJobWaiterQueue(controller, { agingMs: 0 })).toThrow(RangeError);
+  });
+});

@@ -95,13 +95,25 @@ describe('heavy job fairness policy (#145)', () => {
     expect(order(candidates, lastServedAt)).toEqual(['b-blocking', 'a-old']);
   });
 
-  it('orders blocking work FIFO among itself', () => {
+  it('rotates blocking work across workspaces before anything else', () => {
     const candidates = [
-      job('b-blocking', 'b', minutesAgo(1), { position: 2, blocking: true }),
-      job('a-blocking', 'a', minutesAgo(3), { position: 1, blocking: true }),
+      job('a1', 'a', minutesAgo(9), { position: 1, blocking: true }),
+      job('a2', 'a', minutesAgo(8), { position: 2, blocking: true }),
+      job('b1', 'b', minutesAgo(7), { position: 3, blocking: true }),
+      job('b2', 'b', minutesAgo(6), { position: 4, blocking: true }),
+      job('aged-c', 'c', minutesAgo(40), { position: 5 }),
     ];
 
-    expect(order(candidates)).toEqual(['a-blocking', 'b-blocking']);
+    expect(order(candidates)).toEqual(['a1', 'b1', 'a2', 'b2', 'aged-c']);
+  });
+
+  it('keeps blocking work FIFO within one workspace', () => {
+    const candidates = [
+      job('later', 'a', minutesAgo(1), { position: 2, blocking: true }),
+      job('earlier', 'a', minutesAgo(3), { position: 1, blocking: true }),
+    ];
+
+    expect(order(candidates)).toEqual(['earlier', 'later']);
   });
 
   it('is deterministic for identical timestamps', () => {

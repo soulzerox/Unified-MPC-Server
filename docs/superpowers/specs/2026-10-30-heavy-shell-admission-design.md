@@ -33,7 +33,7 @@ shell run (admission_class declared)
 
 Slice 1 (declaration + admission) is merged; slice 2 (this change) adds durable parking. A declared run validates `admission_class`, claims one bounded durable queue row, writes the durable task as `waiting_resource`, and returns its task id with the queue position. The controller stays the admission authority: a queued run starts only when `drain()` admits it on the capacity release that frees the heavy slot, with no second tool call. Cancel while queued removes the queue row and creates no process; queue-full rejects before a task record exists. A row retired by recovery before admission fails its parked task instead of leaving a non-terminal record. `status` / `wait` / `list` add an `admission` block with class, cost, state, position and waited time.
 
-Still open: restart re-attachment. A `waiting_resource` task left by a dead runtime is not revived yet; the next slice re-attaches it to a live queue row or marks it interrupted. Until then the record is truthful (it never claims the work started) but needs operator attention after a restart.
+Restart re-attachment is in place: on startup and on every queue-recovery sweep, a parked declared task re-claims its durable queue row (adopting an orphaned row, leaving a live foreign owner alone) and starts on admission. Parked work older than the queue retention window fails with an explicit `expired before a runtime re-attached it` error instead of being revived indefinitely.
 
 ## Existing seams to extend
 

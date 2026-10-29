@@ -375,13 +375,40 @@ describe('upgrade runtime', () => {
 
   it('exports the effective canonical host schema catalog with drift fingerprints and standalone fallback', async () => {
     const registry = new ToolRegistry({}, actor);
-    const listed = await registry.invoke('tool_schema_list', {});
+    const summary = await registry.invoke('tool_schema_list', {});
+    expect(summary.isError).not.toBe(true);
+    const summaryValue = summary.structuredContent as {
+      schemas: Array<Record<string, unknown>>;
+      catalogFingerprint: string;
+      total: number;
+      detail: string;
+      omittedFields: string[];
+      hint: string;
+    };
+    expect(summaryValue).toMatchObject({ detail: 'summary', total: summaryValue.schemas.length });
+    expect(summaryValue.omittedFields).toEqual(['schema', 'inputSchema', 'outputSchema', 'annotations', 'execution', 'schemaFingerprint']);
+    expect(summaryValue.hint).toContain('tool_describe');
+    expect(summaryValue.schemas.every((row) => row.schema === undefined && row.inputSchema === undefined && row.outputSchema === undefined && typeof row.inputSignature === 'string')).toBe(true);
+    expect(summaryValue.schemas.find((row) => row.id === 'prepare_code_change')).toMatchObject({
+      version: '1.0.0',
+      permissions: ['READ'],
+      source: 'canonical-tool-registry',
+      readOnly: true,
+      destructive: false,
+    });
+    // Required inputs are marked in the compact signature.
+    const prepareSignature = String(summaryValue.schemas.find((row) => row.id === 'prepare_code_change')?.inputSignature);
+    expect(prepareSignature).toContain('workspaceId*');
+    expect(prepareSignature).toContain('filePath*');
+
+    const listed = await registry.invoke('tool_schema_list', { detail: 'full' });
 
     expect(listed.isError).not.toBe(true);
     const listedValue = listed.structuredContent as {
       schemas: Array<Record<string, unknown>>;
       catalogFingerprint: string;
     };
+    expect(listedValue.catalogFingerprint).toBe(summaryValue.catalogFingerprint);
     const expectedNames = registry.listExposedDefinitions().map((tool) => tool.name).sort();
     const canonicalSchemas = listedValue.schemas.filter((schema) => schema.source === 'canonical-tool-registry');
     expect(canonicalSchemas.map((schema) => String(schema.id)).sort()).toEqual(expectedNames);
@@ -420,6 +447,8 @@ describe('upgrade runtime', () => {
       required: ['workspaceId', 'filePath'],
       additionalProperties: false,
     });
+    // `detail=full` keeps the historical duplicate alias next to inputSchema.
+    expect(byId.get('prepare_code_change')?.schema).toEqual(byId.get('prepare_code_change')?.inputSchema);
 
     const standalone = new UpgradeRuntimeService({}, actor);
     const fallback = await standalone.execute('tool_schema_list', {});
@@ -429,6 +458,63 @@ describe('upgrade runtime', () => {
       expect(schemas).toHaveLength(UPGRADE_TOOL_CATALOG.length);
       expect(schemas.every((schema) => schema.source === 'upgrade-catalog-fallback')).toBe(true);
     }
+  });
+
+  it('keeps registered schema safety flags truthful and distinguishes unknown from empty inputs', async () => {
+    const runtime = new UpgradeRuntimeService({}, actor);
+    const registered = await runtime.execute('tool_schema_register', {
+      id: 'custom-danger',
+      version: '1.0.0',
+      permission: 'DANGEROUS',
+      schema: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'], additionalProperties: false },
+    });
+    expect(registered).toMatchObject({ ok: true });
+    const open = await runtime.execute('tool_schema_register', {
+      id: 'custom-open',
+      version: '1.0.0',
+      permission: 'READ',
+      schema: { type: 'object' },
+    });
+    expect(open).toMatchObject({ ok: true });
+
+    const listed = await runtime.execute('tool_schema_list', {});
+    if (!listed.ok) throw new Error('expected a schema listing');
+    const rows = (listed.value as { schemas: Array<Record<string, unknown>> }).schemas;
+    // Registered schemas persist no annotations, so the permission has to decide:
+    // reporting `destructive: false` for a DANGEROUS registration would be a lie.
+    expect(rows.find((row) => row.id === 'custom-danger')).toMatchObject({
+      permissions: ['DANGEROUS'],
+      source: 'registered',
+      readOnly: false,
+      destructive: true,
+      inputSignature: 'target*',
+    });
+    // An object schema without `additionalProperties: false` still accepts fields
+    // the listing cannot name, which is not the same as "takes no input".
+    expect(rows.find((row) => row.id === 'custom-open')).toMatchObject({
+      readOnly: true,
+      destructive: false,
+      inputSignature: '…',
+    });
+    // A closed schema with no properties really does take nothing.
+    const bare = await runtime.execute('tool_schema_register', {
+      id: 'custom-bare',
+      version: '1.0.0',
+      permission: 'READ',
+      schema: { type: 'object', properties: {}, additionalProperties: false },
+    });
+    expect(bare).toMatchObject({ ok: true });
+    const afterBare = await runtime.execute('tool_schema_list', {});
+    if (!afterBare.ok) throw new Error('expected a schema listing');
+    const bareRows = (afterBare.value as { schemas: Array<Record<string, unknown>> }).schemas;
+    expect(bareRows.find((row) => row.id === 'custom-bare')?.inputSignature).toBe('');
+
+    // `execute` bypasses the zod boundary, so the enum is enforced here too
+    // instead of silently falling back to a summary.
+    await expect(runtime.execute('tool_schema_list', { detail: 'FULL' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
   });
 
   it('excludes user-disabled tools from dynamic discovery, ranking, describe, and category counts', async () => {

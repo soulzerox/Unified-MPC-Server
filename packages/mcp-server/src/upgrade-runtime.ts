@@ -481,16 +481,28 @@ export class UpgradeRuntimeService {
       case 'recovery_status':
         return ok({ reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, staleContinuation: 'unverified', indexRecovery: 'rebuildable', workerIsolation: true });
       case 'tool_schema_list': {
+        const detail = readString(input, 'detail');
+        if (detail !== undefined && detail !== 'summary' && detail !== 'full') {
+          return err(appError('INVALID_INPUT', 'tool_schema_list accepts detail=summary|full'));
+        }
         const schemas = this.listToolSchemas();
         const catalogFingerprint = digest(schemas.map((schema) => ({
           id: schema.id,
           version: schema.version,
           schemaFingerprint: schema.schemaFingerprint,
         })));
+        const persistence = this.stateStore === undefined ? 'memory_only' : 'session_locked_state';
+        if (detail === 'full') {
+          return ok({ schemas, total: schemas.length, detail: 'full', catalogFingerprint, persistence });
+        }
         return ok({
-          schemas,
+          schemas: schemas.map((schema) => toolSchemaSummaryRow(schema)),
+          total: schemas.length,
+          detail: 'summary',
+          omittedFields: TOOL_SCHEMA_SUMMARY_OMITTED_FIELDS,
+          hint: "one compact row per tool: inputSignature lists the input fields and marks required ones with '*', a trailing '…' means undeclared fields are still accepted, and null means the tool published no input schema; call tool_describe { name } for one tool's full JSON schemas and annotations, or pass detail=full for every schema in this listing",
           catalogFingerprint,
-          persistence: this.stateStore === undefined ? 'memory_only' : 'session_locked_state',
+          persistence,
         });
       }
       case 'tool_schema_register':
@@ -3015,6 +3027,69 @@ function diagnosticProcessResult(
 function readString(input: Record<string, unknown>, key: string): string | undefined {
   const value = input[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * `tool_schema_list` forwarded every record whole: on this host 261 tools made a
+ * default call 434 KB (~109k tokens), of which the JSON schemas were 276 KB --
+ * and `schema` is a byte-identical duplicate of `inputSchema`. A listing only has
+ * to answer "which tools exist, may I call them, what do they take"; one tool's
+ * schemas come from `tool_describe` or from an explicit `detail=full`.
+ */
+const TOOL_SCHEMA_SUMMARY_OMITTED_FIELDS = ['schema', 'inputSchema', 'outputSchema', 'annotations', 'execution', 'schemaFingerprint'] as const;
+
+function toolSchemaSummaryRow(schema: Record<string, unknown>): Record<string, unknown> {
+  const inputSchema = isRecord(schema.inputSchema) ? schema.inputSchema : isRecord(schema.schema) ? schema.schema : undefined;
+  const permissionsValue = schema.permissions;
+  const permissions = Array.isArray(permissionsValue)
+    ? permissionsValue.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  const annotations = isRecord(schema.annotations) ? schema.annotations : undefined;
+  return {
+    id: schema.id,
+    version: schema.version,
+    permissions: schema.permissions,
+    source: schema.source,
+    ...safetyFlags(permissions, annotations),
+    streamable: schema.streamable === true,
+    parallelSafe: schema.parallelSafe === true,
+    inputSignature: inputSignatureOf(inputSchema),
+  };
+}
+
+/**
+ * Session-registered schemas persist no `annotations` (`tool_schema_register`
+ * stores id, version, permission, flags, source and schema), so a listing that
+ * read the hints alone would report `destructive: false` for a DANGEROUS
+ * registration. When hints exist they win; otherwise the permission decides.
+ */
+function safetyFlags(
+  permissions: readonly string[],
+  annotations: Record<string, unknown> | undefined,
+): { readonly readOnly: boolean; readonly destructive: boolean } {
+  const declaresDangerous = permissions.includes('DANGEROUS');
+  const declaresReadOnly = permissions.includes('READ') && !declaresDangerous;
+  return {
+    readOnly: annotations === undefined ? declaresReadOnly : annotations.readOnlyHint === true,
+    destructive: annotations === undefined ? declaresDangerous : annotations.destructiveHint === true,
+  };
+}
+
+/**
+ * `null` means the tool published no input schema (unknown shape), `''` means a
+ * closed schema with no properties (takes nothing), and a trailing `…` means the
+ * schema still accepts undeclared fields -- three states a caller must not have
+ * to guess apart from one empty string.
+ */
+function inputSignatureOf(inputSchema: Record<string, unknown> | undefined): string | null {
+  if (inputSchema === undefined) return null;
+  const propertiesValue = inputSchema.properties;
+  const properties = isRecord(propertiesValue) ? Object.keys(propertiesValue) : [];
+  const requiredValue = inputSchema.required;
+  const required = new Set(Array.isArray(requiredValue) ? requiredValue.filter((entry): entry is string => typeof entry === 'string') : []);
+  const parts = properties.map((name) => required.has(name) ? `${name}*` : name);
+  if (inputSchema.additionalProperties !== false) parts.push('…');
+  return parts.join(', ');
 }
 
 /**

@@ -28,6 +28,7 @@ test('merge profile runs every gate in a deterministic order', () => {
     'diff-check',
     'typecheck',
     'lint',
+    'test:merge-gate',
     'build',
     'test:workspace',
     'test:storage',

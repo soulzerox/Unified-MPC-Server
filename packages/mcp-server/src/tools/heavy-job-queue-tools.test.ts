@@ -42,6 +42,53 @@ function queueTool(
 }
 
 describe('heavyJobQueueTools', () => {
+  it('projects bounded terminal outcome counts when the store keeps history', async () => {
+    const sinceCalls: string[] = [];
+    const tool = queueTool({
+      heavyJobQueue: {
+        listLive: () => [entry()],
+        depth: () => 1,
+        outcomes: (since: string) => {
+          sinceCalls.push(since);
+          return { completed: 2, failed: 1, interrupted: 0, cancelled: 0, superseded: 1, total: 4 };
+        },
+      },
+    } as unknown as McpToolContext['services']);
+
+    const result = await tool.execute({}, new AbortController().signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        outcomes: { windowMs: 86_400_000, completed: 2, failed: 1, superseded: 1, total: 4 },
+      },
+    });
+    expect(sinceCalls).toHaveLength(1);
+    expect(Number.isFinite(Date.parse(sinceCalls[0]!))).toBe(true);
+  });
+
+  it('omits outcome counts when the store has no history or the read fails', async () => {
+    const withoutHistory = queueTool({
+      heavyJobQueue: { listLive: () => [entry()], depth: () => 1 },
+    } as unknown as McpToolContext['services']);
+    const noHistory = await withoutHistory.execute({}, new AbortController().signal);
+    expect(noHistory).toMatchObject({ ok: true });
+    expect((noHistory as { value: Record<string, unknown> }).value).not.toHaveProperty('outcomes');
+
+    const broken = queueTool({
+      heavyJobQueue: {
+        listLive: () => [entry()],
+        depth: () => 1,
+        outcomes: () => {
+          throw new Error('history unavailable');
+        },
+      },
+    } as unknown as McpToolContext['services']);
+    const brokenResult = await broken.execute({}, new AbortController().signal);
+    expect(brokenResult).toMatchObject({ ok: true });
+    expect((brokenResult as { value: Record<string, unknown> }).value).not.toHaveProperty('outcomes');
+  });
+
   it('fails closed when the durable queue service is unavailable', async () => {
     const result = await queueTool({}).execute({}, new AbortController().signal);
     expect(result).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });

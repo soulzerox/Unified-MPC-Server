@@ -3,6 +3,7 @@ import type {
   HeavyJobClaimResult,
   HeavyJobLiveEntry,
   HeavyJobLiveState,
+  HeavyJobOutcomeCounts,
   HeavyJobQueueEntry,
   HeavyJobQueueStore,
   HeavyJobReattachResult,
@@ -400,6 +401,46 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
       ORDER BY CASE state WHEN 'queued' THEN 0 ELSE 1 END, position ASC, operation_id ASC
     `).all();
     return rows.map((row) => toLiveEntry(this.requireRow(row)));
+  }
+
+  /**
+   * Terminal outcomes finished at or after `since` (#145 observability).
+   *
+   * One row per exact operation identity, so this counts distinct inputs whose
+   * latest outcome landed in the window. The table stays bounded by distinct
+   * inputs, and the state filter keeps the scan off live rows. `julianday`
+   * compares real instants, so a caller-supplied offset timestamp cannot land
+   * on the wrong side of the window.
+   */
+  public outcomes(since: string): HeavyJobOutcomeCounts {
+    validateIso(since, 'since');
+    const rows = this.database.connection.prepare(`
+      SELECT state, COUNT(*) AS total
+      FROM heavy_jobs
+      WHERE state NOT IN ('queued', 'running') AND julianday(finished_at) >= julianday(?)
+      GROUP BY state
+    `).all(since);
+
+    const counts = { completed: 0, failed: 0, interrupted: 0, cancelled: 0, superseded: 0 };
+    for (const value of rows) {
+      if (!isRecord(value) || typeof value.state !== 'string') {
+        throw new HeavyJobQueueStoreError('corrupt', 'Heavy-job outcome row has invalid columns');
+      }
+      const total = requireNumber(value, 'total');
+      switch (value.state) {
+        case 'completed':
+        case 'failed':
+        case 'interrupted':
+        case 'cancelled':
+        case 'superseded':
+          counts[value.state] += total;
+          break;
+        default:
+          throw new HeavyJobQueueStoreError('corrupt', 'Heavy-job outcome row has invalid state');
+      }
+    }
+    const total = counts.completed + counts.failed + counts.interrupted + counts.cancelled + counts.superseded;
+    return { ...counts, total };
   }
 
   /** Read one row in any lifecycle state (read-only diagnostics/recovery). */

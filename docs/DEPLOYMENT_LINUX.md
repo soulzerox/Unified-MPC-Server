@@ -164,8 +164,13 @@ Operator behavior to expect:
 
 Use `heavy_job_queue_status` to inspect queue depth, the running job, positions,
 wait/run durations, heartbeats, active heavy cost and memory pressure without
-admitting new work. `status` / `list` on `shell` show the same parking state per
-task.
+admitting new work. When the durable store keeps history, the response also
+carries `outcomes` — `completed`, `failed`, `interrupted`, `cancelled`,
+`superseded` and `total` for jobs that finished in the last **24 hours**
+(`windowMs`, `since`). It counts distinct operation identities, so a re-claimed
+job reports only its latest outcome; use it to tell a starved queue (nothing
+finishing) from a failing one. `status` / `list` on `shell` show the same
+parking state per task.
 
 Cross-project fairness (#145) shapes which queued job is tried next:
 

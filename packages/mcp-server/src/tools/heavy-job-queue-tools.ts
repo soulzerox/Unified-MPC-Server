@@ -10,6 +10,8 @@ import {
 import { heavyJobQueueStatusSchema } from './schemas.js';
 
 const DEFAULT_LIMIT = 20;
+/** Terminal-outcome window reported by queue status; long enough to spot starvation. */
+const OUTCOMES_WINDOW_MS = 24 * 60 * 60_000;
 
 function elapsedMs(since: string | undefined, nowMs: number): number | undefined {
   if (since === undefined) return undefined;
@@ -75,6 +77,24 @@ interface FairnessAnnotation {
   readonly ranks: ReadonlyMap<string, { readonly effectiveRank: number; readonly aged: boolean }>;
 }
 
+/**
+ * Terminal-outcome counts for the recent window (#145 observability).
+ * History is diagnostic-only: a store without it, or a failed read, must not
+ * hide the live queue state.
+ */
+function projectOutcomes(
+  store: NonNullable<McpToolContext['services']['heavyJobQueue']>,
+  nowMs: number,
+): Record<string, unknown> | undefined {
+  if (store.outcomes === undefined) return undefined;
+  try {
+    const since = new Date(nowMs - OUTCOMES_WINDOW_MS).toISOString();
+    return { windowMs: OUTCOMES_WINDOW_MS, since, ...store.outcomes(since) };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Fairness is diagnostic-only: a broken projection must not hide queue state. */
 function projectFairness(provider: McpApplicationServices['heavyJobFairness']): FairnessAnnotation | undefined {
   if (provider === undefined) return undefined;
@@ -93,7 +113,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
   return [
     defineTool({
       name: 'heavy_job_queue_status',
-      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, configured and measured-effective heavy cap, pressure state, memory and CPU samples) and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the response labels that projection as runtime-local; durable position remains the audit order.',
+      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, configured and measured-effective heavy cap, pressure state, memory and CPU samples), terminal outcome counts for the last 24 hours when the store keeps history, and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the response labels that projection as runtime-local; durable position remains the audit order.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: heavyJobQueueStatusSchema,
@@ -117,6 +137,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
               : { ...projected, effectiveRank: rank.effectiveRank, aged: rank.aged };
           });
           const admission = context.resourceAdmissionController?.snapshot();
+          const outcomes = projectOutcomes(store, nowMs);
           return ok({
             queueDepth: store.depth(),
             live: filtered.length,
@@ -124,6 +145,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
             running: filtered.filter((entry) => entry.state === 'running').length,
             truncated: filtered.length > entries.length,
             ...(admission === undefined ? {} : { admission: projectAdmission(admission) }),
+            ...(outcomes === undefined ? {} : { outcomes }),
             ...(fairness === undefined ? {} : { fairness: fairness.info }),
             entries,
           });

@@ -8,6 +8,34 @@ For rolling continuation, the workspace skill is authoritative. Current mainline
 
 Every rolling-mode workspace mutation must use the current `goalLease` token/generation proof. Same MCP session identity is not ownership proof. Track background work with goal-relative `trackedTasks`: `blocking_job` entries participate in liveness, while `supporting_service` entries do not; explicit `provider` routing and `cancelWithGoal` ownership prevent a shared service from being probed or stopped accidentally. Legacy `activeTaskIds` rows decode conservatively as goal-owned blocking jobs. Live or unknown liveness fails closed; stale-owner takeover must follow the bounded recovery rules in the scheduled-continuation skill. A request to disable scheduling stops only scheduled continuation and never abandons the durable goal. When the goal finishes, make the exact Native ChatGPT task non-runnable using the strongest operation actually exposed by the host (prefer true delete, otherwise host-confirmed disable), record truthful cleanup evidence, finish the goal, verify `get_goal` is terminal, and stop. Never report completion while the goal is active.
 
+## Local-only verification before every PR
+
+This repository has no GitHub Actions verification. Build, test, lint and
+typecheck run locally, and local evidence is what authorizes a merge.
+
+Run the merge-readiness profile on the **exact commit** you are about to push:
+
+```sh
+corepack pnpm@10.15.0 verify:local
+```
+
+It runs `diff-check`, `typecheck`, `lint`, `build`, the `workspace`, `storage`,
+`mcp-server` and `cli` suites, then version consistency, the tool catalog check
+and `dist` provenance freshness. It refuses a dirty worktree because provenance
+and the build-provenance test describe the committed tree, and it writes a
+durable receipt to `.unified-mpc/local-verify/` (`headSha`, `diffFingerprint`,
+per-step exit codes, bounded log refs, `mergeReady`).
+
+For fast iteration before committing, use the subset:
+
+```sh
+corepack pnpm@10.15.0 verify:targeted
+```
+
+Copy the `mergeReady` verdict and the failing step names into the PR body. Never
+claim local CI passed without a receipt for the current head. The unit tests for
+the profile runner are `node --test scripts/local-verify.test.mjs`.
+
 ## Authoritative CI Watcher Policy
 
 When a GitHub Actions workflow must be monitored until completion, use one authoritative long-running background/durable watcher for the exact workflow run instead of repeated ad-hoc polling.

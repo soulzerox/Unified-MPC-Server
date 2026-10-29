@@ -132,6 +132,8 @@ pnpm cli tools call working_memory_search '{"workspaceId":"<workspace-id>","quer
 
 Client แบบ non-Web ที่เข้า Unified-MPC ผ่าน `startMcpStdio` ใช้ trusted human approval adapter ชุดเดียวกันโดยอัตโนมัติ จึงครอบคลุม CLI, standalone local STDIO และ IDE ที่ launch Unified-MPC stdio entrypoint โดยไม่ต้องทำ adapter แยกราย IDE หาก host ฝัง provider ของตัวเองมา ระบบจะใช้ provider นั้นแทนค่าเริ่มต้น
 
+ในโหมด Thai-RAG single-host (#407) HTTP runtime เป็นเจ้าของ provider data root และ stdio entrypoint จะ follow host เท่านั้นโดยไม่ elect ตัวเอง หากใช้งาน standalone stdio ที่ไม่มี HTTP host ให้ตั้ง `UNIFIED_THAI_RAG_FORWARD_ONLY=0` เพื่อให้ process นั้นเป็น owner ได้
+
 STDIO entrypoint รองรับทั้ง MCP ยุค `2025-11-25` (เช่น Cline 4.1.17) และ modern `2026-07-28+` บน factory เดียวกัน โดยแยกความสามารถด้าน Tasks ตาม protocol era. Native Thai-RAG memory เป็น workspace-scoped และ selective; ไม่มีการบันทึก transcript ทุก turn และการเริ่ม task ใหม่ไม่ขึ้นกับ persistence ของ turn ก่อนหน้า ทั้งสองเส้นทางยังผ่าน trusted host approval boundary เดิม
 
 ช่องทางยืนยันถูกแยกออกจาก MCP protocol โดยเด็ดขาดและ **ไม่อ่าน MCP stdin**: Linux ใช้ `zenity`/`kdialog` เมื่อมี GUI และ fallback ไป controlling TTY, macOS ใช้ `osascript`, Windows ใช้ PowerShell/WinForms dialog หากผู้ใช้กดปฏิเสธจริงจะจบที่ Deny ทันทีและไม่วนไปถามช่องทางอื่น แต่ถ้า helper ใช้งานไม่ได้ ระบบจึงค่อย fallback ไปช่องทาง trusted ถัดไป; หากไม่มีช่องทางที่ถามมนุษย์ได้จริง mutation จะ fail closed ไม่มี environment variable สำหรับ auto-approve

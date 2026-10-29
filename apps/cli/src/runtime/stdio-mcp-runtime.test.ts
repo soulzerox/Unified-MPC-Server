@@ -520,6 +520,71 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+  it('defaults a stdio-role runtime to forward-only so it cannot elect over the host (#407)', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-rag-forward-default-peer-'));
+    temporaryRoots.push(dataPath);
+    const healthy = { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] };
+    let startCalls = 0;
+    const driver: ThaiRagProviderDriver = {
+      start: async () => { startCalls += 1; return ok(healthy); },
+      health: async () => ok(healthy),
+      call: async () => ok({ election: 'owner' }),
+      stop: async () => ok(undefined),
+    };
+    const previousForwardOnly = process.env.UNIFIED_THAI_RAG_FORWARD_ONLY;
+    delete process.env.UNIFIED_THAI_RAG_FORWARD_ONLY;
+    let runtime: ReturnType<typeof createStdioMcpRuntime> | undefined;
+    try {
+      runtime = createStdioMcpRuntime(dataPath, workspace, false, {
+        thaiRagDriver: driver,
+        thaiRagForwardOnlyDefault: true,
+      });
+      // No host around: the peer fails with the machine-readable reason instead
+      // of taking ownership, so a later HTTP host can still become the owner.
+      const failed = await runtime.services.thaiRag?.call('code_search', { query: 'needle' });
+      expect(failed).toMatchObject({
+        ok: false,
+        error: { code: 'CONFLICT', details: { reason: 'forward-host-unreachable' } },
+      });
+      expect(startCalls).toBe(0);
+      expect(existsSync(path.join(dataPath, 'thai-rag', 'provider.lock'))).toBe(false);
+    } finally {
+      if (previousForwardOnly === undefined) delete process.env.UNIFIED_THAI_RAG_FORWARD_ONLY;
+      else process.env.UNIFIED_THAI_RAG_FORWARD_ONLY = previousForwardOnly;
+      await runtime?.close();
+    }
+  });
+
+  it('lets UNIFIED_THAI_RAG_FORWARD_ONLY=0 opt a stdio peer back into election (#407)', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-rag-forward-opt-out-'));
+    temporaryRoots.push(dataPath);
+    const healthy = { workerReachable: true, sqliteAvailable: true, ftsAvailable: true, vectorStoreAvailable: true, embedderAvailable: true, lexicalRetrievalAvailable: true, semanticRetrievalAvailable: true, activeJobs: [] };
+    let startCalls = 0;
+    const driver: ThaiRagProviderDriver = {
+      start: async () => { startCalls += 1; return ok(healthy); },
+      health: async () => ok(healthy),
+      call: async () => ok({ election: 'owner' }),
+      stop: async () => ok(undefined),
+    };
+    const previousForwardOnly = process.env.UNIFIED_THAI_RAG_FORWARD_ONLY;
+    process.env.UNIFIED_THAI_RAG_FORWARD_ONLY = '0';
+    let runtime: ReturnType<typeof createStdioMcpRuntime> | undefined;
+    try {
+      runtime = createStdioMcpRuntime(dataPath, workspace, false, {
+        thaiRagDriver: driver,
+        thaiRagForwardOnlyDefault: true,
+      });
+      await runtime.initializeThaiRag();
+      const result = await runtime.services.thaiRag?.call('code_search', { query: 'needle' });
+      expect(result).toMatchObject({ ok: true, value: { election: 'owner' } });
+      expect(startCalls).toBe(1);
+    } finally {
+      if (previousForwardOnly === undefined) delete process.env.UNIFIED_THAI_RAG_FORWARD_ONLY;
+      else process.env.UNIFIED_THAI_RAG_FORWARD_ONLY = previousForwardOnly;
+      await runtime?.close();
+    }
+  });
+
   it('forwards the deployment-attested embedding env to the Thai-RAG data-owner launch (#413)', () => {
     const env = thaiRagProviderLaunchEnv({});
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');

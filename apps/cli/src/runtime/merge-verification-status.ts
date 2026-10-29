@@ -102,6 +102,8 @@ export interface MergeVerificationStatusPort {
 
 const DEFAULT_STALE_AFTER_MS = 90_000;
 const EXPIRED_DETAIL = 'Heartbeat expired without a verdict; the runner never reported completion';
+const RECONCILED_DETAIL = 'The attempt was never closed by its runner, but a persisted exact-head receipt '
+  + 'recorded after it started carries the verdict; the receipt is authoritative.';
 const QUEUED_DETAIL = 'Queued behind heavy admission; no gate has run and no receipt exists yet. '
   + 'A merge_verification_run for this exact head claims it.';
 
@@ -111,8 +113,11 @@ const QUEUED_DETAIL = 'Queued behind heavy admission; no gate has run and no rec
  * This port never writes: a `running` row whose heartbeat expired is *reported* as
  * `interrupted`, and the owning runner repairs the stored row on its next attempt. That keeps
  * `merge_verification_status` genuinely read-only while still refusing to claim that a dead
- * runner is working. No decision is derived without an exact head, a persisted receipt and the
- * most recent base branch a verification attempt observed.
+ * runner is working. One exception is reconciled from durable evidence, never assumed: when a
+ * receipt for the exact head was persisted after the attempt started, the verdict survived the
+ * dead runner, so the attempt is projected as `completed` with that receipt. No decision is
+ * derived without an exact head, a persisted receipt and the most recent base branch a
+ * verification attempt observed.
  */
 export function createMergeVerificationStatusPort(
   deps: MergeVerificationStatusDependencies,
@@ -171,7 +176,7 @@ export function createMergeVerificationStatusPort(
         repository: request.repository,
         pullRequest: request.pullRequest,
         ...(request.headSha === undefined ? {} : { headSha: request.headSha }),
-        attempts: attempts.map((record) => toAttemptView(record, staleCutoff)),
+        attempts: attempts.map((record) => toAttemptView(record, staleCutoff, receipts)),
         receipts: receipts.map((record) => ({
           receiptRef: record.receiptRef,
           sequence: record.sequence,
@@ -189,9 +194,26 @@ export function createMergeVerificationStatusPort(
 function toAttemptView(
   record: AttemptSourceRecord,
   staleCutoff: number,
+  receipts: readonly ReceiptSourceRecord[],
 ): MergeVerificationStatusAttemptView {
   const expired = record.status === 'running' && Date.parse(record.heartbeatAt) <= staleCutoff;
   const queued = record.status === 'queued';
+  const recovered = queued ? undefined : findReceiptRecordedAfterAttemptStart(record, receipts);
+  if (recovered !== undefined && (expired || record.status === 'interrupted')) {
+    return {
+      attemptId: record.attemptId,
+      headSha: record.headSha,
+      status: 'completed',
+      ...(record.baseBranch === undefined ? {} : { baseBranch: record.baseBranch }),
+      ...(record.workspaceId === undefined ? {} : { workspaceId: record.workspaceId }),
+      ...(record.gateName === undefined ? {} : { gateName: record.gateName }),
+      startedAt: record.startedAt,
+      heartbeatAt: record.heartbeatAt,
+      finishedAt: recovered.recordedAt,
+      detail: RECONCILED_DETAIL,
+      receiptRef: recovered.receiptRef,
+    };
+  }
   return {
     attemptId: record.attemptId,
     headSha: record.headSha,
@@ -207,4 +229,25 @@ function toAttemptView(
       : { detail: record.detail ?? (expired ? EXPIRED_DETAIL : QUEUED_DETAIL) }),
     ...(record.receiptRef === undefined ? {} : { receiptRef: record.receiptRef }),
   };
+}
+
+/**
+ * A receipt recorded at or after the attempt started is the durable verdict that attempt was
+ * producing, even when its runner died before closing the row. Receipts recorded earlier belong
+ * to a previous verification of the same head and must not make a dead re-run look complete.
+ */
+function findReceiptRecordedAfterAttemptStart(
+  record: AttemptSourceRecord,
+  receipts: readonly ReceiptSourceRecord[],
+): ReceiptSourceRecord | undefined {
+  const startedAt = Date.parse(record.startedAt);
+  if (!Number.isFinite(startedAt)) return undefined;
+  // A reaped attempt was closed at `finishedAt`, so a later receipt belongs to a later attempt.
+  const finishedAt = record.finishedAt === undefined ? undefined : Date.parse(record.finishedAt);
+  return receipts.find((entry) => {
+    const recordedAt = Date.parse(entry.recordedAt);
+    if (entry.receipt.headSha.toLowerCase() !== record.headSha.toLowerCase()) return false;
+    if (recordedAt < startedAt) return false;
+    return finishedAt === undefined || !Number.isFinite(finishedAt) || recordedAt <= finishedAt;
+  });
 }

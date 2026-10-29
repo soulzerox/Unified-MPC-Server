@@ -107,6 +107,154 @@ describe('createMergeVerificationStatusPort', () => {
     expect(Object.keys(port)).toEqual(['get']);
   });
 
+  it('reconciles an expired attempt from a receipt persisted after it started', async () => {
+    const port = createMergeVerificationStatusPort({
+      attempts: {
+        list: vi.fn(async () => [{
+          attemptId: 'attempt-recovered',
+          headSha: HEAD,
+          baseBranch: 'main',
+          status: 'running' as const,
+          startedAt: '2026-10-27T09:00:00.000Z',
+          heartbeatAt: '2026-10-27T09:00:00.000Z',
+        }]),
+      },
+      receipts: {
+        listForExactHead: vi.fn(async () => [{
+          receiptRef: 'merge-verification:305@head:receipt',
+          sequence: 12,
+          receipt: receipt(),
+          recordedAt: '2026-10-27T09:30:00.000Z',
+        }]),
+        listForPullRequest: vi.fn(async () => []),
+      },
+      policy: { getByRepository: async () => policy() },
+      now: () => new Date(NOW),
+    });
+
+    const status = await port.get({ repository: REPOSITORY, pullRequest: 305, headSha: HEAD });
+
+    expect(status.attempts).toEqual([expect.objectContaining({
+      attemptId: 'attempt-recovered',
+      status: 'completed',
+      finishedAt: '2026-10-27T09:30:00.000Z',
+      receiptRef: 'merge-verification:305@head:receipt',
+      detail: expect.stringContaining('receipt is authoritative'),
+    })]);
+    expect(status.latestReceiptRef).toBe('merge-verification:305@head:receipt');
+    expect(status.decision).toMatchObject({ status: 'MERGE_ALLOWED' });
+    // Reconciliation is projected from durable evidence; it never writes the attempt row.
+    expect(Object.keys(port)).toEqual(['get']);
+  });
+
+  it('reconciles an attempt already reaped as interrupted from a later receipt', async () => {
+    const port = createMergeVerificationStatusPort({
+      attempts: {
+        list: vi.fn(async () => [{
+          attemptId: 'attempt-reaped',
+          headSha: HEAD,
+          baseBranch: 'main',
+          status: 'interrupted' as const,
+          startedAt: '2026-10-27T09:00:00.000Z',
+          heartbeatAt: '2026-10-27T09:00:00.000Z',
+          finishedAt: '2026-10-27T09:05:00.000Z',
+          detail: 'Heartbeat expired before the runner recorded a verdict',
+        }]),
+      },
+      receipts: {
+        listForExactHead: vi.fn(async () => [{
+          receiptRef: 'merge-verification:305@head:receipt',
+          sequence: 12,
+          receipt: receipt(),
+          recordedAt: '2026-10-27T09:03:00.000Z',
+        }]),
+        listForPullRequest: vi.fn(async () => []),
+      },
+      policy: { getByRepository: async () => policy() },
+      now: () => new Date(NOW),
+    });
+
+    const status = await port.get({ repository: REPOSITORY, pullRequest: 305, headSha: HEAD });
+
+    expect(status.attempts).toEqual([expect.objectContaining({
+      attemptId: 'attempt-reaped',
+      status: 'completed',
+      finishedAt: '2026-10-27T09:03:00.000Z',
+      receiptRef: 'merge-verification:305@head:receipt',
+    })]);
+    expect(status.decision).toMatchObject({ status: 'MERGE_ALLOWED' });
+  });
+
+  it('does not attribute a receipt recorded after a reaped attempt was closed', async () => {
+    const port = createMergeVerificationStatusPort({
+      attempts: {
+        list: vi.fn(async () => [{
+          attemptId: 'attempt-reaped',
+          headSha: HEAD,
+          status: 'interrupted' as const,
+          startedAt: '2026-10-27T09:00:00.000Z',
+          heartbeatAt: '2026-10-27T09:00:00.000Z',
+          finishedAt: '2026-10-27T09:05:00.000Z',
+          detail: 'Heartbeat expired before the runner recorded a verdict',
+        }]),
+      },
+      receipts: {
+        listForExactHead: vi.fn(async () => [{
+          receiptRef: 'merge-verification:305@head:later-receipt',
+          sequence: 12,
+          receipt: receipt(),
+          recordedAt: '2026-10-27T09:10:00.000Z',
+        }]),
+        listForPullRequest: vi.fn(async () => []),
+      },
+      policy: { getByRepository: async () => policy() },
+      now: () => new Date(NOW),
+    });
+
+    const status = await port.get({ repository: REPOSITORY, pullRequest: 305, headSha: HEAD });
+
+    expect(status.attempts).toEqual([expect.objectContaining({
+      attemptId: 'attempt-reaped',
+      status: 'interrupted',
+      detail: expect.stringContaining('Heartbeat expired'),
+    })]);
+    expect(status.attempts[0]?.receiptRef).toBeUndefined();
+  });
+
+  it('does not reuse a receipt recorded before the expired attempt started', async () => {
+    const port = createMergeVerificationStatusPort({
+      attempts: {
+        list: vi.fn(async () => [{
+          attemptId: 'attempt-retry',
+          headSha: HEAD,
+          status: 'running' as const,
+          startedAt: '2026-10-27T09:50:00.000Z',
+          heartbeatAt: '2026-10-27T09:50:00.000Z',
+        }]),
+      },
+      receipts: {
+        listForExactHead: vi.fn(async () => [{
+          receiptRef: 'merge-verification:305@head:older-receipt',
+          sequence: 11,
+          receipt: receipt(),
+          recordedAt: '2026-10-27T09:00:00.000Z',
+        }]),
+        listForPullRequest: vi.fn(async () => []),
+      },
+      policy: { getByRepository: async () => policy() },
+      now: () => new Date(NOW),
+    });
+
+    const status = await port.get({ repository: REPOSITORY, pullRequest: 305, headSha: HEAD });
+
+    expect(status.attempts).toEqual([expect.objectContaining({
+      attemptId: 'attempt-retry',
+      status: 'interrupted',
+      detail: expect.stringContaining('Heartbeat expired'),
+    })]);
+    expect(status.attempts[0]?.receiptRef).toBeUndefined();
+  });
+
   it('reports a durable queued attempt without implying a verdict', async () => {
     const port = createMergeVerificationStatusPort({
       attempts: {

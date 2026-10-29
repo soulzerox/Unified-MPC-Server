@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { WorkspaceIndexEntry, WorkspaceIndexStatus } from '@unified-mpc/application';
 import { mapResult } from '../result-mapper.js';
+import { ToolSchemaRegistry } from '../tool-schema-registry.js';
 import { workspaceIndexTools } from './workspace-index-tools.js';
 import type { McpToolContext } from './tool-types.js';
 
@@ -139,6 +140,28 @@ describe('workspace_index_status payload bounds', () => {
       indexed: true,
     });
     expect(mapped.structuredContent?.truncated).toBeUndefined();
+  });
+});
+
+describe('workspace_index tool annotation contract', () => {
+  it('only claims read-only for the surface that only reads', () => {
+    const tools = workspaceIndexTools({ services: {} } as unknown as McpToolContext);
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    expect(byName.get('workspace_index_status')?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    for (const name of ['workspace_index', 'workspace_index_watch', 'workspace_index_stop']) {
+      expect(byName.get(name)?.annotations, name).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+    }
+  });
+
+  it('keeps the index build and watcher control out of the parallel-safe set', () => {
+    const registry = new ToolSchemaRegistry();
+    for (const tool of workspaceIndexTools({ services: {} } as unknown as McpToolContext)) registry.register(tool);
+    expect(registry.describe('workspace_index_status')?.parallelSafe).toBe(true);
+    // Two concurrent builds, or a build racing a watcher drain, are a hazard on
+    // one workspace; `parallelSafe` is derived from `readOnlyHint`.
+    for (const name of ['workspace_index', 'workspace_index_watch', 'workspace_index_stop']) {
+      expect(registry.describe(name)?.parallelSafe, name).toBe(false);
+    }
   });
 });
 

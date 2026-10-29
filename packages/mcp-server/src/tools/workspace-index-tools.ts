@@ -23,7 +23,9 @@ export function workspaceIndexTools(context: McpToolContext): McpToolDefinition[
       name: 'workspace_index',
       description: 'Build or refresh the persistent workspace index using automatic context filters unless ignored paths are explicitly included.',
       permission: 'READ',
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      // Writes the derived index snapshot under the data root: not read-only,
+      // and not parallel-safe with another build of the same workspace.
+      annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: workspaceIndexSchema,
       handler: async (input) => context.services.workspaceIndex === undefined
         ? missingService()
@@ -48,7 +50,8 @@ export function workspaceIndexTools(context: McpToolContext): McpToolDefinition[
       name: 'workspace_index_watch',
       description: 'Watch all workspace paths and incrementally re-index only changed paths with configurable debounce/concurrency.',
       permission: 'READ',
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      // Starts a filesystem watcher that writes index updates: not read-only.
+      annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: workspaceIndexWatchSchema,
       handler: async (input) => {
         if (context.services.workspaceIndex === undefined) return missingService();
@@ -65,7 +68,8 @@ export function workspaceIndexTools(context: McpToolContext): McpToolDefinition[
       name: 'workspace_index_stop',
       description: 'Stop a workspace watcher after draining all queued path updates.',
       permission: 'READ',
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      // Draining the queue applies pending index writes before closing: not read-only.
+      annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: workspaceIndexStopSchema,
       handler: async (input) => context.services.workspaceIndex === undefined
         ? missingService()

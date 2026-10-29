@@ -160,6 +160,7 @@ export class ResourceAdmissionController {
   private readonly elevatedGlobalCostRatio: number;
   private readonly criticalGlobalCostRatio: number;
   private readonly active = new Map<string, ResourceAdmissionLease>();
+  private readonly releaseListeners = new Set<() => void>();
   private rejected = 0;
 
   public constructor(limits: ResourceAdmissionLimits, options: ResourceAdmissionControllerOptions = {}) {
@@ -263,10 +264,34 @@ export class ResourceAdmissionController {
     return true;
   }
 
+  /**
+   * Observe successful lease releases (#145 wake-on-release).
+   *
+   * A waiter queue above the controller has no way to learn that capacity
+   * became available: without this it only drains when another request
+   * arrives, so a queued job can sit behind a released lease indefinitely.
+   * Listeners are best-effort — one that throws can never fail the caller
+   * that is releasing — and the returned function removes the subscription.
+   */
+  public onRelease(listener: () => void): () => void {
+    this.releaseListeners.add(listener);
+    return (): void => {
+      this.releaseListeners.delete(listener);
+    };
+  }
+
   public release(lease: ResourceAdmissionLease): boolean {
     const current = this.active.get(lease.operationId);
     if (current === undefined || !sameLease(current, lease)) return false;
     this.active.delete(lease.operationId);
+    for (const listener of [...this.releaseListeners]) {
+      try {
+        listener();
+      } catch {
+        // A wake failure must not fail the release: capacity is already free,
+        // and the next successful release or drain still makes progress.
+      }
+    }
     return true;
   }
 

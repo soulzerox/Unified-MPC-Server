@@ -370,6 +370,44 @@ describe('PreEditDemandRuntime durable queue authority (#145 U5)', () => {
     }]);
   });
 
+  it('starts a queued delta when another heavy lease releases, without a new submit (#145 wake-on-release)', () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 8,
+      workspaceCost: 8,
+      sessionCost: 8,
+      maxOperations: 4,
+      resourceClassCost: { rag_indexing: 8 },
+    });
+    // A heavy verification holds the only slot, exactly like a local CI run.
+    const foreign = controller.tryAcquire({
+      operationId: 'verification-a',
+      workspaceId: 'workspace-1',
+      sessionId: 'system',
+      resourceClass: 'verification_heavy',
+      cost: 8,
+    });
+    if (!foreign.admitted) throw new Error('expected the foreign lease to be admitted');
+    const executed: string[] = [];
+    const runtime = new PreEditDemandRuntime({
+      controller,
+      cost: 8,
+      queueLimit: 4,
+      executor: (job): Promise<unknown> => {
+        executed.push(job.filePath);
+        return Promise.resolve({ ok: true });
+      },
+    });
+
+    const submitted = submit(runtime);
+    expect(submitted?.queueState).toBe('queued');
+    expect(executed).toEqual([]);
+
+    // No further submit: freeing capacity must wake the waiter queue itself,
+    // otherwise a delta queued behind a finished verification waits forever.
+    expect(controller.release(foreign.lease)).toBe(true);
+    expect(executed).toEqual(['src/target.ts']);
+  });
+
   it('supersedes the queued durable generation in place', async () => {
     const store = new RecordingHeavyJobStore();
     // The single admission slot cannot fit the job, so it stays queued.

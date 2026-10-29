@@ -121,6 +121,10 @@ export class PreEditDemandRuntime {
   private readonly running = new Set<string>();
   private readonly jobRecords = new Map<string, PreEditDeltaJob>();
   private readonly completions = new Map<string, Array<() => void>>();
+  /** Removes the controller release subscription while nothing is queued (#145 wake-on-release). */
+  private wakeSubscription: (() => void) | undefined;
+  private executing = false;
+  private wakeRequested = false;
 
   public constructor(input: {
     controller?: ResourceAdmissionController;
@@ -341,7 +345,48 @@ export class PreEditDemandRuntime {
     for (const release of list.splice(0)) release();
   }
 
+  /**
+   * Drain queued deltas, coalescing wake-ups (#145 wake-on-release).
+   *
+   * A release can land while this runtime is already draining — the job that
+   * just finished releases its own lease — so re-entry is folded into one
+   * extra pass instead of recursing. While work is still queued the runtime
+   * stays subscribed to controller releases; otherwise the subscription is
+   * dropped so an idle host pays nothing.
+   */
   private executePending(): void {
+    if (this.executing) {
+      this.wakeRequested = true;
+      return;
+    }
+    this.executing = true;
+    try {
+      do {
+        this.wakeRequested = false;
+        this.drainAdmitted();
+      } while (this.wakeRequested);
+    } finally {
+      this.executing = false;
+    }
+    this.syncWakeSubscription();
+  }
+
+  /** Subscribe only while queued-not-running work exists, so an idle runtime holds no listener. */
+  private syncWakeSubscription(): void {
+    const queued = this.jobRecords.size > this.running.size;
+    if (queued && this.wakeSubscription === undefined) {
+      this.wakeSubscription = this.controller?.onRelease(() => {
+        this.executePending();
+      });
+      return;
+    }
+    if (!queued && this.wakeSubscription !== undefined) {
+      this.wakeSubscription();
+      this.wakeSubscription = undefined;
+    }
+  }
+
+  private drainAdmitted(): void {
     const queue = this.queue;
     const controller = this.controller;
     if (queue === undefined || controller === undefined) return;

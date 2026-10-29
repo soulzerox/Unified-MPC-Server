@@ -174,7 +174,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       if (method === 'result') return { swarmId: '00000000-0000-4000-8000-000000000001', taskId: 'inspect', state: 'completed', text: '', eof: true, outputTruncated: false };
       return { swarmId: '00000000-0000-4000-8000-000000000001', state: method === 'cancel' ? 'cancelled' : 'running', tasks: [] };
     }),
-    goals: serviceProxy('goals', calls, (method) => method === 'listGoals' ? [] : { goalId: 'goal-1', status: 'active', acquired: true, leaseToken: 'lease-token' }),
+    goals: serviceProxy('goals', calls, (method) => method === 'listGoals' ? { goals: [] } : { goalId: 'goal-1', status: 'active', acquired: true, leaseToken: 'lease-token' }),
     scheduledContinuations: serviceProxy('scheduledContinuations', calls, (method) => method === 'authorizeWorkspaceMutation'
       ? { allowed: true }
       : { continuationId: 'continuation-1', status: 'scheduled', version: 1 }),

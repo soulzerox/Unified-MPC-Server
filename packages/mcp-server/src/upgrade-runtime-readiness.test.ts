@@ -139,6 +139,49 @@ describe('upgrade runtime readiness facades', () => {
     ]);
   });
 
+  it('bounds skill_match to a shortlist and reports the truncation', async () => {
+    const catalog = Array.from({ length: 60 }, (_, index) => ({
+      id: `skill-${index}`,
+      name: `Skill ${index}`,
+      description: `Use when the user asks about capability ${index}. `.repeat(10),
+      source: 'workspace',
+      trustTier: 'trusted',
+      rootPath: '/root',
+      skillPath: `/root/skill-${index}/SKILL.md`,
+    }));
+    const services = {
+      extensions: { async listSkills() { return ok({ skills: catalog }); } },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    const listed = await runtime.execute('skill_match', { query: 'skill', limit: 3 });
+    if (!listed.ok) throw new Error('expected a match listing');
+    const limited = listed.value as { total: number; returned: number; truncated: boolean; hint: string; skills: Record<string, unknown>[] };
+    expect(limited).toMatchObject({ total: 60, returned: 3, truncated: true });
+    expect(limited.hint).toContain('showing 3 of 60 matches');
+    expect(limited.skills).toHaveLength(3);
+    expect(limited.skills[0]).toMatchObject({ id: 'skill-0', descriptionTruncated: true });
+    expect(Object.keys(limited.skills[0] ?? {}).sort()).toEqual(['description', 'descriptionTruncated', 'id', 'name', 'source', 'trustTier']);
+    expect(JSON.stringify(limited.skills)).not.toContain('/root/skill-0/SKILL.md');
+
+    // No limit is a shortlist too: the advertised default is 10 rows.
+    const byDefault = await runtime.execute('skill_match', { query: 'skill' });
+    expect(byDefault).toMatchObject({ ok: true, value: { total: 60, returned: 10, truncated: true } });
+
+    // The cap is 50, so 500 returns a full shortlist that still says it clipped.
+    const capped = await runtime.execute('skill_match', { query: 'skill', limit: 500 });
+    expect(capped).toMatchObject({ ok: true, value: { total: 60, returned: 50, truncated: true } });
+
+    // A limit that matches the catalog exactly is not truncation.
+    const smallCatalog = catalog.slice(0, 10);
+    const exact = await new UpgradeRuntimeService({
+      extensions: { async listSkills() { return ok({ skills: smallCatalog }); } },
+    } as unknown as McpApplicationServices, actor).execute('skill_match', { query: 'skill', limit: 10 });
+    expect(exact).toMatchObject({ ok: true, value: { total: 10, returned: 10, truncated: false } });
+    expect((exact as { value: { hint: string } }).value.hint).toContain('skills_read');
+    expect((exact as { value: { hint: string } }).value.hint).toContain('detail=full');
+  });
+
   it('pins browser and visual facades to the caller-selected DOM/CDP tab', async () => {
     const calls: Array<{ tool: string; input: Record<string, unknown> }> = [];
     const services = {

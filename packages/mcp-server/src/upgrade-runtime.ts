@@ -33,6 +33,7 @@ import {
 } from '@unified-mpc/workspace';
 import { z } from 'zod';
 import type { McpApplicationServices, McpToolDefinition } from './tools/tool-types.js';
+import { summarizeSkillCatalog } from './tools/skill-summary.js';
 import { ContextEngine } from './context-engine.js';
 import type { ActivityTelemetrySnapshot, ActivityTracker, ToolTelemetrySnapshot } from './activity-tracker.js';
 import { ContextEconomyRuntime } from './context-economy.js';
@@ -2114,9 +2115,16 @@ export class UpgradeRuntimeService {
         ...(query.length === 0 ? {} : { query }),
         ...(source === undefined ? {} : { source }),
       });
-      return listed.ok
-        ? ok({ tool: name, status: 'ready', available: true, ready: true, executed: true, query, skills: listed.value.skills })
-        : listed;
+      if (!listed.ok) return listed;
+      return ok({
+        tool: name,
+        status: 'ready',
+        available: true,
+        ready: true,
+        executed: true,
+        query,
+        ...summarizeSkillCatalog(listed.value.skills, { limit: readSkillMatchLimit(input) }),
+      });
     }
 
     const skillId = readString(input, 'skillId') ?? readString(input, 'id') ?? readString(input, 'name');
@@ -3007,6 +3015,27 @@ function diagnosticProcessResult(
 function readString(input: Record<string, unknown>, key: string): string | undefined {
   const value = input[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * `skill_match` used to ignore `limit` entirely and return every matched row,
+ * so an empty query forwarded the whole catalog. A match is a ranking, not an
+ * archive: it defaults to a shortlist and says when it truncated.
+ *
+ * The MCP boundary already enforces `positiveInt` (`upgrade-tool-contracts.ts`),
+ * so the string and out-of-range branches only matter for direct service
+ * callers; they fall back to the default rather than failing the call.
+ */
+const SKILL_MATCH_DEFAULT_LIMIT = 10;
+const SKILL_MATCH_MAX_LIMIT = 50;
+
+function readSkillMatchLimit(input: Record<string, unknown>): number {
+  const raw = input.limit;
+  const parsed = typeof raw === 'number'
+    ? raw
+    : typeof raw === 'string' && raw.trim().length > 0 ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(parsed)) return SKILL_MATCH_DEFAULT_LIMIT;
+  return Math.min(SKILL_MATCH_MAX_LIMIT, Math.max(1, Math.trunc(parsed)));
 }
 
 function sanitizedDiagnosticEnvironment(): NodeJS.ProcessEnv {

@@ -86,6 +86,90 @@ describe('file page engine', () => {
     expect(result).toMatchObject({ ok: true, value: { endLine: 1, content: 'one' } });
   });
 
+  it('trims a page by bytes in one pass and leaves an in-budget page byte-identical', async () => {
+    const content = 'alpha\r\nbeta\r\ngamma';
+    const crlfServices: McpApplicationServices = {
+      file: {
+        async readFile(_actor, _workspaceId, request): Promise<ReturnType<typeof ok>> {
+          return ok({
+            path: request.path,
+            content,
+            startLine: 1,
+            endLine: 3,
+            encoding: 'utf8' as const,
+            byteLength: Buffer.byteLength(content, 'utf8'),
+          });
+        },
+      },
+    };
+    const engine = new FilePageEngine(crlfServices, actor);
+
+    // No budget: the page is returned untouched, including its line endings.
+    await expect(engine.readPage({ path: 'src/crlf.ts', pageSize: 5 })).resolves.toMatchObject({
+      ok: true,
+      value: { content, startLine: 1, endLine: 3, hasMore: false, byteLength: 18 },
+    });
+
+    // maxTextBytes 12: 'alpha' (5) + '\nbeta' (5) = 10, so 'gamma' (6 more) is dropped.
+    const trimmed = await engine.readPage({ path: 'src/crlf.ts', pageSize: 5 }, {
+      maxItems: 5,
+      maxTextBytes: 12,
+      maxStructuredBytes: 12,
+      maxBinaryBytes: 12,
+      maxBase64Bytes: 12,
+    } satisfies ResultBudget);
+
+    expect(trimmed).toMatchObject({
+      ok: true,
+      value: { content: 'alpha\nbeta', startLine: 1, endLine: 2, hasMore: true, byteLength: 10 },
+    });
+  });
+
+  it('keeps a CRLF page inside the byte budget when only normalization makes it fit', async () => {
+    const content = 'aa\r\nbb';
+    const crlfServices: McpApplicationServices = {
+      file: {
+        async readFile(_actor, _workspaceId, request): Promise<ReturnType<typeof ok>> {
+          return ok({ path: request.path, content, startLine: 1, endLine: 2, encoding: 'utf8' as const, byteLength: Buffer.byteLength(content, 'utf8') });
+        },
+      },
+    };
+
+    const result = await new FilePageEngine(crlfServices, actor).readPage({ path: 'src/crlf-budget.ts', pageSize: 5 }, {
+      maxItems: 5,
+      maxTextBytes: 5,
+      maxStructuredBytes: 5,
+      maxBinaryBytes: 5,
+      maxBase64Bytes: 5,
+    } satisfies ResultBudget);
+
+    // 6 raw bytes exceed the 5-byte target, 5 LF-normalized bytes do not.
+    expect(result).toMatchObject({ ok: true, value: { content: 'aa\nbb', endLine: 2, hasMore: false, byteLength: 5 } });
+  });
+
+  it('keeps a leading empty line inside the page instead of shifting the line count', async () => {
+    const content = '\na\nb';
+    const leadingEmptyServices: McpApplicationServices = {
+      file: {
+        async readFile(_actor, _workspaceId, request): Promise<ReturnType<typeof ok>> {
+          return ok({ path: request.path, content, startLine: 1, endLine: 3, encoding: 'utf8' as const, byteLength: Buffer.byteLength(content, 'utf8') });
+        },
+      },
+    };
+
+    const result = await new FilePageEngine(leadingEmptyServices, actor).readPage({ path: 'src/leading-empty.ts', pageSize: 5 }, {
+      maxItems: 5,
+      maxTextBytes: 3,
+      maxStructuredBytes: 3,
+      maxBinaryBytes: 3,
+      maxBase64Bytes: 3,
+    } satisfies ResultBudget);
+
+    // Line 1 is empty; dropping it (the previous byte pass did) would report
+    // line 2 as `endLine: 1` and shift every continuation.
+    expect(result).toMatchObject({ ok: true, value: { content: '\na', startLine: 1, endLine: 2, hasMore: true, byteLength: 2 } });
+  });
+
   it('rejects an unknown continuation token without changing the source read contract', async () => {
     const result = await new FilePageEngine(services(), actor).continue('missing-token');
 

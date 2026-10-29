@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Result } from '@unified-mpc/domain';
+import type { Result, ResultBudget } from '@unified-mpc/domain';
 import type { ExecutableResolver } from './executable-resolver.js';
 import { DirectProcessRunner, RipgrepAdapter, type ProcessRunResult, type ProcessRunner } from './ripgrep-adapter.js';
 
@@ -45,6 +45,84 @@ describe('RipgrepAdapter', () => {
     expect(result.timedOut).not.toBe(true);
     expect(observed).toBeGreaterThan(100);
     expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThan(1024 * 1024);
+  });
+
+  it('keeps observed stdout out of the result while still delivering every line', async () => {
+    const runner = new DirectProcessRunner();
+    const observed: string[] = [];
+    const script = "process.stdout.write('alpha\\nbeta\\ngamma\\n')";
+
+    const result = await runner.run(process.execPath, ['-e', script], process.cwd(), {
+      timeoutMs: 5_000,
+      retainStdout: false,
+      stopAfterStdoutLine: (line) => {
+        observed.push(line);
+        return false;
+      },
+    });
+
+    expect(observed).toEqual(['alpha', 'beta', 'gamma']);
+    expect(result.stdout).toBe('');
+
+    // Default retention is unchanged: without the flag the same lines are buffered.
+    const retained = await runner.run(process.execPath, ['-e', script], process.cwd(), {
+      timeoutMs: 5_000,
+      stopAfterStdoutLine: () => false,
+    });
+    expect(retained.stdout).toBe('alpha\nbeta\ngamma\n');
+  });
+
+  it('keeps an exact match-budget fit and stops when the next record would exceed it', async () => {
+    const matchA = { path: 'src\\a.ts', line: 1, text: 'needle a' };
+    const matchB = { path: 'src\\b.ts', line: 2, text: 'needle b' };
+    const matchC = { path: 'src\\c.ts', line: 3, text: 'needle c' };
+    const line = (match: typeof matchA): string => JSON.stringify({ type: 'match', data: { path: { text: match.path }, line_number: match.line, lines: { text: match.text } } });
+    let delivered = [matchA, matchB];
+    const runner: ProcessRunner = {
+      async run(_command, _args, _cwd, options): Promise<ProcessRunResult> {
+        let stopped = false;
+        for (const match of delivered) {
+          if (options?.stopAfterStdoutLine?.(line(match)) === true) {
+            stopped = true;
+            break;
+          }
+        }
+        return { exitCode: 0, stderr: '', stdout: '', ...(stopped ? { stoppedEarly: true } : {}) };
+      },
+    };
+    const resolver: ExecutableResolver = { resolve: async (): Promise<Result<string>> => ({ ok: true, value: 'rg.exe' }) };
+    const adapter = new RipgrepAdapter(resolver, runner);
+    const oneMatch = Buffer.byteLength(JSON.stringify(matchA), 'utf8');
+    const budget = (maxStructuredBytes: number): ResultBudget => ({ maxItems: 10, maxTextBytes: 1024, maxStructuredBytes, maxBinaryBytes: 1024, maxBase64Bytes: 1024 });
+
+    // Exactly maxStructuredBytes of matches is kept, not rejected.
+    await expect(adapter.searchText({ rootPath: 'C:\\workspace', query: 'needle', maxResults: 10, resultBudget: budget(oneMatch * 2) })).resolves.toEqual({
+      ok: true,
+      value: { matches: [matchA, matchB], truncated: false },
+    });
+    delivered = [matchA, matchB, matchC];
+    await expect(adapter.searchText({ rootPath: 'C:\\workspace', query: 'needle', maxResults: 10, resultBudget: budget(oneMatch * 2 - 1) })).resolves.toEqual({
+      ok: true,
+      value: { matches: [matchA], truncated: true },
+    });
+  });
+
+  it('stops a file listing on the path after maxResults and reports truncation', async () => {
+    const runner: ProcessRunner = {
+      async run(_command, _args, _cwd, options): Promise<ProcessRunResult> {
+        for (const path of ['src/a.ts', 'src/b.ts', 'src/c.ts']) {
+          if (options?.stopAfterStdoutLine?.(path) === true) return { exitCode: 0, stderr: '', stdout: '', stoppedEarly: true };
+        }
+        return { exitCode: 0, stderr: '', stdout: '' };
+      },
+    };
+    const resolver: ExecutableResolver = { resolve: async (): Promise<Result<string>> => ({ ok: true, value: 'rg.exe' }) };
+    const adapter = new RipgrepAdapter(resolver, runner);
+
+    await expect(adapter.searchFiles({ rootPath: 'C:\\workspace', maxResults: 2, discovery: 'explicit' })).resolves.toEqual({
+      ok: true,
+      value: { paths: ['src/a.ts', 'src/b.ts'], truncated: true },
+    });
   });
 
   it('terminates a ripgrep child when the MCP invocation is aborted', async () => {
@@ -156,17 +234,27 @@ describe('RipgrepAdapter', () => {
     });
   });
 
-  it('parses bounded JSON match records and reports truncation', async () => {
+  it('collects bounded JSON match records from observed lines instead of retained stdout', async () => {
+    let retainStdout: boolean | undefined;
     const runner: ProcessRunner = {
-      async run(): Promise<ProcessRunResult> {
-        return {
-          exitCode: 0,
-          stderr: '',
-          stdout: [
-            JSON.stringify({ type: 'match', data: { path: { text: 'src\\a.ts' }, line_number: 3, lines: { text: 'const a = 1;\n' } } }),
-            JSON.stringify({ type: 'match', data: { path: { text: 'src\\b.ts' }, line_number: 4, lines: { text: 'const b = 2;\n' } } }),
-          ].join('\n'),
-        };
+      async run(_command, _args, _cwd, options): Promise<ProcessRunResult> {
+        retainStdout = options?.retainStdout;
+        const lines = [
+          JSON.stringify({ type: 'begin', data: { path: { text: 'src\\a.ts' } } }),
+          JSON.stringify({ type: 'match', data: { path: { text: 'src\\a.ts' }, line_number: 3, lines: { text: 'const a = 1;\n' } } }),
+          JSON.stringify({ type: 'end', data: { path: { text: 'src\\a.ts' } } }),
+          JSON.stringify({ type: 'match', data: { path: { text: 'src\\b.ts' }, line_number: 4, lines: { text: 'const b = 2;\n' } } }),
+        ];
+        let stopped = false;
+        for (const line of lines) {
+          if (options?.stopAfterStdoutLine?.(line) === true) {
+            stopped = true;
+            break;
+          }
+        }
+        // The raw stream is deliberately unusable: the adapter must collect from
+        // the observer, not from what the runner buffered.
+        return { exitCode: 0, stderr: '', stdout: 'raw-stream-must-not-be-parsed', ...(stopped ? { stoppedEarly: true } : {}) };
       },
     };
     const resolver: ExecutableResolver = { resolve: async (): Promise<Result<string>> => ({ ok: true, value: 'rg.exe' }) };
@@ -174,6 +262,7 @@ describe('RipgrepAdapter', () => {
 
     const result = await adapter.searchText({ rootPath: 'C:\\workspace', query: 'const', maxResults: 1 });
 
+    expect(retainStdout).toBe(false);
     expect(result).toEqual({
       ok: true,
       value: {
@@ -259,9 +348,12 @@ describe('RipgrepAdapter', () => {
   it('applies context-economy filters to automatic discovery and allows explicit enumeration', async () => {
     let receivedArgs: readonly string[] = [];
     const runner: ProcessRunner = {
-      async run(_command: string, args: readonly string[]): Promise<ProcessRunResult> {
+      async run(_command: string, args: readonly string[], _cwd, options): Promise<ProcessRunResult> {
         receivedArgs = args;
-        return { exitCode: 0, stderr: '', stdout: ['src/app.ts', '.env', 'node_modules/pkg/index.js', 'dist/app.js'].join('\n') };
+        if (args.includes('--files')) {
+          for (const line of ['src/app.ts', '.env', 'node_modules/pkg/index.js', 'dist/app.js']) options?.stopAfterStdoutLine?.(line);
+        }
+        return { exitCode: 0, stderr: '', stdout: '' };
       },
     };
     const resolver: ExecutableResolver = { resolve: async (): Promise<Result<string>> => ({ ok: true, value: 'rg.exe' }) };

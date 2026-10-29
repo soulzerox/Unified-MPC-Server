@@ -24,7 +24,8 @@
     "runtime:smoke": "node scripts/smoke-mcp-http-runtime.mjs",
     "release:materialize": "bash scripts/materialize-runtime-release.sh",
     "verify:local": "node scripts/local-verify.mjs --profile merge",
-    "verify:targeted": "node scripts/local-verify.mjs --profile targeted"
+    "verify:targeted": "node scripts/local-verify.mjs --profile targeted",
+    "merge:pr": "node scripts/guarded-merge.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.33.0",

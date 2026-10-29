@@ -694,6 +694,9 @@ describe('real HTTP host failure modes (#407 addendum)', () => {
       }
       expect(recovered, 'search did not recover after the status deadline').toBeDefined();
       expect(recovered?.payload?.status).toBe('ok');
+      // The recovered read is a real lexical hit, not an empty success: code
+      // indexing is FTS5-first and needs no embedding backend (#407 addendum).
+      expect(recovered?.payload?.data?.items?.some((item) => item.file_path?.endsWith('math.ts'))).toBe(true);
 
       const afterRows = await readJournal(fixture);
       expect(afterRows.some((job) => job.jobId !== running?.jobId)).toBe(true);

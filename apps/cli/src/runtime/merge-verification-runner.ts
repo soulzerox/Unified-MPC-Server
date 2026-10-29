@@ -279,7 +279,11 @@ export function createMergeVerificationRunPort(
       const runClaimedAttempt = async (attemptId: string): Promise<Result<MergeVerificationVerdictResult>> => {
         let result: Result<MergeVerificationVerdictResult>;
         try {
-          result = await verify(context, request, subject, localGates, signal, attemptId);
+          // The durable attempt owns the run lifetime, not the caller's transport. A client
+          // disconnect must not kill an exact-head verification that already recorded its
+          // intent: each gate is still bounded by LOCAL_GATE_TIMEOUT_MS, and a crash leaves
+          // the row to be reaped as interrupted rather than reported as completed.
+          result = await verify(context, request, subject, localGates, undefined, attemptId);
         } catch (error) {
           await attempts.markInterrupted(attemptId, {
             finishedAt: now().toISOString(),

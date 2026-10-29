@@ -15,6 +15,7 @@ import {
   type McpClientFactory,
   type McpServerLaunchConfig,
 } from '@unified-mpc/extensions';
+import { parseBooleanSetting } from '@unified-mpc/shared';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 import {
   ThaiRagIndexJobStore,
@@ -46,8 +47,19 @@ const SERVER_NAME = 'thai-rag-native';
  * positive state (`evidence.semantic = "lexical_only"`, thai-rag-mcp #392);
  * `readPreEditReadiness` accepts that state as current, so `prepare_code_change`
  * no longer needs to force vectors to keep the gate open (issue #463).
+ *
+ * The default stays lexical-only. An operator who deliberately wants a
+ * semantic baseline opts in per deployment with
+ * `UNIFIED_MPC_THAI_RAG_CODE_INDEX_VECTORS=1`; on a CPU-only host that is a
+ * many-hour one-off pass, not a flag flip (issue #445 option 4).
  */
-const CODE_INDEX_VECTORS = false;
+export const DEFAULT_CODE_INDEX_VECTORS = false;
+
+/** Reads the code-index vector opt-in; an unknown value keeps the default. */
+export function codeIndexVectorsFromEnv(value: string | null | undefined): boolean {
+  return parseBooleanSetting(value, DEFAULT_CODE_INDEX_VECTORS);
+}
+
 // Publishing a full generation (CPG resolution + generation copy) can take far
 // longer than a request; the provider answers as soon as the job is created,
 // but the follow-up status/often-blocking calls must survive the publish.
@@ -139,6 +151,12 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly indexStatusTimeoutMs?: number;
   /** Consecutive index_status call timeouts tolerated by the admission monitor before the job is failed and the admission gate released (issue #407 deadline). */
   readonly indexStatusTimeoutCap?: number;
+  /**
+   * Ask the provider to embed code chunks as well as index them lexically
+   * (issue #445 option 4). Default `false` keeps the #463 FTS5-first policy;
+   * enabling it costs a full semantic baseline pass on CPU-only hosts.
+   */
+  readonly codeIndexVectors?: boolean;
   /** Stuck-job reaper window for mirrored index jobs (issue #445 exposes it so a test can prove an embedding-phase heartbeat keeps a build alive). */
   readonly indexJobStuckTimeoutMs?: number;
   /**
@@ -171,6 +189,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly indexJobPollMs: number;
   private readonly indexStatusTimeoutMs: number;
   private readonly indexStatusTimeoutCap: number;
+  private readonly codeIndexVectors: boolean;
   private ownerId: string | undefined;
   private launchConfig: McpServerLaunchConfig | undefined;
   private lastHealth: ThaiRagProviderDriverHealth | undefined;
@@ -259,6 +278,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
     this.indexStatusTimeoutMs = Math.max(1_000, Math.floor(options.indexStatusTimeoutMs ?? DEFAULT_INDEX_STATUS_TIMEOUT_MS));
     this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? DEFAULT_INDEX_STATUS_TIMEOUT_POLLS));
+    this.codeIndexVectors = options.codeIndexVectors ?? DEFAULT_CODE_INDEX_VECTORS;
   }
 
   public start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
@@ -582,7 +602,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       workspace_id: workspace.value.workspaceId,
       force,
       background: false,
-      vectors: CODE_INDEX_VECTORS,
+      vectors: this.codeIndexVectors,
       ...(requestedPaths.length === 0 ? {} : { paths: requestedPaths }),
       ...(maxFiles === undefined ? {} : { max_files: maxFiles }),
     };
@@ -840,7 +860,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // restart continues the generation instead of rebuilding it.
       force: false,
       background: true,
-      vectors: CODE_INDEX_VECTORS,
+      vectors: this.codeIndexVectors,
     };
     const started = await this.retryStorageBusy(() => (session === 'admission'
       ? this.callAdmissionWorker('code_index', args)
@@ -1291,7 +1311,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
               force: false,
               background: false,
               max_files: 3,
-              vectors: CODE_INDEX_VECTORS,
+              vectors: this.codeIndexVectors,
             })
             : normalizeWorkerCallResult(
               'code_index',
@@ -1301,7 +1321,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
                 force: false,
                 background: false,
                 max_files: 3,
-                vectors: CODE_INDEX_VECTORS,
+                vectors: this.codeIndexVectors,
               }),
             ))));
           if (!trial.ok) indexed = trial;
@@ -1322,7 +1342,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             force: false,
             background: true,
             mode: 'delta',
-            vectors: CODE_INDEX_VECTORS,
+            vectors: this.codeIndexVectors,
           }));
           if (!started.ok) {
             indexed = started;
@@ -1354,7 +1374,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             force: false,
             background: true,
             mode: 'delta',
-            vectors: CODE_INDEX_VECTORS,
+            vectors: this.codeIndexVectors,
           });
           indexed = normalizeWorkerCallResult('code_index', raw);
         }

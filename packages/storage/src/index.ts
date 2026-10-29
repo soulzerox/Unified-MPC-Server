@@ -34,5 +34,6 @@ export * from './heavy-job-queue-repository.js';
 export * from './migrations/heavy-job-queue-migration.js';
 export * from './migrations/merge-verification-attempt-migration.js';
 export * from './migrations/merge-verification-attempt-base-branch-migration.js';
+export * from './migrations/merge-verification-attempt-queue-migration.js';
 export * from './merge-reconciliation-repository.js';
 export * from './migrations/merge-reconciliation-migration.js';

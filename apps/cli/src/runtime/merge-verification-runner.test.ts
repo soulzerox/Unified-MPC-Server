@@ -545,7 +545,7 @@ describe('createMergeVerificationRunPort', () => {
     }]);
   });
 
-  it('fails closed with RESOURCE_PRESSURE before recording an attempt or running a gate', async () => {
+  it('durably queues the exact-head request when heavy admission is denied instead of losing it', async () => {
     const controller = new ResourceAdmissionController({
       globalCost: 16,
       workspaceCost: 16,
@@ -559,6 +559,70 @@ describe('createMergeVerificationRunPort', () => {
       cost: 8,
     }).admitted).toBe(true);
     const attempts = attemptRecorder();
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      admission: controller,
+      randomAttemptId: () => 'attempt-denied',
+      now: () => new Date('2026-10-27T10:00:00Z'),
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        status: 'queued',
+        attemptId: 'attempt-denied',
+        repository: REPOSITORY,
+        pullRequest: 17,
+        headSha: HEAD,
+        reason: 'resource_class_cost_exhausted',
+        retryable: true,
+        requestedCost: 8,
+        detail: expect.stringContaining('no gate ran and no receipt exists'),
+      },
+    });
+    expect(attempts.calls.enqueue).toEqual([{
+      attemptId: 'attempt-denied',
+      repository: REPOSITORY,
+      pullRequest: 17,
+      headSha: HEAD,
+      baseBranch: 'main',
+      workspaceId: 'workspace-1',
+      requestedAt: '2026-10-27T10:00:00.000Z',
+    }]);
+    expect(attempts.calls.begin).toEqual([]);
+    expect(attempts.calls.claim).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+  });
+
+  it('fails closed with RESOURCE_PRESSURE when the denied request cannot be queued durably', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 16,
+      sessionCost: 16,
+      maxOperations: 8,
+      resourceClassCost: { verification_heavy: 8 },
+    });
+    expect(tryAdmitVerificationHeavy(controller, {
+      operationId: 'other-verification',
+      workspaceId: 'workspace-2',
+      cost: 8,
+    }).admitted).toBe(true);
+    const attempts = attemptRecorder({ enqueueFails: true });
     const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const service = createService({
       github: githubFor(),
@@ -594,6 +658,168 @@ describe('createMergeVerificationRunPort', () => {
     expect(attempts.calls.begin).toEqual([]);
     expect(run).not.toHaveBeenCalled();
     expect(controller.snapshot()).toMatchObject({ activeCost: 8, activeOperations: 1 });
+  });
+
+  it('claims the durable queued attempt for the same exact head instead of duplicating it', async () => {
+    const attempts = attemptRecorder({ active: { attemptId: 'queued-attempt', status: 'queued' } });
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '511 passed', stderr: '' }));
+    const receipts = receiptWriter();
+    const service = createService({
+      github: githubFor(),
+      receipts: receipts.writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      now: () => new Date('2026-10-27T10:10:00Z'),
+      randomId: () => 'receipt-id',
+      randomAttemptId: () => 'must-not-be-used',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { status: 'completed', decision: { status: 'MERGE_ALLOWED' } },
+    });
+    expect(attempts.calls.claim).toEqual([{
+      attemptId: 'queued-attempt',
+      request: { claimedAt: '2026-10-27T10:10:00.000Z', workspaceId: 'workspace-1' },
+    }]);
+    expect(attempts.calls.begin).toEqual([]);
+    expect(attempts.calls.enqueue).toEqual([]);
+    expect(attempts.calls.finish[0]).toMatchObject({
+      attemptId: 'queued-attempt',
+      request: { status: 'completed', receiptRef: `merge-verification:17@${HEAD}:receipt-id` },
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(receipts.append).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the same queued attempt again while heavy admission is still denied', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 16,
+      sessionCost: 16,
+      maxOperations: 8,
+      resourceClassCost: { verification_heavy: 8 },
+    });
+    expect(tryAdmitVerificationHeavy(controller, {
+      operationId: 'other-verification',
+      workspaceId: 'workspace-2',
+      cost: 8,
+    }).admitted).toBe(true);
+    const attempts = attemptRecorder({ active: { attemptId: 'queued-attempt', status: 'queued' } });
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      admission: controller,
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { status: 'queued', attemptId: 'queued-attempt', reason: 'resource_class_cost_exhausted' },
+    });
+    expect(attempts.calls.claim).toEqual([]);
+    expect(attempts.calls.enqueue).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('adopts a concurrent queued row when begin loses the unique-index race', async () => {
+    const attempts = attemptRecorder();
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const findActive = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ attemptId: 'concurrent-queued', status: 'queued' });
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: {
+        ...attempts.recorder,
+        begin: async () => {
+          throw new Error('unique index');
+        },
+        findActive,
+      },
+      randomAttemptId: () => 'attempt-own',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { status: 'completed' } });
+    expect(attempts.calls.claim[0]).toMatchObject({ attemptId: 'concurrent-queued' });
+    expect(attempts.calls.finish[0]).toMatchObject({ attemptId: 'concurrent-queued' });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the concurrently queued attempt id when its own enqueue loses the race', async () => {
+    const controller = new ResourceAdmissionController({
+      globalCost: 16,
+      workspaceCost: 16,
+      sessionCost: 16,
+      maxOperations: 8,
+      resourceClassCost: { verification_heavy: 8 },
+    });
+    expect(tryAdmitVerificationHeavy(controller, {
+      operationId: 'other-verification',
+      workspaceId: 'workspace-2',
+      cost: 8,
+    }).admitted).toBe(true);
+    const attempts = attemptRecorder({ enqueueFails: true });
+    const findActive = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ attemptId: 'concurrent-queued', status: 'queued' });
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run: vi.fn() },
+      attempts: { ...attempts.recorder, findActive },
+      admission: controller,
+      randomAttemptId: () => 'attempt-own',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { status: 'queued', attemptId: 'concurrent-queued', reason: 'resource_class_cost_exhausted' },
+    });
   });
 
   it('releases the heavy admission lease after a successful, blocked and thrown run', async () => {
@@ -721,7 +947,7 @@ describe('createMergeVerificationRunPort', () => {
           expect(controller.snapshot().activeCostByClass.verification_heavy).toBe(8);
           throw new Error('storage unavailable');
         },
-        findLive: async () => undefined,
+        findActive: async () => undefined,
       },
       admission: controller,
     });
@@ -743,9 +969,9 @@ describe('createMergeVerificationRunPort', () => {
     const controller = permissiveAdmission();
     const tryAcquire = vi.spyOn(controller, 'tryAcquire');
     const attempts = attemptRecorder();
-    const findLive = vi.fn()
+    const findActive = vi.fn()
       .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({ attemptId: 'race-winner' });
+      .mockResolvedValueOnce({ attemptId: 'race-winner', status: 'running' });
     const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const service = createService({
       github: githubFor(),
@@ -758,7 +984,7 @@ describe('createMergeVerificationRunPort', () => {
         begin: async () => {
           throw new Error('unique index');
         },
-        findLive,
+        findActive,
       },
       admission: controller,
     });
@@ -775,7 +1001,7 @@ describe('createMergeVerificationRunPort', () => {
       ok: false,
       error: { code: 'CONFLICT', message: expect.stringContaining('race-winner') },
     });
-    expect(findLive).toHaveBeenCalledTimes(2);
+    expect(findActive).toHaveBeenCalledTimes(2);
     expect(tryAcquire).toHaveBeenCalledTimes(1);
     expect(run).not.toHaveBeenCalled();
     expect(controller.snapshot()).toMatchObject({ activeCost: 0, activeOperations: 0 });
@@ -835,17 +1061,27 @@ describe('createMergeVerificationRunPort', () => {
   });
 });
 
-function attemptRecorder(options: { live?: { attemptId: string } } = {}): {
+function attemptRecorder(options: {
+  live?: { attemptId: string };
+  active?: { attemptId: string; status: 'queued' | 'running' };
+  enqueueFails?: boolean;
+} = {}): {
   recorder: MergeVerificationAttemptRecorder;
   calls: {
     begin: unknown[];
+    enqueue: unknown[];
+    claim: Array<{ attemptId: string; request: unknown }>;
     heartbeat: Array<{ attemptId: string; request: unknown }>;
     finish: Array<{ attemptId: string; request: unknown }>;
     interrupted: Array<{ attemptId: string; request: unknown }>;
   };
 } {
+  const active = options.active
+    ?? (options.live === undefined ? undefined : { ...options.live, status: 'running' as const });
   const calls = {
     begin: [] as unknown[],
+    enqueue: [] as unknown[],
+    claim: [] as Array<{ attemptId: string; request: unknown }>,
     heartbeat: [] as Array<{ attemptId: string; request: unknown }>,
     finish: [] as Array<{ attemptId: string; request: unknown }>,
     interrupted: [] as Array<{ attemptId: string; request: unknown }>,
@@ -856,6 +1092,15 @@ function attemptRecorder(options: { live?: { attemptId: string } } = {}): {
       begin: async (request): Promise<unknown> => {
         calls.begin.push(request);
         return request;
+      },
+      enqueue: async (request): Promise<unknown> => {
+        if (options.enqueueFails === true) throw new Error('a live or queued attempt already exists');
+        calls.enqueue.push(request);
+        return request;
+      },
+      claimQueued: async (attemptId, request): Promise<unknown> => {
+        calls.claim.push({ attemptId, request });
+        return {};
       },
       heartbeat: async (attemptId, request): Promise<boolean> => {
         calls.heartbeat.push({ attemptId, request });
@@ -869,7 +1114,7 @@ function attemptRecorder(options: { live?: { attemptId: string } } = {}): {
         calls.interrupted.push({ attemptId, request });
         return {};
       },
-      findLive: async (): Promise<{ attemptId: string } | undefined> => options.live,
+      findActive: async (): Promise<{ attemptId: string; status: 'queued' | 'running' } | undefined> => active,
       reapStale: async (): Promise<readonly string[]> => [],
     },
   };

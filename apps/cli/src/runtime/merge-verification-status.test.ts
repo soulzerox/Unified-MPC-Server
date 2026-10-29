@@ -107,6 +107,37 @@ describe('createMergeVerificationStatusPort', () => {
     expect(Object.keys(port)).toEqual(['get']);
   });
 
+  it('reports a durable queued attempt without implying a verdict', async () => {
+    const port = createMergeVerificationStatusPort({
+      attempts: {
+        list: vi.fn(async () => [{
+          attemptId: 'attempt-queued',
+          headSha: HEAD,
+          status: 'queued' as const,
+          startedAt: '2026-10-27T09:00:00.000Z',
+          heartbeatAt: '2026-10-27T09:00:00.000Z',
+        }]),
+      },
+      receipts: {
+        listForExactHead: vi.fn(async () => []),
+        listForPullRequest: vi.fn(async () => []),
+      },
+      policy: { getByRepository: async () => policy() },
+      now: () => new Date(NOW),
+    });
+
+    const status = await port.get({ repository: REPOSITORY, pullRequest: 305, headSha: HEAD });
+
+    expect(status.attempts).toEqual([expect.objectContaining({
+      attemptId: 'attempt-queued',
+      status: 'queued',
+      detail: expect.stringContaining('Queued behind heavy admission'),
+    })]);
+    // A queued request never expires like a dead runner and never authorizes a merge.
+    expect(status.decision).toBeUndefined();
+    expect(status.latestReceiptRef).toBeUndefined();
+  });
+
   it('keeps a live attempt running when its heartbeat is inside the grace window', async () => {
     const port = createMergeVerificationStatusPort({
       attempts: {

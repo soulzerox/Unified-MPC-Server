@@ -1,4 +1,4 @@
-import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type MergeReviewOutcome, type MergeVerificationReceipt, type RepositoryMergePolicy, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
+import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type MergeReviewOutcome, type MergeVerificationRunOutcome, type RepositoryMergePolicy, type Result, type ResultBudget, type WorkspaceAdmissionProjection } from '@unified-mpc/domain';
 import type { CapabilityService, EventLogBackendOptions } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
@@ -162,18 +162,13 @@ export interface MergeVerificationRunPort {
       readonly evidence?: string;
       readonly userConfirmed?: boolean;
     };
-  }, signal?: AbortSignal): Promise<Result<{
-    readonly receiptRef: string;
-    readonly receipt: MergeVerificationReceipt;
-    readonly decision: MergeEvidenceDecision;
-    readonly sequence: number;
-  }>>;
+  }, signal?: AbortSignal): Promise<Result<MergeVerificationRunOutcome>>;
 }
 
 export interface MergeVerificationStatusAttemptView {
   readonly attemptId: string;
   readonly headSha: string;
-  readonly status: 'running' | 'completed' | 'failed' | 'interrupted';
+  readonly status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
   readonly baseBranch?: string;
   readonly workspaceId?: string;
   readonly gateName?: string;

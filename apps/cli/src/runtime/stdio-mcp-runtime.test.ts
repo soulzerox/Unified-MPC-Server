@@ -1137,7 +1137,7 @@ describe('stdio MCP runtime', () => {
     }
   }, 15_000);
 
-  it('admits merge verification through the shared process controller', async () => {
+  it('queues merge verification durably when the shared process controller denies admission', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-merge-admission-'));
     const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-merge-admission-project-'));
     temporaryRoots.push(dataPath, rootPath);
@@ -1199,9 +1199,29 @@ describe('stdio MCP runtime', () => {
         review: { outcome: 'clean_llm_review' },
       });
       expect(result).toMatchObject({
-        ok: false,
-        error: { code: 'RESOURCE_PRESSURE' },
+        ok: true,
+        value: {
+          status: 'queued',
+          repository,
+          pullRequest: 17,
+          headSha: head,
+          retryable: true,
+          detail: expect.stringContaining('no gate ran and no receipt exists'),
+        },
       });
+      // The denied request is durable and queryable, and it never implies a verdict.
+      const status = await runtime.services.mergeVerificationStatus?.get({
+        repository,
+        pullRequest: 17,
+        headSha: head,
+      });
+      expect(status?.attempts).toEqual([expect.objectContaining({
+        status: 'queued',
+        headSha: head,
+        workspaceId: project.id,
+      })]);
+      expect(status?.receipts).toEqual([]);
+      expect(status?.decision).toBeUndefined();
     } finally {
       controller.release(occupant.lease);
       await runtime.close();

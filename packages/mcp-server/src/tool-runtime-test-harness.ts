@@ -194,6 +194,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       async run(request: Parameters<NonNullable<McpApplicationServices['mergeVerificationRun']>['run']>[0]) {
         calls.push('mergeVerificationRun.run');
         return ok({
+          status: 'completed' as const,
           receiptRef: `runtime-contract:${request.pullRequest}`,
           receipt: {
             repository: request.repository,

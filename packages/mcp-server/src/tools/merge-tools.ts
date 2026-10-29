@@ -24,7 +24,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'merge_verification_run',
-      description: 'Produce and persist a host-owned exact-head merge verification receipt for one open pull request. The repository policy is authoritative: local command argv and GitHub check requirements come from host configuration, never caller-supplied gate outcomes. Local gates require a clean registered workspace whose origin and HEAD exactly match the PR head. Review evidence is bound to the exact head before a receipt is persisted. If the client request ends after the durable attempt begins, local verification continues; do not blindly retry a duplicate (it returns CONFLICT) and use merge_verification_status to read the running/completed state and receipt.',
+      description: 'Produce and persist a host-owned exact-head merge verification receipt for one open pull request. The repository policy is authoritative: local command argv and GitHub check requirements come from host configuration, never caller-supplied gate outcomes. Local gates require a clean registered workspace whose origin and HEAD exactly match the PR head. Review evidence is bound to the exact head before a receipt is persisted. If the client request ends after the durable attempt begins, local verification continues; do not blindly retry a duplicate (it returns CONFLICT) and use merge_verification_status to read the running/completed state and receipt. When heavy admission is denied, no gate runs and no receipt exists: the request is durably queued for the exact head and the result has status="queued" with its attemptId; call this tool again with the same head to claim and run it. A queued result never authorizes a merge.',
       permission: 'EXECUTE',
       annotations: {
         readOnlyHint: false,
@@ -66,7 +66,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'merge_verification_status',
-      description: 'Read durable exact-head merge verification state without running any gate: recorded attempts (running, completed, failed, interrupted) plus persisted receipts for a pull request. A running attempt whose heartbeat expired is reported as interrupted, never as still working, and no verdict is implied unless a receipt exists.',
+      description: 'Read durable exact-head merge verification state without running any gate: recorded attempts (queued, running, completed, failed, interrupted) plus persisted receipts for a pull request. A running attempt whose heartbeat expired is reported as interrupted, never as still working, and no verdict is implied unless a receipt exists. A queued attempt means heavy admission was denied: nothing ran, and a later merge_verification_run for the same head claims it.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: mergeVerificationStatusSchema,

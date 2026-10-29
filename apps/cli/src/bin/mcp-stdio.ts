@@ -178,6 +178,10 @@ async function main(): Promise<void> {
     permissionProfile: profileName,
     fullBypassAll: stdioFullBypassAll,
     persistWorkspaceSelection: true,
+    // #407 single-host: the client-facing stdio peer follows the long-lived
+    // HTTP host and never elects itself. Standalone stdio deployments set
+    // UNIFIED_THAI_RAG_FORWARD_ONLY=0 to restore local election.
+    thaiRagForwardOnlyDefault: true,
     ...(strictAllowedRoots === undefined ? {} : { strictAllowedRoots }),
   });
   await runtime.activityReady;

@@ -17,7 +17,9 @@ import { createStdioMcpRuntime } from './stdio-mcp-runtime.js';
  *
  * The host is built in this process with an injected driver (the same factory
  * the HTTP host uses), so the test stays deterministic and needs no Python
- * worker; only the follower is a real child process.
+ * worker; only the follower is a real child process. The child sets no
+ * forward-only env override: the shipped stdio entrypoint must default to
+ * following the designated host (#407 single-host).
  */
 const temporaryRoots: string[] = [];
 const children: ChildProcessWithoutNullStreams[] = [];
@@ -70,15 +72,18 @@ function startChild(dataPath: string, home: string, workspacePath: string): Chil
       `mcp-stdio build is missing; run \`corepack pnpm --filter @unified-mpc/cli build\` (looked for ${CLI_STDIO_BIN})`,
     );
   }
+  // The test proves the shipped default, so inherit the rest of the
+  // environment but never an operator's forward-only override.
+  const inheritedEnv = { ...process.env };
+  delete inheritedEnv.UNIFIED_THAI_RAG_FORWARD_ONLY;
   const child = spawn(process.execPath, [CLI_STDIO_BIN, '--workspace', workspacePath], {
     env: {
-      ...process.env,
+      ...inheritedEnv,
       NODE_NO_WARNINGS: '1',
       HOME: home,
       XDG_DATA_HOME: path.join(home, '.local', 'share'),
       UNIFIED_MPC_DATA_PATH: dataPath,
       UNIFIED_MPC_CHECKPOINT_KEY_BASE64: TEST_CHECKPOINT_KEY,
-      UNIFIED_THAI_RAG_FORWARD_ONLY: '1',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });

@@ -178,6 +178,13 @@ export interface StdioMcpRuntimeOptions {
   readonly thaiRagFollowerRequestRetryMs?: number;
   /** Startup-attach budget for a verified live owner that holds the lock before it listens (#418). */
   readonly thaiRagOwnerBootWaitMs?: number;
+  /**
+   * Default for a client-facing stdio peer: follow the designated HTTP host
+   * instead of electing ownership when no host is running (#407 single-host).
+   * `UNIFIED_THAI_RAG_FORWARD_ONLY` still wins: `0`/`false`/`no`/`off`
+   * restores local election for standalone deployments without an HTTP host.
+   */
+  readonly thaiRagForwardOnlyDefault?: boolean;
   readonly extensions?: ExtensionsService;
   /** Supplied by the first-party host transport, never by request parameters. */
   readonly trustedGoalRelocationActorProvider?: () => TrustedGoalRelocationHostActor | null;
@@ -327,12 +334,15 @@ export function createStdioMcpRuntime(
     strictWorkerRegistryGenerationProvider: (): number => rawWorkspaceRepository.readAuthorityGeneration(),
     callTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
   });
-  // Designated forward-only mode (#407 req 3 phase 1): a peer started with
-  // UNIFIED_THAI_RAG_FORWARD_ONLY truthy never runs the owner election; it
-  // follows the designated owner straight or fails with the machine-readable
-  // forward-host-unreachable reason (locked hosts stay untouched).
-  const thaiRagForwardOnly = process.env.UNIFIED_THAI_RAG_FORWARD_ONLY === '1'
-    || process.env.UNIFIED_THAI_RAG_FORWARD_ONLY === 'true';
+  // Designated forward-only mode (#407 req 3): a peer never runs the owner
+  // election; it follows the designated owner straight or fails with the
+  // machine-readable forward-host-unreachable reason (locked hosts stay
+  // untouched). The shipped stdio entry defaults to this; the env var still
+  // opts a standalone stdio deployment back into election.
+  const thaiRagForwardOnly = parseBooleanSetting(
+    process.env.UNIFIED_THAI_RAG_FORWARD_ONLY,
+    options.thaiRagForwardOnlyDefault === true,
+  );
   const thaiRagCoordinator = new ThaiRagProviderCoordinator({
     dataRoot: dataPath,
     ownerId: `unified-mpc:${process.pid}`,

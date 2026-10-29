@@ -63,6 +63,18 @@ PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 `UNIFIED_MPC_WORKSPACE` must be a real project directory, not `/`, `/mnt`, or another filesystem mount root.
 
+### Thai-RAG single-host mode (#407)
+
+In the standard single-host deployment, the MCP HTTP runtime is the designated
+Thai-RAG provider host: it owns `provider.lock` and runs the Python worker. The
+shipped stdio entrypoint (`mcp-stdio`) follows that host by default and never
+elects itself, so a client process cannot take ownership away from the
+long-lived host during a restart or first boot.
+
+If you run a standalone stdio server without the HTTP runtime, set
+`UNIFIED_THAI_RAG_FORWARD_ONLY=0` in that process environment to restore local
+election. `1`/`true`/`yes`/`on` forces follow mode for any runtime.
+
 ### Runtime-root safety
 
 `UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. The recommended production value is the stable `runtime/current` pointer. The validator also permits a durable canonical checkout for controlled recovery/development use, but its lifecycle must remain independent of issue/goal cleanup. Never point it at:

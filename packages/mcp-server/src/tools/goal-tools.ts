@@ -3,6 +3,8 @@ import {
   DEFAULT_GOAL_LEASE_SECONDS,
   MAX_GOAL_LEASE_SECONDS,
   MIN_GOAL_LEASE_SECONDS,
+  type GoalSnapshot,
+  type ListGoalsResult,
 } from '@unified-mpc/application';
 import { ok } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
@@ -126,6 +128,7 @@ const listGoalsSchema = z.object({
   workspaceId: z.string().min(1).max(128).optional(),
   status: z.enum(['active', 'completed', 'failed', 'blocked', 'cancelled']).optional(),
   limit: z.number().int().min(1).max(100).default(50),
+  detail: z.enum(['summary', 'full']).default('summary'),
 }).strict();
 
 const reconcileGoalWorktreesSchema = z.object({
@@ -383,15 +386,100 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'list_goals',
-      description: 'List a bounded set of durable goals owned by the current stable MCP client, optionally filtered by workspace/status.',
+      description: 'List a bounded set of durable goals owned by the current stable MCP client, optionally filtered by workspace/status. Returns a summary row per goal by default (status, phase, objective preview, step counts, lease and checkpoint time); plan steps, completed/pending step text, the last checkpoint and terminal evidence are omitted because a full snapshot per goal makes this listing unusable on a host with many goals. Call get_goal with a goalId for the full record, or pass detail=full to get the unprojected { goals } snapshots without this summary envelope.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: listGoalsSchema,
-      handler: async (input) => context.services.goals?.listGoals(context.actor, {
-        limit: input.limit,
-        ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
-        ...(input.status === undefined ? {} : { status: input.status }),
-      }) ?? missingService(),
+      handler: async (input) => {
+        const goals = context.services.goals;
+        if (goals === undefined) return missingService();
+        const listed = await goals.listGoals(context.actor, {
+          limit: input.limit,
+          ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+        });
+        if (!listed.ok || input.detail === 'full') return listed;
+        return ok(summarizeGoalList(listed.value));
+      },
     }),
   ];
+}
+
+/**
+ * A goal snapshot is the right shape for `get_goal`, not for a listing: every
+ * row carries its plan steps, the same steps again as completed/pending text,
+ * the last checkpoint and terminal evidence. On this host 34 owned goals made a
+ * default `list_goals` call 117 KB (~29k tokens) of history, so the listing was
+ * paid for on every scheduled-continuation wake. Summary rows keep the
+ * decision-grade facts and report truncation explicitly; `detail=full` and
+ * `get_goal` remain the way to read a whole record.
+ */
+const GOAL_LIST_OMITTED_FIELDS = ['plan', 'completedSteps', 'pendingSteps', 'lastCheckpoint', 'terminalEvidence'] as const;
+const GOAL_LIST_PREVIEW_CHARS = 192;
+const GOAL_LIST_BLOCKER_LIMIT = 5;
+const GOAL_LIST_TASK_LIMIT = 5;
+
+function previewText(text: string): { value: string; truncated: boolean } {
+  return text.length <= GOAL_LIST_PREVIEW_CHARS
+    ? { value: text, truncated: false }
+    : { value: `${text.slice(0, GOAL_LIST_PREVIEW_CHARS)}…`, truncated: true };
+}
+
+function summarizeGoalList(result: ListGoalsResult): Record<string, unknown> {
+  return {
+    goalCount: result.goals.length,
+    detail: 'summary',
+    omittedFields: GOAL_LIST_OMITTED_FIELDS,
+    hint: 'call get_goal with goalId for the full plan, step text, checkpoint and terminal evidence, or list_goals with detail=full for whole snapshots',
+    goals: result.goals.map(summarizeGoal),
+  };
+}
+
+function summarizeGoal(goal: GoalSnapshot): Record<string, unknown> {
+  const objective = previewText(goal.objective);
+  const nextAction = previewText(goal.nextAction);
+  const terminalSummary = goal.terminalSummary === undefined ? undefined : previewText(goal.terminalSummary);
+  const keptBlockers = goal.blockers.slice(0, GOAL_LIST_BLOCKER_LIMIT);
+  const blockers = keptBlockers.map((blocker) => previewText(blocker).value);
+  // A dropped blocker and a clipped blocker are both truncation: report either.
+  const blockersTruncated = goal.blockers.length > GOAL_LIST_BLOCKER_LIMIT
+    || keptBlockers.some((blocker) => blocker.length > GOAL_LIST_PREVIEW_CHARS);
+  const keptTasks = goal.trackedTasks.slice(0, GOAL_LIST_TASK_LIMIT);
+  const keptTaskIds = goal.activeTaskIds.slice(0, GOAL_LIST_TASK_LIMIT);
+  return {
+    goalId: goal.goalId,
+    goalKey: goal.goalKey,
+    workspaceId: goal.workspaceId,
+    ...(goal.executionId === undefined ? {} : { executionId: goal.executionId }),
+    ...(goal.executionGeneration === undefined ? {} : { executionGeneration: goal.executionGeneration }),
+    status: goal.status,
+    revision: goal.revision,
+    currentPhase: goal.currentPhase,
+    ponytailMode: goal.ponytailMode,
+    objective: objective.value,
+    objectiveTruncated: objective.truncated,
+    nextAction: nextAction.value,
+    nextActionTruncated: nextAction.truncated,
+    blockers,
+    blockerCount: goal.blockers.length,
+    blockersTruncated,
+    activeTaskIds: keptTaskIds,
+    activeTaskIdCount: goal.activeTaskIds.length,
+    activeTaskIdsTruncated: goal.activeTaskIds.length > keptTaskIds.length,
+    trackedTasks: keptTasks,
+    trackedTaskCount: goal.trackedTasks.length,
+    trackedTasksTruncated: goal.trackedTasks.length > keptTasks.length,
+    planStepCount: goal.plan.steps.length,
+    completedStepCount: goal.completedSteps.length,
+    pendingStepCount: goal.pendingSteps.length,
+    lastCheckpointAt: goal.lastCheckpoint?.createdAt ?? null,
+    leaseGeneration: goal.leaseGeneration,
+    leaseActivitySeq: goal.leaseActivitySeq,
+    ...(goal.leaseExpiresAt === undefined ? {} : { leaseExpiresAt: goal.leaseExpiresAt }),
+    createdAt: goal.createdAt,
+    updatedAt: goal.updatedAt,
+    ...(goal.terminalAt === undefined ? {} : { terminalAt: goal.terminalAt }),
+    ...(terminalSummary === undefined ? {} : { terminalSummary: terminalSummary.value, terminalSummaryTruncated: terminalSummary.truncated }),
+    ...(goal.pendingScheduledTaskCleanup === undefined ? {} : { pendingScheduledTaskCleanup: goal.pendingScheduledTaskCleanup }),
+  };
 }

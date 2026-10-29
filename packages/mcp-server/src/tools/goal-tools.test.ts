@@ -32,6 +32,10 @@ describe('durable goal MCP tools', () => {
     expect(byName.get('retry_goal_workspace_admission')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
     expect(byName.get('get_goal')).toMatchObject({ permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false } });
     expect(byName.get('list_goals')).toMatchObject({ permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false } });
+    expect(byName.get('list_goals')?.description).toContain('Returns a summary row per goal by default');
+    expect(byName.get('list_goals')?.parse({})).toMatchObject({ ok: true, value: { limit: 50, detail: 'summary' } });
+    expect(byName.get('list_goals')?.parse({ detail: 'full' })).toMatchObject({ ok: true, value: { detail: 'full' } });
+    expect(byName.get('list_goals')?.parse({ detail: 'everything' })).toMatchObject({ ok: false });
     expect(byName.get('checkpoint_goal')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
     expect(byName.get('finish_goal')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
     expect(byName.get('cancel_goal')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: true } });
@@ -748,6 +752,203 @@ describe('durable goal MCP tools', () => {
       services: {},
     } as unknown as McpToolContext, 'reconcile_goal_worktrees').execute({}, new AbortController().signal);
     expect(missing).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+  });
+
+  it('lists goals as bounded summaries and keeps the whole snapshot behind get_goal', async () => {
+    const requests: unknown[] = [];
+    const longText = 'x'.repeat(1_200);
+    const goal = {
+      goalId: 'goal-1',
+      executionId: 'exec-1',
+      executionGeneration: 2,
+      goalKey: 'stable-key',
+      workspaceId: 'workspace-1',
+      objective: 'objective '.repeat(80),
+      status: 'active',
+      revision: 3,
+      currentPhase: 'verify',
+      plan: { steps: [{ id: 's1', title: 'step one' }, { id: 's2', title: 'step two' }] },
+      completedSteps: [{ id: 's1', title: longText }],
+      pendingSteps: [{ id: 's2', title: longText }],
+      nextAction: 'continue',
+      blockers: Array.from({ length: 12 }, (_, index) => `blocker-${index}`),
+      activeTaskIds: ['job-1'],
+      trackedTasks: [{ taskId: 'job-1', provider: 'shell', role: 'blocking_job', cancelWithGoal: true }],
+      ponytailMode: 'full',
+      lastCheckpoint: {
+        id: 'checkpoint-1', goalId: 'goal-1', revision: 2, currentPhase: 'verify', summary: 'checkpoint summary',
+        stepUpdates: [], nextAction: 'continue', blockers: [], evidence: [], activeTaskIds: [],
+        createdAt: '2026-10-29T00:00:00.000Z',
+      },
+      leaseGeneration: 4,
+      leaseActivitySeq: 9,
+      leaseExpiresAt: '2026-10-29T01:00:00.000Z',
+      createdAt: '2026-10-28T00:00:00.000Z',
+      updatedAt: '2026-10-29T00:00:00.000Z',
+      terminalSummary: 'finished '.repeat(200),
+      terminalEvidence: [{ kind: 'note', value: 'evidence-value' }],
+    };
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        goals: {
+          async listGoals(_actor: unknown, request: unknown) {
+            requests.push(request);
+            return ok({ goals: [goal] });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+
+    const summary = await tool(context, 'list_goals').execute(
+      { workspaceId: 'workspace-1', status: 'active', limit: 20 },
+      new AbortController().signal,
+    );
+    expect(requests).toEqual([{ limit: 20, workspaceId: 'workspace-1', status: 'active' }]);
+    expect(summary).toMatchObject({
+      ok: true,
+      value: {
+        goalCount: 1,
+        detail: 'summary',
+        omittedFields: ['plan', 'completedSteps', 'pendingSteps', 'lastCheckpoint', 'terminalEvidence'],
+        goals: [{
+          goalId: 'goal-1',
+          executionId: 'exec-1',
+          status: 'active',
+          revision: 3,
+          objectiveTruncated: true,
+          planStepCount: 2,
+          completedStepCount: 1,
+          pendingStepCount: 1,
+          lastCheckpointAt: '2026-10-29T00:00:00.000Z',
+          blockerCount: 12,
+          blockersTruncated: true,
+          terminalSummaryTruncated: true,
+          trackedTasks: [{ taskId: 'job-1', role: 'blocking_job' }],
+        }],
+      },
+    });
+    expect(JSON.stringify(summary)).toContain('get_goal');
+    const serializedSummary = JSON.stringify(summary);
+    expect(serializedSummary).not.toContain(longText);
+    expect(serializedSummary).not.toContain('evidence-value');
+    expect(serializedSummary).not.toContain('blocker-11');
+    if (!summary.ok) throw new Error('expected a summary listing');
+    expect(Object.keys(summary.value.goals[0] ?? {})).not.toContain('lastCheckpoint');
+    expect((summary.value.goals[0] as { blockers: string[] }).blockers).toHaveLength(5);
+    expect((summary.value.goals[0] as { objective: string }).objective).toHaveLength(193);
+
+    const full = await tool(context, 'list_goals').execute({ detail: 'full' }, new AbortController().signal);
+    expect(full).toEqual(ok({ goals: [goal] }));
+
+    const failed = await tool({
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { goals: { async listGoals() { return err(appError('INTERNAL_ERROR', 'goal read failed')); } } },
+    } as unknown as McpToolContext, 'list_goals').execute({}, new AbortController().signal);
+    expect(failed).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+
+    const missing = await tool({
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {},
+    } as unknown as McpToolContext, 'list_goals').execute({}, new AbortController().signal);
+    expect(missing).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+  });
+
+  it('reports a single clipped blocker as truncation', async () => {
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        goals: {
+          async listGoals() {
+            return ok({
+              goals: [{
+                goalId: 'goal-1', goalKey: 'stable-key', workspaceId: 'workspace-1', objective: 'objective',
+                status: 'blocked', revision: 1, currentPhase: 'unblock', plan: { steps: [] },
+                completedSteps: [], pendingSteps: [], nextAction: 'wait', blockers: ['b'.repeat(900)],
+                activeTaskIds: [], trackedTasks: [], ponytailMode: 'inherit', lastCheckpoint: null,
+                leaseGeneration: 0, leaseActivitySeq: 0,
+                createdAt: '2026-10-28T00:00:00.000Z', updatedAt: '2026-10-29T00:00:00.000Z',
+              }],
+            });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+
+    const listed = await tool(context, 'list_goals').execute({}, new AbortController().signal);
+    if (!listed.ok) throw new Error('expected a summary listing');
+    expect(listed.value.goals[0]).toMatchObject({ blockerCount: 1, blockersTruncated: true });
+    expect((listed.value.goals[0] as { blockers: string[] }).blockers[0]).toHaveLength(193);
+  });
+
+  it('keeps a maximum-size goal listing inside the tool-result budget', async () => {
+    const stepTitle = 'step '.repeat(210);
+    const goals = Array.from({ length: 50 }, (_, index) => ({
+      goalId: `goal-${index}`,
+      goalKey: `goal-key-${index}`,
+      workspaceId: 'workspace-1',
+      objective: 'objective '.repeat(400),
+      status: 'completed',
+      revision: index,
+      currentPhase: 'delivered',
+      plan: { steps: Array.from({ length: 100 }, (_, step) => ({ id: `s${step}`, title: stepTitle })) },
+      completedSteps: Array.from({ length: 100 }, (_, step) => ({ id: `s${step}`, title: stepTitle })),
+      pendingSteps: [],
+      nextAction: 'none',
+      blockers: Array.from({ length: 20 }, () => 'blocker '.repeat(60)),
+      activeTaskIds: Array.from({ length: 50 }, (_, task) => `job-${task}`),
+      trackedTasks: Array.from({ length: 50 }, (_, task) => ({ taskId: `job-${task}`, provider: 'shell', role: 'blocking_job', cancelWithGoal: true })),
+      ponytailMode: 'inherit',
+      lastCheckpoint: null,
+      leaseGeneration: 0,
+      leaseActivitySeq: 0,
+      createdAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-02T00:00:00.000Z',
+      terminalSummary: 'delivered '.repeat(200),
+      terminalEvidence: [{ kind: 'note', value: 'terminal evidence '.repeat(60) }],
+    }));
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { goals: { async listGoals() { return ok({ goals }); } } },
+    } as unknown as McpToolContext;
+
+    const summary = await tool(context, 'list_goals').execute({ limit: 50 }, new AbortController().signal);
+    if (!summary.ok) throw new Error('expected a summary listing');
+    const summaryBytes = Buffer.byteLength(JSON.stringify(summary.value));
+    const unprojectedBytes = Buffer.byteLength(JSON.stringify({ goals }));
+    expect(unprojectedBytes).toBeGreaterThan(5 * 1024 * 1024);
+    expect(summary.value.goals[0]).toMatchObject({
+      blockersTruncated: true,
+      activeTaskIdsTruncated: true,
+      trackedTasksTruncated: true,
+      trackedTaskCount: 50,
+    });
+    expect(summaryBytes).toBeLessThan(128 * 1024);
+
+    // The pathological row above is far worse than real goal state: ordinary
+    // content (short blockers, one tracked job, a few plan steps) must cost a
+    // fraction of the old whole-snapshot listing.
+    const realistic = goals.slice(0, 34).map((goal, index) => ({
+      ...goal,
+      goalId: `real-${index}`,
+      blockers: ['waiting on CI'],
+      activeTaskIds: [`job-${index}`],
+      trackedTasks: [{ taskId: `job-${index}`, provider: 'shell', role: 'blocking_job', cancelWithGoal: true }],
+    }));
+    const realisticSummary = await tool({
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { goals: { async listGoals() { return ok({ goals: realistic }); } } },
+    } as unknown as McpToolContext, 'list_goals').execute({ limit: 50 }, new AbortController().signal);
+    if (!realisticSummary.ok) throw new Error('expected a summary listing');
+    const realisticBytes = Buffer.byteLength(JSON.stringify(realisticSummary.value));
+    expect(Buffer.byteLength(JSON.stringify({ goals: realistic }))).toBeGreaterThan(2 * 1024 * 1024);
+    expect(realisticBytes).toBeLessThan(48 * 1024);
   });
 
   it('registers every goal tool in the public registry/catalog with typed schemas', () => {

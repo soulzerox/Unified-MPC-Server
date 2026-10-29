@@ -439,6 +439,45 @@ describe('createMergeVerificationRunPort', () => {
     }]);
   });
 
+  it('keeps a durable verification running when the caller transport aborts mid-gate', async () => {
+    const attempts = attemptRecorder();
+    const caller = new AbortController();
+    const run = vi.fn(async (_command: unknown, _cwd: string, signal: AbortSignal | undefined) => {
+      // A client disconnect aborts the transport signal while the heavy gate is running.
+      // Durable verification must not inherit it, or the verdict would be lost silently.
+      expect(signal).toBeUndefined();
+      caller.abort();
+      expect(caller.signal.aborted).toBe(true);
+      return { exitCode: 0, stdout: '511 passed', stderr: '' };
+    });
+    const service = createService({
+      github: githubFor(),
+      receipts: receiptWriter().writer,
+      workspaces,
+      workspaceVerifier: workspaceVerifier(),
+      commandRunner: { run },
+      attempts: attempts.recorder,
+      randomId: () => 'receipt-id',
+      randomAttemptId: () => 'attempt-detached',
+    });
+
+    const result = await service.run({
+      policy: localPolicy(),
+      repository: REPOSITORY,
+      pullRequest: 17,
+      workspaceId: 'workspace-1',
+      review: { outcome: 'clean_llm_review', reviewId: 55 },
+    }, caller.signal);
+
+    expect(result).toMatchObject({ ok: true, value: { decision: { status: 'MERGE_ALLOWED' } } });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(attempts.calls.interrupted).toEqual([]);
+    expect(attempts.calls.finish).toEqual([{
+      attemptId: 'attempt-detached',
+      request: expect.objectContaining({ status: 'completed' }),
+    }]);
+  });
+
   it('closes a blocked verdict as a completed attempt and a gate failure as failed', async () => {
     const completed = attemptRecorder();
     const blocked = await createService({

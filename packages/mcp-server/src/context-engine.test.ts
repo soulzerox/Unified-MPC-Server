@@ -374,6 +374,30 @@ describe('context engine', () => {
     await expect(engine.continueFullScan(scan.value.continuationToken)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
   });
 
+  it('evicts the oldest context continuations once their retained weight exceeds the byte budget', async () => {
+    const engine = new ContextEngine(services(), actor, undefined, {
+      maxContinuations: 64,
+      continuationMaxBytes: 2_048,
+    });
+    const tokens: string[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      const result = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });
+      if (!result.ok || result.value.continuationToken === undefined) throw new Error('expected a continuation token');
+      tokens.push(result.value.continuationToken);
+    }
+
+    const stats = engine.retentionStats();
+    expect(stats.continuations.retainedBytes).toBeLessThanOrEqual(2_048);
+    expect(stats.continuations.entries).toBeGreaterThan(0);
+    expect(stats.continuations.entries).toBeLessThan(tokens.length);
+
+    const newest = tokens[tokens.length - 1]!;
+    await expect(engine.continue(newest, 1)).resolves.toMatchObject({ ok: true });
+    const oldest = tokens[0]!;
+    await expect(engine.continue(oldest, 1)).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(engine.retentionStats().continuations.retainedBytes).toBeLessThanOrEqual(2_048);
+  });
+
   it('uses the context ledger to avoid resending unchanged files', async () => {
     const engine = new ContextEngine(services(), actor);
     const first = await engine.collect({ query: 'login', workspaceId: 'workspace-1', pageSize: 1 });

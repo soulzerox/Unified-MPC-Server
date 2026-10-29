@@ -182,11 +182,58 @@ const DEFAULT_PAGE_SIZE: Record<ContextMode, number> = { optimized: 12, full: 50
 const SEARCH_LIMIT: Record<ContextMode, number> = { optimized: 100, full: 300, exhaustive: 500 };
 const DEFAULT_CONTINUATION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_CONTINUATIONS = 64;
+/** Retained candidate/file arrays must not outgrow their count/ttl limits. */
+const DEFAULT_MAX_CONTINUATION_BYTES = 8 * 1024 * 1024;
+const CONTINUATION_ENTRY_OVERHEAD_BYTES = 256;
+/** V8 stores retained strings as UTF-16, so one code unit is two bytes. */
+const STRING_BYTES_PER_CODE_UNIT = 2;
+
+function stringWeight(value: string | undefined): number {
+  return (value?.length ?? 0) * STRING_BYTES_PER_CODE_UNIT;
+}
+
+/** Approximate retained size of one context continuation (candidate + match strings). */
+export function weighContextContinuation(value: {
+  readonly candidates: readonly {
+    readonly workspaceId: string;
+    readonly path: string;
+    readonly reason: string;
+    readonly matches: readonly { readonly workspaceId: string; readonly path: string; readonly text: string }[];
+  }[];
+}): number {
+  let bytes = CONTINUATION_ENTRY_OVERHEAD_BYTES;
+  for (const candidate of value.candidates) {
+    bytes += stringWeight(candidate.workspaceId) + stringWeight(candidate.path) + stringWeight(candidate.reason) + 64;
+    for (const match of candidate.matches) {
+      bytes += stringWeight(match.workspaceId) + stringWeight(match.path) + stringWeight(match.text) + 32;
+    }
+  }
+  return bytes;
+}
+
+/** Approximate retained size of one scan continuation (deferred path list or cursor). */
+export function weighScanContinuation(value:
+  | { readonly kind: 'materialized'; readonly files: readonly { readonly workspaceId: string; readonly path: string }[] }
+  | { readonly kind: 'indexed'; readonly workspaceId: string; readonly requestedPath?: string; readonly lastPath?: string }
+): number {
+  if (value.kind === 'indexed') {
+    return CONTINUATION_ENTRY_OVERHEAD_BYTES + stringWeight(value.workspaceId) + stringWeight(value.requestedPath) + stringWeight(value.lastPath);
+  }
+  let bytes = CONTINUATION_ENTRY_OVERHEAD_BYTES;
+  for (const file of value.files) bytes += stringWeight(file.workspaceId) + stringWeight(file.path) + 32;
+  return bytes;
+}
 
 export interface ContextEngineRetentionOptions {
   readonly continuationTtlMs?: number;
   readonly maxContinuations?: number;
+  readonly continuationMaxBytes?: number;
   readonly now?: () => number;
+}
+
+export interface ContextEngineRetentionStats {
+  readonly continuations: { readonly entries: number; readonly retainedBytes: number };
+  readonly scanContinuations: { readonly entries: number; readonly retainedBytes: number };
 }
 
 export class ContextEngine {
@@ -202,10 +249,19 @@ export class ContextEngine {
     const options = {
       ttlMs: retention.continuationTtlMs ?? DEFAULT_CONTINUATION_TTL_MS,
       maxEntries: retention.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS,
+      maxBytes: retention.continuationMaxBytes ?? DEFAULT_MAX_CONTINUATION_BYTES,
       ...(retention.now === undefined ? {} : { now: retention.now }),
     };
-    this.continuations = new BoundedRetentionMap(options);
-    this.scanContinuations = new BoundedRetentionMap(options);
+    this.continuations = new BoundedRetentionMap<string, Continuation>({ ...options, weigh: (value): number => weighContextContinuation(value) });
+    this.scanContinuations = new BoundedRetentionMap<string, ScanContinuation>({ ...options, weigh: (value): number => weighScanContinuation(value) });
+  }
+
+  /** Retained continuation footprint, exposed for tests and diagnostics. */
+  public retentionStats(): ContextEngineRetentionStats {
+    return {
+      continuations: { entries: this.continuations.size, retainedBytes: this.continuations.retainedBytes },
+      scanContinuations: { entries: this.scanContinuations.size, retainedBytes: this.scanContinuations.retainedBytes },
+    };
   }
 
   public async collect(request: WorkspaceContextRequest, budget?: ResultBudget, signal?: AbortSignal): Promise<Result<WorkspaceContextResult>> {

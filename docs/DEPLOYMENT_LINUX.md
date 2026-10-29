@@ -167,9 +167,30 @@ wait/run durations, heartbeats, active heavy cost and memory pressure without
 admitting new work. `status` / `list` on `shell` show the same parking state per
 task.
 
+Cross-project fairness (#145) shapes which queued job is tried next:
+
+- when several workspaces have queued heavy work, the queue alternates one
+  candidate per workspace per pass instead of draining one project's burst.
+  The least-recently-served workspace goes first, and a workspace that just
+  started a job yields its next turn to the others;
+- blocking work always comes first, including rotation inside that tier; a job
+  that has waited at least **30 minutes** (`agingMs`) is tried ahead of the
+  workspace rotation but never ahead of blocking work and never past a global
+  admission denial. Aging is a starvation ceiling, not a latency promise;
+- fairness history is process-local and **restart clears it**: the oldest
+  queued job goes first and rotation resumes. Durable positions are never
+  rewritten, so the stored position remains the audit order and restart
+  fallback;
+- when the serving runtime owns a shell admission queue,
+  `heavy_job_queue_status` returns `fairness.scope: "runtime-local"` with
+  `agingMs`, and adds `effectiveRank` (0 = next tried) and `aged` to queued
+  entries. The projection is computed from the same state as the drain, so it
+  cannot disagree with the order actually tried. Runtimes without a shell
+  admission queue omit these fields.
+
 The one-heavy-slot cap is a configured controller limit, not a measured one; do
-not raise it on a constrained host. Dynamic headroom and cross-project aging are
-tracked separately in #145.
+not raise it on a constrained host. Dynamic headroom is tracked separately in
+#145.
 
 ### Runtime-root safety
 

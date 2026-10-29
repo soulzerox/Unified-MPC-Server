@@ -86,8 +86,10 @@ prompts from inside the adapter.
   `core.sshCommand` from repository config.
 - No credential, token, URL userinfo, or helper path is written to the tool result,
   the activity log, the audit row, or any error message. `diagnosticConfigKey()`
-  already reduces a URL-scoped config key to a pattern; the publish path applies the
-  same rule to everything it reports.
+  reduces free-form config subsections to a pattern, and `firstCredentialConfigKey()`
+  reduces every scoped credential helper — host-only or full URL — to
+  `credential.<url>.helper` while reporting the global `credential.helper` exactly.
+  The publish path applies the same rule to everything it reports.
 - On authentication failure the result is `PERMISSION_DENIED` with
   `details.reason: "publish-authentication-failed"`. The raw `git` stderr is
   redacted with `redactDiagnosticText()` before it is logged, and is not returned.

@@ -228,6 +228,53 @@ describe('GuardedMergeService', () => {
       status: 'inspect_required',
       reason: 'merge_dispatch_error',
       receiptRef: RECEIPT_REF,
+      detail: 'provider failure',
+    });
+  });
+
+  it('reports a bounded single-line dispatch detail and redacts credential-shaped text', async () => {
+    const failingPort: GuardedMergeDispatchPort = {
+      async dispatchMerge(): Promise<never> {
+        throw new Error(
+          `Unknown MCP server: github\n\tghp_abcdefghijklmnopqrstuvwxyz0123456789 ${'x'.repeat(600)}`,
+        );
+      },
+    };
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      failingPort,
+    );
+
+    const result = await service.dispatch({ policy, subject, receiptRef: RECEIPT_REF });
+    expect(result).toMatchObject({
+      status: 'inspect_required',
+      reason: 'merge_dispatch_error',
+      receiptRef: RECEIPT_REF,
+    });
+    if (result.status !== 'inspect_required') throw new Error('expected inspect_required');
+    expect(result.detail).toContain('Unknown MCP server: github');
+    expect(result.detail).not.toContain('\n');
+    expect(result.detail).not.toContain('\t');
+    expect(result.detail).not.toContain('ghp_');
+    expect(result.detail).toContain('[redacted-token]');
+    expect((result.detail ?? '').length).toBeLessThanOrEqual(400);
+  });
+
+  it('omits dispatch detail when the failure carries no message', async () => {
+    const failingPort: GuardedMergeDispatchPort = {
+      async dispatchMerge(): Promise<never> {
+        throw undefined;
+      },
+    };
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      failingPort,
+    );
+
+    await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
+      status: 'inspect_required',
+      reason: 'merge_dispatch_error',
+      receiptRef: RECEIPT_REF,
     });
   });
 

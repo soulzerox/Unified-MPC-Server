@@ -190,6 +190,7 @@ describe('mergeTools', () => {
       status: 'inspect_required' as const,
       reason: 'merge_dispatch_error' as const,
       receiptRef: 'receipt-278',
+      detail: 'Unknown MCP server: github',
     }));
     const tool = mergeTools(context({
       mergePolicy: { async getByRepository(): Promise<RepositoryMergePolicy> { return policy; } },
@@ -213,6 +214,8 @@ describe('mergeTools', () => {
         message: expect.stringContaining('merge_dispatch_error'),
       },
     });
+    const message = result.ok === false ? result.error.message : '';
+    expect(message).toContain('Unknown MCP server: github');
   });
 
   it('dispatches only with the host-owned policy and exact subject supplied to the guarded service', async () => {

@@ -53,6 +53,14 @@ const CODE_INDEX_VECTORS = false;
 // but the follow-up status/often-blocking calls must survive the publish.
 const INDEX_CALL_TIMEOUT_MS = 3_600_000;
 const INDEX_ADMISSION_WAIT_MS = 5_000;
+/**
+ * A status read answers from the worker's in-memory job registry; it never
+ * waits for publishing. Bounding it separately keeps the #407 deadline real:
+ * `cap * timeout` is the longest a wedged worker can hold the read gate.
+ */
+export const DEFAULT_INDEX_STATUS_TIMEOUT_MS = 30_000;
+/** Consecutive timed-out status polls before the mirrored job is failed (#407). */
+export const DEFAULT_INDEX_STATUS_TIMEOUT_POLLS = 30;
 /** Heartbeat cadence for synchronous provider calls that carry no provider job id. */
 const SYNC_CALL_HEARTBEAT_MS = 60_000;
 
@@ -123,6 +131,12 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly healthRefreshMs?: number;
   /** Poll interval for provider-owned background index jobs mirrored into the durable Unified job store. */
   readonly indexJobPollMs?: number;
+  /**
+   * Per-call deadline for one `index_status` poll (issue #407). Status polls
+   * must not inherit the index session budget: a worker that stops answering
+   * would otherwise hold the read gate for up to an hour per poll.
+   */
+  readonly indexStatusTimeoutMs?: number;
   /** Consecutive index_status call timeouts tolerated by the admission monitor before the job is failed and the admission gate released (issue #407 deadline). */
   readonly indexStatusTimeoutCap?: number;
   /** Stuck-job reaper window for mirrored index jobs (issue #445 exposes it so a test can prove an embedding-phase heartbeat keeps a build alive). */
@@ -155,6 +169,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly verifications: ThaiRagWorkspaceVerificationStore;
   private readonly healthRefreshMs: number;
   private readonly indexJobPollMs: number;
+  private readonly indexStatusTimeoutMs: number;
   private readonly indexStatusTimeoutCap: number;
   private ownerId: string | undefined;
   private launchConfig: McpServerLaunchConfig | undefined;
@@ -242,7 +257,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.verifications = new ThaiRagWorkspaceVerificationStore(options.dataRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
-    this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? 30));
+    this.indexStatusTimeoutMs = Math.max(1_000, Math.floor(options.indexStatusTimeoutMs ?? DEFAULT_INDEX_STATUS_TIMEOUT_MS));
+    this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? DEFAULT_INDEX_STATUS_TIMEOUT_POLLS));
   }
 
   public start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
@@ -864,7 +880,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       const status = await this.callWorker('index_status', {
         job_id: providerJobId,
         workspace_id: workspaceId,
-      });
+      }, undefined, undefined, this.indexStatusTimeoutMs);
       if (this.shuttingDown) return;
       if (!status.ok) {
         // Issue #439: the worker answers index_status from the same session
@@ -890,7 +906,17 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }
         consecutiveStatusTimeouts += 1;
         if (consecutiveStatusTimeouts >= this.indexStatusTimeoutCap) {
-          const deadlineCancel = this.callWorker('cancel_index', { job_id: providerJobId, workspace_id: workspaceId });
+          // The worker is unresponsive by definition here, so the best-effort
+          // cancel must use the same deadline: the session manager drops a
+          // session that times out, which releases the queue the next read
+          // needs instead of blocking it for the index-session budget.
+          const deadlineCancel = this.callWorker(
+            'cancel_index',
+            { job_id: providerJobId, workspace_id: workspaceId },
+            undefined,
+            undefined,
+            this.indexStatusTimeoutMs,
+          );
           void deadlineCancel.catch(() => undefined);
           await this.jobs.fail(
             jobId,
@@ -1451,7 +1477,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         return err(appError('CONFLICT', `Native Thai-RAG admission index job is no longer active: ${jobId}`, true));
       }
 
-      const status = await this.callAdmissionWorker('index_status', { job_id: providerJobId, workspace_id: workspaceId });
+      const status = await this.callAdmissionWorker(
+        'index_status',
+        { job_id: providerJobId, workspace_id: workspaceId },
+        this.indexStatusTimeoutMs,
+      );
       if (!status.ok) {
         // A timed-out read is not evidence that the provider-owned background
         // job failed. Keep the same providerJobId, dedicated stdio session, and
@@ -1475,7 +1505,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           // hostage: fire a non-blocking best-effort cancel, fail the local
           // job, and surface an actionable CONFLICT so the finally block in
           // the admission monitor releases the gate deterministically.
-          const deadlineCancel = this.callAdmissionWorker('cancel_index', { job_id: providerJobId, workspace_id: workspaceId });
+          const deadlineCancel = this.callAdmissionWorker(
+            'cancel_index',
+            { job_id: providerJobId, workspace_id: workspaceId },
+            this.indexStatusTimeoutMs,
+          );
           void deadlineCancel.catch(() => undefined);
           return err(appError('CONFLICT', `Native Thai-RAG index_status stayed unreachable for ${this.indexStatusTimeoutCap} consecutive polls; workspace ${workspaceId} index job marked failed (index-status-unreachable)`, true, {
             reason: 'index-status-unreachable',
@@ -1554,8 +1588,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     args: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
     budget?: ResultBudget,
+    callTimeoutMs?: number,
   ): Promise<Result<unknown>> {
-    const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget));
+    const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget, callTimeoutMs));
     return normalizeWorkerCallResult(tool, raw);
   }
 
@@ -1574,8 +1609,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return normalizeWorkerCallResult(tool, raw);
   }
 
-  private async callAdmissionWorker(tool: string, args: Readonly<Record<string, unknown>>): Promise<Result<unknown>> {
-    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args));
+  private async callAdmissionWorker(
+    tool: string,
+    args: Readonly<Record<string, unknown>>,
+    callTimeoutMs?: number,
+  ): Promise<Result<unknown>> {
+    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, undefined, {}, undefined, callTimeoutMs));
   }
 
   /**

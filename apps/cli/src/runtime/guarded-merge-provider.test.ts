@@ -150,6 +150,20 @@ describe('built-in GitHub merge provider', () => {
       .rejects.toThrow('GitHub did not merge the pull request: Pull Request is not mergeable');
   });
 
+  it('fails closed when the CLI emits invalid JSON', async () => {
+    const api = createGitHubMergeApi(async () => 'not-json');
+
+    await expect(api.merge(invocation))
+      .rejects.toThrow('GitHub merge API returned invalid JSON');
+  });
+
+  it('fails closed when the CLI emits a non-object payload', async () => {
+    const api = createGitHubMergeApi(async () => 'null');
+
+    await expect(api.merge(invocation))
+      .rejects.toThrow('GitHub merge API returned an invalid response');
+  });
+
   it('surfaces a CLI failure without multiline noise', async () => {
     const api = createGitHubMergeApi(async () => {
       throw new Error('Command failed: gh api --method PUT\nhead changed');

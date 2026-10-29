@@ -1,8 +1,8 @@
 import { ok } from '@unified-mpc/domain';
-import type { SkillSummary } from '@unified-mpc/extensions';
 import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import { skillsListSchema, skillsReadSchema } from './schemas.js';
+import { summarizeSkillCatalog } from './skill-summary.js';
 
 const ponytailSessionSchema = z.object({
   workspaceId: z.string().min(1).max(128),
@@ -35,7 +35,7 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.source === undefined ? {} : { source: input.source }),
         });
         if (!listed.ok || input.detail === 'full') return listed;
-        return ok(summarizeSkillList(listed.value));
+        return ok(summarizeSkillCatalog(listed.value.skills));
       },
     }),
     defineTool({
@@ -84,34 +84,4 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
       },
     }),
   ];
-}
-
-/**
- * A skill row is cheap until it is multiplied by the catalog: on this host 136
- * skills made a default `skills_list` 112 KB, of which the description text was
- * 53% and three path variants per skill another 26%. The paths are runtime
- * bookkeeping, not routing information, so a listing keeps identity plus a
- * description preview and reports every clip.
- */
-const SKILL_LIST_OMITTED_FIELDS = ['rootPath', 'skillPath', 'canonicalSkillPath'] as const;
-const SKILL_LIST_DESCRIPTION_PREVIEW_CHARS = 200;
-
-function summarizeSkillList(result: { readonly skills: readonly SkillSummary[] }): Record<string, unknown> {
-  return {
-    total: result.skills.length,
-    detail: 'summary',
-    omittedFields: SKILL_LIST_OMITTED_FIELDS,
-    hint: 'description is a preview of the text skill_match ranks; pass detail=full for complete descriptions and filesystem paths',
-    skills: result.skills.map((skill) => {
-      const truncated = skill.description.length > SKILL_LIST_DESCRIPTION_PREVIEW_CHARS;
-      return {
-        id: skill.id,
-        name: skill.name,
-        source: skill.source,
-        trustTier: skill.trustTier,
-        description: truncated ? `${skill.description.slice(0, SKILL_LIST_DESCRIPTION_PREVIEW_CHARS)}…` : skill.description,
-        descriptionTruncated: truncated,
-      };
-    }),
-  };
 }

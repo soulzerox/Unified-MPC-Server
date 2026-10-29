@@ -92,7 +92,7 @@ export const UPGRADE_TOOL_CATALOG: readonly UpgradeToolCatalogEntry[] = [
   read('hook_list', 14, 'List registered lifecycle hooks.', ['hooks', 'lifecycle']),
   write('hook_register', 14, 'Register a deterministic lifecycle hook descriptor.', ['hooks', 'lifecycle']),
   write('hook_remove', 14, 'Remove a lifecycle hook descriptor.', ['hooks', 'lifecycle']),
-  read('skill_match', 15, 'Match relevant local skills without loading all skill text.', ['skills', 'discovery']),
+  read('skill_match', 15, 'Match relevant local skills without loading all skill text. Returns bounded summary rows (id, name, source, trust tier, description preview) for at most limit matches (default 10, max 50) and reports total/returned/truncated.', ['skills', 'discovery']),
   read('skill_load', 15, 'Load a selected local skill by identifier.', ['skills']),
   write('plugin_install', 16, 'Register a validated plugin descriptor in the locked shared runtime registry. This manages declared plugin state; it does not execute untrusted plugin code.', ['plugin']),
   read('plugin_list', 16, 'List plugin descriptors from the locked shared runtime registry.', ['plugin']),

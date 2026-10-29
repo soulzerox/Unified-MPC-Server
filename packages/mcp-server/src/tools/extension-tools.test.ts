@@ -235,6 +235,8 @@ describe('skills and mcp bridge tools', () => {
     if (!summary.ok) throw new Error('expected a summary listing');
     expect(summary.value).toMatchObject({
       total: 3,
+      returned: 3,
+      truncated: false,
       detail: 'summary',
       omittedFields: ['rootPath', 'skillPath', 'canonicalSkillPath'],
     });
@@ -247,6 +249,8 @@ describe('skills and mcp bridge tools', () => {
     expect(rows[2]).toMatchObject({ id: 'a/exact', description: exactDescription, descriptionTruncated: false });
     expect(JSON.stringify(summary.value)).not.toContain('/root/a/SKILL.md');
     expect(JSON.stringify(summary.value)).not.toContain(longDescription);
+    // `detail=full` has to stay discoverable from the default envelope.
+    expect((summary.value as { hint: string }).hint).toContain('detail=full');
 
     const full = await tool.execute({ detail: 'full' }, new AbortController().signal);
     expect(full).toEqual(ok({ skills: catalog }));

@@ -89,6 +89,7 @@ import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
   DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
   NativeThaiRagProviderDriver,
+  codeIndexVectorsFromEnv,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
@@ -352,6 +353,10 @@ export function createStdioMcpRuntime(
       1,
       600,
     ),
+    // #463 keeps code indexing FTS5-first. Enabling vectors is a deliberate
+    // per-deployment opt-in: on a CPU-only host it is a multi-hour baseline
+    // pass (issue #445 option 4), so it must never be implicit.
+    codeIndexVectors: codeIndexVectorsFromEnv(process.env.UNIFIED_MPC_THAI_RAG_CODE_INDEX_VECTORS),
   });
   // Designated forward-only mode (#407 req 3): a peer never runs the owner
   // election; it follows the designated owner straight or fails with the

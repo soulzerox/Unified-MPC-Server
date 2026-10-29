@@ -12,7 +12,7 @@ import {
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
 } from '@unified-mpc/thai-rag';
-import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
+import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv } from './native-thai-rag-provider.js';
 
 const roots: string[] = [];
 const workspaceId = '11111111-1111-4111-8111-111111111111';
@@ -80,6 +80,40 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(calls.filter(({ tool }) => THAI_RAG_CONFORMANCE_FIXTURE.operations[tool as keyof typeof THAI_RAG_CONFORMANCE_FIXTURE.operations].scope === 'workspace_id').every(({ args }) => args.workspace_id === workspaceId)).toBe(true);
     await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: 'missing' })).resolves.toMatchObject({ ok: false, error: { code: 'FILE_NOT_FOUND' } });
     await driver.stop();
+  });
+
+  it('keeps code indexing lexical-only unless the deployment opts into vectors (#445)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      codeIndexVectors: true,
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'health' || tool === 'version') return success(tool, defaultHandshake());
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId })).resolves.toMatchObject({ ok: true });
+    expect(calls.filter(({ tool }) => tool === 'code_index').every(({ args }) => args.vectors === true)).toBe(true);
+    await driver.stop();
+
+    // The default deployment stays lexical-only, and an unparseable value must
+    // never opt a host into a multi-hour embedding baseline by accident.
+    expect(codeIndexVectorsFromEnv(undefined)).toBe(false);
+    expect(codeIndexVectorsFromEnv('')).toBe(false);
+    expect(codeIndexVectorsFromEnv('0')).toBe(false);
+    expect(codeIndexVectorsFromEnv('off')).toBe(false);
+    expect(codeIndexVectorsFromEnv('banana')).toBe(false);
+    expect(codeIndexVectorsFromEnv('1')).toBe(true);
+    expect(codeIndexVectorsFromEnv('true')).toBe(true);
+    expect(codeIndexVectorsFromEnv(' ON ')).toBe(true);
   });
 
   it('mirrors provider-owned cancellable background jobs into durable Unified job status', async () => {

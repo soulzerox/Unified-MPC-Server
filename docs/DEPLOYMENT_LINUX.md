@@ -95,6 +95,31 @@ released, and later reads re-admit against the active generation without a
 runtime restart. Lower the values only if your provider answers status reads
 quickly; a stale index is safer than a gate that never clears.
 
+### Thai-RAG code-index vectors (#445)
+
+Code indexing is FTS5-first by policy (#463): Unified asks the provider to index
+code lexically only, the provider publishes `semantic: lexical_only`, and the
+pre-edit gate accepts that as current. This is the supported default on every
+host, including CPU-only ones.
+
+If you deliberately want a semantic code baseline on this deployment, opt in
+explicitly:
+
+```sh
+# 1/true/yes/on requests code embeddings; anything else stays lexical-only.
+UNIFIED_MPC_THAI_RAG_CODE_INDEX_VECTORS=0
+```
+
+This is a deployment decision, not a tuning flag. Enabling it starts a full
+semantic pass over the workspace, which on a 2-core CPU-only host takes roughly
+13-20 hours and saturates the machine for most of that time. Interrupted passes
+resume from `embedding_artifacts`, so a reap or restart costs the remaining
+chunks rather than the whole rebuild. Chunker or embedding-profile changes
+still invalidate the cache and force a cold pass.
+
+Leave it at `0` unless retrieval quality, not write authorization, is the
+problem you are solving; the gate opens either way.
+
 ### Runtime-root safety
 
 `UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. The recommended production value is the stable `runtime/current` pointer. The validator also permits a durable canonical checkout for controlled recovery/development use, but its lifecycle must remain independent of issue/goal cleanup. Never point it at:

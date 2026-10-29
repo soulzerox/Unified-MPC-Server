@@ -128,10 +128,10 @@ Run `pnpm docs:tools` after intentionally changing the registry; CI runs `pnpm d
 | 107 | `read_many_files` | READ | default | operational | service_dispatch | yes | no |
 | 108 | `read_file_page` | READ | default | operational | service_dispatch | yes | no |
 | 109 | `read_file_page_continue` | READ | default | operational | service_dispatch | yes | no |
-| 110 | `workspace_index` | READ | default | operational | service_dispatch | yes | no |
+| 110 | `workspace_index` | READ | default | operational | service_dispatch | no | no |
 | 111 | `workspace_index_status` | READ | default | operational | service_dispatch | yes | no |
-| 112 | `workspace_index_watch` | READ | default | operational | service_dispatch | yes | no |
-| 113 | `workspace_index_stop` | READ | default | operational | service_dispatch | yes | no |
+| 112 | `workspace_index_watch` | READ | default | operational | service_dispatch | no | no |
+| 113 | `workspace_index_stop` | READ | default | operational | service_dispatch | no | no |
 | 114 | `session_handoff` | READ | default | operational | service_dispatch | yes | no |
 | 115 | `verify_incremental` | EXECUTE | default | operational | service_dispatch | no | no |
 | 116 | `run_goal` | WRITE | default | operational | service_dispatch | no | no |

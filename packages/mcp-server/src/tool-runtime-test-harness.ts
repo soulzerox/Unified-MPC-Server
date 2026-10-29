@@ -135,11 +135,15 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     search: serviceProxy('search', calls, (method) => method === 'searchText'
       ? { matches: [{ path: 'src/smoke.ts', line: 1, text: 'smoke' }, { path: 'src/second.test.ts', line: 1, text: 'smoke' }], truncated: false }
       : { paths: ['src/smoke.ts', 'src/second.test.ts'], truncated: false }),
-    workspaceIndex: serviceProxy('workspaceIndex', calls, (method) => method === 'status'
-      ? { indexed: true, snapshot: { entries: [
-        { relativePath: 'src/smoke.ts', kind: 'file', language: 'typescript', isTest: false, symbols: ['smoke'], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
-        { relativePath: 'src/second.test.ts', kind: 'file', language: 'typescript', isTest: true, symbols: ['second'], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
-      ] } }
+    workspaceIndex: serviceProxy('workspaceIndex', calls, (method) => method === 'status' || method === 'startWatch'
+      // `startWatch` resolves the same `WorkspaceIndexStatus` the status tool
+      // reads, so the fixture must answer with one: a `{executed:true}` stub
+      // modelled a service result that does not exist.
+      ? { indexed: true, generation: 'gen-1', freshness: 'watching_clean', stale: false, watcher: null, snapshot: {
+        version: 1, workspaceId: 'workspace-1', rootPath: '/repos/smoke', indexedAt: '2026-10-09T08:00:00.000Z', entries: [
+          { relativePath: 'src/smoke.ts', kind: 'file', language: 'typescript', isTest: false, symbols: ['smoke'], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
+          { relativePath: 'src/second.test.ts', kind: 'file', language: 'typescript', isTest: true, symbols: ['second'], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
+        ] } }
       : { executed: true }),
     git: serviceProxy('git', calls, (method) => {
       if (method === 'status') return { entries: [] };

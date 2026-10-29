@@ -54,7 +54,10 @@ function status(entryCount: number): WorkspaceIndexStatus {
   };
 }
 
-function toolFor(reported: WorkspaceIndexStatus | Error): { execute: (input: unknown) => Promise<{ ok: boolean; value?: unknown; error?: unknown }> } {
+function toolFor(
+  reported: WorkspaceIndexStatus | Error,
+  name = 'workspace_index_status',
+): { execute: (input: unknown) => Promise<{ ok: boolean; value?: unknown; error?: unknown }> } {
   const context = {
     actor: { clientId: 'test', clientName: 'test' },
     contextEconomy: undefined,
@@ -64,11 +67,17 @@ function toolFor(reported: WorkspaceIndexStatus | Error): { execute: (input: unk
           if (reported instanceof Error) return err(appError('WORKSPACE_NOT_FOUND', reported.message, false));
           return ok(reported);
         },
+        // The watch handler shares the projection with status; the same stub is
+        // enough to pin its payload because startWatch resolves the same status.
+        async startWatch() {
+          if (reported instanceof Error) return err(appError('WORKSPACE_NOT_FOUND', reported.message, false));
+          return ok(reported);
+        },
       },
     },
   } as unknown as McpToolContext;
-  const tool = workspaceIndexTools(context).find((candidate) => candidate.name === 'workspace_index_status');
-  if (tool === undefined) throw new Error('workspace_index_status is not registered');
+  const tool = workspaceIndexTools(context).find((candidate) => candidate.name === name);
+  if (tool === undefined) throw new Error(`${name} is not registered`);
   return {
     async execute(input: unknown): Promise<{ ok: boolean; value?: unknown; error?: unknown }> {
       const parsed = tool.parse(input);
@@ -130,5 +139,36 @@ describe('workspace_index_status payload bounds', () => {
       indexed: true,
     });
     expect(mapped.structuredContent?.truncated).toBeUndefined();
+  });
+});
+
+describe('workspace_index_watch payload bounds', () => {
+  it('answers a control call with watcher telemetry and no entries by default', async () => {
+    const result = await toolFor(status(950), 'workspace_index_watch').execute({ workspaceId: WORKSPACE });
+    expect(result.ok).toBe(true);
+    expect(result.value).toMatchObject({
+      indexed: true,
+      generation: 'gen-1',
+      freshness: 'watching_clean',
+      stale: false,
+      entryCount: 950,
+      entryLimit: 0,
+      entriesTruncated: true,
+      watcher: { concurrency: 4, debounceMs: 25, completedEvents: 8 },
+    });
+    expect((result.value as { snapshot: { entries: unknown[] } }).snapshot.entries).toHaveLength(0);
+  });
+
+  it('opts entries back in through entryLimit', async () => {
+    const result = await toolFor(status(950), 'workspace_index_watch').execute({ workspaceId: WORKSPACE, entryLimit: 3 });
+    expect(result.value).toMatchObject({ entryCount: 950, entryLimit: 3, entriesTruncated: true });
+    expect((result.value as { snapshot: { entries: unknown[] } }).snapshot.entries).toHaveLength(3);
+  });
+
+  it('stays under the real 512 KiB budget instead of returning the whole snapshot', async () => {
+    const result = await toolFor(status(950), 'workspace_index_watch').execute({ workspaceId: WORKSPACE });
+    const mapped = mapResult(result as never, { maxBytes: 524_288, toolName: 'workspace_index_watch' });
+    expect(mapped.structuredContent?.truncated).toBeUndefined();
+    expect(mapped.structuredContent).toMatchObject({ entryCount: 950, indexed: true });
   });
 });

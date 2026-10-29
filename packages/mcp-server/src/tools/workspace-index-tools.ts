@@ -10,6 +10,12 @@ import { workspaceIndexSchema, workspaceIndexStatusSchema, workspaceIndexStopSch
  * the point of this surface; entries are opt-in and capped.
  */
 const DEFAULT_STATUS_ENTRY_LIMIT = 200;
+/**
+ * `workspace_index_watch` answers a control action, not a read: the caller wants
+ * to know the watcher started and what it is doing, never the index contents.
+ * It defaults to zero entries for that reason; `entryLimit` opts back in.
+ */
+const DEFAULT_WATCH_ENTRY_LIMIT = 0;
 
 export function workspaceIndexTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -44,12 +50,16 @@ export function workspaceIndexTools(context: McpToolContext): McpToolDefinition[
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceIndexWatchSchema,
-      handler: async (input) => context.services.workspaceIndex === undefined
-        ? missingService()
-        : context.services.workspaceIndex.startWatch(input.workspaceId, {
+      handler: async (input) => {
+        if (context.services.workspaceIndex === undefined) return missingService();
+        const status = await context.services.workspaceIndex.startWatch(input.workspaceId, {
           ...(input.debounceMs === undefined ? {} : { debounceMs: input.debounceMs }),
           ...(input.concurrency === undefined ? {} : { concurrency: input.concurrency }),
-        }),
+        });
+        return status.ok
+          ? ok(boundedIndexStatus(status.value, input.entryLimit ?? DEFAULT_WATCH_ENTRY_LIMIT))
+          : status;
+      },
     }),
     defineTool({
       name: 'workspace_index_stop',

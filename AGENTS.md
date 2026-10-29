@@ -36,6 +36,18 @@ Copy the `mergeReady` verdict and the failing step names into the PR body. Never
 claim local CI passed without a receipt for the current head. The unit tests for
 the profile runner are `node --test scripts/local-verify.test.mjs`.
 
+Merge through the guarded path, not a bare `gh pr merge`:
+
+```sh
+corepack pnpm@10.15.0 merge:pr --pr <number>
+```
+
+It refuses unless a `mergeReady` receipt exists for the exact current PR head
+(and the PR is open, non-draft, targeting `main`, `CLEAN`, and free of retracted
+closing keywords), then passes `--match-head-commit` so GitHub rejects a head
+that moved after verification. It records the merge under
+`.unified-mpc/local-verify/merges/`. Use `--dry-run` to check eligibility only.
+
 ## Authoritative CI Watcher Policy
 
 When a GitHub Actions workflow must be monitored until completion, use one authoritative long-running background/durable watcher for the exact workflow run instead of repeated ad-hoc polling.

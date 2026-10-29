@@ -122,3 +122,34 @@ request proves what GitHub is merging. Both must match the same commit:
   hostname to `github.com`. An alias that resolves elsewhere, an HTTPS remote on
   another host, or an SSH resolution failure fails closed as a repository
   mismatch instead of trusting the remote URL text.
+
+---
+
+## 6. Repository-Level Companion (`pnpm merge:pr`)
+
+`guarded_pr_merge` is the MCP path for runtimes that own merge policy. A shell
+session that merges from a checkout uses the repository companion instead:
+
+```sh
+corepack pnpm@10.15.0 verify:local          # writes a mergeReady receipt for HEAD
+corepack pnpm@10.15.0 merge:pr --pr 534     # refuses unless that receipt matches
+```
+
+`scripts/guarded-merge.mjs` applies the same two-head idea without a policy
+store:
+
+1. resolve the open PR and freeze `headRefOid`;
+2. find a receipt for that exact SHA with `profile: "merge"`, `dirty: false`,
+   `mergeReady: true`, and a `diffFingerprint` recomputed from the head;
+3. refuse on a draft, wrong base, non-`CLEAN` merge state, or a PR body that
+   retracts a closing keyword;
+4. merge with `gh pr merge --match-head-commit <sha>`, so a branch that moved
+   after verification is rejected by GitHub;
+5. record `{ headSha, prNumber, verificationId, mergeCommit, mergedAt }` under
+   `.unified-mpc/local-verify/merges/`.
+
+`--dry-run` performs steps 1-3 and reports every blocker without merging. The
+receipt stays the single source of truth for this path: it never merges a head
+that was not verified on this host. A bare `gh pr merge` bypasses it, so the
+guard is only as strong as the workflow that uses it.
+

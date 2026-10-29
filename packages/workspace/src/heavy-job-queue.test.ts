@@ -8,6 +8,7 @@ import {
   type HeavyJobClaimResult,
   type HeavyJobLiveEntry,
   type HeavyJobQueueStore,
+  type HeavyJobReattachResult,
   type HeavyJobSupersedeStoreResult,
 } from './heavy-job-queue.js';
 
@@ -215,6 +216,9 @@ describe('heavy job queue durable retirement (#145)', () => {
     const retired: string[] = [];
     const store: HeavyJobQueueStore = {
       claim: (entry): HeavyJobClaimResult => ({ status: 'queued', operationId: entry.operationId, position: 1, depth: 1 }),
+      claimExisting: (entry): HeavyJobReattachResult => ({
+        status: 'missing', operationId: entry.operationId, depth: 0,
+      }),
       promote: (): number | undefined => 1,
       cancel: (): boolean => true,
       supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
@@ -235,6 +239,45 @@ describe('heavy job queue durable retirement (#145)', () => {
     expect(retired).toEqual(['shell:x']);
     expect(queue.position('shell:x')).toBeUndefined();
     expect(controller.snapshot()).toMatchObject({ activeOperations: 0 });
+  });
+});
+
+describe('heavy job queue reattach (#145 restart)', () => {
+  it('never creates a row for missing work and adopts an existing one', () => {
+    const controller = makeController();
+    const rows = new Set<string>();
+    const store: HeavyJobQueueStore = {
+      claim: (entry): HeavyJobClaimResult => {
+        rows.add(entry.operationId);
+        return { status: 'queued', operationId: entry.operationId, position: 1, depth: rows.size };
+      },
+      claimExisting: (entry): HeavyJobReattachResult => (rows.has(entry.operationId)
+        ? { status: 'queued', operationId: entry.operationId, position: 1, depth: 1 }
+        : { status: 'missing', operationId: entry.operationId, depth: 0 }),
+      promote: (): number | undefined => 1,
+      cancel: (): boolean => true,
+      supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      start: (): boolean => true,
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => rows.size,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const queue = new HeavyJobWaiterQueue(controller, { store });
+
+    expect(queue.reattach({ operationId: 'shell:gone', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'missing' });
+    expect(rows.has('shell:gone')).toBe(false);
+    expect(queue.depth()).toBe(0);
+
+    rows.add('shell:live');
+    expect(queue.reattach({ operationId: 'shell:live', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'queued' });
+    expect(queue.position('shell:live')).toBe(1);
+    const grants = queue.drain();
+    expect(grants.map((grant) => grant.lease.operationId)).toEqual(['shell:live']);
+    queue.settle('shell:live', 'completed');
+    controller.release(grants[0]!.lease);
   });
 });
 

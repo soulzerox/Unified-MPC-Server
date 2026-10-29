@@ -5,6 +5,7 @@ import {
   type HeavyJobLiveEntry,
   type HeavyJobQueueEntry,
   type HeavyJobQueueStore,
+  type HeavyJobReattachResult,
   type HeavyJobRecoveryAction,
   type HeavyJobSupersedeStoreResult,
 } from '@unified-mpc/workspace';
@@ -140,6 +141,10 @@ class RecordingHeavyJobStore implements HeavyJobQueueStore {
     if (this.failClaim) throw new Error('database is locked');
     this.claims.push(entry);
     return this.nextClaim;
+  }
+
+  public claimExisting(entry: HeavyJobQueueEntry): HeavyJobReattachResult {
+    return { status: 'missing', operationId: entry.operationId, depth: 0 };
   }
 
   public promote(operationId: string): number | undefined {

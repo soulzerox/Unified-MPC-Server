@@ -11,6 +11,7 @@ import type {
   ShellHeavyAdmissionGrant,
   ShellHeavyAdmissionLease,
   ShellHeavyAdmissionPort,
+  ShellHeavyAdmissionReattachResult,
   ShellHeavyAdmissionRequest,
 } from '@unified-mpc/capabilities';
 
@@ -103,6 +104,37 @@ export function createShellHeavyAdmissionPort(
         }
         return { status: 'full', depth: enqueued.depth, cost };
       } catch {
+        return { status: 'failed', depth: 0, cost };
+      }
+    },
+    reattach: (request: ShellHeavyAdmissionRequest): ShellHeavyAdmissionReattachResult => {
+      const cost = ADMISSION_COST[request.resourceClass];
+      try {
+        const target = ensureQueue();
+        const reattached = target.reattach({
+          operationId: request.operationId,
+          workspaceId: request.workspaceId ?? 'shell-heavy',
+          ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+          resourceClass: request.resourceClass,
+          cost,
+          blocking: true,
+          jobKind: SHELL_HEAVY_ADMISSION_JOB_KIND,
+        });
+        if (reattached.status === 'queued') {
+          return {
+            status: 'queued',
+            position: target.position(request.operationId) ?? reattached.position,
+            depth: reattached.depth,
+            cost,
+          };
+        }
+        if (reattached.status === 'coalesced' || reattached.status === 'running') {
+          return { status: 'coalesced', depth: reattached.depth, cost };
+        }
+        return { status: 'missing', depth: reattached.depth, cost };
+      } catch {
+        // An unreadable queue is transient: leave the parked task for the next
+        // sweep instead of failing work that a later re-attachment can adopt.
         return { status: 'failed', depth: 0, cost };
       }
     },

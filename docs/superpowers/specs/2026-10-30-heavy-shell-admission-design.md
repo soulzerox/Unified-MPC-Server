@@ -33,7 +33,7 @@ shell run (admission_class declared)
 
 Slice 1 (declaration + admission) is merged; slice 2 (this change) adds durable parking. A declared run validates `admission_class`, claims one bounded durable queue row, writes the durable task as `waiting_resource`, and returns its task id with the queue position. The controller stays the admission authority: a queued run starts only when `drain()` admits it on the capacity release that frees the heavy slot, with no second tool call. Cancel while queued removes the queue row and creates no process; queue-full rejects before a task record exists. A row retired by recovery before admission fails its parked task instead of leaving a non-terminal record. `status` / `wait` / `list` add an `admission` block with class, cost, state, position and waited time.
 
-Restart re-attachment is in place: on startup and on every queue-recovery sweep, a parked declared task re-claims its durable queue row (adopting an orphaned row, leaving a live foreign owner alone) and starts on admission. Parked work older than the queue retention window fails with an explicit `expired before a runtime re-attached it` error instead of being revived indefinitely.
+Restart re-attachment is in place: on startup and on every queue-recovery sweep, a parked declared task re-attaches to its existing durable queue row (adopting an orphaned row, leaving a live foreign owner alone) and starts on admission. A parked task whose row is gone is not re-enqueued: it fails with an explicit `interrupted before admission` error, because the admission generation that would have run it is gone. Parked work older than the queue retention window fails with an explicit `expired before a runtime re-attached it` error instead of being revived indefinitely.
 
 ## Existing seams to extend
 
@@ -85,7 +85,7 @@ A declared run writes the durable task record first and spawns second:
 ## Restart and recovery
 
 - `waiting_resource` task with a matching live queue row (same `operationId`, same owner) is re-attached in place, keeping its queue position; recovery never starts work whose admission is unproven.
-- `waiting_resource` task without a queue row is marked `interrupted`. It is **not** silently started after restart: the admission generation that would have run it is gone.
+- `waiting_resource` task without a live queue row is `interrupted`: it is **not** silently started after restart, because the admission generation that would have run it is gone. The durable task schema has no separate `interrupted` state, so the terminal record is `failed` with an explicit `interrupted before admission` error.
 - `running` tasks keep the existing worker-identity reconciliation (`live` vs dead worker) unchanged.
 - `operationId` is deterministic per durable task id, and queue ownership is fenced by `ownerId`, so two runtimes cannot both start one task.
 
@@ -113,7 +113,7 @@ A declared run writes the durable task record first and spawns second:
 - Queue full: `RESOURCE_PRESSURE`, no task record created.
 - Unknown or non-heavy `admission_class`: `INVALID_INPUT`, no task, no queue row.
 - Policy-denied command with a declaration: denial as today, queue depth stays 0.
-- Restart: `waiting_resource` + live row resumes in place; `waiting_resource` without a row becomes `interrupted`.
+- Restart: `waiting_resource` + live row resumes in place; `waiting_resource` without a live row fails as `interrupted` and is never re-enqueued.
 - Lease released on every verified terminal path and on spawn failure, proven by a controller snapshot showing zero active heavy operations; `termination_unverified` holds it until reconciliation proves the process gone.
 
 ## Delivery sequence

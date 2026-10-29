@@ -4,6 +4,7 @@ import type {
   HeavyJobClaimResult,
   HeavyJobLiveEntry,
   HeavyJobQueueStore,
+  HeavyJobReattachResult,
   HeavyJobSupersedeStoreResult,
 } from '@unified-mpc/workspace';
 import type { ShellHeavyAdmissionLease } from '@unified-mpc/capabilities';
@@ -100,6 +101,9 @@ describe('shell heavy admission port (#145)', () => {
       claim: (entry): HeavyJobClaimResult => (claims++ === 0
         ? { status: 'queued', operationId: entry.operationId, position: 3, depth: 1 }
         : { status: 'coalesced', operationId: entry.operationId, depth: 1 }),
+      claimExisting: (entry): HeavyJobReattachResult => ({
+        status: 'missing', operationId: entry.operationId, depth: 0,
+      }),
       promote: (): number | undefined => 3,
       cancel: (): boolean => true,
       supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
@@ -121,6 +125,33 @@ describe('shell heavy admission port (#145)', () => {
     const grant = port.pump()[0];
     expect(grant?.operationId).toBe('shell:reattached');
     grant?.lease.settle('completed');
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
+  });
+
+  it('re-attaches only an existing live row and never creates work', () => {
+    const admission = controller();
+    const live = new Set(['shell:live']);
+    const store: HeavyJobQueueStore = {
+      claim: (): HeavyJobClaimResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      claimExisting: (entry): HeavyJobReattachResult => (live.has(entry.operationId)
+        ? { status: 'queued', operationId: entry.operationId, position: 3, depth: 1 }
+        : { status: 'missing', operationId: entry.operationId, depth: 0 }),
+      promote: (): number | undefined => 3,
+      cancel: (): boolean => true,
+      supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      start: (): boolean => true,
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => live.size,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const port = createShellHeavyAdmissionPort(() => admission, () => store);
+
+    expect(port.reattach({ operationId: 'shell:live', resourceClass: 'verification_heavy' }))
+      .toMatchObject({ status: 'queued', position: 3 });
+    expect(port.reattach({ operationId: 'shell:gone', resourceClass: 'verification_heavy' }))
+      .toMatchObject({ status: 'missing' });
+    expect(live.has('shell:gone')).toBe(false);
     expect(admission.snapshot().activeHeavyOperations).toBe(0);
   });
 

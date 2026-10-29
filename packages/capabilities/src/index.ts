@@ -40,6 +40,7 @@ export {
   type ShellHeavyAdmissionGrant,
   type ShellHeavyAdmissionLease,
   type ShellHeavyAdmissionPort,
+  type ShellHeavyAdmissionReattachResult,
   type ShellHeavyAdmissionRequest,
 } from './shell-backend.js';
 export {

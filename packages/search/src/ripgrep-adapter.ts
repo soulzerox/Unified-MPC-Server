@@ -342,12 +342,23 @@ export class RipgrepAdapter {
         let lineNumber = 1;
         let pending = '';
         let oversizedLine = false;
+        let sniffed = false;
+        let binary = false;
         const decoder = new StringDecoder('utf8');
         try {
           for await (const chunk of stream) {
             if (aborted || (request.signal?.aborted ?? false) || Date.now() >= deadline) {
               truncated = true;
               break;
+            }
+            if (!sniffed) {
+              sniffed = true;
+              // ripgrep skips files with a NUL byte in their first block; mirror it so
+              // binaries neither produce garbage matches nor a false `truncated` flag.
+              if (looksBinary(chunk as Buffer)) {
+                binary = true;
+                break;
+              }
             }
             const text = decoder.write(chunk as Buffer);
             let start = 0;
@@ -383,7 +394,7 @@ export class RipgrepAdapter {
               truncated = true;
             }
           }
-          if (!truncated && !oversizedLine) {
+          if (!truncated && !oversizedLine && !binary) {
             const line = pending + decoder.end();
             pattern.lastIndex = 0;
             if (pattern.test(line)) {
@@ -509,6 +520,18 @@ export class RipgrepAdapter {
 function searchArgumentError(stderr: string): string {
   const detail = boundedSearchError(stderr);
   return detail.length === 0 ? 'Search pattern or glob is invalid' : `Search pattern or glob is invalid: ${detail}`;
+}
+
+/** How much of a file the fallback inspects before deciding it is binary. */
+const BINARY_SNIFF_BYTES = 8 * 1024;
+
+/** ripgrep treats a file with a NUL byte in its first block as binary. */
+function looksBinary(chunk: Buffer): boolean {
+  const limit = Math.min(chunk.length, BINARY_SNIFF_BYTES);
+  for (let index = 0; index < limit; index += 1) {
+    if (chunk[index] === 0) return true;
+  }
+  return false;
 }
 
 function searchProcessError(stderr: string): string {

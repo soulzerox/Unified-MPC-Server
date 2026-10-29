@@ -1436,14 +1436,35 @@ export class ToolRegistry {
       const thaiRag = this.services.thaiRag;
       if (thaiRag === undefined) return err(appError('INTERNAL_ERROR', 'Native Thai-RAG provider is unavailable', true));
       const thaiHealth = await thaiRag.health(signal);
-      if (!thaiHealth.ok || !nativeThaiRagReadyForHarness(thaiHealth.ok ? thaiHealth.value : undefined)) {
-        return err(appError('CONFLICT', `Native Thai-RAG provider is not ready for pre-edit diagnostics${thaiHealth.ok ? '' : `: ${thaiHealth.error.message}`}`, true));
+      if (!thaiHealth.ok) {
+        // Issue #407: forward the provider's typed failure instead of rewriting it into a
+        // generic CONFLICT, so a transport/transport-readiness denial stays distinguishable
+        // from a genuine pre-edit evidence conflict.
+        return err(appError(
+          thaiHealth.error.code,
+          `Native Thai-RAG provider is not ready for pre-edit diagnostics: ${thaiHealth.error.message}`,
+          thaiHealth.error.recoverable,
+          thaiHealth.error.details,
+        ));
+      }
+      if (!nativeThaiRagReadyForHarness(thaiHealth.value)) {
+        return err(appError('CONFLICT', 'Native Thai-RAG provider is not ready for pre-edit diagnostics', true));
       }
       const thaiCheck = await this.nativeRagCall(workspaceId, 'pre_edit_context', {
         file_path: filePath,
         ...(proposedSymbol === undefined ? {} : { proposed_symbol: proposedSymbol }),
       }, signal);
-      if (!thaiCheck.ok) return err(appError('CONFLICT', `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`, true));
+      if (!thaiCheck.ok) {
+        // Issue #407: keep the provider's code and machine-readable details. Queued or
+        // indexing denials carry the blocking workspace/job in `details`, and a timeout must
+        // not be reported as an evidence CONFLICT.
+        return err(appError(
+          thaiCheck.error.code,
+          `Thai-RAG pre-edit check failed: ${thaiCheck.error.message}`,
+          thaiCheck.error.recoverable,
+          thaiCheck.error.details,
+        ));
+      }
       let verdict: ReturnType<typeof readPreEditReadiness> = readPreEditReadiness(thaiCheck.value);
       let waitOutcome: 'timeout' | 'aborted' | 'rechecked' | undefined;
       // #346 behaviour 5, Slice B (D2): when a demand-first delta for exactly

@@ -44,11 +44,6 @@ export interface ShellHeavyAdmissionRequest {
   /** Requesting session, so per-session ceilings account the declared run. */
   readonly sessionId?: string;
   readonly resourceClass: ShellHeavyAdmissionClass;
-  /**
-   * Bounded wait for a busy heavy slot. `0` means start-or-fail-now; the
-   * caller keeps its own retry policy.
-   */
-  readonly waitMs: number;
 }
 
 export interface ShellHeavyAdmissionLease {
@@ -59,17 +54,33 @@ export interface ShellHeavyAdmissionLease {
   settle(outcome: 'completed' | 'failed' | 'cancelled'): void;
 }
 
-export type ShellHeavyAdmissionResult =
-  | { readonly admitted: true; readonly lease: ShellHeavyAdmissionLease }
-  | { readonly admitted: false; readonly reason: string; readonly position?: number };
+export type ShellHeavyAdmissionEnqueueResult =
+  | { readonly status: 'queued'; readonly position: number; readonly depth: number; readonly cost: number }
+  | { readonly status: 'coalesced'; readonly depth: number; readonly cost: number }
+  | { readonly status: 'full'; readonly depth: number; readonly cost: number }
+  | { readonly status: 'failed'; readonly depth: number; readonly cost: number };
+
+export interface ShellHeavyAdmissionGrant {
+  readonly operationId: string;
+  readonly lease: ShellHeavyAdmissionLease;
+}
 
 /**
  * Admission seam for declared heavy shell work. The runtime adapter owns the
- * durable queue and the resource controller; this backend only asks whether a
- * process may start and reports the terminal outcome back through the lease.
+ * durable queue and the resource controller; the backend reserves the durable
+ * task first, then asks the queue to admit it.
  */
 export interface ShellHeavyAdmissionPort {
-  acquire(request: ShellHeavyAdmissionRequest): Promise<ShellHeavyAdmissionResult>;
+  /** Claim one bounded durable queue row; never starts a process. */
+  enqueue(request: ShellHeavyAdmissionRequest): ShellHeavyAdmissionEnqueueResult;
+  /** Admit queued work now; grants are operations this call started. */
+  pump(): readonly ShellHeavyAdmissionGrant[];
+  /** Remove one still-queued row; false when it already started or settled. */
+  cancel(operationId: string): boolean;
+  /** Current queue position, or undefined when not queued. */
+  position(operationId: string): number | undefined;
+  /** Register the executor that starts an admitted task; returns unsubscribe. */
+  onAdmitted(listener: (grant: ShellHeavyAdmissionGrant) => void): () => void;
 }
 type TaskState = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
 
@@ -126,8 +137,6 @@ export interface ShellCapabilityOptions {
   readonly unrestricted?: boolean;
   /** When omitted, a declared heavy run fails closed instead of starting unqueued. */
   readonly heavyAdmission?: ShellHeavyAdmissionPort;
-  /** Bounded wait passed to the port for a busy heavy slot; defaults to 0. */
-  readonly heavyAdmissionWaitMs?: number;
   /** Settlement poll interval for admitted heavy tasks (tests shorten it). */
   readonly heavyAdmissionWatchIntervalMs?: number;
 }
@@ -164,7 +173,6 @@ const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TIMEOUT_SECONDS = 604_800;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const FOREGROUND_CANCELLATION_RETRY_MS = 250;
-const DEFAULT_HEAVY_ADMISSION_WAIT_MS = 0;
 const DEFAULT_HEAVY_ADMISSION_WATCH_INTERVAL_MS = 2_000;
 const HEAVY_SETTLE_READ_FAILURE_LIMIT = 3;
 
@@ -184,10 +192,11 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly unrestricted: boolean;
   private readonly durableTaskReconciliation: DurableShellTaskReconciliationProvider | undefined;
   private readonly heavyAdmission: ShellHeavyAdmissionPort | undefined;
-  private readonly heavyAdmissionWaitMs: number;
   private readonly heavyAdmissionWatchIntervalMs: number;
   private readonly heavyWatches = new Map<string, ReturnType<typeof setInterval>>();
   private readonly heavyLeases = new Map<string, ShellHeavyAdmissionLease>();
+  private readonly heavyPending = new Set<string>();
+  private readonly heavyStarting = new Map<string, Promise<void>>();
   private readonly heavySettling = new Set<string>();
   private readonly heavySettleFailures = new Map<string, number>();
 
@@ -209,8 +218,10 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.maxOutputBytes = Math.floor(clampNumber(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES, 1, MAX_OUTPUT_BYTES));
     this.unrestricted = options.unrestricted === true;
     this.heavyAdmission = options.heavyAdmission;
-    this.heavyAdmissionWaitMs = Math.max(0, Math.floor(options.heavyAdmissionWaitMs ?? DEFAULT_HEAVY_ADMISSION_WAIT_MS));
     this.heavyAdmissionWatchIntervalMs = Math.max(10, Math.floor(options.heavyAdmissionWatchIntervalMs ?? DEFAULT_HEAVY_ADMISSION_WATCH_INTERVAL_MS));
+    this.heavyAdmission?.onAdmitted((grant) => {
+      void this.startAdmittedHeavy(grant);
+    });
   }
 
   public async execute(input: unknown, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<unknown>> {
@@ -227,15 +238,30 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       case 'result': return this.taskSnapshot(parsed.value.taskId, undefined, parsed.value.owner);
       case 'cancel': {
         if (!isApplicationAuthorized(authorization, parsed.value.userConfirmed)) return err(appError('PERMISSION_REQUIRED', 'Cancelling a task requires explicit user confirmation'));
-        const cancelled = await this.cancel(parsed.value.taskId, false, parsed.value.owner);
-        // A declared heavy task that is already terminal must release its slot
-        // now: waiting for the next poll would keep a cancelled build holding it.
-        const cancelledState = cancelled.ok && isRecord(cancelled.value) ? cancelled.value.state : undefined;
-        const outcome = heavyLeaseOutcome(cancelledState);
-        if (outcome !== undefined && parsed.value.taskId !== undefined && this.heavyLeases.has(parsed.value.taskId)) {
-          this.settleHeavyTaskOnce(parsed.value.taskId, outcome);
+        const taskId = parsed.value.taskId;
+        if (taskId !== undefined) {
+          // Serialize against an in-flight admission start so a cancel can
+          // never be overwritten by a later "running" write.
+          const starting = this.heavyStarting.get(taskId);
+          if (starting !== undefined) await starting;
         }
-        return cancelled;
+        const cancelled = await this.cancel(parsed.value.taskId, false, parsed.value.owner);
+        if (taskId !== undefined) {
+          // A declared heavy task that is already terminal must release its slot
+          // now: waiting for the next poll would keep a cancelled build holding it.
+          const cancelledState = cancelled.ok && isRecord(cancelled.value) ? cancelled.value.state : undefined;
+          const outcome = heavyLeaseOutcome(cancelledState);
+          if (outcome !== undefined) {
+            // Queued work has no lease yet; its durable row is removed here so a
+            // later wake can never spawn a task the caller cancelled.
+            this.heavyAdmission?.cancel(shellOperationId(taskId));
+            this.heavyPending.delete(taskId);
+            if (this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
+          }
+        }
+        return cancelled.ok && isRecord(cancelled.value) && taskId !== undefined
+          ? ok(this.decorateTaskResult(cancelled.value, taskId))
+          : cancelled;
       }
       case 'resume':
       case 'approve':
@@ -277,7 +303,21 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       }
       return ok({ matched: true, state: 'termination_unverified', detail: record.state });
     }
-    if (this.durableStore !== undefined) return this.durableStore.cancelForGoal(taskId, ownerClientId, workspaceId);
+    if (this.durableStore !== undefined) {
+      const starting = this.heavyStarting.get(taskId);
+      if (starting !== undefined) await starting;
+      const cancelled = await this.durableStore.cancelForGoal(taskId, ownerClientId, workspaceId);
+      if (cancelled.ok) {
+        // A queued declared task owns no process; retire its queue row too.
+        this.heavyAdmission?.cancel(shellOperationId(taskId));
+        this.heavyPending.delete(taskId);
+        const outcome = cancelled.value.state === 'cancelled'
+          ? 'cancelled' as const
+          : cancelled.value.state === 'already_terminal' ? heavyLeaseOutcome(cancelled.value.detail) : undefined;
+        if (outcome !== undefined && this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
+      }
+      return cancelled;
+    }
     return ok({ matched: false, state: 'not_found' });
   }
 
@@ -399,7 +439,8 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       return ok(this.snapshot(record, request.tailLines));
     }
     if (this.durableStore !== undefined) {
-      return this.durableStore.wait(request.taskId, Math.min(request.timeoutSeconds, this.currentMaxSynchronousWaitSeconds()), request.tailLines, request.owner);
+      const waited = await this.durableStore.wait(request.taskId, Math.min(request.timeoutSeconds, this.currentMaxSynchronousWaitSeconds()), request.tailLines, request.owner);
+      return waited.ok ? ok(this.decorateTaskResult(waited.value, request.taskId)) : waited;
     }
     return err(appError('PROCESS_NOT_FOUND', 'Task was not found'));
   }
@@ -511,7 +552,10 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       const ownership = this.authorizeTaskOwner(record.owner, owner);
       return ownership.ok ? ok(this.snapshot(record, tailLines)) : ownership;
     }
-    if (this.durableStore !== undefined) return this.durableStore.snapshot(taskId, tailLines, owner);
+    if (this.durableStore !== undefined) {
+      const snapshot = await this.durableStore.snapshot(taskId, tailLines, owner);
+      return snapshot.ok ? ok(this.decorateTaskResult(snapshot.value, taskId)) : snapshot;
+    }
     return err(appError('PROCESS_NOT_FOUND', 'Task was not found'));
   }
 
@@ -541,43 +585,126 @@ export class ShellCapabilityBackend implements CapabilityBackend {
         false,
       ));
     }
+    const store = this.durableStore;
+    if (store === undefined) {
+      return err(appError('INVALID_INPUT', 'admission_class requires the durable task store', false));
+    }
     if (request.execution === 'foreground') {
       return err(appError('INVALID_INPUT', 'admission_class requires background execution; a foreground run cannot hold a heavy slot', false));
     }
-    if (this.durableStore === undefined) {
-      return err(appError('INVALID_INPUT', 'admission_class requires the durable task store', false));
-    }
     const taskId = randomUUID();
+    const operationId = shellOperationId(taskId);
     const workspaceId = request.owner.workspaceId;
-    const acquired = await admission.acquire({
-      operationId: `shell:${taskId}`,
+    const enqueued = admission.enqueue({
+      operationId,
       ...(workspaceId === undefined ? {} : { workspaceId }),
       ...(request.owner.sessionId === undefined ? {} : { sessionId: request.owner.sessionId }),
       resourceClass: admissionClass,
-      waitMs: this.heavyAdmissionWaitMs,
     });
-    if (!acquired.admitted) {
+    if (enqueued.status === 'full') {
       // No task record, no process: the caller never holds a task id for work
       // that was never accepted.
       return err(appError(
         'RESOURCE_PRESSURE',
-        `Heavy shell work was not admitted (${acquired.reason}); wait for the running heavy job to finish, then retry`,
+        `The heavy-job queue is full (${enqueued.depth} waiting); wait for running work to finish, then retry`,
         true,
-        {
-          reason: acquired.reason,
-          resourceClass: admissionClass,
-          ...(acquired.position === undefined ? {} : { position: acquired.position }),
-        },
+        { reason: 'queue_full', resourceClass: admissionClass, depth: enqueued.depth },
       ));
     }
-    const launched = await this.runDurable(request, cwd, invocation, taskId);
-    if (!launched.ok) {
-      // Spawn refused or store unavailable: never leak the slot.
-      acquired.lease.settle('failed');
-      return launched;
+    if (enqueued.status === 'coalesced') {
+      return err(appError(
+        'RESOURCE_PRESSURE',
+        'Heavy shell work with this identity is already owned by another runtime; retry with a fresh request',
+        true,
+        { reason: 'coalesced', resourceClass: admissionClass, depth: enqueued.depth },
+      ));
     }
-    this.watchHeavyTask(taskId, acquired.lease);
-    return launched;
+    if (enqueued.status === 'failed') {
+      return err(appError(
+        'INTERNAL_ERROR',
+        'The heavy-job queue is unavailable; retry the run',
+        true,
+        { reason: 'queue_unavailable', resourceClass: admissionClass },
+      ));
+    }
+    const environment = createSafeEnvironment(process.env, this.unrestricted);
+    const externalReconciliation = this.durableTaskReconciliation?.describe({
+      executable: invocation.executable,
+      arguments: invocation.args,
+      cwd,
+      environment,
+    });
+    const reserved = await store.reserve({
+      taskId,
+      executable: invocation.executable,
+      arguments: invocation.args,
+      cwd,
+      ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
+      timeoutSeconds: request.timeoutSeconds,
+      maxOutputBytes: request.maxOutputBytes,
+      includeStdout: request.includeStdout,
+      includeStderr: request.includeStderr,
+      owner: request.owner,
+      ...(externalReconciliation === undefined ? {} : { externalReconciliation }),
+      admissionClass,
+      admissionCost: enqueued.cost,
+    });
+    if (!reserved.ok) {
+      // The durable record could not be written: give the queue row back.
+      admission.cancel(operationId);
+      return reserved;
+    }
+    this.heavyPending.add(taskId);
+    await this.pumpHeavy();
+    const snapshot = await store.snapshot(taskId, undefined, request.owner);
+    return snapshot.ok ? ok(this.decorateTaskResult(snapshot.value, taskId)) : snapshot;
+  }
+
+  /** Admit queued declared runs now and start every grant this process owns. */
+  private async pumpHeavy(): Promise<void> {
+    const admission = this.heavyAdmission;
+    if (admission === undefined) return;
+    const grants = admission.pump();
+    await Promise.all(grants.map((grant) => this.startAdmittedHeavy(grant)));
+  }
+
+  private async startAdmittedHeavy(grant: ShellHeavyAdmissionGrant): Promise<void> {
+    const taskId = shellTaskIdFromOperationId(grant.operationId);
+    if (taskId === undefined || !this.heavyPending.has(taskId)) {
+      // Cancelled or already started while the grant was in flight: never
+      // spawn a process for work this backend no longer owns.
+      grant.lease.settle('failed');
+      return;
+    }
+    const starting = this.startHeavyTask(taskId, grant.lease);
+    this.heavyStarting.set(taskId, starting);
+    try {
+      await starting;
+    } finally {
+      if (this.heavyStarting.get(taskId) === starting) this.heavyStarting.delete(taskId);
+    }
+  }
+
+  private async startHeavyTask(taskId: string, lease: ShellHeavyAdmissionLease): Promise<void> {
+    const store = this.durableStore;
+    if (store === undefined) {
+      this.heavyPending.delete(taskId);
+      lease.settle('failed');
+      return;
+    }
+    try {
+      const started = await store.startReserved(taskId, createSafeEnvironment(process.env, this.unrestricted));
+      if (!started.ok) {
+        this.heavyPending.delete(taskId);
+        lease.settle('failed');
+        return;
+      }
+      this.heavyPending.delete(taskId);
+      this.watchHeavyTask(taskId, lease);
+    } catch {
+      this.heavyPending.delete(taskId);
+      lease.settle('failed');
+    }
   }
 
   /**
@@ -638,6 +765,27 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.heavySettleFailures.delete(taskId);
   }
 
+  /** Project the persisted declaration into the public `admission` block (#145). */
+  private decorateTaskResult(value: Record<string, unknown>, taskId: string): Record<string, unknown> {
+    const admissionClass = value.admission_class;
+    if (!isShellHeavyAdmissionClass(admissionClass)) return value;
+    const waiting = value.state === 'waiting_resource';
+    const position = waiting ? this.heavyAdmission?.position(shellOperationId(taskId)) : undefined;
+    const cost = typeof value.admission_cost === 'number' ? value.admission_cost : undefined;
+    const startedAt = typeof value.started_at === 'string' ? Date.parse(value.started_at) : Number.NaN;
+    const waitedMs = waiting && Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : undefined;
+    return {
+      ...value,
+      admission: {
+        class: admissionClass,
+        ...(cost === undefined ? {} : { cost }),
+        state: waiting ? 'queued' : value.state,
+        ...(position === undefined ? {} : { position }),
+        ...(waitedMs === undefined ? {} : { waitedMs }),
+      },
+    };
+  }
+
   private async runDurable(
     request: ShellRequest,
     cwd: string,
@@ -675,7 +823,8 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       .filter((record) => capabilityTaskOwnerMatches(record.owner, owner))
       .map((record) => this.snapshot(record));
     if (this.durableStore === undefined) return ok({ tasks: inMemory });
-    const durable = await this.durableStore.list(owner);
+    const durable = (await this.durableStore.list(owner))
+      .map((task) => typeof task.task_id === 'string' ? this.decorateTaskResult(task, task.task_id) : task);
     const durableIds = new Set(durable.map((task) => task.task_id).filter((value): value is string => typeof value === 'string'));
     return ok({ tasks: [...durable, ...inMemory.filter((task) => !durableIds.has(String(task.task_id ?? '')))] });
   }
@@ -845,6 +994,14 @@ function parseShellRequest(value: unknown, defaultTimeoutSeconds: number, defaul
   const activeWorkspaceRoot = readCapabilityActiveWorkspaceRoot(value);
   if (typeof includeStdout !== 'boolean' || typeof includeStderr !== 'boolean' || typeof dryRun !== 'boolean') return err(appError('INVALID_INPUT', 'Shell flags are invalid'));
   return ok({ operation, ...(executable === undefined ? {} : { executable: executable.trim() }), arguments: rawArguments, privilege, ...(cwd === undefined ? {} : { cwd }), ...(activeWorkspaceRoot === undefined ? {} : { activeWorkspaceRoot }), execution, ...(taskId === undefined ? {} : { taskId }), timeoutSeconds, maxOutputBytes: requestedMaxBytes, ...(tailLines === undefined ? {} : { tailLines }), includeStdout, includeStderr, dryRun, userConfirmed, owner, ...(rawAdmissionClass === undefined ? {} : { admissionClass: rawAdmissionClass }) });
+}
+
+function shellOperationId(taskId: string): string {
+  return `shell:${taskId}`;
+}
+
+function shellTaskIdFromOperationId(operationId: string): string | undefined {
+  return operationId.startsWith('shell:') ? operationId.slice('shell:'.length) : undefined;
 }
 
 function heavyLeaseOutcome(state: unknown): 'completed' | 'failed' | 'cancelled' | undefined {

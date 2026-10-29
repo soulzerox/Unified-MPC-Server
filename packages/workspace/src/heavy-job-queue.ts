@@ -308,6 +308,11 @@ export class HeavyJobWaiterQueue {
     return this.store === undefined ? this.queued.length : this.store.depth();
   }
 
+  /** Local queue position of one operation, or undefined when this queue does not hold it. */
+  public position(operationId: string): number | undefined {
+    return this.queued.find((candidate) => candidate.entry.operationId === operationId)?.position;
+  }
+
   /**
    * Record the terminal outcome of one admitted job. Fail-closed callers invoke
    * this on every exit path; a duplicate/losing settle is a no-op.

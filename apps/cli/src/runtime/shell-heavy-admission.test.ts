@@ -1,76 +1,100 @@
 import { describe, expect, it } from 'vitest';
+import { ResourceAdmissionController } from '@unified-mpc/workspace';
+import type { ShellHeavyAdmissionLease } from '@unified-mpc/capabilities';
 import {
-  DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
-  ResourceAdmissionController,
-  tryAdmitVerificationHeavy,
-} from '@unified-mpc/workspace';
-import { createShellHeavyAdmissionPort } from './shell-heavy-admission.js';
+  createShellHeavyAdmissionPort,
+  SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
+} from './shell-heavy-admission.js';
 
 function controller(): ResourceAdmissionController {
   return new ResourceAdmissionController({ globalCost: 16, workspaceCost: 8, sessionCost: 8, maxOperations: 8 });
 }
 
 describe('shell heavy admission port (#145)', () => {
-  it('admits a declared run into the shared controller and releases the slot on settle', async () => {
+  it('queues a declared run and admits it only on pump', () => {
     const admission = controller();
     const port = createShellHeavyAdmissionPort(() => admission);
 
-    const acquired = await port.acquire({ operationId: 'shell:a', workspaceId: 'workspace-a', sessionId: 'session-a', resourceClass: 'verification_heavy', waitMs: 0 });
-
-    expect(acquired.admitted).toBe(true);
-    expect(admission.snapshot()).toMatchObject({ activeOperations: 1, activeHeavyOperations: 1 });
-    if (!acquired.admitted) return;
-    acquired.lease.settle('completed');
-    acquired.lease.settle('failed');
-    expect(admission.snapshot()).toMatchObject({ activeOperations: 0, activeHeavyOperations: 0 });
-  });
-
-  it('refuses a declared run while the heavy slot is taken and reports the reason', async () => {
-    const admission = controller();
-    const running = tryAdmitVerificationHeavy(admission, {
-      operationId: 'verification-running',
-      workspaceId: 'workspace-a',
-      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    const enqueued = port.enqueue({
+      operationId: 'shell:a', workspaceId: 'workspace-a', sessionId: 'session-a', resourceClass: 'verification_heavy',
     });
-    if (!running.admitted) throw new Error('expected admission');
-    const port = createShellHeavyAdmissionPort(() => admission);
 
-    const acquired = await port.acquire({ operationId: 'shell:b', workspaceId: 'workspace-b', sessionId: 'session-b', resourceClass: 'rag_indexing', waitMs: 0 });
+    expect(enqueued).toMatchObject({ status: 'queued', position: 1, cost: 8 });
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
 
-    expect(acquired).toEqual({ admitted: false, reason: 'heavy_capacity_exhausted' });
-    admission.release(running.lease);
-  });
-
-  it('waits for a bounded budget and admits when the slot frees', async () => {
-    const admission = controller();
-    const running = tryAdmitVerificationHeavy(admission, {
-      operationId: 'verification-running',
-      workspaceId: 'workspace-a',
-      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
-    });
-    if (!running.admitted) throw new Error('expected admission');
-    const port = createShellHeavyAdmissionPort(() => admission);
-
-    const pending = port.acquire({ operationId: 'shell:c', sessionId: 'session-c', resourceClass: 'verification_heavy', waitMs: 5_000 });
-    setTimeout(() => admission.release(running.lease), 120);
-
-    await expect(pending).resolves.toMatchObject({ admitted: true });
+    const grants = port.pump();
+    expect(grants.map((grant) => grant.operationId)).toEqual(['shell:a']);
     expect(admission.snapshot().activeHeavyOperations).toBe(1);
+
+    grants[0]?.lease.settle('completed');
+    grants[0]?.lease.settle('failed');
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
   });
 
-  it('gives up at the budget with the last reason when nothing frees', async () => {
+  it('keeps a second run queued until the first settles, then wakes the listener', () => {
     const admission = controller();
-    const running = tryAdmitVerificationHeavy(admission, {
-      operationId: 'verification-running',
-      workspaceId: 'workspace-a',
-      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
-    });
-    if (!running.admitted) throw new Error('expected admission');
     const port = createShellHeavyAdmissionPort(() => admission);
+    port.enqueue({ operationId: 'shell:a', sessionId: 'session-a', resourceClass: 'verification_heavy' });
+    const first = port.pump()[0];
+    expect(first).toBeDefined();
 
-    const acquired = await port.acquire({ operationId: 'shell:d', sessionId: 'session-c', resourceClass: 'verification_heavy', waitMs: 150 });
+    const woke: string[] = [];
+    let secondLease: ShellHeavyAdmissionLease | undefined;
+    port.onAdmitted((grant) => {
+      woke.push(grant.operationId);
+      secondLease = grant.lease;
+    });
 
-    expect(acquired).toEqual({ admitted: false, reason: 'heavy_capacity_exhausted' });
-    admission.release(running.lease);
+    const second = port.enqueue({ operationId: 'shell:b', sessionId: 'session-b', resourceClass: 'verification_heavy' });
+    // Positions are monotonic ordering tokens, not a contiguous index: the
+    // first job already consumed position 1.
+    expect(second).toMatchObject({ status: 'queued', position: 2 });
+    expect(port.pump()).toEqual([]);
+    expect(port.position('shell:b')).toBe(2);
+
+    first?.lease.settle('completed');
+
+    expect(woke).toEqual(['shell:b']);
+    expect(admission.snapshot().activeHeavyOperations).toBe(1);
+    secondLease?.settle('completed');
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
+  });
+
+  it('cancels a queued run without taking capacity', () => {
+    const admission = controller();
+    const port = createShellHeavyAdmissionPort(() => admission);
+    port.enqueue({ operationId: 'shell:c', resourceClass: 'verification_heavy' });
+
+    expect(port.cancel('shell:c')).toBe(true);
+    expect(port.position('shell:c')).toBeUndefined();
+    expect(port.pump()).toEqual([]);
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
+  });
+
+  it('does not wake the listener for a run cancelled before the release', () => {
+    const admission = controller();
+    const port = createShellHeavyAdmissionPort(() => admission);
+    port.enqueue({ operationId: 'shell:a', sessionId: 'session-a', resourceClass: 'verification_heavy' });
+    const first = port.pump()[0];
+    port.enqueue({ operationId: 'shell:b', sessionId: 'session-b', resourceClass: 'verification_heavy' });
+    expect(port.cancel('shell:b')).toBe(true);
+
+    const woke: string[] = [];
+    port.onAdmitted((grant) => woke.push(grant.operationId));
+    first?.lease.settle('completed');
+
+    expect(woke).toEqual([]);
+    expect(admission.snapshot().activeHeavyOperations).toBe(0);
+  });
+
+  it('rejects over the bounded queue', () => {
+    const admission = controller();
+    const port = createShellHeavyAdmissionPort(() => admission);
+    for (let index = 0; index < SHELL_HEAVY_ADMISSION_QUEUE_LIMIT; index += 1) {
+      expect(port.enqueue({ operationId: `shell:q${index}`, resourceClass: 'verification_heavy' }))
+        .toMatchObject({ status: 'queued' });
+    }
+    expect(port.enqueue({ operationId: 'shell:overflow', resourceClass: 'verification_heavy' }))
+      .toMatchObject({ status: 'full' });
   });
 });

@@ -25,11 +25,16 @@ describe('heavy job waiter queue (#145 U3)', () => {
     expect(queuedB).toMatchObject({ status: 'queued' });
     expect(queuedC).toMatchObject({ status: 'queued' });
     expect(queue.depth()).toBe(2);
+    expect(queue.position('heavy-b')).toBe(1);
+    expect(queue.position('heavy-c')).toBe(2);
+    expect(queue.position('missing')).toBeUndefined();
 
     if (first.admitted) controller.release(first.lease);
     const admitted = queue.drain();
     expect(admitted.map((a) => a.lease.operationId)).toEqual(['heavy-b']);
     expect(queue.depth()).toBe(1);
+    expect(queue.position('heavy-b')).toBeUndefined();
+    expect(queue.position('heavy-c')).toBe(2);
   });
 
   it('coalesces duplicate exact-input work instead of queueing twice', () => {

@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { appError, err, ok, type GoalTaskCancellationObservation, type Result } from '@unified-mpc/domain';
 import { capabilityTaskOwnerMatches, legacyCapabilityTaskOwner, type CapabilityTaskOwner } from './task-ownership.js';
 
-export type DurableShellTaskState = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
+export type DurableShellTaskState = 'waiting_resource' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
 
 export interface DurableShellTaskExternalReconciliationDescriptor {
   readonly kind: string;
@@ -23,12 +23,11 @@ export type DurableShellTaskExternalReconciler = (
   descriptor: DurableShellTaskExternalReconciliationDescriptor,
 ) => Promise<DurableShellTaskExternalReconciliationResult | undefined>;
 
-export interface DurableShellLaunchRequest {
+export interface DurableShellReserveRequest {
   readonly taskId: string;
   readonly executable: string;
   readonly arguments: readonly string[];
   readonly cwd: string;
-  readonly environment: NodeJS.ProcessEnv;
   readonly windowsVerbatimArguments?: boolean;
   readonly timeoutSeconds: number;
   readonly maxOutputBytes: number;
@@ -36,20 +35,27 @@ export interface DurableShellLaunchRequest {
   readonly includeStderr: boolean;
   readonly owner: CapabilityTaskOwner;
   readonly externalReconciliation?: DurableShellTaskExternalReconciliationDescriptor;
+  /** Declared heavy class (#145), persisted so status survives a backend replacement. */
+  readonly admissionClass?: string;
+  readonly admissionCost?: number;
+}
+
+export interface DurableShellLaunchRequest extends DurableShellReserveRequest {
+  readonly environment: NodeJS.ProcessEnv;
 }
 
 interface DurableTaskMetadata {
   readonly version: 1;
   readonly task_id: string;
   state: DurableShellTaskState;
-  readonly started_at: string;
+  started_at: string;
   finished_at?: string;
   exit_code?: number;
   error?: string;
   readonly include_stdout: boolean;
   readonly include_stderr: boolean;
   readonly max_output_bytes: number;
-  readonly deadline_at: string;
+  deadline_at: string;
   worker_pid?: number;
   worker_started_at?: string;
   child_pid?: number;
@@ -61,6 +67,8 @@ interface DurableTaskMetadata {
   readonly owner_workspace_id?: string;
   readonly cwd?: string;
   readonly external_reconciliation?: DurableShellTaskExternalReconciliationDescriptor;
+  readonly admission_class?: string;
+  readonly admission_cost?: number;
 }
 
 interface DurableWorkerSpec {
@@ -118,34 +126,39 @@ export class DurableShellTaskStore {
   }
 
   public async launch(request: DurableShellLaunchRequest): Promise<Result<Record<string, unknown>>> {
-    const activeTasks = await this.activeTaskCount();
-    if (activeTasks >= this.maxConcurrentTasks) {
-      return err(appError('CONFLICT', `Too many durable background tasks are already running (${activeTasks}/${this.maxConcurrentTasks}); inspect or stop existing tasks before starting another.`, true));
-    }
+    const capacity = await this.capacityError();
+    if (capacity !== undefined) return capacity;
+    const reserved = await this.reserve(request);
+    if (!reserved.ok) return reserved;
+    return this.startReservedInternal(request.taskId, request.environment);
+  }
 
+  /**
+   * Persist a declared heavy task as `waiting_resource` without spawning (#145).
+   * The spec is the launch payload, so admission can start it later from the
+   * same record, including after a backend replacement.
+   */
+  public async reserve(request: DurableShellReserveRequest): Promise<Result<Record<string, unknown>>> {
     const taskDirectory = this.taskDirectory(request.taskId);
-    await mkdir(taskDirectory, { recursive: true });
-    await mkdir(this.rootDirectory, { recursive: true });
-    const startedAt = new Date().toISOString();
-    const deadlineAt = new Date(Date.now() + request.timeoutSeconds * 1000).toISOString();
+    const reservedAt = new Date().toISOString();
     const metadataPath = path.join(taskDirectory, METADATA_FILENAME);
-    const stdoutPath = path.join(taskDirectory, STDOUT_FILENAME);
-    const stderrPath = path.join(taskDirectory, STDERR_FILENAME);
     const specPath = path.join(taskDirectory, SPEC_FILENAME);
     const metadata: DurableTaskMetadata = {
       version: 1,
       task_id: request.taskId,
-      state: 'running',
-      started_at: startedAt,
+      state: 'waiting_resource',
+      started_at: reservedAt,
       include_stdout: request.includeStdout,
       include_stderr: request.includeStderr,
       max_output_bytes: request.maxOutputBytes,
-      deadline_at: deadlineAt,
+      deadline_at: reservedAt,
       owner_client_id: request.owner.clientId,
       owner_session_id: request.owner.sessionId,
       ...(request.owner.workspaceId === undefined ? {} : { owner_workspace_id: request.owner.workspaceId }),
       cwd: request.cwd,
       ...(request.externalReconciliation === undefined ? {} : { external_reconciliation: request.externalReconciliation }),
+      ...(request.admissionClass === undefined ? {} : { admission_class: request.admissionClass }),
+      ...(request.admissionCost === undefined ? {} : { admission_cost: request.admissionCost }),
     };
     const spec: DurableWorkerSpec = {
       version: 1,
@@ -158,15 +171,75 @@ export class DurableShellTaskStore {
       maxOutputBytes: request.maxOutputBytes,
       includeStdout: request.includeStdout,
       includeStderr: request.includeStderr,
-      startedAt,
-      deadlineAt,
+      startedAt: reservedAt,
+      deadlineAt: reservedAt,
       metadataPath,
-      stdoutPath,
-      stderrPath,
+      stdoutPath: path.join(taskDirectory, STDOUT_FILENAME),
+      stderrPath: path.join(taskDirectory, STDERR_FILENAME),
     };
     try {
-      await writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
+      await mkdir(taskDirectory, { recursive: true });
+      await mkdir(this.rootDirectory, { recursive: true });
       await writeFile(specPath, JSON.stringify(spec), 'utf8');
+      await writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
+      return ok(await this.snapshotFromMetadata(metadata));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Durable task could not be reserved';
+      metadata.state = 'failed';
+      metadata.exit_code = -1;
+      metadata.error = `Durable task could not be reserved: ${message}`;
+      metadata.finished_at = new Date().toISOString();
+      await writeFile(metadataPath, JSON.stringify(metadata), 'utf8').catch(() => undefined);
+      return err(appError('INTERNAL_ERROR', 'Durable task could not be reserved', true));
+    }
+  }
+
+  /**
+   * Start a reserved task. The execution deadline is computed here, not at
+   * reservation, so queue residence never eats the caller's timeout budget.
+   */
+  public async startReserved(taskId: string, environment: NodeJS.ProcessEnv): Promise<Result<Record<string, unknown>>> {
+    const capacity = await this.capacityError();
+    if (capacity !== undefined) {
+      await this.failWaiting(taskId, 'Durable task capacity was exhausted before heavy admission');
+      return capacity;
+    }
+    return this.startReservedInternal(taskId, environment);
+  }
+
+  private async capacityError(): Promise<Result<Record<string, unknown>> | undefined> {
+    const activeTasks = await this.activeTaskCount();
+    if (activeTasks < this.maxConcurrentTasks) return undefined;
+    return err(appError('CONFLICT', `Too many durable background tasks are already running (${activeTasks}/${this.maxConcurrentTasks}); inspect or stop existing tasks before starting another.`, true));
+  }
+
+  private async startReservedInternal(taskId: string, environment: NodeJS.ProcessEnv): Promise<Result<Record<string, unknown>>> {
+    const metadataResult = await this.readMetadata(taskId);
+    if (!metadataResult.ok) return metadataResult;
+    const metadata = metadataResult.value;
+    if (metadata.state !== 'waiting_resource') {
+      return err(appError('CONFLICT', `Durable task is not waiting for admission (${metadata.state})`, false));
+    }
+    const specResult = await this.readSpec(taskId);
+    if (!specResult.ok) {
+      await this.failWaiting(taskId, 'Durable task specification was unavailable at admission');
+      return specResult;
+    }
+    const taskDirectory = this.taskDirectory(taskId);
+    const startedAt = new Date().toISOString();
+    const deadlineAt = new Date(Date.now() + specResult.value.timeoutMs).toISOString();
+    const metadataPath = path.join(taskDirectory, METADATA_FILENAME);
+    const specPath = path.join(taskDirectory, SPEC_FILENAME);
+    metadata.state = 'running';
+    metadata.started_at = startedAt;
+    metadata.deadline_at = deadlineAt;
+    delete metadata.finished_at;
+    delete metadata.error;
+    delete metadata.exit_code;
+    const spec: DurableWorkerSpec = { ...specResult.value, startedAt, deadlineAt };
+    try {
+      await writeFile(specPath, JSON.stringify(spec), 'utf8');
+      await writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
       const workerPath = await this.ensureWorkerScript();
       const worker = spawn(process.execPath, [workerPath, specPath], {
         // The durable worker only coordinates the real child process; it does not need
@@ -177,10 +250,10 @@ export class DurableShellTaskStore {
         stdio: 'ignore',
         shell: false,
         windowsHide: true,
-        env: { ...request.environment, ELECTRON_RUN_AS_NODE: '1' },
+        env: { ...environment, ELECTRON_RUN_AS_NODE: '1' },
       });
       await waitForSpawn(worker);
-      if (worker.pid === undefined) return err(appError('INTERNAL_ERROR', 'Durable task worker did not return a process ID', true));
+      if (worker.pid === undefined) throw new Error('Durable task worker did not return a process ID');
       metadata.worker_pid = worker.pid;
       // Capture the launcher identity without delaying a short-lived task's
       // return path. The worker owns task.json, so the identity is published
@@ -205,6 +278,17 @@ export class DurableShellTaskStore {
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8').catch(() => undefined);
       return err(appError('INTERNAL_ERROR', 'Durable task could not start', true));
     }
+  }
+
+  private async failWaiting(taskId: string, message: string): Promise<void> {
+    const metadataResult = await this.readMetadata(taskId);
+    if (!metadataResult.ok || metadataResult.value.state !== 'waiting_resource') return;
+    const metadata = metadataResult.value;
+    metadata.state = 'failed';
+    metadata.exit_code = -1;
+    metadata.error = message;
+    metadata.finished_at = new Date().toISOString();
+    await this.writeMetadata(metadata).catch(() => undefined);
   }
 
   public async list(owner?: CapabilityTaskOwner): Promise<Record<string, unknown>[]> {
@@ -268,7 +352,7 @@ export class DurableShellTaskStore {
   public async wait(taskId: string, seconds: number, tailLines?: number, owner?: CapabilityTaskOwner): Promise<Result<Record<string, unknown>>> {
     const deadline = Date.now() + Math.max(0, seconds) * 1000;
     let snapshot = await this.snapshot(taskId, tailLines, owner);
-    while (snapshot.ok && snapshot.value.state === 'running' && Date.now() < deadline) {
+    while (snapshot.ok && (snapshot.value.state === 'running' || snapshot.value.state === 'waiting_resource') && Date.now() < deadline) {
       await delay(Math.min(100, Math.max(10, deadline - Date.now())));
       snapshot = await this.snapshot(taskId, tailLines, owner);
     }
@@ -283,6 +367,15 @@ export class DurableShellTaskStore {
     }
     let metadata = await this.reconcile(metadataResult.value);
     if (isTerminal(metadata.state)) return ok(await this.snapshotFromMetadata(metadata));
+    if (metadata.state === 'waiting_resource') {
+      // A queued task owns no process, so cancellation is a pure state change.
+      metadata.state = 'cancelled';
+      metadata.exit_code = -1;
+      delete metadata.error;
+      metadata.finished_at = new Date().toISOString();
+      await this.writeMetadata(metadata);
+      return ok(await this.snapshotFromMetadata(metadata));
+    }
     metadata = await this.hydrateProcessIdentities(metadata);
     const workerProbe = metadata.worker_pid === undefined
       ? { state: 'gone' as const }
@@ -447,7 +540,9 @@ export class DurableShellTaskStore {
       ...(metadata.error === undefined ? {} : { error: metadata.error }),
       started_at: metadata.started_at,
       ...(metadata.finished_at === undefined ? {} : { finished_at: metadata.finished_at }),
-      deadline_at: metadata.deadline_at,
+      ...(metadata.state === 'waiting_resource' ? {} : { deadline_at: metadata.deadline_at }),
+      ...(metadata.admission_class === undefined ? {} : { admission_class: metadata.admission_class }),
+      ...(metadata.admission_cost === undefined ? {} : { admission_cost: metadata.admission_cost }),
       durable: true,
       ...(metadata.worker_pid === undefined ? {} : { worker_pid: metadata.worker_pid }),
       ...(metadata.worker_started_at === undefined ? {} : { worker_started_at: metadata.worker_started_at }),
@@ -455,6 +550,17 @@ export class DurableShellTaskStore {
       ...(metadata.child_started_at === undefined ? {} : { child_started_at: metadata.child_started_at }),
       truncated: metadata.stdout_truncated === true || metadata.stderr_truncated === true,
     };
+  }
+
+  private async readSpec(taskId: string): Promise<Result<DurableWorkerSpec>> {
+    const specPath = path.join(this.taskDirectory(taskId), SPEC_FILENAME);
+    try {
+      const parsed: unknown = JSON.parse(await readFile(specPath, 'utf8'));
+      if (isWorkerSpec(parsed) && parsed.taskId === taskId) return ok(parsed);
+    } catch {
+      // Fall through to the bounded not-found error.
+    }
+    return err(appError('PROCESS_NOT_FOUND', 'Durable task specification was not found'));
   }
 
   private async readMetadata(taskId: string): Promise<Result<DurableTaskMetadata>> {
@@ -546,7 +652,29 @@ function isMetadata(value: unknown): value is DurableTaskMetadata {
     && (record.cwd === undefined || typeof record.cwd === 'string')
     && (record.worker_started_at === undefined || typeof record.worker_started_at === 'string')
     && (record.child_started_at === undefined || typeof record.child_started_at === 'string')
+    && (record.admission_class === undefined || typeof record.admission_class === 'string')
+    && (record.admission_cost === undefined || typeof record.admission_cost === 'number')
     && (record.external_reconciliation === undefined || isExternalReconciliationDescriptor(record.external_reconciliation));
+}
+
+function isWorkerSpec(value: unknown): value is DurableWorkerSpec {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.version === 1
+    && typeof record.taskId === 'string'
+    && typeof record.executable === 'string'
+    && Array.isArray(record.arguments)
+    && record.arguments.every((argument) => typeof argument === 'string')
+    && typeof record.cwd === 'string'
+    && typeof record.timeoutMs === 'number'
+    && typeof record.maxOutputBytes === 'number'
+    && typeof record.includeStdout === 'boolean'
+    && typeof record.includeStderr === 'boolean'
+    && typeof record.startedAt === 'string'
+    && typeof record.deadlineAt === 'string'
+    && typeof record.metadataPath === 'string'
+    && typeof record.stdoutPath === 'string'
+    && typeof record.stderrPath === 'string';
 }
 
 function isExternalReconciliationDescriptor(value: unknown): value is DurableShellTaskExternalReconciliationDescriptor {

@@ -31,9 +31,9 @@ shell run (admission_class declared)
 
 ## Implementation status
 
-Slice 1 is merged as the declaration seam only: `admission_class` is validated against `SHELL_HEAVY_ADMISSION_CLASSES`, an opted-in runtime takes the heavy slot **before** spawning, and the slot is settled on the durable task's verified terminal state (or immediately on cancel). A denied declaration returns `RESOURCE_PRESSURE` with the reason and creates no task.
+Slice 1 (declaration + admission) is merged; slice 2 (this change) adds durable parking. A declared run validates `admission_class`, claims one bounded durable queue row, writes the durable task as `waiting_resource`, and returns its task id with the queue position. The controller stays the admission authority: a queued run starts only when `drain()` admits it on the capacity release that frees the heavy slot, with no second tool call. Cancel while queued removes the queue row and creates no process; queue-full rejects before a task record exists. `status` / `wait` / `list` add an `admission` block with class, cost, state, position and waited time.
 
-Deliberate divergence from the lifecycle below: slice 1 does **not** park a queued run as a durable `waiting_resource` record. Parking needs a new durable task state and restart re-attachment, and the shell backend must not change its task-store contract in the same step as its admission seam. Until that lands, a caller either starts now or retries after the reason clears - which is strictly better than starting over a running heavy job, and never leaves a task id for work that was never accepted.
+Still open: restart re-attachment. A `waiting_resource` task left by a dead runtime is not revived yet; the next slice re-attaches it to a live queue row or marks it interrupted. Until then the record is truthful (it never claims the work started) but needs operator attention after a restart.
 
 ## Existing seams to extend
 

@@ -545,6 +545,118 @@ describe('durable shell background tasks', () => {
   }, 15_000);
 });
 
+describe('durable shell task parking (#145)', () => {
+  it('reserves a waiting task without spawning, then starts it on admission', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    const request = {
+      taskId: 'waiting-one',
+      executable: process.execPath,
+      arguments: ['-e', ''],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+      admissionClass: 'verification_heavy',
+      admissionCost: 8,
+    } as const;
+
+    const reserved = await store.reserve(request);
+    expect(reserved).toMatchObject({
+      ok: true,
+      value: {
+        task_id: 'waiting-one',
+        state: 'waiting_resource',
+        durable: true,
+        admission_class: 'verification_heavy',
+        admission_cost: 8,
+      },
+    });
+    expect(reserved.ok && (reserved.value as Record<string, unknown>).deadline_at).toBeUndefined();
+    expect(await store.list(owner)).toMatchObject([{ task_id: 'waiting-one', state: 'waiting_resource' }]);
+
+    const started = await store.startReserved('waiting-one', process.env);
+    expect(started).toMatchObject({ ok: true, value: { state: 'running', deadline_at: expect.any(String) } });
+
+    const waited = await store.wait('waiting-one', 5, undefined, owner);
+    expect(waited).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
+  });
+
+  it('cancels a waiting task without a process and refuses to start it later', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    await store.reserve({
+      taskId: 'waiting-two',
+      executable: process.execPath,
+      arguments: ['-e', ''],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+
+    const cancelled = await store.cancel('waiting-two', owner);
+    expect(cancelled).toMatchObject({ ok: true, value: { state: 'cancelled', exit_code: -1 } });
+
+    const started = await store.startReserved('waiting-two', process.env);
+    expect(started).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+  });
+
+  it('waits on a parked task only up to the caller budget', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    await store.reserve({
+      taskId: 'waiting-three',
+      executable: process.execPath,
+      arguments: ['-e', ''],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+
+    const waited = await store.wait('waiting-three', 0.05, undefined, owner);
+    expect(waited).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
+    await store.cancel('waiting-three', owner);
+  });
+
+  it('refuses to start a task that is not parked', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    const launched = await store.launch({
+      taskId: 'running-one',
+      executable: process.execPath,
+      arguments: ['-e', 'setTimeout(() => {}, 5000)'],
+      cwd: root,
+      environment: process.env,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+    expect(launched).toMatchObject({ ok: true, value: { state: 'running' } });
+
+    const again = await store.startReserved('running-one', process.env);
+    expect(again).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    await store.cancel('running-one', owner);
+  }, 15000);
+});
+
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

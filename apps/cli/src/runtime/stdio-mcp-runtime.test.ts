@@ -810,6 +810,34 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+  it('does not raise an unhandled rejection when recovery fails before the caller awaits readiness', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-recovery-unhandled-'));
+    temporaryRoots.push(dataPath);
+    const recoveryBase = path.join(dataPath, 'recovery-trash', workspace.id, '22222222-2222-4222-8222-222222222222');
+    await mkdir(recoveryBase, { recursive: true });
+    await writeFile(path.join(recoveryBase, 'metadata.json'), '{not-json', 'utf8');
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const runtime = createStdioMcpRuntime(dataPath, workspace);
+    try {
+      // A stdio host can be torn down before it ever awaits recoveryReady. The
+      // rejection must stay observable through recoveryReady, but it must never
+      // escape as an unhandled rejection: Node terminates the process on those.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const rejection = await runtime.recoveryReady.catch((error: unknown) => error);
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toContain('Recovery reconciliation found unsafe entries');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await runtime.close();
+    }
+  });
+
   it('observes persisted tool availability writes from another SQLite connection without restart or duplicate unrelated notifications', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-tool-availability-'));
     temporaryRoots.push(dataPath);

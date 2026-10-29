@@ -22,4 +22,5 @@ export * from './scheduled-continuation.js';
 export * from './limits.js';
 export * from './merge-verification.js';
 export * from './merge-reconciliation.js';
+export * from './publish-approval.js';
 export * from './types.js';

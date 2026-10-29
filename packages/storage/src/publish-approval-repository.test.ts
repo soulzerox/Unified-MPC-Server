@@ -137,6 +137,42 @@ describe('SqlitePublishApprovalRepository', () => {
     await expect(repository.read('a'.repeat(129))).resolves.toBeNull();
   });
 
+  it('reports the ledger state for one exact binding', async () => {
+    const { repository } = await setup();
+    const binding = { workspaceId: WORKSPACE, remote: 'origin', branch: 'goal/publish', expectedSha: HEAD };
+    await expect(repository.inspect(binding, NOW)).resolves.toBe('missing');
+    await repository.record(approval());
+    await expect(repository.inspect(binding, NOW)).resolves.toBe('pending');
+    await expect(repository.inspect({ ...binding, expectedSha: NEXT_HEAD }, NOW)).resolves.toBe('missing');
+    await expect(repository.inspect({ ...binding, branch: 'goal/other' }, NOW)).resolves.toBe('missing');
+    await expect(repository.inspect(binding, approval().expiresAt)).resolves.toBe('expired');
+    await repository.consume(approval(), NOW + 1_000);
+    await expect(repository.inspect(binding, NOW + 1_000)).resolves.toBe('consumed');
+  });
+
+  it('prefers a live receipt over an expired one for the same binding', async () => {
+    const { repository } = await setup();
+    await repository.record(approval());
+    await repository.record(approval({
+      approvalId: 'approval-2',
+      approvedAt: NOW + TTL_MS + 1,
+      expiresAt: NOW + (2 * TTL_MS) + 1,
+    }));
+    await expect(repository.inspect({
+      workspaceId: WORKSPACE, remote: 'origin', branch: 'goal/publish', expectedSha: HEAD,
+    }, NOW + TTL_MS + 1)).resolves.toBe('pending');
+  });
+
+  it('fails closed to missing for a malformed binding or clock', async () => {
+    const { repository } = await setup();
+    await repository.record(approval());
+    const binding = { workspaceId: WORKSPACE, remote: 'origin', branch: 'goal/publish', expectedSha: HEAD };
+    await expect(repository.inspect({ ...binding, expectedSha: 'not-a-sha' }, NOW)).resolves.toBe('missing');
+    await expect(repository.inspect({ ...binding, remote: '../origin' }, NOW)).resolves.toBe('missing');
+    await expect(repository.inspect(binding, -1)).resolves.toBe('missing');
+    await expect(repository.inspect(binding, 1.5)).resolves.toBe('missing');
+  });
+
   it('enforces the binding shape in SQLite even when a row is written directly', async () => {
     const { database } = await setup();
     const insertDirect = (approvalId: string, workspaceId: string, expiresAt: number): void => {

@@ -1,3 +1,4 @@
+import type { PublishApprovalBinding, PublishApprovalLookupPort, PublishApprovalState } from '@unified-mpc/domain';
 import type { SqliteDatabase } from './database.js';
 
 /**
@@ -113,7 +114,7 @@ export function consumePublishApproval(
  * so a host retry cannot widen an earlier approval; consumption binds the
  * capability to one publish and nothing can rewind it afterwards.
  */
-export class SqlitePublishApprovalRepository {
+export class SqlitePublishApprovalRepository implements PublishApprovalLookupPort {
   public constructor(private readonly database: SqliteDatabase) {}
 
   /** Idempotent per (approvalId, exact binding). Never rewinds a consumed row. */
@@ -183,4 +184,35 @@ export class SqlitePublishApprovalRepository {
       approvedAt: row.approved_at, expiresAt: row.expires_at, consumedAt: row.consumed_at,
     };
   }
+
+  /**
+   * Read-only lifecycle of the exact binding for a preflight answer. Never
+   * authority: the publish path must still spend a receipt in its own
+   * transaction. A malformed binding or clock fails closed to `missing`, and a
+   * live receipt is preferred over an expired or consumed one so a re-approval
+   * is visible immediately.
+   */
+  public async inspect(binding: PublishApprovalBinding, now: number): Promise<PublishApprovalState> {
+    if (!validBinding(binding) || !Number.isSafeInteger(now) || now < 0) return 'missing';
+    const rows = this.database.connection.prepare(`
+      SELECT expires_at, consumed_at
+      FROM publish_approvals
+      WHERE workspace_id = ? AND remote = ? AND branch = ? AND expected_sha = ?
+      ORDER BY approved_at DESC, approval_id DESC
+    `).all(binding.workspaceId, binding.remote, binding.branch, binding.expectedSha) as Array<{
+      expires_at: number;
+      consumed_at: number | null;
+    }>;
+    if (rows.length === 0) return 'missing';
+    if (rows.some((row) => row.consumed_at === null && row.expires_at > now)) return 'pending';
+    if (rows.some((row) => row.consumed_at === null)) return 'expired';
+    return 'consumed';
+  }
+}
+
+function validBinding(binding: PublishApprovalBinding): boolean {
+  return bounded(binding.workspaceId, 128)
+    && typeof binding.remote === 'string' && REMOTE_NAME.test(binding.remote)
+    && validBranch(binding.branch)
+    && OBJECT_ID.test(binding.expectedSha);
 }

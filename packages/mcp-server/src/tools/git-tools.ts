@@ -58,7 +58,7 @@ export function gitTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'git_publish_preflight',
-      description: 'Report whether a Git publish would be blocked by runtime transport or credential configuration, without pushing and without changing anything. Returns the resolved head commit, sanitized push targets (scheme and host only), default branches, whether the branch is protected, and runtime.ready plus runtime.reason (a push safety code such as push-credential-helper) when configuration would block a push. Policy is decided before this runs, so reaching this tool means the caller may ask; approval is always reported as missing until the host-mediated publish path exists.',
+      description: 'Report whether a Git publish would be blocked by runtime transport or credential configuration, without pushing and without changing anything. Returns the resolved head commit, sanitized push targets (scheme and host only), default branches, whether the branch is protected, and runtime.ready plus runtime.reason (a push safety code such as push-credential-helper) when configuration would block a push. Policy is decided before this runs, so reaching this tool means the caller may ask. approval is the host approval ledger state for this exact workspace, remote, branch and head (missing, pending, expired, or consumed); pending is a diagnostic, not permission, and this tool cannot publish anything.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: gitPublishPreflightSchema,

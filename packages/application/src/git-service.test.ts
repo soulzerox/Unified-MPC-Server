@@ -556,4 +556,84 @@ describe('GitService', () => {
 
     expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
   });
+
+  it('reports the approval ledger state for the resolved publish head', async () => {
+    const workspace = await createWorkspace();
+    const head = 'a'.repeat(40);
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            remote: 'origin',
+            branch: 'goal/publish',
+            head,
+            defaultBranches: ['main'],
+            protectedBranch: false,
+            targets: ['https://github.com'],
+            runtime: { ready: true },
+            approval: 'missing',
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    const observed: Array<{ binding: unknown; now: number }> = [];
+    const service = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovals: {
+        async inspect(binding: unknown, now: number): Promise<'pending'> {
+          observed.push({ binding, now });
+          return 'pending';
+        },
+      },
+      now: (): number => 1_700_000_000_000,
+    });
+
+    const result = await service.publishPreflight(
+      { clientId: 'test', clientName: 'test' },
+      { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish' },
+    );
+
+    expect(result).toMatchObject({ ok: true, value: { approval: 'pending', head } });
+    expect(observed).toEqual([{
+      binding: { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head },
+      now: 1_700_000_000_000,
+    }]);
+  });
+
+  it('reports approval missing when no ledger is wired or the lookup fails', async () => {
+    const workspace = await createWorkspace();
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            remote: 'origin',
+            branch: 'goal/publish',
+            head: 'b'.repeat(40),
+            defaultBranches: [],
+            protectedBranch: false,
+            targets: ['ssh://github.com'],
+            runtime: { ready: true },
+            approval: 'missing',
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    const actor = { clientId: 'test', clientName: 'test' };
+    const request = { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish' };
+
+    const withoutLedger = new GitService(repository(workspace), undefined, adapter);
+    await expect(withoutLedger.publishPreflight(actor, request))
+      .resolves.toMatchObject({ ok: true, value: { approval: 'missing' } });
+
+    const failingLedger = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovals: {
+        async inspect(): Promise<never> {
+          throw new Error('ledger unavailable');
+        },
+      },
+    });
+    await expect(failingLedger.publishPreflight(actor, request))
+      .resolves.toMatchObject({ ok: true, value: { approval: 'missing' } });
+  });
 });

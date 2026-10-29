@@ -595,6 +595,7 @@ export const schedulerCapabilitySchema = z.object({
 export const skillsListSchema = z.object({
   query: z.string().max(1024).optional(),
   source: z.string().trim().min(1).max(256).optional(),
+  detail: z.enum(['summary', 'full']).default('summary'),
 }).strict();
 
 export const skillsReadSchema = z.object({

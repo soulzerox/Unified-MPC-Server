@@ -45,6 +45,11 @@ unified-mpc install skill agy-customizations /path/to/skill --targets antigravit
 unified-mpc install skill local-helper /path/to/skill --workspace /home/user/project
 ```
 
+The install name must match the `name:` declared in the skill's `SKILL.md`
+frontmatter. A mismatch is rejected with `CONFLICT` (`reason:
+skill-name-conflict`) so the canonical catalog cannot advertise one logical
+Skill under two IDs (issue #294).
+
 ### `unified-mpc install server`
 Installs and registers an executable MCP Server into target IDE configurations.
 ```bash

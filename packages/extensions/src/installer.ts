@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type AppError, type Result } from '@unified-mpc/domain';
 import { DirectGitRunner, type GitRunner } from '@unified-mpc/git';
 import {
   CanonicalExtensionRegistry,
@@ -101,6 +101,23 @@ function validateTargets(targets: readonly InstallTarget[] | undefined): ReturnT
     `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${supportedTargets.join(', ')}`,
     false,
     { invalidTargets: invalid.join(', '), supportedTargets: supportedTargets.join(', ') },
+  );
+}
+
+/**
+ * Issue #294: a canonical Skill's ID comes from the install name while the
+ * catalog advertises the `name:` declared in SKILL.md. The two must be the
+ * same identity, otherwise a second install can advertise an existing Skill
+ * under another ID and `skills_list` shows one logical name twice.
+ */
+function declaredSkillNameConflict(content: string, installName: string): AppError | undefined {
+  const declaredName = parseSkillMarkdown(content, installName).name.trim();
+  if (declaredName.length === 0 || declaredName === installName) return undefined;
+  return appError(
+    'CONFLICT',
+    `Skill '${installName}' declares name '${declaredName}' in SKILL.md; install it under its declared name so the catalog keeps one identity per Skill`,
+    false,
+    { reason: 'skill-name-conflict', skillName: installName, declaredName },
   );
 }
 
@@ -311,17 +328,29 @@ export class InstallerService {
       const stagedFingerprint = await fingerprintCanonicalSkillDirectory(stagedSkillDir);
       if (!stagedFingerprint.ok) return err(stagedFingerprint.error);
 
+      const stagedSkillFile = path.join(stagedSkillDir, 'SKILL.md');
+      let stagedSkillMarkdown: string;
       try {
-        parseSkillMarkdown(
-          await readFile(path.join(stagedSkillDir, 'SKILL.md'), 'utf8'),
-          skillName,
-        );
+        stagedSkillMarkdown = await readFile(stagedSkillFile, 'utf8');
+      } catch (error: unknown) {
+        return err(appError(
+          'INVALID_INPUT',
+          `Failed to read staged canonical Skill markdown: ${error instanceof Error ? error.message : String(error)}`,
+        ));
+      }
+      try {
+        parseSkillMarkdown(stagedSkillMarkdown, skillName);
       } catch (error: unknown) {
         return err(appError(
           'INVALID_INPUT',
           `Failed to validate staged canonical Skill markdown: ${error instanceof Error ? error.message : String(error)}`,
         ));
       }
+      // Issue #294: the catalog advertises the declared SKILL.md name, while
+      // the ID comes from the install name. Installing under any other name
+      // lets two IDs advertise one logical Skill, so keep them identical.
+      const declaredNameError = declaredSkillNameConflict(stagedSkillMarkdown, skillName);
+      if (declaredNameError !== undefined) return err(declaredNameError);
 
       const compatibility = await this.validateDeclaredCompatibility(stagedSkillDir);
       if (!compatibility.ok) return err(compatibility.error);

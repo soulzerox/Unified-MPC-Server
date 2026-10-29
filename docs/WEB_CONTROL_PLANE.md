@@ -197,7 +197,7 @@ The Web Control Plane is intentionally **not an installation surface**. It expos
 
 Installation is owned by the Unified MCP parent runtime and is performed through the LLM-facing MCP tools:
 
-- `skills_install { name, source }` validates a local or HTTPS Git skill and installs it into the canonical parent store at `<dataDir>/extensions/skills/<name>/`.
+- `skills_install { name, source }` validates a local or HTTPS Git skill and installs it into the canonical parent store at `<dataDir>/extensions/skills/<name>/`. The name must equal the `name:` declared in `SKILL.md`; a mismatch is rejected with `CONFLICT` (`reason: skill-name-conflict`) so one logical Skill is never advertised under two IDs.
 - `mcp_install { name, transport, ... }` registers a child server in `<dataDir>/extensions/mcp/registry.json` (and may materialize managed source versions under the parent data directory).
 
 The public LLM install schemas do not accept IDE targets, workspace scope, or workspace-root overrides. They are hard-bound to the parent-owned `unified-mpc` target, so asking the LLM to install a skill or child MCP does **not** write Cursor, Cline, Claude, Codex, Antigravity, or OpenCode configuration. Legacy/direct installer platform targets remain an explicit compatibility/export seam and are not the default LLM path.

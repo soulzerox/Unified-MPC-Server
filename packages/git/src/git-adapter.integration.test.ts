@@ -10,6 +10,14 @@ import { DirectGitRunner } from './git-runner.js';
 const execFileAsync = promisify(execFile);
 const temporaryRoots: string[] = [];
 
+/**
+ * A Windows path appears escaped inside a serialized error, so comparing the raw
+ * path would pass without proving anything. Compare the same escaped form.
+ */
+function escapedForJson(value: string): string {
+  return JSON.stringify(value).slice(1, -1);
+}
+
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -236,7 +244,7 @@ describe('GitAdapter integration', () => {
           details: { reason: 'push-environment-override', keys: expect.stringContaining('GIT_SSH_COMMAND') },
         },
       });
-      expect(JSON.stringify(denied)).not.toContain(wrapper);
+      expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
       await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
       if (previous === undefined) delete process.env.GIT_SSH_COMMAND;
@@ -263,7 +271,7 @@ describe('GitAdapter integration', () => {
         details: { reason: 'push-config-override', key: 'core.askPass' },
       },
     });
-    expect(JSON.stringify(denied)).not.toContain(wrapper);
+    expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
@@ -287,7 +295,7 @@ describe('GitAdapter integration', () => {
       },
     });
     // The diagnostic names the blocking key pattern but never its value or URL scope.
-    expect(JSON.stringify(denied)).not.toContain(wrapper);
+    expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
     expect(JSON.stringify(denied)).not.toContain('example.invalid');
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
@@ -312,9 +320,57 @@ describe('GitAdapter integration', () => {
       },
     });
     const serialized = JSON.stringify(denied);
-    expect(serialized).not.toContain(wrapper);
+    expect(serialized).not.toContain(escapedForJson(wrapper));
     expect(serialized).not.toContain('user:secret');
     expect(serialized).not.toContain('secret@example.invalid');
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
+  it('reports a global credential helper as a credential denial, not a generic config override', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    const marker = path.join(root, 'credential-wrapper-ran');
+    const wrapper = path.join(root, 'credential-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'credential.helper', `!${wrapper}`], { cwd: root, windowsHide: true });
+
+    const denied = await new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin');
+    expect(denied).toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+    expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
+  it('reduces a host-only credential helper scope to the URL key pattern', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    const marker = path.join(root, 'credential-wrapper-ran');
+    const wrapper = path.join(root, 'credential-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'credential.internal.example.helper', `!${wrapper}`], { cwd: root, windowsHide: true });
+
+    const denied = await new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin');
+    expect(denied).toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.<url>.helper' },
+      },
+    });
+    const serialized = JSON.stringify(denied);
+    expect(serialized).not.toContain(escapedForJson(wrapper));
+    expect(serialized).not.toContain('internal.example');
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
@@ -337,7 +393,7 @@ describe('GitAdapter integration', () => {
         details: { reason: 'push-signing-program', key: 'gpg.program' },
       },
     });
-    expect(JSON.stringify(denied)).not.toContain(wrapper);
+    expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
@@ -378,6 +434,22 @@ describe('GitAdapter integration', () => {
     });
     await expect(new GitAdapter(new DirectGitRunner()).defaultBranches(root, 'origin')).resolves.toEqual({ ok: true, value: [] });
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
+  it('rejects the global protocol allow list as a protocol override', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'protocol.allow', 'always'], { cwd: root, windowsHide: true });
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-protocol-override', key: 'protocol.allow' },
+      },
+    });
   }, 15_000);
 
   it('aborts a conflicted guarded rebase and restores the exact old head while preserving the recovery ref', async () => {

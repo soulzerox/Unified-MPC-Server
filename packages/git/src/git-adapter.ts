@@ -630,11 +630,9 @@ export class GitAdapter {
       { key: 'core.sshCommand', fallback: 'core.sshCommand' },
       { key: 'core.askPass', fallback: 'core.askPass' },
       { key: 'core.gitProxy', fallback: 'core.gitProxy' },
-      { key: 'credential.helper', fallback: 'credential.helper' },
       { key: 'push.gpgSign', fallback: 'push.gpgSign' },
       { key: 'push.recurseSubmodules', fallback: 'push.recurseSubmodules' },
       { key: 'submodule.recurse', fallback: 'submodule.recurse' },
-      { key: 'protocol.allow', fallback: 'protocol.allow' },
     ];
     for (const { key, fallback } of executableConfigKeys) {
       const configured = await this.runner.run(['config', '--get-all', key], cwd, this.signalOptions(signal));
@@ -651,7 +649,7 @@ export class GitAdapter {
         if (error !== null) return error;
       }
     }
-    const protocolAllow = await this.runner.run(['config', '--get-regexp', '^protocol\\..*\\.allow$'], cwd, this.signalOptions(signal));
+    const protocolAllow = await this.runner.run(['config', '--get-regexp', '^protocol(\\..+)?\\.allow$'], cwd, this.signalOptions(signal));
     if (protocolAllow.exitCode === 0) {
       return err(appError(
         'PERMISSION_DENIED',
@@ -670,7 +668,7 @@ export class GitAdapter {
         'PERMISSION_DENIED',
         'Git push cannot use configured credential helpers',
         false,
-        { reason: 'push-credential-helper', key: firstConfigKey(credentialHelpers.stdout, 'credential.<url>.helper') },
+        { reason: 'push-credential-helper', key: firstCredentialConfigKey(credentialHelpers.stdout) },
       ));
     }
     if (credentialHelpers.exitCode !== 1) {
@@ -714,6 +712,9 @@ export class GitAdapter {
         ));
       }
     } catch (error: unknown) {
+      // Only a policy denial carries a reason code. A hook path that exists but
+      // cannot be inspected is an environment failure: keep it retryable and
+      // reasonless so callers do not mistake it for a stable policy decision.
       if (!isMissingFile(error)) return err(appError('INTERNAL_ERROR', 'Git push hook safety could not be verified', true));
     }
     return ok(undefined);
@@ -926,6 +927,18 @@ function describeRemoteTarget(target: string): string {
   const scpMatch = /^(?:[^@/\s]+@)?([^:/\s]+):/i.exec(target);
   const scpHost = scpMatch?.[1];
   return scpHost === undefined ? 'file' : `ssh://${scpHost}`;
+}
+
+/**
+ * A credential helper is either global (`credential.helper`) or scoped through a
+ * free-form subsection (`credential.<url>.helper`). Only the exact global key is
+ * safe to echo: a scope can be a host name, a URL, or URL userinfo.
+ */
+function firstCredentialConfigKey(output: string): string {
+  const line = output.split(/\r?\n/).find((entry) => entry.trim().length > 0);
+  if (line === undefined) return 'credential.<url>.helper';
+  const key = line.trim().split(/\s+/)[0] ?? '';
+  return key === 'credential.helper' ? key : 'credential.<url>.helper';
 }
 
 function isSupportedRemoteTarget(target: string): boolean {

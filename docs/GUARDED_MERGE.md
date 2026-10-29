@@ -41,7 +41,9 @@ mismatched evidence keeps the result `blocked` before any provider call.
 | a registered child MCP server name | That child server's `merge_pull_request` tool | The server must be registered, connected and expose `merge_pull_request` |
 
 The built-in path is the default. It removes the former requirement for an
-out-of-repo MCP shim: Unified-MPC itself performs the exact-head merge.
+out-of-repo MCP shim: Unified-MPC itself performs the exact-head merge. The
+`builtin` name is reserved and always selects this path; a child server cannot
+shadow it.
 
 ### Built-in dispatch
 
@@ -67,21 +69,22 @@ descriptor and catalog fingerprints, so a changed provider contract fails
 closed instead of silently executing a different mutation.
 
 There is **no automatic fallback** between paths. If the configured provider is
-missing, drifted or fails, the tool returns `inspect_required` with
-`reason: merge_dispatch_error` (sanitized detail, no credentials).
+missing, drifted or fails, the service returns `inspect_required` with
+`reason: merge_dispatch_error`; `guarded_pr_merge` surfaces that as a `CONFLICT`
+error with sanitized detail and no credentials.
 
 ---
 
 ## 3. Failure Behavior
 
-| Condition | Result |
+| Condition | Tool result |
 |---|---|
 | No authoritative merge policy for the repository | `PERMISSION_DENIED` |
-| Receipt missing, stale, rejected, or for another head | `blocked` with the evidence decision |
-| Built-in CLI missing, unauthenticated, or network failure | `inspect_required` / `merge_dispatch_error` |
-| GitHub refuses the merge (head moved, not mergeable, protected branch) | `inspect_required` / `merge_dispatch_error` |
-| Child provider missing the tool or drifted | `inspect_required` / `merge_dispatch_error` |
-| Merge accepted | `dispatched` with the exact subject |
+| Receipt missing, stale, rejected, or for another head | `PERMISSION_DENIED` (blocked by evidence) |
+| Built-in CLI missing, unauthenticated, or network failure | `CONFLICT` (`merge_dispatch_error`) |
+| GitHub refuses the merge (head moved, not mergeable, protected branch) | `CONFLICT` (`merge_dispatch_error`) |
+| Child provider missing the tool or drifted | `CONFLICT` (`merge_dispatch_error`) |
+| Merge accepted | success with `status: dispatched` and the exact subject |
 
 A dispatch failure reports that the remote outcome may be unknown; callers must
 inspect PR state instead of retrying blindly.

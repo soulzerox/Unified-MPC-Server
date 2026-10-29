@@ -30,7 +30,17 @@ export interface CapabilityService {
 }
 
 export { LocalCapabilityService, type CapabilityBackend, type LocalCapabilityBackends } from './local-capability-service.js';
-export { ShellCapabilityBackend, type DurableShellTaskReconciliationProvider, type ShellCapabilityOptions } from './shell-backend.js';
+export {
+  ShellCapabilityBackend,
+  SHELL_HEAVY_ADMISSION_CLASSES,
+  type DurableShellTaskReconciliationProvider,
+  type ShellCapabilityOptions,
+  type ShellHeavyAdmissionClass,
+  type ShellHeavyAdmissionLease,
+  type ShellHeavyAdmissionPort,
+  type ShellHeavyAdmissionRequest,
+  type ShellHeavyAdmissionResult,
+} from './shell-backend.js';
 export {
   type DurableShellTaskExternalReconciler,
   type DurableShellTaskExternalReconciliationDescriptor,

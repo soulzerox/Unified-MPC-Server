@@ -105,6 +105,7 @@ import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApi
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
+import { createShellHeavyAdmissionPort } from './shell-heavy-admission.js';
 import {
   createGitHubClosedPullRequestFeed,
   createSettingsMergeReconciliationPollStateStore,
@@ -630,7 +631,8 @@ export function createStdioMcpRuntime(
   });
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
-  createRuntimePromotionTaskReconciliation());
+  createRuntimePromotionTaskReconciliation(),
+  createShellHeavyAdmissionPort(() => resourceAdmissionController));
   const requestCancellation = new GoalRequestCancellationService();
   const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
   const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
@@ -1299,6 +1301,7 @@ function createStdioCapabilityService(
   configuredRootsProvider: () => readonly string[] = () => [],
   synchronousWaitSecondsProvider: () => number = () => DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS,
   durableTaskReconciliation = createRuntimePromotionTaskReconciliation(),
+  heavyAdmission?: import('@unified-mpc/capabilities').ShellHeavyAdmissionPort,
 ): StdioCapabilityRuntime {
   const runtime = createPlatformCapabilitySet({
     platform: process.platform,
@@ -1308,6 +1311,7 @@ function createStdioCapabilityService(
     configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.UNIFIED_MPC_CAPABILITY_ROOTS), ...configuredRootsProvider()],
     synchronousWaitSecondsProvider,
     durableTaskReconciliation,
+    ...(heavyAdmission === undefined ? {} : { heavyAdmission }),
   });
   return { service: runtime.service, shell: runtime.shell };
 }

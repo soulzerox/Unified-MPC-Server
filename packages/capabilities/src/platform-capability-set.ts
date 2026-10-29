@@ -22,6 +22,8 @@ export interface PlatformCapabilitySetOptions {
   readonly configuredRootsProvider?: () => readonly string[];
   readonly synchronousWaitSecondsProvider?: () => number;
   readonly durableTaskReconciliation?: DurableShellTaskReconciliationProvider;
+  /** Admission seam for declared heavy shell runs (#145). */
+  readonly heavyAdmission?: import('./shell-backend.js').ShellHeavyAdmissionPort;
   /** Electron-main providers whose semantics are shared by macOS/Linux. */
   readonly shared?: Partial<Record<import('./index.js').CapabilityToolName, CapabilityBackend>>;
   /** Optional integrity-bound native host for macOS/Linux desktop capabilities. */
@@ -52,6 +54,7 @@ export function createPlatformCapabilitySet(options: PlatformCapabilitySetOption
     allowedRootsProvider: capabilityRootsProvider,
     unrestricted,
     taskStateDirectory: path.join(options.dataPath, 'background-tasks'),
+    ...(options.heavyAdmission === undefined ? {} : { heavyAdmission: options.heavyAdmission }),
     ...(options.synchronousWaitSecondsProvider === undefined ? {} : { maxSynchronousWaitSecondsProvider: options.synchronousWaitSecondsProvider }),
     ...(options.durableTaskReconciliation === undefined ? {} : { durableTaskReconciliation: options.durableTaskReconciliation }),
   });

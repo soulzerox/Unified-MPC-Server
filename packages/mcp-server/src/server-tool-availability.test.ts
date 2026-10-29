@@ -67,7 +67,7 @@ describe('MCP server live tool availability', () => {
       expect(client.getServerCapabilities()?.tools?.listChanged).toBe(true);
 
       const listed = await client.listTools();
-      const schemaList = await client.callTool({ name: 'tool_schema_list', arguments: {} });
+      const schemaList = await client.callTool({ name: 'tool_schema_list', arguments: { detail: 'full' } });
       expect(schemaList.isError).not.toBe(true);
       const schemaListValue = schemaList.structuredContent as {
         schemas: Array<Record<string, unknown>>;

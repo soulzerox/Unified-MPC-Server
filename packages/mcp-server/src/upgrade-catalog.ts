@@ -143,7 +143,7 @@ export const UPGRADE_TOOL_CATALOG: readonly UpgradeToolCatalogEntry[] = [
   read('repo_map', 29, 'Return a traversable repository structural map.', ['repository', 'map'], { streamable: true }),
   read('context_expand', 30, 'Return optional import, caller, type, test, and change references.', ['context', 'dependency']),
   read('recovery_status', 31, 'Return reconnect, retry, continuation, cache, and worker recovery state.', ['resilience', 'recovery']),
-  read('tool_schema_list', 32, 'List versioned tool schema metadata.', ['schema', 'registry']),
+  read('tool_schema_list', 32, 'List versioned tool schema metadata. Returns one compact row per tool by default (id, version, permissions, source, read-only/destructive/streamable/parallel-safe flags and the input signature with required fields marked *), plus total and catalogFingerprint; pass detail=full for every full JSON schema and per-tool fingerprint, or tool_describe for a single tool.', ['schema', 'registry']),
   write('tool_schema_register', 32, 'Register a validated backward-compatible versioned tool schema descriptor in the local runtime registry.', ['schema', 'registry']),
   read('capabilities', 33, 'Discover capability categories without requiring every full schema.', ['capability', 'discovery']),
   read('tool_search', 33, 'Search tools, tags, phases, and descriptions deterministically.', ['tool', 'search', 'discovery']),

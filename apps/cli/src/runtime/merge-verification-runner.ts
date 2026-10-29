@@ -29,6 +29,7 @@ import type {
   ResourceAdmissionSnapshot,
 } from '@unified-mpc/workspace';
 import type { GitHubApiReader } from './github-merge-observer.js';
+import { githubRepositoryFromRemote } from './github-remote.js';
 
 const LOCAL_GATE_TIMEOUT_MS = 20 * 60_000;
 const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -857,7 +858,7 @@ function createExactHeadWorkspaceVerifier(workspaces: WorkspaceRepository): Exac
         if (status.trim().length > 0) {
           return err(appError('CONFLICT', 'Verification workspace must be clean before and after local gates'));
         }
-        const observedRepository = githubRepositoryFromRemote(remote.trim());
+        const observedRepository = await githubRepositoryFromRemote(remote.trim());
         if (observedRepository === undefined
           || observedRepository.toLowerCase() !== request.repository.toLowerCase()) {
           return err(appError('PERMISSION_DENIED', 'Verification workspace origin does not match the requested repository'));
@@ -940,16 +941,6 @@ async function execGit(cwd: string, args: readonly string[]): Promise<string> {
       maxBuffer: 1024 * 1024,
     }, (error, stdout) => error === null ? resolve(stdout) : reject(error));
   });
-}
-
-function githubRepositoryFromRemote(value: string): string | undefined {
-  const normalized = value.trim().replace(/\.git$/i, '');
-  const https = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/i.exec(normalized);
-  if (https) return `${https[1]}/${https[2]}`;
-  const ssh = /^git@github\.com:([^/]+)\/([^/]+)$/i.exec(normalized);
-  if (ssh) return `${ssh[1]}/${ssh[2]}`;
-  const sshUrl = /^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+)$/i.exec(normalized);
-  return sshUrl ? `${sshUrl[1]}/${sshUrl[2]}` : undefined;
 }
 
 function repositoryCoordinates(value: string): { owner: string; repo: string } {

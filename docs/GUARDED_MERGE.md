@@ -111,3 +111,8 @@ request proves what GitHub is merging. Both must match the same commit:
   setting at a child server keeps working unchanged.
 - `merge_reconcile` uses the same authenticated GitHub API reader to observe the
   merged result and persist reconciliation evidence.
+- Exact-head verification accepts a GitHub SSH host alias (for example
+  `git@github.com-work:owner/repo.git`) only when `ssh -G <alias>` resolves the
+  hostname to `github.com`. An alias that resolves elsewhere, an HTTPS remote on
+  another host, or an SSH resolution failure fails closed as a repository
+  mismatch instead of trusting the remote URL text.

@@ -11,8 +11,14 @@ const MAX_LIST_LIMIT = 100;
 const SHA_PATTERN = /^[0-9a-f]{40,64}$/;
 
 const TERMINAL_STATUSES = new Set<MergeVerificationAttemptStatus>(['completed', 'failed', 'interrupted']);
+const LIVE_STATUSES = new Set<MergeVerificationAttemptStatus>(['queued', 'running']);
 
-export type MergeVerificationAttemptStatus = 'running' | 'completed' | 'failed' | 'interrupted';
+/**
+ * `queued` means the exact-head request was accepted but heavy admission was denied.
+ * The row is durable and truthful: no gate ran, no receipt exists, and the next
+ * `merge_verification_run` for the same head claims this row instead of duplicating it.
+ */
+export type MergeVerificationAttemptStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
 
 export interface MergeVerificationAttemptRecord {
   readonly attemptId: string;
@@ -30,6 +36,11 @@ export interface MergeVerificationAttemptRecord {
   readonly receiptRef?: string;
 }
 
+/** A row that is still live (`queued` or `running`); never a terminal verdict. */
+export type LiveMergeVerificationAttemptRecord = MergeVerificationAttemptRecord & {
+  readonly status: 'queued' | 'running';
+};
+
 export interface BeginMergeVerificationAttemptRequest {
   readonly attemptId: string;
   readonly repository: string;
@@ -43,6 +54,24 @@ export interface BeginMergeVerificationAttemptRequest {
 export interface HeartbeatMergeVerificationAttemptRequest {
   readonly heartbeatAt: string;
   readonly gateName?: string;
+}
+
+/** Persist a durable `queued` attempt for a denied heavy admission (#305). */
+export interface QueueMergeVerificationAttemptRequest {
+  readonly attemptId: string;
+  readonly repository: string;
+  readonly pullRequest: number;
+  readonly headSha: string;
+  readonly baseBranch?: string;
+  readonly workspaceId?: string;
+  readonly requestedAt: string;
+}
+
+/** Atomically promote one `queued` attempt to `running`. */
+export interface ClaimQueuedMergeVerificationAttemptRequest {
+  readonly claimedAt: string;
+  /** The workspace the promoted run will actually use; keeps the row truthful. */
+  readonly workspaceId?: string;
 }
 
 export interface FinishMergeVerificationAttemptRequest {
@@ -147,6 +176,91 @@ export class SqliteMergeVerificationAttemptRepository {
     }
 
     return this.requireById(attemptId);
+  }
+
+  /**
+   * Persist a `queued` attempt for an exact head whose heavy admission was denied.
+   *
+   * Nothing ran and no receipt exists; the row is the durable record of the request.
+   * The single-live partial unique index also covers `queued`, so a second enqueue for
+   * the same head conflicts instead of creating a duplicate queue entry.
+   */
+  public async enqueue(
+    request: QueueMergeVerificationAttemptRequest,
+  ): Promise<MergeVerificationAttemptRecord> {
+    const attemptId = requiredBounded(request.attemptId, 'attemptId', MAX_ATTEMPT_ID_CHARS);
+    const repository = requiredBounded(request.repository, 'repository', MAX_REPOSITORY_CHARS);
+    positiveInteger(request.pullRequest, 'pullRequest');
+    validateSha(request.headSha, 'headSha');
+    const baseBranch = request.baseBranch === undefined
+      ? undefined
+      : requiredBounded(request.baseBranch, 'baseBranch', MAX_BRANCH_CHARS);
+    const workspaceId = request.workspaceId === undefined
+      ? undefined
+      : requiredBounded(request.workspaceId, 'workspaceId', MAX_WORKSPACE_ID_CHARS);
+    validateIso(request.requestedAt, 'requestedAt');
+
+    const inserted = this.database.connection.prepare(`
+      INSERT OR IGNORE INTO merge_verification_attempts (
+        attempt_id,
+        repository,
+        pull_request,
+        head_sha,
+        base_branch,
+        workspace_id,
+        status,
+        started_at,
+        heartbeat_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+    `).run(
+      attemptId,
+      repository,
+      request.pullRequest,
+      request.headSha,
+      baseBranch ?? null,
+      workspaceId ?? null,
+      request.requestedAt,
+      request.requestedAt,
+    );
+
+    if (Number(inserted.changes) !== 1) {
+      throw new MergeVerificationAttemptStoreError(
+        'attempt_conflict',
+        `A queued or running merge verification already exists for ${repository}#${request.pullRequest}@${request.headSha}`,
+      );
+    }
+
+    return this.requireById(attemptId);
+  }
+
+  /**
+   * Promote one queued attempt to running. Exactly one caller wins the transition;
+   * a losing caller must re-read durable state instead of running the gates twice.
+   */
+  public async claimQueued(
+    attemptId: string,
+    request: ClaimQueuedMergeVerificationAttemptRequest,
+  ): Promise<MergeVerificationAttemptRecord> {
+    const normalizedAttemptId = requiredBounded(attemptId, 'attemptId', MAX_ATTEMPT_ID_CHARS);
+    validateIso(request.claimedAt, 'claimedAt');
+    const workspaceId = request.workspaceId === undefined
+      ? undefined
+      : requiredBounded(request.workspaceId, 'workspaceId', MAX_WORKSPACE_ID_CHARS);
+
+    const updated = this.database.connection.prepare(`
+      UPDATE merge_verification_attempts
+      SET status = 'running', heartbeat_at = ?, workspace_id = COALESCE(?, workspace_id)
+      WHERE attempt_id = ? AND status = 'queued'
+    `).run(request.claimedAt, workspaceId ?? null, normalizedAttemptId);
+
+    if (Number(updated.changes) !== 1) {
+      throw new MergeVerificationAttemptStoreError(
+        'attempt_conflict',
+        `Merge verification attempt '${normalizedAttemptId}' is not queued`,
+      );
+    }
+
+    return this.requireById(normalizedAttemptId);
   }
 
   public async heartbeat(
@@ -295,6 +409,44 @@ export class SqliteMergeVerificationAttemptRepository {
     return rows.map((row) => this.toRecord(this.requireRow(row)));
   }
 
+  /**
+   * Live-or-queued lookup for one exact head. A `running` row only counts while its
+   * heartbeat is fresh; a `queued` row never expires because no work has started.
+   * Running rows are preferred so a real run always wins over a stale queue marker.
+   */
+  public async findActive(
+    request: FindLiveMergeVerificationAttemptRequest,
+  ): Promise<LiveMergeVerificationAttemptRecord | undefined> {
+    const repository = requiredBounded(request.repository, 'repository', MAX_REPOSITORY_CHARS);
+    positiveInteger(request.pullRequest, 'pullRequest');
+    validateSha(request.headSha, 'headSha');
+    validateIso(request.now, 'now');
+    if (!Number.isInteger(request.staleAfterMs) || request.staleAfterMs <= 0) {
+      throw new MergeVerificationAttemptStoreError('invalid_attempt', 'staleAfterMs must be a positive integer');
+    }
+    const cutoff = new Date(Date.parse(request.now) - request.staleAfterMs).toISOString();
+
+    const row = this.database.connection.prepare(`
+      SELECT *
+      FROM merge_verification_attempts
+      WHERE repository = ? AND pull_request = ? AND head_sha = ?
+        AND (
+          status = 'queued'
+          OR (status = 'running' AND heartbeat_at > ?)
+        )
+      ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, started_at DESC, attempt_id DESC
+      LIMIT 1
+    `).get(repository, request.pullRequest, request.headSha, cutoff);
+
+    if (row === undefined) return undefined;
+    const record = this.toRecord(this.requireRow(row));
+    const status = record.status;
+    if (status !== 'queued' && status !== 'running') {
+      throw new MergeVerificationAttemptStoreError('corrupt', 'Active attempt row has a non-live status');
+    }
+    return { ...record, status };
+  }
+
   public async findLive(
     request: FindLiveMergeVerificationAttemptRequest,
   ): Promise<MergeVerificationAttemptRecord | undefined> {
@@ -365,7 +517,7 @@ export class SqliteMergeVerificationAttemptRepository {
       || (baseBranch !== null && typeof baseBranch !== 'string')
       || (workspaceId !== null && typeof workspaceId !== 'string')
       || typeof status !== 'string'
-      || (!TERMINAL_STATUSES.has(status as MergeVerificationAttemptStatus) && status !== 'running')
+      || (!TERMINAL_STATUSES.has(status as MergeVerificationAttemptStatus) && !LIVE_STATUSES.has(status as MergeVerificationAttemptStatus))
       || (gateName !== null && typeof gateName !== 'string')
       || typeof startedAt !== 'string'
       || typeof heartbeatAt !== 'string'
@@ -396,10 +548,10 @@ export class SqliteMergeVerificationAttemptRepository {
     validateIso(row.started_at, 'startedAt', 'corrupt');
     validateIso(row.heartbeat_at, 'heartbeatAt', 'corrupt');
     if (row.finished_at !== null) validateIso(row.finished_at, 'finishedAt', 'corrupt');
-    if (row.status === 'running' && row.finished_at !== null) {
-      throw new MergeVerificationAttemptStoreError('corrupt', 'Running attempt must not have a finish timestamp');
+    if (LIVE_STATUSES.has(row.status as MergeVerificationAttemptStatus) && row.finished_at !== null) {
+      throw new MergeVerificationAttemptStoreError('corrupt', 'Live attempt must not have a finish timestamp');
     }
-    if (row.status !== 'running' && row.finished_at === null) {
+    if (TERMINAL_STATUSES.has(row.status as MergeVerificationAttemptStatus) && row.finished_at === null) {
       throw new MergeVerificationAttemptStoreError('corrupt', 'Terminal attempt must have a finish timestamp');
     }
 

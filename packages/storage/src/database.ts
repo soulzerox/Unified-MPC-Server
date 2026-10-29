@@ -38,6 +38,7 @@ import { GOAL_RUNTIME_INTEGRATION_OBSERVATION_MIGRATION_SQL } from './migrations
 import { MERGE_VERIFICATION_RECEIPT_MIGRATION_SQL } from './migrations/merge-verification-receipt-migration.js';
 import { MERGE_VERIFICATION_ATTEMPT_MIGRATION_SQL } from './migrations/merge-verification-attempt-migration.js';
 import { MERGE_VERIFICATION_ATTEMPT_BASE_BRANCH_MIGRATION_SQL } from './migrations/merge-verification-attempt-base-branch-migration.js';
+import { MERGE_VERIFICATION_ATTEMPT_QUEUE_MIGRATION_SQL } from './migrations/merge-verification-attempt-queue-migration.js';
 import { MERGE_RECONCILIATION_MIGRATION_SQL } from './migrations/merge-reconciliation-migration.js';
 import { GOAL_WORKSPACE_TRANSFER_INTENT_MIGRATION_SQL } from './migrations/goal-workspace-transfer-intent-migration.js';
 import { GOAL_WORKSPACE_RETENTION_CUSTODY_MIGRATION_SQL } from './migrations/goal-workspace-retention-custody-migration.js';
@@ -56,6 +57,14 @@ export interface SqliteDatabaseOptions {
 export interface Migration {
   readonly id: string;
   readonly sql: string;
+  /**
+   * Compact the database after the migration commits. A table-rebuild migration
+   * frees the old table's pages into the freelist, and a freshly created database
+   * would otherwise open with dead pages that the physical-space metrics report as
+   * reclaimable. `VACUUM` cannot run inside the migration transaction, so it runs
+   * once, right after the commit.
+   */
+  readonly reclaimFreePages?: boolean;
 }
 
 /**
@@ -65,7 +74,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '040_heavy_job_queue' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '041_merge_verification_attempt_queue' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -133,7 +142,12 @@ export class SqliteDatabase {
     this.applyMigration({ id: '037_goal_relocation_approvals', sql: GOAL_RELOCATION_APPROVAL_MIGRATION_SQL });
     this.applyMigration({ id: '038_merge_verification_attempts', sql: MERGE_VERIFICATION_ATTEMPT_MIGRATION_SQL });
     this.applyMigration({ id: '039_merge_verification_attempt_base_branch', sql: MERGE_VERIFICATION_ATTEMPT_BASE_BRANCH_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: HEAVY_JOB_QUEUE_MIGRATION_SQL });
+    this.applyMigration({ id: '040_heavy_job_queue', sql: HEAVY_JOB_QUEUE_MIGRATION_SQL });
+    this.applyMigration({
+      id: CURRENT_SCHEMA_MIGRATION_ID,
+      sql: MERGE_VERIFICATION_ATTEMPT_QUEUE_MIGRATION_SQL,
+      reclaimFreePages: true,
+    });
   }
 
   private ensureDirectory(): void {
@@ -172,6 +186,8 @@ export class SqliteDatabase {
       this.connection.exec('ROLLBACK;');
       throw error;
     }
+
+    if (migration.reclaimFreePages === true) this.connection.exec('VACUUM;');
   }
 
   private backupBeforeFirstPendingMigration(): void {

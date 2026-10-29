@@ -7,12 +7,15 @@ import {
   err,
   evaluateMergeEvidence,
   ok,
+  type AppError,
   type CommandSpec,
-  type MergeEvidenceDecision,
   type MergeGateOutcome,
   type MergeGateReceipt,
   type MergeReviewOutcome,
+  type MergeVerificationQueuedOutcome,
   type MergeVerificationReceipt,
+  type MergeVerificationRunOutcome,
+  type MergeVerificationVerdictOutcome,
   type RepositoryMergePolicy,
   type RequiredMergeGate,
   type Result,
@@ -23,6 +26,7 @@ import type {
   ResourceAdmissionDecision,
   ResourceAdmissionLease,
   ResourceAdmissionRequest,
+  ResourceAdmissionSnapshot,
 } from '@unified-mpc/workspace';
 import type { GitHubApiReader } from './github-merge-observer.js';
 
@@ -58,12 +62,16 @@ export interface MergeVerificationRunRequest {
   };
 }
 
-export interface MergeVerificationRunResult {
-  readonly receiptRef: string;
-  readonly receipt: MergeVerificationReceipt;
-  readonly decision: MergeEvidenceDecision;
-  readonly sequence: number;
-}
+export type MergeVerificationVerdictResult = MergeVerificationVerdictOutcome;
+
+/**
+ * Durable queued outcome (#305). Heavy admission was denied, so no gate ran and no
+ * receipt exists. The attempt row is persisted for the exact head and the next
+ * `merge_verification_run` for that head claims it instead of duplicating it.
+ */
+export type MergeVerificationQueuedResult = MergeVerificationQueuedOutcome;
+
+export type MergeVerificationRunResult = MergeVerificationRunOutcome;
 
 export interface MergeVerificationRunPort {
   run(request: MergeVerificationRunRequest, signal?: AbortSignal): Promise<Result<MergeVerificationRunResult>>;
@@ -133,6 +141,21 @@ export interface MergeVerificationAttemptRecorder {
     readonly workspaceId?: string;
     readonly startedAt: string;
   }): Promise<unknown>;
+  /** Persist a `queued` attempt when heavy admission is denied (#305). */
+  enqueue(request: {
+    readonly attemptId: string;
+    readonly repository: string;
+    readonly pullRequest: number;
+    readonly headSha: string;
+    readonly baseBranch?: string;
+    readonly workspaceId?: string;
+    readonly requestedAt: string;
+  }): Promise<unknown>;
+  /** Promote one `queued` attempt to `running`; exactly one caller wins. */
+  claimQueued(
+    attemptId: string,
+    request: { readonly claimedAt: string; readonly workspaceId?: string },
+  ): Promise<unknown>;
   heartbeat(
     attemptId: string,
     request: { readonly heartbeatAt: string; readonly gateName?: string },
@@ -147,19 +170,26 @@ export interface MergeVerificationAttemptRecorder {
     attemptId: string,
     request: { readonly finishedAt: string; readonly detail: string },
   ): Promise<unknown>;
-  findLive(request: {
+  /** Live-or-queued lookup; a queued row never expires, a running row must be fresh. */
+  findActive(request: {
     readonly repository: string;
     readonly pullRequest: number;
     readonly headSha: string;
     readonly now: string;
     readonly staleAfterMs: number;
-  }): Promise<LiveMergeVerificationAttempt | undefined>;
+  }): Promise<ActiveMergeVerificationAttempt | undefined>;
   reapStale(request: {
     readonly now: string;
     readonly staleAfterMs: number;
   }): Promise<readonly string[]>;
 }
 
+export interface ActiveMergeVerificationAttempt {
+  readonly attemptId: string;
+  readonly status: 'queued' | 'running';
+}
+
+/** @deprecated Kept for older callers; `findActive` covers queued rows too. */
 export interface LiveMergeVerificationAttempt {
   readonly attemptId: string;
 }
@@ -208,66 +238,46 @@ export function createMergeVerificationRunPort(
 
       const startedAt = now().toISOString();
       await attempts.reapStale({ now: startedAt, staleAfterMs: ATTEMPT_STALE_AFTER_MS }).catch(() => []);
-      let live: LiveMergeVerificationAttempt | undefined;
+
+      const findActive = async (): Promise<ActiveMergeVerificationAttempt | undefined> => attempts.findActive({
+        repository: request.repository,
+        pullRequest: request.pullRequest,
+        headSha: subject.headSha,
+        now: now().toISOString(),
+        staleAfterMs: ATTEMPT_STALE_AFTER_MS,
+      });
+
+      const queued = (attemptId: string, pressure: VerificationPressure): Result<MergeVerificationQueuedResult> => ok({
+        status: 'queued',
+        attemptId,
+        repository: request.repository,
+        pullRequest: request.pullRequest,
+        headSha: subject.headSha,
+        reason: pressure.reason,
+        retryable: pressure.retryable,
+        requestedCost: pressure.requestedCost,
+        detail: 'Heavy admission was denied, so no gate ran and no receipt exists. '
+          + 'The request is durably queued for this exact head: call merge_verification_run again to claim it, '
+          + 'and read merge_verification_status for queued/running/terminal state.',
+      });
+
+      let active: ActiveMergeVerificationAttempt | undefined;
       try {
-        live = await attempts.findLive({
-          repository: request.repository,
-          pullRequest: request.pullRequest,
-          headSha: subject.headSha,
-          now: startedAt,
-          staleAfterMs: ATTEMPT_STALE_AFTER_MS,
-        });
+        active = await findActive();
       } catch {
         return err(appError('INTERNAL_ERROR', 'Merge verification attempt state could not be read', true));
       }
-      if (live !== undefined) {
+      if (active !== undefined && active.status === 'running') {
         return err(appError(
           'CONFLICT',
-          `Merge verification is already running for this exact head (attempt ${live.attemptId}); `
+          `Merge verification is already running for this exact head (attempt ${active.attemptId}); `
           + 'wait for it to finish and query merge_verification_status instead of starting a duplicate run',
           true,
         ));
       }
 
-      const attemptId = randomAttemptId();
-      const admitted = acquireVerificationAdmission(admission, {
-        operationId: attemptId,
-        workspaceId: request.workspaceId,
-      });
-      if (!admitted.ok) return admitted;
-      const lease = admitted.value;
-      try {
-        try {
-          await attempts.begin({
-            attemptId,
-            repository: request.repository,
-            pullRequest: request.pullRequest,
-            headSha: subject.headSha,
-            baseBranch: subject.baseBranch,
-            ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
-            startedAt,
-          });
-        } catch {
-          // The partial unique index allows one live attempt per exact head, so a losing
-          // race lands here rather than in the guard above. Re-check before blaming storage.
-          const raced = await attempts.findLive({
-            repository: request.repository,
-            pullRequest: request.pullRequest,
-            headSha: subject.headSha,
-            now: now().toISOString(),
-            staleAfterMs: ATTEMPT_STALE_AFTER_MS,
-          }).catch(() => undefined);
-          if (raced !== undefined) {
-            return err(appError(
-              'CONFLICT',
-              `Merge verification is already running for this exact head (attempt ${raced.attemptId})`,
-              true,
-            ));
-          }
-          return err(appError('INTERNAL_ERROR', 'Merge verification attempt could not be recorded', true));
-        }
-
-        let result: Result<MergeVerificationRunResult>;
+      const runClaimedAttempt = async (attemptId: string): Promise<Result<MergeVerificationVerdictResult>> => {
+        let result: Result<MergeVerificationVerdictResult>;
         try {
           result = await verify(context, request, subject, localGates, signal, attemptId);
         } catch (error) {
@@ -288,6 +298,115 @@ export function createMergeVerificationRunPort(
           // The receipt table remains authoritative for the verdict either way.
         }
         return result;
+      };
+
+      if (active !== undefined) {
+        // A durable queued attempt already exists for this exact head: promote it instead
+        // of inserting a duplicate, so the attempt id stays stable across retries.
+        const decided = decideVerificationAdmission(admission, {
+          operationId: active.attemptId,
+          workspaceId: request.workspaceId,
+        });
+        if (decided.kind === 'rejected') return err(decided.error);
+        if (decided.kind === 'pressure') return queued(active.attemptId, decided.pressure);
+        const lease = decided.lease;
+        try {
+          try {
+            await attempts.claimQueued(active.attemptId, {
+              claimedAt: now().toISOString(),
+              workspaceId: request.workspaceId,
+            });
+          } catch {
+            const raced = await findActive().catch(() => undefined);
+            if (raced !== undefined && raced.status === 'running') {
+              return err(appError(
+                'CONFLICT',
+                `Merge verification is already running for this exact head (attempt ${raced.attemptId})`,
+                true,
+              ));
+            }
+            return err(appError('CONFLICT', 'Queued merge verification was claimed by another runner', true));
+          }
+          return await runClaimedAttempt(active.attemptId);
+        } finally {
+          admission.release(lease);
+        }
+      }
+
+      const attemptId = randomAttemptId();
+      const decided = decideVerificationAdmission(admission, {
+        operationId: attemptId,
+        workspaceId: request.workspaceId,
+      });
+      if (decided.kind === 'rejected') return err(decided.error);
+      if (decided.kind === 'pressure') {
+        // A denied admission must not evaporate: persist the request as a durable queued
+        // attempt bound to this exact head, then report truthfully that nothing ran.
+        try {
+          await attempts.enqueue({
+            attemptId,
+            repository: request.repository,
+            pullRequest: request.pullRequest,
+            headSha: subject.headSha,
+            baseBranch: subject.baseBranch,
+            workspaceId: request.workspaceId,
+            requestedAt: now().toISOString(),
+          });
+        } catch {
+          const raced = await findActive().catch(() => undefined);
+          if (raced !== undefined && raced.status === 'running') {
+            return err(appError(
+              'CONFLICT',
+              `Merge verification is already running for this exact head (attempt ${raced.attemptId})`,
+              true,
+            ));
+          }
+          if (raced !== undefined) return queued(raced.attemptId, decided.pressure);
+          // The intent could not be persisted; keep the truthful pressure failure.
+          return pressureError(decided.pressure, attemptId);
+        }
+        return queued(attemptId, decided.pressure);
+      }
+
+      const lease = decided.lease;
+      try {
+        try {
+          await attempts.begin({
+            attemptId,
+            repository: request.repository,
+            pullRequest: request.pullRequest,
+            headSha: subject.headSha,
+            baseBranch: subject.baseBranch,
+            ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
+            startedAt,
+          });
+        } catch {
+          // The partial unique index allows one live-or-queued attempt per exact head, so a
+          // losing race lands here rather than in the guard above. Re-check before blaming
+          // storage: a concurrent queued row can be adopted instead of discarded.
+          const raced = await findActive().catch(() => undefined);
+          if (raced === undefined) {
+            return err(appError('INTERNAL_ERROR', 'Merge verification attempt could not be recorded', true));
+          }
+          if (raced.status === 'running') {
+            return err(appError(
+              'CONFLICT',
+              `Merge verification is already running for this exact head (attempt ${raced.attemptId})`,
+              true,
+            ));
+          }
+          try {
+            await attempts.claimQueued(raced.attemptId, {
+              claimedAt: now().toISOString(),
+              workspaceId: request.workspaceId,
+            });
+          } catch {
+            return err(appError('CONFLICT', 'Queued merge verification was claimed by another runner', true));
+          }
+          return await runClaimedAttempt(raced.attemptId);
+        }
+
+        return await runClaimedAttempt(attemptId);
       } finally {
         admission.release(lease);
       }
@@ -295,45 +414,85 @@ export function createMergeVerificationRunPort(
   };
 }
 
-function acquireVerificationAdmission(
+interface VerificationPressure {
+  readonly reason: string;
+  readonly requestedCost: number;
+  readonly retryable: boolean;
+  readonly snapshot: ResourceAdmissionSnapshot;
+}
+
+type VerificationAdmissionOutcome =
+  | { readonly kind: 'admitted'; readonly lease: ResourceAdmissionLease }
+  | { readonly kind: 'pressure'; readonly pressure: VerificationPressure }
+  | { readonly kind: 'rejected'; readonly error: AppError };
+
+function decideVerificationAdmission(
   admission: MergeVerificationAdmissionPort,
   input: { readonly operationId: string; readonly workspaceId: string },
-): Result<ResourceAdmissionLease> {
+): VerificationAdmissionOutcome {
   const decision = admission.tryAcquire({
     operationId: input.operationId,
     workspaceId: input.workspaceId,
     resourceClass: 'verification_heavy',
     cost: MERGE_VERIFICATION_ADMISSION_COST,
   });
-  if (decision.admitted) return ok(decision.lease);
+  if (decision.admitted) return { kind: 'admitted', lease: decision.lease };
   if (decision.code === 'RESOURCE_PRESSURE') {
-    return err(appError(
-      'RESOURCE_PRESSURE',
-      `Exact-head merge verification was not admitted (${decision.reason}); `
-      + 'wait for the running heavy work to finish, then retry',
-      true,
-      {
+    return {
+      kind: 'pressure',
+      pressure: {
         reason: decision.reason,
-        operationId: input.operationId,
         requestedCost: decision.requestedCost,
-        retryable: decision.retryable ? 1 : 0,
-        pressureState: decision.snapshot.pressureState,
-        activeCost: decision.snapshot.activeCost,
-        effectiveGlobalCost: decision.snapshot.effectiveGlobalCost,
+        retryable: decision.retryable,
+        snapshot: decision.snapshot,
       },
-    ));
+    };
   }
   if (decision.reason === 'duplicate_operation') {
-    return err(appError(
-      'CONFLICT',
-      `Merge verification admission is already held for ${input.operationId}`,
-      true,
-    ));
+    return {
+      kind: 'rejected',
+      error: appError(
+        'CONFLICT',
+        `Merge verification admission is already held for ${input.operationId}`,
+        true,
+      ),
+    };
   }
+  return {
+    kind: 'rejected',
+    error: appError(
+      'INVALID_INPUT',
+      `Merge verification admission request was rejected (${decision.reason})`,
+      false,
+    ),
+  };
+}
+
+function acquireVerificationAdmission(
+  admission: MergeVerificationAdmissionPort,
+  input: { readonly operationId: string; readonly workspaceId: string },
+): Result<ResourceAdmissionLease> {
+  const outcome = decideVerificationAdmission(admission, input);
+  if (outcome.kind === 'admitted') return ok(outcome.lease);
+  if (outcome.kind === 'pressure') return pressureError(outcome.pressure, input.operationId);
+  return err(outcome.error);
+}
+
+function pressureError(pressure: VerificationPressure, operationId: string): Result<never> {
   return err(appError(
-    'INVALID_INPUT',
-    `Merge verification admission request was rejected (${decision.reason})`,
-    false,
+    'RESOURCE_PRESSURE',
+    `Exact-head merge verification was not admitted (${pressure.reason}); `
+    + 'wait for the running heavy work to finish, then retry',
+    true,
+    {
+      reason: pressure.reason,
+      operationId,
+      requestedCost: pressure.requestedCost,
+      retryable: pressure.retryable ? 1 : 0,
+      pressureState: pressure.snapshot.pressureState,
+      activeCost: pressure.snapshot.activeCost,
+      effectiveGlobalCost: pressure.snapshot.effectiveGlobalCost,
+    },
   ));
 }
 
@@ -353,7 +512,7 @@ async function verify(
   localGates: readonly RequiredMergeGate[],
   signal: AbortSignal | undefined,
   attemptId: string | undefined,
-): Promise<Result<MergeVerificationRunResult>> {
+): Promise<Result<MergeVerificationVerdictResult>> {
   const { deps, workspaceVerifier, now, randomId } = context;
 
   let workspaceRoot: string | undefined;
@@ -461,6 +620,7 @@ async function verify(
   try {
     const appended = await deps.receipts.append({ receiptRef, receipt, recordedAt: createdAt });
     return ok({
+      status: 'completed' as const,
       receiptRef,
       receipt,
       decision,

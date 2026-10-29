@@ -5,7 +5,7 @@ import {
   type RepositoryMergePolicy,
 } from '@unified-mpc/domain';
 
-export type MergeVerificationStatusAttemptState = 'running' | 'completed' | 'failed' | 'interrupted';
+export type MergeVerificationStatusAttemptState = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
 
 export interface MergeVerificationStatusAttemptView {
   readonly attemptId: string;
@@ -102,6 +102,8 @@ export interface MergeVerificationStatusPort {
 
 const DEFAULT_STALE_AFTER_MS = 90_000;
 const EXPIRED_DETAIL = 'Heartbeat expired without a verdict; the runner never reported completion';
+const QUEUED_DETAIL = 'Queued behind heavy admission; no gate has run and no receipt exists yet. '
+  + 'A merge_verification_run for this exact head claims it.';
 
 /**
  * Read-only projection of durable verification state.
@@ -189,6 +191,7 @@ function toAttemptView(
   staleCutoff: number,
 ): MergeVerificationStatusAttemptView {
   const expired = record.status === 'running' && Date.parse(record.heartbeatAt) <= staleCutoff;
+  const queued = record.status === 'queued';
   return {
     attemptId: record.attemptId,
     headSha: record.headSha,
@@ -199,7 +202,9 @@ function toAttemptView(
     startedAt: record.startedAt,
     heartbeatAt: record.heartbeatAt,
     ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
-    ...(record.detail === undefined && !expired ? {} : { detail: record.detail ?? EXPIRED_DETAIL }),
+    ...(record.detail === undefined && !expired && !queued
+      ? {}
+      : { detail: record.detail ?? (expired ? EXPIRED_DETAIL : QUEUED_DETAIL) }),
     ...(record.receiptRef === undefined ? {} : { receiptRef: record.receiptRef }),
   };
 }

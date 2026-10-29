@@ -60,6 +60,36 @@ export interface MergeVerificationReceipt {
   readonly createdAt: string;
 }
 
+/** One completed exact-head verification that persisted a receipt. */
+export interface MergeVerificationVerdictOutcome {
+  readonly status: 'completed';
+  readonly receiptRef: string;
+  readonly receipt: MergeVerificationReceipt;
+  readonly decision: MergeEvidenceDecision;
+  readonly sequence: number;
+}
+
+/**
+ * Durable queued outcome (#305): the exact-head verification request was accepted but
+ * heavy admission was denied. No gate ran, no receipt exists, and the attempt row is the
+ * durable record that the next run for the same head claims.
+ */
+export interface MergeVerificationQueuedOutcome {
+  readonly status: 'queued';
+  readonly attemptId: string;
+  readonly repository: string;
+  readonly pullRequest: number;
+  readonly headSha: string;
+  readonly reason: string;
+  readonly retryable: boolean;
+  readonly requestedCost: number;
+  readonly detail: string;
+}
+
+export type MergeVerificationRunOutcome =
+  | MergeVerificationVerdictOutcome
+  | MergeVerificationQueuedOutcome;
+
 export interface MergeEvidenceSubject {
   readonly repository: string;
   readonly pullRequest: number;

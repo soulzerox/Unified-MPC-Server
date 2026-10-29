@@ -6,10 +6,17 @@ import {
   type ResourceAdmissionRejectionReason,
   type ResourceAdmissionRequest,
 } from './resource-admission.js';
+import {
+  orderHeavyJobs,
+  type HeavyJobFairnessCandidate,
+} from './heavy-job-fairness.js';
 
 export const HEAVY_JOB_QUEUE_VERSION = 1 as const;
 
 export const DEFAULT_HEAVY_JOB_KIND = 'generic' as const;
+
+/** Aging bound for cross-project fairness (#145); below the one-hour retention. */
+export const DEFAULT_HEAVY_JOB_AGING_MS = 30 * 60_000;
 
 export interface HeavyJobRequest {
   readonly operationId: string;
@@ -145,6 +152,8 @@ export interface HeavyJobWaiterQueueOptions {
   /** Durable state authority; omitted for the process-local queue. */
   readonly store?: HeavyJobQueueStore;
   readonly now?: () => Date;
+  /** Starvation bound for cross-project fairness; defaults to 30 minutes. */
+  readonly agingMs?: number;
   /**
    * Called when drain() drops a local row because its durable row is no longer
    * claimable (retired by recovery or another owner). The owner must retire the
@@ -176,7 +185,10 @@ export class HeavyJobWaiterQueue {
   private readonly maxQueued: number;
   private readonly store: HeavyJobQueueStore | undefined;
   private readonly now: () => Date;
+  private readonly agingMs: number;
   private readonly onRetired: ((operationId: string) => void) | undefined;
+  /** Process-local fairness history; empty after a restart by design. */
+  private readonly lastServedAt = new Map<string, number>();
   private nextPosition = 1;
 
   public constructor(
@@ -187,9 +199,14 @@ export class HeavyJobWaiterQueue {
     if (!Number.isSafeInteger(max) || max < 1) {
       throw new RangeError('maxQueued must be a positive safe integer');
     }
+    const agingMs = options.agingMs ?? DEFAULT_HEAVY_JOB_AGING_MS;
+    if (!Number.isSafeInteger(agingMs) || agingMs < 1) {
+      throw new RangeError('agingMs must be a positive safe integer');
+    }
     this.maxQueued = max;
     this.store = options.store;
     this.now = options.now ?? ((): Date => new Date());
+    this.agingMs = agingMs;
     this.onRetired = options.onRetired;
   }
 
@@ -365,18 +382,43 @@ export class HeavyJobWaiterQueue {
   }
 
   /**
-   * Admit queued jobs in position order while the controller allows.
+   * Admit queued jobs in fair order while the controller allows.
+   *
+   * Blocking work stays ahead of aged and background work (#145 U12) and the
+   * least-recently-served workspace is tried first, inside every tier, so one
+   * project cannot hold a single heavy slot. The durable position is never
+   * rewritten: it stays the audit order and restart fallback.
    *
    * A scoped denial (workspace, session or resource-class ceiling) only
    * blocks that scope, so a later job from another scope may still run:
    * backfill it instead of letting one project's saturated workspace hold
    * the whole queue. Global denials (memory pressure, global cost or the
    * operation limit) stop the drain because no later job can fit either.
-   * Within the admitted scopes, position order is preserved.
+   * Within the admitted scopes, fair order is preserved.
    */
   public drain(): HeavyJobAdmission[] {
     const admitted: HeavyJobAdmission[] = [];
-    for (const queued of [...this.queued]) {
+    const nowMs = this.now().getTime();
+    // Prune before ordering: history for a workspace with no local row can no
+    // longer influence this pass and would only grow the map.
+    this.pruneFairnessHistory();
+    const candidates: HeavyJobFairnessCandidate[] = this.queued.map((queued) => ({
+      operationId: queued.entry.operationId,
+      workspaceId: queued.entry.workspaceId,
+      requestedAt: queued.entry.requestedAt,
+      blocking: queued.entry.blocking,
+      position: queued.position,
+    }));
+    const ordered = orderHeavyJobs(candidates, {
+      now: nowMs,
+      agingMs: this.agingMs,
+      lastServedAt: this.lastServedAt,
+    });
+    const local = new Map(this.queued.map((queued) => [queued.entry.operationId, queued]));
+
+    for (const operationId of ordered) {
+      const queued = local.get(operationId);
+      if (queued === undefined) continue;
       const candidate: ResourceAdmissionRequest = {
         operationId: queued.entry.operationId,
         workspaceId: queued.entry.workspaceId,
@@ -398,10 +440,22 @@ export class HeavyJobWaiterQueue {
         this.onRetired?.(queued.entry.operationId);
         continue;
       }
+      // Only a real admission counts as service: a row that could not start
+      // must not make its workspace yield its next turn.
+      this.lastServedAt.set(queued.entry.workspaceId, nowMs);
       this.removeLocal(queued.entry.operationId);
       admitted.push({ lease: decision.lease });
     }
     return admitted;
+  }
+
+  /** Drop fairness history for workspaces with no work left in this queue. */
+  private pruneFairnessHistory(): void {
+    if (this.lastServedAt.size === 0) return;
+    const waiting = new Set(this.queued.map((queued) => queued.entry.workspaceId));
+    for (const workspaceId of [...this.lastServedAt.keys()]) {
+      if (!waiting.has(workspaceId)) this.lastServedAt.delete(workspaceId);
+    }
   }
 
   private insertLocal(entry: HeavyJobQueueEntry, position: number): void {

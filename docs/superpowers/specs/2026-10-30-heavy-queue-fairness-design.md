@@ -13,8 +13,14 @@ against the admission controller.
 Two rules, in order:
 
 1. **Blocking first** — existing #145 U12 promotion of user-blocking gate work
-   stays authoritative and is not reordered by fairness.
+   stays authoritative and is never outranked by aged or background work.
 2. **Least-recently-served workspace first**, with a bounded aging escape.
+
+Rotation applies **inside** the blocking tier as well: every current producer
+(declared heavy `shell`, pre-edit gate) enqueues `blocking: true`, so FIFO
+among blocking jobs would leave cross-project fairness inert in production.
+Blocking work still always precedes aged and background work; only the order
+between blocking jobs from different workspaces changes.
 
 Aging is the safety net, not the primary mechanism: round-robin between active
 workspaces already prevents one project from monopolizing a single heavy slot,
@@ -69,7 +75,8 @@ denial), and prunes workspaces that no longer have a local row. The map is proce
 
 The ordering is:
 
-1. blocking candidates, FIFO by `requestedAt` then position;
+1. blocking candidates, rotated by workspace with the same
+   least-recently-served rule, FIFO within one workspace;
 2. aged candidates (`now - requestedAt >= agingMs`), FIFO by `requestedAt`;
 3. every other candidate grouped by workspace, choosing the workspace with the
    oldest `lastServedAt` first (never-served before any served workspace), then
@@ -80,6 +87,19 @@ The ordering is:
 
 Ties always fall back to `requestedAt` and then durable position, so ordering is
 deterministic for a given context.
+
+### Amendment (implementation step 2)
+
+The original rule kept blocking candidates strictly FIFO. That would have made
+fairness inert for both production queues: the declared heavy `shell` adapter
+and the pre-edit gate both enqueue `blocking: true`, so every real candidate
+would have landed in the FIFO blocking tier and a burst from one project could
+still hold the single heavy slot. Rotation therefore also applies inside the
+blocking tier. The tier boundary is unchanged — blocking work still always
+precedes aged and background work, and `promote()` still moves a job ahead of
+background maintenance — but two projects' blocking jobs now alternate instead
+of one project draining its burst first. Single-workspace blocking queues are
+still FIFO by `requestedAt` then position.
 
 ## Why not durable fairness state
 

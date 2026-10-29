@@ -19,6 +19,7 @@ import {
   tryAdmitDelegatedAgent,
   tryAdmitVerificationHeavy,
 } from './resource-admission.js';
+import type { CpuLoadProbe } from './cpu-load.js';
 import type { ResourcePressureProbe } from './resource-pressure.js';
 
 describe('resource admission contract', () => {
@@ -697,9 +698,18 @@ describe('heavy headroom (#145)', () => {
     };
   }
 
+  function cpuProbe(loadAverage1m: number, cpuCount = 8): CpuLoadProbe {
+    return { sample: () => ({ loadAverage1m, cpuCount, sampledAtMs: 1 }) };
+  }
+
   function headroomController(
     probe: ResourcePressureProbe | undefined,
-    options: { readonly maxExtraHeavyJobs?: number; readonly maxHeavyOperations?: number } = {},
+    options: {
+      readonly maxExtraHeavyJobs?: number;
+      readonly maxHeavyOperations?: number;
+      readonly loadAverage1m?: number;
+      readonly cpuCount?: number;
+    } = {},
   ): ResourceAdmissionController {
     return new ResourceAdmissionController(
       {
@@ -709,9 +719,13 @@ describe('heavy headroom (#145)', () => {
           maxExtraHeavyJobs: options.maxExtraHeavyJobs ?? 1,
           bytesPerExtraHeavyJob: 4 * GIB,
           reserveBytes: 2 * GIB,
+          maxLoadPerCore: 1,
         },
       },
-      probe === undefined ? {} : { pressureProbe: probe },
+      {
+        ...(probe === undefined ? {} : { pressureProbe: probe }),
+        cpuProbe: cpuProbe(options.loadAverage1m ?? 0.5, options.cpuCount ?? 8),
+      },
     );
   }
 
@@ -773,7 +787,7 @@ describe('heavy headroom (#145)', () => {
       { ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS },
       // Keep the global-cost reduction out of the way so this pins the heavy
       // cap itself, not the independent elevated-pressure cost ratio.
-      { pressureProbe: probe, elevatedGlobalCostRatio: 1 },
+      { pressureProbe: probe, cpuProbe: cpuProbe(0.5), elevatedGlobalCostRatio: 1 },
     );
 
     expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
@@ -805,6 +819,39 @@ describe('heavy headroom (#145)', () => {
     expect(controller.snapshot().effectiveMaxHeavyOperations).toBe(1);
   });
 
+  it('denies extra slots when the CPU load is above the per-core ceiling', () => {
+    const controller = headroomController(pressureProbe('normal', 16 * GIB), { loadAverage1m: 8.1 });
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2')))
+      .toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot()).toMatchObject({
+      effectiveMaxHeavyOperations: 1,
+      cpu: { loadAverage1m: 8.1, cpuCount: 8 },
+    });
+  });
+
+  it('exposes the live CPU sample beside the measured heavy cap', () => {
+    const controller = headroomController(pressureProbe('normal', 16 * GIB), { loadAverage1m: 2, cpuCount: 4 });
+
+    expect(controller.snapshot()).toMatchObject({
+      effectiveMaxHeavyOperations: 2,
+      cpu: { loadAverage1m: 2, cpuCount: 4 },
+    });
+  });
+
+  it('fails closed when no CPU probe is configured', () => {
+    const controller = new ResourceAdmissionController(
+      { ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS },
+      { pressureProbe: pressureProbe('normal', 16 * GIB) },
+    );
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2')))
+      .toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot().effectiveMaxHeavyOperations).toBe(1);
+  });
+
   it('treats maxExtraHeavyJobs=0 as disabled', () => {
     const controller = headroomController(pressureProbe('normal', 64 * GIB), { maxExtraHeavyJobs: 0 });
 
@@ -829,9 +876,10 @@ describe('heavy headroom (#145)', () => {
           maxExtraHeavyJobs: 2,
           bytesPerExtraHeavyJob: 4 * GIB,
           reserveBytes: 2 * GIB,
+          maxLoadPerCore: 1,
         },
       },
-      { pressureProbe: pressureProbe('normal', 16 * GIB) },
+      { pressureProbe: pressureProbe('normal', 16 * GIB), cpuProbe: cpuProbe(0.5) },
     );
 
     expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);

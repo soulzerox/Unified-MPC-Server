@@ -1,9 +1,11 @@
 import { ProcessMemoryPressureProbe } from './resource-pressure.js';
 import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
+import { ProcessCpuLoadProbe, type CpuLoadProbe, type CpuLoadSample } from './cpu-load.js';
 import {
   DEFAULT_HEAVY_BYTES_PER_EXTRA_JOB,
   DEFAULT_HEAVY_HEADROOM_RESERVE_BYTES,
   DEFAULT_HEAVY_MAX_EXTRA_JOBS,
+  DEFAULT_HEAVY_MAX_LOAD_PER_CORE,
   effectiveHeavyCapacity,
   heavyHeadroomFromEnv,
   normalizeHeavyHeadroom,
@@ -78,6 +80,8 @@ interface NormalizedResourceAdmissionLimits {
 
 export interface ResourceAdmissionControllerOptions {
   readonly pressureProbe?: ResourcePressureProbe;
+  /** Live CPU sample for measured extra heavy slots; omitted fails closed. */
+  readonly cpuProbe?: CpuLoadProbe;
   /** Effective global weighted-cost ceiling while memory pressure is elevated. */
   readonly elevatedGlobalCostRatio?: number;
   /** Effective global weighted-cost ceiling while memory pressure is critical. */
@@ -101,6 +105,7 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
     maxExtraHeavyJobs: DEFAULT_HEAVY_MAX_EXTRA_JOBS,
     bytesPerExtraHeavyJob: DEFAULT_HEAVY_BYTES_PER_EXTRA_JOB,
     reserveBytes: DEFAULT_HEAVY_HEADROOM_RESERVE_BYTES,
+    maxLoadPerCore: DEFAULT_HEAVY_MAX_LOAD_PER_CORE,
   }),
   resourceClassCost: Object.freeze({
     dependency_bootstrap: 8,
@@ -175,6 +180,8 @@ export interface ResourceAdmissionSnapshot {
   readonly effectiveGlobalCost: number;
   /** Present when a live pressure probe produced the current bounded sample. */
   readonly pressure?: ResourcePressureSample;
+  /** Present when a live CPU probe produced the current bounded sample. */
+  readonly cpu?: CpuLoadSample;
 }
 
 export type ResourceAdmissionRejectionReason =
@@ -221,6 +228,7 @@ export type ResourceAdmissionDecision =
 export class ResourceAdmissionController {
   private readonly limits: NormalizedResourceAdmissionLimits;
   private readonly pressureProbe: ResourcePressureProbe | undefined;
+  private readonly cpuProbe: CpuLoadProbe | undefined;
   private readonly elevatedGlobalCostRatio: number;
   private readonly criticalGlobalCostRatio: number;
   private readonly active = new Map<string, ResourceAdmissionLease>();
@@ -257,6 +265,7 @@ export class ResourceAdmissionController {
     };
 
     this.pressureProbe = options.pressureProbe;
+    this.cpuProbe = options.cpuProbe;
     this.elevatedGlobalCostRatio = options.elevatedGlobalCostRatio ?? DEFAULT_ELEVATED_GLOBAL_COST_RATIO;
     this.criticalGlobalCostRatio = options.criticalGlobalCostRatio ?? DEFAULT_CRITICAL_GLOBAL_COST_RATIO;
     validateCostRatio(this.elevatedGlobalCostRatio, 'elevatedGlobalCostRatio');
@@ -274,7 +283,8 @@ export class ResourceAdmissionController {
 
     const sessionId = normalizeSessionId(request.sessionId);
     const pressure = this.readPressure();
-    const snapshot = this.buildSnapshot(pressure);
+    const cpu = this.readCpu();
+    const snapshot = this.buildSnapshot(pressure, cpu);
     const workspaceCost = snapshot.activeCostByWorkspace[request.workspaceId] ?? 0;
     const sessionCost = snapshot.activeCostBySession[sessionId] ?? 0;
     const classCost = snapshot.activeCostByClass[request.resourceClass];
@@ -308,7 +318,7 @@ export class ResourceAdmissionController {
         reason,
         requestedCost,
         retryable: true,
-        snapshot: this.buildSnapshot(pressure),
+        snapshot: this.buildSnapshot(pressure, cpu),
       };
     }
 
@@ -320,7 +330,7 @@ export class ResourceAdmissionController {
       cost: request.cost,
     };
     this.active.set(lease.operationId, lease);
-    return { admitted: true, lease, snapshot: this.buildSnapshot(pressure) };
+    return { admitted: true, lease, snapshot: this.buildSnapshot(pressure, cpu) };
   }
 
   /**
@@ -372,10 +382,14 @@ export class ResourceAdmissionController {
   }
 
   public snapshot(): ResourceAdmissionSnapshot {
-    return this.buildSnapshot(this.readPressure());
+    const pressure = this.readPressure();
+    return this.buildSnapshot(pressure, this.readCpu());
   }
 
-  private buildSnapshot(pressure: ResourcePressureSample | undefined): ResourceAdmissionSnapshot {
+  private buildSnapshot(
+    pressure: ResourcePressureSample | undefined,
+    cpu: CpuLoadSample | undefined,
+  ): ResourceAdmissionSnapshot {
     const activeCostByClass: Record<ResourceAdmissionClass, number> = {
       dependency_bootstrap: 0,
       context_scan: 0,
@@ -410,7 +424,13 @@ export class ResourceAdmissionController {
       effectiveMaxHeavyOperations: effectiveHeavyCapacity(
         this.limits.maxHeavyOperations,
         this.limits.heavyHeadroom,
-        pressure,
+        pressure === undefined
+          ? undefined
+          : {
+            state: pressure.state,
+            availableMemoryBytes: pressure.availableMemoryBytes,
+            ...(cpu === undefined ? {} : { loadAverage1m: cpu.loadAverage1m, cpuCount: cpu.cpuCount }),
+          },
       ),
       rejected: this.rejected,
       pressureState,
@@ -421,6 +441,7 @@ export class ResourceAdmissionController {
         this.criticalGlobalCostRatio,
       ),
       ...(pressure === undefined ? {} : { pressure }),
+      ...(cpu === undefined ? {} : { cpu }),
     };
   }
 
@@ -431,6 +452,17 @@ export class ResourceAdmissionController {
     } catch {
       // OS/process metric failure must not take down admission; static ceilings
       // remain in force until the pressure probe can produce a sample again.
+      return undefined;
+    }
+  }
+
+  private readCpu(): CpuLoadSample | undefined {
+    if (this.cpuProbe === undefined) return undefined;
+    try {
+      return this.cpuProbe.sample();
+    } catch {
+      // A failed CPU probe only removes measured extra heavy slots; it never
+      // blocks the base cap or any static ceiling.
       return undefined;
     }
   }
@@ -518,7 +550,10 @@ export function sharedProcessResourceAdmissionController(): ResourceAdmissionCon
       ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
       heavyHeadroom: heavyHeadroomFromEnv(),
     },
-    { pressureProbe: new ProcessMemoryPressureProbe() },
+    {
+      pressureProbe: new ProcessMemoryPressureProbe(),
+      cpuProbe: new ProcessCpuLoadProbe(),
+    },
   );
   return processResourceAdmissionController;
 }

@@ -36,12 +36,14 @@ export {
   type DurableShellTaskReconciliationProvider,
   type ShellCapabilityOptions,
   type ShellHeavyAdmissionClass,
+  type ShellHeavyAdmissionEnqueueResult,
+  type ShellHeavyAdmissionGrant,
   type ShellHeavyAdmissionLease,
   type ShellHeavyAdmissionPort,
   type ShellHeavyAdmissionRequest,
-  type ShellHeavyAdmissionResult,
 } from './shell-backend.js';
 export {
+  type DurableShellReserveRequest,
   type DurableShellTaskExternalReconciler,
   type DurableShellTaskExternalReconciliationDescriptor,
   type DurableShellTaskExternalReconciliationResult,

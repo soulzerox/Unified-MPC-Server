@@ -3,7 +3,13 @@ import {
   ResourceAdmissionController,
   tryAdmitGoalProcess,
 } from './resource-admission.js';
-import { HeavyJobWaiterQueue } from './heavy-job-queue.js';
+import {
+  HeavyJobWaiterQueue,
+  type HeavyJobClaimResult,
+  type HeavyJobLiveEntry,
+  type HeavyJobQueueStore,
+  type HeavyJobSupersedeStoreResult,
+} from './heavy-job-queue.js';
 
 function makeController(): ResourceAdmissionController {
   return new ResourceAdmissionController({ globalCost: 8, workspaceCost: 8, maxOperations: 4 });
@@ -25,11 +31,16 @@ describe('heavy job waiter queue (#145 U3)', () => {
     expect(queuedB).toMatchObject({ status: 'queued' });
     expect(queuedC).toMatchObject({ status: 'queued' });
     expect(queue.depth()).toBe(2);
+    expect(queue.position('heavy-b')).toBe(1);
+    expect(queue.position('heavy-c')).toBe(2);
+    expect(queue.position('missing')).toBeUndefined();
 
     if (first.admitted) controller.release(first.lease);
     const admitted = queue.drain();
     expect(admitted.map((a) => a.lease.operationId)).toEqual(['heavy-b']);
     expect(queue.depth()).toBe(1);
+    expect(queue.position('heavy-b')).toBeUndefined();
+    expect(queue.position('heavy-c')).toBe(2);
   });
 
   it('coalesces duplicate exact-input work instead of queueing twice', () => {
@@ -195,6 +206,35 @@ describe('heavy job queue supersede (#145 U4)', () => {
     const res = queue.supersede('missing-h1', 'verify-h2', { workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 2 });
     expect(res).toMatchObject({ status: 'queued', queued: 'verify-h2' });
     expect(queue.depth()).toBe(1);
+  });
+});
+
+describe('heavy job queue durable retirement (#145)', () => {
+  it('reports a dropped local row so its owner can retire the parked work', () => {
+    const controller = makeController();
+    const retired: string[] = [];
+    const store: HeavyJobQueueStore = {
+      claim: (entry): HeavyJobClaimResult => ({ status: 'queued', operationId: entry.operationId, position: 1, depth: 1 }),
+      promote: (): number | undefined => 1,
+      cancel: (): boolean => true,
+      supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      start: (): boolean => false,
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => 1,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const queue = new HeavyJobWaiterQueue(controller, {
+      store,
+      onRetired: (operationId): void => { retired.push(operationId); },
+    });
+
+    queue.enqueue({ operationId: 'shell:x', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 });
+    expect(queue.drain()).toEqual([]);
+
+    expect(retired).toEqual(['shell:x']);
+    expect(queue.position('shell:x')).toBeUndefined();
+    expect(controller.snapshot()).toMatchObject({ activeOperations: 0 });
   });
 });
 

@@ -961,6 +961,11 @@ export function createStdioMcpRuntime(
     managedResourceRecoveryReady,
     heavyJobQueueRecoveryReady,
   ]).then(() => undefined);
+  // Callers await this to learn whether recovery succeeded, but a stdio host can
+  // also be torn down (or lose its client) before it ever awaits. Mark the
+  // rejection handled so a failed recovery stays observable through the same
+  // promise instead of terminating the process as an unhandled rejection.
+  void recoveryReady.catch(() => undefined);
   const actor: FileActor = { clientId: 'cli-mcp-stdio', clientName: 'Unified-MPC-Server CLI' };
   const sharedActivityLease = createSharedActivityLease(process.env.TUNNEL_CLIENT_PROFILE_DIR);
   const activityReady = sharedActivityLease.then(async (lease) => lease?.initialize());

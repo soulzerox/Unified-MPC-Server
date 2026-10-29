@@ -744,6 +744,11 @@ export const mergeVerificationStatusSchema = z.object({
   limit: z.number().int().min(1).max(100).optional(),
 }).strict();
 
+export const heavyJobQueueStatusSchema = z.object({
+  workspaceId: z.string().trim().min(1).max(128).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).strict();
+
 export const mergeReconcileSchema = z.object({
   repository: z.string().trim().min(1).max(512),
   pullRequest: z.number().int().positive(),

@@ -1,0 +1,58 @@
+import { appError, err, ok } from '@unified-mpc/domain';
+import type { HeavyJobLiveEntry } from '@unified-mpc/workspace';
+import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
+import { heavyJobQueueStatusSchema } from './schemas.js';
+
+const DEFAULT_LIMIT = 20;
+
+function projectEntry(entry: HeavyJobLiveEntry): Record<string, unknown> {
+  return {
+    operationId: entry.operationId,
+    workspaceId: entry.workspaceId,
+    jobKind: entry.jobKind,
+    resourceClass: entry.resourceClass,
+    cost: entry.cost,
+    blocking: entry.blocking,
+    state: entry.state,
+    position: entry.position,
+    attempt: entry.attempt,
+    requestedAt: entry.requestedAt,
+    heartbeatAt: entry.heartbeatAt,
+    ...(entry.startedAt === undefined ? {} : { startedAt: entry.startedAt }),
+    ...(entry.ownerId === undefined ? {} : { ownerId: entry.ownerId }),
+  };
+}
+
+export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[] {
+  return [
+    defineTool({
+      name: 'heavy_job_queue_status',
+      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth plus bounded queued/running entries with position, attempt and heartbeat times, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: heavyJobQueueStatusSchema,
+      handler: async (input) => {
+        const store = context.services.heavyJobQueue;
+        if (store === undefined) return missingService();
+        try {
+          const live = store.listLive();
+          const filtered = input.workspaceId === undefined
+            ? live
+            : live.filter((entry) => entry.workspaceId === input.workspaceId);
+          const limit = input.limit ?? DEFAULT_LIMIT;
+          const entries = filtered.slice(0, limit).map(projectEntry);
+          return ok({
+            queueDepth: store.depth(),
+            live: filtered.length,
+            queued: filtered.filter((entry) => entry.state === 'queued').length,
+            running: filtered.filter((entry) => entry.state === 'running').length,
+            truncated: filtered.length > entries.length,
+            entries,
+          });
+        } catch {
+          return err(appError('INTERNAL_ERROR', 'Heavy job queue state could not be read', true));
+        }
+      },
+    }),
+  ];
+}

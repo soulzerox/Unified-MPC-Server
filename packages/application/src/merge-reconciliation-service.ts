@@ -1,5 +1,6 @@
 import {
   evaluateMergeEvidence,
+  MergeReconciliationRefConflictError,
   reconcileMergeEvidence,
   type MergeMethod,
   type MergeObservation,
@@ -45,6 +46,7 @@ export type MergeReconciliationInspectReason =
   | 'receipt_store_error'
   | 'receipt_identity_mismatch'
   | 'reconciliation_store_error'
+  | 'reconciliation_ref_conflict'
   | MergeReconciliationReason;
 
 export type MergeReconciliationResult =
@@ -218,7 +220,15 @@ export class MergeReconciliationService {
     let persisted: MergeReconciliationRecord;
     try {
       persisted = (await this.historyWriter.append(record)).record;
-    } catch {
+    } catch (error) {
+      if (error instanceof MergeReconciliationRefConflictError) {
+        return {
+          status: 'inspect_required',
+          reason: 'reconciliation_ref_conflict',
+          ...(receiptRef === undefined ? {} : { receiptRef }),
+          record: error.persisted,
+        };
+      }
       return {
         status: 'inspect_required',
         reason: 'reconciliation_store_error',

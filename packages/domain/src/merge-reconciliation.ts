@@ -57,6 +57,19 @@ export interface MergeReconciliationRecord {
   readonly recordedAt: string;
 }
 
+/** Thrown when a reconciliation ref is already persisted with materially different evidence. */
+export class MergeReconciliationRefConflictError extends Error {
+  public readonly reason = 'reconciliation_ref_conflict' as const;
+
+  public constructor(
+    public readonly persisted: MergeReconciliationRecord,
+    message = `Merge reconciliation ref '${persisted.reconciliationRef}' already identifies different evidence`,
+  ) {
+    super(message);
+    this.name = 'MergeReconciliationRefConflictError';
+  }
+}
+
 export function reconcileMergeEvidence(
   policy: RepositoryMergePolicy,
   observation: MergeObservation,

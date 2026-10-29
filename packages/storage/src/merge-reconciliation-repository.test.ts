@@ -100,6 +100,21 @@ describe('SqliteMergeReconciliationRepository', () => {
     }
   });
 
+  it('treats a repeated observation of the same merge at a later time as idempotent', async () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const repository = new SqliteMergeReconciliationRepository(database);
+      const first = await repository.append(record());
+
+      await expect(repository.append(record({
+        observation: { ...observation, observedAt: '2026-10-07T01:35:00.000Z' },
+        recordedAt: '2026-10-07T01:36:00.000Z',
+      }))).resolves.toEqual({ appended: false, record: first.record });
+    } finally {
+      database.close();
+    }
+  });
+
   it('is idempotent for an identical reconciliation ref and rejects conflicting evidence under that ref', async () => {
     const database = new SqliteDatabase(':memory:');
     try {
@@ -107,9 +122,20 @@ describe('SqliteMergeReconciliationRepository', () => {
       const first = await repository.append(record());
       await expect(repository.append(record())).resolves.toEqual({ appended: false, record: first.record });
 
+      const conflictingObservation: MergeObservation = {
+        ...observation,
+        mergeSha: 'cccccccccccccccccccccccccccccccccccccccc',
+      };
       await expect(repository.append(record({
-        observation: { ...observation, mergeSha: 'cccccccccccccccccccccccccccccccccccccccc' },
-      }))).rejects.toMatchObject({ reason: 'reconciliation_ref_conflict' });
+        observation: conflictingObservation,
+        decision: reconcileMergeEvidence(policy, conflictingObservation, receipt, 'merge'),
+      }))).rejects.toMatchObject({
+        reason: 'reconciliation_ref_conflict',
+        persisted: {
+          reconciliationRef: 'merge-reconciliation:279@bbbbbbbb',
+          decision: { status: 'RECONCILED' },
+        },
+      });
     } finally {
       database.close();
     }

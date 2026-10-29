@@ -120,6 +120,57 @@ still invalidate the cache and force a cold pass.
 Leave it at `0` unless retrieval quality, not write authorization, is the
 problem you are solving; the gate opens either way.
 
+### Heavy job queue (#145)
+
+Declared heavy work runs through one durable queue shared by the MCP HTTP and
+stdio runtimes. The default constrained profile admits **one heavy job at a
+time**; a second declaration waits instead of failing or running beside it.
+
+Heavy classes are `verification_heavy` (full build/test/lint/typecheck
+verification) and `rag_indexing` (large index/embedding batches). Callers opt in
+explicitly, with no command-name heuristics:
+
+```jsonc
+{
+  "operation": "run",
+  "executable": "pnpm",
+  "arguments": ["-r", "test"],
+  "execution": "background",
+  "admission_class": "verification_heavy"
+}
+```
+
+A declared run writes its durable task as `waiting_resource` first and starts
+only when the admission controller frees a heavy slot; `shell` `status` / `wait`
+then show an `admission` block with class, cost, state, position and waited
+time. `timeout_seconds` starts counting at launch, so queue residence does not
+consume the caller's budget.
+
+Operator behavior to expect:
+
+- the waiter list is bounded (16 queued shell declarations); overflow returns
+  `RESOURCE_PRESSURE` before a task record exists, so a refused run never holds
+  a slot;
+- cancel while queued removes the queue row and spawns nothing;
+- queued work survives an MCP restart: the next runtime adopts the existing
+  durable row and starts it on admission, keeping its queue position;
+- a `waiting_resource` task older than the one-hour queue retention fails with
+  `expired before a runtime re-attached it`, and one whose queue row was retired
+  fails with `interrupted before admission` instead of silently starting a new
+  generation;
+- `termination_unverified` keeps the heavy slot until worker-identity
+  reconciliation proves the process is gone, so a possibly-live build never
+  overlaps new heavy work.
+
+Use `heavy_job_queue_status` to inspect queue depth, the running job, positions,
+wait/run durations, heartbeats, active heavy cost and memory pressure without
+admitting new work. `status` / `list` on `shell` show the same parking state per
+task.
+
+The one-heavy-slot cap is a configured controller limit, not a measured one; do
+not raise it on a constrained host. Dynamic headroom and cross-project aging are
+tracked separately in #145.
+
 ### Runtime-root safety
 
 `UNIFIED_MPC_ROOT` is the **production runtime identity**, not a Goal Workspace. The recommended production value is the stable `runtime/current` pointer. The validator also permits a durable canonical checkout for controlled recovery/development use, but its lifecycle must remain independent of issue/goal cleanup. Never point it at:

@@ -178,6 +178,16 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     scheduledContinuations: serviceProxy('scheduledContinuations', calls, (method) => method === 'authorizeWorkspaceMutation'
       ? { allowed: true }
       : { continuationId: 'continuation-1', status: 'scheduled', version: 1 }),
+    heavyJobQueue: {
+      listLive() {
+        calls.push('heavyJobQueue.listLive');
+        return [];
+      },
+      depth() {
+        calls.push('heavyJobQueue.depth');
+        return 0;
+      },
+    },
     mergePolicy: {
       async getByRepository() {
         calls.push('mergePolicy.getByRepository');

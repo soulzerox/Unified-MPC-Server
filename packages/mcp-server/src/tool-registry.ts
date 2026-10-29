@@ -93,6 +93,7 @@ import { gitTools } from './tools/git-tools.js';
 import { goalTools } from './tools/goal-tools.js';
 import { harnessTools } from './tools/harness-tools.js';
 import { mcpBridgeTools } from './tools/mcp-bridge-tools.js';
+import { heavyJobQueueTools } from './tools/heavy-job-queue-tools.js';
 import { mergeTools } from './tools/merge-tools.js';
 import { processTools } from './tools/process-tools.js';
 import { ragTools } from './tools/rag-tools.js';
@@ -400,6 +401,7 @@ export class ToolRegistry {
       ...skillTools(context),
       ...mcpBridgeTools(context),
       ...mergeTools(context),
+      ...heavyJobQueueTools(context),
       ...ragTools(context),
       ...contextTools(context, contextEngine),
       ...filePageTools(filePageEngine),

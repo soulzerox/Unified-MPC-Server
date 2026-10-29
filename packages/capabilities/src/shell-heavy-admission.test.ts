@@ -23,6 +23,8 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
   public readonly requests: ShellHeavyAdmissionRequest[] = [];
   public readonly settled: Array<{ operationId: string; outcome: string }> = [];
   public readonly cancelled = new Set<string>();
+  /** Durable rows that survived the backend instance; shared across restarts. */
+  public readonly rows: Set<string>;
   public full = false;
   public coalesce = false;
   public autoAdmit = false;
@@ -33,17 +35,32 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
   private readonly listeners = new Set<(grant: ShellHeavyAdmissionGrant) => void>();
   private readonly retiredListeners = new Set<(operationId: string) => void>();
 
+  public constructor(rows: Set<string> = new Set()) {
+    this.rows = rows;
+  }
+
   public enqueue(request: ShellHeavyAdmissionRequest): ShellHeavyAdmissionEnqueueResult {
     this.requests.push(request);
     if (this.enqueueFailure) return { status: 'failed', depth: 0, cost: COST };
     if (this.full) return { status: 'full', depth: 16, cost: COST };
     if (this.coalesce) return { status: 'coalesced', depth: 1, cost: COST };
+    this.rows.add(request.operationId);
     if (this.autoAdmit) this.admitted.add(request.operationId);
     if (this.grantOnEnqueue) {
       // Deliver the capacity release while the backend is still writing its
       // reservation: the grant must wait, not be mistaken for a stale one.
       queueMicrotask(() => this.grantNow(request.operationId));
     }
+    return { status: 'queued', position: this.requests.length, depth: this.requests.length, cost: COST };
+  }
+
+  public reattach(
+    request: ShellHeavyAdmissionRequest,
+  ): ShellHeavyAdmissionEnqueueResult | { status: 'missing'; depth: number; cost: number } {
+    this.requests.push(request);
+    if (!this.rows.has(request.operationId)) return { status: 'missing', depth: 0, cost: COST };
+    if (this.coalesce) return { status: 'coalesced', depth: 1, cost: COST };
+    if (this.autoAdmit) this.admitted.add(request.operationId);
     return { status: 'queued', position: this.requests.length, depth: this.requests.length, cost: COST };
   }
 
@@ -69,6 +86,7 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
     if (!this.requests.some((request) => request.operationId === operationId)) return false;
     this.cancelled.add(operationId);
     this.admitted.delete(operationId);
+    this.rows.delete(operationId);
     return true;
   }
 
@@ -104,6 +122,7 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
   public retire(operationId: string): void {
     this.cancelled.add(operationId);
     this.admitted.delete(operationId);
+    this.rows.delete(operationId);
     for (const listener of [...this.retiredListeners]) listener(operationId);
   }
 
@@ -281,8 +300,9 @@ describe('declared heavy shell admission (#145)', () => {
   it('re-attaches a parked run after a restart and starts it on admission', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
     temporaryRoots.push(root);
+    const firstAdmission = new FakeAdmission();
     const first = new ShellCapabilityBackend({
-      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: firstAdmission,
     });
     const run = await first.execute({
       operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
@@ -291,7 +311,7 @@ describe('declared heavy shell admission (#145)', () => {
     expect(run).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
     const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
 
-    const fake = new FakeAdmission();
+    const fake = new FakeAdmission(firstAdmission.rows);
     const restarted = new ShellCapabilityBackend({
       allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
     });
@@ -316,8 +336,9 @@ describe('declared heavy shell admission (#145)', () => {
   it('fails a parked run that outlived the re-attachment window', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
     temporaryRoots.push(root);
+    const firstAdmission = new FakeAdmission();
     const first = new ShellCapabilityBackend({
-      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: firstAdmission,
     });
     const run = await first.execute({
       operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
@@ -325,7 +346,7 @@ describe('declared heavy shell admission (#145)', () => {
     });
     const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
 
-    const fake = new FakeAdmission();
+    const fake = new FakeAdmission(firstAdmission.rows);
     const restarted = new ShellCapabilityBackend({
       allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
     });
@@ -338,11 +359,42 @@ describe('declared heavy shell admission (#145)', () => {
     expect(status).toMatchObject({ ok: true, value: { state: 'failed', error: expect.stringContaining('expired') } });
   });
 
+  it('fails a parked run whose queue row is gone instead of starting a new generation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
+    temporaryRoots.push(root);
+    const firstAdmission = new FakeAdmission();
+    const first = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: firstAdmission,
+    });
+    const run = await first.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
+      admission_class: 'verification_heavy',
+    });
+    expect(run).toMatchObject({ ok: true, value: { state: 'waiting_resource' } });
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    // The queue row was retired while no runtime held it: the durable task is
+    // the only surviving record, and the admission generation that would have
+    // run it is gone. Re-enqueueing would silently start a new generation, so
+    // the parked task must become terminal instead.
+    const fake = new FakeAdmission();
+    const restarted = new ShellCapabilityBackend({
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,
+    });
+    expect(await restarted.recoverParkedHeavy()).toEqual({ reattached: 0, failed: 1, skipped: 0 });
+    expect(fake.rows.has(`shell:${taskId}`)).toBe(false);
+
+    const status = await restarted.execute({ operation: 'status', task_id: taskId });
+    expect(status).toMatchObject({ ok: true, value: { state: 'failed', error: expect.stringContaining('interrupted') } });
+    expect(fake.settled).toEqual([]);
+  });
+
   it('leaves a parked run to a live foreign runtime instead of double-queuing it', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-shell-'));
     temporaryRoots.push(root);
+    const firstAdmission = new FakeAdmission();
     const first = new ShellCapabilityBackend({
-      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: new FakeAdmission(),
+      allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: firstAdmission,
     });
     const run = await first.execute({
       operation: 'run', executable: process.execPath, arguments: ['-e', ''], cwd: root, execution: 'background', userConfirmed: true,
@@ -350,7 +402,7 @@ describe('declared heavy shell admission (#145)', () => {
     });
     const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
 
-    const fake = new FakeAdmission();
+    const fake = new FakeAdmission(firstAdmission.rows);
     fake.coalesce = true;
     const restarted = new ShellCapabilityBackend({
       allowedRoots: [root], taskStateDirectory: path.join(root, '.tasks'), heavyAdmissionWatchIntervalMs: 15, heavyAdmission: fake,

@@ -5,6 +5,7 @@ import type {
   HeavyJobLiveState,
   HeavyJobQueueEntry,
   HeavyJobQueueStore,
+  HeavyJobReattachResult,
   HeavyJobRecoveryAction,
   HeavyJobSupersedeStoreResult,
 } from '@unified-mpc/workspace';
@@ -195,6 +196,40 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
         );
       }
       return { status: 'queued', operationId: normalized.operationId, position, depth: this.depth() };
+    });
+  }
+
+  /**
+   * Claim an existing live row only (#145 restart). A missing or terminal row
+   * is reported as `missing` and left untouched: restart re-attachment must
+   * never create a new admission generation for parked work.
+   */
+  public claimExisting(entry: HeavyJobQueueEntry): HeavyJobReattachResult {
+    const normalized = normalizeEntry(entry);
+    const now = this.now().toISOString();
+
+    return this.transaction((): HeavyJobReattachResult => {
+      const existing = this.find(normalized.operationId);
+      if (existing === undefined || !LIVE_STATES.has(existing.state as HeavyJobLiveState)) {
+        return { status: 'missing', operationId: normalized.operationId, depth: this.depth() };
+      }
+      if (existing.state === 'running') {
+        return { status: 'running', operationId: normalized.operationId, depth: this.depth() };
+      }
+      if (existing.owner_id !== null && existing.owner_id !== this.ownerId) {
+        return { status: 'coalesced', operationId: normalized.operationId, depth: this.depth() };
+      }
+      this.database.connection.prepare(`
+        UPDATE heavy_jobs
+        SET owner_id = ?, heartbeat_at = ?
+        WHERE operation_id = ? AND state = 'queued'
+      `).run(this.ownerId, now, normalized.operationId);
+      return {
+        status: 'queued',
+        operationId: normalized.operationId,
+        position: existing.position,
+        depth: this.depth(),
+      };
     });
   }
 

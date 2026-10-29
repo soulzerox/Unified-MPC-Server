@@ -60,6 +60,10 @@ export type ShellHeavyAdmissionEnqueueResult =
   | { readonly status: 'full'; readonly depth: number; readonly cost: number }
   | { readonly status: 'failed'; readonly depth: number; readonly cost: number };
 
+export type ShellHeavyAdmissionReattachResult =
+  | ShellHeavyAdmissionEnqueueResult
+  | { readonly status: 'missing'; readonly depth: number; readonly cost: number };
+
 export interface ShellHeavyAdmissionGrant {
   readonly operationId: string;
   readonly lease: ShellHeavyAdmissionLease;
@@ -73,6 +77,12 @@ export interface ShellHeavyAdmissionGrant {
 export interface ShellHeavyAdmissionPort {
   /** Claim one bounded durable queue row; never starts a process. */
   enqueue(request: ShellHeavyAdmissionRequest): ShellHeavyAdmissionEnqueueResult;
+  /**
+   * Re-attach to a durable queue row that already exists (#145 restart).
+   * Never creates or revives a row: `missing` means the admission generation
+   * is gone, so the parked task must be failed instead of silently started.
+   */
+  reattach(request: ShellHeavyAdmissionRequest): ShellHeavyAdmissionReattachResult;
   /** Admit queued work now; grants are operations this call started. */
   pump(): readonly ShellHeavyAdmissionGrant[];
   /** Remove one still-queued row; false when it already started or settled. */
@@ -736,12 +746,22 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       }
       this.heavyPending.add(taskId);
       const workspaceId = typeof task.workspace_id === 'string' ? task.workspace_id : undefined;
-      const enqueued = admission.enqueue({
+      const reattachedRow = admission.reattach({
         operationId: shellOperationId(taskId),
         ...(workspaceId === undefined ? {} : { workspaceId }),
         resourceClass: admissionClass,
       });
-      if (enqueued.status !== 'queued') {
+      if (reattachedRow.status === 'missing') {
+        // The row was retired before any runtime re-attached it, so the
+        // admission generation that would have run this work is gone.
+        // Re-enqueueing would silently start a new generation; fail the
+        // parked task instead (#145 restart).
+        this.abandonHeavyReservation(taskId);
+        await store.failWaiting(taskId, 'Parked heavy task was interrupted before admission: its durable queue row is gone');
+        failed += 1;
+        continue;
+      }
+      if (reattachedRow.status !== 'queued') {
         this.abandonHeavyReservation(taskId);
         // Full/unavailable is transient (the next sweep retries); coalesced
         // means a live foreign runtime owns the row and its work is never

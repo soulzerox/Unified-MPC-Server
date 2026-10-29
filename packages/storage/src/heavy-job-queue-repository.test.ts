@@ -107,6 +107,36 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
     }
   });
 
+  it('re-attaches only an existing live row and never revives terminal work', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const first = repository(database, 'owner-a');
+      const second = repository(database, 'owner-b');
+
+      expect(first.claimExisting(entry('job-a'))).toEqual({ status: 'missing', operationId: 'job-a', depth: 0 });
+      expect(first.depth()).toBe(0);
+
+      expect(first.claim(entry('job-a'), 8)).toMatchObject({ status: 'queued', position: 1 });
+      // A live foreign owner's queued row is left alone.
+      expect(second.claimExisting(entry('job-a'))).toEqual({ status: 'coalesced', operationId: 'job-a', depth: 1 });
+
+      // An orphaned row is adopted in place, keeping its position.
+      first.recover('job-a', 'orphan', { at: NOW.toISOString() });
+      expect(second.claimExisting(entry('job-a'))).toEqual({ status: 'queued', operationId: 'job-a', position: 1, depth: 1 });
+
+      // A running row is reported as running, never re-queued.
+      second.start('job-a', NOW.toISOString());
+      expect(second.claimExisting(entry('job-a'))).toEqual({ status: 'running', operationId: 'job-a', depth: 0 });
+      second.settle('job-a', 'completed', NOW.toISOString());
+
+      // A terminal row is not revived by restart re-attachment.
+      expect(second.claimExisting(entry('job-a'))).toEqual({ status: 'missing', operationId: 'job-a', depth: 0 });
+      expect(first.depth()).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
   it('promotes a queued job ahead of the current head', () => {
     const database = new SqliteDatabase(':memory:');
     try {

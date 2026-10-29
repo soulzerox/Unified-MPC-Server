@@ -72,6 +72,13 @@ export type HeavyJobClaimResult =
   | { readonly status: 'running'; readonly operationId: string; readonly depth: number }
   | { readonly status: 'full'; readonly operationId: string; readonly depth: number };
 
+/** Re-attachment never creates work: `missing` means the row is gone. */
+export type HeavyJobReattachResult =
+  | { readonly status: 'queued'; readonly operationId: string; readonly position: number; readonly depth: number }
+  | { readonly status: 'coalesced'; readonly operationId: string; readonly depth: number }
+  | { readonly status: 'running'; readonly operationId: string; readonly depth: number }
+  | { readonly status: 'missing'; readonly operationId: string; readonly depth: number };
+
 export type HeavyJobSupersedeStoreResult =
   | { readonly status: 'superseded'; readonly operationId: string; readonly position: number; readonly depth: number }
   | { readonly status: 'queued'; readonly operationId: string; readonly position: number; readonly depth: number }
@@ -104,6 +111,11 @@ export type HeavyJobRecoveryAction = 'orphan' | 'interrupt' | 'expire';
  */
 export interface HeavyJobQueueStore {
   claim(entry: HeavyJobQueueEntry, maxQueued: number): HeavyJobClaimResult;
+  /**
+   * Claim an existing live row only (#145 restart). Never inserts and never
+   * revives a terminal row: `missing` means the admission generation is gone.
+   */
+  claimExisting(entry: HeavyJobQueueEntry): HeavyJobReattachResult;
   /** Returns the durable position the operation now holds, or undefined when it is not queued. */
   promote(operationId: string): number | undefined;
   cancel(operationId: string, finishedAt: string): boolean;
@@ -185,6 +197,25 @@ export class HeavyJobWaiterQueue {
     const entry = normalizeEntry(request, this.now().toISOString());
     if (this.store !== undefined) return this.enqueueDurable(entry);
     return this.enqueueLocal(entry);
+  }
+
+  /**
+   * Re-attach to a durable row that already exists (#145 restart). Unlike
+   * enqueue(), this never creates or revives a row: a missing row is reported
+   * so the caller can fail the parked work instead of starting a generation
+   * whose admission is gone.
+   */
+  public reattach(request: HeavyJobRequest): HeavyJobReattachResult {
+    const entry = normalizeEntry(request, this.now().toISOString());
+    if (this.store === undefined) {
+      return { status: 'missing', operationId: entry.operationId, depth: this.queued.length };
+    }
+    const claim = this.store.claimExisting(entry);
+    if (claim.status === 'queued'
+      && !this.queued.some((candidate) => candidate.entry.operationId === entry.operationId)) {
+      this.insertLocal(entry, claim.position);
+    }
+    return claim;
   }
 
   private enqueueLocal(entry: HeavyJobQueueEntry): HeavyJobEnqueueResult {

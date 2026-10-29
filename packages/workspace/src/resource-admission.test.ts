@@ -663,3 +663,215 @@ describe('resource admission contract', () => {
   });
 
 });
+
+describe('heavy headroom (#145)', () => {
+  const GIB = 1024 ** 3;
+
+  function pressureProbe(
+    state: 'normal' | 'elevated' | 'critical',
+    availableMemoryBytes: number,
+  ): ResourcePressureProbe {
+    return {
+      sample: () => ({
+        state,
+        totalMemoryBytes: 32 * GIB,
+        availableMemoryBytes,
+        availableRatio: Number.isFinite(availableMemoryBytes) ? availableMemoryBytes / (32 * GIB) : 0,
+        processRssBytes: 128 * 1024 * 1024,
+        sampledAtMs: 1,
+      }),
+    };
+  }
+
+  function request(operationId: string, workspaceId: string): {
+    operationId: string;
+    workspaceId: string;
+    sessionId: string;
+    cost: number;
+  } {
+    return {
+      operationId,
+      workspaceId,
+      sessionId: `session-${operationId}`,
+      cost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+    };
+  }
+
+  function headroomController(
+    probe: ResourcePressureProbe | undefined,
+    options: { readonly maxExtraHeavyJobs?: number; readonly maxHeavyOperations?: number } = {},
+  ): ResourceAdmissionController {
+    return new ResourceAdmissionController(
+      {
+        ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
+        ...(options.maxHeavyOperations === undefined ? {} : { maxHeavyOperations: options.maxHeavyOperations }),
+        heavyHeadroom: {
+          maxExtraHeavyJobs: options.maxExtraHeavyJobs ?? 1,
+          bytesPerExtraHeavyJob: 4 * GIB,
+          reserveBytes: 2 * GIB,
+        },
+      },
+      probe === undefined ? {} : { pressureProbe: probe },
+    );
+  }
+
+  it('keeps one heavy slot when measured headroom is insufficient', () => {
+    const controller = headroomController(pressureProbe('normal', 4 * GIB));
+
+    const first = tryAdmitRagIndex(controller, request('h1', 'workspace-1'));
+    const second = tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2'));
+
+    expect(first.admitted).toBe(true);
+    expect(second).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      reason: 'heavy_capacity_exhausted',
+    });
+    expect(controller.snapshot()).toMatchObject({
+      maxHeavyOperations: 1,
+      effectiveMaxHeavyOperations: 1,
+      activeHeavyOperations: 1,
+    });
+  });
+
+  it('pairs two heavy classes when normal pressure leaves enough memory', () => {
+    const controller = headroomController(pressureProbe('normal', 16 * GIB));
+
+    const first = tryAdmitRagIndex(controller, request('h1', 'workspace-1'));
+    const second = tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2'));
+    const third = tryAdmitVerificationHeavy(controller, request('h3', 'workspace-3'));
+
+    expect(first.admitted).toBe(true);
+    expect(second.admitted).toBe(true);
+    // The default global and per-class ceilings still stop a third heavy job;
+    // the dedicated per-class test below pins which ceiling rejects it.
+    expect(third).toMatchObject({
+      admitted: false,
+      code: 'RESOURCE_PRESSURE',
+      retryable: true,
+    });
+    expect(controller.snapshot()).toMatchObject({
+      maxHeavyOperations: 1,
+      effectiveMaxHeavyOperations: 2,
+      activeHeavyOperations: 2,
+    });
+  });
+
+  it('drops extra slots under elevated pressure without revoking running leases', () => {
+    let state: 'normal' | 'elevated' = 'normal';
+    const probe: ResourcePressureProbe = {
+      sample: () => ({
+        state,
+        totalMemoryBytes: 32 * GIB,
+        availableMemoryBytes: 16 * GIB,
+        availableRatio: 0.5,
+        processRssBytes: 128 * 1024 * 1024,
+        sampledAtMs: 1,
+      }),
+    };
+    const controller = new ResourceAdmissionController(
+      { ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS },
+      // Keep the global-cost reduction out of the way so this pins the heavy
+      // cap itself, not the independent elevated-pressure cost ratio.
+      { pressureProbe: probe, elevatedGlobalCostRatio: 1 },
+    );
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    state = 'elevated';
+    const second = tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2'));
+
+    expect(second).toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot()).toMatchObject({
+      activeHeavyOperations: 1,
+      effectiveMaxHeavyOperations: 1,
+    });
+  });
+
+  it('keeps the base cap when no pressure probe is configured', () => {
+    const controller = headroomController(undefined);
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2')))
+      .toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot().effectiveMaxHeavyOperations).toBe(1);
+  });
+
+  it('fails closed on a malformed pressure sample', () => {
+    const controller = headroomController(pressureProbe('normal', Number.NaN));
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2')))
+      .toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot().effectiveMaxHeavyOperations).toBe(1);
+  });
+
+  it('treats maxExtraHeavyJobs=0 as disabled', () => {
+    const controller = headroomController(pressureProbe('normal', 64 * GIB), { maxExtraHeavyJobs: 0 });
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2')))
+      .toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot().effectiveMaxHeavyOperations).toBe(1);
+  });
+
+  it('adds more than one extra slot only when the policy and cost ceiling allow', () => {
+    const controller = new ResourceAdmissionController(
+      {
+        globalCost: 32,
+        workspaceCost: 8,
+        sessionCost: 8,
+        maxOperations: 8,
+        maxHeavyOperations: 1,
+        // Keep the per-class ceilings out of the way so this pins the heavy cap
+        // itself; the default verification class stays one-job-only.
+        resourceClassCost: { rag_indexing: 32, verification_heavy: 32 },
+        heavyHeadroom: {
+          maxExtraHeavyJobs: 2,
+          bytesPerExtraHeavyJob: 4 * GIB,
+          reserveBytes: 2 * GIB,
+        },
+      },
+      { pressureProbe: pressureProbe('normal', 16 * GIB) },
+    );
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    for (const index of [2, 3]) {
+      expect(tryAdmitVerificationHeavy(controller, request(`h${index}`, `workspace-${index}`)).admitted).toBe(true);
+    }
+    expect(tryAdmitVerificationHeavy(controller, request('h4', 'workspace-4')))
+      .toMatchObject({ admitted: false, reason: 'heavy_capacity_exhausted' });
+    expect(controller.snapshot()).toMatchObject({
+      maxHeavyOperations: 1,
+      effectiveMaxHeavyOperations: 3,
+      activeHeavyOperations: 3,
+    });
+  });
+
+  it('keeps scoped ceilings ahead of the extra slot', () => {
+    const controller = headroomController(pressureProbe('normal', 16 * GIB));
+
+    expect(tryAdmitRagIndex(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-1')))
+      .toMatchObject({ admitted: false, reason: 'workspace_cost_exhausted' });
+    expect(controller.snapshot().activeHeavyOperations).toBe(1);
+  });
+
+  it('keeps the default per-class ceiling ahead of the extra slot', () => {
+    const controller = headroomController(pressureProbe('normal', 16 * GIB));
+
+    expect(tryAdmitVerificationHeavy(controller, request('h1', 'workspace-1')).admitted).toBe(true);
+    expect(tryAdmitVerificationHeavy(controller, request('h2', 'workspace-2')))
+      .toMatchObject({ admitted: false, reason: 'resource_class_cost_exhausted' });
+    expect(controller.snapshot()).toMatchObject({
+      activeHeavyOperations: 1,
+      effectiveMaxHeavyOperations: 2,
+    });
+  });
+
+  it('rejects an invalid headroom policy instead of silently disabling it', () => {
+    expect(() => new ResourceAdmissionController({
+      ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
+      heavyHeadroom: { maxExtraHeavyJobs: -1, bytesPerExtraHeavyJob: 4 * GIB, reserveBytes: 2 * GIB },
+    })).toThrow(RangeError);
+  });
+});

@@ -58,7 +58,12 @@ running leases are never revoked.
 6. The weighted-cost checks run unchanged. Two heavy jobs at cost 8 still need
    the default global ceiling of 16; a custom global ceiling is the operator's
    responsibility.
-7. Fairness, blocking promotion, scoped-denial backfill, and the durable queue
+7. Per-class ceilings are unchanged. With the default 8-cost
+   `verification_heavy` class, two verification jobs still do not overlap even
+   when the effective heavy cap is 2; the measured extra slot pairs a
+   verification job with a `rag_indexing` job. Raising the class ceiling is a
+   separate operator decision.
+8. Fairness, blocking promotion, scoped-denial backfill, and the durable queue
    are untouched. `drain()` already walks the fair order until the controller
    denies, so an extra slot simply admits the next candidate in that order.
 
@@ -72,9 +77,9 @@ Process-wide environment, read once when the shared controller is created:
 | `UNIFIED_MPC_HEAVY_JOB_MEMORY_BYTES` | `4294967296` (4 GiB) | Memory reserved per extra heavy job. |
 | `UNIFIED_MPC_HEAVY_HEADROOM_RESERVE_BYTES` | `2147483648` (2 GiB) | Memory kept free before extra slots count. |
 
-Values are positive integers (`MAX_EXTRA_JOBS` may be `0`). Invalid values fail
-controller creation with an explicit error instead of silently changing the
-cap.
+Values are positive integers (`UNIFIED_MPC_HEAVY_MAX_EXTRA_JOBS` may be `0`).
+Invalid values fail controller creation with an explicit error instead of
+silently changing the cap.
 
 ## Observability
 
@@ -110,8 +115,10 @@ pretend to measure it.
 
 - Default profile on a constrained host (normal pressure, little free memory):
   effective cap stays `1`, second heavy job is `heavy_capacity_exhausted`.
-- Normal pressure with enough free memory: effective cap rises to `2`, two
-  heavy jobs from two workspaces are admitted, a third is denied.
+- Normal pressure with enough free memory: effective cap rises to `2`, a
+  `rag_indexing` job and a `verification_heavy` job from different workspaces
+  are admitted, and a second verification job still hits the default per-class
+  ceiling.
 - Elevated or critical pressure: extra slots disappear even when memory numbers
   would otherwise fit; already running leases stay active.
 - Missing or malformed sample: effective cap stays `1` (fail closed).

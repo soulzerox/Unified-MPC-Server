@@ -5,6 +5,7 @@ export * from './dependency-resource-manager.js';
 export * from './dependency-cache-lifecycle.js';
 export * from './delegated-workspace-contract.js';
 export * from './resource-admission.js';
+export * from './heavy-headroom.js';
 export * from './heavy-job-queue.js';
 export * from './heavy-job-fairness.js';
 export * from './canonical-ref-store.js';

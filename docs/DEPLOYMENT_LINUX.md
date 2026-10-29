@@ -188,9 +188,35 @@ Cross-project fairness (#145) shapes which queued job is tried next:
   cannot disagree with the order actually tried. Runtimes without a shell
   admission queue omit these fields.
 
-The one-heavy-slot cap is a configured controller limit, not a measured one; do
-not raise it on a constrained host. Dynamic headroom is tracked separately in
-#145.
+#### Measured heavy headroom
+
+The base cap stays one heavy slot. Extra heavy slots come from **measured
+memory headroom**, never from total RAM:
+
+- an extra slot requires normal pressure and, after a reserve, enough
+  `availableMemoryBytes` for one job estimate;
+- the configured cap remains the floor and hard bound; the default policy adds
+  at most one extra slot;
+- class, workspace, session and global weighted-cost ceilings still apply. With
+  the default 8-cost `verification_heavy` class, the extra slot pairs a
+  verification job with an indexing job; two verification jobs still do not
+  overlap unless their class ceiling is raised;
+- elevated or critical pressure removes the extra slots immediately without
+  revoking running leases; a missing or malformed sample fails closed to the
+  base cap.
+
+The policy is process-wide and read once at controller creation:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `UNIFIED_MPC_HEAVY_MAX_EXTRA_JOBS` | `1` | Extra heavy slots above the base cap; `0` disables measured widening. |
+| `UNIFIED_MPC_HEAVY_JOB_MEMORY_BYTES` | `4294967296` (4 GiB) | Memory reserved per extra heavy job. |
+| `UNIFIED_MPC_HEAVY_HEADROOM_RESERVE_BYTES` | `2147483648` (2 GiB) | Memory kept free for the OS/runtime before extra slots count. |
+
+Invalid values fail runtime startup with the variable name. An 8 GiB host with
+the defaults normally keeps one heavy slot. `heavy_job_queue_status` reports
+both the configured `maxHeavyOperations` and the measured
+`effectiveMaxHeavyOperations` in its `admission` block.
 
 ### Runtime-root safety
 

@@ -1,5 +1,15 @@
 import { ProcessMemoryPressureProbe } from './resource-pressure.js';
 import type { ResourcePressureProbe, ResourcePressureSample, ResourcePressureState } from './resource-pressure.js';
+import {
+  DEFAULT_HEAVY_BYTES_PER_EXTRA_JOB,
+  DEFAULT_HEAVY_HEADROOM_RESERVE_BYTES,
+  DEFAULT_HEAVY_MAX_EXTRA_JOBS,
+  effectiveHeavyCapacity,
+  heavyHeadroomFromEnv,
+  normalizeHeavyHeadroom,
+  type HeavyHeadroomLimits,
+  type NormalizedHeavyHeadroom,
+} from './heavy-headroom.js';
 
 export const RESOURCE_ADMISSION_CLASSES = [
   'dependency_bootstrap',
@@ -40,12 +50,18 @@ export interface ResourceAdmissionLimits {
   readonly sessionCost?: number;
   readonly maxOperations: number;
   /**
-   * Optional ceiling on concurrently active `HEAVY_ADMISSION_CLASSES`
+   * Optional configured ceiling on concurrently active `HEAVY_ADMISSION_CLASSES`
    * operations, independent of class and workspace. Defaults to
-   * `DEFAULT_MAX_HEAVY_OPERATIONS`; raise it only when measured headroom
-   * proves the host can run more than one heavy job safely.
+   * `DEFAULT_MAX_HEAVY_OPERATIONS`. This is the floor and hard bound for the
+   * measured extra slots configured by `heavyHeadroom`.
    */
   readonly maxHeavyOperations?: number;
+  /**
+   * Measured extra heavy slots (#145). Omitted keeps the default policy:
+   * one extra slot when normal pressure leaves enough available memory.
+   * Set `maxExtraHeavyJobs: 0` to disable the measured widening.
+   */
+  readonly heavyHeadroom?: Partial<HeavyHeadroomLimits>;
   /** Optional per-class ceilings; unspecified classes default to the global ceiling. */
   readonly resourceClassCost?: Readonly<Partial<Record<ResourceAdmissionClass, number>>>;
 }
@@ -56,6 +72,7 @@ interface NormalizedResourceAdmissionLimits {
   readonly sessionCost: number;
   readonly maxOperations: number;
   readonly maxHeavyOperations: number;
+  readonly heavyHeadroom: NormalizedHeavyHeadroom;
   readonly resourceClassCost: Readonly<Record<ResourceAdmissionClass, number>>;
 }
 
@@ -78,6 +95,13 @@ export const DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS = Object.freeze({
   // #145: build/test/lint verification and embedding/index work share one
   // constrained budget, so the default profile runs at most one of them.
   maxHeavyOperations: DEFAULT_MAX_HEAVY_OPERATIONS,
+  // #145 measured headroom: one extra slot is possible, but only while the
+  // live sample is normal and 4 GiB remains after a 2 GiB reserve.
+  heavyHeadroom: Object.freeze({
+    maxExtraHeavyJobs: DEFAULT_HEAVY_MAX_EXTRA_JOBS,
+    bytesPerExtraHeavyJob: DEFAULT_HEAVY_BYTES_PER_EXTRA_JOB,
+    reserveBytes: DEFAULT_HEAVY_HEADROOM_RESERVE_BYTES,
+  }),
   resourceClassCost: Object.freeze({
     dependency_bootstrap: 8,
     context_scan: 8,
@@ -139,8 +163,13 @@ export interface ResourceAdmissionSnapshot {
   readonly activeCostBySession: Readonly<Record<string, number>>;
   /** Live `HEAVY_ADMISSION_CLASSES` operations, regardless of workspace. */
   readonly activeHeavyOperations: number;
-  /** Ceiling that `activeHeavyOperations` is compared against. */
+  /** Configured heavy ceiling; the floor and hard bound for measured extras. */
   readonly maxHeavyOperations: number;
+  /**
+   * Ceiling that `activeHeavyOperations` is actually compared against: the
+   * configured cap plus any measured extra slots available right now.
+   */
+  readonly effectiveMaxHeavyOperations: number;
   readonly rejected: number;
   readonly pressureState: ResourcePressureState;
   readonly effectiveGlobalCost: number;
@@ -204,6 +233,7 @@ export class ResourceAdmissionController {
     validateLimit(limits.sessionCost ?? limits.globalCost, 'sessionCost');
     validateLimit(limits.maxOperations, 'maxOperations');
     validateLimit(limits.maxHeavyOperations ?? DEFAULT_MAX_HEAVY_OPERATIONS, 'maxHeavyOperations');
+    const heavyHeadroom = normalizeHeavyHeadroom(limits.heavyHeadroom);
     for (const resourceClass of RESOURCE_ADMISSION_CLASSES) {
       validateLimit(limits.resourceClassCost?.[resourceClass] ?? limits.globalCost, `resourceClassCost.${resourceClass}`);
     }
@@ -213,6 +243,7 @@ export class ResourceAdmissionController {
       sessionCost: limits.sessionCost ?? limits.globalCost,
       maxOperations: limits.maxOperations,
       maxHeavyOperations: limits.maxHeavyOperations ?? DEFAULT_MAX_HEAVY_OPERATIONS,
+      heavyHeadroom,
       resourceClassCost: {
         dependency_bootstrap: limits.resourceClassCost?.dependency_bootstrap ?? limits.globalCost,
         context_scan: limits.resourceClassCost?.context_scan ?? limits.globalCost,
@@ -253,7 +284,7 @@ export class ResourceAdmissionController {
     // still win (they hold for every later job), and a same-workspace or
     // same-class denial keeps its more specific reason.
     const heavyCapacityExhausted = isHeavyAdmissionClass(request.resourceClass)
-      && snapshot.activeHeavyOperations >= this.limits.maxHeavyOperations;
+      && snapshot.activeHeavyOperations >= snapshot.effectiveMaxHeavyOperations;
     const reason = exceedsEffectiveGlobalCost
       ? snapshot.pressureState === 'normal'
         ? 'global_cost_exhausted'
@@ -376,6 +407,11 @@ export class ResourceAdmissionController {
       activeCostBySession,
       activeHeavyOperations,
       maxHeavyOperations: this.limits.maxHeavyOperations,
+      effectiveMaxHeavyOperations: effectiveHeavyCapacity(
+        this.limits.maxHeavyOperations,
+        this.limits.heavyHeadroom,
+        pressure,
+      ),
       rejected: this.rejected,
       pressureState,
       effectiveGlobalCost: effectiveGlobalCost(
@@ -478,7 +514,10 @@ let processResourceAdmissionController: ResourceAdmissionController | undefined;
  */
 export function sharedProcessResourceAdmissionController(): ResourceAdmissionController {
   processResourceAdmissionController ??= new ResourceAdmissionController(
-    DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
+    {
+      ...DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS,
+      heavyHeadroom: heavyHeadroomFromEnv(),
+    },
     { pressureProbe: new ProcessMemoryPressureProbe() },
   );
   return processResourceAdmissionController;

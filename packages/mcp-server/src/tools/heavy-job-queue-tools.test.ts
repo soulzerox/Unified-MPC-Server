@@ -334,7 +334,9 @@ describe('heavyJobQueueTools', () => {
       },
     } as unknown as McpToolContext['services']);
 
-    const result = await tool.execute({}, new AbortController().signal);
+    // A workspace filter narrows the entry list only; the counts stay store-wide
+    // so the refusal reason is visible to the filtered request too.
+    const result = await tool.execute({ workspaceId: 'ws-a' }, new AbortController().signal);
 
     expect(result).toMatchObject({
       ok: true,
@@ -342,9 +344,18 @@ describe('heavyJobQueueTools', () => {
         // Running rows are not queued work, and the count is store-wide even
         // when the entry list itself is filtered.
         queuedByWorkspace: { 'ws-a': 2, 'ws-b': 1 },
+        live: 2,
+        queued: 2,
+        running: 0,
         fairness: { scope: 'runtime-local', agingMs: 1_000, maxQueuedPerWorkspace: 2 },
+        entries: [
+          expect.objectContaining({ operationId: 'a1' }),
+          expect.objectContaining({ operationId: 'a2' }),
+        ],
       },
     });
+    const value = (result as { ok: true; value: { entries: unknown[] } }).value;
+    expect(value.entries).toHaveLength(2);
   });
 
   it('omits fair-order fields when the runtime has no fairness provider', async () => {

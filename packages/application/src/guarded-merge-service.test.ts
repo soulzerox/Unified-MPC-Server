@@ -7,6 +7,7 @@ import type {
 import {
   GuardedMergeService,
   type GuardedMergeDispatchPort,
+  type GuardedMergeDispatchRequest,
   type GuardedMergeReceiptReader,
 } from './guarded-merge-service.js';
 
@@ -80,7 +81,7 @@ function reader(
 }
 
 function dispatchPort(
-  calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }>,
+  calls: GuardedMergeDispatchRequest[],
 ): GuardedMergeDispatchPort {
   return {
     async dispatchMerge(request): Promise<void> {
@@ -91,7 +92,7 @@ function dispatchPort(
 
 describe('GuardedMergeService', () => {
   it('fails closed without a durable verification receipt and never dispatches', async () => {
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const service = new GuardedMergeService(reader(undefined), dispatchPort(calls));
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toMatchObject({
@@ -106,7 +107,7 @@ describe('GuardedMergeService', () => {
   });
 
   it('rejects stale exact-head evidence before the merge adapter sees it', async () => {
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt(STALE_HEAD) }),
       dispatchPort(calls),
@@ -128,7 +129,7 @@ describe('GuardedMergeService', () => {
   });
 
   it('never dispatches when required gates or review do not satisfy policy', async () => {
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const invalidReceipt = receipt();
     const service = new GuardedMergeService(
       reader({
@@ -167,7 +168,7 @@ describe('GuardedMergeService', () => {
   });
 
   it('dispatches once only after the referenced receipt satisfies the exact-head policy', async () => {
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
       dispatchPort(calls),
@@ -178,11 +179,26 @@ describe('GuardedMergeService', () => {
       receiptRef: RECEIPT_REF,
       subject,
     });
-    expect(calls).toEqual([{ receiptRef: RECEIPT_REF, subject }]);
+    expect(calls).toEqual([{ receiptRef: RECEIPT_REF, subject, mergeMethod: 'merge' }]);
+  });
+
+  it('dispatches the merge method the policy declares', async () => {
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      dispatchPort(calls),
+    );
+
+    await expect(service.dispatch({
+      policy: { ...policy, mergeMethod: 'squash' },
+      subject,
+      receiptRef: RECEIPT_REF,
+    })).resolves.toMatchObject({ status: 'dispatched' });
+    expect(calls).toEqual([{ receiptRef: RECEIPT_REF, subject, mergeMethod: 'squash' }]);
   });
 
   it('fails closed when receipt storage cannot be inspected', async () => {
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const failingReader: GuardedMergeReceiptReader = {
       async getByRef(): Promise<never> {
         throw new Error('storage unavailable');
@@ -199,7 +215,7 @@ describe('GuardedMergeService', () => {
   });
 
   it('fails closed when the receipt reader returns a different receipt identity', async () => {
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const service = new GuardedMergeService(
       reader({ receiptRef: 'merge-verification:other', receipt: receipt() }),
       dispatchPort(calls),
@@ -280,7 +296,7 @@ describe('GuardedMergeService', () => {
 
   it('rejects an empty receipt ref before reading storage or dispatching', async () => {
     let reads = 0;
-    const calls: Array<{ readonly receiptRef: string; readonly subject: MergeEvidenceSubject }> = [];
+    const calls: GuardedMergeDispatchRequest[] = [];
     const service = new GuardedMergeService({
       async getByRef(): Promise<undefined> {
         reads += 1;

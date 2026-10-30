@@ -6,7 +6,6 @@ import type { ExtensionsService } from '@unified-mpc/extensions';
 const execFileAsync = promisify(execFile);
 
 const MERGE_TOOL = 'merge_pull_request';
-const DEFAULT_MERGE_METHOD = 'merge';
 const SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 const MERGE_API_TIMEOUT_MS = 60_000;
 const MERGE_API_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
@@ -97,7 +96,7 @@ export function createBuiltinGuardedMergeDispatchPort(
         repository: request.subject.repository,
         pullRequest: request.subject.pullRequest,
         headSha: request.subject.headSha,
-        method: DEFAULT_MERGE_METHOD,
+        method: request.mergeMethod,
       });
     },
   };
@@ -136,7 +135,7 @@ export function createGuardedMergeDispatchPort(
           owner,
           repo,
           pullNumber: request.subject.pullRequest,
-          merge_method: 'merge',
+          merge_method: request.mergeMethod,
           expectedHeadSha: request.subject.headSha,
         },
         descriptorFingerprint: described.value.provenance.descriptorFingerprint,

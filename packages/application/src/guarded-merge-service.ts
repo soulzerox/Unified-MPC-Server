@@ -2,6 +2,7 @@ import {
   evaluateMergeEvidence,
   type MergeEvidenceDecision,
   type MergeEvidenceSubject,
+  type MergeMethod,
   type MergeVerificationReceipt,
   type RepositoryMergePolicy,
 } from '@unified-mpc/domain';
@@ -18,6 +19,7 @@ export interface GuardedMergeReceiptReader {
 export interface GuardedMergeDispatchRequest {
   readonly receiptRef: string;
   readonly subject: MergeEvidenceSubject;
+  readonly mergeMethod: MergeMethod;
 }
 
 export interface GuardedMergeDispatchPort {
@@ -102,6 +104,7 @@ export class GuardedMergeService {
       await this.dispatchPort.dispatchMerge({
         receiptRef,
         subject: request.subject,
+        mergeMethod: request.policy.mergeMethod ?? 'merge',
       });
     } catch (error: unknown) {
       const detail = dispatchFailureDetail(error);

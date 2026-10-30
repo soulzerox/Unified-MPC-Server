@@ -57,7 +57,7 @@ describe('createGuardedMergeDispatchPort', () => {
       callMcpTool,
     }, () => 'github');
 
-    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject })).resolves.toBeUndefined();
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' })).resolves.toBeUndefined();
 
     expect(callMcpTool).toHaveBeenCalledWith({
       server: 'github',
@@ -81,9 +81,23 @@ describe('createGuardedMergeDispatchPort', () => {
       callMcpTool,
     }, () => 'github');
 
-    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject }))
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' }))
       .rejects.toThrow('does not expose merge_pull_request');
     expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('passes the policy merge method to the child provider', async () => {
+    const callMcpTool = vi.fn(async () => ok({ merged: true }));
+    const port = createGuardedMergeDispatchPort({
+      async describeMcpServer() { return description(); },
+      callMcpTool,
+    }, () => 'github');
+
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'squash' })).resolves.toBeUndefined();
+
+    expect(callMcpTool).toHaveBeenCalledWith(expect.objectContaining({
+      arguments: expect.objectContaining({ merge_method: 'squash' }),
+    }));
   });
 
   it('fails closed before child dispatch when the repository is not in owner/repo form', async () => {
@@ -96,6 +110,7 @@ describe('createGuardedMergeDispatchPort', () => {
     await expect(port.dispatchMerge({
       receiptRef: 'receipt-278',
       subject: { ...subject, repository: 'invalid-repository' },
+      mergeMethod: 'merge',
     })).rejects.toThrow('must use owner/repo form');
     expect(callMcpTool).not.toHaveBeenCalled();
   });
@@ -108,7 +123,7 @@ describe('createGuardedMergeDispatchPort', () => {
       },
     }, () => 'github');
 
-    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject })).rejects.toThrow('head changed');
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' })).rejects.toThrow('head changed');
   });
 });
 
@@ -197,13 +212,27 @@ describe('built-in guarded merge dispatch port', () => {
     const merge = vi.fn(async () => undefined);
     const port = createBuiltinGuardedMergeDispatchPort({ merge });
 
-    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject })).resolves.toBeUndefined();
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' })).resolves.toBeUndefined();
 
     expect(merge).toHaveBeenCalledWith({
       repository: subject.repository,
       pullRequest: subject.pullRequest,
       headSha: subject.headSha,
       method: 'merge',
+    });
+  });
+
+  it('sends the dispatch method the policy chose', async () => {
+    const merge = vi.fn(async () => undefined);
+    const port = createBuiltinGuardedMergeDispatchPort({ merge });
+
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'squash' })).resolves.toBeUndefined();
+
+    expect(merge).toHaveBeenCalledWith({
+      repository: subject.repository,
+      pullRequest: subject.pullRequest,
+      headSha: subject.headSha,
+      method: 'squash',
     });
   });
 });
@@ -226,9 +255,9 @@ describe('guarded merge provider selection', () => {
       builtin,
     );
 
-    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject })).resolves.toBeUndefined();
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' })).resolves.toBeUndefined();
 
-    expect(builtin.dispatchMerge).toHaveBeenCalledWith({ receiptRef: 'receipt-278', subject });
+    expect(builtin.dispatchMerge).toHaveBeenCalledWith({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' });
     expect(describeMcpServer).not.toHaveBeenCalled();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
@@ -241,7 +270,7 @@ describe('guarded merge provider selection', () => {
       callMcpTool,
     }, () => resolveGuardedMergeProviderServer('github'), builtin);
 
-    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject })).resolves.toBeUndefined();
+    await expect(port.dispatchMerge({ receiptRef: 'receipt-278', subject, mergeMethod: 'merge' })).resolves.toBeUndefined();
 
     expect(builtin.dispatchMerge).not.toHaveBeenCalled();
     expect(callMcpTool).toHaveBeenCalledWith(expect.objectContaining({

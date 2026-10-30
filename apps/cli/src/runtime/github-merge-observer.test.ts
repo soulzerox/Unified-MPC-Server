@@ -66,6 +66,42 @@ describe('createGitHubMergeObservationPort', () => {
     expect(observed.mergeMethod).toBeUndefined();
   });
 
+  it('proves a squash merge from the single-parent commit GitHub labels with the PR number', async () => {
+    const github: GitHubApiReader = {
+      async get(path): Promise<unknown> {
+        if (path.endsWith('/pulls/281')) return pull();
+        return {
+          sha: MERGE,
+          parents: [{ sha: BASE }],
+          commit: { message: 'Add the merge guard (#281)\n\nBody text.\n' },
+        };
+      },
+    };
+    const observer = createGitHubMergeObservationPort(github);
+
+    await expect(observer.observe({ repository: REPOSITORY, pullRequest: 281 })).resolves.toMatchObject({
+      mergeMethod: 'squash',
+      mergeSha: MERGE,
+    });
+  });
+
+  it('does not prove squash from a single parent without the PR trailer', async () => {
+    const github: GitHubApiReader = {
+      async get(path): Promise<unknown> {
+        if (path.endsWith('/pulls/281')) return pull();
+        return {
+          sha: MERGE,
+          parents: [{ sha: BASE }],
+          commit: { message: 'Add the merge guard\n' },
+        };
+      },
+    };
+    const observer = createGitHubMergeObservationPort(github);
+
+    const observed = await observer.observe({ repository: REPOSITORY, pullRequest: 281 });
+    expect(observed.mergeMethod).toBeUndefined();
+  });
+
   it('returns stable provider time for an unmerged PR and does not inspect a commit', async () => {
     const get = vi.fn(async (): Promise<unknown> => pull({
       merged: false,

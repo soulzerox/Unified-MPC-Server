@@ -90,6 +90,14 @@ world-writable, and still inside the deployment the process was started from. A
 symlinked helper, a path outside that deployment, or a deployment that changed
 under a running process fails closed.
 
+Credential targets additionally require a **promoted release**: a deployment
+whose root is the permitted canonical checkout is the agent-writable
+development tree, so a helper file living there could be rewritten by the model
+and would still pass an ownership and mode check. In that deployment mode
+`publish_credential_grant` refuses with `publish-credential-unsupported`, and
+consequently no credential target can publish. Release deployments get the
+helper from the promoted artifact, which the model does not write.
+
 `-c` on the command line is not repository config, so nothing the model writes
 into `.git/config` can add a second helper. The empty first assignment clears
 inherited helpers for this invocation only; both assignments are host-built.
@@ -154,7 +162,8 @@ parameterized because three different Gits need the helper at three different
 moments:
 
 ```text
-validatePushSafety(cwd, remote, authorization?) where authorization is
+validatePushSafety(cwd, remote, options?: { signal?, argv?, authorization? })
+authorization is one of
     | { kind: 'diagnostic', leaseId }              pre-approval `ls-remote`
     | { kind: 'publish',    leaseId, approvalId }  the push itself
     | { kind: 'verify',     leaseId, approvalId, spendNonce }  post-push `ls-remote`
@@ -168,21 +177,25 @@ if the target may use a credential helper:
             diagnostic: the lease is live and its host set equals the resolved set
             publish:    the receipt is live, its lease id is this lease, and the
                         receipt fingerprint equals the resolved push-URL set
-            verify:     same as publish, plus a spendNonce minted in-process by
-                        the publish that consumed this exact receipt
+            verify:     this receipt was consumed by the publish that is running
+                        now (not merely "was consumed"), the lease id matches the
+                        receipt row, and the spendNonce matches the one minted
+                        for that spawn
 ```
 
 Without an `authorization` the guard behaves exactly as today: a credential
 helper on an HTTP(S) target is denied with `push-credential-helper`. The `git`
 tool and `git push` never pass one, so nothing on that surface relaxes.
 
-The `verify` mode exists because the receipt is spent before the push, and the
+The `verify` mode exists because the receipt is spent before the push, so the
 post-push `remoteBranchSha` would otherwise be an unauthenticated `ls-remote`
-that fails on a private remote. `spendNonce` is created by the publish that
-consumed the receipt, lives only in its memory, and is never accepted from a
-caller, a tool argument or the environment; the verification passes it back
-once. That keeps the sequence authenticated without inventing a second
-credential grant after approval.
+that fails on a private remote. It is deliberately keyed to the **consumed**
+receipt plus a `spendNonce` minted by the publish that consumed it — not to a
+live receipt, which no longer exists at that point. The nonce lives only in the
+spawning publish's memory, is never accepted from a caller, a tool argument or
+the environment, and is passed back for exactly one verification read. That
+keeps the whole sequence authenticated without inventing a second credential
+grant after approval.
 
 A user-configured helper does not deny the publish path any more, because it
 cannot run: the host-built argv starts with an empty `-c credential.helper=`,
@@ -199,7 +212,11 @@ Every existing denial is unchanged: the fixed `GIT_SSH`, `GIT_SSH_COMMAND`,
 list (the adapter's own `GIT_TERMINAL_PROMPT=0` is not an override),
 `remote.<name>.receivepack|uploadpack|proxy|vcs`, `core.sshCommand|askPass|gitProxy`,
 `push.gpgSign|recurseSubmodules`, `submodule.recurse`, `gpg.*.program`,
-`protocol.*.allow`, an unresolvable hook location and any additional `-c` entry.
+`protocol.*.allow`, an unresolvable hook location (`push-hook-location-unresolved`)
+or a configured pre-push hook (`push-pre-push-hook`), and any additional `-c`
+entry. The guard also re-checks the argv it is about to spawn (`argv` above):
+the two-part reset-then-install shape is verified against the actual argument
+list, not against a promise from the caller.
 A wrong path, a symlinked path, a stale lease id, a host set that no longer
 matches the receipt, a second helper assignment, a missing reset or a missing
 `authorization` fails closed with the existing reasons plus
@@ -263,8 +280,9 @@ secret alive until its lease TTL.** Mitigations: the TTL is minutes, the key is
 the lease id, the receipt cannot be replayed, and `open` refuses an expired
 lease. Reclamation does not happen in a `READ` tool: `git_publish_preflight`
 stays side-effect free, and stale rows are deleted by the next `grant` or
-`revoke` for the same workspace plus a startup sweep, so a preflight can never
-delete the live lease of a pending approval.
+`revoke` for the same workspace plus a sweep on server start **and on a timer**
+(hourly, deleting leases whose `expiresAt` has passed), so a long-running
+service cannot keep an abandoned secret past its TTL.
 
 ## 6. Trust model
 
@@ -286,36 +304,43 @@ secret to an unapproved host.
 1. A repository with its own `credential.helper` still publishes through the
    host helper, and the configured helper is never executed (assert with a
    sentinel script that would create a file if it ran).
-2. A lease for `github.com` never answers a `gitlab.com` prompt (helper invoked
+2. The same holds for a URL-scoped `credential.<url>.helper` entry, which the
+   current guard special-cases.
+3. A lease for `github.com` never answers a `gitlab.com` prompt (helper invoked
    directly with a forged prompt).
-3. `store` and `erase` do nothing and exit non-zero.
-4. The helper writes the secret to stdout only for a successful `get`, and
+4. `store` and `erase` do nothing and exit non-zero.
+5. The helper writes the secret to stdout only for a successful `get`, and
    never to stderr, a log, a file, argv or the environment; a failed `get`
    exits non-zero with empty stdout.
-5. The secret is absent from the child argv, the child environment and the
+6. The secret is absent from the child argv, the child environment and the
    serialized tool result (assert by scanning all three).
-6. An expired lease, a consumed receipt and a mismatched lease id each fail
+7. An expired lease, a consumed receipt and a mismatched lease id each fail
    closed with `publish-credential-unavailable` before any push spawns.
-7. `revoke` runs on success, on push failure, on timeout and on abort.
-8. A helper path that is a symlink, resolves outside the running deployment, or
+8. `revoke` runs on success, on push failure, on timeout and on abort.
+9. A helper path that is a symlink, resolves outside the running deployment, or
    belongs to another deployment than the running server is denied.
-9. `git push` is still denied for the same HTTP(S) target, proving the publish
+10. `git push` is still denied for the same HTTP(S) target, proving the publish
    path did not relax the general guard.
-10. A credential-target remote with two push URLs is refused with
+11. A credential-target remote with two push URLs is refused with
     `push-target-ambiguous`; the same remote still publishes over SSH.
-11. `git_publish_preflight` performs no SecretStore write, including when a
+12. `git_publish_preflight` performs no SecretStore write, including when a
     stale lease exists for the workspace.
-12. Rewriting `remote.origin.url` after approval fails the spend with
+13. Rewriting `remote.origin.url` after approval fails the spend with
     `publish-target-changed` and delivers no credential.
-13. A private HTTP(S) fixture completes preflight, approve, push and the
+14. A private HTTP(S) fixture completes preflight, approve, push and the
     post-push verification with one lease, and the lease is gone afterwards.
-14. `grant` refuses an `http://` target with `publish-transport-unsupported` and
+15. `grant` refuses an `http://` target with `publish-transport-unsupported` and
     stores nothing.
-15. The publish argv carries exactly two `credential.helper` assignments — an
+16. The publish argv carries exactly two `credential.helper` assignments — an
     empty reset first, then the host helper — and a third assignment is denied.
-16. A helper-scoped invocation with no `authorization` is denied with
+17. A helper-scoped invocation with no `authorization` is denied with
     `push-credential-helper`, and a `verify` call with a `spendNonce` that the
     adapter did not mint is denied.
+18. `verify` is refused when the receipt is live rather than consumed by the
+    running publish, and when the nonce belongs to a different spawn.
+19. `publish_credential_grant` refuses a canonical-checkout deployment with
+    `publish-credential-unsupported`.
+20. The expiry sweep deletes a lease whose TTL passed without any `revoke`.
 
 ## 8. Slices
 

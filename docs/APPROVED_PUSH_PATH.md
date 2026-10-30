@@ -250,7 +250,7 @@ refuses a head that moved, and this PR does not touch it.
 
 ## 8. Non-goals
 
-- Relaxing `validatePushSafety` for credential-bearing targets, or adding an "ignore safety" flag to `git push`. Scoping a check to the transports it can apply to is not a relaxation: no helper runs on the targets that skip the credential denial.
+- Relaxing `validatePushSafety` for credential-bearing targets, or adding an "ignore safety" flag to `git push`. Scoping a check to the transports it can apply to is not a relaxation: no helper runs on the targets that skip the credential denial. The credential slice does not relax this either — it adds one host-owned helper behind an explicit `authorization` (see APPROVED_PUSH_PATH_CREDENTIALS.md §4), and `git push` itself is untouched.
 - Publishing from an unleased or unscheduled session.
 - Automatic PR creation, CI triggering, or merge from this tool.
 - Supporting arbitrary remotes, multiple push URLs, or non-GitHub forges in the first slice.

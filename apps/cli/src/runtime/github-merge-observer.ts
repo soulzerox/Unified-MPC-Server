@@ -64,9 +64,13 @@ export function createGitHubMergeObservationPort(
           throw new Error('GitHub merge commit identity mismatch');
         }
         const parentShas = requiredParentShas(commit.parents);
-        if (parentShas.length === 2 && parentShas.includes(baseSha) && parentShas.includes(headSha)) {
+        // The merge is identified by the head, not by the base: a pull request
+        // keeps the base SHA it branched from, while the commit is created on
+        // whatever the base branch held when the merge ran. Comparing baseSha
+        // would turn every merge of an outdated branch into an unproven method.
+        if (parentShas.length === 2 && parentShas.includes(headSha)) {
           mergeMethod = 'merge';
-        } else if (parentShas.length === 1 && parentShas[0] === baseSha
+        } else if (parentShas.length === 1 && parentShas[0] !== headSha
           && isSquashCommitMessage(commit.commit, request.pullRequest)) {
           // Squash: one commit on top of the base that GitHub labels with the
           // pull request number. A rebase keeps the original commit message, so

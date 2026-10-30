@@ -167,7 +167,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
           policy,
           repository: input.repository,
           pullRequest: input.pullRequest,
-          expectedMergeMethod: input.expectedMergeMethod ?? 'merge',
+          expectedMergeMethod: input.expectedMergeMethod ?? policy.mergeMethod ?? 'merge',
           ...(input.receiptRef === undefined ? {} : { receiptRef: input.receiptRef }),
         });
         return ok(result);

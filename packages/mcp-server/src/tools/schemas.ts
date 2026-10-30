@@ -763,7 +763,7 @@ export const heavyJobQueueStatusSchema = z.object({
 export const mergeReconcileSchema = z.object({
   repository: z.string().trim().min(1).max(512),
   pullRequest: z.number().int().positive(),
-  expectedMergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
+  expectedMergeMethod: z.enum(['merge', 'squash', 'rebase']).optional(),
   receiptRef: z.string().trim().min(1).max(1024).optional(),
 }).strict();
 

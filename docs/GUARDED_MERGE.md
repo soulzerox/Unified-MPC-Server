@@ -59,7 +59,7 @@ The provider runs one bounded call:
 gh api --method PUT \
   -H 'Accept: application/vnd.github+json' \
   repos/<owner>/<repo>/pulls/<number>/merge \
-  -f merge_method=merge \
+  -f merge_method=<policy mergeMethod> \
   -f sha=<verified-head-sha>
 ```
 

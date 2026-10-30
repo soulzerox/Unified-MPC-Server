@@ -85,6 +85,24 @@ describe('createGitHubMergeObservationPort', () => {
     });
   });
 
+  it('proves squash when the base branch moved after the PR branched', async () => {
+    const github: GitHubApiReader = {
+      async get(path): Promise<unknown> {
+        if (path.endsWith('/pulls/281')) return pull();
+        return {
+          sha: MERGE,
+          parents: [{ sha: 'cccccccccccccccccccccccccccccccccccccccc' }],
+          commit: { message: 'Add the merge guard (#281)\n' },
+        };
+      },
+    };
+    const observer = createGitHubMergeObservationPort(github);
+
+    await expect(observer.observe({ repository: REPOSITORY, pullRequest: 281 })).resolves.toMatchObject({
+      mergeMethod: 'squash',
+    });
+  });
+
   it('does not prove squash from a single parent without the PR trailer', async () => {
     const github: GitHubApiReader = {
       async get(path): Promise<unknown> {
@@ -100,6 +118,23 @@ describe('createGitHubMergeObservationPort', () => {
 
     const observed = await observer.observe({ repository: REPOSITORY, pullRequest: 281 });
     expect(observed.mergeMethod).toBeUndefined();
+  });
+
+  it('proves a merge commit when the base branch moved after the PR branched', async () => {
+    const github: GitHubApiReader = {
+      async get(path): Promise<unknown> {
+        if (path.endsWith('/pulls/281')) return pull();
+        return {
+          sha: MERGE,
+          parents: [{ sha: 'cccccccccccccccccccccccccccccccccccccccc' }, { sha: HEAD }],
+        };
+      },
+    };
+    const observer = createGitHubMergeObservationPort(github);
+
+    await expect(observer.observe({ repository: REPOSITORY, pullRequest: 281 })).resolves.toMatchObject({
+      mergeMethod: 'merge',
+    });
   });
 
   it('returns stable provider time for an unmerged PR and does not inspect a commit', async () => {

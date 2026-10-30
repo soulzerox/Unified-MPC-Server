@@ -7,18 +7,20 @@ import { fileURLToPath } from 'node:url';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
 import { diffFingerprint } from './local-verify.mjs';
+import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint } from './review-gate.mjs';
 
 /**
  * Repository-level guarded merge (#144).
  *
  * The runtime already owns `guarded_pr_merge` for MCP callers. This is the CLI
  * path used from a shell session: it refuses to merge unless a merge-ready
- * local verification receipt exists for the exact current PR head, then lets
- * GitHub enforce the same head through `--match-head-commit`.
+ * local verification receipt and a clean exact-head review receipt exist for
+ * the current PR head, then lets GitHub enforce the same head through
+ * `--match-head-commit`.
  *
  * Advisory gates (PR body wording, base branch) are checked here because a
  * later fix would be a new commit and therefore a new head, which invalidates
- * the receipt anyway.
+ * the receipts anyway.
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -104,7 +106,7 @@ export function expectedFingerprint(headSha) {
  * Every blocker is reported, not just the first, so one run tells the operator
  * everything that stands between this head and a merge.
  */
-export function evaluateEligibility({ pr, receipt, expectedBase, headFingerprint }) {
+export function evaluateEligibility({ pr, receipt, review, reviewSkill, reviewFingerprint: headReviewFingerprint, headReceiptCount, corruptReviewReceipts, expectedBase, headFingerprint }) {
   const blockers = [];
   if (pr.state !== 'OPEN') blockers.push(`PR is not open (state=${pr.state})`);
   if (pr.isDraft === true) blockers.push('PR is a draft');
@@ -124,6 +126,16 @@ export function evaluateEligibility({ pr, receipt, expectedBase, headFingerprint
     if (receipt.profile !== 'merge') blockers.push(`local verification receipt used the '${String(receipt.profile)}' profile`);
     if (receipt.diffFingerprint !== headFingerprint) blockers.push('receipt fingerprint does not match the PR head');
   }
+
+  const reviewEvaluation = evaluateReviewEvidence({
+    receipt: review,
+    headReceiptCount,
+    corruptReceiptCount: corruptReviewReceipts,
+    pr,
+    skill: reviewSkill,
+    fingerprint: headReviewFingerprint,
+  });
+  blockers.push(...reviewEvaluation.blockers);
 
   for (const hazard of findNegatedClosingKeywordHazards({ title: pr.title, body: pr.body })) {
     blockers.push(`PR ${hazard.source} retracts a closing keyword: "${hazard.excerpt}"`);
@@ -150,10 +162,10 @@ function run(argv) {
   });
 }
 
-async function readReceipts() {
+async function readReceipts(directory = RECEIPT_ROOT) {
   let names;
   try {
-    names = await readdir(RECEIPT_ROOT);
+    names = await readdir(directory);
   } catch {
     return [];
   }
@@ -161,9 +173,10 @@ async function readReceipts() {
   for (const name of names) {
     if (!name.endsWith('.json') || name === 'latest.json') continue;
     try {
-      receipts.push(JSON.parse(await readFile(path.join(RECEIPT_ROOT, name), 'utf8')));
+      receipts.push(JSON.parse(await readFile(path.join(directory, name), 'utf8')));
     } catch {
-      // A corrupt receipt is not evidence; ignore it instead of failing the run.
+      // A corrupt verification receipt is not evidence; another one for the
+      // same head may still be valid, so this store skips unreadable files.
     }
   }
   return receipts;
@@ -172,11 +185,6 @@ async function readReceipts() {
 async function resolveRepository(explicit) {
   if (explicit !== undefined) return explicit;
   return parseRepositoryFromRemote(await run(['git', 'remote', 'get-url', 'origin']));
-}
-
-async function readPullRequest(repository, prNumber) {
-  const fields = 'number,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergeStateStatus,title,body';
-  return JSON.parse(await run(['gh', 'pr', 'view', String(prNumber), '--repo', repository, '--json', fields]));
 }
 
 async function main() {
@@ -188,10 +196,22 @@ async function main() {
 
   const repository = await resolveRepository(options.repo);
   const pr = await readPullRequest(repository, options.pr);
-  const receipt = findReceipt(await readReceipts(), pr.headRefOid);
+  const [verificationReceipts, reviewStore, reviewSkill, prDiff] = await Promise.all([
+    readReceipts(),
+    readReviewReceipts(),
+    readSkillIdentity(),
+    readPullDiff(repository, options.pr),
+  ]);
+  const receipt = findReceipt(verificationReceipts, pr.headRefOid);
+  const review = findReviewReceipt(reviewStore.records, pr.headRefOid);
   const { eligible, blockers } = evaluateEligibility({
     pr,
     receipt,
+    review,
+    reviewSkill,
+    reviewFingerprint: reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff: prDiff }),
+    headReceiptCount: reviewStore.records.filter((record) => record?.headSha === pr.headRefOid).length,
+    corruptReviewReceipts: reviewStore.corrupt.length,
     expectedBase: options.base,
     headFingerprint: expectedFingerprint(pr.headRefOid),
   });
@@ -199,6 +219,9 @@ async function main() {
   console.log(`guarded-merge ${repository}#${options.pr} head ${String(pr.headRefOid).slice(0, 12)}`);
   if (receipt !== undefined) {
     console.log(`  receipt ${String(receipt.verificationId)} (${String(receipt.profile)}, mergeReady=${String(receipt.mergeReady)})`);
+  }
+  if (review !== undefined) {
+    console.log(`  review ${String(review.reviewId)} (${String(review.verdict)}, blockingOpen=${String(review.blockingOpenCount)})`);
   }
 
   if (!eligible) {
@@ -230,6 +253,7 @@ async function main() {
     baseBranch: options.base,
     method: options.method,
     verificationId: receipt.verificationId,
+    reviewId: review.reviewId,
     state: merged.state,
     mergeCommit,
     mergedAt: new Date().toISOString(),

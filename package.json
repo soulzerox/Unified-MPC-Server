@@ -25,7 +25,8 @@
     "release:materialize": "bash scripts/materialize-runtime-release.sh",
     "verify:local": "node scripts/local-verify.mjs --profile merge",
     "verify:targeted": "node scripts/local-verify.mjs --profile targeted",
-    "merge:pr": "node scripts/guarded-merge.mjs"
+    "merge:pr": "node scripts/guarded-merge.mjs",
+    "review:pr": "node scripts/review-gate.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.33.0",

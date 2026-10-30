@@ -19,9 +19,9 @@ Run the merge-readiness profile on the **exact commit** you are about to push:
 corepack pnpm@10.15.0 verify:local
 ```
 
-It runs `diff-check`, `typecheck`, `lint`, `build`, the `workspace`, `storage`,
-`mcp-server` and `cli` suites, then version consistency, the tool catalog check
-and `dist` provenance freshness. It refuses a dirty worktree because provenance
+It runs `diff-check`, `typecheck`, `lint`, the merge-gate unit tests, `build`,
+the `workspace`, `storage`, `mcp-server` and `cli` suites, then version
+consistency, the tool catalog check and `dist` provenance freshness. It refuses a dirty worktree because provenance
 and the build-provenance test describe the committed tree, and it writes a
 durable receipt to `.unified-mpc/local-verify/` (`headSha`, `diffFingerprint`,
 per-step exit codes, bounded log refs, `mergeReady`).
@@ -36,16 +36,42 @@ Copy the `mergeReady` verdict and the failing step names into the PR body. Never
 claim local CI passed without a receipt for the current head. The unit tests for
 the profile runner are `node --test scripts/local-verify.test.mjs`.
 
-Merge through the guarded path, not a bare `gh pr merge`:
+## Exact-head review before merge
+
+Verification is not a review. A merge also needs a review receipt from a
+**separate reviewer context** that only saw a frozen capsule of the head:
+
+```sh
+corepack pnpm@10.15.0 review:pr capsule --pr <number>   # freezes the head
+# start a fresh reviewer sub-agent, give it capsule.md, read-only
+corepack pnpm@10.15.0 review:pr record --pr <number> --findings <file>
+```
+
+The mandatory review contract is `.agents/skills/unified-code-review/SKILL.md`;
+a receipt is refused if its skill hash differs from the file on disk. Findings
+are structured (`severity`, `category`, `file`, `line`, `claim`,
+`evidence_refs`, `required_fix`, `status`), and any open finding with
+`required_fix` blocks the merge.
+
+A fix is a new commit, which is a new head: run `review:pr capsule` again and
+review again. One head has at most one review receipt, so a second opinion
+without a new commit is refused. A reviewer never marks its own findings fixed, and nothing reads
+its transcript after `record` — the receipt is the handoff, so the reviewer
+context can be recycled immediately.
+
+## Merge through the guarded path
+
+Never a bare `gh pr merge`:
 
 ```sh
 corepack pnpm@10.15.0 merge:pr --pr <number>
 ```
 
-It refuses unless a `mergeReady` receipt exists for the exact current PR head
-(and the PR is open, non-draft, targeting `main`, `CLEAN`, and free of retracted
-closing keywords), then passes `--match-head-commit` so GitHub rejects a head
-that moved after verification. It records the merge under
+It refuses unless both receipts — a `mergeReady` verification receipt and a
+clean review receipt — exist for the exact current PR head (and the PR is open,
+non-draft, targeting `main`, `CLEAN`, and free of retracted closing keywords),
+then passes `--match-head-commit` so GitHub rejects a head that moved after
+verification. It records the merge under
 `.unified-mpc/local-verify/merges/`. Use `--dry-run` to check eligibility only.
 
 ## Authoritative CI Watcher Policy

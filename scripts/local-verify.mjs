@@ -25,7 +25,7 @@ const MAX_LOG_CHARS = 2 * 1024 * 1024;
 const PNPM = 'corepack';
 const PNPM_PREFIX = ['pnpm@10.15.0'];
 
-export const PROFILE_VERSION = 1;
+export const PROFILE_VERSION = 2;
 export const PROFILES = ['merge', 'targeted'];
 
 /**
@@ -37,6 +37,9 @@ export const STEP_DEFINITIONS = [
   { name: 'diff-check', profiles: ['targeted', 'merge'], command: ['git', 'diff', '--check'] },
   { name: 'typecheck', profiles: ['targeted', 'merge'], command: [PNPM, ...PNPM_PREFIX, 'typecheck'] },
   { name: 'lint', profiles: ['targeted', 'merge'], command: [PNPM, ...PNPM_PREFIX, 'lint'] },
+  // The merge gate's own tests run before the expensive build: a broken guard
+  // must fail fast, and these suites need no workspace output.
+  { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs'] },
   { name: 'build', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, 'build'] },
   { name: 'test:workspace', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/workspace', 'test'] },
   { name: 'test:storage', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/storage', 'test'] },

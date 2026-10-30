@@ -132,24 +132,93 @@ session that merges from a checkout uses the repository companion instead:
 
 ```sh
 corepack pnpm@10.15.0 verify:local          # writes a mergeReady receipt for HEAD
-corepack pnpm@10.15.0 merge:pr --pr 534     # refuses unless that receipt matches
+corepack pnpm@10.15.0 review:pr capsule --pr 534
+corepack pnpm@10.15.0 review:pr record  --pr 534 --findings <file>
+corepack pnpm@10.15.0 merge:pr --pr 534     # refuses unless both receipts match
 ```
 
 `scripts/guarded-merge.mjs` applies the same two-head idea without a policy
 store:
 
 1. resolve the open PR and freeze `headRefOid`;
-2. find a receipt for that exact SHA with `profile: "merge"`, `dirty: false`,
-   `mergeReady: true`, and a `diffFingerprint` recomputed from the head;
-3. refuse on a draft, wrong base, non-`CLEAN` merge state, or a PR body that
+2. find a verification receipt for that exact SHA with `profile: "merge"`,
+   `dirty: false`, `mergeReady: true`, and a `diffFingerprint` recomputed from
+   the head;
+3. find a review receipt for that exact SHA with `role: "reviewer"`, the
+   current bundled skill hash, `verdict: "clean"`, no open blocking finding, and
+   a `reviewedFingerprint` recomputed from `gh pr diff`;
+4. refuse on a draft, wrong base, non-`CLEAN` merge state, or a PR body that
    retracts a closing keyword;
-4. merge with `gh pr merge --match-head-commit <sha>`, so a branch that moved
+5. merge with `gh pr merge --match-head-commit <sha>`, so a branch that moved
    after verification is rejected by GitHub;
-5. record `{ headSha, prNumber, verificationId, mergeCommit, mergedAt }` under
-   `.unified-mpc/local-verify/merges/`.
+6. record `{ headSha, prNumber, verificationId, reviewId, mergeCommit,
+   mergedAt }` under `.unified-mpc/local-verify/merges/`.
 
-`--dry-run` performs steps 1-3 and reports every blocker without merging. The
-receipt stays the single source of truth for this path: it never merges a head
-that was not verified on this host. A bare `gh pr merge` bypasses it, so the
-guard is only as strong as the workflow that uses it.
+`--dry-run` performs every check in steps 1-4 and reports all blockers without merging. The
+receipts are the single source of truth for this path: it never merges a head
+that was not verified and reviewed on this host. A bare `gh pr merge` bypasses
+it, so the guard is only as strong as the workflow that uses it.
+
+---
+
+## 7. Exact-Head Review Gate (`pnpm review:pr`)
+
+`scripts/review-gate.mjs` implements the review half of #144. It never reviews
+anything itself: it freezes the reviewer's input, validates the reviewer's
+findings, and turns a clean generation into a receipt the merge guard accepts.
+
+```text
+capsule --pr N     freeze head/base/diff + skill + verification into
+                   .unified-mpc/reviews/capsules/<head12>-<N>/
+        |
+        v
+fresh reviewer     separate context, read-only, capsule + repo at that head
+        |
+        v
+record --findings  validate identity, skill hash, file anchors, severities,
+                   recompute the verdict, write
+                   .unified-mpc/reviews/receipts/<head12>-<N>-<reviewId>.json
+```
+
+### Capsule
+
+`capsule.json` holds the full head SHA, base SHA, PR title/body, issue refs,
+changed files, `diffFingerprint` (over `gh pr diff`), the merge-ready
+verification receipt for that head, and the bundled skill identity. `capsule.md`
+is the reviewer's instruction sheet; `diff.patch` is the exact diff and
+`files.txt` the changed paths. Nothing from the implementer's session is
+included: a reviewer that sees the implementer's reasoning is not independent.
+
+### Findings
+
+A finding is `severity`, `category`, `file`, `line`, `claim`, `evidence_refs`,
+`required_fix`, `status`. Categories and severities are closed sets, the file
+must be in the PR's changed files, and `line` may be `null` for a whole-file
+finding. `fixed` and `invalidated` are refused at record time: only a later
+review generation can supersede an earlier one, so an implementer cannot mark
+its own findings resolved.
+
+`verdict` is recomputed from the findings, never trusted from the file. A
+finding blocks while `status === "open"` and `required_fix === true`.
+
+### Invalidation
+
+| Change | Effect |
+| --- | --- |
+| New commit / force-push | different `headSha`; old receipt stops matching |
+| Base branch moved | `baseSha` is part of the fingerprint, so the receipt stops matching |
+| `SKILL.md` edited | `skillSha256` mismatch |
+| Tree dirty or HEAD moved at freeze/record time | refused |
+| Second receipt for the same head | refused; review evidence is unique per head |
+
+A fix therefore starts a new review generation. The previous receipt stays on
+disk as history; it is never edited.
+
+### What this does not prove
+
+The reviewer is a role contract, not an OS sandbox, and a receipt is a file that
+someone with checkout access could forge — exactly like a verification receipt.
+`record` proves the tree was clean at the reviewed head afterwards, which
+catches accidental edits, not a determined actor. No GitHub review is posted;
+the runtime's `clean_llm_review` evidence remains a separate source.
 

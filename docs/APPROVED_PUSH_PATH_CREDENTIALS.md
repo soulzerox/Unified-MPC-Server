@@ -43,8 +43,8 @@ export interface PublishCredentialLease {
 export interface PublishCredentialPort {
   /** Host-side: store the operator secret for one lease. */
   grant(lease: PublishCredentialLease, secret: string): Promise<Result<void>>;
-  /** Host-side: read one lease, used by the helper process only. */
-  read(leaseId: string): Promise<Result<PublishCredentialLease | null>>;
+  /** Host-side: open one lease for the descriptor responder. Never a tool call. */
+  open(leaseId: string): Promise<Result<{ readonly lease: PublishCredentialLease; readonly secret: string } | null>>;
   /** Host-side: remove the secret, idempotently. */
   revoke(leaseId: string): Promise<Result<void>>;
 }
@@ -123,36 +123,58 @@ deployment directory (§2), with no ambient state:
   the resolved port when non-default) is in the lease's host set, the lease has
   not expired and the inherited descriptor answers; otherwise it exits `1`.
 
+A lease whose target resolves to any scheme other than `https` is refused at
+`grant` with `publish-transport-unsupported` before a secret is stored, so an
+`http://` remote fails at the first step instead of later as an opaque
+authentication failure.
+
 A process that runs the helper directly still cannot obtain a secret. The lease
-id is not itself a credential: the value lives in the host SecretStore and is
-released only to a helper holding a live inherited descriptor from the server
-that spawned it. Bounding the exposure is the descriptor's lifetime plus the
-lease TTL, not the secrecy of the id.
+id is not itself a credential: the value is released only through `open`, which
+the descriptor responder calls inside the server process that spawned the
+helper, and only while the lease is live. Bounding the exposure is the
+descriptor's lifetime plus the lease TTL, not the secrecy of the id.
+
+This is a bound against the model, not against a process that already has the
+server's uid. On a single-user host, `secret-tool lookup service unified-mpc key
+publish-<leaseId>` reads the same entry, exactly as `/proc/<pid>/environ` exposes
+an environment token to the same user. S2 removes the transcript, argv, config
+and child-environment exposures; it does not claim to defend the host against
+its own login, and it keeps the TTL short because of that.
 
 ## 4. Guard change
 
 `validatePushSafety` stays the single place that decides whether a push may
 spawn. Today a credential helper is denied whenever the resolved target could
-use one. The S2 form is narrower, not looser:
+use one, and that denial is exactly what #297 reports when a user has any helper
+configured. The S2 form is narrower, not looser:
 
 ```text
 if the target may use a credential helper:
     deny unless
-        the repository and global config contain no credential helper
-        and the invoke-level helper is exactly <deployment>/publish-credential-helper
+        the invocation clears the helper list and then installs exactly
+            <deployment>/publish-credential-helper
+        and no other -c credential.* entry, GIT_* variable or core.askPass exists
         and the receipt carries a live lease id whose host set equals the
             resolved push-URL host set recorded in the receipt
 ```
 
-The config query keeps reading only what `git config --get-regexp` reports from the
-config files (repository, global, system); a host-injected `-c credential.helper`
-is not a config entry, so the guard does not trip on its own injection.
+A user-configured helper does not deny the publish path any more, because it
+cannot run: the host-built argv starts with an empty `-c credential.helper=`,
+which clears every helper Git collected from system, global, repository and
+URL-scoped config for that one invocation, and then installs the host helper.
+That reset is what makes the #297 scenario work — configuration is neutralized
+instead of being a permanent veto — and it is why the guard no longer reads
+`credential.*.helper` as a blocker for `publish`. The reset is verified from the
+invocation the adapter built, not from the repository: exactly two
+`credential.helper` assignments, the first empty, the second the resolved
+helper, and nothing else in command scope that can execute.
 
 Everything else stays denied: `remote.<name>.receivepack`, `core.sshCommand`,
-`push.gpgSign`, `protocol.*.allow`, `GIT_*` overrides and any helper the user
-configured. A wrong path, a symlinked path, a stale lease id, a host set that no
-longer matches the receipt, or a second `-c credential.helper` fails closed with
-the existing reasons plus `publish-credential-unavailable` or
+`core.askPass`, `core.gitProxy`, `push.gpgSign`, `push.recurseSubmodules`,
+`protocol.*.allow`, `GIT_*` overrides and any additional `-c` entry. A wrong
+path, a symlinked path, a stale lease id, a host set that no longer matches the
+receipt, a second helper assignment or a missing reset fails closed with the
+existing reasons plus `publish-credential-unavailable` or
 `publish-target-changed`.
 
 `git push` remains unchanged: it never gets the `-c` treatment and keeps denying
@@ -206,7 +228,7 @@ Two revocation shapes were considered:
 
 S2 adopts the second and states the residue: **a crashed publisher can leave a
 secret alive until its lease TTL.** Mitigations: the TTL is minutes, the key is
-the lease id, the receipt cannot be replayed, and `read` refuses an expired
+the lease id, the receipt cannot be replayed, and `open` refuses an expired
 lease. Reclamation does not happen in a `READ` tool: `git_publish_preflight`
 stays side-effect free, and stale rows are deleted by the next `grant` or
 `revoke` for the same workspace plus a startup sweep, so a preflight can never
@@ -229,8 +251,9 @@ secret to an unapproved host.
 
 ## 7. Tests that must exist before S2 ships
 
-1. A repository with its own `credential.helper` is still denied, even with a
-   live lease.
+1. A repository with its own `credential.helper` still publishes through the
+   host helper, and the configured helper is never executed (assert with a
+   sentinel script that would create a file if it ran).
 2. A lease for `github.com` never answers a `gitlab.com` prompt (helper invoked
    directly with a forged prompt).
 3. `store` and `erase` do nothing and exit non-zero.
@@ -254,12 +277,16 @@ secret to an unapproved host.
     `publish-target-changed` and delivers no credential.
 13. A private HTTP(S) fixture completes preflight, approve, push and the
     post-push verification with one lease, and the lease is gone afterwards.
+14. `grant` refuses an `http://` target with `publish-transport-unsupported` and
+    stores nothing.
+15. The publish argv carries exactly two `credential.helper` assignments — an
+    empty reset first, then the host helper — and a third assignment is denied.
 
 ## 8. Slices
 
 | Slice | Content | Ships independently |
 |---|---|---|
-| S2a | `PublishCredentialPort` implemented over the existing `SecretStore` port (`SecretToolSecretStore`, Linux Secret Service; no plaintext file, no new engine) with `publish-<leaseId>` keys, the lease ledger row, the operator CLI (`grant`/`revoke`/`status`) and grant/revoke/read tests | yes, no behavior change |
+| S2a | `PublishCredentialPort` implemented over the existing `SecretStore` port (`SecretToolSecretStore`, Linux Secret Service; no plaintext file, no new engine) with `publish-<leaseId>` keys, the lease ledger row, the operator CLI (`grant`/`revoke`/`status`) and grant/revoke/open tests | yes, no behavior change |
 | S2b | helper entry point + direct-invocation tests (no network) | yes |
 | S2c | guard allowlist, `-c` argv on push and on both `ls-remote` paths, fingerprint-bound receipt, lease-for-the-spawn + revocation, end-to-end private HTTPS fixture | yes, the only slice that can publish over HTTP(S) |
 | S2d | audit row, docs, operator runbook for rotating a token | yes |

@@ -69,7 +69,7 @@ Full Bypass does not disable schema/input validation, existence checks, task/pro
 
 **Covered tools:** `git`, `git_publish_preflight`, `git_worktree_spawn`, `git_worktree_remove`.
 
-`git_publish_preflight` is read-only: it resolves the head, sanitizes push targets to scheme and host, and reports whether runtime configuration would block a push. It never writes or pushes; the only remote access is `ls-remote` to resolve default branches, and an empty `defaultBranches` means that lookup failed, so `protectedBranch` is not authoritative in that case.
+`git_publish_preflight` is read-only: it resolves the head, sanitizes push targets to scheme and host, and reports whether runtime configuration would block a push. It never writes or pushes; the only remote access is `ls-remote` to resolve default branches, which runs only after the push safety guard passes, and an empty `defaultBranches` means that lookup failed or was skipped because the guard blocked the preflight, so `protectedBranch` is not authoritative in either case.
 
 | Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
 | --- | --- | --- | --- | --- | --- | --- | --- |

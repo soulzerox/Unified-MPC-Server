@@ -154,12 +154,14 @@ head, sanitized targets, default branches and `protectedBranch`:
   "branch": "goal/publish",
   "head": "<sha>",
   "targets": ["https://github.com"],
-  "defaultBranches": ["main"],
+  "defaultBranches": [],
   "protectedBranch": false,
   "runtime": { "ready": false, "reason": "push-credential-helper", "key": "credential.<url>.helper" },
   "approval": "missing"
 }
 ```
+
+A blocked verdict carries no branch list: the guard runs before any remote contact, so a runtime that cannot publish never triggers `ls-remote`. A ready preflight carries the resolved `defaultBranches` and the matching `protectedBranch`.
 
 It does not return a `policy` field: reaching the tool already means policy allowed
 the action, and the tool cannot publish anything. `approval` is read from
@@ -167,8 +169,9 @@ the action, and the tool cannot publish anything. `approval` is read from
 `missing` means no receipt exists, `pending` means a live unconsumed receipt exists,
 and `expired`/`consumed` mean a new approval is required. A lookup failure reports
 `missing`, because a diagnostic must never claim an approval it could not read.
-When the `ls-remote` lookup for default branches fails, `defaultBranches` is `[]`
-and `protectedBranch` is not authoritative.
+When the `ls-remote` lookup for default branches fails, or the preflight is blocked
+before it contacts the remote, `defaultBranches` is `[]` and `protectedBranch` is not
+authoritative.
 
 This is what requirement 3 of #297 asks for: a caller can tell a policy-level allow
 from a runtime authentication/credential block *before* attempting to publish.

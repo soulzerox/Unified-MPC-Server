@@ -111,8 +111,11 @@ model                    host (ToolRegistry + GitService)                git chi
 Steps 1–4 fail closed. A missing, expired, mismatched or already-consumed receipt
 returns `PERMISSION_REQUIRED` with `details.reason: "publish-approval-required"`; it
 never prompts from inside the adapter. Spending happens before the spawn, so a race
-after the spend loses the receipt and refuses rather than pushing twice. A goal-lease
-check, credential injection and a separate audit row are later slices, not S1.
+after the spend loses the receipt and refuses rather than pushing twice. Both tools sit
+behind the scheduled-continuation goal-lease fence at the tool boundary, so a live
+rolling-goal fence requires the current `goalLease` before a receipt can be minted or
+spent. An in-path lease check, credential injection and a separate audit row are later
+slices, not S1.
 
 ## 4. Credential handling
 

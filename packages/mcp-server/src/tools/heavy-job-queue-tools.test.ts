@@ -285,6 +285,7 @@ describe('heavyJobQueueTools', () => {
       heavyJobFairness: {
         fairnessSnapshot: () => ({
           agingMs: 1_800_000,
+          maxQueuedPerWorkspace: 2,
           entries: [
             { operationId: 'job-b', effectiveRank: 0, aged: false },
             { operationId: 'job-a', effectiveRank: 1, aged: true },
@@ -301,7 +302,7 @@ describe('heavyJobQueueTools', () => {
     expect(result).toMatchObject({
       ok: true,
       value: {
-        fairness: { scope: 'runtime-local', agingMs: 1_800_000 },
+        fairness: { scope: 'runtime-local', agingMs: 1_800_000, maxQueuedPerWorkspace: 2 },
         entries: [
           expect.objectContaining({ operationId: 'job-a', effectiveRank: 1, aged: true }),
           expect.objectContaining({ operationId: 'job-b', effectiveRank: 0, aged: false }),
@@ -315,6 +316,35 @@ describe('heavyJobQueueTools', () => {
     }).value;
     expect(value.entries[2]).not.toHaveProperty('effectiveRank');
     expect(value.entries[2]).not.toHaveProperty('aged');
+  });
+
+  it('counts queued rows per workspace so a bound refusal is explainable', async () => {
+    const tool = queueTool({
+      heavyJobQueue: {
+        listLive: () => [
+          entry({ operationId: 'a1', workspaceId: 'ws-a' }),
+          entry({ operationId: 'a2', workspaceId: 'ws-a', position: 2 }),
+          entry({ operationId: 'b1', workspaceId: 'ws-b', position: 3 }),
+          entry({ operationId: 'r1', workspaceId: 'ws-b', position: 4, state: 'running' }),
+        ],
+        depth: () => 3,
+      },
+      heavyJobFairness: {
+        fairnessSnapshot: () => ({ agingMs: 1_000, maxQueuedPerWorkspace: 2, entries: [] }),
+      },
+    } as unknown as McpToolContext['services']);
+
+    const result = await tool.execute({}, new AbortController().signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        // Running rows are not queued work, and the count is store-wide even
+        // when the entry list itself is filtered.
+        queuedByWorkspace: { 'ws-a': 2, 'ws-b': 1 },
+        fairness: { scope: 'runtime-local', agingMs: 1_000, maxQueuedPerWorkspace: 2 },
+      },
+    });
   });
 
   it('omits fair-order fields when the runtime has no fairness provider', async () => {

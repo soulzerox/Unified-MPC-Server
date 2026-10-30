@@ -173,6 +173,7 @@ describe('shell heavy admission port (#145)', () => {
 
     expect(port.fairnessSnapshot()).toEqual({
       agingMs: DEFAULT_HEAVY_JOB_AGING_MS,
+      maxQueuedPerWorkspace: SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
       entries: [],
     });
   });
@@ -184,6 +185,7 @@ describe('shell heavy admission port (#145)', () => {
 
     expect(port.fairnessSnapshot()).toEqual({
       agingMs: DEFAULT_HEAVY_JOB_AGING_MS,
+      maxQueuedPerWorkspace: SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
       entries: [
         { operationId: 'shell:a', effectiveRank: 0, aged: false },
         { operationId: 'shell:b', effectiveRank: 1, aged: false },
@@ -236,6 +238,7 @@ describe('per-workspace queue bound (#543)', () => {
 
   it('rejects a workspace over an explicit bound while another still queues', () => {
     const port = createShellHeavyAdmissionPort(() => controller(), undefined, 1);
+    expect(port.fairnessSnapshot()).toMatchObject({ maxQueuedPerWorkspace: 1 });
     expect(port.enqueue({
       operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
     })).toMatchObject({ status: 'queued' });

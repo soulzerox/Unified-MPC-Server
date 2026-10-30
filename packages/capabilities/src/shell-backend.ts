@@ -72,6 +72,8 @@ export interface ShellHeavyAdmissionGrant {
 /** Bounded, runtime-local projection of the heavy-job fair order (#145). */
 export interface ShellHeavyFairnessSnapshot {
   readonly agingMs: number;
+  /** Configured per-workspace bound on queued rows (#543); the global bound when unset. */
+  readonly maxQueuedPerWorkspace: number;
   /** `effectiveRank` is 0-based: rank 0 is the next candidate tried. */
   readonly entries: readonly {
     readonly operationId: string;

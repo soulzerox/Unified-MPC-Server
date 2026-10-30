@@ -100,6 +100,46 @@ describe('DirectGitRunner cancellation', () => {
     expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
+  it('passes one extra inherited pipe and the helper environment when a descriptor is supplied', async () => {
+    const child = Object.assign(fakeChild(), { stdio: [null, null, null, { on: vi.fn(), end: vi.fn() }] });
+    spawnMock.mockReturnValue(child);
+    const terminator: ProcessTreeTerminator = { stop: vi.fn(async () => undefined) };
+
+    const running = new DirectGitRunner(terminator).run(['-c', 'alias.readfd=!cat <&3', 'readfd'], 'C:\\workspace', {
+      env: { UNIFIED_PUBLISH_LEASE_ID: 'lease-1', UNIFIED_PUBLISH_CREDENTIAL_FD: '3' },
+      descriptor: '{"version":1}\n',
+    });
+    closeChild(child, 0);
+
+    await expect(running).resolves.toEqual({ exitCode: 0, stdout: '', stderr: '' });
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['-c', 'alias.readfd=!cat <&3', 'readfd'],
+      expect.objectContaining({
+        stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+        env: expect.objectContaining({
+          GIT_TERMINAL_PROMPT: '0',
+          UNIFIED_PUBLISH_LEASE_ID: 'lease-1',
+          UNIFIED_PUBLISH_CREDENTIAL_FD: '3',
+        }),
+      }),
+    );
+    const fd3 = (child.stdio as unknown[])[3] as { end: ReturnType<typeof vi.fn> };
+    expect(fd3.end).toHaveBeenCalledWith('{"version":1}\n');
+  });
+
+  it('keeps the default stdio shape when no descriptor is supplied', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+    const terminator: ProcessTreeTerminator = { stop: vi.fn(async () => undefined) };
+
+    const running = new DirectGitRunner(terminator).run(['status'], 'C:\\workspace');
+    closeChild(child, 0);
+
+    await expect(running).resolves.toEqual({ exitCode: 0, stdout: '', stderr: '' });
+    expect(spawnMock).toHaveBeenCalledWith('git', ['status'], expect.not.objectContaining({ stdio: expect.anything() }));
+  });
+
   it('keeps the run unsettled after a failed tree stop and retries until verification succeeds', async () => {
     const child = fakeChild();
     spawnMock.mockReturnValue(child);

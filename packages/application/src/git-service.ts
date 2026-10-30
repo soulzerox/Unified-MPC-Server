@@ -182,7 +182,7 @@ export class GitService {
     if (!workspace.ok) return workspace;
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd);
     if (!cwd.ok) return cwd;
-    const preflight = await this.adapter.publishPreflight(cwd.value, request.remote, request.branch, signal);
+    const preflight = await this.adapter.publishPreflight(cwd.value, request.remote, request.branch, { signal });
     if (!preflight.ok) return preflight;
     const approval = await this.inspectPublishApproval(
       workspace.value.id,
@@ -234,7 +234,7 @@ export class GitService {
       cwd.value,
       binding.value.remote,
       binding.value.branch,
-      signal,
+      { signal },
     );
     if (!preflight.ok) return preflight;
     const runtimeDenial = publishRuntimeDenial(preflight.value.runtime);
@@ -325,7 +325,7 @@ export class GitService {
       cwd.value,
       binding.value.remote,
       binding.value.branch,
-      signal,
+      { signal },
     );
     if (!preflight.ok) return preflight;
     const runtimeDenial = publishRuntimeDenial(preflight.value.runtime);
@@ -383,7 +383,7 @@ export class GitService {
       remote: binding.value.remote,
       branch: binding.value.branch,
       expectedSha: binding.value.expectedSha,
-    }, signal);
+    }, { signal });
     if (!published.ok) return published;
     return ok({ ...published.value, approvalId: request.approvalId });
   }
@@ -542,7 +542,7 @@ export class GitService {
       if (parsedPush.remote === undefined) return err(appError('PERMISSION_DENIED', 'Git push remote must be explicit so push side effects can be checked'));
       const pushSafetyResolver = this.adapter.validatePushSafety;
       if (typeof pushSafetyResolver !== 'function') return err(appError('PERMISSION_DENIED', 'Git push side effects could not be verified safely'));
-      const pushSafety = await pushSafetyResolver.call(this.adapter, cwd.value, parsedPush.remote, signal);
+      const pushSafety = await pushSafetyResolver.call(this.adapter, cwd.value, parsedPush.remote, { signal });
       if (!pushSafety.ok) return pushSafety;
       const defaultBranches = await this.resolveDefaultBranches(cwd.value, invocation.subcommandArgs);
       if (!defaultBranches.ok) return defaultBranches;

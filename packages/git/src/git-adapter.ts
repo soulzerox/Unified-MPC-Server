@@ -1,7 +1,21 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import {
+  appError,
+  err,
+  isPublishCredentialAuthorization,
+  normalizePublishCredentialPushHost,
+  ok,
+  PUBLISH_CREDENTIAL_DESCRIPTOR_FD_ENV,
+  PUBLISH_CREDENTIAL_HELPER_NAME,
+  PUBLISH_CREDENTIAL_LEASE_ID_ENV,
+  serializePublishCredentialDescriptorAnswer,
+  type AppError,
+  type PublishCredentialAuthorization,
+  type PublishCredentialMaterial,
+  type Result,
+} from '@unified-mpc/domain';
 import { DirectGitRunner, type GitRunOptions, type GitRunResult, type GitRunner } from './git-runner.js';
 import { parsePorcelainStatus, type GitStatusEntry } from './parsers/status-parser.js';
 
@@ -141,8 +155,82 @@ const MAX_UNTRACKED_FILE_BYTES = 512 * 1024;
 const MAX_UNTRACKED_TOTAL_BYTES = 4 * 1024 * 1024;
 const DEFAULT_GENERATED_SEGMENTS = ['.cache', '.next', '.turbo', 'coverage', 'dist', 'node_modules', 'vendor'];
 
+/**
+ * Where the running server believes it lives (#297 §2). Only a promoted release
+ * may install the helper: in a canonical checkout the deployment root is the
+ * agent-writable development tree, so a helper file there could be rewritten and
+ * would still pass an ownership and mode check.
+ */
+export interface GitPublishCredentialDeployment {
+  readonly root: string | null;
+  readonly promoted: boolean;
+}
+
+export interface GitAdapterOptions {
+  /**
+   * Resolves the running deployment. Omitted means "cannot prove a release", so
+   * every credential-scoped invocation fails closed.
+   */
+  readonly resolvePublishCredentialDeployment?: () => Promise<GitPublishCredentialDeployment>;
+  /** Test seam for the lease-expiry clock. */
+  readonly now?: () => number;
+}
+
+/** A credential-scoped invocation: the material the helper answers from. */
+export interface GitPublishCredentialSpawn {
+  /** The receipt this spawn consumed; the guard matches it against the nonce. */
+  readonly approvalId: string;
+  readonly material: PublishCredentialMaterial;
+}
+
+/** Options for the push itself; `credential` activates the host helper. */
+export interface GitPublishOptions {
+  readonly signal?: AbortSignal | undefined;
+  readonly credential?: GitPublishCredentialSpawn | undefined;
+}
+
+/** Options for the pre-approval diagnostic read. */
+export interface GitPublishPreflightOptions {
+  readonly signal?: AbortSignal | undefined;
+  /** The live lease the diagnostic `ls-remote` answers from, if one exists. */
+  readonly credential?: GitPublishCredentialSpawn | undefined;
+}
+
+/** The exact invocation a caller is about to spawn, plus its host authorization. */
+export interface GitPushSafetyOptions {
+  readonly signal?: AbortSignal | undefined;
+  /** The complete argv, including the helper assignments when scoped. */
+  readonly argv?: readonly string[] | undefined;
+  /** Minted by this adapter for the spawn in progress; never a caller value. */
+  readonly authorization?: PublishCredentialAuthorization | undefined;
+}
+
+interface CredentialScopedInvocation {
+  readonly helperPath: string;
+  readonly runOptions: Pick<GitRunOptions, 'env' | 'descriptor'>;
+  readonly authorization: PublishCredentialAuthorization;
+}
+
+interface PublishCredentialAuthorizationEntry {
+  readonly approvalId: string;
+  readonly leaseId: string;
+  readonly kind: 'publish' | 'verify';
+  /** A publish nonce spawns exactly once. */
+  readonly consumed: boolean;
+}
+
 export class GitAdapter {
-  public constructor(private readonly runner: GitRunner = new DirectGitRunner()) {}
+  /**
+   * One-shot authorizations minted by this adapter for the publish spawn that is
+   * running now. The nonce is never accepted from a caller, a tool argument or
+   * the environment, and it dies with the spawn.
+   */
+  private readonly publishAuthorizations = new Map<string, PublishCredentialAuthorizationEntry>();
+
+  public constructor(
+    private readonly runner: GitRunner = new DirectGitRunner(),
+    private readonly options: GitAdapterOptions = {},
+  ) {}
 
   public async observeWorkspace(
     cwd: string,
@@ -395,6 +483,21 @@ export class GitAdapter {
     branchName: string,
     signal?: AbortSignal,
   ): Promise<Result<string | null>> {
+    return this.readRemoteBranchSha(cwd, remote, branchName, { signal });
+  }
+
+  /**
+   * The post-push read (#297 §2). With a credential it installs the same helper
+   * scope as the push and is allowed only by the `verify` authorization tied to
+   * the nonce of the publish spawn that just exited.
+   */
+  private async readRemoteBranchSha(
+    cwd: string,
+    remote: string,
+    branchName: string,
+    options: { readonly signal?: AbortSignal | undefined; readonly credential?: GitPublishCredentialSpawn | undefined; readonly spendNonce?: string | undefined },
+  ): Promise<Result<string | null>> {
+    const signal = options.signal;
     if (!isValidRemoteName(remote)
       || branchName.length === 0 || branchName.length > 1024
       || branchName.includes('..') || branchName.includes('//') || branchName.endsWith('/')) {
@@ -404,7 +507,31 @@ export class GitAdapter {
     const validRef = await this.runner.run(['check-ref-format', ref], cwd, this.signalOptions(signal));
     if (validRef.exitCode !== 0) return err(appError('INVALID_INPUT', 'Git remote branch is invalid'));
 
-    const safety = await this.validatePushSafety(cwd, remote, signal);
+    let scoped: CredentialScopedInvocation | undefined;
+    if (options.credential !== undefined) {
+      const helper = await this.resolveCredentialHelperPath();
+      if (!helper.ok) return helper;
+      const spendNonce = options.spendNonce;
+      if (spendNonce === undefined) return err(credentialUnavailable());
+      scoped = {
+        helperPath: helper.value,
+        runOptions: credentialRunOptions(options.credential.material),
+        authorization: {
+          kind: 'verify',
+          lease: options.credential.material.lease,
+          approvalId: options.credential.approvalId,
+          spendNonce,
+        },
+      };
+    }
+
+    const safety = await this.validatePushSafety(cwd, remote, {
+      signal,
+      ...(scoped === undefined ? {} : {
+        argv: [...credentialHelperArgv(scoped.helperPath), 'ls-remote', '--heads', remote, ref],
+        authorization: scoped.authorization,
+      }),
+    });
     if (!safety.ok) return safety;
 
     const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd, this.signalOptions(signal));
@@ -418,7 +545,12 @@ export class GitAdapter {
       if (!isSupportedRemoteTarget(target)) {
         return err(appError('PERMISSION_DENIED', 'Git publication remote uses an unsupported transport'));
       }
-      const remoteBranch = await this.runner.run(['ls-remote', '--heads', target, ref], cwd, this.signalOptions(signal));
+      const argv = scoped === undefined
+        ? ['ls-remote', '--heads', target, ref]
+        : [...credentialHelperArgv(scoped.helperPath), 'ls-remote', '--heads', target, ref];
+      const remoteBranch = await this.runner.run(argv, cwd, scoped === undefined
+        ? this.signalOptions(signal)
+        : { ...this.signalOptions(signal), ...scoped.runOptions });
       const remoteError = this.mapError(remoteBranch);
       if (remoteError !== null) return remoteError;
       const lines = remoteBranch.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
@@ -612,6 +744,19 @@ export class GitAdapter {
   }
 
   public async defaultBranches(cwd: string, remote = 'origin'): Promise<Result<readonly string[]>> {
+    return this.defaultBranchesScoped(cwd, remote);
+  }
+
+  /**
+   * The pre-approval diagnostic read (#297 §5). With a lease it installs the
+   * same helper scope as the push, because a private HTTP(S) remote answers
+   * neither `ls-remote` nor the default-branch lookup without a credential.
+   */
+  private async defaultBranchesScoped(
+    cwd: string,
+    remote: string,
+    scoped?: CredentialScopedInvocation,
+  ): Promise<Result<readonly string[]>> {
     const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd);
     if (pushUrls.exitCode !== 0) return ok([]);
     const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
@@ -619,7 +764,10 @@ export class GitAdapter {
     const branches: string[] = [];
     for (const target of targets) {
       if (!isSupportedRemoteTarget(target)) return ok([]);
-      const remoteHead = await this.runner.run(['ls-remote', '--symref', target, 'HEAD'], cwd);
+      const argv = scoped === undefined
+        ? ['ls-remote', '--symref', target, 'HEAD']
+        : [...credentialHelperArgv(scoped.helperPath), 'ls-remote', '--symref', target, 'HEAD'];
+      const remoteHead = await this.runner.run(argv, cwd, scoped === undefined ? undefined : scoped.runOptions);
       if (remoteHead.exitCode !== 0) return ok([]);
       const match = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD\s*$/im.exec(remoteHead.stdout);
       if (match?.[1] === undefined) return ok([]);
@@ -628,7 +776,12 @@ export class GitAdapter {
     return ok(branches);
   }
 
-  public async validatePushSafety(cwd: string, remote: string, signal?: AbortSignal): Promise<Result<void>> {
+  public async validatePushSafety(
+    cwd: string,
+    remote: string,
+    options: GitPushSafetyOptions = {},
+  ): Promise<Result<void>> {
+    const signal = options.signal;
     const executableEnvironmentKeys = [
       'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_PROXY_COMMAND', 'GIT_EXEC_PATH',
     ];
@@ -686,18 +839,41 @@ export class GitAdapter {
     // Issue #297: a helper only runs for HTTP(S) push targets. A global helper
     // configured for unrelated HTTPS remotes must not deny an SSH push.
     if (await this.pushTargetsMayUseCredentialHelper(cwd, remote, signal)) {
-      const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
-      if (credentialHelpers.exitCode === 0) {
+      if (options.authorization !== undefined) {
+        // A host-authorized invocation installs exactly one helper and clears
+        // every configured one for this spawn. The guard verifies the argv it is
+        // about to spawn, not a promise from the caller (#297 §4).
+        const authorized = await this.verifyPublishCredentialAuthorization(
+          cwd,
+          remote,
+          options.authorization,
+          options.argv,
+          signal,
+        );
+        if (!authorized.ok) return authorized;
+      } else if (options.argv?.some((argument) => argument.startsWith('credential.helper=')) === true) {
+        // Installing a helper without an authorization is never allowed, even
+        // when no helper is configured: the invocation itself is the risk.
         return err(appError(
           'PERMISSION_DENIED',
-          'Git push cannot use configured credential helpers',
+          'Git push cannot use a credential helper without a host authorization',
           false,
-          { reason: 'push-credential-helper', key: firstCredentialConfigKey(credentialHelpers.stdout) },
+          { reason: 'push-credential-helper', key: 'credential.helper' },
         ));
-      }
-      if (credentialHelpers.exitCode !== 1) {
-        const error = this.mapError(credentialHelpers);
-        if (error !== null) return error;
+      } else {
+        const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
+        if (credentialHelpers.exitCode === 0) {
+          return err(appError(
+            'PERMISSION_DENIED',
+            'Git push cannot use configured credential helpers',
+            false,
+            { reason: 'push-credential-helper', key: firstCredentialConfigKey(credentialHelpers.stdout) },
+          ));
+        }
+        if (credentialHelpers.exitCode !== 1) {
+          const error = this.mapError(credentialHelpers);
+          if (error !== null) return error;
+        }
       }
     }
     const signingPrograms = await this.runner.run(['config', '--get-regexp', '^gpg(\\..+)?\\.program$'], cwd, this.signalOptions(signal));
@@ -746,6 +922,117 @@ export class GitAdapter {
   }
 
   /**
+   * The S2c allowlist (#297 §4). A credential-scoped invocation is allowed only
+   * when every one of these holds, and any failure is the same fail-closed
+   * denial: a promoted deployment, a helper at the fixed path that is a regular
+   * file owned by this uid with no group/world write bit, an argv that clears
+   * the helper list and installs exactly that path, a live lease whose host set
+   * equals the resolved push-URL set, and — for `publish`/`verify` — the nonce
+   * this adapter minted for the spawn that is running now.
+   */
+  private async verifyPublishCredentialAuthorization(
+    cwd: string,
+    remote: string,
+    authorization: PublishCredentialAuthorization,
+    argv: readonly string[] | undefined,
+    signal?: AbortSignal,
+  ): Promise<Result<void>> {
+    if (!isPublishCredentialAuthorization(authorization)) return err(credentialUnavailable());
+    const helper = await this.resolveCredentialHelperPath();
+    if (!helper.ok) return helper;
+    if (argv === undefined || !verifyCredentialHelperArgv(argv, helper.value)) {
+      return err(credentialUnavailable());
+    }
+    const hosts = await this.resolvedCredentialHosts(cwd, remote, signal);
+    if (!hosts.ok) return hosts;
+    const leaseHosts = [...authorization.lease.hosts].sort();
+    if (hosts.value.length !== leaseHosts.length
+      || hosts.value.some((host, index) => host !== leaseHosts[index])) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Git push target changed after the credential lease was granted',
+        false,
+        { reason: 'publish-target-changed' },
+      ));
+    }
+    const now = this.options.now?.() ?? Date.now();
+    if (!Number.isSafeInteger(now) || now < 0 || authorization.lease.expiresAt <= now) {
+      return err(credentialUnavailable());
+    }
+    if (authorization.kind === 'diagnostic') return ok(undefined);
+
+    const entry = this.publishAuthorizations.get(authorization.spendNonce);
+    if (entry === undefined
+      || entry.approvalId !== authorization.approvalId
+      || entry.leaseId !== authorization.lease.leaseId
+      || entry.kind !== authorization.kind) {
+      return err(credentialUnavailable());
+    }
+    if (authorization.kind === 'publish') {
+      if (entry.consumed) return err(credentialUnavailable());
+      this.publishAuthorizations.set(authorization.spendNonce, { ...entry, consumed: true });
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * Resolve `<deployment>/publish-credential-helper` and prove it is the file
+   * the running release shipped. A canonical checkout, an unset deployment, a
+   * symlink, a foreign owner, a writable mode or a path that resolves outside
+   * the deployment all answer the same unavailable error.
+   */
+  private async resolveCredentialHelperPath(): Promise<Result<string>> {
+    const resolver = this.options.resolvePublishCredentialDeployment;
+    if (resolver === undefined) return err(credentialUnavailable());
+    let deployment: GitPublishCredentialDeployment;
+    try {
+      deployment = await resolver();
+    } catch {
+      return err(credentialUnavailable());
+    }
+    if (!deployment.promoted || deployment.root === null) return err(credentialUnavailable());
+    const helper = path.join(deployment.root, PUBLISH_CREDENTIAL_HELPER_NAME);
+    let entry;
+    try {
+      entry = await lstat(helper);
+    } catch {
+      return err(credentialUnavailable());
+    }
+    if (entry.isSymbolicLink() || !entry.isFile()) return err(credentialUnavailable());
+    if (typeof process.getuid === 'function' && entry.uid !== process.getuid()) return err(credentialUnavailable());
+    if ((entry.mode & 0o022) !== 0) return err(credentialUnavailable());
+    let realHelper: string;
+    let realRoot: string;
+    try {
+      realHelper = await realpath(helper);
+      realRoot = await realpath(deployment.root);
+    } catch {
+      return err(credentialUnavailable());
+    }
+    if (realHelper !== path.join(realRoot, PUBLISH_CREDENTIAL_HELPER_NAME)) return err(credentialUnavailable());
+    return ok(realHelper);
+  }
+
+  /**
+   * Normalize every resolved push URL to the lease host shape. A credential
+   * lease can only cover HTTPS targets, so a non-HTTPS or unresolvable URL
+   * refuses the whole invocation instead of silently narrowing the set.
+   */
+  private async resolvedCredentialHosts(cwd: string, remote: string, signal?: AbortSignal): Promise<Result<readonly string[]>> {
+    const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd, this.signalOptions(signal));
+    if (pushUrls.exitCode !== 0) return err(credentialUnavailable());
+    const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (targets.length === 0) return err(credentialUnavailable());
+    const hosts: string[] = [];
+    for (const target of targets) {
+      const host = normalizePublishCredentialPushHost(target);
+      if (host === null) return err(credentialUnavailable());
+      hosts.push(host);
+    }
+    return ok([...new Set(hosts)].sort());
+  }
+
+  /**
    * Issue #297: report whether any resolved push target can consult a
    * credential helper. An unresolvable or unsupported target answers `true`
    * (`isSupportedRemoteTarget` owns the unsupported verdict), so an unknown
@@ -770,8 +1057,9 @@ export class GitAdapter {
     cwd: string,
     remote: string,
     branch: string,
-    signal?: AbortSignal,
+    options: GitPublishPreflightOptions = {},
   ): Promise<Result<GitPublishPreflight>> {
+    const signal = options.signal;
     if (!isValidRemoteName(remote)) return err(appError('INVALID_INPUT', 'Git publish remote is invalid'));
     const ref = `refs/heads/${branch}`;
     if (branch.length === 0 || branch.length > 1024 || branch.includes('..') || branch.includes('//') || branch.endsWith('/')) {
@@ -803,7 +1091,23 @@ export class GitAdapter {
       targets.push(describeRemoteTarget(target));
     }
 
-    const safety = await this.validatePushSafety(cwd, remote, signal);
+    let scoped: CredentialScopedInvocation | undefined;
+    if (options.credential !== undefined) {
+      const helper = await this.resolveCredentialHelperPath();
+      if (!helper.ok) return helper;
+      scoped = {
+        helperPath: helper.value,
+        runOptions: credentialRunOptions(options.credential.material),
+        authorization: { kind: 'diagnostic', lease: options.credential.material.lease },
+      };
+    }
+    const safety = await this.validatePushSafety(cwd, remote, {
+      signal,
+      ...(scoped === undefined ? {} : {
+        argv: [...credentialHelperArgv(scoped.helperPath), 'ls-remote', '--symref', remote, 'HEAD'],
+        authorization: scoped.authorization,
+      }),
+    });
     const reason = safety.ok ? undefined : safety.error.details?.reason;
     const blockingKey = safety.ok ? undefined : safety.error.details?.key;
     const runtime: GitPublishRuntimeStatus = safety.ok
@@ -832,7 +1136,7 @@ export class GitAdapter {
       });
     }
 
-    const defaults = await this.defaultBranches(cwd, remote);
+    const defaults = await this.defaultBranchesScoped(cwd, remote, scoped);
     if (!defaults.ok) return defaults;
 
     return ok({
@@ -857,8 +1161,9 @@ export class GitAdapter {
   public async publish(
     cwd: string,
     request: GitPublishRequest,
-    signal?: AbortSignal,
+    options: GitPublishOptions = {},
   ): Promise<Result<GitPublishResult>> {
+    const signal = options.signal;
     if (!isValidRemoteName(request.remote)) {
       return err(appError('INVALID_INPUT', 'Git publish remote is invalid'));
     }
@@ -898,36 +1203,86 @@ export class GitAdapter {
       targets.push(describeRemoteTarget(target));
     }
 
-    const safety = await this.validatePushSafety(cwd, request.remote, signal);
-    if (!safety.ok) return safety;
+    let scoped: CredentialScopedInvocation | undefined;
+    let spendNonce: string | undefined;
+    let spawnArgv: readonly string[] = ['push', '--no-verify', '--no-follow-tags', '--porcelain', request.remote, `${expectedSha}:${ref}`];
+    if (options.credential !== undefined) {
+      const helper = await this.resolveCredentialHelperPath();
+      if (!helper.ok) return helper;
+      spendNonce = randomUUID();
+      this.publishAuthorizations.set(spendNonce, {
+        approvalId: options.credential.approvalId,
+        leaseId: options.credential.material.lease.leaseId,
+        kind: 'publish',
+        consumed: false,
+      });
+      scoped = {
+        helperPath: helper.value,
+        runOptions: credentialRunOptions(options.credential.material),
+        authorization: {
+          kind: 'publish',
+          lease: options.credential.material.lease,
+          approvalId: options.credential.approvalId,
+          spendNonce,
+        },
+      };
+      spawnArgv = [...credentialHelperArgv(helper.value), ...spawnArgv];
+    }
 
-    // `--no-follow-tags` keeps the push bound to the single approved refspec even
-    // when the user's config sets `push.followTags`, which would otherwise push
-    // every annotated tag reachable from the approved commit.
-    const pushed = await this.runner.run(
-      ['push', '--no-verify', '--no-follow-tags', '--porcelain', request.remote, `${expectedSha}:${ref}`],
-      cwd,
-      this.signalOptions(signal),
-    );
-    if (pushed.exitCode !== 0) {
-      if (PUBLISH_AUTH_FAILURE.test(pushed.stderr)) {
-        return err(appError('PERMISSION_DENIED', 'Git publish authentication failed', false, {
-          reason: 'publish-authentication-failed',
+    try {
+      const safety = await this.validatePushSafety(cwd, request.remote, {
+        signal,
+        argv: spawnArgv,
+        ...(scoped === undefined ? {} : { authorization: scoped.authorization }),
+      });
+      if (!safety.ok) return safety;
+
+      // `--no-follow-tags` keeps the push bound to the single approved refspec even
+      // when the user's config sets `push.followTags`, which would otherwise push
+      // every annotated tag reachable from the approved commit.
+      const pushed = await this.runner.run(spawnArgv, cwd, scoped === undefined
+        ? this.signalOptions(signal)
+        : { ...this.signalOptions(signal), ...scoped.runOptions });
+      if (pushed.exitCode !== 0) {
+        if (PUBLISH_AUTH_FAILURE.test(pushed.stderr)) {
+          return err(appError('PERMISSION_DENIED', 'Git publish authentication failed', false, {
+            reason: 'publish-authentication-failed',
+          }));
+        }
+        return err(appError('CONFLICT', 'Git publish was not accepted by the remote', true, {
+          reason: 'publish-push-failed',
         }));
       }
-      return err(appError('CONFLICT', 'Git publish was not accepted by the remote', true, {
-        reason: 'publish-push-failed',
-      }));
-    }
 
-    const observed = await this.remoteBranchSha(cwd, request.remote, request.branch, signal);
-    if (!observed.ok) return observed;
-    if (observed.value !== expectedSha) {
-      return err(appError('CONFLICT', 'Git publish could not be verified on the remote', true, {
-        reason: 'publish-verification-failed',
-      }));
+      // The verification read is allowed only after the push exited, and only
+      // through the same nonce, so it can never run before the credential it
+      // proves has been spent (#297 §4, test 18).
+      let observed: Result<string | null>;
+      if (scoped !== undefined && spendNonce !== undefined && options.credential !== undefined) {
+        this.publishAuthorizations.set(spendNonce, {
+          approvalId: options.credential.approvalId,
+          leaseId: options.credential.material.lease.leaseId,
+          kind: 'verify',
+          consumed: true,
+        });
+        observed = await this.readRemoteBranchSha(cwd, request.remote, request.branch, {
+          signal,
+          credential: options.credential,
+          spendNonce,
+        });
+      } else {
+        observed = await this.remoteBranchSha(cwd, request.remote, request.branch, signal);
+      }
+      if (!observed.ok) return observed;
+      if (observed.value !== expectedSha) {
+        return err(appError('CONFLICT', 'Git publish could not be verified on the remote', true, {
+          reason: 'publish-verification-failed',
+        }));
+      }
+      return ok({ remote: request.remote, branch: request.branch, sha: expectedSha, targets });
+    } finally {
+      if (spendNonce !== undefined) this.publishAuthorizations.delete(spendNonce);
     }
-    return ok({ remote: request.remote, branch: request.branch, sha: expectedSha, targets });
   }
 
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {
@@ -1094,6 +1449,76 @@ function usesCredentialHelper(target: string): boolean {
   const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(target)?.[1]?.toLowerCase();
   if (scheme === undefined) return false;
   return scheme === 'http' || scheme === 'https';
+}
+
+/**
+ * The only credential-helper shape a push-capable child may spawn (#297 §2):
+ * the empty first assignment clears every helper Git collected from system,
+ * global, repository and URL-scoped config for this one invocation, and the
+ * second installs the host helper. Both assignments are host-built.
+ */
+function credentialHelperArgv(helperPath: string): readonly string[] {
+  return ['-c', 'credential.helper=', '-c', `credential.helper=!${helperPath}`];
+}
+
+/**
+ * Verify the invocation the guard is about to spawn: exactly two
+ * `credential.helper` assignments in command scope, the reset first and the host
+ * helper second, and no other `-c`, `--config-env`, `--exec-path`,
+ * `--upload-pack` or `--receive-pack` form that could run something else.
+ */
+function verifyCredentialHelperArgv(argv: readonly string[], helperPath: string): boolean {
+  const reset = 'credential.helper=';
+  const install = `credential.helper=!${helperPath}`;
+  if (argv.length < 4 || argv[0] !== '-c' || argv[1] !== reset || argv[2] !== '-c' || argv[3] !== install) {
+    return false;
+  }
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] ?? '';
+    if (argument === '-c') {
+      if (index !== 0 && index !== 2) return false;
+      continue;
+    }
+    if (argument.startsWith('-c') && argument.length > 2) return false;
+    if (argument === '--config-env' || argument.startsWith('--config-env=')
+      || argument === '--exec-path' || argument.startsWith('--exec-path=')
+      || argument === '--upload-pack' || argument.startsWith('--upload-pack=')
+      || argument === '--receive-pack' || argument.startsWith('--receive-pack=')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function credentialUnavailable(): AppError {
+  return appError(
+    'PERMISSION_DENIED',
+    'Git push cannot use a host credential for this invocation',
+    false,
+    { reason: 'publish-credential-unavailable' },
+  );
+}
+
+/**
+ * The one channel the secret travels on (#297 §3): a single JSON line on the
+ * inherited fd the helper reads. The lease id and the fd number are the only
+ * values added to the child environment; the secret never is.
+ */
+function credentialRunOptions(material: PublishCredentialMaterial): Pick<GitRunOptions, 'env' | 'descriptor'> {
+  return {
+    env: {
+      [PUBLISH_CREDENTIAL_LEASE_ID_ENV]: material.lease.leaseId,
+      [PUBLISH_CREDENTIAL_DESCRIPTOR_FD_ENV]: '3',
+    },
+    descriptor: serializePublishCredentialDescriptorAnswer({
+      version: 1,
+      leaseId: material.lease.leaseId,
+      username: material.lease.username,
+      secret: material.secret,
+      hosts: material.lease.hosts,
+      expiresAt: material.lease.expiresAt,
+    }),
+  };
 }
 
 function isSupportedRemoteTarget(target: string): boolean {

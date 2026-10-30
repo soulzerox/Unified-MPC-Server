@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { Writable } from 'node:stream';
 import { createProcessTreeTerminator, type ProcessTreeTerminator } from '@unified-mpc/process';
 
 export interface GitRunResult {
@@ -10,6 +11,18 @@ export interface GitRunResult {
 export interface GitRunOptions {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /**
+   * Extra environment for this one child. Used for the credential-helper
+   * invocation (#297), where the lease id and the descriptor fd number travel
+   * with the spawn and never with a caller.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+  /**
+   * One inherited pipe on fd 3 carrying this payload, then closed. The child
+   * (Git) passes the fd to the credential helper it spawns, and the helper reads
+   * exactly one descriptor answer from it.
+   */
+  readonly descriptor?: string;
 }
 
 export interface GitRunner {
@@ -37,13 +50,28 @@ export class DirectGitRunner implements GitRunner {
       try {
         child = spawn('git', [...args], {
           cwd,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...options.env },
           shell: false,
           detached: true,
+          // fd 3 exists only for a helper-scoped invocation: it is the pipe the
+          // helper reads its one descriptor answer from (#297 §3).
+          ...(options.descriptor === undefined ? {} : { stdio: ['pipe', 'pipe', 'pipe', 'pipe'] }),
         });
       } catch (error: unknown) {
         resolve({ exitCode: -1, stdout: '', stderr: errorMessage(error) });
         return;
+      }
+      if (options.descriptor !== undefined) {
+        const descriptor = child.stdio?.[3] as Writable | null | undefined;
+        if (descriptor === null || descriptor === undefined) {
+          child.kill();
+          resolve({ exitCode: -1, stdout: '', stderr: 'Git credential descriptor could not be opened' });
+          return;
+        }
+        // A helper that exits before reading leaves EPIPE; that is the helper's
+        // silent failure, not a Git failure, so the write error is ignored.
+        descriptor.on('error', () => {});
+        descriptor.end(options.descriptor);
       }
       let stdout = '';
       let stderr = '';

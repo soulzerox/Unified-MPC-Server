@@ -10,6 +10,8 @@ export * from './goal-relocation-approval-repository.js';
 export * from './migrations/goal-relocation-approval-migration.js';
 export * from './publish-approval-repository.js';
 export * from './migrations/publish-approval-migration.js';
+export * from './publish-credential-repository.js';
+export * from './migrations/publish-credential-migration.js';
 export * from './goal-runtime-event-repository.js';
 export * from './goal-runtime-snapshot-repository.js';
 export * from './migrations/scheduled-continuation-migration.js';

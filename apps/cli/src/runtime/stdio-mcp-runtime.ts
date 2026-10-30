@@ -63,6 +63,7 @@ import {
 } from '@unified-mpc/thai-rag';
 import {
   AesGcmCheckpointCipher,
+  SecretToolSecretStore,
   SqliteAgentSwarmRepository,
   SqliteAuditRepository,
   SqliteCheckpointRepository,
@@ -80,6 +81,7 @@ import {
   SqliteMergeVerificationAttemptRepository,
   SqliteMergeVerificationReceiptRepository,
   SqlitePublishApprovalRepository,
+  SqlitePublishCredentialRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
@@ -115,6 +117,7 @@ import {
   GitHubMergeReconciliationPoller,
 } from './github-merge-reconciliation-poller.js';
 import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
+import { startPublishCredentialSweep } from './publish-credential-sweep.js';
 import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest } from '@unified-mpc/mcp-server';
 import { createTrustedGoalRelocationHostFence, type TrustedGoalRelocationHostActor } from './goal-relocation-host-fence.js';
 
@@ -1022,6 +1025,16 @@ export function createStdioMcpRuntime(
     heavyJobQueueRecovery.reconcileOnce();
     await capabilityRuntime.shell.recoverParkedHeavy().catch(() => undefined);
   })();
+  // #297 S2a: reclaim publish credential leases whose TTL passed. `open` already
+  // refuses an expired lease, so this timer is what actually deletes an abandoned
+  // `publish-<leaseId>` secret. It runs on start and hourly, never blocks boot,
+  // and never rejects: a Secret Service outage must not take the runtime down.
+  const publishCredentialSweep = startPublishCredentialSweep({
+    leases: new SqlitePublishCredentialRepository({
+      database,
+      secretStore: new SecretToolSecretStore(),
+    }),
+  });
   const recoveryReady = Promise.all([
     fileRecoveryReady,
     goalRuntimeRecoveryReady,
@@ -1197,6 +1210,7 @@ export function createStdioMcpRuntime(
       managedResourceRecovery.close();
       clearInterval(heavyJobQueueRecoveryTimer);
       heavyJobQueue.close();
+      publishCredentialSweep.stop();
       mergeReconciliationPoller.close();
       await thaiRagCoordinator.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();

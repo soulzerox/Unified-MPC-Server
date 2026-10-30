@@ -8,7 +8,7 @@ import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSn
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository, type StorageRecoveryResult } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -47,6 +47,14 @@ import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
 import { parseWebArgs, runWeb, type WebCommand, type WebRunResult } from './commands/web.js';
 import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/tools.js';
 import { parseStorageArgs, type StorageRecoverCommand } from './commands/storage.js';
+import {
+  parsePublishCredentialArgs,
+  readPublishCredentialSecret,
+  resolveGitPushUrls,
+  resolvePublishCredentialDeployment,
+  runPublishCredentialCommand,
+  type PublishCredentialCommand,
+} from './commands/publish-credential.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from './build-provenance.js';
 
 export { formatDoctorReport } from './commands/doctor.js';
@@ -57,6 +65,7 @@ export * from './commands/sync.js';
 export * from './commands/web.js';
 export * from './commands/tools.js';
 export * from './commands/storage.js';
+export * from './commands/publish-credential.js';
 
 export type CliCommand =
   | { readonly kind: 'help' }
@@ -77,6 +86,7 @@ export type CliCommand =
   | PruneServerCommand
   | SyncCommand
   | StorageRecoverCommand
+  | PublishCredentialCommand
   | WebCommand
   | ToolsCommand;
 
@@ -106,6 +116,11 @@ export interface CliDependencies {
   pruneServer?(input: PruneServerInput): Promise<Result<PruneServerResult>>;
   sync?(targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
   storageRecover?(): Promise<StorageRecoveryResult>;
+  publishCredential?(
+    command: PublishCredentialCommand,
+    write: (text: string) => void,
+    writeError: (text: string) => void,
+  ): Promise<number>;
   web?(options?: { port?: number }): Promise<Result<WebRunResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
@@ -124,6 +139,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'prune') return parsePruneArgs(args.slice(1));
   if (args[0] === 'sync') return parseSyncArgs(args.slice(1));
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
+  if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
   return err(appError('INVALID_INPUT', 'Unknown unified-mpc command'));
@@ -150,6 +166,9 @@ Commands:
   prune skill --name <n>                 Prune an installed skill
   prune server --name <n>                Prune an installed MCP server
   storage recover                        Recover one unambiguous historical SQLite database safely
+  publish-credential grant <remote>      Grant a publish credential lease from stdin
+  publish-credential revoke <lease>      Revoke a publish credential lease
+  publish-credential status <lease>      Show lease expiry and hosts without the secret
   web [--port <p>]                       Start the Local Web Control Plane
   tools list                             List available downstream MCP tools
   tools call <tool> <args-json>          Call a downstream MCP tool headlessly
@@ -227,6 +246,15 @@ Commands:
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
       }
+    }
+    case 'publish-credential-grant':
+    case 'publish-credential-revoke':
+    case 'publish-credential-status': {
+      if (dependencies.publishCredential === undefined) {
+        writeError('Publish credential service is not available');
+        return 1;
+      }
+      return dependencies.publishCredential(parsed.value, write, writeError);
     }
     case 'install-skill': {
       const installer = dependencies.installSkill !== undefined
@@ -424,6 +452,7 @@ export interface DefaultCliDependenciesOptions {
 
 export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
   let workspaceState: {
+    readonly database: SqliteDatabase;
     readonly repository: SqliteWorkspaceRepository;
     readonly settings: SqliteSettingsRepository;
     readonly service: WorkspaceService;
@@ -436,12 +465,15 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     const repository = new SqliteWorkspaceRepository(database);
     workspaceState = {
+      database,
       repository,
       settings: new SqliteSettingsRepository(database),
       service: new WorkspaceService(repository),
     };
     return workspaceState;
   };
+  let secretStore: SecretToolSecretStore | undefined;
+  const getSecretStore = (): SecretToolSecretStore => (secretStore ??= new SecretToolSecretStore());
   const getWorkspaceService = (): WorkspaceService => getWorkspaceState().service;
   const getWorkspaceSelection = async (): Promise<Result<WorkspaceSelectionService>> => {
     const state = getWorkspaceState();
@@ -569,6 +601,33 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
     storageRecover: async (): Promise<StorageRecoveryResult> =>
       recoverHistoricalStorageIdentity(resolveDataPathFromShared()),
+    publishCredential: async (
+      command: PublishCredentialCommand,
+      write: (text: string) => void,
+      writeError: (text: string) => void,
+    ): Promise<number> => {
+      const state = getWorkspaceState();
+      const credential = new SqlitePublishCredentialRepository({
+        database: state.database,
+        secretStore: getSecretStore(),
+      });
+      // #297 §5 startup sweep: an abandoned lease must not survive the next
+      // credential command. `sweepExpired` fails closed to 0, so it cannot block.
+      await credential.sweepExpired(Date.now());
+      return runPublishCredentialCommand(command, {
+        credential,
+        resolveWorkspace: async (workspaceReference: string) => {
+          const workspace = await resolveWorkspaceReference(workspaceReference);
+          return workspace.ok
+            ? ok({ id: workspace.value.id, rootPath: workspace.value.rootPath })
+            : workspace;
+        },
+        resolvePushUrls: resolveGitPushUrls,
+        readSecret: readPublishCredentialSecret,
+        resolveDeployment: async () => ok(await resolvePublishCredentialDeployment()),
+        inspect: (leaseId: string) => credential.inspect(leaseId),
+      }, write, writeError);
+    },
     web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
       const registry = await getToolRegistry();

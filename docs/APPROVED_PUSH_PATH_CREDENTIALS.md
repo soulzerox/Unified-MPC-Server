@@ -191,10 +191,14 @@ tool and `git push` never pass one, so nothing on that surface relaxes.
 
 Both `publish` and `verify` are keyed to the receipt **this spawn consumed**, not
 to a live receipt: S1 commits `consumed_at` before the push spawns, so a
-"live receipt" condition could never hold at guard time. The adapter mints a
-`spendNonce` in the same step that consumes the receipt, holds it in memory,
-and hands it to the push and to the single verification read that follows. The
-nonce is never accepted from a caller, a tool argument or the environment, and
+"live receipt" condition could never hold at guard time. The publish path mints
+the `spendNonce` in the same step that consumes the receipt — that is
+`GitService.publish`, which owns `PublishApprovalAuthorityPort.consume` and
+hands the adapter only `{ remote, branch, expectedSha }` today. The nonce and
+the lease live in a registry owned by that service; the adapter receives the
+resulting one-shot `authorization` (which carries the approval id only so the
+guard can match it) and nothing else from the ledger.
+The nonce is never accepted from a caller, a tool argument or the environment, and
 dies with the spawn. The two modes differ only in what the Git child is allowed
 to do — `publish` spawns the push, `verify` performs one `ls-remote` after it
 exits — so the same proof covers the whole sequence without inventing a second
@@ -359,6 +363,16 @@ secret to an unapproved host.
 | S2b | helper entry point, emitted into the release artifact by `scripts/materialize-runtime-release.sh` so `<deployment>/publish-credential-helper` exists after promotion, + direct-invocation tests (no network) | yes |
 | S2c | guard allowlist with the three authorization modes (`diagnostic`, `publish`, `verify`), `-c` argv on push and on both `ls-remote` paths, fingerprint-bound receipt, lease-for-the-spawn + revocation, end-to-end private HTTPS fixture | yes, the only slice that can publish over HTTP(S) |
 | S2d | audit row, docs, operator runbook for rotating a token | yes |
+
+S2c changes contracts that currently say the opposite, so it ships the wording
+too: the `git_publish` description ("HTTP(S) targets that could run a credential
+helper stay denied with the push safety reason"), the `git_publish_preflight`
+description ("the push safety guard runs before any remote contact ... instead
+of running ls-remote and a possible credential helper") in
+`packages/mcp-server/src/tools/git-tools.ts`, and the paragraph in
+`docs/architecture/MUTATION_SAFETY_MATRIX.md` that repeats "an HTTP(S) target
+that could reach a credential helper stays denied". Those three strings are the
+contract #297 is about making truthful.
 
 S2a reuses the port rather than adding storage: if the Secret Service is
 unavailable, `grant` fails with `publish-credential-unavailable` and S2c stays

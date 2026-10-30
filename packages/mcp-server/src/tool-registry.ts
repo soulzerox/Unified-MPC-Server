@@ -3178,6 +3178,12 @@ const ALWAYS_CONFIRM_MUTATION_TOOLS = new Set([
   'audio', 'screen_record', 'publish_approve', 'git_publish',
 ]);
 
+// Issue #297: the publish pair is a human gate, not an ordinary execute. It asks
+// for host exact-action approval in every built-in profile, including the ones
+// whose EXECUTE default is ALLOW, so the documented "host dialog except Full
+// Bypass" promise holds for both tools.
+const ALWAYS_CONFIRM_IN_EVERY_PROFILE = new Set(['publish_approve', 'git_publish']);
+
 function requiresAlwaysConfirmation(toolName: string, decision: MutationPolicyDecision): boolean {
   if (decision.kind === 'read') return false;
   if (decision.kind === 'delete') return true;
@@ -3190,6 +3196,7 @@ function requiresAlwaysConfirmation(toolName: string, decision: MutationPolicyDe
 }
 
 function requiresProfileMutationConfirmation(toolName: string, decision: MutationPolicyDecision, profile: PermissionProfile): boolean {
+  if (ALWAYS_CONFIRM_IN_EVERY_PROFILE.has(toolName)) return requiresAlwaysConfirmation(toolName, decision);
   if (profile.name === 'full' || profile.name === 'custom') return requiresAlwaysConfirmation(toolName, decision);
   return requiresMutationConfirmation(decision);
 }

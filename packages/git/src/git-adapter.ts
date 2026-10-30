@@ -901,8 +901,11 @@ export class GitAdapter {
     const safety = await this.validatePushSafety(cwd, request.remote, signal);
     if (!safety.ok) return safety;
 
+    // `--no-follow-tags` keeps the push bound to the single approved refspec even
+    // when the user's config sets `push.followTags`, which would otherwise push
+    // every annotated tag reachable from the approved commit.
     const pushed = await this.runner.run(
-      ['push', '--no-verify', '--porcelain', request.remote, `${expectedSha}:${ref}`],
+      ['push', '--no-verify', '--no-follow-tags', '--porcelain', request.remote, `${expectedSha}:${ref}`],
       cwd,
       this.signalOptions(signal),
     );

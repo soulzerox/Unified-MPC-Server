@@ -1759,6 +1759,41 @@ describe('MCP tool registry', () => {
     expect(requests.at(-1)?.summary).toContain('approvalId = approval-1');
   });
 
+  it('requires the same host exact-action approval for publish tools in the balanced profile', async () => {
+    const rootPath = path.resolve(tmpdir(), 'unified-mpc-publish-approval-balanced-fixture');
+    const requests: Array<{ toolName?: string }> = [];
+    let approved = false;
+    let approveCalls = 0;
+    const services = {
+      git: {
+        async approvePublish(): Promise<ReturnType<typeof ok>> {
+          approveCalls += 1;
+          return ok({ approvalId: 'approval-1', workspaceId: 'workspace-a', remote: 'origin', branch: 'goal/publish', expectedSha: 'a'.repeat(40), approvedBy: 'test', approvedAt: 0, expiresAt: 1 });
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.balanced,
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-a', rootPath }),
+      hostMutationApprovalProvider: async (request: unknown): Promise<boolean> => {
+        requests.push(request as { toolName?: string });
+        return approved;
+      },
+    } as ToolRegistryOptions & { readonly hostMutationApprovalProvider: (request: unknown) => Promise<boolean> });
+    const binding = { workspaceId: 'workspace-a', remote: 'origin', branch: 'goal/publish', expectedSha: 'a'.repeat(40) };
+
+    await expect(registry.invoke('publish_approve', { ...binding, userConfirmed: true }))
+      .resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED' } } });
+    expect(approveCalls).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ toolName: 'publish_approve' });
+
+    approved = true;
+    const minted = await registry.invoke('publish_approve', { ...binding, userConfirmed: true });
+    expect(minted.isError).not.toBe(true);
+    expect(approveCalls).toBe(1);
+  });
+
   it('backs up and normalizes mutating Office targets inside the host active workspace', async () => {
     const preparedInputs: unknown[] = [];
     const capabilityInputs: unknown[] = [];

@@ -133,6 +133,11 @@ userinfo — a user-configured credential that this slice neither supplies nor s
   `core.gitProxy`, `push.gpgSign`, `push.recurseSubmodules`, `submodule.recurse`,
   `protocol.*.allow`, and a credential helper when a resolved push target could use one.
   The denial carries `details.reason` plus the blocking key name, never a value.
+- The push argv also carries `--no-follow-tags`, because `push.followTags=true` is a
+  ref-selection setting rather than an executable one: without the flag, Git would push
+  every annotated tag reachable from the approved commit, so the receipt would bound one
+  branch while the remote also gained tags. The flag is host-built and not settable from
+  a tool argument.
 - HTTPS credentials, host-owned key paths and helper injection are a later slice and
   are not implemented. Until then an HTTP(S) target that could reach a helper stays
   denied by the same guard, so nothing in this slice can publish over an authenticated
@@ -215,7 +220,7 @@ from a runtime authentication/credential block *before* attempting to publish.
 
 ## 7. Tests that must exist before this ships
 
-Requirements 1–4, 6 and 8 are covered by
+Requirements 1–4, 6, 8 and 10 are covered by
 `packages/application/src/git-service.test.ts`,
 `packages/git/src/git-adapter.integration.test.ts`,
 `packages/storage/src/publish-approval-repository.test.ts` and
@@ -236,6 +241,7 @@ refuses a head that moved, and this PR does not touch it.
 7. Serialized results, logs and audit rows contain no token, helper path, or URL userinfo.
 8. Authentication failure returns `publish-authentication-failed` and leaves the remote untouched.
 9. Exact-head/tree verification and `guarded_pr_merge` still refuse a head that moved after publication.
+10. A repository with `push.followTags=true` publishes the approved branch and no tag.
 
 ## 8. Non-goals
 

@@ -100,12 +100,15 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
       expect(queue.claim(entry('job-b', { workspaceId: 'workspace-b' }), 4, 1))
         .toMatchObject({ status: 'queued' });
 
-      // A settled row frees the workspace's slot; the bound counts live rows only.
+      // Starting the row takes it out of `queued`, which frees the workspace
+      // slot: the bound counts queued rows, not terminal outcomes.
       expect(queue.start('job-a', NOW.toISOString())).toBe(true);
-      expect(queue.settle('job-a', 'completed', NOW.toISOString())).toBe(true);
       expect(queue.claim(entry('job-a3'), 4, 1)).toMatchObject({ status: 'queued' });
       expect(queue.claim(entry('job-a4'), 4, 1))
         .toMatchObject({ status: 'full', scope: 'workspace' });
+      expect(queue.start('job-a3', NOW.toISOString())).toBe(true);
+      expect(queue.settle('job-a3', 'completed', NOW.toISOString())).toBe(true);
+      expect(queue.claim(entry('job-a5'), 4, 1)).toMatchObject({ status: 'queued' });
 
       expect(() => queue.claim(entry('job-z'), 2, 3)).toThrow(HeavyJobQueueStoreError);
     } finally {

@@ -147,11 +147,14 @@ time. `timeout_seconds` starts counting at launch, so queue residence does not
 consume the caller's budget.
 
 The global bound (16 waiting declared runs) is not the only one: one workspace
-may hold at most `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` of them (default
-16, never above the global bound), so a single project cannot fill the queue and
-starve another that has eligible work. A run over that bound is rejected with
-`WORKSPACE_QUEUE_FULL` before its task record is written; identical work that is
-already queued still coalesces instead of being rejected.
+may hold at most `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` queued heavy rows
+(default 16, never above the global bound), so a single project cannot fill the
+queue and starve another that has eligible work. The count is every queued row
+of that workspace, not only shell declarations: pre-edit work shares the durable
+queue, so a pre-edit backlog consumes part of the workspace's shell budget. A
+run over that bound is refused before its task record is written and reaches the
+caller as the same `RESOURCE_PRESSURE` refusal described below; identical work
+that is already queued still coalesces instead of being rejected.
 
 Operator behavior to expect:
 

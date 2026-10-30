@@ -153,10 +153,10 @@ to the response.
 ## Non-goals
 
 - No priority tiers beyond the existing `blocking` flag.
-- No per-workspace or per-Goal queue caps; the existing shell bound (16 rows,
-  `SHELL_HEAVY_ADMISSION_QUEUE_LIMIT`) remains. A per-scope cap can be added
-  later behind the same policy module if real contention shows the global bound
-  is not enough.
+- ~~No per-workspace or per-Goal queue caps; the existing shell bound (16 rows,
+  `SHELL_HEAVY_ADMISSION_QUEUE_LIMIT`) remains.~~ Superseded by the #543
+  amendment below: a per-workspace queued bound now sits inside the global one.
+  There is still no per-Goal cap.
 - No cross-runtime scheduler and no durable fairness counters.
 - No dynamic headroom (auto-raising the heavy slot from measured pressure);
   that is a separate #145 slice.
@@ -214,9 +214,21 @@ workspace maxQueuedPerWorkspace          (default: global, never above it)
   to `HeavyJobQueueStore.claim()`/`supersede()` and enforced **inside** the
   claim transaction, like the global depth check. A process-local check alone
   would let two runtimes each admit under the cap.
-- **What overflow does.** Reject with `WORKSPACE_QUEUE_FULL` before a task record
-  or process exists. Coalescing still wins: identical work that is already
-  queued is adopted, not rejected, because it costs no new row.
+- **What overflow does.** Reject with `WORKSPACE_QUEUE_FULL` at the queue layer
+  before a task record or process exists. The shell port maps any full queue —
+  global or workspace — onto its existing `RESOURCE_PRESSURE` refusal with
+  `reason: 'queue_full'`, so operators see one recovery path, not two.
+  Coalescing still wins: identical work that is already queued is adopted, not
+  rejected, because it costs no new row.
+- **What the count covers.** Every queued row with that `workspace_id`, whichever
+  job kind wrote it. Shell and pre-edit work share the durable table, so the
+  bound is a workspace intake budget rather than a shell-only counter, and
+  promotion, re-attach and recovery never create rows that could exceed it.
+- **Known limit.** `supersede()` re-checks the bound for a replacement row in the
+  same workspace, but a row that *moves* into another workspace is not counted
+  against the destination before the swap. No caller supersedes across
+  workspaces today; a future one must re-check the destination depth inside the
+  same transaction.
 - **Why not retire a stale row on overflow.** Retirement is a cancellation of
   real pending work; using it as an overflow valve would make a bounded intake
   decision destroy someone else's job. Rejection is visible and recoverable by

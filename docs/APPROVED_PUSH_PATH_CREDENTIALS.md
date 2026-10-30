@@ -94,8 +94,9 @@ Credential targets additionally require a **promoted release**: a deployment
 whose root is the permitted canonical checkout is the agent-writable
 development tree, so a helper file living there could be rewritten by the model
 and would still pass an ownership and mode check. In that deployment mode
-`publish_credential_grant` refuses with `publish-credential-unsupported`, and
-consequently no credential target can publish. Release deployments get the
+`unified-mpc publish-credential grant` refuses with
+`publish-credential-unsupported`, and consequently no credential target can
+publish. Release deployments get the
 helper from the promoted artifact, which the model does not write.
 
 `-c` on the command line is not repository config, so nothing the model writes
@@ -175,7 +176,8 @@ if the target may use a credential helper:
         and no other -c credential.* entry, GIT_* override or core.askPass exists
         and authorization is present and matches the mode:
             diagnostic: the lease is live and its host set equals the resolved set
-            publish:    the receipt is live, its lease id is this lease, and the
+            publish:    the receipt was consumed by this spawn (same spendNonce
+                        proof as verify), its lease id is this lease, and the
                         receipt fingerprint equals the resolved push-URL set
             verify:     this receipt was consumed by the publish that is running
                         now (not merely "was consumed"), the lease id matches the
@@ -187,15 +189,16 @@ Without an `authorization` the guard behaves exactly as today: a credential
 helper on an HTTP(S) target is denied with `push-credential-helper`. The `git`
 tool and `git push` never pass one, so nothing on that surface relaxes.
 
-The `verify` mode exists because the receipt is spent before the push, so the
-post-push `remoteBranchSha` would otherwise be an unauthenticated `ls-remote`
-that fails on a private remote. It is deliberately keyed to the **consumed**
-receipt plus a `spendNonce` minted by the publish that consumed it — not to a
-live receipt, which no longer exists at that point. The nonce lives only in the
-spawning publish's memory, is never accepted from a caller, a tool argument or
-the environment, and is passed back for exactly one verification read. That
-keeps the whole sequence authenticated without inventing a second credential
-grant after approval.
+Both `publish` and `verify` are keyed to the receipt **this spawn consumed**, not
+to a live receipt: S1 commits `consumed_at` before the push spawns, so a
+"live receipt" condition could never hold at guard time. The adapter mints a
+`spendNonce` in the same step that consumes the receipt, holds it in memory,
+and hands it to the push and to the single verification read that follows. The
+nonce is never accepted from a caller, a tool argument or the environment, and
+dies with the spawn. The two modes differ only in what the Git child is allowed
+to do — `publish` spawns the push, `verify` performs one `ls-remote` after it
+exits — so the same proof covers the whole sequence without inventing a second
+credential grant after approval.
 
 A user-configured helper does not deny the publish path any more, because it
 cannot run: the host-built argv starts with an empty `-c credential.helper=`,
@@ -276,7 +279,9 @@ Two revocation shapes were considered:
   receipt is gone, and the lease is gone with it.
 
 S2 adopts the second and states the residue: **a crashed publisher can leave a
-secret alive until its lease TTL.** Mitigations: the TTL is minutes, the key is
+secret alive until its lease TTL, plus at most one sweep interval** (the TTL is
+checked by `open`, so an expired lease answers nothing even before the sweep
+deletes it). Mitigations: the TTL is minutes, the key is
 the lease id, the receipt cannot be replayed, and `open` refuses an expired
 lease. Reclamation does not happen in a `READ` tool: `git_publish_preflight`
 stays side-effect free, and stale rows are deleted by the next `grant` or
@@ -314,8 +319,10 @@ secret to an unapproved host.
    exits non-zero with empty stdout.
 6. The secret is absent from the child argv, the child environment and the
    serialized tool result (assert by scanning all three).
-7. An expired lease, a consumed receipt and a mismatched lease id each fail
-   closed with `publish-credential-unavailable` before any push spawns.
+7. An expired lease, a receipt consumed by an earlier publish (replay) and a
+   mismatched lease id each fail closed with `publish-credential-unavailable`
+   before any push spawns; a receipt consumed by the running spawn is the one
+   case that proceeds.
 8. `revoke` runs on success, on push failure, on timeout and on abort.
 9. A helper path that is a symlink, resolves outside the running deployment, or
    belongs to another deployment than the running server is denied.
@@ -336,18 +343,20 @@ secret to an unapproved host.
 17. A helper-scoped invocation with no `authorization` is denied with
     `push-credential-helper`, and a `verify` call with a `spendNonce` that the
     adapter did not mint is denied.
-18. `verify` is refused when the receipt is live rather than consumed by the
-    running publish, and when the nonce belongs to a different spawn.
-19. `publish_credential_grant` refuses a canonical-checkout deployment with
-    `publish-credential-unsupported`.
-20. The expiry sweep deletes a lease whose TTL passed without any `revoke`.
+18. Both `publish` and `verify` are refused when the nonce belongs to a
+    different spawn, and `verify` is refused before the push exits.
+19. `unified-mpc publish-credential grant` refuses a canonical-checkout
+    deployment with `publish-credential-unsupported`.
+20. The expiry sweep deletes a lease whose TTL passed without any `revoke`,
+    and asserts the `publish-<leaseId>` entry is gone from the SecretStore, not
+    only that the ledger row is marked expired.
 
 ## 8. Slices
 
 | Slice | Content | Ships independently |
 |---|---|---|
 | S2a | `PublishCredentialPort` implemented over the existing `SecretStore` port (`SecretToolSecretStore`, Linux Secret Service; no plaintext file, no new engine) with `publish-<leaseId>` keys, the lease ledger row, the operator CLI (`grant`/`revoke`/`status`) and grant/revoke/open tests | yes, no behavior change |
-| S2b | helper entry point + direct-invocation tests (no network) | yes |
+| S2b | helper entry point, emitted into the release artifact by `scripts/materialize-runtime-release.sh` so `<deployment>/publish-credential-helper` exists after promotion, + direct-invocation tests (no network) | yes |
 | S2c | guard allowlist with the three authorization modes (`diagnostic`, `publish`, `verify`), `-c` argv on push and on both `ls-remote` paths, fingerprint-bound receipt, lease-for-the-spawn + revocation, end-to-end private HTTPS fixture | yes, the only slice that can publish over HTTP(S) |
 | S2d | audit row, docs, operator runbook for rotating a token | yes |
 

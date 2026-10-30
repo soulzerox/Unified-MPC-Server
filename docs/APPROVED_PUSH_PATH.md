@@ -145,9 +145,12 @@ userinfo — a user-configured credential that this slice neither supplies nor s
   branch while the remote also gained tags. The flag is host-built and not settable from
   a tool argument.
 - HTTPS credentials, host-owned key paths and helper injection are a later slice and
-  are not implemented. Until then an HTTP(S) target that could reach a helper stays
-  denied by the same guard, so nothing in this slice can publish over an authenticated
-  HTTP(S) transport.
+  are not implemented. S2a added the credential lease and its operator CLI, and S2b
+  ships the helper artifact inside a promoted release (see
+  APPROVED_PUSH_PATH_CREDENTIALS.md), but nothing installs that helper on a Git
+  invocation yet. Until then an HTTP(S) target that could reach a helper stays
+  denied by the same guard, so nothing in this slice can publish over an
+  authenticated HTTP(S) transport.
 - No credential, token, URL userinfo, or helper path is written to the tool result,
   the activity log, the audit row, or any error message. `diagnosticConfigKey()`
   reduces free-form config subsections to a pattern, and `firstCredentialConfigKey()`

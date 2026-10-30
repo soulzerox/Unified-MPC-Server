@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { Writable } from 'node:stream';
+import { PassThrough, type Writable } from 'node:stream';
 import {
   PUBLISH_CREDENTIAL_DESCRIPTOR_FD_ENV,
   PUBLISH_CREDENTIAL_LEASE_ID_ENV,
@@ -12,6 +12,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import {
   PUBLISH_CREDENTIAL_HELPER_REFUSED,
+  readBoundedStream,
   runPublishCredentialHelper,
   type PublishCredentialHelperIo,
 } from './publish-credential-helper.js';
@@ -192,16 +193,43 @@ describe('publish credential helper contract', () => {
   });
 });
 
+describe('publish credential helper bounded reads', () => {
+  it('returns the whole answer once the peer closes', async () => {
+    const stream = new PassThrough();
+    stream.end('{"version":1}');
+    await expect(readBoundedStream(stream, 1_024, 1_000)).resolves.toBe('{"version":1}');
+  });
+
+  it('refuses an answer larger than the limit and stops reading', async () => {
+    const stream = new PassThrough();
+    stream.end('x'.repeat(64));
+    await expect(readBoundedStream(stream, 16, 1_000)).resolves.toBeNull();
+    expect(stream.destroyed).toBe(true);
+  });
+
+  it('gives up on a peer that never closes instead of hanging the push', async () => {
+    const stream = new PassThrough();
+    stream.write('{"version":1');
+    const started = Date.now();
+    await expect(readBoundedStream(stream, 1_024, 25)).resolves.toBeNull();
+    expect(stream.destroyed).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
 /**
  * The compiled entry, spawned exactly the way Git spawns it: one operation
  * argument, a prompt on stdin, the descriptor on an inherited fd 3.
  */
 const builtHelper = path.join(import.meta.dirname, '..', '..', 'dist', 'bin', 'publish-credential-helper.js');
-
 interface SpawnedHelper {
   readonly code: number | null;
   readonly stdout: string;
   readonly stderr: string;
+  /** The argv the child really ran with. */
+  readonly argv: readonly string[];
+  /** The environment the child really received. */
+  readonly env: Readonly<Record<string, string>>;
 }
 
 async function spawnHelper(input: {
@@ -220,13 +248,14 @@ async function spawnHelper(input: {
       `publish-credential-helper build is missing; run \`corepack pnpm --filter @unified-mpc/cli build\` (looked for ${builtHelper})`,
     );
   }
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    [PUBLISH_CREDENTIAL_LEASE_ID_ENV]: input.leaseId ?? LEASE_ID,
+    [PUBLISH_CREDENTIAL_DESCRIPTOR_FD_ENV]: String(input.descriptorFd ?? 3),
+    ...input.env,
+  };
   const child = spawn(process.execPath, [builtHelper, input.operation], {
-    env: {
-      PATH: process.env.PATH ?? '',
-      [PUBLISH_CREDENTIAL_LEASE_ID_ENV]: input.leaseId ?? LEASE_ID,
-      [PUBLISH_CREDENTIAL_DESCRIPTOR_FD_ENV]: String(input.descriptorFd ?? 3),
-      ...input.env,
-    },
+    env,
     stdio: ['pipe', 'pipe', 'pipe', input.descriptorFileDescriptor ?? 'pipe'],
   });
   const stdout: Buffer[] = [];
@@ -252,6 +281,8 @@ async function spawnHelper(input: {
     code,
     stdout: Buffer.concat(stdout).toString('utf8'),
     stderr: Buffer.concat(stderr).toString('utf8'),
+    argv: [...child.spawnargs],
+    env,
   };
 }
 
@@ -262,17 +293,36 @@ describe('publish credential helper entry point', () => {
       prompt: 'protocol=https\nhost=github.com\npath=soulzerox/repo.git\n\n',
       descriptor: serializePublishCredentialDescriptorAnswer(answer({ expiresAt: Date.now() + 60_000 })),
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       code: 0,
       stdout: `username=x-access-token\npassword=${SECRET}\n`,
       stderr: '',
     });
-    // The child argv is the entry point plus one operation, and the environment
-    // carries the lease id and the fd number only.
-    const argv = [builtHelper, 'get'];
-    for (const value of argv) expect(value).not.toContain(SECRET);
-    for (const [key, value] of Object.entries({ [PUBLISH_CREDENTIAL_LEASE_ID_ENV]: LEASE_ID, [PUBLISH_CREDENTIAL_DESCRIPTOR_FD_ENV]: '3' })) {
-      expect(`${key}=${value}`).not.toContain(SECRET);
+    // stdout is the one channel that carries the value...
+    expect(result.stdout).toContain(SECRET);
+    // ...and the process's own argv and environment are inspected as the child
+    // really received them, not as this test would have built them. The lease id
+    // proves the environment under test is the one that reached the process.
+    expect(result.argv.join('\u0000')).not.toContain(SECRET);
+    const environment = Object.entries(result.env).map(([key, value]) => `${key}=${value}`).join('\u0000');
+    expect(environment).toContain(`${PUBLISH_CREDENTIAL_LEASE_ID_ENV}=${LEASE_ID}`);
+    expect(environment).not.toContain(SECRET);
+  });
+
+  it('exposes the secret on no channel at all when the get is refused', async () => {
+    const result = await spawnHelper({
+      operation: 'get',
+      prompt: 'protocol=https\nhost=gitlab.com\n\n',
+      descriptor: serializePublishCredentialDescriptorAnswer(answer({ expiresAt: Date.now() + 60_000 })),
+    });
+    expect(result.code).toBe(PUBLISH_CREDENTIAL_HELPER_REFUSED);
+    for (const channel of [
+      result.stdout,
+      result.stderr,
+      result.argv.join('\u0000'),
+      Object.values(result.env).join('\u0000'),
+    ]) {
+      expect(channel).not.toContain(SECRET);
     }
   });
 
@@ -282,7 +332,7 @@ describe('publish credential helper entry point', () => {
       prompt: 'protocol=https\nhost=gitlab.com\n\n',
       descriptor: serializePublishCredentialDescriptorAnswer(answer({ expiresAt: Date.now() + 60_000 })),
     });
-    expect(result).toEqual({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
+    expect(result).toMatchObject({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
   });
 
   it('exits 1 silently without a descriptor', async () => {
@@ -291,7 +341,7 @@ describe('publish credential helper entry point', () => {
       prompt: 'protocol=https\nhost=github.com\n\n',
       descriptor: null,
     });
-    expect(result).toEqual({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
+    expect(result).toMatchObject({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
   });
 
   it('exits 1 silently when the descriptor names another lease', async () => {
@@ -300,7 +350,7 @@ describe('publish credential helper entry point', () => {
       prompt: 'protocol=https\nhost=github.com\n\n',
       descriptor: serializePublishCredentialDescriptorAnswer(answer({ leaseId: 'lease-2', expiresAt: Date.now() + 60_000 })),
     });
-    expect(result).toEqual({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
+    expect(result).toMatchObject({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
   });
 
   it('exits 1 instead of crashing when the descriptor fd is not open', async () => {
@@ -310,7 +360,7 @@ describe('publish credential helper entry point', () => {
       descriptor: null,
       descriptorFd: 9,
     });
-    expect(result).toEqual({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
+    expect(result).toMatchObject({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
   });
 
   it('refuses a descriptor that is a regular file rather than a pipe', async () => {
@@ -325,7 +375,7 @@ describe('publish credential helper entry point', () => {
         descriptor: null,
         descriptorFileDescriptor: fd,
       });
-      expect(result).toEqual({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
+      expect(result).toMatchObject({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
     } finally {
       fs.closeSync(fd);
       fs.rmSync(root, { recursive: true, force: true });
@@ -339,7 +389,7 @@ describe('publish credential helper entry point', () => {
         prompt: 'protocol=https\nhost=github.com\nusername=git\npassword=stored\n\n',
         descriptor: serializePublishCredentialDescriptorAnswer(answer({ expiresAt: Date.now() + 60_000 })),
       });
-      expect(result).toEqual({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
+      expect(result).toMatchObject({ code: PUBLISH_CREDENTIAL_HELPER_REFUSED, stdout: '', stderr: '' });
     }
   });
 });

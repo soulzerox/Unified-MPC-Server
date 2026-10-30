@@ -116,13 +116,20 @@ export async function runPublishCredentialHelperProcess(): Promise<number> {
 /**
  * Read one pipe to EOF without exceeding `limit`. The timeout, not the payload,
  * is what ends a peer that never closes its end.
+ *
+ * Exported so the bounds are testable with a short timeout; production always
+ * uses the default.
  */
-async function readBoundedStream(stream: Readable, limit: number): Promise<string | null> {
+export async function readBoundedStream(
+  stream: Readable,
+  limit: number,
+  timeoutMs: number = PUBLISH_CREDENTIAL_HELPER_READ_TIMEOUT_MS,
+): Promise<string | null> {
   const chunks: Buffer[] = [];
   let total = 0;
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(() => resolve('timeout'), PUBLISH_CREDENTIAL_HELPER_READ_TIMEOUT_MS);
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
     timer.unref();
   });
   const read = (async (): Promise<'end' | 'overflow' | 'error'> => {

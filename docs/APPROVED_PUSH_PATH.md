@@ -16,9 +16,11 @@ approval ledger described in section 5, and the two-tool pair `publish_approve` 
 for an exact workspace/remote/branch/SHA binding after `userConfirmed: true`, and
 `git_publish` spends it to push that exact commit to that exact branch through
 host-built argv. The credential-mediation slice (item 1 of the requested behavior)
-is designed, and its inert first slice (S2a: the lease port, the SecretStore-backed
-ledger, the operator CLI and the expiry sweep) is implemented: see
-[APPROVED_PUSH_PATH_CREDENTIALS.md](APPROVED_PUSH_PATH_CREDENTIALS.md).
+is designed, and its first two slices are implemented: S2a (the lease port, the
+SecretStore-backed ledger, the operator CLI and the expiry sweep) and S2b (the
+credential helper emitted into a promoted release). Nothing installs that helper
+on a Git invocation yet, so no HTTP(S) target gains a credential path in this
+state: see [APPROVED_PUSH_PATH_CREDENTIALS.md](APPROVED_PUSH_PATH_CREDENTIALS.md).
 
 Trust model B: `userConfirmed: true` is the calling model's assertion of an explicit
 chat approval, not an independently verified human verdict. Every built-in profile

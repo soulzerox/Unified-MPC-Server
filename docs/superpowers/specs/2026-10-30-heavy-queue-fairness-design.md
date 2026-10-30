@@ -194,3 +194,39 @@ to the response.
 
 Each step is TDD and exercises the queue/controller contract through its public
 interface.
+
+## Amendment: per-workspace queued bound (#543)
+
+Rotation decides *which* workspace runs next; it does not decide *how much* of
+the queue one workspace may hold. With only a global bound, one project could
+occupy every waiting row and keep every other project's eligible work out of the
+queue entirely — a different failure from starvation, and rotation cannot fix it
+because the work never gets a row.
+
+The bound is therefore a queued-row count, not an ordering rule:
+
+```text
+global    maxQueued                     (16 declared shell runs)
+workspace maxQueuedPerWorkspace          (default: global, never above it)
+```
+
+- **Where it lives.** `HeavyJobWaiterQueueOptions.maxQueuedPerWorkspace`, passed
+  to `HeavyJobQueueStore.claim()`/`supersede()` and enforced **inside** the
+  claim transaction, like the global depth check. A process-local check alone
+  would let two runtimes each admit under the cap.
+- **What overflow does.** Reject with `WORKSPACE_QUEUE_FULL` before a task record
+  or process exists. Coalescing still wins: identical work that is already
+  queued is adopted, not rejected, because it costs no new row.
+- **Why not retire a stale row on overflow.** Retirement is a cancellation of
+  real pending work; using it as an overflow valve would make a bounded intake
+  decision destroy someone else's job. Rejection is visible and recoverable by
+  the caller; retirement is not.
+- **Per Goal instead of per workspace.** Goal identity is not a durable queue
+  column, and a Goal may move between workspaces. Adding it would need a schema
+  change plus a decision about which one wins when both apply. Workspace is the
+  identity the queue already owns, so it is the bound that can be enforced
+  atomically today.
+
+Operator contract and default live in `docs/DEPLOYMENT_LINUX.md`; the runtime
+reads `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` once at port creation and
+fails startup on a malformed or oversized value.

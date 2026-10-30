@@ -133,9 +133,14 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
     return Number(updated.changes);
   }
 
-  public claim(entry: HeavyJobQueueEntry, maxQueued: number): HeavyJobClaimResult {
+  public claim(
+    entry: HeavyJobQueueEntry,
+    maxQueued: number,
+    maxQueuedPerWorkspace?: number,
+  ): HeavyJobClaimResult {
     const normalized = normalizeEntry(entry);
     validateMaxQueued(maxQueued);
+    validateMaxQueuedPerWorkspace(maxQueuedPerWorkspace, maxQueued);
     const now = this.now().toISOString();
 
     return this.transaction((): HeavyJobClaimResult => {
@@ -161,8 +166,12 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
       }
 
       const depth = this.depth();
+      if (maxQueuedPerWorkspace !== undefined
+        && this.workspaceQueuedDepth(normalized.workspaceId) >= maxQueuedPerWorkspace) {
+        return { status: 'full', operationId: normalized.operationId, depth, scope: 'workspace' };
+      }
       if (depth >= maxQueued) {
-        return { status: 'full', operationId: normalized.operationId, depth };
+        return { status: 'full', operationId: normalized.operationId, depth, scope: 'queue' };
       }
       const position = this.nextPosition();
       if (existing !== undefined) {
@@ -269,10 +278,12 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
     staleOperationId: string,
     entry: HeavyJobQueueEntry,
     maxQueued: number,
+    maxQueuedPerWorkspace?: number,
   ): HeavyJobSupersedeStoreResult {
     requireIdentifier(staleOperationId, 'staleOperationId');
     const normalized = normalizeEntry(entry);
     validateMaxQueued(maxQueued);
+    validateMaxQueuedPerWorkspace(maxQueuedPerWorkspace, maxQueued);
     const now = this.now().toISOString();
 
     return this.transaction((): HeavyJobSupersedeStoreResult => {
@@ -289,8 +300,12 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
 
       if (!staleQueued) {
         const depth = this.depth();
+        if (maxQueuedPerWorkspace !== undefined
+          && this.workspaceQueuedDepth(normalized.workspaceId) >= maxQueuedPerWorkspace) {
+          return { status: 'full', operationId: normalized.operationId, depth, scope: 'workspace' };
+        }
         if (depth >= maxQueued) {
-          return { status: 'full', operationId: normalized.operationId, depth };
+          return { status: 'full', operationId: normalized.operationId, depth, scope: 'queue' };
         }
         const position = this.nextPosition();
         if (replacement !== undefined) {
@@ -385,6 +400,18 @@ export class SqliteHeavyJobQueueRepository implements HeavyJobQueueStore {
       return Number(updated.changes) === 1;
     }
     throw new HeavyJobQueueStoreError('invalid_entry', `Unknown heavy-job recovery action '${String(action)}'`);
+  }
+
+  /**
+   * Queued rows one workspace holds, counted inside the caller's transaction
+   * (#543). A global depth check is not enough: one project could otherwise
+   * take every row while another has eligible work.
+   */
+  private workspaceQueuedDepth(workspaceId: string): number {
+    const row = this.database.connection
+      .prepare(`SELECT COUNT(*) AS total FROM heavy_jobs WHERE state = 'queued' AND workspace_id = ?`)
+      .get(workspaceId) as { total?: number } | undefined;
+    return Number(row?.total ?? 0);
   }
 
   public depth(): number {
@@ -639,6 +666,16 @@ function requirePositiveInteger(value: unknown, label: string): asserts value is
 function validateMaxQueued(value: number): void {
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX_QUEUED_JOBS) {
     throw new HeavyJobQueueStoreError('invalid_entry', `maxQueued must be between 1 and ${MAX_QUEUED_JOBS}`);
+  }
+}
+
+function validateMaxQueuedPerWorkspace(value: number | undefined, maxQueued: number): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < 1 || value > maxQueued) {
+    throw new HeavyJobQueueStoreError(
+      'invalid_entry',
+      `maxQueuedPerWorkspace must be between 1 and ${maxQueued}`,
+    );
   }
 }
 

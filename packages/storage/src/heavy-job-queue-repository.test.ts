@@ -82,8 +82,32 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
     try {
       const queue = repository(database);
       expect(queue.claim(entry('job-a'), 1)).toMatchObject({ status: 'queued' });
-      expect(queue.claim(entry('job-b'), 1)).toEqual({ status: 'full', operationId: 'job-b', depth: 1 });
+      expect(queue.claim(entry('job-b'), 1))
+        .toEqual({ status: 'full', operationId: 'job-b', depth: 1, scope: 'queue' });
       expect(queue.claim(entry('job-a'), 1)).toMatchObject({ status: 'queued' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects one workspace over its own bound while another workspace still claims (#543)', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const queue = repository(database);
+      expect(queue.claim(entry('job-a'), 4, 1)).toMatchObject({ status: 'queued' });
+      expect(queue.claim(entry('job-a2'), 4, 1))
+        .toEqual({ status: 'full', operationId: 'job-a2', depth: 1, scope: 'workspace' });
+      expect(queue.claim(entry('job-b', { workspaceId: 'workspace-b' }), 4, 1))
+        .toMatchObject({ status: 'queued' });
+
+      // A settled row frees the workspace's slot; the bound counts live rows only.
+      expect(queue.start('job-a', NOW.toISOString())).toBe(true);
+      expect(queue.settle('job-a', 'completed', NOW.toISOString())).toBe(true);
+      expect(queue.claim(entry('job-a3'), 4, 1)).toMatchObject({ status: 'queued' });
+      expect(queue.claim(entry('job-a4'), 4, 1))
+        .toMatchObject({ status: 'full', scope: 'workspace' });
+
+      expect(() => queue.claim(entry('job-z'), 2, 3)).toThrow(HeavyJobQueueStoreError);
     } finally {
       database.close();
     }

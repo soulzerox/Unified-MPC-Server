@@ -662,18 +662,22 @@ export class GitAdapter {
       const error = this.mapError(protocolAllow);
       if (error !== null) return error;
     }
-    const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
-    if (credentialHelpers.exitCode === 0) {
-      return err(appError(
-        'PERMISSION_DENIED',
-        'Git push cannot use configured credential helpers',
-        false,
-        { reason: 'push-credential-helper', key: firstCredentialConfigKey(credentialHelpers.stdout) },
-      ));
-    }
-    if (credentialHelpers.exitCode !== 1) {
-      const error = this.mapError(credentialHelpers);
-      if (error !== null) return error;
+    // Issue #297: a helper only runs for HTTP(S) push targets. A global helper
+    // configured for unrelated HTTPS remotes must not deny an SSH push.
+    if (await this.pushTargetsMayUseCredentialHelper(cwd, remote, signal)) {
+      const credentialHelpers = await this.runner.run(['config', '--get-regexp', '^credential(\\..+)?\\.helper$'], cwd, this.signalOptions(signal));
+      if (credentialHelpers.exitCode === 0) {
+        return err(appError(
+          'PERMISSION_DENIED',
+          'Git push cannot use configured credential helpers',
+          false,
+          { reason: 'push-credential-helper', key: firstCredentialConfigKey(credentialHelpers.stdout) },
+        ));
+      }
+      if (credentialHelpers.exitCode !== 1) {
+        const error = this.mapError(credentialHelpers);
+        if (error !== null) return error;
+      }
     }
     const signingPrograms = await this.runner.run(['config', '--get-regexp', '^gpg(\\..+)?\\.program$'], cwd, this.signalOptions(signal));
     if (signingPrograms.exitCode === 0) {
@@ -718,6 +722,22 @@ export class GitAdapter {
       if (!isMissingFile(error)) return err(appError('INTERNAL_ERROR', 'Git push hook safety could not be verified', true));
     }
     return ok(undefined);
+  }
+
+  /**
+   * Issue #297: report whether any resolved push target can consult a
+   * credential helper. An unresolvable or unsupported target answers `true`
+   * (`isSupportedRemoteTarget` owns the unsupported verdict), so an unknown
+   * transport keeps the existing denial; only transports that never run a
+   * helper skip the credential check.
+   */
+  private async pushTargetsMayUseCredentialHelper(cwd: string, remote: string, signal?: AbortSignal): Promise<boolean> {
+    if (!isValidRemoteName(remote)) return true;
+    const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd, this.signalOptions(signal));
+    if (pushUrls.exitCode !== 0) return true;
+    const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (targets.length === 0) return true;
+    return targets.some((target) => !isSupportedRemoteTarget(target) || usesCredentialHelper(target));
   }
 
   /**
@@ -939,6 +959,19 @@ function firstCredentialConfigKey(output: string): string {
   if (line === undefined) return 'credential.<url>.helper';
   const key = line.trim().split(/\s+/)[0] ?? '';
   return key === 'credential.helper' ? key : 'credential.<url>.helper';
+}
+
+/**
+ * Git consults `credential.helper` only for HTTP(S) remotes. A target without a
+ * `scheme://` prefix is a local path or scp-like SSH, and neither runs a helper;
+ * every other scheme is classified here and an unsupported one is still guarded
+ * by `isSupportedRemoteTarget` in the caller (#297).
+ */
+function usesCredentialHelper(target: string): boolean {
+  if (/^[a-z][a-z0-9+.-]*::/i.test(target)) return true;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(target)?.[1]?.toLowerCase();
+  if (scheme === undefined) return false;
+  return scheme === 'http' || scheme === 'https';
 }
 
 function isSupportedRemoteTarget(target: string): boolean {

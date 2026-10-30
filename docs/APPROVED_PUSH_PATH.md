@@ -12,8 +12,11 @@ credentials that never reach the model, the transcript, or a log.
 Status: **preflight and receipt store implemented, publish not implemented.**
 `git_publish_preflight` (read-only) ships the diagnostics half described in section
 6, and migration `042_publish_approvals` ships the durable approval ledger described
-in section 5. Nothing writes or consumes an approval yet, and nothing in this
-repository can publish; `git push` remains denied for every caller.
+in section 5. Nothing writes or consumes an approval yet, and no authenticated
+publish path exists: `git push` stays denied for every target that could run a
+credential helper. Credential-free transports — SSH, `git://`, `file://` and local
+paths — are not denied by an unrelated helper, because no helper can run on them
+(see §1).
 
 ---
 
@@ -33,6 +36,22 @@ transport is constructed, and every refusal now carries `details.reason` plus th
 blocking `details.key`/`details.keys` — key names only, never values. The guard is
 about *who executes the helper*, not about whether the user is allowed to publish.
 
+That guard is transport-scoped, because Git consults `credential.helper` only for
+HTTP(S) remotes:
+
+| resolved push target | helper can run | credential-helper denial |
+|---|---|---|
+| `https://` / `http://` | yes | reported |
+| `ssh://`, scp-like `user@host:path` | no | not reported |
+| `git://`, `file://`, local path | no | not reported |
+| unresolvable or unsupported (`ftp`, `ext::`, unknown scheme) | unknown | reported (fail closed) |
+
+So a host-wide `credential.helper` configured for `https://github.com` no longer
+denies an SSH publish that cannot use it. Nothing is relaxed for HTTP(S): the
+denial, the key redaction, and the rest of the executable-config checks are
+unchanged there, and the approved path in this document is still the only way to
+publish over an authenticated HTTP(S) transport.
+
 Two facts make a model-driven `git push` unsupportable even with approval:
 
 1. The helper runs in the same process tree as the model's command. Approval does
@@ -44,7 +63,7 @@ Two facts make a model-driven `git push` unsupportable even with approval:
 
 | # | Decision | Rationale |
 |---|---|---|
-| D1 | Add a dedicated `git_publish` tool. Do not relax `git push`. | The guarded path gets its own approval class, schema and audit row. `git push` keeps failing closed for every caller, including Full Bypass. |
+| D1 | Add a dedicated `git_publish` tool. Do not relax `git push`. | The guarded path gets its own approval class, schema and audit row. `git push` keeps failing closed for every transport that can run a credential helper (HTTP/S), including under Full Bypass; the transport scoping in §1 only stops an unrelated helper from denying a transport that never runs one. |
 | D2 | The host builds and executes the Git invocation, not the caller. | The caller supplies `workspaceId`, `remote`, `branch` and an expected commit SHA — never argv, config, or environment. |
 | D3 | Authority is a durable approval receipt, not a boolean. | Mirrors the `guarded_pr_merge` evidence chain: the caller cannot supply the verdict. |
 | D4 | One remote, one branch, one exact SHA per approval. | No force, tags, deletes, `--all`, `--mirror`, or default/protected branches. A moved head invalidates the receipt. |
@@ -168,7 +187,7 @@ from a runtime authentication/credential block *before* attempting to publish.
 
 ## 8. Non-goals
 
-- Relaxing `validatePushSafety` or adding an "ignore safety" flag to `git push`.
+- Relaxing `validatePushSafety` for credential-bearing targets, or adding an "ignore safety" flag to `git push`. Scoping a check to the transports it can apply to is not a relaxation: no helper runs on the targets that skip the credential denial.
 - Publishing from an unleased or unscheduled session.
 - Automatic PR creation, CI triggering, or merge from this tool.
 - Supporting arbitrary remotes, multiple push URLs, or non-GitHub forges in the first slice.

@@ -270,6 +270,9 @@ export function prohibitedDefaultBranchPushReason(args: readonly string[], defau
     return `AI-issued git push cannot use ${recursiveOption}; guarded pushes cannot launch nested submodule pushes`;
   }
   const parsed = parseGitPushArguments(args);
+  if (parsed.invalidOption === '--repo') {
+    return 'AI-issued git push cannot name both a positional repository and --repo; name exactly one repository so the checked target is the one the push uses';
+  }
   if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is not on the explicit allowlist or is missing its value`;
   const lower = args.map((arg) => arg.toLowerCase());
   if (hasGitOption(lower, ['--all'])) {
@@ -322,7 +325,14 @@ export function parseGitPushArguments(args: readonly string[]): GitPushArguments
     if (argument.startsWith('--') && !GIT_PUSH_OPTIONS.has(optionName)) return { refspecs: [], invalidOption: argument };
     if (!argument.startsWith('-')) positional.push(argument);
   }
-  if (optionRemote !== undefined) return { remote: optionRemote, refspecs: positional };
+  if (optionRemote !== undefined) {
+    // Git resolves the positional repository first and only falls back to
+    // `--repo`, so accepting both would validate a remote the push never uses
+    // and could send an HTTPS push past a helper check on a different remote
+    // (#297). Name exactly one repository.
+    if (positional.length > 0) return { refspecs: [], invalidOption: '--repo' };
+    return { remote: optionRemote, refspecs: [] };
+  }
   return positional[0] === undefined
     ? { refspecs: [] }
     : { remote: positional[0], refspecs: positional.slice(1) };

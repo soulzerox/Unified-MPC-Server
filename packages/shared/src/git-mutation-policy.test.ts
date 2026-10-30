@@ -112,12 +112,23 @@ describe('prohibitedAgentGitInvocationReason', () => {
     });
   });
 
-  it('keeps --repo push syntax available for an explicit feature ref', () => {
-    expect(parseGitPushArguments(['--repo=origin', 'feature/review-gate'])).toEqual({
+  it('accepts --repo push syntax only when it is the sole repository', () => {
+    expect(parseGitPushArguments(['--repo=origin'])).toEqual({
       remote: 'origin',
-      refspecs: ['feature/review-gate'],
+      refspecs: [],
     });
-    expect(prohibitedAgentGitInvocationReason(['push', '--repo', 'origin', 'feature/review-gate'])).toBeUndefined();
+  });
+
+  it('rejects a push that names both a positional repository and --repo', () => {
+    // Git prefers the positional repository, so the validated remote would not
+    // be the target the push uses (#297).
+    expect(parseGitPushArguments(['https://example.invalid/r.git', '--repo', 'origin', 'goal/x:goal/x'])).toEqual({
+      refspecs: [],
+      invalidOption: '--repo',
+    });
+    const reason = 'AI-issued git push cannot name both a positional repository and --repo; name exactly one repository so the checked target is the one the push uses';
+    expect(prohibitedAgentGitInvocationReason(['push', '--repo', 'origin', 'feature/review-gate'])).toBe(reason);
+    expect(prohibitedAgentGitInvocationReason(['push', 'https://example.invalid/r.git', '--repo', 'origin', 'goal/x:goal/x'])).toBe(reason);
   });
 
   it.each([

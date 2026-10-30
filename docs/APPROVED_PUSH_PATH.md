@@ -33,6 +33,22 @@ transport is constructed, and every refusal now carries `details.reason` plus th
 blocking `details.key`/`details.keys` — key names only, never values. The guard is
 about *who executes the helper*, not about whether the user is allowed to publish.
 
+That guard is transport-scoped, because Git consults `credential.helper` only for
+HTTP(S) remotes:
+
+| resolved push target | helper can run | credential-helper denial |
+|---|---|---|
+| `https://` / `http://` | yes | reported |
+| `ssh://`, scp-like `user@host:path` | no | not reported |
+| `git://`, `file://`, local path | no | not reported |
+| unresolvable, unsupported, `ext::`, unclassified | unknown | reported (fail closed) |
+
+So a host-wide `credential.helper` configured for `https://github.com` no longer
+denies an SSH publish that cannot use it. Nothing is relaxed for HTTP(S): the
+denial, the key redaction, and the rest of the executable-config checks are
+unchanged there, and the approved path in this document is still the only way to
+publish over an authenticated HTTP(S) transport.
+
 Two facts make a model-driven `git push` unsupportable even with approval:
 
 1. The helper runs in the same process tree as the model's command. Approval does

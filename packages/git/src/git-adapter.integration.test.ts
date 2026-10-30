@@ -349,6 +349,72 @@ describe('GitAdapter integration', () => {
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
+  it('allows an SSH push while an unrelated credential helper is configured', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'git@example.invalid:owner/repo.git'], { cwd: root, windowsHide: true });
+    const marker = path.join(root, 'credential-wrapper-ran');
+    const wrapper = path.join(root, 'credential-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'credential.helper', `!${wrapper}`], { cwd: root, windowsHide: true });
+
+    // scp-like `user@host:path` is the SSH transport, which never consults a helper.
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({ ok: true });
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 15_000);
+
+  it('keeps the credential-helper denial when any push target uses HTTPS', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'git@example.invalid:owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', '--add', 'remote.origin.pushurl', 'git@example.invalid:owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', '--add', 'remote.origin.pushurl', 'https://example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+    const wrapper = path.join(root, 'credential-wrapper.sh');
+    await writeFile(wrapper, '#!/bin/sh\nexit 1\n', 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'credential.helper', `!${wrapper}`], { cwd: root, windowsHide: true });
+
+    // Git pushes to every pushurl, so one HTTP(S) target can run the helper.
+    const denied = await new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin');
+    expect(denied).toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+    expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
+  }, 15_000);
+
+  it('reports a credential-free publish as ready while a helper is configured', async () => {
+    if (!gitAvailable) return;
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(parent);
+    const origin = path.join(parent, 'origin.git');
+    const workRoot = path.join(parent, 'work');
+    await execFileAsync('git', ['init', '--bare', origin], { cwd: parent, windowsHide: true });
+    await mkdir(workRoot, { recursive: true });
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: workRoot, windowsHide: true });
+    await writeFile(path.join(workRoot, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', origin], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: workRoot, windowsHide: true });
+
+    const preflight = await new GitAdapter(new DirectGitRunner()).publishPreflight(workRoot, 'origin', 'goal/publish');
+    expect(preflight).toMatchObject({
+      ok: true,
+      value: { targets: ['file'], runtime: { ready: true }, approval: 'missing' },
+    });
+  }, 20_000);
+
   it('reduces a host-only credential helper scope to the URL key pattern', async () => {
     if (!gitAvailable) return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

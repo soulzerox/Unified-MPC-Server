@@ -148,15 +148,16 @@ consume the caller's budget.
 
 The global bound (16 waiting declared runs) is not the only one: shell admission
 also refuses to queue more than `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE`
-heavy rows for one workspace (default 16, never above the global bound), so a
-single project cannot fill the queue and starve another that has eligible work.
-The count is every queued row of that workspace, not only shell declarations:
-pre-edit work shares the durable queue, so an already queued pre-edit row
-consumes part of the workspace's budget, even though pre-edit intake itself is
-bounded only by its own queue limit. A run over that bound is refused before its
-task record is written and reaches the caller as the same `RESOURCE_PRESSURE`
-refusal described below; identical work that is already queued still coalesces
-instead of being rejected.
+heavy rows for one workspace (default 16, never above the global bound). With the
+default equal to the global bound the cap only bites after an operator lowers it;
+once lowered, a single project can no longer fill the queue and starve another
+that has eligible work. The count is every queued row of that workspace, not only
+shell declarations: pre-edit work shares the durable queue, so an already queued
+pre-edit row consumes part of the workspace's budget, even though pre-edit intake
+itself is bounded only by its own queue limit. A run over that bound is refused
+before its task record is written and reaches the caller as the same
+`RESOURCE_PRESSURE` refusal described below; identical work that is already
+queued still coalesces instead of being rejected.
 
 Operator behavior to expect:
 

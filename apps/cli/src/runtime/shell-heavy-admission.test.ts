@@ -246,4 +246,37 @@ describe('per-workspace queue bound (#543)', () => {
       operationId: 'shell:b', workspaceId: 'workspace-b', resourceClass: 'verification_heavy',
     })).toMatchObject({ status: 'queued' });
   });
+
+  it('forwards both bounds to the durable claim', () => {
+    const admission = controller();
+    const calls: Array<{ maxQueued: number; maxQueuedPerWorkspace?: number }> = [];
+    const store: HeavyJobQueueStore = {
+      claim: (entry, maxQueued, maxQueuedPerWorkspace): HeavyJobClaimResult => {
+        calls.push({ maxQueued, ...(maxQueuedPerWorkspace === undefined ? {} : { maxQueuedPerWorkspace }) });
+        return { status: 'queued', operationId: entry.operationId, position: 1, depth: 1 };
+      },
+      claimExisting: (entry): HeavyJobReattachResult => ({
+        status: 'missing', operationId: entry.operationId, depth: 0,
+      }),
+      promote: (): number | undefined => undefined,
+      cancel: (): boolean => true,
+      supersede: (): HeavyJobSupersedeStoreResult => ({ status: 'full', operationId: 'unused', depth: 0 }),
+      start: (): boolean => true,
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => 1,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const port = createShellHeavyAdmissionPort(() => admission, () => store, 3);
+
+    expect(port.enqueue({
+      operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'queued' });
+    // Dropping either argument would leave every other suite green while the
+    // bound silently stopped applying to durable rows.
+    expect(calls).toEqual([{
+      maxQueued: SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
+      maxQueuedPerWorkspace: 3,
+    }]);
+  });
 });

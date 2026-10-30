@@ -242,8 +242,9 @@ every HTTP(S) target that could run a helper, including under Full Bypass.
 ## 5. Lifecycle
 
 ```text
-unified-mpc publish-credential grant <workspace> <remote> --username <user> --ttl 15m
-        |   secret from a no-echo TTY prompt or a pipe; hosts resolved from the remote
+unified-mpc publish-credential grant <remote> --workspace <id> --username <user> --ttl 900
+        |   secret from a no-echo TTY prompt or a pipe (stdin only, never argv or env);
+        |   hosts resolved from the remote's single push URL; --ttl is whole seconds
         |   SecretToolSecretStore: publish-<leaseId>; ledger row: hosts, username, expiry
         v
 git_publish_preflight   -> authorization 'diagnostic' for the default-branch ls-remote

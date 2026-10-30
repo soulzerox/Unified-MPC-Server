@@ -112,7 +112,17 @@ describe('SqlitePublishCredentialRepository', () => {
       .toEqual({ lease_id: 'lease-1' });
   });
 
-  it('deletes the secret when the ledger row write fails', async () => {
+  it('removes the ledger row when the secret write fails, so nothing is left behind', async () => {
+    const { database, store, repository } = setup();
+    store.failSet = true;
+    const result = await repository.grant(lease(), SECRET);
+    expect(result).toMatchObject({ ok: false });
+    expect(ledgerRows(database)).toEqual([]);
+    expect(store.values.size).toBe(0);
+    await expect(repository.open('lease-1', NOW)).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('never leaves a secret without a ledger row when the row write fails', async () => {
     const { database, store, repository } = setup();
     database.connection.exec(`
       CREATE TRIGGER reject_publish_credential BEFORE INSERT ON publish_credential_leases

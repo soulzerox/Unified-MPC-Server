@@ -26,10 +26,13 @@ describe('publish credential validators', () => {
   it('accepts only SecretStore-safe lease ids', () => {
     expect(isPublishCredentialLeaseId('lease-1')).toBe(true);
     expect(isPublishCredentialLeaseId('a.b_c-9')).toBe(true);
-    expect(isPublishCredentialLeaseId('a'.repeat(128))).toBe(true);
+    expect(isPublishCredentialLeaseId('a'.repeat(120))).toBe(true);
     expect(isPublishCredentialLeaseId('')).toBe(false);
     expect(isPublishCredentialLeaseId('publish/lease')).toBe(false);
     expect(isPublishCredentialLeaseId('lease id')).toBe(false);
+    // 121 id characters would build a 129-character `publish-` key, which the
+    // SecretStore refuses, so the id bound stops at 120.
+    expect(isPublishCredentialLeaseId('a'.repeat(121))).toBe(false);
     expect(isPublishCredentialLeaseId('a'.repeat(129))).toBe(false);
     expect(isPublishCredentialLeaseId(42)).toBe(false);
   });

@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { promisify } from 'node:util';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   appError,
   err,
@@ -9,13 +15,25 @@ import {
 } from '@unified-mpc/domain';
 import {
   parsePublishCredentialArgs,
+  readPublishCredentialSecret,
+  resolveGitPushUrls,
   resolvePublishCredentialDeployment,
   runPublishCredentialCommand,
   type PublishCredentialCommandRunner,
 } from './publish-credential.js';
 
+const execFileAsync = promisify(execFile);
+
 const NOW = 1_780_000_000_000;
 const SECRET = 'super-secret-token-value';
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  while (tempDirs.length > 0) {
+    const directory = tempDirs.pop();
+    if (directory !== undefined) await rm(directory, { recursive: true, force: true });
+  }
+});
 
 interface RecordedPort {
   readonly port: PublishCredentialPort;
@@ -364,3 +382,106 @@ describe('publish-credential secret intake', () => {
   });
 });
 
+describe('publish-credential secret intake from stdin', () => {
+  beforeEach(() => {
+    // The TTY prompt goes to stderr; keep the test output quiet.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function terminal(): PassThrough & { isTTY?: boolean; setRawMode?: (mode: boolean) => void } {
+    const stream = new PassThrough() as PassThrough & { isTTY?: boolean; setRawMode?: (mode: boolean) => void };
+    Object.defineProperty(stream, 'isTTY', { value: true });
+    return stream;
+  }
+
+  it('reads a piped secret to EOF and strips the trailing newline', async () => {
+    const stream = new PassThrough();
+    const pending = readPublishCredentialSecret(stream as unknown as NodeJS.ReadStream);
+    stream.end(`${SECRET}\n`);
+    await expect(pending).resolves.toEqual(ok(SECRET));
+  });
+
+  it('reads a no-echo TTY secret until enter and restores the terminal mode', async () => {
+    const stream = terminal();
+    const modes: boolean[] = [];
+    stream.setRawMode = (mode: boolean): void => {
+      modes.push(mode);
+    };
+    const pending = readPublishCredentialSecret(stream as unknown as NodeJS.ReadStream);
+    stream.write('tok');
+    stream.write('en\r');
+    await expect(pending).resolves.toEqual(ok('token'));
+    expect(modes).toEqual([true, false]);
+  });
+
+  it('cancels a TTY read on ctrl-c', async () => {
+    const stream = terminal();
+    const modes: boolean[] = [];
+    stream.setRawMode = (mode: boolean): void => {
+      modes.push(mode);
+    };
+    const pending = readPublishCredentialSecret(stream as unknown as NodeJS.ReadStream);
+    stream.write('\u0003');
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(modes).toEqual([true, false]);
+  });
+
+  it('refuses an empty, multi-line or oversized secret', async () => {
+    const empty = new PassThrough();
+    const emptyPending = readPublishCredentialSecret(empty as unknown as NodeJS.ReadStream);
+    empty.end('\n');
+    await expect(emptyPending).resolves.toMatchObject({ ok: false });
+
+    const multiLine = new PassThrough();
+    const multiLinePending = readPublishCredentialSecret(multiLine as unknown as NodeJS.ReadStream);
+    multiLine.end('line\nline\n');
+    await expect(multiLinePending).resolves.toMatchObject({ ok: false });
+
+    const oversized = new PassThrough();
+    const oversizedPending = readPublishCredentialSecret(oversized as unknown as NodeJS.ReadStream);
+    oversized.end('a'.repeat(8_193));
+    await expect(oversizedPending).resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe('resolveGitPushUrls', () => {
+  async function repository(remote: string): Promise<string> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-publish-'));
+    tempDirs.push(directory);
+    await execFileAsync('git', ['init', '--quiet'], { cwd: directory });
+    await execFileAsync('git', ['remote', 'add', 'origin', remote], { cwd: directory });
+    return directory;
+  }
+
+  it('resolves the configured push URL of a remote', async () => {
+    const directory = await repository('https://github.com/owner/repo.git');
+    await expect(resolveGitPushUrls(directory, 'origin')).resolves.toEqual({
+      ok: true,
+      value: ['https://github.com/owner/repo.git'],
+    });
+  });
+
+  it('reports every push URL so the command can refuse an ambiguous remote', async () => {
+    const directory = await repository('https://github.com/owner/repo.git');
+    for (const url of ['https://github.com/owner/repo.git', 'https://gitlab.com/owner/repo.git']) {
+      await execFileAsync('git', ['remote', 'set-url', '--add', '--push', 'origin', url], { cwd: directory });
+    }
+    const resolved = await resolveGitPushUrls(directory, 'origin');
+    expect(resolved).toMatchObject({ ok: true });
+    expect(resolved.ok ? resolved.value : []).toEqual([
+      'https://github.com/owner/repo.git',
+      'https://gitlab.com/owner/repo.git',
+    ]);
+  });
+
+  it('fails closed when the remote does not exist', async () => {
+    const directory = await repository('https://github.com/owner/repo.git');
+    const resolved = await resolveGitPushUrls(directory, 'missing');
+    expect(resolved.ok).toBe(false);
+    expect(resolved.ok ? undefined : resolved.error.details?.reason).toBe('push-target-unresolved');
+  });
+});

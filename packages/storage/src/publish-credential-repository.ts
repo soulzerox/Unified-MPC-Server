@@ -54,10 +54,11 @@ export interface PublishCredentialInspection {
 /**
  * Host-owned credential leases backed by the publish ledger and the existing
  * `SecretStore` (#297). The ledger row and the secret are two stores, so grant
- * writes the secret first and deletes it again if the row write fails: a
- * failure never leaves a secret without a row that can revoke or sweep it.
- * Every answer fails closed, and no method returns a secret for an unknown,
- * revoked or expired lease.
+ * writes the row first and deletes it again if the secret write fails: that way
+ * no failure can leave a secret without a row that can revoke or sweep it, and a
+ * row without a secret is inert (`open` answers null and the sweep prunes it at
+ * expiry). Every answer fails closed, and no method returns a secret for an
+ * unknown, revoked or expired lease.
  */
 export class SqlitePublishCredentialRepository implements PublishCredentialPort {
   public constructor(private readonly options: PublishCredentialRepositoryOptions) {}
@@ -79,12 +80,6 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
     }
 
     try {
-      await this.options.secretStore.set(secretKey(lease.leaseId), secret);
-    } catch {
-      return err(secretServiceUnavailable());
-    }
-
-    try {
       conn.prepare(`
         INSERT INTO publish_credential_leases (
           lease_id, workspace_id, remote, hosts, username, created_at, expires_at
@@ -98,10 +93,16 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
         lease.createdAt,
         lease.expiresAt,
       );
+    } catch {
+      return err(ledgerUnavailable());
+    }
+
+    try {
+      await this.options.secretStore.set(secretKey(lease.leaseId), secret);
       return ok(undefined);
     } catch {
-      await this.deleteSecret(lease.leaseId);
-      return err(ledgerUnavailable());
+      this.deleteRow(lease.leaseId);
+      return err(secretServiceUnavailable());
     }
   }
 
@@ -201,12 +202,13 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
     return ok(isValidPublishCredentialLease(lease) ? { lease, revokedAt: row.revoked_at } : null);
   }
 
-  private async deleteSecret(leaseId: string): Promise<void> {
+  private deleteRow(leaseId: string): void {
     try {
-      await this.options.secretStore.delete(secretKey(leaseId));
+      this.options.database.connection.prepare('DELETE FROM publish_credential_leases WHERE lease_id = ?')
+        .run(leaseId);
     } catch {
-      // The row write failed and the secret must not outlive the attempt. A
-      // failed delete is swept later from the ledger row; never mask the
+      // The secret write already failed, so the row is inert: `open` answers
+      // null without a secret and the expiry sweep prunes it. Never mask the
       // original failure with a second error.
     }
   }

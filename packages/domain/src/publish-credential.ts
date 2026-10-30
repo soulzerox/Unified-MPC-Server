@@ -40,8 +40,13 @@ export interface PublishCredentialPort {
   revoke(leaseId: string, now: number): Promise<Result<void>>;
 }
 
-/** Same charset `SecretStore.normalizeKey` accepts, so the key is `publish-<leaseId>`. */
-const PUBLISH_CREDENTIAL_LEASE_ID = /^[A-Za-z0-9._-]{1,128}$/u;
+/**
+ * Lease ids are charset-safe because the id becomes part of a SecretStore key.
+ * The bound is 120, not 128: the key is `publish-<leaseId>` (8 characters of
+ * prefix) and `SecretStore.normalizeKey` refuses a key longer than 128, so a
+ * longer id would be accepted here and then fail inside the secret store.
+ */
+const PUBLISH_CREDENTIAL_LEASE_ID = /^[A-Za-z0-9._-]{1,120}$/u;
 const PUBLISH_CREDENTIAL_HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const PUBLISH_CREDENTIAL_PORT = /^[1-9][0-9]{0,4}$/u;
 const MAX_PUBLISH_CREDENTIAL_SECRET = 8_192;

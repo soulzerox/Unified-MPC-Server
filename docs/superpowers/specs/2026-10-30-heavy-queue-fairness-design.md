@@ -222,13 +222,16 @@ workspace maxQueuedPerWorkspace          (default: global, never above it)
   rejected, because it costs no new row.
 - **What the count covers.** Every queued row with that `workspace_id`, whichever
   job kind wrote it. Shell and pre-edit work share the durable table, so the
-  bound is a workspace intake budget rather than a shell-only counter, and
-  promotion, re-attach and recovery never create rows that could exceed it.
-- **Known limit.** `supersede()` re-checks the bound for a replacement row in the
-  same workspace, but a row that *moves* into another workspace is not counted
-  against the destination before the swap. No caller supersedes across
-  workspaces today; a future one must re-check the destination depth inside the
-  same transaction.
+  bound is a shell-admission intake budget, not a shell-only counter: a queued
+  pre-edit row already consumes the workspace's budget, while pre-edit intake
+  itself is bounded only by its own queue limit. Promotion, re-attach and
+  recovery never create rows that could exceed it.
+- **Known limit.** A same-workspace `supersede()` swaps the replacement into the
+  slot its retired row frees, so it cannot exceed the bound by construction; the
+  depth check only runs when the stale row is no longer queued. A row that
+  *moves* into another workspace is not counted against the destination before
+  the swap: no caller supersedes across workspaces today, and a future one must
+  re-check the destination depth inside the same transaction.
 - **Why not retire a stale row on overflow.** Retirement is a cancellation of
   real pending work; using it as an overflow valve would make a bounded intake
   decision destroy someone else's job. Rejection is visible and recoverable by

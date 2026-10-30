@@ -116,6 +116,28 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
     }
   });
 
+  it('applies the workspace bound when a supersede cannot reuse the stale slot (#543)', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const queue = repository(database);
+      expect(queue.claim(entry('job-a'), 4, 1)).toMatchObject({ status: 'queued' });
+      expect(queue.start('job-a', NOW.toISOString())).toBe(true);
+      expect(queue.claim(entry('job-b'), 4, 1)).toMatchObject({ status: 'queued' });
+
+      // `job-a` already left the queue, so `job-c` inherits no slot and the
+      // workspace is at its bound.
+      expect(queue.supersede('job-a', entry('job-c'), 4, 1))
+        .toEqual({ status: 'full', operationId: 'job-c', depth: 1, scope: 'workspace' });
+
+      // A stale row that is still queued frees its own slot, so the swap stays
+      // inside the bound without a separate check.
+      expect(queue.supersede('job-b', entry('job-d'), 4, 1)).toMatchObject({ status: 'superseded' });
+      expect(queue.depth()).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
   it('re-claims a terminal exact input as a new attempt instead of growing the table', () => {
     const database = new SqliteDatabase(':memory:');
     try {

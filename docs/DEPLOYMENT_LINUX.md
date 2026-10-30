@@ -146,15 +146,17 @@ then show an `admission` block with class, cost, state, position and waited
 time. `timeout_seconds` starts counting at launch, so queue residence does not
 consume the caller's budget.
 
-The global bound (16 waiting declared runs) is not the only one: one workspace
-may hold at most `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` queued heavy rows
-(default 16, never above the global bound), so a single project cannot fill the
-queue and starve another that has eligible work. The count is every queued row
-of that workspace, not only shell declarations: pre-edit work shares the durable
-queue, so a pre-edit backlog consumes part of the workspace's shell budget. A
-run over that bound is refused before its task record is written and reaches the
-caller as the same `RESOURCE_PRESSURE` refusal described below; identical work
-that is already queued still coalesces instead of being rejected.
+The global bound (16 waiting declared runs) is not the only one: shell admission
+also refuses to queue more than `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE`
+heavy rows for one workspace (default 16, never above the global bound), so a
+single project cannot fill the queue and starve another that has eligible work.
+The count is every queued row of that workspace, not only shell declarations:
+pre-edit work shares the durable queue, so an already queued pre-edit row
+consumes part of the workspace's budget, even though pre-edit intake itself is
+bounded only by its own queue limit. A run over that bound is refused before its
+task record is written and reaches the caller as the same `RESOURCE_PRESSURE`
+refusal described below; identical work that is already queued still coalesces
+instead of being rejected.
 
 Operator behavior to expect:
 
@@ -223,7 +225,7 @@ memory and CPU headroom**, never from total RAM:
   revoking running leases; a missing or malformed memory or CPU sample fails
   closed to the base cap.
 
-The policy is process-wide and read once at controller creation:
+The policy is process-wide and read once at runtime startup:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -231,7 +233,7 @@ The policy is process-wide and read once at controller creation:
 | `UNIFIED_MPC_HEAVY_JOB_MEMORY_BYTES` | `4294967296` (4 GiB) | Memory reserved per extra heavy job. |
 | `UNIFIED_MPC_HEAVY_HEADROOM_RESERVE_BYTES` | `2147483648` (2 GiB) | Memory kept free for the OS/runtime before extra slots count. |
 | `UNIFIED_MPC_HEAVY_MAX_LOAD_PER_CORE` | `0.5` | Highest 1-minute load average per core for extra slots; `0` disables the CPU gate. |
-| `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` | `16` | Declared shell runs one workspace may keep waiting; must be between 1 and the global bound of 16. |
+| `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` | `16` | Queued heavy rows one workspace may hold before shell admission refuses more; queued pre-edit rows count too. Must be an integer between 1 and the global bound of 16. |
 
 Invalid values fail runtime startup with the variable name. An 8 GiB host with
 the defaults normally keeps one heavy slot. `heavy_job_queue_status` reports

@@ -62,7 +62,7 @@ export function resolveShellHeavyAdmissionPerWorkspaceLimit(
 export function createShellHeavyAdmissionPort(
   getController: () => ResourceAdmissionController,
   getStore: () => HeavyJobQueueStore | undefined = () => undefined,
-  perWorkspaceLimit: number = resolveShellHeavyAdmissionPerWorkspaceLimit(),
+  perWorkspaceLimit: number = SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
 ): ShellHeavyAdmissionPort {
   let queue: HeavyJobWaiterQueue | undefined;
   let controller: ResourceAdmissionController | undefined;

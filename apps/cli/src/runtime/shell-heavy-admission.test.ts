@@ -213,4 +213,37 @@ describe('per-workspace queue bound (#543)', () => {
       })).toThrow(RangeError);
     }
   });
+
+  it('keeps the port factory independent of the ambient environment', () => {
+    const previous = process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV];
+    process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV] = '1';
+    try {
+      const admission = controller();
+      const port = createShellHeavyAdmissionPort(() => admission);
+      // The runtime passes the resolved value; the factory keeps the global
+      // bound, so a developer's exported variable cannot rewrite these tests.
+      expect(port.enqueue({
+        operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+      })).toMatchObject({ status: 'queued' });
+      expect(port.enqueue({
+        operationId: 'shell:b', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+      })).toMatchObject({ status: 'queued' });
+    } finally {
+      if (previous === undefined) delete process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV];
+      else process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV] = previous;
+    }
+  });
+
+  it('rejects a workspace over an explicit bound while another still queues', () => {
+    const port = createShellHeavyAdmissionPort(() => controller(), undefined, 1);
+    expect(port.enqueue({
+      operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'queued' });
+    expect(port.enqueue({
+      operationId: 'shell:a2', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'full' });
+    expect(port.enqueue({
+      operationId: 'shell:b', workspaceId: 'workspace-b', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'queued' });
+  });
 });

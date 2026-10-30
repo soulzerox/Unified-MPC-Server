@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -716,6 +717,53 @@ describe('GitAdapter integration', () => {
     });
     expect(JSON.stringify(preflight)).not.toContain('!true');
   }, 15_000);
+
+  it('does not contact the remote while the runtime is blocked', async () => {
+    if (!gitAvailable) return;
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      response.writeHead(401, { 'www-authenticate': 'Basic realm="test"' });
+      response.end('denied\n');
+    });
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+    try {
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+      temporaryRoots.push(root);
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: root, windowsHide: true });
+      await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, windowsHide: true });
+      await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: root, windowsHide: true });
+      await writeFile(path.join(root, 'readme.txt'), 'initial\n', 'utf8');
+      await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: root, windowsHide: true });
+      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: root, windowsHide: true });
+      await execFileAsync('git', ['remote', 'add', 'origin', `http://127.0.0.1:${port}/owner/repo.git`], { cwd: root, windowsHide: true });
+      const marker = path.join(root, 'credential-wrapper-ran');
+      const wrapper = path.join(root, 'credential-wrapper.sh');
+      await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+      await chmod(wrapper, 0o755);
+      await execFileAsync('git', ['config', 'credential.helper', `!${wrapper}`], { cwd: root, windowsHide: true });
+
+      // Issue #549: `ls-remote` would answer the 401 by running the helper, and the
+      // guard already refuses this target, so the blocked preflight must not ask.
+      const preflight = await new GitAdapter(new DirectGitRunner()).publishPreflight(root, 'origin', 'goal/publish');
+      expect(preflight).toMatchObject({
+        ok: true,
+        value: {
+          targets: [`http://127.0.0.1:${port}`],
+          defaultBranches: [],
+          protectedBranch: false,
+          runtime: { ready: false, reason: 'push-credential-helper', key: 'credential.helper' },
+          approval: 'missing',
+        },
+      });
+      expect(requests).toBe(0);
+      await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await new Promise<void>((resolve) => { server.close(() => { resolve(); }); });
+    }
+  }, 20_000);
 
   it('never echoes credentials embedded in a publish remote URL', async () => {
     if (!gitAvailable) return;

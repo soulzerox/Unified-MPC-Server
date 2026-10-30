@@ -176,6 +176,28 @@ if [[ "$deployed_commit" != "$source_commit" ]]; then
   fail 67 "RUNTIME_RELEASE_INCOMPLETE: deployed provenance does not match source HEAD"
 fi
 
+# #297: the approved publish path installs exactly one host-owned credential
+# helper at <deployment>/publish-credential-helper. It is emitted here, from the
+# promoted artifact the model does not write, and never at runtime: a helper a
+# model could rewrite would defeat the deployment check that gates grants.
+helper_entry="$stage_root/apps/cli/dist/bin/publish-credential-helper.js"
+if [[ ! -f "$helper_entry" ]]; then
+  fail 67 "RUNTIME_ARTIFACT_MISSING: built credential helper is missing: '$helper_entry'"
+fi
+cat >"$stage_root/publish-credential-helper" <<'HELPER_LAUNCHER'
+#!/bin/sh
+# Host-owned Git credential helper (#297). Materialized with the release; never
+# edited afterwards. It answers one `get` per approved publish lease and is
+# silent otherwise. Argument and stdin handling live in the compiled entry.
+set -eu
+entry="$(dirname -- "$0")/apps/cli/dist/bin/publish-credential-helper.js"
+# A release missing its compiled entry must stay silent instead of letting node
+# print a module-resolution trace on the stderr Git shows the operator.
+[ -f "$entry" ] || exit 1
+exec node "$entry" "$@"
+HELPER_LAUNCHER
+chmod 0555 "$stage_root/publish-credential-helper"
+
 while IFS= read -r -d '' link; do
   raw_target="$(readlink -- "$link" 2>/dev/null || true)"
   resolved="$(readlink -f -- "$link" 2>/dev/null || true)"

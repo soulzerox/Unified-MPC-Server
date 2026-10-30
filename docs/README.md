@@ -25,5 +25,5 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
 9. **[Approved Git Push Path](APPROVED_PUSH_PATH.md)**:
    Approved publish for a leased Goal: `publish_approve` receipts, host-built `git_publish`, credential handling and preflight. Credential-free transports only (#297).
 10. **[Publish Credential Mediation (S2 design)](APPROVED_PUSH_PATH_CREDENTIALS.md)**:
-   The remaining slice of #297: a host-owned credential helper, a receipt-bound grant, the guard allowlist and the revocation lifecycle. S2a (lease port, SecretStore ledger, operator CLI, expiry sweep) is implemented; S2b–S2d are not, so no credential target can publish yet.
+   The remaining slice of #297: a host-owned credential helper, a receipt-bound grant, the guard allowlist and the revocation lifecycle. S2a (lease port, SecretStore ledger, operator CLI, expiry sweep) and S2b (the `publish-credential-helper` artifact inside a promoted release) are implemented; S2c–S2d are not, so no credential target can publish yet.
 

@@ -270,6 +270,9 @@ export function prohibitedDefaultBranchPushReason(args: readonly string[], defau
     return `AI-issued git push cannot use ${recursiveOption}; guarded pushes cannot launch nested submodule pushes`;
   }
   const parsed = parseGitPushArguments(args);
+  if (parsed.invalidOption === '--repo') {
+    return 'AI-issued git push cannot name both a positional repository and --repo; name exactly one repository so the checked target is the one the push uses';
+  }
   if (parsed.invalidOption !== undefined) return `AI-issued git push option ${parsed.invalidOption} is not on the explicit allowlist or is missing its value`;
   const lower = args.map((arg) => arg.toLowerCase());
   if (hasGitOption(lower, ['--all'])) {

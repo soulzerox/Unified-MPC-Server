@@ -126,8 +126,9 @@ describe('prohibitedAgentGitInvocationReason', () => {
       refspecs: [],
       invalidOption: '--repo',
     });
-    expect(prohibitedAgentGitInvocationReason(['push', '--repo', 'origin', 'feature/review-gate'])).toBeTypeOf('string');
-    expect(prohibitedAgentGitInvocationReason(['push', 'https://example.invalid/r.git', '--repo', 'origin', 'goal/x:goal/x'])).toBeTypeOf('string');
+    const reason = 'AI-issued git push cannot name both a positional repository and --repo; name exactly one repository so the checked target is the one the push uses';
+    expect(prohibitedAgentGitInvocationReason(['push', '--repo', 'origin', 'feature/review-gate'])).toBe(reason);
+    expect(prohibitedAgentGitInvocationReason(['push', 'https://example.invalid/r.git', '--repo', 'origin', 'goal/x:goal/x'])).toBe(reason);
   });
 
   it.each([

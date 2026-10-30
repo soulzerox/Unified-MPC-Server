@@ -1,6 +1,6 @@
 # Approved Push Path — Credential Mediation (S2 design)
 
-Status: **S2a implemented; S2b–S2d not implemented.** S1 shipped in #552 and
+Status: **S2a and S2b implemented; S2c–S2d not implemented.** S1 shipped in #552 and
 covers every credential-free transport. This document designs the remaining
 slice of #297:
 item 1 of the requested behavior, "supported credential-helper
@@ -146,6 +146,42 @@ A lease whose target resolves to any scheme other than `https` is refused at
 `grant` with `publish-credential-unsupported` before a secret is stored, so an
 `http://` remote fails at the first step instead of later as an opaque
 authentication failure.
+
+### The artifact S2b ships
+
+| Path | Content |
+|---|---|
+| `<deployment>/publish-credential-helper` | The fixed-path entry point: a `0555` `/bin/sh` launcher that `exec`s the compiled entry beside it. Written once, with the release. |
+| `<deployment>/apps/cli/dist/bin/publish-credential-helper.js` | The compiled helper: argument, prompt and descriptor handling. |
+
+`scripts/materialize-runtime-release.sh` writes both before the atomic release
+rename, and refuses to materialize when the compiled entry is missing, so a
+deployment either carries the helper or is never promoted. The fixed path is a
+launcher rather than the compiled file itself because the release root has no
+`node_modules` — only `apps/cli` carries the deployed dependency tree — and the
+helper must import the same validators as the rest of the server instead of a
+copy that could drift.
+
+The host hands the helper one JSON line on an inherited pipe
+(`UNIFIED_PUBLISH_CREDENTIAL_FD`, an integer `>= 3`) written before the spawn:
+
+```json
+{"version":1,"leaseId":"lease-id","username":"x-access-token","secret":"<operator-secret>","hosts":["github.com"],"expiresAt":1750000000000}
+```
+
+The helper re-checks the lease id, the expiry, the host set and the `https`
+protocol against the prompt rather than trusting either side, so a host bug is
+not the only thing between a forged prompt and a credential block. The wire
+contract lives in `packages/domain/src/publish-credential-descriptor.ts`, which
+is also where the S2c responder builds its answer. Both the prompt and the
+answer are bounded (64 KiB) and the descriptor must be an inherited pipe; a
+stalled or mistyped peer gets 15 seconds, so a broken host cannot hang a push
+indefinitely.
+
+Failure is one silent exit `1`: no stdout, no stderr, no file. A reason string
+would be a diagnostic derived from a prompt the helper is forbidden to
+reproduce; the operator reads the reason from `unified-mpc publish-credential
+status`, which never needs the prompt.
 
 A process that runs the helper directly still cannot obtain a secret. The lease
 id is not itself a credential: the value is released only through `open`, which
@@ -402,6 +438,16 @@ What S2a actually shipped, so later slices build on the same seams:
 The gate is deliberately pure filesystem classification and deliberately not a
 workspace property: the question is where the *running program* lives, because
 that is the directory a helper file would have to be written into.
+
+What S2b actually shipped, so S2c builds on the same seams:
+
+| Concern | S2b placement |
+|---|---|
+| Wire contract | `packages/domain/src/publish-credential-descriptor.ts`: prompt parsing, host normalization, the one-line descriptor answer, the credential block |
+| Helper logic | `apps/cli/src/runtime/publish-credential-helper.ts`: `get`-only, silent exit `1`, bounded reads with a 15 s stalled-peer guard |
+| Process entry | `apps/cli/src/bin/publish-credential-helper.ts` → `dist/bin/publish-credential-helper.js` |
+| Deployment artifact | `scripts/materialize-runtime-release.sh` emits `<deployment>/publish-credential-helper` (mode `0555`) and fails when the compiled entry is missing |
+| Tests | Contract tests over injected I/O plus one real spawn of the built entry: success, forged host, expired lease, wrong lease id, missing descriptor, `store`/`erase`, empty stdout/stderr and a secret absent from argv and the environment |
 
 ## 9. Non-goals
 

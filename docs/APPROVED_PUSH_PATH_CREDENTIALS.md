@@ -97,7 +97,10 @@ inherited helpers for this invocation only; both assignments are host-built.
 The post-push verification (`remoteBranchSha`, which shells out to `ls-remote`)
 and the pre-approval default-branch resolution (§5) use the same
 `-c`-scoped helper, because a private HTTP(S) remote answers neither without a
-credential. They never inherit the secret any other way.
+credential. They never inherit the secret any other way. The helper scope is an
+explicit parameter of the publish path, not a new default: `remoteBranchSha` has
+a second, unrelated caller (the guarded-rebase base refresh), and that caller
+keeps today's behaviour with no helper, no lease and no `authorization`.
 
 ## 3. The helper
 
@@ -143,39 +146,64 @@ its own login, and it keeps the TTL short because of that.
 
 ## 4. Guard change
 
-`validatePushSafety` stays the single place that decides whether a push may
-spawn. Today a credential helper is denied whenever the resolved target could
-use one, and that denial is exactly what #297 reports when a user has any helper
-configured. The S2 form is narrower, not looser:
+`validatePushSafety` stays the single place that decides whether a push-capable
+Git child may spawn. Today a credential helper is denied whenever the resolved
+target could use one, and that denial is exactly what #297 reports when a user
+has any helper configured. The S2 form is narrower, not looser, and it is
+parameterized because three different Gits need the helper at three different
+moments:
 
 ```text
+validatePushSafety(cwd, remote, authorization?) where authorization is
+    | { kind: 'diagnostic', leaseId }              pre-approval `ls-remote`
+    | { kind: 'publish',    leaseId, approvalId }  the push itself
+    | { kind: 'verify',     leaseId, approvalId, spendNonce }  post-push `ls-remote`
+
 if the target may use a credential helper:
     deny unless
         the invocation clears the helper list and then installs exactly
             <deployment>/publish-credential-helper
-        and no other -c credential.* entry, GIT_* variable or core.askPass exists
-        and the receipt carries a live lease id whose host set equals the
-            resolved push-URL host set recorded in the receipt
+        and no other -c credential.* entry, GIT_* override or core.askPass exists
+        and authorization is present and matches the mode:
+            diagnostic: the lease is live and its host set equals the resolved set
+            publish:    the receipt is live, its lease id is this lease, and the
+                        receipt fingerprint equals the resolved push-URL set
+            verify:     same as publish, plus a spendNonce minted in-process by
+                        the publish that consumed this exact receipt
 ```
+
+Without an `authorization` the guard behaves exactly as today: a credential
+helper on an HTTP(S) target is denied with `push-credential-helper`. The `git`
+tool and `git push` never pass one, so nothing on that surface relaxes.
+
+The `verify` mode exists because the receipt is spent before the push, and the
+post-push `remoteBranchSha` would otherwise be an unauthenticated `ls-remote`
+that fails on a private remote. `spendNonce` is created by the publish that
+consumed the receipt, lives only in its memory, and is never accepted from a
+caller, a tool argument or the environment; the verification passes it back
+once. That keeps the sequence authenticated without inventing a second
+credential grant after approval.
 
 A user-configured helper does not deny the publish path any more, because it
 cannot run: the host-built argv starts with an empty `-c credential.helper=`,
 which clears every helper Git collected from system, global, repository and
 URL-scoped config for that one invocation, and then installs the host helper.
 That reset is what makes the #297 scenario work — configuration is neutralized
-instead of being a permanent veto — and it is why the guard no longer reads
-`credential.*.helper` as a blocker for `publish`. The reset is verified from the
-invocation the adapter built, not from the repository: exactly two
-`credential.helper` assignments, the first empty, the second the resolved
-helper, and nothing else in command scope that can execute.
+instead of being a permanent veto. The reset is verified from the invocation the
+adapter built, not from the repository: exactly two `credential.helper`
+assignments, the first empty, the second the resolved helper, and nothing else
+in command scope that can execute.
 
-Everything else stays denied: `remote.<name>.receivepack`, `core.sshCommand`,
-`core.askPass`, `core.gitProxy`, `push.gpgSign`, `push.recurseSubmodules`,
-`protocol.*.allow`, `GIT_*` overrides and any additional `-c` entry. A wrong
-path, a symlinked path, a stale lease id, a host set that no longer matches the
-receipt, a second helper assignment or a missing reset fails closed with the
-existing reasons plus `publish-credential-unavailable` or
-`publish-target-changed`.
+Every existing denial is unchanged: the fixed `GIT_SSH`, `GIT_SSH_COMMAND`,
+`GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PROXY_COMMAND` and `GIT_EXEC_PATH` override
+list (the adapter's own `GIT_TERMINAL_PROMPT=0` is not an override),
+`remote.<name>.receivepack|uploadpack|proxy|vcs`, `core.sshCommand|askPass|gitProxy`,
+`push.gpgSign|recurseSubmodules`, `submodule.recurse`, `gpg.*.program`,
+`protocol.*.allow`, an unresolvable hook location and any additional `-c` entry.
+A wrong path, a symlinked path, a stale lease id, a host set that no longer
+matches the receipt, a second helper assignment, a missing reset or a missing
+`authorization` fails closed with the existing reasons plus
+`publish-credential-unavailable` or `publish-target-changed`.
 
 `git push` remains unchanged: it never gets the `-c` treatment and keeps denying
 every HTTP(S) target that could run a helper, including under Full Bypass.
@@ -187,7 +215,7 @@ unified-mpc publish-credential grant <workspace> <remote> --username <user> --tt
         |   secret from a no-echo TTY prompt or a pipe; hosts resolved from the remote
         |   SecretToolSecretStore: publish-<leaseId>; ledger row: hosts, username, expiry
         v
-git_publish_preflight   -> resolves default branches through the same helper scope
+git_publish_preflight   -> authorization 'diagnostic' for the default-branch ls-remote
                         -> runtime.ready stays false with publish-credential-required
                            when no live lease exists for this remote
 publish_approve(userConfirmed)
@@ -195,10 +223,14 @@ publish_approve(userConfirmed)
                            push-URL fingerprint, plus the lease id and min(receipt TTL, lease TTL)
 git_publish(approvalId) -> spend receipt (S1, unchanged)
                         -> re-resolve push URLs; mismatch => publish-target-changed
-                        -> spawn helper-scoped push
-                        -> helper-scoped remoteBranchSha verification
+                        -> spawn helper-scoped push                 ('publish')
+                        -> helper-scoped remoteBranchSha verification ('verify' + spendNonce)
                         -> revoke publish-<leaseId>   (success, failure, timeout, abort)
 ```
+
+Step by step that is `diagnostic` before the receipt, `publish` while spending
+it, and `verify` for the single read that proves the ref landed; the three modes
+are the parameter of §4, and no mode is reachable from a tool caller.
 
 The secret enters through the operator CLI (`unified-mpc publish-credential
 grant`), which reads it from a no-echo TTY prompt or a pipe, never from argv,
@@ -281,6 +313,9 @@ secret to an unapproved host.
     stores nothing.
 15. The publish argv carries exactly two `credential.helper` assignments — an
     empty reset first, then the host helper — and a third assignment is denied.
+16. A helper-scoped invocation with no `authorization` is denied with
+    `push-credential-helper`, and a `verify` call with a `spendNonce` that the
+    adapter did not mint is denied.
 
 ## 8. Slices
 
@@ -288,7 +323,7 @@ secret to an unapproved host.
 |---|---|---|
 | S2a | `PublishCredentialPort` implemented over the existing `SecretStore` port (`SecretToolSecretStore`, Linux Secret Service; no plaintext file, no new engine) with `publish-<leaseId>` keys, the lease ledger row, the operator CLI (`grant`/`revoke`/`status`) and grant/revoke/open tests | yes, no behavior change |
 | S2b | helper entry point + direct-invocation tests (no network) | yes |
-| S2c | guard allowlist, `-c` argv on push and on both `ls-remote` paths, fingerprint-bound receipt, lease-for-the-spawn + revocation, end-to-end private HTTPS fixture | yes, the only slice that can publish over HTTP(S) |
+| S2c | guard allowlist with the three authorization modes (`diagnostic`, `publish`, `verify`), `-c` argv on push and on both `ls-remote` paths, fingerprint-bound receipt, lease-for-the-spawn + revocation, end-to-end private HTTPS fixture | yes, the only slice that can publish over HTTP(S) |
 | S2d | audit row, docs, operator runbook for rotating a token | yes |
 
 S2a reuses the port rather than adding storage: if the Secret Service is

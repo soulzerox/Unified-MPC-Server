@@ -222,3 +222,33 @@ someone with checkout access could forge — exactly like a verification receipt
 catches accidental edits, not a determined actor. No GitHub review is posted;
 the runtime's `clean_llm_review` evidence remains a separate source.
 
+
+---
+
+## 8. Repository Ruleset
+
+`main` carries the active `main-exact-head-merge` ruleset (id `26172448`):
+
+| Rule | Effect |
+| --- | --- |
+| `pull_request` | a direct push to `main` is rejected; every change lands through a PR |
+| `allowed_merge_methods: ["squash"]` | only squash merges, matching `merge:pr` |
+| `non_fast_forward` | a force-push to `main` is rejected |
+| `deletion` | `main` cannot be deleted |
+| `required_approving_review_count: 0` | GitHub does not demand a human approval |
+| no bypass actors | the rules apply to admins too |
+
+No GitHub status check is required, because no verification runs on GitHub. The
+ruleset is the outer ring (a PR must exist, the branch cannot be rewritten) and
+the receipts from §6 and §7 are the inner one (which exact head was verified and
+reviewed).
+
+Zero required GitHub approvals is deliberate. The review evidence for this
+repository is the dedicated reviewer receipt from §7, bound to the head and the
+bundled skill hash. Asking for a GitHub approval on top would add a second,
+weaker signal that a push can still invalidate, and would put a human in every
+loop. The ruleset still makes the PR mandatory, which is what #144 asked for.
+
+The ruleset does not replace the local guard: a PR can merge with a stale head
+if someone bypasses `merge:pr`, and the ruleset cannot see the receipts. Use
+`merge:pr`.

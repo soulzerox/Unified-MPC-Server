@@ -15,7 +15,8 @@ approval ledger described in section 5, and the two-tool pair `publish_approve` 
 `git_publish` ships the publish half. `publish_approve` mints one single-use receipt
 for an exact workspace/remote/branch/SHA binding after `userConfirmed: true`, and
 `git_publish` spends it to push that exact commit to that exact branch through
-host-built argv.
+host-built argv. The credential-mediation slice (requirement 6) is designed but not
+implemented: see [APPROVED_PUSH_PATH_CREDENTIALS.md](APPROVED_PUSH_PATH_CREDENTIALS.md).
 
 Trust model B: `userConfirmed: true` is the calling model's assertion of an explicit
 chat approval, not an independently verified human verdict. Every built-in profile

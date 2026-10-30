@@ -95,13 +95,27 @@ function projectOutcomes(
   }
 }
 
+/** Queued rows per workspace, so a workspace-bound refusal is explainable without logs (#546). */
+function countQueuedByWorkspace(entries: readonly HeavyJobLiveEntry[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const entry of entries) {
+    if (entry.state !== 'queued') continue;
+    counts[entry.workspaceId] = (counts[entry.workspaceId] ?? 0) + 1;
+  }
+  return counts;
+}
+
 /** Fairness is diagnostic-only: a broken projection must not hide queue state. */
 function projectFairness(provider: McpApplicationServices['heavyJobFairness']): FairnessAnnotation | undefined {
   if (provider === undefined) return undefined;
   try {
     const snapshot = provider.fairnessSnapshot();
     return {
-      info: { scope: 'runtime-local', agingMs: snapshot.agingMs },
+      info: {
+        scope: 'runtime-local',
+        agingMs: snapshot.agingMs,
+        maxQueuedPerWorkspace: snapshot.maxQueuedPerWorkspace,
+      },
       ranks: new Map(snapshot.entries.map((entry) => [entry.operationId, entry])),
     };
   } catch {
@@ -113,7 +127,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
   return [
     defineTool({
       name: 'heavy_job_queue_status',
-      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, the current admission snapshot (active/effective cost, configured and measured-effective heavy cap, pressure state, memory and CPU samples), terminal outcome counts for the last 24 hours when the store keeps history, and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the response labels that projection as runtime-local; durable position remains the audit order.',
+      description: 'Read the durable heavy-job queue without running or admitting work. Reports store-wide queueDepth, queuedByWorkspace (queued rows per workspace, so a workspace-bound refusal is explainable without logs), the current admission snapshot (active/effective cost, configured and measured-effective heavy cap, pressure state, memory and CPU samples), terminal outcome counts for the last 24 hours when the store keeps history, and bounded queued/running entries with position, attempt, heartbeat and wait/run durations, so a starved, stalled or orphaned job can be diagnosed before it is retried. live, queued and running honour an optional workspaceId filter when several projects share the queue. When the serving runtime owns a shell admission queue, queued entries also carry its runtime-local fair order (effectiveRank, aged) and the fairness info carries its maxQueuedPerWorkspace bound; the projection is labelled runtime-local and durable position remains the audit order.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: heavyJobQueueStatusSchema,
@@ -143,6 +157,7 @@ export function heavyJobQueueTools(context: McpToolContext): McpToolDefinition[]
             live: filtered.length,
             queued: filtered.filter((entry) => entry.state === 'queued').length,
             running: filtered.filter((entry) => entry.state === 'running').length,
+            queuedByWorkspace: countQueuedByWorkspace(live),
             truncated: filtered.length > entries.length,
             ...(admission === undefined ? {} : { admission: projectAdmission(admission) }),
             ...(outcomes === undefined ? {} : { outcomes }),

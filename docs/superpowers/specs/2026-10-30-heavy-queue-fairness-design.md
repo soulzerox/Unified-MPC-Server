@@ -136,6 +136,8 @@ projection:
 // ShellHeavyAdmissionPort, implemented by the CLI adapter
 fairnessSnapshot(): {
   readonly agingMs: number;
+  // Configured per-workspace queued-row bound (#543); the global bound when unset.
+  readonly maxQueuedPerWorkspace: number;
   readonly entries: readonly { operationId: string; effectiveRank: number; aged: boolean }[];
 }
 ```

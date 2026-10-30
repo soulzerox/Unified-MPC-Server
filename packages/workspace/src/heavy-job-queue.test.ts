@@ -269,6 +269,39 @@ describe('heavy job queue durable retirement (#145)', () => {
     expect(queue.position('shell:x')).toBeUndefined();
     expect(controller.snapshot()).toMatchObject({ activeOperations: 0 });
   });
+
+  it('forwards both bounds to the durable supersede (#546)', () => {
+    const controller = makeController();
+    const calls: Array<{ maxQueued: number; maxQueuedPerWorkspace?: number }> = [];
+    const store: HeavyJobQueueStore = {
+      claim: (entry): HeavyJobClaimResult => ({ status: 'queued', operationId: entry.operationId, position: 1, depth: 1 }),
+      claimExisting: (entry): HeavyJobReattachResult => ({
+        status: 'missing', operationId: entry.operationId, depth: 0,
+      }),
+      promote: (): number | undefined => 1,
+      cancel: (): boolean => true,
+      supersede: (_stale, entry, maxQueued, maxQueuedPerWorkspace): HeavyJobSupersedeStoreResult => {
+        calls.push({ maxQueued, ...(maxQueuedPerWorkspace === undefined ? {} : { maxQueuedPerWorkspace }) });
+        return { status: 'superseded', operationId: entry.operationId, position: 1, depth: 1 };
+      },
+      start: (): boolean => true,
+      settle: (): boolean => true,
+      recover: (): boolean => true,
+      depth: (): number => 1,
+      listLive: (): readonly HeavyJobLiveEntry[] => [],
+    };
+    const queue = new HeavyJobWaiterQueue(controller, { store, maxQueued: 8, maxQueuedPerWorkspace: 3 });
+
+    queue.enqueue({ operationId: 'shell:a', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 });
+    const result = queue.supersede('shell:a', 'shell:b', {
+      workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1,
+    });
+
+    expect(result).toMatchObject({ status: 'superseded' });
+    // Dropping either argument would still leave every process-local assertion
+    // green while the durable per-workspace bound stopped applying.
+    expect(calls).toEqual([{ maxQueued: 8, maxQueuedPerWorkspace: 3 }]);
+  });
 });
 
 describe('heavy job queue reattach (#145 restart)', () => {

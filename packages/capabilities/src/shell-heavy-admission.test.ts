@@ -100,6 +100,7 @@ class FakeAdmission implements ShellHeavyAdmissionPort {
   public fairnessSnapshot(): ShellHeavyFairnessSnapshot {
     return {
       agingMs: 30 * 60_000,
+      maxQueuedPerWorkspace: 4,
       entries: this.requests
         .filter((request) => !this.cancelled.has(request.operationId) && !this.granted.has(request.operationId))
         .map((request, effectiveRank) => ({ operationId: request.operationId, effectiveRank, aged: false })),

@@ -175,9 +175,10 @@ Operator behavior to expect:
   reconciliation proves the process is gone, so a possibly-live build never
   overlaps new heavy work.
 
-Use `heavy_job_queue_status` to inspect queue depth, the running job, positions,
-wait/run durations, heartbeats, active heavy cost and memory pressure without
-admitting new work. When the durable store keeps history, the response also
+Use `heavy_job_queue_status` to inspect queue depth, queued rows per workspace
+with the configured per-workspace bound, the running job, positions, wait/run
+durations, heartbeats, active heavy cost and memory pressure without admitting
+new work. When the durable store keeps history, the response also
 carries `outcomes` — `completed`, `failed`, `interrupted`, `cancelled`,
 `superseded` and `total` for jobs that finished in the last **24 hours**
 (`windowMs`, `since`). It counts distinct operation identities, so a re-claimed

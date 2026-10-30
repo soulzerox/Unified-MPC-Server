@@ -183,8 +183,10 @@ export function createShellHeavyAdmissionPort(
       }
     },
     position: (operationId: string): number | undefined => queue?.position(operationId),
-    fairnessSnapshot: (): ShellHeavyFairnessSnapshot => queue?.fairnessSnapshot()
-      ?? { agingMs: DEFAULT_HEAVY_JOB_AGING_MS, entries: [] },
+    fairnessSnapshot: (): ShellHeavyFairnessSnapshot => ({
+      ...(queue?.fairnessSnapshot() ?? { agingMs: DEFAULT_HEAVY_JOB_AGING_MS, entries: [] }),
+      maxQueuedPerWorkspace: perWorkspaceLimit,
+    }),
     onAdmitted: (listener: (grant: ShellHeavyAdmissionGrant) => void): (() => void) => {
       listeners.add(listener);
       return (): void => {

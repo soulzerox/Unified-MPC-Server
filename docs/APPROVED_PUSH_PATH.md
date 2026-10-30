@@ -63,7 +63,7 @@ Two facts make a model-driven `git push` unsupportable even with approval:
 
 | # | Decision | Rationale |
 |---|---|---|
-| D1 | Add a dedicated `git_publish` tool. Do not relax `git push`. | The guarded path gets its own approval class, schema and audit row. `git push` keeps failing closed for every credential-bearing transport, including under Full Bypass; the transport scoping in §1 only stops an unrelated helper from denying a transport that never runs one. |
+| D1 | Add a dedicated `git_publish` tool. Do not relax `git push`. | The guarded path gets its own approval class, schema and audit row. `git push` keeps failing closed for every transport that can run a credential helper (HTTP/S), including under Full Bypass; the transport scoping in §1 only stops an unrelated helper from denying a transport that never runs one. |
 | D2 | The host builds and executes the Git invocation, not the caller. | The caller supplies `workspaceId`, `remote`, `branch` and an expected commit SHA — never argv, config, or environment. |
 | D3 | Authority is a durable approval receipt, not a boolean. | Mirrors the `guarded_pr_merge` evidence chain: the caller cannot supply the verdict. |
 | D4 | One remote, one branch, one exact SHA per approval. | No force, tags, deletes, `--all`, `--mirror`, or default/protected branches. A moved head invalidates the receipt. |

@@ -322,7 +322,14 @@ export function parseGitPushArguments(args: readonly string[]): GitPushArguments
     if (argument.startsWith('--') && !GIT_PUSH_OPTIONS.has(optionName)) return { refspecs: [], invalidOption: argument };
     if (!argument.startsWith('-')) positional.push(argument);
   }
-  if (optionRemote !== undefined) return { remote: optionRemote, refspecs: positional };
+  if (optionRemote !== undefined) {
+    // Git resolves the positional repository first and only falls back to
+    // `--repo`, so accepting both would validate a remote the push never uses
+    // and could send an HTTPS push past a helper check on a different remote
+    // (#297). Name exactly one repository.
+    if (positional.length > 0) return { refspecs: [], invalidOption: '--repo' };
+    return { remote: optionRemote, refspecs: [] };
+  }
   return positional[0] === undefined
     ? { refspecs: [] }
     : { remote: positional[0], refspecs: positional.slice(1) };

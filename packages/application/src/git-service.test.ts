@@ -158,6 +158,34 @@ describe('GitService', () => {
     expect(calls).toBe(0);
   });
 
+  it('denies a push that names both a positional repository and --repo', async () => {
+    const workspace = await createWorkspace();
+    let calls = 0;
+    const adapter = {
+      async validatePushSafety(): Promise<{ ok: true; value: undefined }> {
+        calls += 1;
+        return { ok: true, value: undefined };
+      },
+      async defaultBranch(): Promise<{ ok: true; value: string }> {
+        calls += 1;
+        return { ok: true, value: 'trunk' };
+      },
+      async run(): Promise<{ ok: true; value: { exitCode: number; stdout: string; stderr: string } }> {
+        throw new Error('ambiguous push target must be denied before adapter execution');
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const authorization = { mode: 'full_bypass', applicationApproved: true, bypassApplicationAuthorization: true, source: 'full_bypass' } as const;
+
+    // Git prefers the positional repository, so validating `--repo origin`
+    // would clear a push that actually targets the URL (#297).
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['push', 'https://example.invalid/owner/repo.git', '--repo', 'origin', 'goal/x:goal/x'],
+      workspaceId: workspace.id,
+    }, undefined, authorization)).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toBe(0);
+  });
+
   it.each([
     ['-c', ['-c', 'color.ui=false', 'push', 'origin', 'trunk']],
     ['--no-pager', ['--no-pager', 'push', 'origin', 'trunk']],

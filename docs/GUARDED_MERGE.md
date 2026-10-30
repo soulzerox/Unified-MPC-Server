@@ -90,6 +90,13 @@ The runtime therefore works on a squash-only branch such as this repository's
 dispatch, the `guarded_pr_merge` call and the reconciliation expectation all
 follow the same value.
 
+One owner, including on the way back in: `merge_reconcile` takes its expected
+method from the same policy field. A request may restate that value, but a
+declaration that disagrees is refused with `PERMISSION_DENIED` before any
+observation or evidence write. Accepting it would let a caller record
+`RECONCILED` for a merge the policy says is wrong, which makes the verdict
+depend on who asked.
+
 ### Child MCP dispatch
 
 Before calling a child provider, Unified-MPC describes the live server and

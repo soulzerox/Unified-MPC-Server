@@ -366,6 +366,31 @@ describe('GitAdapter integration', () => {
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15_000);
 
+  it('allows an ssh:// push while an unrelated credential helper is configured', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'ssh://git@example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: root, windowsHide: true });
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({ ok: true });
+  }, 15_000);
+
+  it('follows a pushInsteadOf rewrite before judging the credential helper', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'https://example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'url.ssh://git@example.invalid/.pushInsteadOf', 'https://example.invalid/'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: root, windowsHide: true });
+
+    // The rewrite makes the realized push transport SSH, so no helper can run;
+    // judging the raw `remote.origin.url` would report a false denial.
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({ ok: true });
+  }, 15_000);
+
   it('keeps the credential-helper denial when any push target uses HTTPS', async () => {
     if (!gitAvailable) return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

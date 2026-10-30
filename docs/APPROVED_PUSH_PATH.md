@@ -44,7 +44,7 @@ HTTP(S) remotes:
 | `https://` / `http://` | yes | reported |
 | `ssh://`, scp-like `user@host:path` | no | not reported |
 | `git://`, `file://`, local path | no | not reported |
-| unresolvable, unsupported (`ftp`, `ext::`), unclassified by the adapter | unknown | reported (fail closed) |
+| unresolvable or unsupported (`ftp`, `ext::`, unknown scheme) | unknown | reported (fail closed) |
 
 So a host-wide `credential.helper` configured for `https://github.com` no longer
 denies an SSH publish that cannot use it. Nothing is relaxed for HTTP(S): the

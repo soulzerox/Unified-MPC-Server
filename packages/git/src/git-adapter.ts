@@ -726,9 +726,10 @@ export class GitAdapter {
 
   /**
    * Issue #297: report whether any resolved push target can consult a
-   * credential helper. Unresolvable, unsupported or unclassified targets answer
-   * `true`, so an unknown transport keeps the existing denial; only transports
-   * that never run a helper skip the credential check.
+   * credential helper. An unresolvable or unsupported target answers `true`
+   * (`isSupportedRemoteTarget` owns the unsupported verdict), so an unknown
+   * transport keeps the existing denial; only transports that never run a
+   * helper skip the credential check.
    */
   private async pushTargetsMayUseCredentialHelper(cwd: string, remote: string, signal?: AbortSignal): Promise<boolean> {
     if (!isValidRemoteName(remote)) return true;

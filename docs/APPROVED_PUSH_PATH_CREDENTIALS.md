@@ -1,7 +1,8 @@
 # Approved Push Path — Credential Mediation (S2 design)
 
-Status: **proposal, not implemented.** S1 shipped in #552 and covers every
-credential-free transport. This document designs the remaining slice of #297:
+Status: **S2a implemented; S2b–S2d not implemented.** S1 shipped in #552 and
+covers every credential-free transport. This document designs the remaining
+slice of #297:
 item 1 of the requested behavior, "supported credential-helper
 mediation/approval if appropriate", for HTTP(S) targets.
 
@@ -37,6 +38,7 @@ export interface PublishCredentialLease {
   /** Resolved push targets at grant time: lowercase host + optional port. */
   readonly hosts: readonly string[];
   readonly username: string;   // operator-supplied, never model-supplied
+  readonly createdAt: number;
   readonly expiresAt: number;
 }
 
@@ -44,11 +46,16 @@ export interface PublishCredentialPort {
   /** Host-side: store the operator secret for one lease. */
   grant(lease: PublishCredentialLease, secret: string): Promise<Result<void>>;
   /** Host-side: open one lease for the descriptor responder. Never a tool call. */
-  open(leaseId: string): Promise<Result<{ readonly lease: PublishCredentialLease; readonly secret: string } | null>>;
+  open(leaseId: string, now: number): Promise<Result<PublishCredentialMaterial | null>>;
   /** Host-side: remove the secret, idempotently. */
-  revoke(leaseId: string): Promise<Result<void>>;
+  revoke(leaseId: string, now: number): Promise<Result<void>>;
 }
 ```
+
+`now` is a parameter rather than an ambient clock read so the expiry rule is
+one testable expression: a lease answers only while `expiresAt > now`. The
+ledger row keeps `createdAt` as well, so `status` can report a duration without
+recomputing it from the Secret Service.
 
 Deletion test: remove the port and every caller has to learn the SecretStore
 layout, the key format, the expiry rule, the host normalization and the
@@ -136,7 +143,7 @@ deployment directory (§2), with no ambient state:
   not expired and the inherited descriptor answers; otherwise it exits `1`.
 
 A lease whose target resolves to any scheme other than `https` is refused at
-`grant` with `publish-transport-unsupported` before a secret is stored, so an
+`grant` with `publish-credential-unsupported` before a secret is stored, so an
 `http://` remote fails at the first step instead of later as an opaque
 authentication failure.
 
@@ -235,8 +242,9 @@ every HTTP(S) target that could run a helper, including under Full Bypass.
 ## 5. Lifecycle
 
 ```text
-unified-mpc publish-credential grant <workspace> <remote> --username <user> --ttl 15m
-        |   secret from a no-echo TTY prompt or a pipe; hosts resolved from the remote
+unified-mpc publish-credential grant <remote> --workspace <id> --username <user> --ttl 900
+        |   secret from a no-echo TTY prompt or a pipe (stdin only, never argv or env);
+        |   hosts resolved from the remote's single push URL; --ttl is whole seconds
         |   SecretToolSecretStore: publish-<leaseId>; ledger row: hosts, username, expiry
         v
 git_publish_preflight   -> authorization 'diagnostic' for the default-branch ls-remote
@@ -340,7 +348,7 @@ secret to an unapproved host.
     `publish-target-changed` and delivers no credential.
 14. A private HTTP(S) fixture completes preflight, approve, push and the
     post-push verification with one lease, and the lease is gone afterwards.
-15. `grant` refuses an `http://` target with `publish-transport-unsupported` and
+15. `grant` refuses an `http://` target with `publish-credential-unsupported` and
     stores nothing.
 16. The publish argv carries exactly two `credential.helper` assignments — an
     empty reset first, then the host helper — and a third assignment is denied.
@@ -379,6 +387,21 @@ unavailable, `grant` fails with `publish-credential-unavailable` and S2c stays
 unusable for HTTP(S) remotes. It deliberately does not extend `SecretEnvelope`'s
 purpose list (`checkpoint_master_key`, `tunnel_api_key`), because the credential
 is a live lease with a TTL, not a long-lived encrypted envelope.
+
+What S2a actually shipped, so later slices build on the same seams:
+
+| Concern | S2a placement |
+|---|---|
+| Lease, material and port | `packages/domain/src/publish-credential.ts`, re-exported from the domain index |
+| Ledger row | `043_publish_credential_leases` (`publish_credential_leases`, indexed by `workspace_id, expires_at`) |
+| Grant/open/revoke/sweep | `SqlitePublishCredentialRepository` over the existing `SecretStore`; the secret key is `publish-<leaseId>` |
+| Operator surface | `unified-mpc publish-credential grant\|revoke\|status`; the secret is read from stdin only |
+| Release gate | `resolvePublishCredentialDeployment` classifies `UNIFIED_MPC_ROOT` by its real path under `<runtimeDir>/releases/<id>`; unset, relative, unresolvable or nested paths do not prove a release, so `grant` refuses them |
+| Reclamation | `startPublishCredentialSweep` in the MCP runtime: one sweep on start, then hourly, unref'd and failure-swallowing; the CLI also sweeps before each `publish-credential` command |
+
+The gate is deliberately pure filesystem classification and deliberately not a
+workspace property: the question is where the *running program* lives, because
+that is the directory a helper file would have to be written into.
 
 ## 9. Non-goals
 

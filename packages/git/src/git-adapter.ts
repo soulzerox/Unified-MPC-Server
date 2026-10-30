@@ -782,9 +782,6 @@ export class GitAdapter {
       targets.push(describeRemoteTarget(target));
     }
 
-    const defaults = await this.defaultBranches(cwd, remote);
-    if (!defaults.ok) return defaults;
-
     const safety = await this.validatePushSafety(cwd, remote, signal);
     const reason = safety.ok ? undefined : safety.error.details?.reason;
     const blockingKey = safety.ok ? undefined : safety.error.details?.key;
@@ -795,6 +792,27 @@ export class GitAdapter {
         ...(typeof reason === 'string' ? { reason } : {}),
         ...(typeof blockingKey === 'string' ? { key: blockingKey } : {}),
       };
+
+    // Issue #549: the guard runs before anything contacts the remote. `defaultBranches`
+    // shells out to `ls-remote`, and an HTTP(S) target would consult a configured
+    // credential helper during what is meant to be a read-only diagnostic. A blocked
+    // runtime can never publish, so the target is not contacted and no branch list is
+    // reported, matching what `defaultBranches` already answers when it cannot resolve.
+    if (!safety.ok) {
+      return ok({
+        remote,
+        branch,
+        head,
+        defaultBranches: [],
+        protectedBranch: false,
+        targets,
+        runtime,
+        approval: 'missing',
+      });
+    }
+
+    const defaults = await this.defaultBranches(cwd, remote);
+    if (!defaults.ok) return defaults;
 
     return ok({
       remote,

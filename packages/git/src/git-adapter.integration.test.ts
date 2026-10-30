@@ -694,6 +694,113 @@ describe('GitAdapter integration', () => {
     });
   }, 20_000);
 
+  it('publishes one exact commit to one branch without running a credential helper', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    const remoteRoot = path.join(root, 'remote.git');
+    const workRoot = path.join(root, 'work');
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', remoteRoot], { cwd: root, windowsHide: true });
+    await mkdir(workRoot, { recursive: true });
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: workRoot, windowsHide: true });
+    await writeFile(path.join(workRoot, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', remoteRoot], { cwd: workRoot, windowsHide: true });
+    const marker = path.join(root, 'credential-wrapper-ran');
+    const wrapper = path.join(root, 'credential-wrapper.sh');
+    await writeFile(wrapper, `#!/bin/sh\nprintf hit > "${marker}"\nexit 1\n`, 'utf8');
+    await chmod(wrapper, 0o755);
+    await execFileAsync('git', ['config', 'credential.helper', `!${wrapper}`], { cwd: workRoot, windowsHide: true });
+
+    const head = (await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: workRoot, windowsHide: true }))
+      .stdout.trim().toLowerCase();
+    const adapter = new GitAdapter(new DirectGitRunner());
+    const published = await adapter.publish(workRoot, { remote: 'origin', branch: 'goal/publish', expectedSha: head });
+    expect(published).toMatchObject({
+      ok: true,
+      value: { remote: 'origin', branch: 'goal/publish', sha: head, targets: ['file'] },
+    });
+    const remoteRef = (await execFileAsync('git', ['ls-remote', '--heads', remoteRoot, 'refs/heads/goal/publish'], { cwd: root, windowsHide: true }))
+      .stdout.trim();
+    expect(remoteRef).toBe(`${head}\trefs/heads/goal/publish`);
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await expect(adapter.publish(workRoot, {
+      remote: 'origin', branch: 'goal/publish', expectedSha: 'b'.repeat(40),
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'publish-head-moved' } },
+    });
+  }, 20_000);
+
+  it('does not publish annotated tags when the repository sets push.followTags', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    const remoteRoot = path.join(root, 'remote.git');
+    const workRoot = path.join(root, 'work');
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', remoteRoot], { cwd: root, windowsHide: true });
+    await mkdir(workRoot, { recursive: true });
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: workRoot, windowsHide: true });
+    await writeFile(path.join(workRoot, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['tag', '-a', 'v1', '-m', 'release'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', remoteRoot], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'push.followTags', 'true'], { cwd: workRoot, windowsHide: true });
+
+    const head = (await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: workRoot, windowsHide: true }))
+      .stdout.trim().toLowerCase();
+    const adapter = new GitAdapter(new DirectGitRunner());
+    await expect(adapter.publish(workRoot, { remote: 'origin', branch: 'goal/publish', expectedSha: head }))
+      .resolves.toMatchObject({ ok: true, value: { branch: 'goal/publish', sha: head } });
+
+    const remoteRefs = (await execFileAsync('git', ['ls-remote', remoteRoot], { cwd: root, windowsHide: true }))
+      .stdout.trim().split(/\r?\n/).filter((line) => line.length > 0);
+    expect(remoteRefs).toEqual([`${head}\trefs/heads/goal/publish`]);
+  }, 20_000);
+
+  it('classifies a rejected push as an authentication failure and leaves no ref behind', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    const remoteRoot = path.join(root, 'remote.git');
+    const workRoot = path.join(root, 'work');
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', remoteRoot], { cwd: root, windowsHide: true });
+    await mkdir(path.join(remoteRoot, 'hooks'), { recursive: true });
+    const hook = path.join(remoteRoot, 'hooks', 'pre-receive');
+    await writeFile(hook, '#!/bin/sh\nprintf "%s\\n" "fatal: Authentication failed for https://example.invalid/owner/repo.git" >&2\nexit 1\n', 'utf8');
+    await chmod(hook, 0o755);
+    await mkdir(workRoot, { recursive: true });
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['config', 'user.name', 'unified-mpc test'], { cwd: workRoot, windowsHide: true });
+    await writeFile(path.join(workRoot, 'readme.txt'), 'initial\n', 'utf8');
+    await execFileAsync('git', ['add', '--', 'readme.txt'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: workRoot, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', remoteRoot], { cwd: workRoot, windowsHide: true });
+
+    const head = (await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: workRoot, windowsHide: true }))
+      .stdout.trim().toLowerCase();
+    const adapter = new GitAdapter(new DirectGitRunner());
+    const published = await adapter.publish(workRoot, { remote: 'origin', branch: 'goal/publish', expectedSha: head });
+    expect(published).toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_DENIED', details: { reason: 'publish-authentication-failed' } },
+    });
+    expect(JSON.stringify(published)).not.toContain('example.invalid');
+    const remoteRefs = (await execFileAsync('git', ['ls-remote', remoteRoot], { cwd: root, windowsHide: true })).stdout.trim();
+    expect(remoteRefs).toBe('');
+  }, 20_000);
+
   it('reports a credential-helper runtime block without attempting a push', async () => {
     if (!gitAvailable) return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

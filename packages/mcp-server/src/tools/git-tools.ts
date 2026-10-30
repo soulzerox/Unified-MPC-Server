@@ -1,5 +1,5 @@
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
-import { gitDiffSchema, gitLogSchema, gitPublishPreflightSchema, gitRunSchema, gitStatusSchema } from './schemas.js';
+import { gitDiffSchema, gitLogSchema, gitPublishPreflightSchema, gitPublishSchema, gitRunSchema, gitStatusSchema, publishApproveSchema } from './schemas.js';
 
 export function gitTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -69,6 +69,41 @@ export function gitTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
           remote: input.remote,
           branch: input.branch,
+        }, signal),
+    }),
+    defineTool({
+      name: 'publish_approve',
+      description: 'Mint one single-use publish approval for an exact workspace, remote, branch and commit. This is the human approval gate: call it only after the user explicitly approves that exact binding in chat, and pass userConfirmed: true as their answer. It never pushes. It refuses without userConfirmed, when the checked-out head is not the expected commit, when the branch is a repository default branch, or when runtime transport/credential configuration would block a publish. The receipt expires (default 15 minutes) and can be spent once by git_publish.',
+      permission: 'EXECUTE',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: publishApproveSchema,
+      handler: async (input, signal) => context.services.git === undefined
+        ? missingService()
+        : context.services.git.approvePublish(context.actor, {
+          ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          remote: input.remote,
+          branch: input.branch,
+          expectedSha: input.expectedSha,
+          ...(input.ttlSeconds === undefined ? {} : { ttlSeconds: input.ttlSeconds }),
+          ...(input.userConfirmed === undefined ? {} : { userConfirmed: input.userConfirmed }),
+        }, signal),
+    }),
+    defineTool({
+      name: 'git_publish',
+      description: 'Spend one single-use publish approval and push exactly its approved commit to exactly its approved branch. The host builds the Git invocation and verifies the remote ref afterwards; the caller supplies only workspaceId or cwd, remote, branch, expectedSha and approvalId, never argv. Force, tags, deletes, --all, --mirror and default branches are not expressible. A missing, expired, already consumed or differently-bound approval fails with reason publish-approval-required and no Git child runs. HTTP(S) targets that could run a credential helper stay denied with the push safety reason; SSH, git:// and local targets are supported. The result reports the verified remote sha and sanitized transport targets, never credentials or raw stderr.',
+      permission: 'EXECUTE',
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      inputSchema: gitPublishSchema,
+      handler: async (input, signal) => context.services.git === undefined
+        ? missingService()
+        : context.services.git.publish(context.actor, {
+          ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          remote: input.remote,
+          branch: input.branch,
+          expectedSha: input.expectedSha,
+          approvalId: input.approvalId,
         }, signal),
     }),
   ];

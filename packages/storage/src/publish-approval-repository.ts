@@ -1,21 +1,16 @@
-import type { PublishApprovalBinding, PublishApprovalLookupPort, PublishApprovalState } from '@unified-mpc/domain';
+import {
+  isValidPublishBinding,
+  type PublishApprovalAuthorityPort,
+  type PublishApprovalBinding,
+  type PublishApprovalLookupPort,
+  type PublishApprovalRecord,
+  type PublishApprovalState,
+} from '@unified-mpc/domain';
 import type { SqliteDatabase } from './database.js';
 
-/**
- * One host-issued publish capability (issue #297). Bound to a single workspace,
- * remote, branch and exact commit; only the trusted host approval surface may
- * construct one, and MCP callers never do.
- */
-export interface PublishApprovalRecord {
-  readonly approvalId: string;
-  readonly workspaceId: string;
-  readonly remote: string;
-  readonly branch: string;
-  readonly expectedSha: string;
-  readonly approvedBy: string;
-  readonly approvedAt: number;
-  readonly expiresAt: number;
-}
+// The record type lives in the domain so the application layer can mint and
+// spend without importing storage; re-exported here for existing callers.
+export type { PublishApprovalRecord };
 
 interface ApprovalRow {
   approval_id: string;
@@ -35,21 +30,8 @@ const SELECT_APPROVAL = `
   FROM publish_approvals WHERE approval_id = ?
 `;
 
-/** Same shape the Git adapter accepts for a remote name; no URL or option form. */
-const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
-
 function bounded(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
-}
-
-/** ASCII control characters, space, and DEL are never part of a branch name. */
-function hasControlOrSpace(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code <= 0x20 || code === 0x7f) return true;
-  }
-  return false;
 }
 
 /**
@@ -57,21 +39,9 @@ function hasControlOrSpace(value: string): boolean {
  * capability never carries whitespace, a traversal segment, or an option form.
  * The publish path revalidates against the live remote before it spawns Git.
  */
-function validBranch(branch: unknown): branch is string {
-  return bounded(branch, 256)
-    && !hasControlOrSpace(branch)
-    && !branch.includes('..')
-    && !branch.startsWith('-')
-    && !branch.endsWith('/')
-    && !branch.endsWith('.lock');
-}
-
 function validRecord(record: PublishApprovalRecord): boolean {
   return bounded(record.approvalId, 128)
-    && bounded(record.workspaceId, 128)
-    && typeof record.remote === 'string' && REMOTE_NAME.test(record.remote)
-    && validBranch(record.branch)
-    && OBJECT_ID.test(record.expectedSha)
+    && isValidPublishBinding(record)
     && bounded(record.approvedBy, 256)
     && Number.isSafeInteger(record.approvedAt) && record.approvedAt >= 0
     && Number.isSafeInteger(record.expiresAt) && record.expiresAt > record.approvedAt;
@@ -84,28 +54,41 @@ function sameBinding(row: ApprovalRow, record: PublishApprovalRecord): boolean {
     && row.expected_sha === record.expectedSha;
 }
 
+function sameApprovalBinding(row: ApprovalRow, binding: PublishApprovalBinding): boolean {
+  return row.workspace_id === binding.workspaceId
+    && row.remote === binding.remote
+    && row.branch === binding.branch
+    && row.expected_sha === binding.expectedSha;
+}
+
 /**
- * Transaction-scoped spend of one capability. Runs on the caller's open
- * transaction so consumption and the authorized publish either both land or
- * both roll back; a spent capability never outlives the publish it authorized.
+ * Transaction-scoped spend of one capability. The caller may run it inside its
+ * own open transaction; the repository's standalone `consume` wraps it in
+ * `BEGIN IMMEDIATE` and commits before the publish spawns Git. Spending is
+ * therefore durable first and fail-closed: a push that fails afterwards leaves
+ * the receipt consumed, and replaying it is impossible.
  *
- * Fails closed on an unknown, differently-bound, expired, or already consumed
- * approval. The `consumed_at IS NULL` guard is the replay barrier.
+ * The caller supplies only the approval id and the binding it intends to
+ * publish, never the row's timestamps or approver. Fails closed on an unknown,
+ * differently-bound, expired, or already consumed approval. The
+ * `consumed_at IS NULL` guard is the replay barrier.
  */
 export function consumePublishApproval(
   conn: SqliteDatabase['connection'],
-  record: PublishApprovalRecord,
+  approvalId: string,
+  binding: PublishApprovalBinding,
   now: number,
 ): boolean {
-  if (!validRecord(record) || !Number.isSafeInteger(now) || now < 0) return false;
-  const row = conn.prepare(SELECT_APPROVAL).get(record.approvalId) as ApprovalRow | undefined;
-  if (row === undefined || !sameBinding(row, record) || row.consumed_at !== null
+  if (!bounded(approvalId, 128) || !isValidPublishBinding(binding)
+    || !Number.isSafeInteger(now) || now < 0) return false;
+  const row = conn.prepare(SELECT_APPROVAL).get(approvalId) as ApprovalRow | undefined;
+  if (row === undefined || !sameApprovalBinding(row, binding) || row.consumed_at !== null
     || row.expires_at <= now) return false;
   const consumed = conn.prepare(`
     UPDATE publish_approvals
     SET consumed_at = ?
     WHERE approval_id = ? AND consumed_at IS NULL
-  `).run(now, record.approvalId);
+  `).run(now, approvalId);
   return Number(consumed.changes) === 1;
 }
 
@@ -114,7 +97,7 @@ export function consumePublishApproval(
  * so a host retry cannot widen an earlier approval; consumption binds the
  * capability to one publish and nothing can rewind it afterwards.
  */
-export class SqlitePublishApprovalRepository implements PublishApprovalLookupPort {
+export class SqlitePublishApprovalRepository implements PublishApprovalLookupPort, PublishApprovalAuthorityPort {
   public constructor(private readonly database: SqliteDatabase) {}
 
   /** Idempotent per (approvalId, exact binding). Never rewinds a consumed row. */
@@ -157,12 +140,12 @@ export class SqlitePublishApprovalRepository implements PublishApprovalLookupPor
    * Standalone spend for callers that own no other mutation. Prefer
    * `consumePublishApproval` inside an already open transaction.
    */
-  public async consume(record: PublishApprovalRecord, now: number): Promise<boolean> {
+  public async consume(approvalId: string, binding: PublishApprovalBinding, now: number): Promise<boolean> {
     if (!Number.isSafeInteger(now) || now < 0) return false;
     const conn = this.database.connection;
     conn.exec('BEGIN IMMEDIATE;');
     try {
-      const ok = consumePublishApproval(conn, record, now);
+      const ok = consumePublishApproval(conn, approvalId, binding, now);
       conn.exec(ok ? 'COMMIT;' : 'ROLLBACK;');
       return ok;
     } catch (error) {
@@ -211,8 +194,5 @@ export class SqlitePublishApprovalRepository implements PublishApprovalLookupPor
 }
 
 function validBinding(binding: PublishApprovalBinding): boolean {
-  return bounded(binding.workspaceId, 128)
-    && typeof binding.remote === 'string' && REMOTE_NAME.test(binding.remote)
-    && validBranch(binding.branch)
-    && OBJECT_ID.test(binding.expectedSha);
+  return isValidPublishBinding(binding);
 }

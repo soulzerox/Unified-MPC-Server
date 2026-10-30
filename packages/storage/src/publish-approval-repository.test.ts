@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { PublishApprovalBinding } from '@unified-mpc/domain';
 import { SqliteDatabase } from './database.js';
 import {
   SqlitePublishApprovalRepository,
@@ -22,6 +23,17 @@ function approval(overrides: Partial<PublishApprovalRecord> = {}): PublishApprov
     approvedBy: 'host:desktop',
     approvedAt: NOW,
     expiresAt: NOW + TTL_MS,
+    ...overrides,
+  };
+}
+
+function binding(overrides: Partial<PublishApprovalBinding> = {}): PublishApprovalBinding {
+  const record = approval();
+  return {
+    workspaceId: record.workspaceId,
+    remote: record.remote,
+    branch: record.branch,
+    expectedSha: record.expectedSha,
     ...overrides,
   };
 }
@@ -68,9 +80,9 @@ describe('SqlitePublishApprovalRepository', () => {
   it('consumes exactly once and never rewinds the consumption', async () => {
     const { repository } = await setup();
     await repository.record(approval());
-    await expect(repository.consume(approval(), NOW + 1_000)).resolves.toBe(true);
+    await expect(repository.consume('approval-1', binding(), NOW + 1_000)).resolves.toBe(true);
     await expect(repository.read('approval-1')).resolves.toEqual({ ...approval(), consumedAt: NOW + 1_000 });
-    await expect(repository.consume(approval(), NOW + 2_000)).resolves.toBe(false);
+    await expect(repository.consume('approval-1', binding(), NOW + 2_000)).resolves.toBe(false);
     await expect(repository.record(approval())).resolves.toBe(false);
     await expect(repository.read('approval-1')).resolves.toEqual({ ...approval(), consumedAt: NOW + 1_000 });
   });
@@ -78,19 +90,19 @@ describe('SqlitePublishApprovalRepository', () => {
   it('refuses an approval at and after its expiry boundary', async () => {
     const { repository } = await setup();
     await repository.record(approval());
-    await expect(repository.consume(approval(), approval().expiresAt)).resolves.toBe(false);
-    await expect(repository.consume(approval(), approval().expiresAt + 1)).resolves.toBe(false);
-    await expect(repository.consume(approval({ expectedSha: 'c'.repeat(40) }), approval().expiresAt)).resolves.toBe(false);
+    await expect(repository.consume('approval-1', binding(), approval().expiresAt)).resolves.toBe(false);
+    await expect(repository.consume('approval-1', binding(), approval().expiresAt + 1)).resolves.toBe(false);
+    await expect(repository.consume('approval-1', binding({ expectedSha: 'c'.repeat(40) }), approval().expiresAt)).resolves.toBe(false);
     await expect(repository.read('approval-1')).resolves.toEqual({ ...approval(), consumedAt: null });
   });
 
   it('refuses a receipt bound to a different commit and keeps the stored binding spendable', async () => {
     const { repository } = await setup();
     await repository.record(approval());
-    await expect(repository.consume(approval({ expectedSha: NEXT_HEAD }), NOW + 1_000)).resolves.toBe(false);
-    await expect(repository.consume(approval({ remote: 'upstream' }), NOW + 1_000)).resolves.toBe(false);
+    await expect(repository.consume('approval-1', binding({ expectedSha: NEXT_HEAD }), NOW + 1_000)).resolves.toBe(false);
+    await expect(repository.consume('approval-1', binding({ remote: 'upstream' }), NOW + 1_000)).resolves.toBe(false);
     await expect(repository.read('approval-1')).resolves.toEqual({ ...approval(), consumedAt: null });
-    await expect(repository.consume(approval(), NOW + 1_000)).resolves.toBe(true);
+    await expect(repository.consume('approval-1', binding(), NOW + 1_000)).resolves.toBe(true);
   });
 
   it('rejects malformed bindings without writing', async () => {
@@ -126,7 +138,7 @@ describe('SqlitePublishApprovalRepository', () => {
     const { repository } = await setup();
     await repository.record(approval());
     for (const now of [-1, 1.5, Number.NaN, Number.MAX_VALUE]) {
-      await expect(repository.consume(approval(), now)).resolves.toBe(false);
+      await expect(repository.consume('approval-1', binding(), now)).resolves.toBe(false);
     }
     await expect(repository.read('approval-1')).resolves.toEqual({ ...approval(), consumedAt: null });
   });
@@ -139,15 +151,15 @@ describe('SqlitePublishApprovalRepository', () => {
 
   it('reports the ledger state for one exact binding', async () => {
     const { repository } = await setup();
-    const binding = { workspaceId: WORKSPACE, remote: 'origin', branch: 'goal/publish', expectedSha: HEAD };
-    await expect(repository.inspect(binding, NOW)).resolves.toBe('missing');
+    const exact = { workspaceId: WORKSPACE, remote: 'origin', branch: 'goal/publish', expectedSha: HEAD };
+    await expect(repository.inspect(exact, NOW)).resolves.toBe('missing');
     await repository.record(approval());
-    await expect(repository.inspect(binding, NOW)).resolves.toBe('pending');
-    await expect(repository.inspect({ ...binding, expectedSha: NEXT_HEAD }, NOW)).resolves.toBe('missing');
-    await expect(repository.inspect({ ...binding, branch: 'goal/other' }, NOW)).resolves.toBe('missing');
-    await expect(repository.inspect(binding, approval().expiresAt)).resolves.toBe('expired');
-    await repository.consume(approval(), NOW + 1_000);
-    await expect(repository.inspect(binding, NOW + 1_000)).resolves.toBe('consumed');
+    await expect(repository.inspect(exact, NOW)).resolves.toBe('pending');
+    await expect(repository.inspect({ ...exact, expectedSha: NEXT_HEAD }, NOW)).resolves.toBe('missing');
+    await expect(repository.inspect({ ...exact, branch: 'goal/other' }, NOW)).resolves.toBe('missing');
+    await expect(repository.inspect(exact, approval().expiresAt)).resolves.toBe('expired');
+    await repository.consume('approval-1', binding(), NOW + 1_000);
+    await expect(repository.inspect(exact, NOW + 1_000)).resolves.toBe('consumed');
   });
 
   it('prefers a live receipt over an expired one for the same binding', async () => {

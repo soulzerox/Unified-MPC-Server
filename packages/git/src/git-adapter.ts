@@ -109,6 +109,27 @@ export interface GitPublishPreflight {
   readonly approval: 'missing';
 }
 
+/** One host-built publish invocation: no argv, force, tag, delete or `--all` exists here. */
+export interface GitPublishRequest {
+  readonly remote: string;
+  readonly branch: string;
+  readonly expectedSha: string;
+}
+
+export interface GitPublishResult {
+  readonly remote: string;
+  readonly branch: string;
+  readonly sha: string;
+  /** Sanitized transport targets: scheme and host only, never userinfo or path. */
+  readonly targets: readonly string[];
+}
+
+/**
+ * Authentication-shaped failures are reported with a stable reason instead of
+ * the raw stderr, which may carry a URL, helper path or token.
+ */
+const PUBLISH_AUTH_FAILURE = /authentication failed|permission denied|could not read username|terminal prompts disabled|\b401\b|\b403\b/i;
+
 const MAX_GIT_ARGS = 128;
 const MAX_GIT_ARG_LENGTH = 32_768;
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
@@ -824,6 +845,89 @@ export class GitAdapter {
       runtime,
       approval: 'missing',
     });
+  }
+
+  /**
+   * Publish exactly one approved commit to one branch, then read the remote ref
+   * back. The host builds the entire invocation: the only refspec is
+   * `<sha>:refs/heads/<branch>`, so force, tags, deletes, `--all` and `--mirror`
+   * are not expressible. The runtime guard runs immediately before the spawn,
+   * and no stderr is returned or logged.
+   */
+  public async publish(
+    cwd: string,
+    request: GitPublishRequest,
+    signal?: AbortSignal,
+  ): Promise<Result<GitPublishResult>> {
+    if (!isValidRemoteName(request.remote)) {
+      return err(appError('INVALID_INPUT', 'Git publish remote is invalid'));
+    }
+    if (request.branch.length === 0 || request.branch.length > 1024
+      || request.branch.includes('..') || request.branch.includes('//') || request.branch.endsWith('/')) {
+      return err(appError('INVALID_INPUT', 'Git publish branch is invalid'));
+    }
+    const expectedSha = request.expectedSha.toLowerCase();
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha)) {
+      return err(appError('INVALID_INPUT', 'Git publish requires a full lowercase commit id'));
+    }
+    const ref = `refs/heads/${request.branch}`;
+    const validRef = await this.runner.run(['check-ref-format', ref], cwd, this.signalOptions(signal));
+    if (validRef.exitCode !== 0) return err(appError('INVALID_INPUT', 'Git publish branch is invalid'));
+
+    const headResult = await this.runner.run(['rev-parse', '--verify', 'HEAD^{commit}'], cwd, this.signalOptions(signal));
+    const headError = this.mapError(headResult);
+    if (headError !== null) return headError;
+    if (headResult.stdout.trim().toLowerCase() !== expectedSha) {
+      return err(appError('CONFLICT', 'Git publish head moved after the approval was minted', true, {
+        reason: 'publish-head-moved',
+      }));
+    }
+
+    const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', request.remote], cwd, this.signalOptions(signal));
+    const pushUrlError = this.mapError(pushUrls);
+    if (pushUrlError !== null) return pushUrlError;
+    const rawTargets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (rawTargets.length === 0) return err(appError('CONFLICT', 'Git publish remote could not be resolved', true));
+    const targets: string[] = [];
+    for (const target of rawTargets) {
+      if (!isSupportedRemoteTarget(target)) {
+        return err(appError('PERMISSION_DENIED', 'Git publish remote uses an unsupported transport', false, {
+          reason: 'publish-remote-unsupported',
+        }));
+      }
+      targets.push(describeRemoteTarget(target));
+    }
+
+    const safety = await this.validatePushSafety(cwd, request.remote, signal);
+    if (!safety.ok) return safety;
+
+    // `--no-follow-tags` keeps the push bound to the single approved refspec even
+    // when the user's config sets `push.followTags`, which would otherwise push
+    // every annotated tag reachable from the approved commit.
+    const pushed = await this.runner.run(
+      ['push', '--no-verify', '--no-follow-tags', '--porcelain', request.remote, `${expectedSha}:${ref}`],
+      cwd,
+      this.signalOptions(signal),
+    );
+    if (pushed.exitCode !== 0) {
+      if (PUBLISH_AUTH_FAILURE.test(pushed.stderr)) {
+        return err(appError('PERMISSION_DENIED', 'Git publish authentication failed', false, {
+          reason: 'publish-authentication-failed',
+        }));
+      }
+      return err(appError('CONFLICT', 'Git publish was not accepted by the remote', true, {
+        reason: 'publish-push-failed',
+      }));
+    }
+
+    const observed = await this.remoteBranchSha(cwd, request.remote, request.branch, signal);
+    if (!observed.ok) return observed;
+    if (observed.value !== expectedSha) {
+      return err(appError('CONFLICT', 'Git publish could not be verified on the remote', true, {
+        reason: 'publish-verification-failed',
+      }));
+    }
+    return ok({ remote: request.remote, branch: request.branch, sha: expectedSha, targets });
   }
 
   public async diff(cwd: string, request: GitDiffRequest = {}, signal?: AbortSignal): Promise<Result<GitDiffResult>> {

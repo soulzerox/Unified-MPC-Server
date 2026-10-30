@@ -136,7 +136,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'merge_reconcile',
-      description: 'Observe one pull request from the host GitHub provider, reconcile its actual post-merge state against the authoritative repository policy and optional exact-head receipt, and persist immutable reconciliation evidence. A merged PR without a valid receipt is surfaced as a policy breach rather than terminal success.',
+      description: 'Observe one pull request from the host GitHub provider, reconcile its actual post-merge state against the authoritative repository policy and optional exact-head receipt, and persist immutable reconciliation evidence. A merged PR without a valid receipt is surfaced as a policy breach rather than terminal success. The expected merge method always comes from the repository policy; a declared method that disagrees with it is refused instead of applied.',
       permission: 'WRITE',
       annotations: {
         readOnlyHint: false,
@@ -163,11 +163,22 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
           ));
         }
 
+        // The policy owns the merge method. A caller may restate it, but a
+        // declaration that disagrees is refused: accepting it would let a
+        // request record a verdict the authoritative policy would not produce.
+        const expectedMergeMethod = policy.mergeMethod ?? 'merge';
+        if (input.expectedMergeMethod !== undefined && input.expectedMergeMethod !== expectedMergeMethod) {
+          return err(appError(
+            'PERMISSION_DENIED',
+            `The repository merge policy declares mergeMethod=${expectedMergeMethod}; a request for ${input.expectedMergeMethod} is refused`,
+          ));
+        }
+
         const result = await context.services.mergeReconciliation.reconcile({
           policy,
           repository: input.repository,
           pullRequest: input.pullRequest,
-          expectedMergeMethod: input.expectedMergeMethod ?? policy.mergeMethod ?? 'merge',
+          expectedMergeMethod,
           ...(input.receiptRef === undefined ? {} : { receiptRef: input.receiptRef }),
         });
         return ok(result);

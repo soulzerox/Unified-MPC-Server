@@ -67,6 +67,19 @@ gh api --method PUT \
 The response body must contain `merged: true`; a 200 response with
 `merged: false` is treated as a failed dispatch, never as success.
 
+The method is fixed at `merge`: the built-in path sends `merge_method=merge`
+and the child dispatch sends `merge_method: "merge"` for the same reason. The
+automatic reconciliation only *proves* that method, because a merge commit is
+the one shape it can recognise (two parents: base and head). A squash merge
+leaves a single-parent commit, so a runtime that expected squash could not tell
+it apart from a rebase.
+
+That makes `guarded_pr_merge` the wrong path for this repository: its ruleset
+allows squash only (§8). Use `merge:pr` (§6), which squashes. Teaching the
+runtime a configurable method *and* a squash-merge proof is follow-up work on
+#144; until then the runtime path would be refused by GitHub
+(`Merge method merge is not allowed`), not silently merge the wrong way.
+
 ### Child MCP dispatch
 
 Before calling a child provider, Unified-MPC describes the live server and
@@ -117,6 +130,11 @@ request proves what GitHub is merging. Both must match the same commit:
   setting at a child server keeps working unchanged.
 - `merge_reconcile` uses the same authenticated GitHub API reader to observe the
   merged result and persist reconciliation evidence.
+- A merge made by `merge:pr` writes no runtime verification receipt, so the
+  automatic reconciliation records it as
+  `POLICY_BREACH / verification_receipt_missing`. That is the two stores not
+  being connected yet, not a bad merge: the shell evidence is
+  `.unified-mpc/local-verify/`, the runtime reads its own receipt store.
 - Exact-head verification accepts a GitHub SSH host alias (for example
   `git@github.com-work:owner/repo.git`) only when `ssh -G <alias>` resolves the
   hostname to `github.com`. An alias that resolves elsewhere, an HTTPS remote on
@@ -252,3 +270,9 @@ loop. The ruleset still makes the PR mandatory, which is what #144 asked for.
 The ruleset does not replace the local guard: a PR can merge with a stale head
 if someone bypasses `merge:pr`, and the ruleset cannot see the receipts. Use
 `merge:pr`.
+
+Only the squash method works. `merge:pr` defaults to `--squash`; passing
+`--method merge` or `--method rebase` produces a PR GitHub refuses to merge
+into `main`, and `gh pr merge` reports that as an error rather than as success.
+The runtime path is affected the same way (§2), which is why the shell path is
+the one this repository documents.

@@ -196,7 +196,8 @@ the `spendNonce` in the same step that consumes the receipt — that is
 `GitService.publish`, which owns `PublishApprovalAuthorityPort.consume` and
 hands the adapter only `{ remote, branch, expectedSha }` today. The nonce and
 the lease live in a registry owned by that service; the adapter receives the
-resulting `authorization` for exactly one spawn and never sees the approval id.
+resulting one-shot `authorization` (which carries the approval id only so the
+guard can match it) and nothing else from the ledger.
 The nonce is never accepted from a caller, a tool argument or the environment, and
 dies with the spawn. The two modes differ only in what the Git child is allowed
 to do — `publish` spawns the push, `verify` performs one `ls-remote` after it
@@ -366,7 +367,7 @@ secret to an unapproved host.
 S2c changes contracts that currently say the opposite, so it ships the wording
 too: the `git_publish` description ("HTTP(S) targets that could run a credential
 helper stay denied with the push safety reason"), the `git_publish_preflight`
-description ("runs the push safety guard before any remote contact ... instead
+description ("the push safety guard runs before any remote contact ... instead
 of running ls-remote and a possible credential helper") in
 `packages/mcp-server/src/tools/git-tools.ts`, and the paragraph in
 `docs/architecture/MUTATION_SAFETY_MATRIX.md` that repeats "an HTTP(S) target

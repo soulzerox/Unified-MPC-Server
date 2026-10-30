@@ -73,6 +73,9 @@ non-draft, targeting `main`, `CLEAN`, and free of retracted closing keywords),
 then passes `--match-head-commit` so GitHub rejects a head that moved after
 verification. It records the merge under
 `.unified-mpc/local-verify/merges/`. Use `--dry-run` to check eligibility only.
+`main` also carries the `main-exact-head-merge` ruleset: direct pushes and
+force-pushes are rejected and only squash merges are allowed, with no GitHub
+status check and no required GitHub approval.
 
 ## Authoritative CI Watcher Policy
 

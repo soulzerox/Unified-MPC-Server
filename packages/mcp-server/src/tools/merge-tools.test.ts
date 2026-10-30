@@ -293,6 +293,38 @@ describe('mergeTools', () => {
     });
   });
 
+  it('reconciles against the method the policy declares when the caller omits it', async () => {
+    const squashPolicy: RepositoryMergePolicy = { ...policy, mergeMethod: 'squash' };
+    const reconcile = vi.fn(async () => ({ status: 'reconciled' as const, record: {} as never }));
+    const tool = mergeTools(context({
+      mergePolicy: { async getByRepository(): Promise<RepositoryMergePolicy> { return squashPolicy; } },
+      mergeReconciliation: { reconcile },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'merge_reconcile');
+    if (tool === undefined) throw new Error('missing merge_reconcile');
+
+    await tool.execute({ repository: squashPolicy.repository, pullRequest: 281 }, new AbortController().signal);
+
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ expectedMergeMethod: 'squash' }));
+  });
+
+  it('lets an explicit caller method override the policy for a one-off observation', async () => {
+    const squashPolicy: RepositoryMergePolicy = { ...policy, mergeMethod: 'squash' };
+    const reconcile = vi.fn(async () => ({ status: 'reconciled' as const, record: {} as never }));
+    const tool = mergeTools(context({
+      mergePolicy: { async getByRepository(): Promise<RepositoryMergePolicy> { return squashPolicy; } },
+      mergeReconciliation: { reconcile },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'merge_reconcile');
+    if (tool === undefined) throw new Error('missing merge_reconcile');
+
+    await tool.execute({
+      repository: squashPolicy.repository,
+      pullRequest: 281,
+      expectedMergeMethod: 'merge',
+    }, new AbortController().signal);
+
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ expectedMergeMethod: 'merge' }));
+  });
+
   it('fails closed when reconciliation has no authoritative repository policy', async () => {
     const reconcile = vi.fn();
     const tool = mergeTools(context({

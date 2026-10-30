@@ -2,12 +2,19 @@ import type {
   AcceptedMergeReviewOutcome,
   CommandSpec,
   MergeEvidenceSource,
+  MergeMethod,
   RepositoryMergePolicy,
   VerificationMode,
 } from '@unified-mpc/domain';
 
 const VERIFICATION_MODES = new Set<VerificationMode>(['github_ci', 'local_exact_head', 'hybrid']);
 const EVIDENCE_SOURCES = new Set<MergeEvidenceSource>(['github_check', 'local_command', 'external_verifier']);
+/**
+ * Only methods the observer can prove. `rebase` is absent on purpose: a rebased
+ * pull request leaves single-parent commits with their original messages, so a
+ * policy asking for it could never be reconciled without guessing.
+ */
+const PROVABLE_MERGE_METHODS = new Set<MergeMethod>(['merge', 'squash']);
 const ACCEPTED_REVIEW_OUTCOMES = new Set<AcceptedMergeReviewOutcome>([
   'github_approved',
   'clean_llm_review',
@@ -88,6 +95,9 @@ function parsePolicy(value: unknown): RepositoryMergePolicy | undefined {
   }
   if (value.reviewPolicy.required && acceptedOutcomes.length === 0) return undefined;
 
+  const mergeMethod = parseMergeMethod(value.mergeMethod);
+  if (value.mergeMethod !== undefined && mergeMethod === undefined) return undefined;
+
   return {
     repository,
     defaultBranch,
@@ -97,6 +107,7 @@ function parsePolicy(value: unknown): RepositoryMergePolicy | undefined {
       required: value.reviewPolicy.required,
       acceptedOutcomes,
     },
+    ...(mergeMethod === undefined ? {} : { mergeMethod }),
   };
 }
 
@@ -129,6 +140,12 @@ function parseCommandSpec(value: unknown): CommandSpec | undefined {
 function parseVerificationMode(value: unknown): VerificationMode | undefined {
   return typeof value === 'string' && VERIFICATION_MODES.has(value as VerificationMode)
     ? value as VerificationMode
+    : undefined;
+}
+
+function parseMergeMethod(value: unknown): MergeMethod | undefined {
+  return typeof value === 'string' && PROVABLE_MERGE_METHODS.has(value as MergeMethod)
+    ? value as MergeMethod
     : undefined;
 }
 

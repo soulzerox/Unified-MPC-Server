@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { MergeObservation } from '@unified-mpc/domain';
+import type { MergeMethod, MergeObservation } from '@unified-mpc/domain';
 import type { MergeObservationReader, MergeObservationRequest } from '@unified-mpc/application';
 
 const execFileAsync = promisify(execFile);
@@ -55,7 +55,7 @@ export function createGitHubMergeObservationPort(
       }
 
       const mergeSha = optionalSha(pull.merge_commit_sha, 'merge commit SHA');
-      let mergeMethod: 'merge' | undefined;
+      let mergeMethod: MergeMethod | undefined;
       if (mergeSha !== undefined) {
         const commit = requiredRecord(await github.get(
           `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${mergeSha}`,
@@ -64,8 +64,18 @@ export function createGitHubMergeObservationPort(
           throw new Error('GitHub merge commit identity mismatch');
         }
         const parentShas = requiredParentShas(commit.parents);
-        if (parentShas.length === 2 && parentShas.includes(baseSha) && parentShas.includes(headSha)) {
+        // The merge is identified by the head, not by the base: a pull request
+        // keeps the base SHA it branched from, while the commit is created on
+        // whatever the base branch held when the merge ran. Comparing baseSha
+        // would turn every merge of an outdated branch into an unproven method.
+        if (parentShas.length === 2 && parentShas.includes(headSha)) {
           mergeMethod = 'merge';
+        } else if (parentShas.length === 1 && parentShas[0] !== headSha
+          && isSquashCommitMessage(commit.commit, request.pullRequest)) {
+          // Squash: one commit on top of the base that GitHub labels with the
+          // pull request number. A rebase keeps the original commit message, so
+          // it cannot satisfy the trailer unless someone wrote it by hand.
+          mergeMethod = 'squash';
         }
       }
 
@@ -139,4 +149,18 @@ function requiredTimestamp(value: unknown, label: string): string {
 function requiredParentShas(value: unknown): readonly string[] {
   if (!Array.isArray(value)) throw new Error('GitHub merge commit parents are invalid');
   return value.map((entry) => requiredSha(requiredRecord(entry, 'merge commit parent').sha, 'merge parent SHA'));
+}
+
+/**
+ * GitHub writes a squash subject as `<title> (#<pull request>)`. The trailer is
+ * the only part of the resulting commit that a rebase merge does not reproduce,
+ * so it is what separates squash from rebase. A hand-edited squash message that
+ * drops the trailer stays unproven instead of being guessed as squash.
+ */
+function isSquashCommitMessage(value: unknown, pullRequest: number): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const message = (value as Record<string, unknown>).message;
+  if (typeof message !== 'string') return false;
+  const subject = message.split('\n')[0]?.trim() ?? '';
+  return subject.endsWith(`(#${pullRequest})`);
 }

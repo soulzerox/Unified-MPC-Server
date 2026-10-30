@@ -1,13 +1,14 @@
 import {
   evaluateMergeEvidence,
   type MergeEvidenceBlocker,
+  type MergeMethod,
   type MergeVerificationReceipt,
   type RepositoryMergePolicy,
 } from './merge-verification.js';
 
 const SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 
-export type MergeMethod = 'merge' | 'squash' | 'rebase';
+export type { MergeMethod };
 
 export interface MergeObservation {
   readonly repository: string;

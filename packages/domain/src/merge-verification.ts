@@ -15,6 +15,14 @@ export type MergeReviewOutcome =
 
 export type AcceptedMergeReviewOutcome = Exclude<MergeReviewOutcome, 'rejected' | 'missing'>;
 
+/**
+ * How a pull request reaches the default branch. The runtime dispatches this
+ * method and reconciles the recorded evidence against the same value, so one
+ * policy field owns both sides.
+ */
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+
+
 export interface RequiredMergeGate {
   readonly name: string;
   readonly source: MergeEvidenceSource;
@@ -33,6 +41,11 @@ export interface RepositoryMergePolicy {
   readonly verificationMode: VerificationMode;
   readonly requiredGates: readonly RequiredMergeGate[];
   readonly reviewPolicy: MergeReviewPolicy;
+  /**
+   * Method the runtime dispatches and the method reconciliation expects.
+   * Absent means `merge`, so existing policies keep their behaviour.
+   */
+  readonly mergeMethod?: MergeMethod;
 }
 
 export interface MergeGateReceipt {

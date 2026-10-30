@@ -59,7 +59,7 @@ The provider runs one bounded call:
 gh api --method PUT \
   -H 'Accept: application/vnd.github+json' \
   repos/<owner>/<repo>/pulls/<number>/merge \
-  -f merge_method=merge \
+  -f merge_method=<policy mergeMethod> \
   -f sha=<verified-head-sha>
 ```
 
@@ -67,18 +67,28 @@ gh api --method PUT \
 The response body must contain `merged: true`; a 200 response with
 `merged: false` is treated as a failed dispatch, never as success.
 
-The method is fixed at `merge`: the built-in path sends `merge_method=merge`
-and the child dispatch sends `merge_method: "merge"` for the same reason. The
-automatic reconciliation only *proves* that method, because a merge commit is
-the one shape it can recognise (two parents: base and head). A squash merge
-leaves a single-parent commit, so a runtime that expected squash could not tell
-it apart from a rebase.
+The method comes from the repository policy, `mergeMethod`. The built-in path
+sends it as `merge_method=<method>` and the child dispatch sends the same value
+as `merge_method`. Absent means `merge`, so an existing policy keeps the
+behaviour it had before the field existed.
 
-That makes `guarded_pr_merge` the wrong path for this repository: its ruleset
-allows squash only (§8). Use `merge:pr` (§6), which squashes. Teaching the
-runtime a configurable method *and* a squash-merge proof is follow-up work on
-#144; until then the runtime path would be refused by GitHub
-(`Merge method merge is not allowed`), not silently merge the wrong way.
+Only two methods are accepted, and that is the honest set:
+
+| `mergeMethod` | What the observer proves |
+| --- | --- |
+| `merge` (default) | the merge commit has two parents: the base and the pull request head |
+| `squash` | the merge commit has one parent (the base) and its subject ends with `(#<pull request>)` |
+
+`rebase` is refused by the policy parser instead of accepted and then always
+breaching: a rebased pull request leaves single-parent commits carrying their
+original messages, so the observer could not separate it from a squash whose
+message lost the trailer. A squash merge whose message was hand-edited to drop
+`(#N)` also stays unproven — that is a fail-closed gap, not a silent pass.
+
+The runtime therefore works on a squash-only branch such as this repository's
+(§8): set `mergeMethod: "squash"` in `repository_merge_policies_v1` and the
+dispatch, the `guarded_pr_merge` call and the reconciliation expectation all
+follow the same value.
 
 ### Child MCP dispatch
 
@@ -274,5 +284,7 @@ if someone bypasses `merge:pr`, and the ruleset cannot see the receipts. Use
 Only the squash method works. `merge:pr` defaults to `--squash`; passing
 `--method merge` or `--method rebase` produces a PR GitHub refuses to merge
 into `main`, and `gh pr merge` reports that as an error rather than as success.
-The runtime path is affected the same way (§2), which is why the shell path is
-the one this repository documents.
+The runtime follows the policy instead of a constant (§2), so this repository's
+`repository_merge_policies_v1` entry carries `"mergeMethod": "squash"`; the
+built-in dispatch, the child dispatch and the reconciliation then all expect
+the method the ruleset allows.

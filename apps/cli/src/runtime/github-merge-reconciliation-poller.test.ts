@@ -85,6 +85,35 @@ describe('GitHubMergeReconciliationPoller', () => {
     });
   });
 
+  it('expects the merge method the policy declares', async () => {
+    const state = memoryState();
+    const squashPolicy: RepositoryMergePolicy = { ...policy, mergeMethod: 'squash' };
+    const reconcile = vi.fn(async () => ({ status: 'reconciled' as const, record: {} as never }));
+    const poller = new GitHubMergeReconciliationPoller(
+      () => [squashPolicy],
+      {
+        async listUpdatedClosed(): Promise<GitHubClosedPullRequestFeedResult> {
+          return {
+            complete: true,
+            updates: [{ pullRequest: 283, updatedAt: '2026-10-07T06:00:01Z', mergedAt: '2026-10-07T06:00:01Z' }],
+          };
+        },
+      },
+      state.store,
+      { reconcile },
+      { now: (): Date => new Date('2026-10-07T06:00:00.900Z') },
+    );
+
+    await poller.reconcileOnce();
+
+    expect(reconcile).toHaveBeenCalledWith({
+      policy: squashPolicy,
+      repository: squashPolicy.repository,
+      pullRequest: 283,
+      expectedMergeMethod: 'squash',
+    });
+  });
+
   it('does not advance past inspect-required reconciliation so the merge is retried', async () => {
     const initial = {
       startedAt: '2026-10-07T06:00:00Z',

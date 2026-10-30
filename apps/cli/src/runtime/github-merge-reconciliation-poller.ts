@@ -167,7 +167,7 @@ export class GitHubMergeReconciliationPoller {
           policy,
           repository: policy.repository,
           pullRequest: update.pullRequest,
-          expectedMergeMethod: 'merge',
+          expectedMergeMethod: policy.mergeMethod ?? 'merge',
         });
       } catch {
         return {

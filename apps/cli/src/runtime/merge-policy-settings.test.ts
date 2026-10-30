@@ -46,6 +46,38 @@ describe('parseRepositoryMergePolicySetting', () => {
     expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
   });
 
+  it('parses the merge method the runtime must dispatch and prove', () => {
+    const value = JSON.stringify([
+      {
+        repository: 'soulzerox/Unified-MPC-Server',
+        defaultBranch: 'main',
+        verificationMode: 'local_exact_head',
+        mergeMethod: 'squash',
+        requiredGates: [],
+        reviewPolicy: { required: false, acceptedOutcomes: [] },
+      },
+    ]);
+
+    expect(parseRepositoryMergePolicySetting(value, 'soulzerox/unified-mpc-server')).toMatchObject({
+      mergeMethod: 'squash',
+    });
+  });
+
+  it('refuses a merge method the observer cannot prove', () => {
+    const value = JSON.stringify([
+      {
+        repository: 'owner/repo',
+        defaultBranch: 'main',
+        verificationMode: 'local_exact_head',
+        mergeMethod: 'rebase',
+        requiredGates: [],
+        reviewPolicy: { required: false, acceptedOutcomes: [] },
+      },
+    ]);
+
+    expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
+  });
+
   it('still parses a zero-gate policy so the policy list itself stays usable', () => {
     // The evaluator blocks zero-gate merges via policy_requires_no_gates. Rejecting the
     // entry here would instead invalidate every other repository policy in the setting

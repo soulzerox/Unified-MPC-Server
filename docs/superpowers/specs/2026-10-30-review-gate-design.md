@@ -92,18 +92,18 @@ receipt. Reviewer-authored fields:
 }
 ```
 
-`line` may be `null` for a whole-file finding. `record` adds the review
-identity and the recomputed verdict:
+`line` may be `null` for a whole-file finding. `record` adds the review identity and the recomputed verdict. The receipt on
+disk uses camelCase keys; these are the fields:
 
 ```text
-review_id, role=reviewer, pr_number, base_sha, head_sha, workflow_version,
-skill_id, skill_version, skill_sha256, capsule_id, capsule_ref,
-reviewed_fingerprint, reviewer, findings[], blocking_open_count,
-verdict: clean | blocked, created_at
+reviewId, role=reviewer, prNumber, baseSha, headSha, workflowVersion,
+skillId, skillVersion, skillSha256, capsuleId, capsuleRef,
+reviewedFingerprint, reviewer, findings[], blockingOpenCount,
+verdict: clean | blocked, createdAt
 ```
 
-Validation is closed-set and fails on the first bad field with a message naming
-the finding index, because a silently accepted typo in `severity` would turn a
+Validation is closed-set and reports every bad field with a message naming the
+finding index, because a silently accepted typo in `severity` would turn a
 blocking finding into a pass.
 
 ## Blocking rule
@@ -126,13 +126,19 @@ Every path that changes what was reviewed produces a different artifact:
 | --- | --- |
 | New commit / new head | new capsule required; old receipt has another `head_sha` |
 | Force-push to the same absent head | same as above |
-| Base branch moved | `gh pr diff` changes, so the recomputed fingerprint changes |
+| Base branch moved | `baseSha` is hashed, so the recomputed fingerprint changes |
 | Skill edited | `skill_sha256` mismatch |
 | Finding fixed | only a fresh reviewer pass on the new head can say so |
 
 `record` freezes `headRefOid` from GitHub at write time, requires it to equal the
-submitted `head_sha`, and requires the working tree to be clean at that commit.
-So the receipt cannot be written from a stale checkout or a mutated tree.
+submitted `head_sha`, re-hashes the capsule's `diff.patch` and `files.txt` so the
+reviewed bytes are the frozen bytes, and requires the working tree to be clean at
+that commit. So the receipt cannot be written from a stale checkout or a mutated
+tree.
+
+Exactly one receipt is allowed per head. A second review of the same commit is
+refused rather than overwriting the first, so an implementer cannot shop for a
+cleaner second opinion without changing the head.
 
 The reviewer never marks its own findings resolved after the fact. Fixing a
 finding is a commit, a new head, a new capsule and a new reviewer; the previous

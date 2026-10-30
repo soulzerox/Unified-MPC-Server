@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
 import { diffFingerprint } from './local-verify.mjs';
-import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readSkillIdentity, reviewFingerprint } from './review-gate.mjs';
+import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint } from './review-gate.mjs';
 
 /**
  * Repository-level guarded merge (#144).
@@ -25,7 +25,6 @@ import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullReques
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RECEIPT_ROOT = path.join(ROOT, '.unified-mpc', 'local-verify');
-const REVIEW_RECEIPT_ROOT = path.join(ROOT, '.unified-mpc', 'reviews', 'receipts');
 const MERGE_RECORD_ROOT = path.join(RECEIPT_ROOT, 'merges');
 const METHODS = ['squash', 'merge', 'rebase'];
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -107,7 +106,7 @@ export function expectedFingerprint(headSha) {
  * Every blocker is reported, not just the first, so one run tells the operator
  * everything that stands between this head and a merge.
  */
-export function evaluateEligibility({ pr, receipt, review, reviewSkill, reviewFingerprint: headReviewFingerprint, expectedBase, headFingerprint }) {
+export function evaluateEligibility({ pr, receipt, review, reviewSkill, reviewFingerprint: headReviewFingerprint, headReceiptCount, corruptReviewReceipts, expectedBase, headFingerprint }) {
   const blockers = [];
   if (pr.state !== 'OPEN') blockers.push(`PR is not open (state=${pr.state})`);
   if (pr.isDraft === true) blockers.push('PR is a draft');
@@ -130,6 +129,8 @@ export function evaluateEligibility({ pr, receipt, review, reviewSkill, reviewFi
 
   const reviewEvaluation = evaluateReviewEvidence({
     receipt: review,
+    headReceiptCount,
+    corruptReceiptCount: corruptReviewReceipts,
     pr,
     skill: reviewSkill,
     fingerprint: headReviewFingerprint,
@@ -174,7 +175,8 @@ async function readReceipts(directory = RECEIPT_ROOT) {
     try {
       receipts.push(JSON.parse(await readFile(path.join(directory, name), 'utf8')));
     } catch {
-      // A corrupt receipt is not evidence; ignore it instead of failing the run.
+      // A corrupt verification receipt is not evidence; another one for the
+      // same head may still be valid, so this store skips unreadable files.
     }
   }
   return receipts;
@@ -194,20 +196,22 @@ async function main() {
 
   const repository = await resolveRepository(options.repo);
   const pr = await readPullRequest(repository, options.pr);
-  const [verificationReceipts, reviewReceipts, reviewSkill, prDiff] = await Promise.all([
+  const [verificationReceipts, reviewStore, reviewSkill, prDiff] = await Promise.all([
     readReceipts(),
-    readReceipts(REVIEW_RECEIPT_ROOT),
+    readReviewReceipts(),
     readSkillIdentity(),
     readPullDiff(repository, options.pr),
   ]);
   const receipt = findReceipt(verificationReceipts, pr.headRefOid);
-  const review = findReviewReceipt(reviewReceipts, pr.headRefOid);
+  const review = findReviewReceipt(reviewStore.records, pr.headRefOid);
   const { eligible, blockers } = evaluateEligibility({
     pr,
     receipt,
     review,
     reviewSkill,
     reviewFingerprint: reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff: prDiff }),
+    headReceiptCount: reviewStore.records.filter((record) => record?.headSha === pr.headRefOid).length,
+    corruptReviewReceipts: reviewStore.corrupt.length,
     expectedBase: options.base,
     headFingerprint: expectedFingerprint(pr.headRefOid),
   });

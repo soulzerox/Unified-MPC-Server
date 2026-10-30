@@ -154,7 +154,7 @@ store:
 6. record `{ headSha, prNumber, verificationId, reviewId, mergeCommit,
    mergedAt }` under `.unified-mpc/local-verify/merges/`.
 
-`--dry-run` performs steps 1-3 and reports every blocker without merging. The
+`--dry-run` performs every check in steps 1-4 and reports all blockers without merging. The
 receipts are the single source of truth for this path: it never merges a head
 that was not verified and reviewed on this host. A bare `gh pr merge` bypasses
 it, so the guard is only as strong as the workflow that uses it.
@@ -206,9 +206,10 @@ finding blocks while `status === "open"` and `required_fix === true`.
 | Change | Effect |
 | --- | --- |
 | New commit / force-push | different `headSha`; old receipt stops matching |
-| Base branch moved | different `gh pr diff`, so the fingerprint changes |
+| Base branch moved | `baseSha` is part of the fingerprint, so the receipt stops matching |
 | `SKILL.md` edited | `skillSha256` mismatch |
-| Tree dirty at record time | refused |
+| Tree dirty or HEAD moved at freeze/record time | refused |
+| Second receipt for the same head | refused; review evidence is unique per head |
 
 A fix therefore starts a new review generation. The previous receipt stays on
 disk as history; it is never edited.

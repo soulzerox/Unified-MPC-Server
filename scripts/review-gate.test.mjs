@@ -4,11 +4,14 @@ import test from 'node:test';
 import {
   CATEGORIES,
   SKILL_ID,
+  capsuleIntegrityBlockers,
+  cleanTreeBlockers,
   evaluateReviewEvidence,
   findReviewReceipt,
   issueRefsFrom,
   parseArgs,
   readSkillIdentity,
+  receiptUniquenessBlockers,
   renderCapsuleMarkdown,
   reviewFingerprint,
   reviewVerdict,
@@ -64,6 +67,8 @@ const PR = {
 function evaluate(overrides = {}) {
   return evaluateReviewEvidence({
     receipt: 'receipt' in overrides ? overrides.receipt : receipt(),
+    headReceiptCount: overrides.headReceiptCount ?? 1,
+    corruptReceiptCount: overrides.corruptReceiptCount ?? 0,
     pr: { ...PR, ...(overrides.pr ?? {}) },
     skill: overrides.skill ?? SKILL,
     fingerprint: overrides.fingerprint ?? reviewFingerprint({ baseSha: BASE, headSha: HEAD, diff: DIFF }),
@@ -218,6 +223,60 @@ test('blocking findings, or a hand-edited receipt, block the merge', () => {
   const edited = { ...receipt(), verdict: 'clean', blockingOpenCount: 0, findings: [{ ...FINDING, required_fix: true }] };
   assert.match(evaluate({ receipt: edited }).blockers.join('\n'), /blocking count does not match/);
   assert.match(evaluate({ receipt: edited }).blockers.join('\n'), /1 open blocking finding/);
+});
+
+test('a capsule whose files were edited after freeze is refused', () => {
+  const capsule = {
+    workflowVersion: 1,
+    baseSha: BASE,
+    headSha: HEAD,
+    diffBytes: DIFF.length,
+    diffFingerprint: reviewFingerprint({ baseSha: BASE, headSha: HEAD, diff: DIFF }),
+    changedFiles: [{ path: 'a.ts' }, { path: 'b.ts' }],
+  };
+  assert.deepEqual(capsuleIntegrityBlockers({ capsule, patch: DIFF, filesText: 'a.ts\nb.ts' }), []);
+  assert.match(
+    capsuleIntegrityBlockers({ capsule, patch: `${DIFF}edited`, filesText: 'a.ts\nb.ts' }).join('\n'),
+    /no longer matches its frozen fingerprint/,
+  );
+  assert.match(
+    capsuleIntegrityBlockers({ capsule, patch: DIFF, filesText: 'a.ts' }).join('\n'),
+    /files.txt no longer matches/,
+  );
+  assert.match(
+    capsuleIntegrityBlockers({ capsule: { ...capsule, workflowVersion: 0 }, patch: DIFF, filesText: 'a.ts\nb.ts' }).join('\n'),
+    /workflow version/,
+  );
+});
+
+test('record refuses a second review for the same head', () => {
+  assert.deepEqual(receiptUniquenessBlockers([], HEAD), []);
+  assert.deepEqual(receiptUniquenessBlockers([receipt({ headSha: 'd'.repeat(40) })], HEAD), []);
+  assert.match(receiptUniquenessBlockers([receipt()], HEAD).join('\n'), /a new review needs a new head/);
+});
+
+test('cleanTreeBlockers names a moved HEAD and a dirty tree', () => {
+  assert.deepEqual(cleanTreeBlockers({ observedHead: `${HEAD}\n`, status: '', headSha: HEAD }), []);
+  assert.match(
+    cleanTreeBlockers({ observedHead: 'd'.repeat(40), status: '', headSha: HEAD }).join('\n'),
+    /checkout HEAD is dddddddddddd/,
+  );
+  assert.match(
+    cleanTreeBlockers({ observedHead: HEAD, status: ' M x.ts', headSha: HEAD }).join('\n'),
+    /worktree has uncommitted changes/,
+  );
+});
+
+test('merge-time evaluation re-applies the finding shape rules', () => {
+  const rewritten = receipt({ findings: [{ ...FINDING, severity: 'blocking', required_fix: true, status: 'fixed' }] });
+  const result = evaluate({ receipt: rewritten });
+  assert.equal(result.eligible, false);
+  assert.match(result.blockers.join('\n'), /status must be one of open, accepted_nonblocking/);
+});
+
+test('ambiguous or unreadable review evidence blocks the merge', () => {
+  assert.match(evaluate({ headReceiptCount: 2 }).blockers.join('\n'), /review evidence must be unique/);
+  assert.match(evaluate({ corruptReceiptCount: 1 }).blockers.join('\n'), /cannot be read/);
 });
 
 test('a review receipt without a findings array blocks the merge', () => {

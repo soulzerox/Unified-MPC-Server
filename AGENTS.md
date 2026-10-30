@@ -54,7 +54,8 @@ are structured (`severity`, `category`, `file`, `line`, `claim`,
 `required_fix` blocks the merge.
 
 A fix is a new commit, which is a new head: run `review:pr capsule` again and
-review again. A reviewer never marks its own findings fixed, and nothing reads
+review again. One head has at most one review receipt, so a second opinion
+without a new commit is refused. A reviewer never marks its own findings fixed, and nothing reads
 its transcript after `record` — the receipt is the handoff, so the reviewer
 context can be recycled immediately.
 

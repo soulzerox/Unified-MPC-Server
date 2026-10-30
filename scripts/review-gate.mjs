@@ -2,7 +2,7 @@
 /* global process, console, Buffer, URL */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -121,11 +121,6 @@ export function issueRefsFrom({ title, body }) {
   return [...refs].sort((left, right) => left - right);
 }
 
-export function changedFilePaths(pr) {
-  if (!Array.isArray(pr.files)) return [];
-  return pr.files.map((file) => file.path).filter((value) => typeof value === 'string');
-}
-
 /**
  * A findings document is reviewer-authored, so every field it can get wrong is
  * checked here. A typo in `severity` would otherwise turn a blocking finding
@@ -206,8 +201,14 @@ export function findReviewReceipt(receipts, headSha) {
  * is a file on disk: the verdict is recomputed here so an edited receipt cannot
  * claim a review that its own findings do not support.
  */
-export function evaluateReviewEvidence({ receipt, pr, skill, fingerprint }) {
+export function evaluateReviewEvidence({ receipt, headReceiptCount, corruptReceiptCount, pr, skill, fingerprint }) {
   const blockers = [];
+  if (corruptReceiptCount !== undefined && corruptReceiptCount > 0) {
+    blockers.push(`${corruptReceiptCount} review receipt file(s) cannot be read; inspect or remove them`);
+  }
+  if (headReceiptCount !== undefined && headReceiptCount > 1) {
+    blockers.push(`${headReceiptCount} review receipts exist for this head; review evidence must be unique`);
+  }
   if (receipt === undefined) {
     blockers.push(`no exact-head review receipt for ${String(pr.headRefOid).slice(0, 12)}; run \`pnpm review:pr capsule --pr ${String(pr.number)}\` and record a reviewer finding set`);
     return { eligible: false, blockers };
@@ -229,6 +230,11 @@ export function evaluateReviewEvidence({ receipt, pr, skill, fingerprint }) {
     blockers.push('review receipt has no findings array');
     return { eligible: false, blockers };
   }
+
+  // An authentic receipt can still be edited on disk: a status rewrite to
+  // `fixed` would otherwise read as clean. The record-time shape rules apply
+  // again here, without the changed-file allowlist the receipt does not store.
+  blockers.push(...validateFindings({ findings: receipt.findings, changedFiles: [] }));
 
   const derived = reviewVerdict(receipt.findings);
   if (receipt.verdict !== 'clean') blockers.push(`review verdict is '${String(receipt.verdict)}'`);
@@ -278,10 +284,28 @@ async function resolveRepository(explicit) {
  * (base, head) pair to fingerprint a diff.
  */
 export async function readPullRequest(repository, prNumber) {
-  const fields = 'number,title,body,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergeStateStatus,files';
+  const fields = 'number,title,body,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergeStateStatus';
   const pr = JSON.parse(await run(['gh', 'pr', 'view', String(prNumber), '--repo', repository, '--json', fields]));
   pr.baseRefOid = (await run(['gh', 'api', `repos/${repository}/pulls/${String(prNumber)}`, '--jq', '.base.sha'])).trim();
   return pr;
+}
+
+/**
+ * `gh pr view --json files` is capped at 100 entries, which would silently
+ * truncate the finding allowlist on a large PR. The REST endpoint paginates.
+ */
+export async function readPullFiles(repository, prNumber) {
+  const output = await run([
+    'gh', 'api', '--paginate',
+    `repos/${repository}/pulls/${String(prNumber)}/files`,
+    '--jq', '.[] | [.filename, .additions, .deletions] | @tsv',
+  ]);
+  return output.split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => {
+      const [filePath, additions, deletions] = line.split('\t');
+      return { path: filePath, additions: Number(additions), deletions: Number(deletions) };
+    });
 }
 
 export async function readPullDiff(repository, prNumber) {
@@ -293,22 +317,28 @@ async function readJsonDirectory(directory) {
   try {
     names = await readdir(directory);
   } catch {
-    return [];
+    return { records: [], corrupt: [] };
   }
   const records = [];
+  const corrupt = [];
   for (const name of names) {
     if (!name.endsWith('.json') || name === 'latest.json') continue;
     try {
       records.push(JSON.parse(await readFile(path.join(directory, name), 'utf8')));
     } catch {
-      // A corrupt record is not evidence; ignore it rather than failing the run.
+      corrupt.push(name);
     }
   }
-  return records;
+  return { records, corrupt };
+}
+
+/** A receipt that cannot be read must never be skipped silently by the gate. */
+export async function readReviewReceipts() {
+  return readJsonDirectory(RECEIPT_ROOT);
 }
 
 async function findMergeVerificationReceipt(headSha) {
-  const receipts = await readJsonDirectory(VERIFICATION_ROOT);
+  const { records: receipts } = await readJsonDirectory(VERIFICATION_ROOT);
   const matches = receipts.filter((receipt) => receipt?.headSha === headSha
     && receipt?.profile === 'merge'
     && receipt?.dirty === false
@@ -330,6 +360,36 @@ async function readCapsule(headSha, prNumber) {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The reviewer reads `diff.patch`; the fingerprint was computed from the diff at
+ * freeze time. Without this check a capsule file could be edited or truncated
+ * after freeze and a clean receipt written for bytes nobody reviewed.
+ */
+export function capsuleIntegrityBlockers({ capsule, patch, filesText }) {
+  const blockers = [];
+  if (capsule.workflowVersion !== WORKFLOW_VERSION) {
+    blockers.push(`capsule workflow version ${String(capsule.workflowVersion)} is not ${WORKFLOW_VERSION}`);
+  }
+  const observed = reviewFingerprint({ baseSha: capsule.baseSha, headSha: capsule.headSha, diff: patch });
+  if (observed !== capsule.diffFingerprint) {
+    blockers.push('capsule diff.patch no longer matches its frozen fingerprint; freeze a new capsule');
+  }
+  if (Buffer.byteLength(patch) !== capsule.diffBytes) {
+    blockers.push('capsule diff.patch size no longer matches its manifest');
+  }
+  const manifestFiles = capsule.changedFiles.map((file) => file.path).join('\n').trim();
+  if (filesText.trim() !== manifestFiles) {
+    blockers.push('capsule files.txt no longer matches its manifest');
+  }
+  return blockers;
+}
+
+export function receiptUniquenessBlockers(receipts, headSha) {
+  const existing = receipts.filter((receipt) => receipt?.headSha === headSha);
+  if (existing.length === 0) return [];
+  return [`a review receipt already exists for ${headSha.slice(0, 12)} (${String(existing[0]?.reviewId)}); a new review needs a new head`];
 }
 
 export function renderCapsuleMarkdown(capsule) {
@@ -399,15 +459,23 @@ function summarizeReceipt(receipt, receiptPath) {
   return lines.join('\n');
 }
 
+export function cleanTreeBlockers({ observedHead, status, headSha }) {
+  const blockers = [];
+  if (String(observedHead).trim() !== headSha) {
+    blockers.push(`checkout HEAD is ${String(observedHead).trim().slice(0, 12)}, reviewed head is ${headSha.slice(0, 12)}`);
+  }
+  if (String(status).trim() !== '') {
+    blockers.push('worktree has uncommitted changes; the reviewer must not mutate the tree under review');
+  }
+  return blockers;
+}
+
 async function gitCleanAtHead(headSha) {
   const [observed, status] = await Promise.all([
     run(['git', 'rev-parse', 'HEAD']),
-    run(['git', 'status', 'porcelain=v1', '--untracked-files=normal']),
+    run(['git', 'status', '--porcelain=v1', '--untracked-files=normal']),
   ]);
-  const blockers = [];
-  if (observed.trim() !== headSha) blockers.push(`checkout HEAD is ${observed.trim().slice(0, 12)}, reviewed head is ${headSha.slice(0, 12)}`);
-  if (status.trim() !== '') blockers.push('worktree has uncommitted changes; the reviewer must not mutate the tree under review');
-  return blockers;
+  return cleanTreeBlockers({ observedHead: observed, status, headSha });
 }
 
 async function capsuleCommand(options) {
@@ -417,8 +485,14 @@ async function capsuleCommand(options) {
   if (pr.baseRefName !== options.base) throw new Error(`PR #${options.pr} targets '${String(pr.baseRefName)}', expected '${options.base}'`);
   if (!HEAD_SHA_PATTERN.test(String(pr.headRefOid))) throw new Error('PR head is not a 40-character commit SHA');
 
-  const [diff, skill, verification] = await Promise.all([
+  const treeBlockers = await gitCleanAtHead(pr.headRefOid);
+  if (treeBlockers.length > 0) {
+    throw new Error(`cannot freeze a capsule from this checkout:\n  - ${treeBlockers.join('\n  - ')}`);
+  }
+
+  const [diff, files, skill, verification] = await Promise.all([
     readPullDiff(repository, options.pr),
+    readPullFiles(repository, options.pr),
     readSkillIdentity(),
     findMergeVerificationReceipt(pr.headRefOid),
   ]);
@@ -438,11 +512,7 @@ async function capsuleCommand(options) {
     mergeable: pr.mergeable,
     mergeStateStatus: pr.mergeStateStatus,
     issueRefs: issueRefsFrom(pr),
-    changedFiles: (pr.files ?? []).map((file) => ({
-      path: file.path,
-      additions: file.additions,
-      deletions: file.deletions,
-    })),
+    changedFiles: files,
     diffFingerprint: reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff }),
     diffBytes: Buffer.byteLength(diff),
     verification: verification === undefined ? null : {
@@ -505,6 +575,13 @@ async function recordCommand(options) {
   if (submitted.skill_sha256 !== skill.skillSha256) blockers.push('findings were produced with a different version of the bundled review skill');
   if (submitted.diff_fingerprint !== capsule.diffFingerprint) blockers.push('findings fingerprint does not match the frozen capsule');
   if (fingerprint !== capsule.diffFingerprint) blockers.push('the PR diff changed after the capsule was frozen; run a fresh review');
+  const directory = capsuleDirectory(pr.headRefOid, pr.number);
+  const [patch, filesText] = await Promise.all([
+    readFile(path.join(directory, 'diff.patch'), 'utf8'),
+    readFile(path.join(directory, 'files.txt'), 'utf8'),
+  ]);
+  blockers.push(...capsuleIntegrityBlockers({ capsule, patch, filesText }));
+  blockers.push(...receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid));
   blockers.push(...await gitCleanAtHead(pr.headRefOid));
   blockers.push(...validateFindings({ findings: submitted.findings, changedFiles: capsule.changedFiles.map((file) => file.path) }));
 
@@ -561,7 +638,9 @@ async function recordCommand(options) {
 
   await mkdir(RECEIPT_ROOT, { recursive: true });
   const receiptPath = path.join(RECEIPT_ROOT, `${pr.headRefOid.slice(0, 12)}-${pr.number}-${reviewId}.json`);
-  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+  const temporaryPath = `${receiptPath}.tmp-${reviewId.slice(0, 8)}`;
+  await writeFile(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+  await rename(temporaryPath, receiptPath);
 
   console.log(`\n${summarizeReceipt(receipt, path.relative(ROOT, receiptPath))}`);
   if (derived.verdict !== 'clean') {
@@ -580,9 +659,17 @@ async function statusCommand(options) {
     readSkillIdentity(),
     readPullDiff(repository, pr.number),
   ]);
-  const receipt = findReviewReceipt(await readJsonDirectory(RECEIPT_ROOT), pr.headRefOid);
+  const store = await readReviewReceipts();
+  const receipt = findReviewReceipt(store.records, pr.headRefOid);
   const fingerprint = reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff });
-  const evaluation = evaluateReviewEvidence({ receipt, pr, skill, fingerprint });
+  const evaluation = evaluateReviewEvidence({
+    receipt,
+    headReceiptCount: store.records.filter((record) => record?.headSha === pr.headRefOid).length,
+    corruptReceiptCount: store.corrupt.length,
+    pr,
+    skill,
+    fingerprint,
+  });
 
   console.log(`review-gate ${repository}#${options.pr} head ${pr.headRefOid.slice(0, 12)} base ${String(pr.baseRefOid).slice(0, 12)}`);
   console.log(`  capsule: ${capsule === undefined ? 'missing' : capsule.capsuleId}`);

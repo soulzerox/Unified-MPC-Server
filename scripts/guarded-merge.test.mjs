@@ -62,6 +62,8 @@ function evaluate(overrides = {}) {
     review: 'review' in overrides ? overrides.review : REVIEW,
     reviewSkill: overrides.reviewSkill ?? SKILL,
     reviewFingerprint: reviewFingerprint({ baseSha: BASE, headSha: HEAD, diff: '' }),
+    headReceiptCount: overrides.headReceiptCount ?? 1,
+    corruptReviewReceipts: overrides.corruptReviewReceipts ?? 0,
     expectedBase: 'main',
     headFingerprint: expectedFingerprint(HEAD),
   });
@@ -150,6 +152,11 @@ test('a missing, stale or blocked review blocks the merge', () => {
     evaluate({ reviewSkill: { ...SKILL, skillSha256: 'sha256:' + 'd'.repeat(64) } }).blockers.join('\n'),
     /different version of the bundled review skill/,
   );
+});
+
+test('ambiguous or unreadable review evidence blocks the merge', () => {
+  assert.match(evaluate({ headReceiptCount: 2 }).blockers.join('\n'), /review evidence must be unique/);
+  assert.match(evaluate({ corruptReviewReceipts: 1 }).blockers.join('\n'), /cannot be read/);
 });
 
 test('a PR body that retracts a closing keyword blocks the merge', () => {

@@ -10,6 +10,8 @@ import type {
 import type { ShellHeavyAdmissionLease } from '@unified-mpc/capabilities';
 import {
   createShellHeavyAdmissionPort,
+  resolveShellHeavyAdmissionPerWorkspaceLimit,
+  SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV,
   SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
 } from './shell-heavy-admission.js';
 
@@ -187,5 +189,61 @@ describe('shell heavy admission port (#145)', () => {
         { operationId: 'shell:b', effectiveRank: 1, aged: false },
       ],
     });
+  });
+});
+
+describe('per-workspace queue bound (#543)', () => {
+  it('defaults to the global queue bound', () => {
+    expect(resolveShellHeavyAdmissionPerWorkspaceLimit({})).toBe(SHELL_HEAVY_ADMISSION_QUEUE_LIMIT);
+    expect(resolveShellHeavyAdmissionPerWorkspaceLimit({
+      [SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV]: '   ',
+    })).toBe(SHELL_HEAVY_ADMISSION_QUEUE_LIMIT);
+  });
+
+  it('accepts a narrower bound', () => {
+    expect(resolveShellHeavyAdmissionPerWorkspaceLimit({
+      [SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV]: '2',
+    })).toBe(2);
+  });
+
+  it('fails closed on a malformed or oversized bound', () => {
+    for (const raw of ['0', '-1', 'x', '1.5', '17']) {
+      expect(() => resolveShellHeavyAdmissionPerWorkspaceLimit({
+        [SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV]: raw,
+      })).toThrow(RangeError);
+    }
+  });
+
+  it('keeps the port factory independent of the ambient environment', () => {
+    const previous = process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV];
+    process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV] = '1';
+    try {
+      const admission = controller();
+      const port = createShellHeavyAdmissionPort(() => admission);
+      // The runtime passes the resolved value; the factory keeps the global
+      // bound, so a developer's exported variable cannot rewrite these tests.
+      expect(port.enqueue({
+        operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+      })).toMatchObject({ status: 'queued' });
+      expect(port.enqueue({
+        operationId: 'shell:b', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+      })).toMatchObject({ status: 'queued' });
+    } finally {
+      if (previous === undefined) delete process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV];
+      else process.env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV] = previous;
+    }
+  });
+
+  it('rejects a workspace over an explicit bound while another still queues', () => {
+    const port = createShellHeavyAdmissionPort(() => controller(), undefined, 1);
+    expect(port.enqueue({
+      operationId: 'shell:a', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'queued' });
+    expect(port.enqueue({
+      operationId: 'shell:a2', workspaceId: 'workspace-a', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'full' });
+    expect(port.enqueue({
+      operationId: 'shell:b', workspaceId: 'workspace-b', resourceClass: 'verification_heavy',
+    })).toMatchObject({ status: 'queued' });
   });
 });

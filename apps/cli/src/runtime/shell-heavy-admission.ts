@@ -24,6 +24,8 @@ const ADMISSION_COST: Readonly<Record<ShellHeavyAdmissionRequest['resourceClass'
 
 /** Global bound on shell work waiting for one heavy slot. */
 export const SHELL_HEAVY_ADMISSION_QUEUE_LIMIT = 16;
+/** Per-workspace bound (#543); defaults to the global bound. */
+export const SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV = 'UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE';
 export const SHELL_HEAVY_ADMISSION_JOB_KIND = 'shell_command';
 
 /**
@@ -35,9 +37,32 @@ export const SHELL_HEAVY_ADMISSION_JOB_KIND = 'shell_command';
  * Capacity releases wake the same drain, so the next declared run starts with
  * no second tool call.
  */
+/**
+ * Per-workspace queued-row limit for declared shell work (#543).
+ *
+ * One project filling every queue row is the failure mode this bounds: the
+ * global limit says how much waits, this says how much of it one workspace may
+ * hold. It never exceeds the global limit, and an unreadable value fails at
+ * port creation instead of silently reverting to the permissive default.
+ */
+export function resolveShellHeavyAdmissionPerWorkspaceLimit(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = env[SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV];
+  if (raw === undefined || raw.trim() === '') return SHELL_HEAVY_ADMISSION_QUEUE_LIMIT;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > SHELL_HEAVY_ADMISSION_QUEUE_LIMIT) {
+    throw new RangeError(
+      `${SHELL_HEAVY_ADMISSION_PER_WORKSPACE_ENV} must be an integer between 1 and ${SHELL_HEAVY_ADMISSION_QUEUE_LIMIT}`,
+    );
+  }
+  return value;
+}
+
 export function createShellHeavyAdmissionPort(
   getController: () => ResourceAdmissionController,
   getStore: () => HeavyJobQueueStore | undefined = () => undefined,
+  perWorkspaceLimit: number = SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
 ): ShellHeavyAdmissionPort {
   let queue: HeavyJobWaiterQueue | undefined;
   let controller: ResourceAdmissionController | undefined;
@@ -60,6 +85,7 @@ export function createShellHeavyAdmissionPort(
     const store = getStore();
     queue = new HeavyJobWaiterQueue(controller, {
       maxQueued: SHELL_HEAVY_ADMISSION_QUEUE_LIMIT,
+      maxQueuedPerWorkspace: perWorkspaceLimit,
       ...(store === undefined ? {} : { store }),
       onRetired: notifyRetired,
     });

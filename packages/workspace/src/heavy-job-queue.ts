@@ -63,13 +63,23 @@ export type HeavyJobEnqueueResult =
        */
       readonly queued: boolean;
     }
-  | { readonly status: 'rejected'; readonly code: 'QUEUE_FULL'; readonly operationId: string; readonly depth: number };
+  | {
+      readonly status: 'rejected';
+      readonly code: 'QUEUE_FULL' | 'WORKSPACE_QUEUE_FULL';
+      readonly operationId: string;
+      readonly depth: number;
+    };
 
 export type HeavyJobSupersedeResult =
   | { readonly status: 'superseded'; readonly retired: string; readonly queued: string; readonly depth: number }
   | { readonly status: 'queued'; readonly queued: string; readonly depth: number }
   | { readonly status: 'coalesced'; readonly queued: string; readonly depth: number }
-  | { readonly status: 'rejected'; readonly code: 'QUEUE_FULL'; readonly queued: string; readonly depth: number };
+  | {
+      readonly status: 'rejected';
+      readonly code: 'QUEUE_FULL' | 'WORKSPACE_QUEUE_FULL';
+      readonly queued: string;
+      readonly depth: number;
+    };
 
 export interface HeavyJobAdmission {
   readonly lease: ResourceAdmissionLease;
@@ -79,7 +89,13 @@ export type HeavyJobClaimResult =
   | { readonly status: 'queued'; readonly operationId: string; readonly position: number; readonly depth: number }
   | { readonly status: 'coalesced'; readonly operationId: string; readonly depth: number }
   | { readonly status: 'running'; readonly operationId: string; readonly depth: number }
-  | { readonly status: 'full'; readonly operationId: string; readonly depth: number };
+  | {
+      readonly status: 'full';
+      readonly operationId: string;
+      readonly depth: number;
+      /** Which bound rejected the claim: the whole queue or one workspace. */
+      readonly scope?: 'queue' | 'workspace';
+    };
 
 /** Re-attachment never creates work: `missing` means the row is gone. */
 export type HeavyJobReattachResult =
@@ -92,7 +108,13 @@ export type HeavyJobSupersedeStoreResult =
   | { readonly status: 'superseded'; readonly operationId: string; readonly position: number; readonly depth: number }
   | { readonly status: 'queued'; readonly operationId: string; readonly position: number; readonly depth: number }
   | { readonly status: 'coalesced'; readonly operationId: string; readonly depth: number }
-  | { readonly status: 'full'; readonly operationId: string; readonly depth: number };
+  | {
+      readonly status: 'full';
+      readonly operationId: string;
+      readonly depth: number;
+      /** Which bound rejected the claim: the whole queue or one workspace. */
+      readonly scope?: 'queue' | 'workspace';
+    };
 
 export type HeavyJobLiveState = 'queued' | 'running';
 
@@ -135,7 +157,7 @@ export type HeavyJobRecoveryAction = 'orphan' | 'interrupt' | 'expire';
  * retire another owner's stale row through `recover()`.
  */
 export interface HeavyJobQueueStore {
-  claim(entry: HeavyJobQueueEntry, maxQueued: number): HeavyJobClaimResult;
+  claim(entry: HeavyJobQueueEntry, maxQueued: number, maxQueuedPerWorkspace?: number): HeavyJobClaimResult;
   /**
    * Claim an existing live row only (#145 restart). Never inserts and never
    * revives a terminal row: `missing` means the admission generation is gone.
@@ -148,6 +170,7 @@ export interface HeavyJobQueueStore {
     staleOperationId: string,
     entry: HeavyJobQueueEntry,
     maxQueued: number,
+    maxQueuedPerWorkspace?: number,
   ): HeavyJobSupersedeStoreResult;
   start(operationId: string, startedAt: string): boolean;
   settle(
@@ -174,6 +197,11 @@ export interface HeavyJobQueueStore {
 
 export interface HeavyJobWaiterQueueOptions {
   readonly maxQueued?: number;
+  /**
+   * Per-workspace bound on queued rows (#543). Defaults to `maxQueued`, so a
+   * single project may use the whole queue unless an operator narrows it.
+   */
+  readonly maxQueuedPerWorkspace?: number;
   /** Durable state authority; omitted for the process-local queue. */
   readonly store?: HeavyJobQueueStore;
   readonly now?: () => Date;
@@ -208,6 +236,7 @@ interface LocalHeavyJob {
 export class HeavyJobWaiterQueue {
   private readonly queued: LocalHeavyJob[] = [];
   private readonly maxQueued: number;
+  private readonly maxQueuedPerWorkspace: number;
   private readonly store: HeavyJobQueueStore | undefined;
   private readonly now: () => Date;
   private readonly agingMs: number;
@@ -228,7 +257,12 @@ export class HeavyJobWaiterQueue {
     if (!Number.isSafeInteger(agingMs) || agingMs < 1) {
       throw new RangeError('agingMs must be a positive safe integer');
     }
+    const perWorkspace = options.maxQueuedPerWorkspace ?? max;
+    if (!Number.isSafeInteger(perWorkspace) || perWorkspace < 1 || perWorkspace > max) {
+      throw new RangeError('maxQueuedPerWorkspace must be between 1 and maxQueued');
+    }
     this.maxQueued = max;
+    this.maxQueuedPerWorkspace = perWorkspace;
     this.store = options.store;
     this.now = options.now ?? ((): Date => new Date());
     this.agingMs = agingMs;
@@ -265,6 +299,14 @@ export class HeavyJobWaiterQueue {
     if (existing !== undefined) {
       return { status: 'coalesced', operationId: entry.operationId, depth: this.queued.length, queued: true };
     }
+    if (this.workspaceQueuedDepth(entry.workspaceId) >= this.maxQueuedPerWorkspace) {
+      return {
+        status: 'rejected',
+        code: 'WORKSPACE_QUEUE_FULL',
+        operationId: entry.operationId,
+        depth: this.queued.length,
+      };
+    }
     if (this.queued.length >= this.maxQueued) {
       return { status: 'rejected', code: 'QUEUE_FULL', operationId: entry.operationId, depth: this.queued.length };
     }
@@ -273,9 +315,14 @@ export class HeavyJobWaiterQueue {
   }
 
   private enqueueDurable(entry: HeavyJobQueueEntry): HeavyJobEnqueueResult {
-    const claim = this.store!.claim(entry, this.maxQueued);
+    const claim = this.store!.claim(entry, this.maxQueued, this.maxQueuedPerWorkspace);
     if (claim.status === 'full') {
-      return { status: 'rejected', code: 'QUEUE_FULL', operationId: entry.operationId, depth: claim.depth };
+      return {
+        status: 'rejected',
+        code: claim.scope === 'workspace' ? 'WORKSPACE_QUEUE_FULL' : 'QUEUE_FULL',
+        operationId: entry.operationId,
+        depth: claim.depth,
+      };
     }
     if (claim.status === 'coalesced') {
       const local = this.queued.some((candidate) => candidate.entry.operationId === entry.operationId);
@@ -347,9 +394,14 @@ export class HeavyJobWaiterQueue {
       this.now().toISOString(),
     );
     if (this.store !== undefined) {
-      const stored = this.store.supersede(staleOperationId, entry, this.maxQueued);
+      const stored = this.store.supersede(staleOperationId, entry, this.maxQueued, this.maxQueuedPerWorkspace);
       if (stored.status === 'full') {
-        return { status: 'rejected', code: 'QUEUE_FULL', queued: replacementOperationId, depth: stored.depth };
+        return {
+          status: 'rejected',
+          code: stored.scope === 'workspace' ? 'WORKSPACE_QUEUE_FULL' : 'QUEUE_FULL',
+          queued: replacementOperationId,
+          depth: stored.depth,
+        };
       }
       const index = this.queued.findIndex((candidate) => candidate.entry.operationId === staleOperationId);
       if (index !== -1) this.queued.splice(index, 1);
@@ -369,7 +421,7 @@ export class HeavyJobWaiterQueue {
     if (index === -1) {
       const enqueued = this.enqueueLocal(entry);
       if (enqueued.status === 'rejected') {
-        return { status: 'rejected', code: 'QUEUE_FULL', queued: replacementOperationId, depth: enqueued.depth };
+        return { status: 'rejected', code: enqueued.code, queued: replacementOperationId, depth: enqueued.depth };
       }
       if (enqueued.status === 'coalesced') {
         return { status: 'coalesced', queued: replacementOperationId, depth: enqueued.depth };
@@ -383,6 +435,11 @@ export class HeavyJobWaiterQueue {
     const stale = this.queued[index]!;
     this.queued.splice(index, 1, { entry, position: stale.position });
     return { status: 'superseded', retired: staleOperationId, queued: replacementOperationId, depth: this.queued.length };
+  }
+
+  /** Queued rows this process holds for one workspace (#543 local view). */
+  private workspaceQueuedDepth(workspaceId: string): number {
+    return this.queued.filter((candidate) => candidate.entry.workspaceId === workspaceId).length;
   }
 
   public depth(): number {

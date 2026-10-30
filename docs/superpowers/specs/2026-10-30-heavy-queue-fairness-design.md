@@ -153,10 +153,10 @@ to the response.
 ## Non-goals
 
 - No priority tiers beyond the existing `blocking` flag.
-- No per-workspace or per-Goal queue caps; the existing shell bound (16 rows,
-  `SHELL_HEAVY_ADMISSION_QUEUE_LIMIT`) remains. A per-scope cap can be added
-  later behind the same policy module if real contention shows the global bound
-  is not enough.
+- ~~No per-workspace or per-Goal queue caps; the existing shell bound (16 rows,
+  `SHELL_HEAVY_ADMISSION_QUEUE_LIMIT`) remains.~~ Superseded by the #543
+  amendment below: a per-workspace queued bound now sits inside the global one.
+  There is still no per-Goal cap.
 - No cross-runtime scheduler and no durable fairness counters.
 - No dynamic headroom (auto-raising the heavy slot from measured pressure);
   that is a separate #145 slice.
@@ -194,3 +194,54 @@ to the response.
 
 Each step is TDD and exercises the queue/controller contract through its public
 interface.
+
+## Amendment: per-workspace queued bound (#543)
+
+Rotation decides *which* workspace runs next; it does not decide *how much* of
+the queue one workspace may hold. With only a global bound, one project could
+occupy every waiting row and keep every other project's eligible work out of the
+queue entirely — a different failure from starvation, and rotation cannot fix it
+because the work never gets a row.
+
+The bound is therefore a queued-row count, not an ordering rule:
+
+```text
+global    maxQueued                     (16 declared shell runs)
+workspace maxQueuedPerWorkspace          (default: global, never above it)
+```
+
+- **Where it lives.** `HeavyJobWaiterQueueOptions.maxQueuedPerWorkspace`, passed
+  to `HeavyJobQueueStore.claim()`/`supersede()` and enforced **inside** the
+  claim transaction, like the global depth check. A process-local check alone
+  would let two runtimes each admit under the cap.
+- **What overflow does.** Reject with `WORKSPACE_QUEUE_FULL` at the queue layer
+  before a task record or process exists. The shell port maps any full queue —
+  global or workspace — onto its existing `RESOURCE_PRESSURE` refusal with
+  `reason: 'queue_full'`, so operators see one recovery path, not two.
+  Coalescing still wins: identical work that is already queued is adopted, not
+  rejected, because it costs no new row.
+- **What the count covers.** Every queued row with that `workspace_id`, whichever
+  job kind wrote it. Shell and pre-edit work share the durable table, so the
+  bound is a shell-admission intake budget, not a shell-only counter: a queued
+  pre-edit row already consumes the workspace's budget, while pre-edit intake
+  itself is bounded only by its own queue limit. Promotion, re-attach and
+  recovery never create rows that could exceed it.
+- **Known limit.** A same-workspace `supersede()` swaps the replacement into the
+  slot its retired row frees, so it cannot exceed the bound by construction; the
+  depth check only runs when the stale row is no longer queued. A row that
+  *moves* into another workspace is not counted against the destination before
+  the swap: no caller supersedes across workspaces today, and a future one must
+  re-check the destination depth inside the same transaction.
+- **Why not retire a stale row on overflow.** Retirement is a cancellation of
+  real pending work; using it as an overflow valve would make a bounded intake
+  decision destroy someone else's job. Rejection is visible and recoverable by
+  the caller; retirement is not.
+- **Per Goal instead of per workspace.** Goal identity is not a durable queue
+  column, and a Goal may move between workspaces. Adding it would need a schema
+  change plus a decision about which one wins when both apply. Workspace is the
+  identity the queue already owns, so it is the bound that can be enforced
+  atomically today.
+
+Operator contract and default live in `docs/DEPLOYMENT_LINUX.md`; the runtime
+reads `UNIFIED_MPC_HEAVY_MAX_QUEUED_PER_WORKSPACE` once at port creation and
+fails startup on a malformed or oversized value.

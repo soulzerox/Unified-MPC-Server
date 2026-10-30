@@ -64,6 +64,34 @@ describe('heavy job waiter queue (#145 U3)', () => {
       .toMatchObject({ status: 'rejected', code: 'QUEUE_FULL' });
   });
 
+  it('rejects one workspace over its own queued bound and still queues another (#543)', () => {
+    const queue = new HeavyJobWaiterQueue(makeController(), { maxQueued: 8, maxQueuedPerWorkspace: 1 });
+    expect(queue.enqueue({ operationId: 'a1', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'queued' });
+    expect(queue.enqueue({ operationId: 'a2', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'rejected', code: 'WORKSPACE_QUEUE_FULL' });
+    expect(queue.enqueue({ operationId: 'b1', workspaceId: 'ws-b', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'queued' });
+
+    // Cancelling the queued row frees the workspace slot immediately.
+    expect(queue.cancel('a1')).toBe(true);
+    expect(queue.enqueue({ operationId: 'a3', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'queued' });
+  });
+
+  it('defaults the per-workspace bound to the global bound and refuses a wider one (#543)', () => {
+    const queue = new HeavyJobWaiterQueue(makeController(), { maxQueued: 2 });
+    expect(queue.enqueue({ operationId: 'a1', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'queued' });
+    expect(queue.enqueue({ operationId: 'a2', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'queued' });
+    expect(queue.enqueue({ operationId: 'a3', workspaceId: 'ws-a', resourceClass: 'goal_process', cost: 1 }))
+      .toMatchObject({ status: 'rejected', code: 'WORKSPACE_QUEUE_FULL' });
+
+    expect(() => new HeavyJobWaiterQueue(makeController(), { maxQueued: 2, maxQueuedPerWorkspace: 3 }))
+      .toThrow(RangeError);
+  });
+
   it('cancels queued work immediately without touching running leases', () => {
     const controller = makeController();
     const queue = new HeavyJobWaiterQueue(controller, { maxQueued: 8 });

@@ -105,7 +105,10 @@ import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApi
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
-import { createShellHeavyAdmissionPort } from './shell-heavy-admission.js';
+import {
+  createShellHeavyAdmissionPort,
+  resolveShellHeavyAdmissionPerWorkspaceLimit,
+} from './shell-heavy-admission.js';
 import {
   createGitHubClosedPullRequestFeed,
   createSettingsMergeReconciliationPollStateStore,
@@ -631,7 +634,11 @@ export function createStdioMcpRuntime(
   });
   // #145 step 3: keep the port reference so diagnostics can project the same
   // fair order the shell queue actually drains, not a second reconstruction.
-  const shellHeavyAdmission = createShellHeavyAdmissionPort(() => resourceAdmissionController, () => heavyJobQueue);
+  const shellHeavyAdmission = createShellHeavyAdmissionPort(
+    () => resourceAdmissionController,
+    () => heavyJobQueue,
+    resolveShellHeavyAdmissionPerWorkspaceLimit(),
+  );
   const capabilityRuntime = createStdioCapabilityService(dataPath, async () => (await activeWorkspaces()).map((entry) => entry.realRootPath), effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
   () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
   createRuntimePromotionTaskReconciliation(),

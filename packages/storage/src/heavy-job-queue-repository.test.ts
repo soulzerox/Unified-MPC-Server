@@ -82,8 +82,57 @@ describe('SqliteHeavyJobQueueRepository (#145 U5)', () => {
     try {
       const queue = repository(database);
       expect(queue.claim(entry('job-a'), 1)).toMatchObject({ status: 'queued' });
-      expect(queue.claim(entry('job-b'), 1)).toEqual({ status: 'full', operationId: 'job-b', depth: 1 });
+      expect(queue.claim(entry('job-b'), 1))
+        .toEqual({ status: 'full', operationId: 'job-b', depth: 1, scope: 'queue' });
       expect(queue.claim(entry('job-a'), 1)).toMatchObject({ status: 'queued' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects one workspace over its own bound while another workspace still claims (#543)', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const queue = repository(database);
+      expect(queue.claim(entry('job-a'), 4, 1)).toMatchObject({ status: 'queued' });
+      expect(queue.claim(entry('job-a2'), 4, 1))
+        .toEqual({ status: 'full', operationId: 'job-a2', depth: 1, scope: 'workspace' });
+      expect(queue.claim(entry('job-b', { workspaceId: 'workspace-b' }), 4, 1))
+        .toMatchObject({ status: 'queued' });
+
+      // Starting the row takes it out of `queued`, which frees the workspace
+      // slot: the bound counts queued rows, not terminal outcomes.
+      expect(queue.start('job-a', NOW.toISOString())).toBe(true);
+      expect(queue.claim(entry('job-a3'), 4, 1)).toMatchObject({ status: 'queued' });
+      expect(queue.claim(entry('job-a4'), 4, 1))
+        .toMatchObject({ status: 'full', scope: 'workspace' });
+      expect(queue.start('job-a3', NOW.toISOString())).toBe(true);
+      expect(queue.settle('job-a3', 'completed', NOW.toISOString())).toBe(true);
+      expect(queue.claim(entry('job-a5'), 4, 1)).toMatchObject({ status: 'queued' });
+
+      expect(() => queue.claim(entry('job-z'), 2, 3)).toThrow(HeavyJobQueueStoreError);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('applies the workspace bound when a supersede cannot reuse the stale slot (#543)', () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const queue = repository(database);
+      expect(queue.claim(entry('job-a'), 4, 1)).toMatchObject({ status: 'queued' });
+      expect(queue.start('job-a', NOW.toISOString())).toBe(true);
+      expect(queue.claim(entry('job-b'), 4, 1)).toMatchObject({ status: 'queued' });
+
+      // `job-a` already left the queue, so `job-c` inherits no slot and the
+      // workspace is at its bound.
+      expect(queue.supersede('job-a', entry('job-c'), 4, 1))
+        .toEqual({ status: 'full', operationId: 'job-c', depth: 1, scope: 'workspace' });
+
+      // A stale row that is still queued frees its own slot, so the swap stays
+      // inside the bound without a separate check.
+      expect(queue.supersede('job-b', entry('job-d'), 4, 1)).toMatchObject({ status: 'superseded' });
+      expect(queue.depth()).toBe(1);
     } finally {
       database.close();
     }

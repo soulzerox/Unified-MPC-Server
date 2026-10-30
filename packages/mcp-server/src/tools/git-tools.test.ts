@@ -41,6 +41,23 @@ describe('gitTools', () => {
               approval: 'missing',
             });
           },
+          async approvePublish(_actor: unknown, _request: unknown, signal?: AbortSignal) {
+            observedSignals.push(signal);
+            return ok({
+              approvalId: 'approval-1',
+              workspaceId: 'workspace-1',
+              remote: 'origin',
+              branch: 'goal/publish',
+              expectedSha: '0'.repeat(40),
+              approvedBy: 'test',
+              approvedAt: 0,
+              expiresAt: 1,
+            });
+          },
+          async publish(_actor: unknown, _request: unknown, signal?: AbortSignal) {
+            observedSignals.push(signal);
+            return ok({ remote: 'origin', branch: 'goal/publish', sha: '0'.repeat(40), targets: ['file'], approvalId: 'approval-1' });
+          },
         },
       },
     } as unknown as McpToolContext;
@@ -52,6 +69,8 @@ describe('gitTools', () => {
       ['git_log', { workspaceId: 'workspace-1' }],
       ['git', { args: ['status'], workspaceId: 'workspace-1', userConfirmed: true }],
       ['git_publish_preflight', { remote: 'origin', branch: 'goal/publish', workspaceId: 'workspace-1' }],
+      ['publish_approve', { remote: 'origin', branch: 'goal/publish', expectedSha: '0'.repeat(40), workspaceId: 'workspace-1', userConfirmed: true }],
+      ['git_publish', { remote: 'origin', branch: 'goal/publish', expectedSha: '0'.repeat(40), approvalId: 'approval-1', workspaceId: 'workspace-1' }],
     ];
 
     for (const [name, input] of calls) {
@@ -60,6 +79,6 @@ describe('gitTools', () => {
       await tool.execute(input, signal);
     }
 
-    expect(observedSignals).toEqual([signal, signal, signal, signal, signal]);
+    expect(observedSignals).toEqual([signal, signal, signal, signal, signal, signal, signal]);
   });
 });

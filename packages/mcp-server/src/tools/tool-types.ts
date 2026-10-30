@@ -258,7 +258,7 @@ export interface McpApplicationServices {
   readonly goalMutationFence?: Pick<GoalMutationFenceService, 'inspectWorkspaceFence' | 'begin' | 'heartbeat' | 'end' | 'observe'>;
   readonly search?: Pick<SearchService, 'searchFiles' | 'searchText'>;
   readonly workspaceIndex?: Pick<WorkspaceIndexService, 'indexWorkspace' | 'status' | 'startWatch' | 'stopWatch' | 'forgetWorkspace'>;
-  readonly git?: Pick<GitService, 'status' | 'diff' | 'log' | 'run' | 'observeWorkspace' | 'publishPreflight'>;
+  readonly git?: Pick<GitService, 'status' | 'diff' | 'log' | 'run' | 'observeWorkspace' | 'publishPreflight' | 'approvePublish' | 'publish'>;
   readonly process?: Pick<ProcessService, 'start' | 'list' | 'status' | 'logs' | 'stop' | 'previewProjectCommand' | 'startProjectCommand' | 'statusForGoalLiveness' | 'recoveryIdentityForGoal'>;
   readonly codex?: Pick<CodexService, 'status' | 'run' | 'list' | 'taskStatus' | 'taskLogs' | 'stop'>;
   readonly agentSwarm?: Pick<AgentSwarmService, 'start' | 'status' | 'result' | 'cancel' | 'list'>;

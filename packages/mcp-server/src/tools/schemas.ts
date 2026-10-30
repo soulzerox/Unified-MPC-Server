@@ -65,6 +65,23 @@ export const gitPublishPreflightSchema = z.object({
   remote: z.string().min(1).max(128),
   branch: z.string().min(1).max(1024),
 }).strict();
+export const publishApproveSchema = z.object({
+  workspaceId: optionalWorkspaceIdSchema,
+  cwd: pathSchema.optional(),
+  remote: z.string().min(1).max(128),
+  branch: z.string().min(1).max(1024),
+  expectedSha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+  ttlSeconds: z.number().int().min(30).max(900).optional(),
+  userConfirmed: z.boolean().optional(),
+}).strict();
+export const gitPublishSchema = z.object({
+  workspaceId: optionalWorkspaceIdSchema,
+  cwd: pathSchema.optional(),
+  remote: z.string().min(1).max(128),
+  branch: z.string().min(1).max(1024),
+  expectedSha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+  approvalId: z.string().min(1).max(128),
+}).strict();
 export const writeFileSchema = z.object({
   workspaceId: optionalWorkspaceIdSchema,
   path: pathSchema,

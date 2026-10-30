@@ -162,6 +162,10 @@ export function inspectMutationOperation(
       return replace('recovery restore changes live workspace state');
     case 'git':
       return inspectGit(value);
+    case 'publish_approve':
+      return execute('publish_approve records one single-use receipt bound to an exact workspace, remote, branch and commit');
+    case 'git_publish':
+      return replace('git_publish changes remote repository state and requires a single-use approval receipt for the exact commit');
     case 'shell':
     case 'wsl_exec':
       return inspectTaskExecution(value, toolName);

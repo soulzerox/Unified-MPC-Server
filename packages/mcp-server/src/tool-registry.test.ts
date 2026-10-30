@@ -100,7 +100,7 @@ describe('MCP tool registry', () => {
     const registry = new ToolRegistry({}, actor);
     expect(registry.list().map((tool) => tool.name)).toEqual([
       'workspace_list', 'workspace_active_list', 'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register', 'workspace_info', 'workspace_bootstrap', 'prepare_code_change', 'workspace_tree', 'project_snapshot', 'working_memory_search', 'working_memory_record', 'read_file', 'read_files',
-      'search_files', 'search_text', 'git_status', 'git_diff', 'git_log', 'git', 'git_publish_preflight', 'write_file',
+      'search_files', 'search_text', 'git_status', 'git_diff', 'git_log', 'git', 'git_publish_preflight', 'publish_approve', 'git_publish', 'write_file',
       'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'list_recovery_items', 'restore_deleted_file', 'list_checkpoints', 'restore_checkpoint', 'process_start', 'process_list', 'process_status',
       'process_logs', 'process_stop', 'project_dev', 'project_test', 'project_lint',
       'project_typecheck', 'project_build', 'shell', 'dom_cdp', 'computer_use', 'accessibility', 'input_event', 'vision', 'vision_annotated_capture', 'ui_target_action', 'window', 'health',

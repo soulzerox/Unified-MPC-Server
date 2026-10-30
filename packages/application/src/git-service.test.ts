@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { GitAdapter } from '@unified-mpc/git';
+import type { PublishApprovalBinding, PublishApprovalRecord } from '@unified-mpc/domain';
 import type { Workspace, WorkspaceRepository } from '@unified-mpc/workspace';
 import { GitService } from './git-service.js';
 
@@ -663,5 +664,333 @@ describe('GitService', () => {
     });
     await expect(failingLedger.publishPreflight(actor, request))
       .resolves.toMatchObject({ ok: true, value: { approval: 'missing' } });
+  });
+
+  it('refuses to mint a publish approval without explicit user confirmation', async () => {
+    const workspace = await createWorkspace();
+    let preflightCalls = 0;
+    const records: PublishApprovalRecord[] = [];
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        preflightCalls += 1;
+        return { ok: true, value: {} };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovalAuthority: {
+        async record(record: PublishApprovalRecord): Promise<boolean> { records.push(record); return true; },
+        async consume(): Promise<boolean> { return false; },
+      },
+    });
+
+    const result = await service.approvePublish(
+      { clientId: 'test', clientName: 'test' },
+      { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: 'a'.repeat(40) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_REQUIRED', details: { reason: 'publish-approval-confirmation-required' } },
+    });
+    expect(preflightCalls).toBe(0);
+    expect(records).toHaveLength(0);
+  });
+
+  it('mints one bounded receipt for the exact approved head', async () => {
+    const workspace = await createWorkspace();
+    const head = 'a'.repeat(40);
+    const now = 1_700_000_000_000;
+    const records: PublishApprovalRecord[] = [];
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            remote: 'origin',
+            branch: 'goal/publish',
+            head,
+            defaultBranches: ['main'],
+            protectedBranch: false,
+            targets: ['ssh://github.com'],
+            runtime: { ready: true },
+            approval: 'missing',
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovalAuthority: {
+        async record(record: PublishApprovalRecord): Promise<boolean> { records.push(record); return true; },
+        async consume(): Promise<boolean> { return false; },
+      },
+      now: (): number => now,
+    });
+
+    const result = await service.approvePublish(
+      { clientId: 'test', clientName: 'Host client' },
+      { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head, userConfirmed: true },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        workspaceId: workspace.id,
+        remote: 'origin',
+        branch: 'goal/publish',
+        expectedSha: head,
+        approvedBy: 'Host client',
+        approvedAt: now,
+        expiresAt: now + (15 * 60_000),
+      },
+    });
+    expect(result.ok && result.value.approvalId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(records).toEqual(result.ok ? [result.value] : []);
+  });
+
+  it('refuses a minted approval when the checked-out head is not the expected commit', async () => {
+    const workspace = await createWorkspace();
+    const records: PublishApprovalRecord[] = [];
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head: 'b'.repeat(40),
+            defaultBranches: ['main'],
+            protectedBranch: false,
+            targets: ['file'],
+            runtime: { ready: true },
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovalAuthority: {
+        async record(record: PublishApprovalRecord): Promise<boolean> { records.push(record); return true; },
+        async consume(): Promise<boolean> { return false; },
+      },
+    });
+
+    await expect(service.approvePublish(
+      { clientId: 'test', clientName: 'test' },
+      { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: 'a'.repeat(40), userConfirmed: true },
+    )).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT', details: { reason: 'publish-head-moved' } } });
+    expect(records).toHaveLength(0);
+  });
+
+  it('refuses to approve or publish a default branch and a runtime-blocked target', async () => {
+    const workspace = await createWorkspace();
+    const head = 'a'.repeat(40);
+    const actor = { clientId: 'test', clientName: 'test' };
+    const protectedAdapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head,
+            defaultBranches: ['main'],
+            protectedBranch: true,
+            targets: ['ssh://github.com'],
+            runtime: { ready: true },
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    const authority = {
+      async record(): Promise<boolean> { return true; },
+      async consume(): Promise<boolean> { return true; },
+    };
+    const protectedService = new GitService(repository(workspace), undefined, protectedAdapter, {
+      publishApprovalAuthority: authority,
+    });
+    for (const method of ['approve', 'publish'] as const) {
+      const result = method === 'approve'
+        ? await protectedService.approvePublish(actor, {
+          workspaceId: workspace.id, remote: 'origin', branch: 'main', expectedSha: head, userConfirmed: true,
+        })
+        : await protectedService.publish(actor, {
+          workspaceId: workspace.id, remote: 'origin', branch: 'main', expectedSha: head, approvalId: 'approval-1',
+        });
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: 'PERMISSION_DENIED', details: { reason: 'publish-protected-branch' } },
+      });
+    }
+
+    const blockedAdapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head,
+            defaultBranches: [],
+            protectedBranch: false,
+            targets: ['https://github.com'],
+            runtime: { ready: false, reason: 'push-credential-helper', key: 'credential.helper' },
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    const blockedService = new GitService(repository(workspace), undefined, blockedAdapter, {
+      publishApprovalAuthority: authority,
+    });
+    await expect(blockedService.approvePublish(actor, {
+      workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head, userConfirmed: true,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+  });
+
+  it('spends the exact binding immediately before the host-built publish', async () => {
+    const workspace = await createWorkspace();
+    const head = 'a'.repeat(40);
+    const now = 1_700_000_000_000;
+    const consumed: Array<{ approvalId: string; binding: PublishApprovalBinding; now: number }> = [];
+    const publishCalls: unknown[] = [];
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head,
+            defaultBranches: ['main'],
+            protectedBranch: false,
+            targets: ['file'],
+            runtime: { ready: true },
+          },
+        };
+      },
+      async publish(cwd: string, request: unknown): Promise<unknown> {
+        publishCalls.push([cwd, request]);
+        return {
+          ok: true,
+          value: { remote: 'origin', branch: 'goal/publish', sha: head, targets: ['file'] },
+        };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovalAuthority: {
+        async record(): Promise<boolean> { return true; },
+        async consume(approvalId: string, binding: PublishApprovalBinding, at: number): Promise<boolean> {
+          consumed.push({ approvalId, binding, now: at });
+          return true;
+        },
+      },
+      now: (): number => now,
+    });
+
+    const result = await service.publish(
+      { clientId: 'test', clientName: 'test' },
+      { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head, approvalId: 'approval-1' },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { remote: 'origin', branch: 'goal/publish', sha: head, targets: ['file'], approvalId: 'approval-1' },
+    });
+    expect(consumed).toEqual([{
+      approvalId: 'approval-1',
+      binding: { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head },
+      now,
+    }]);
+    expect(publishCalls).toEqual([[workspace.realRootPath, {
+      remote: 'origin', branch: 'goal/publish', expectedSha: head,
+    }]]);
+  });
+
+  it('denies a publish without a live approval and spawns no Git child', async () => {
+    const workspace = await createWorkspace();
+    const head = 'a'.repeat(40);
+    let publishCalls = 0;
+    const adapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head,
+            defaultBranches: ['main'],
+            protectedBranch: false,
+            targets: ['file'],
+            runtime: { ready: true },
+          },
+        };
+      },
+      async publish(): Promise<unknown> {
+        publishCalls += 1;
+        return { ok: true, value: {} };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter, {
+      publishApprovalAuthority: {
+        async record(): Promise<boolean> { return true; },
+        async consume(): Promise<boolean> { return false; },
+      },
+    });
+
+    await expect(service.publish(
+      { clientId: 'test', clientName: 'test' },
+      { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head, approvalId: 'approval-1' },
+    )).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_REQUIRED', details: { reason: 'publish-approval-required' } },
+    });
+    expect(publishCalls).toBe(0);
+  });
+
+  it('refuses a publish before spending when the head moved or the default branch is unresolved', async () => {
+    const workspace = await createWorkspace();
+    const head = 'a'.repeat(40);
+    let consumed = 0;
+    const actor = { clientId: 'test', clientName: 'test' };
+    const request = { workspaceId: workspace.id, remote: 'origin', branch: 'goal/publish', expectedSha: head, approvalId: 'approval-1' };
+    const authority = {
+      async record(): Promise<boolean> { return true; },
+      async consume(): Promise<boolean> { consumed += 1; return true; },
+    };
+
+    const movedAdapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head: 'b'.repeat(40),
+            defaultBranches: ['main'],
+            protectedBranch: false,
+            targets: ['file'],
+            runtime: { ready: true },
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    await expect(new GitService(repository(workspace), undefined, movedAdapter, { publishApprovalAuthority: authority })
+      .publish(actor, request)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'publish-head-moved' } },
+    });
+
+    const unresolvedAdapter = {
+      async publishPreflight(): Promise<unknown> {
+        return {
+          ok: true,
+          value: {
+            head,
+            defaultBranches: [],
+            protectedBranch: false,
+            targets: ['file'],
+            runtime: { ready: true },
+          },
+        };
+      },
+    } as unknown as GitAdapter;
+    await expect(new GitService(repository(workspace), undefined, unresolvedAdapter, { publishApprovalAuthority: authority })
+      .publish(actor, request)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'publish-default-branch-unresolved' } },
+    });
+    expect(consumed).toBe(0);
   });
 });

@@ -293,8 +293,10 @@ export function createStdioMcpRuntime(
     }
     return { scope: { workspaceId: current.id, rootPath: current.rootPath } };
   };
+  const publishApprovals = new SqlitePublishApprovalRepository(database);
   const gitService = new GitService(workspaceRepository, undefined, undefined, {
-    publishApprovals: new SqlitePublishApprovalRepository(database),
+    publishApprovals,
+    publishApprovalAuthority: publishApprovals,
   });
   const custodyActor: FileActor = {
     clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',

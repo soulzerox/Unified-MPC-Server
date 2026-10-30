@@ -17,3 +17,78 @@ export interface PublishApprovalBinding {
 export interface PublishApprovalLookupPort {
   inspect(binding: PublishApprovalBinding, now: number): Promise<PublishApprovalState>;
 }
+
+/**
+ * One single-use publish capability (#297). Bound to one workspace, remote,
+ * branch and exact commit; minting is a human-confirmed action, and the publish
+ * path spends it before it spawns Git.
+ */
+export interface PublishApprovalRecord extends PublishApprovalBinding {
+  readonly approvalId: string;
+  readonly approvedBy: string;
+  readonly approvedAt: number;
+  readonly expiresAt: number;
+}
+
+/**
+ * Authority side of the ledger: mint and spend. Kept apart from the read-only
+ * lookup so a diagnostic can hold the lookup alone and never gain authority.
+ */
+export interface PublishApprovalAuthorityPort {
+  /** Idempotent per exact binding; never rewinds a consumed receipt. */
+  record(record: PublishApprovalRecord): Promise<boolean>;
+  /** Transaction-scoped spend: true only when this exact binding was live and is now consumed. */
+  consume(approvalId: string, binding: PublishApprovalBinding, now: number): Promise<boolean>;
+}
+
+/** Same shape the Git adapter accepts for a remote name; no URL or option form. */
+const PUBLISH_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PUBLISH_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+
+function bounded(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max;
+}
+
+function hasControlOrSpace(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code <= 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * A publish remote is a configured remote name. URLs, paths, scp-like forms and
+ * option-like strings are refused, so the ledger and the publish path can only
+ * address a remote the workspace already knows.
+ */
+export function isPublishRemoteName(value: unknown): value is string {
+  return typeof value === 'string' && PUBLISH_REMOTE_NAME.test(value);
+}
+
+/** A plain branch name: no whitespace, traversal segment, option form or ref lock suffix. */
+export function isPublishBranchName(value: unknown): value is string {
+  return bounded(value, 256)
+    && !hasControlOrSpace(value)
+    && !value.includes('..')
+    && !value.includes('@{')
+    && !value.startsWith('-')
+    && !value.startsWith('/')
+    && !value.endsWith('/')
+    && !value.endsWith('.')
+    && !value.endsWith('.lock')
+    && !value.includes('//');
+}
+
+/** An exact commit id: full 40 or 64 lowercase hex characters, never an abbreviation or ref. */
+export function isPublishObjectId(value: unknown): value is string {
+  return typeof value === 'string' && PUBLISH_OBJECT_ID.test(value);
+}
+
+/** Validate a binding before it can reach the ledger or the Git child. */
+export function isValidPublishBinding(binding: PublishApprovalBinding): boolean {
+  return bounded(binding.workspaceId, 128)
+    && isPublishRemoteName(binding.remote)
+    && isPublishBranchName(binding.branch)
+    && isPublishObjectId(binding.expectedSha);
+}

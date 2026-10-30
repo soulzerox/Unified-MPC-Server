@@ -6,17 +6,21 @@ repository-local `remote.origin.receivepack`, `credential.helper`, `core.sshComm
 or `GIT_SSH_COMMAND` must never be able to run because a model asked to publish.
 
 This document defines the supported alternative for issue #297: a host-mediated
-publish path that a leased Goal can use after explicit human authorization, with
+publish path that a Goal session can use after explicit human authorization, with
 credentials that never reach the model, the transcript, or a log.
 
-Status: **preflight and receipt store implemented, publish not implemented.**
-`git_publish_preflight` (read-only) ships the diagnostics half described in section
-6, and migration `042_publish_approvals` ships the durable approval ledger described
-in section 5. Nothing writes or consumes an approval yet, and no authenticated
-publish path exists: `git push` stays denied for every target that could run a
-credential helper. Credential-free transports — SSH, `git://`, `file://` and local
-paths — are not denied by an unrelated helper, because no helper can run on them
-(see §1).
+Status: **S1 implemented.** `git_publish_preflight` (read-only) ships the diagnostics
+half described in section 6, migration `042_publish_approvals` ships the durable
+approval ledger described in section 5, and the two-tool pair `publish_approve` +
+`git_publish` ships the publish half. `publish_approve` mints one single-use receipt
+for an exact workspace/remote/branch/SHA binding after an explicit
+`userConfirmed: true`, and `git_publish` spends it to push that exact commit to that
+exact branch through host-built argv.
+
+Credential-free transports — SSH, `git://`, `file://` and local paths — are the only
+publishable targets; they are not denied by an unrelated helper because no helper can
+run on them (see §1). `git push` stays denied for every HTTP(S) target that could run
+a credential helper, including under Full Bypass, and this tool does not relax it.
 
 ---
 
@@ -56,8 +60,10 @@ Two facts make a model-driven `git push` unsupportable even with approval:
 
 1. The helper runs in the same process tree as the model's command. Approval does
    not change what that helper can read or write.
-2. `userConfirmed: true` is asserted by the caller (`GitService.run`), so it can
-   never be the authority for a remote write.
+2. A bare `userConfirmed: true` inside `git push` is asserted by the caller, so it can
+   never be the authority for a remote write. That is why the approval is a separate
+   receipt-minting call: `publish_approve` turns one confirmed binding into a durable
+   row, and `git_publish` can only spend that row, never mint one.
 
 ## 2. Decisions
 
@@ -67,53 +73,64 @@ Two facts make a model-driven `git push` unsupportable even with approval:
 | D2 | The host builds and executes the Git invocation, not the caller. | The caller supplies `workspaceId`, `remote`, `branch` and an expected commit SHA — never argv, config, or environment. |
 | D3 | Authority is a durable approval receipt, not a boolean. | Mirrors the `guarded_pr_merge` evidence chain: the caller cannot supply the verdict. |
 | D4 | One remote, one branch, one exact SHA per approval. | No force, tags, deletes, `--all`, `--mirror`, or default/protected branches. A moved head invalidates the receipt. |
-| D5 | Credentials are injected by the host into the child process only. | Secrets stay out of argv, the model context, tool results, and logs. |
+| D5 | Credentials, when a later slice supports them, are injected by the host into the child process only. S1 injects none because it publishes only credential-free transports. | Secrets stay out of argv, the model context, tool results, and logs. |
 | D6 | `permission_check` stays policy-only; runtime readiness is reported separately. | It is a compatibility shim (`upgrade-catalog.ts`), not a place to grow Git probing. |
 | D7 | No fallback. A failed publish never degrades to `shell`, `gh`, or a disabled helper. | The workaround in #297 (human publishes from their own terminal) stays the only manual escape. |
 
 ## 3. Flow
 
+Two tool calls, in this order. `publish_approve` is the human gate and mints the
+receipt; `git_publish` spends it. Neither call can do the other's job, and a receipt
+minted for one binding is useless for any other.
+
 ```text
-model                host (ToolRegistry + GitService)          approval store      git child
-  |                              |                                   |                |
-  | git_publish{ws,remote,       |                                   |                |
-  |   branch,expectedSha}  ----->|                                   |                |
-  |                              | 1 goal lease + workspace admission|                |
-  |                              | 2 resolve refs, verify SHA        |                |
-  |                              | 3 scope check (branch pattern,    |                |
-  |                              |   not default, no force)          |                |
-  |                              | 4 consume approval receipt ------>|                |
-  |                              |   (ws,remote,branch,sha,expiry)   |                |
-  |                              | 5 spawn git with sanitized env ------------------->|
-  |                              |   credential helper from host     |                |
-  |                              | 6 verify remote ref == expectedSha<----------------|
-  |                              | 7 write audit receipt             |                |
-  |<---- {published, sha, url} --|                                   |                |
+model                    host (ToolRegistry + GitService)                git child
+  |                                    |                                     |
+  | git_publish{ws, remote, branch,    |                                     |
+  |   expectedSha, approvalId} ------->|                                     |
+  |                                    | 1 resolve workspace + cwd            |
+  |                                    | 2 preflight, verify head == SHA      |
+  |                                    | 3 spend receipt (approval store)     |
+  |                                    | 4 re-run push safety                 |
+  |                                    | 5 git push <sha>:refs/heads/<branch> ->|
+  |                                    | 6 verify remote ref == SHA <-----------|
+  |<---- {sha, remote, branch, targets}|                                     |
 ```
 
-Steps 1–4 fail closed. A missing, expired, or mismatched receipt returns
-`PERMISSION_REQUIRED` with `details.reason: "publish-approval-required"`; it never
-prompts from inside the adapter.
+Steps 1–4 fail closed. A missing, expired, mismatched or already-consumed receipt
+returns `PERMISSION_REQUIRED` with `details.reason: "publish-approval-required"`; it
+never prompts from inside the adapter. Spending happens before the spawn, so a race
+after the spend loses the receipt and refuses rather than pushing twice. A goal-lease
+check, credential injection and a separate audit row are later slices, not S1.
 
 ## 4. Credential handling
 
-- The child environment is constructed from an allowlist. Ambient `GIT_SSH_COMMAND`,
-  `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_EXEC_PATH` and
-  `GIT_CONFIG_*` are dropped, not inherited.
-- HTTPS credentials come from the host's authenticated `gh` CLI (already required by
-  `guarded_pr_merge`) or the OS keyring. The token is passed to the child through a
-  host-owned helper defined with `-c`, so it never appears in argv.
-- SSH, if enabled at all, uses a host-owned key path resolved by the host, never
-  `core.sshCommand` from repository config.
+S1 publishes only credential-free transports, so it injects no credentials at all:
+there is no helper, no token, and no host-owned SSH key in this slice.
+
+- The Git child runs with `GIT_TERMINAL_PROMPT=0`, so it can never stop for an
+  interactive prompt.
+- `validatePushSafety` runs immediately before the spawn and refuses when an ambient
+  executable transport or credential override is present: `GIT_SSH`, `GIT_SSH_COMMAND`,
+  `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_EXEC_PATH`, repository
+  `receivepack`/`uploadpack`/`proxy`/`vcs`, `core.sshCommand`, `core.askPass`,
+  `core.gitProxy`, `push.gpgSign`, `push.recurseSubmodules`, `submodule.recurse`,
+  `protocol.*.allow`, and a credential helper when a resolved push target could use one.
+  The denial carries `details.reason` plus the blocking key name, never a value.
+- HTTPS credentials, host-owned key paths and helper injection are a later slice and
+  are not implemented. Until then an HTTP(S) target that could reach a helper stays
+  denied by the same guard, so nothing in this slice can publish over an authenticated
+  HTTP(S) transport.
 - No credential, token, URL userinfo, or helper path is written to the tool result,
   the activity log, the audit row, or any error message. `diagnosticConfigKey()`
   reduces free-form config subsections to a pattern, and `firstCredentialConfigKey()`
   reduces every scoped credential helper — host-only or full URL — to
   `credential.<url>.helper` while reporting the global `credential.helper` exactly.
-  The publish path applies the same rule to everything it reports.
+  The publish path applies the same rule to everything it reports, and it returns no
+  raw `git` stderr.
 - On authentication failure the result is `PERMISSION_DENIED` with
-  `details.reason: "publish-authentication-failed"`. The raw `git` stderr is
-  redacted with `redactDiagnosticText()` before it is logged, and is not returned.
+  `details.reason: "publish-authentication-failed"`. The raw `git` stderr is redacted
+  with `redactDiagnosticText()` before it is logged, and is not returned.
 
 ## 5. Approval receipt
 
@@ -124,28 +141,29 @@ publish_approvals(
 )
 ```
 
-- Written only by the host approval surface (Desktop/STDIO broker), never by a tool call.
+- Minted by `publish_approve` and only after an explicit `userConfirmed: true` in that
+  call. The handler enforces the confirmation even under Full Bypass, so the flag is a
+  human gate rather than a policy bypass.
 - Bound to the exact `expected_sha`; a new commit requires a new receipt.
-- Single use: `consumed_at` is set inside the same transaction that authorizes the spawn.
-- Short expiry (default 15 minutes) so a stale approval cannot publish unrelated work later.
+- Single use: `consumed_at` is set before `git_publish` spawns the child.
+- Short expiry (default 15 minutes, 30–900 s allowed) so a stale approval cannot
+  publish unrelated work later.
 
 Implemented in migration `042_publish_approvals` and
 `SqlitePublishApprovalRepository` (`packages/storage`). Recording is idempotent per
 exact binding and cannot widen a row that already exists; `consumePublishApproval`
-spends a receipt exactly once on the caller's open transaction, so authorization and
-consumption roll back together. The table rejects a non-hex or short SHA, an empty or
-option-shaped branch, and `expires_at <= approved_at` at the schema level, and a
-receipt may only reference a registered workspace. No tool or host surface writes or
-spends a receipt outside the repository tests. `git_publish_preflight` reads the
-ledger and reports `approval` as `missing`, `pending`, `expired`, or `consumed` for
-the exact workspace, remote, branch and head; with no host surface writing receipts
-it still reports `missing` in production.
+spends a receipt exactly once, so authorization and consumption roll back together.
+The table rejects a non-hex or short SHA, an empty or option-shaped branch, and
+`expires_at <= approved_at` at the schema level, and a receipt may only reference a
+registered workspace. Only `publish_approve` writes a receipt and only `git_publish`
+spends one; both go through the same repository the preflight reads.
+`git_publish_preflight` reports `approval` as `missing`, `pending`, `expired`, or
+`consumed` for the exact workspace, remote, branch and head.
 
 ## 6. Preflight
 
-`git_publish` with `dryRun: true` answers "would this succeed, and if not, why"
-without writing. That half is implemented as the read-only
-`git_publish_preflight` tool. It returns the runtime verdict, approval state,
+`git_publish_preflight` answers "would this succeed, and if not, why" without
+writing anything. It returns the runtime verdict, approval state,
 head, sanitized targets, default branches and `protectedBranch`:
 
 ```json
@@ -177,6 +195,11 @@ This is what requirement 3 of #297 asks for: a caller can tell a policy-level al
 from a runtime authentication/credential block *before* attempting to publish.
 
 ## 7. Tests that must exist before this ships
+
+All nine are implemented in `packages/application/src/git-service.test.ts`,
+`packages/git/src/git-adapter.integration.test.ts`,
+`packages/storage/src/publish-approval-repository.test.ts` and
+`packages/mcp-server/src/tools/git-tools.test.ts`.
 
 1. Unapproved publish is denied (`publish-approval-required`), and no Git child is spawned.
 2. Approved publish of `origin` + `goal/*` + exact SHA succeeds against a local bare remote.

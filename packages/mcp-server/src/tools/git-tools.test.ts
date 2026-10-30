@@ -81,4 +81,28 @@ describe('gitTools', () => {
 
     expect(observedSignals).toEqual([signal, signal, signal, signal, signal, signal, signal]);
   });
+
+  it('rejects force, tag, delete, mirror and option-shaped publish forms at the schema', () => {
+    const context = {
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {},
+    } as unknown as McpToolContext;
+    const tools = gitTools(context);
+    const sha = 'a'.repeat(40);
+    const approve = tools.find((candidate) => candidate.name === 'publish_approve');
+    const publish = tools.find((candidate) => candidate.name === 'git_publish');
+    if (approve === undefined || publish === undefined) throw new Error('Missing publish tools');
+    const binding = { remote: 'origin', branch: 'goal/publish', expectedSha: sha };
+
+    for (const extra of [{ force: true }, { tags: true }, { delete: true }, { all: true }, { mirror: true }]) {
+      expect(approve.parse({ ...binding, userConfirmed: true, ...extra })).toMatchObject({ ok: false });
+      expect(publish.parse({ ...binding, approvalId: 'approval-1', ...extra })).toMatchObject({ ok: false });
+    }
+    expect(approve.parse({ ...binding, expectedSha: sha.toUpperCase(), userConfirmed: true })).toMatchObject({ ok: false });
+    expect(approve.parse({ ...binding, expectedSha: sha.slice(0, 7), userConfirmed: true })).toMatchObject({ ok: false });
+    expect(publish.parse({ ...binding, approvalId: '' })).toMatchObject({ ok: false });
+    expect(approve.parse({ ...binding, userConfirmed: true })).toMatchObject({ ok: true });
+    expect(publish.parse({ ...binding, approvalId: 'approval-1' })).toMatchObject({ ok: true });
+  });
 });

@@ -2762,7 +2762,7 @@ const ACTIVE_PROJECT_SELECTION_TOOLS = new Set(['workspace_activate', 'workspace
 const GOAL_ADMISSION_RECOVERY_TOOLS = new Set(['retry_goal_workspace_admission']);
 export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
   'write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file',
-  'restore_deleted_file', 'restore_checkpoint', 'git', 'shell', 'wsl_exec',
+  'restore_deleted_file', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec',
   'process_start', 'process_stop', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
   'verify_incremental', 'codex_run', 'codex_stop', 'agent_swarm_run', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply',
   'mcp_call', 'rag_remember', 'workspace_memory_record', 'rag_forget', 'rag_code_index', 'rag_cancel_index', 'computer_use', 'dom_cdp', 'accessibility', 'input_event', 'ui_target_action', 'window',
@@ -3024,6 +3024,16 @@ function summarizeMutationForApproval(toolName: string, input: unknown, activeWo
     lines.push('WARNING: this consumes explicitly enabled Codex quota; v4.61.0 enforces read-only child sandboxes.');
     return boundedApprovalSummary(lines);
   }
+  if (toolName === 'publish_approve' || toolName === 'git_publish') {
+    appendApprovalValue(lines, 'remote', readTrimmedString(input.remote));
+    appendApprovalValue(lines, 'branch', readTrimmedString(input.branch));
+    appendApprovalValue(lines, 'expectedSha', readTrimmedString(input.expectedSha));
+    if (toolName === 'git_publish') appendApprovalValue(lines, 'approvalId', readTrimmedString(input.approvalId));
+    lines.push(toolName === 'publish_approve'
+      ? 'WARNING: this mints a single-use publish approval for the exact binding above.'
+      : 'WARNING: this changes remote repository state and is not covered by Recovery Trash.');
+    return boundedApprovalSummary(lines);
+  }
   const projectKind = projectCommandKind(toolName);
   if (projectKind !== undefined) {
     lines.push(`projectCommand = ${projectKind}`);
@@ -3138,7 +3148,7 @@ function prohibitedInvocationReason(toolName: string, input: unknown): string | 
   return undefined;
 }
 
-const LOCAL_MUTATION_TOOLS = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
+const LOCAL_MUTATION_TOOLS = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
 const LOCAL_OUTPUT_REPLACEMENT_TOOLS = new Set(['audio', 'screen_record']);
 function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
   return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));
@@ -3165,7 +3175,7 @@ const ALWAYS_CONFIRM_MUTATION_TOOLS = new Set([
   'codex_run', 'codex_stop', 'agent_swarm_run', 'cancel_goal', 'cancel_scheduled_continuation', 'mcp_call', 'web_fetch', 'scheduler',
   'office', 'office_ppt', 'docx_merge', 'dom_cdp', 'computer_use',
   'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard',
-  'audio', 'screen_record',
+  'audio', 'screen_record', 'publish_approve', 'git_publish',
 ]);
 
 function requiresAlwaysConfirmation(toolName: string, decision: MutationPolicyDecision): boolean {

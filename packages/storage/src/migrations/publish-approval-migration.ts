@@ -1,14 +1,13 @@
 /**
- * Durable, single-use authority for one host-mediated Git publish (issue #297).
+ * Durable, single-use authority for one approved Git publish (issue #297).
  *
  * A row is a capability, not a queue entry: it is bound to one workspace, one
- * remote, one branch and one exact commit, written only by the trusted host
- * approval surface, and spent exactly once inside the transaction that
- * authorizes the Git child (`consumed_at` is the replay barrier).
+ * remote, one branch and one exact commit, minted only by `publish_approve`
+ * after an explicit `userConfirmed: true`, and spent exactly once by
+ * `git_publish` before the Git child runs (`consumed_at` is the replay barrier).
  *
- * Nothing in this repository writes or reads this table yet. The publish tool
- * and its host approval surface are still unimplemented; `git push` remains
- * denied for every caller.
+ * `git push` itself stays denied for every caller that could run a credential
+ * helper; this table authorizes only the host-built publish path.
  */
 export const PUBLISH_APPROVAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS publish_approvals (

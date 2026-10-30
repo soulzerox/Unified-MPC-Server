@@ -62,9 +62,11 @@ function sameApprovalBinding(row: ApprovalRow, binding: PublishApprovalBinding):
 }
 
 /**
- * Transaction-scoped spend of one capability. Runs on the caller's open
- * transaction so consumption and the authorized publish either both land or
- * both roll back; a spent capability never outlives the publish it authorized.
+ * Transaction-scoped spend of one capability. The caller may run it inside its
+ * own open transaction; the repository's standalone `consume` wraps it in
+ * `BEGIN IMMEDIATE` and commits before the publish spawns Git. Spending is
+ * therefore durable first and fail-closed: a push that fails afterwards leaves
+ * the receipt consumed, and replaying it is impossible.
  *
  * The caller supplies only the approval id and the binding it intends to
  * publish, never the row's timestamps or approver. Fails closed on an unknown,

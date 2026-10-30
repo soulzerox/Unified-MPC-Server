@@ -1710,6 +1710,55 @@ describe('MCP tool registry', () => {
     expect(approvalRequests).toHaveLength(2);
   });
 
+  it('requires host exact-action approval for publish tools in the full profile and shows the exact binding', async () => {
+    const rootPath = path.resolve(tmpdir(), 'unified-mpc-publish-approval-fixture');
+    const requests: Array<{ toolName?: string; summary?: string }> = [];
+    let approved = false;
+    let approveCalls = 0;
+    let publishCalls = 0;
+    const services = {
+      git: {
+        async approvePublish(): Promise<ReturnType<typeof ok>> {
+          approveCalls += 1;
+          return ok({ approvalId: 'approval-1', workspaceId: 'workspace-a', remote: 'origin', branch: 'goal/publish', expectedSha: 'a'.repeat(40), approvedBy: 'test', approvedAt: 0, expiresAt: 1 });
+        },
+        async publish(): Promise<ReturnType<typeof ok>> {
+          publishCalls += 1;
+          return ok({ remote: 'origin', branch: 'goal/publish', sha: 'a'.repeat(40), targets: ['file'], approvalId: 'approval-1' });
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-a', rootPath }),
+      hostMutationApprovalProvider: async (request: unknown): Promise<boolean> => {
+        requests.push(request as { toolName?: string; summary?: string });
+        return approved;
+      },
+    } as ToolRegistryOptions & { readonly hostMutationApprovalProvider: (request: unknown) => Promise<boolean> });
+    const binding = { workspaceId: 'workspace-a', remote: 'origin', branch: 'goal/publish', expectedSha: 'a'.repeat(40) };
+
+    const denied = await registry.invoke('publish_approve', { ...binding, userConfirmed: true });
+    expect(denied).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED' } } });
+    expect(approveCalls).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ toolName: 'publish_approve', workspaceId: 'workspace-a' });
+    expect(requests[0]?.summary).toContain('remote = origin');
+    expect(requests[0]?.summary).toContain('branch = goal/publish');
+    expect(requests[0]?.summary).toContain(`expectedSha = ${'a'.repeat(40)}`);
+
+    approved = true;
+    const minted = await registry.invoke('publish_approve', { ...binding, userConfirmed: true });
+    expect(minted.isError).not.toBe(true);
+    expect(approveCalls).toBe(1);
+
+    approved = false;
+    const publishDenied = await registry.invoke('git_publish', { ...binding, approvalId: 'approval-1', userConfirmed: true });
+    expect(publishDenied).toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED' } } });
+    expect(publishCalls).toBe(0);
+    expect(requests.at(-1)?.summary).toContain('approvalId = approval-1');
+  });
+
   it('backs up and normalizes mutating Office targets inside the host active workspace', async () => {
     const preparedInputs: unknown[] = [];
     const capabilityInputs: unknown[] = [];

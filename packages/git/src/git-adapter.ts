@@ -961,8 +961,10 @@ function firstCredentialConfigKey(output: string): string {
 }
 
 /**
- * Git consults `credential.helper` only for HTTP(S) remotes; SSH, `git://` and
- * local paths never run one. Unclassified targets stay guarded (#297).
+ * Git consults `credential.helper` only for HTTP(S) remotes. A target without a
+ * `scheme://` prefix is a local path or scp-like SSH, and neither runs a helper;
+ * every other scheme is classified here and an unsupported one is still guarded
+ * by `isSupportedRemoteTarget` in the caller (#297).
  */
 function usesCredentialHelper(target: string): boolean {
   if (/^[a-z][a-z0-9+.-]*::/i.test(target)) return true;

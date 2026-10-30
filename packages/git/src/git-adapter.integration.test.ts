@@ -391,6 +391,25 @@ describe('GitAdapter integration', () => {
     expect(JSON.stringify(denied)).not.toContain(escapedForJson(wrapper));
   }, 15_000);
 
+  it('keeps the credential-helper denial for a transport the adapter does not support', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['remote', 'add', 'origin', 'ftp://example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: root, windowsHide: true });
+
+    // An unsupported transport is not classified, so it must stay guarded even
+    // though a helper cannot run on it.
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+  }, 15_000);
+
   it('reports a credential-free publish as ready while a helper is configured', async () => {
     if (!gitAvailable) return;
     const parent = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

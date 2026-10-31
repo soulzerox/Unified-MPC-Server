@@ -6,6 +6,7 @@ import type {
   AuditEventRepository,
   CodexRunAuditInput,
   McpToolAuditInput,
+  PublishAuditInput,
 } from './audit-types.js';
 
 export class AuditService {
@@ -45,6 +46,37 @@ export class AuditService {
     });
   }
 
+  /**
+   * Record one publish credential lifecycle event. `metadata` is deliberately
+   * built from a closed list of non-secret fields; a caller cannot pass a
+   * secret through this method, and the redactor still runs over the result.
+   */
+  public recordPublish(input: PublishAuditInput): Promise<void> {
+    const targetSummary = publishTargetSummary(input);
+    return this.record({
+      ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
+      actorId: input.actorId,
+      actorName: input.actorName,
+      ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+      action: input.action,
+      ...(targetSummary === undefined ? {} : { targetSummary }),
+      resultCode: input.resultCode,
+      durationMs: input.durationMs ?? 0,
+      metadata: {
+        ...(input.remote === undefined ? {} : { remote: input.remote }),
+        ...(input.leaseId === undefined ? {} : { leaseId: input.leaseId }),
+        ...(input.approvalId === undefined ? {} : { approvalId: input.approvalId }),
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+        ...(input.expectedSha === undefined ? {} : { expectedSha: input.expectedSha }),
+        ...(input.hosts === undefined ? {} : { hosts: input.hosts }),
+        ...(input.username === undefined ? {} : { username: input.username }),
+        ...(input.pushUrlFingerprint === undefined ? {} : { pushUrlFingerprint: input.pushUrlFingerprint }),
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        ...(input.reclaimed === undefined ? {} : { reclaimed: input.reclaimed }),
+      },
+    });
+  }
+
   public recordMcpTool(input: McpToolAuditInput): Promise<void> {
     return this.record({
       ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
@@ -73,6 +105,16 @@ export class AuditService {
   }
 }
 
+function publishTargetSummary(input: PublishAuditInput): string | undefined {
+  const parts = [
+    input.workspaceId === undefined ? undefined : `workspace=${input.workspaceId}`,
+    input.remote === undefined ? undefined : `remote=${input.remote}`,
+    input.leaseId === undefined ? undefined : `lease=${input.leaseId}`,
+    input.approvalId === undefined ? undefined : `approval=${input.approvalId}`,
+  ].filter((part): part is string => part !== undefined);
+  return parts.length === 0 ? undefined : parts.join(' ').slice(0, 512);
+}
+
 export type {
   AuditEvent,
   AuditEventInput,
@@ -80,4 +122,7 @@ export type {
   AuditEventRepository,
   CodexRunAuditInput,
   McpToolAuditInput,
+  PublishAuditAction,
+  PublishAuditInput,
+  PublishAuditSink,
 } from './audit-types.js';

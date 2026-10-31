@@ -298,6 +298,12 @@ export function createStdioMcpRuntime(
     }
     return { scope: { workspaceId: current.id, rootPath: current.rootPath } };
   };
+  // #297 S2d: one audit sink for the publish spend and the expiry sweep. It
+  // must exist before `GitService` so a spend can always name its lease and
+  // outcome. The credential CLI runs in its own process and builds a second
+  // `AuditService` over the same SQLite ledger.
+  const auditRepository = new SqliteAuditRepository(database);
+  const auditService = new AuditService(auditRepository);
   const publishApprovals = new SqlitePublishApprovalRepository(database);
   // #297 S2c: the same lease ledger backs the publish path and the expiry sweep.
   const publishCredentials = new SqlitePublishCredentialRepository({
@@ -317,6 +323,7 @@ export function createStdioMcpRuntime(
     publishApprovals,
     publishApprovalAuthority: publishApprovals,
     publishCredentials,
+    publishAudit: auditService,
   });
   const custodyActor: FileActor = {
     clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',
@@ -452,8 +459,6 @@ export function createStdioMcpRuntime(
   };
   const toolAvailabilityService = new ToolAvailabilityService(settingsRepository);
   const stopToolAvailabilityWatch = toolAvailabilityService.watch(250);
-  const auditRepository = new SqliteAuditRepository(database);
-  const auditService = new AuditService(auditRepository);
   const checkpointKey = resolveStdioCheckpointKey(options.checkpointEncryptionKey, dataPath);
   const checkpointRepository = new SqliteCheckpointRepository(database, new AesGcmCheckpointCipher(checkpointKey));
   const workspaceService = new WorkspaceService(workspaceRepository);
@@ -1046,7 +1051,10 @@ export function createStdioMcpRuntime(
   // refuses an expired lease, so this timer is what actually deletes an abandoned
   // `publish-<leaseId>` secret. It runs on start and hourly, never blocks boot,
   // and never rejects: a Secret Service outage must not take the runtime down.
-  const publishCredentialSweep = startPublishCredentialSweep({ leases: publishCredentials });
+  const publishCredentialSweep = startPublishCredentialSweep({
+    leases: publishCredentials,
+    audit: auditService,
+  });
   const recoveryReady = Promise.all([
     fileRecoveryReady,
     goalRuntimeRecoveryReady,

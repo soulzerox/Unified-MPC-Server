@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { PublishAuditInput, PublishAuditSink } from '@unified-mpc/audit';
 import {
   fingerprintPublishCredentialHosts,
   type PublishApprovalAuthorityPort,
@@ -95,6 +96,16 @@ class FakeCredentialPort implements PublishCredentialPort {
     this.revoked.push({ leaseId, now });
     this.live.delete(leaseId);
     return { ok: true, value: undefined };
+  }
+}
+
+class RecordingAudit implements PublishAuditSink {
+  public readonly events: PublishAuditInput[] = [];
+  public fail = false;
+
+  public async recordPublish(input: PublishAuditInput): Promise<void> {
+    if (this.fail) throw new Error('audit unavailable');
+    this.events.push(input);
   }
 }
 
@@ -270,10 +281,12 @@ describe('GitService publish credentials', () => {
       pushUrlFingerprint: FINGERPRINT,
     });
     const fake = adapter();
+    const audit = new RecordingAudit();
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: audit,
       now: (): number => NOW,
     });
 
@@ -284,6 +297,23 @@ describe('GitService publish credentials', () => {
     }]);
     expect(ledger.consumed).toHaveLength(1);
     expect(credentials.revoked).toEqual([{ leaseId: 'lease-1', now: NOW }]);
+    expect(audit.events).toEqual([{
+      actorId: 'test',
+      actorName: 'test',
+      workspaceId: 'workspace-1',
+      action: 'publish_credential_use',
+      remote: 'origin',
+      leaseId: 'lease-1',
+      approvalId: 'approval-1',
+      branch: 'goal/publish',
+      expectedSha: HEAD,
+      hosts: ['github.com'],
+      username: 'git',
+      pushUrlFingerprint: FINGERPRINT,
+      resultCode: 'SUCCESS',
+      durationMs: 0,
+    }]);
+    expect(JSON.stringify(audit.events)).not.toContain('secret-token');
   });
 
   it('revokes the lease after a failed push and keeps the failure', async () => {
@@ -305,15 +335,53 @@ describe('GitService publish credentials', () => {
         return { ok: false, error: { code: 'CONFLICT', message: 'push failed', retryable: true, details: { reason: 'publish-push-failed' } } };
       },
     });
+    const audit = new RecordingAudit();
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: audit,
       now: (): number => NOW,
     });
 
     await expect(service.publish(actor, { ...bindingRequest, approvalId: 'approval-1' }))
       .resolves.toMatchObject({ ok: false, error: { details: { reason: 'publish-push-failed' } } });
+    expect(credentials.revoked).toEqual([{ leaseId: 'lease-1', now: NOW }]);
+    expect(audit.events).toMatchObject([{
+      action: 'publish_credential_use',
+      leaseId: 'lease-1',
+      resultCode: 'CONFLICT',
+      reason: 'publish-push-failed',
+    }]);
+  });
+
+  it('keeps the publish result when the audit write fails', async () => {
+    const workspace = await createWorkspace();
+    const credentials = new FakeCredentialPort();
+    credentials.live.set('lease-1', material());
+    const ledger = new FakeApprovalLedger();
+    ledger.records.set('approval-1', {
+      ...bindingRequest,
+      approvalId: 'approval-1',
+      approvedBy: 'host',
+      approvedAt: NOW,
+      expiresAt: NOW + 60_000,
+      leaseId: 'lease-1',
+      pushUrlFingerprint: FINGERPRINT,
+    });
+    const audit = new RecordingAudit();
+    audit.fail = true;
+    const fake = adapter();
+    const service = new GitService(repository(workspace), undefined, fake.adapter, {
+      publishApprovals: ledger,
+      publishApprovalAuthority: ledger,
+      publishCredentials: credentials,
+      publishAudit: audit,
+      now: (): number => NOW,
+    });
+
+    await expect(service.publish(actor, { ...bindingRequest, approvalId: 'approval-1' }))
+      .resolves.toMatchObject({ ok: true, value: { approvalId: 'approval-1' } });
     expect(credentials.revoked).toEqual([{ leaseId: 'lease-1', now: NOW }]);
   });
 
@@ -426,10 +494,12 @@ describe('GitService publish credentials', () => {
       expiresAt: NOW + 60_000,
     });
     const fake = adapter();
+    const audit = new RecordingAudit();
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: audit,
       now: (): number => NOW,
     });
 
@@ -437,5 +507,6 @@ describe('GitService publish credentials', () => {
       .resolves.toMatchObject({ ok: true, value: { approvalId: 'approval-1' } });
     expect(fake.calls.publish).toEqual([{ signal: undefined }]);
     expect(credentials.revoked).toHaveLength(0);
+    expect(audit.events).toEqual([]);
   });
 });

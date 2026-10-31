@@ -38,6 +38,7 @@ import {
   type GitWorkspaceSnapshot,
   type GitWorkspaceSnapshotOptions,
 } from '@unified-mpc/git';
+import type { PublishAuditInput, PublishAuditSink } from '@unified-mpc/audit';
 import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitConfigMutationReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
@@ -117,6 +118,11 @@ export interface GitServiceOptions {
    * installed and the adapter's guard decides.
    */
   readonly publishCredentials?: PublishCredentialPort;
+  /**
+   * Audit sink for credential-bound publishes (#297 S2d). The input carries
+   * lease and receipt metadata only; the secret never enters this port.
+   */
+  readonly publishAudit?: PublishAuditSink;
   /** Test seam for a deterministic preflight clock. */
   readonly now?: () => number;
 }
@@ -364,7 +370,6 @@ export class GitService {
     request: GitPublishRequest,
     signal?: AbortSignal,
   ): Promise<Result<GitPublishReceipt>> {
-    void actor;
     const binding = this.validatePublishBinding(request);
     if (!binding.ok) return binding;
     if (typeof request.approvalId !== 'string' || request.approvalId.length === 0
@@ -512,19 +517,55 @@ export class GitService {
     // verification, and the lease is revoked on success, failure, timeout and
     // abort. A failed revoke is bounded by the lease TTL and the expiry sweep,
     // so it must not turn a completed push into a reported failure.
+    const auditStartedAt = this.publishNow();
+    const auditBase = {
+      actorId: actor.clientId,
+      actorName: actor.clientName,
+      workspaceId: workspace.value.id,
+      action: 'publish_credential_use' as const,
+      remote: binding.value.remote,
+      leaseId: spend.lease.leaseId,
+      approvalId: request.approvalId,
+      branch: binding.value.branch,
+      expectedSha: binding.value.expectedSha,
+      hosts: spend.lease.hosts,
+      username: spend.lease.username,
+      ...(receipt?.pushUrlFingerprint === undefined ? {} : { pushUrlFingerprint: receipt.pushUrlFingerprint }),
+    };
+    let resultCode = 'SUCCESS';
+    let reason: string | undefined;
     try {
       const published = await this.adapter.publish(cwd.value, publishRequest, {
         signal,
         credential: { approvalId: request.approvalId, material: spend },
       });
-      if (!published.ok) return published;
+      if (!published.ok) {
+        resultCode = published.error.code;
+        reason = typeof published.error.details?.reason === 'string'
+          ? published.error.details.reason
+          : published.error.code;
+        return published;
+      }
       return ok({ ...published.value, approvalId: request.approvalId });
+    } catch (error: unknown) {
+      resultCode = 'INTERNAL_ERROR';
+      reason = 'publish-unexpected-error';
+      throw error;
     } finally {
       try {
         await this.options.publishCredentials?.revoke(spend.lease.leaseId, this.publishNow());
       } catch {
         // Reclamation falls back to the TTL sweep; the push result stands.
       }
+      // The audit row is written after the spend so it can name the exact
+      // lease and outcome. It never carries the secret and never changes the
+      // publish result.
+      await this.recordPublishAudit({
+        ...auditBase,
+        resultCode,
+        ...(reason === undefined ? {} : { reason }),
+        durationMs: Math.max(0, this.publishNow() - auditStartedAt),
+      });
     }
   }
 
@@ -580,6 +621,20 @@ export class GitService {
   private publishNow(): number {
     const now = this.options.now?.() ?? Date.now();
     return Number.isSafeInteger(now) && now >= 0 ? now : Date.now();
+  }
+
+  /**
+   * Best-effort audit write. A failed audit insert must never turn a completed
+   * push into a reported failure; the caller's result stands.
+   */
+  private async recordPublishAudit(input: PublishAuditInput): Promise<void> {
+    const audit = this.options.publishAudit;
+    if (audit === undefined) return;
+    try {
+      await audit.recordPublish(input);
+    } catch {
+      // The next audit write can still succeed; the publish result stands.
+    }
   }
 
   /** Shape-check a caller-supplied binding before any workspace or ledger read. */

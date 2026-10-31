@@ -3,12 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { AuditService } from '@unified-mpc/audit';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
+import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type StorageRecoveryResult } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -474,6 +476,13 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
   };
   let secretStore: SecretToolSecretStore | undefined;
   const getSecretStore = (): SecretToolSecretStore => (secretStore ??= new SecretToolSecretStore());
+  let auditService: AuditService | undefined;
+  const getAuditService = (): AuditService => {
+    if (auditService === undefined) {
+      auditService = new AuditService(new SqliteAuditRepository(getWorkspaceState().database));
+    }
+    return auditService;
+  };
   const getWorkspaceService = (): WorkspaceService => getWorkspaceState().service;
   const getWorkspaceSelection = async (): Promise<Result<WorkspaceSelectionService>> => {
     const state = getWorkspaceState();
@@ -611,11 +620,14 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         database: state.database,
         secretStore: getSecretStore(),
       });
+      const audit = getAuditService();
       // #297 §5 startup sweep: an abandoned lease must not survive the next
       // credential command. `sweepExpired` fails closed to 0, so it cannot block.
-      await credential.sweepExpired(Date.now());
+      const swept = await credential.sweepExpired(Date.now());
+      await recordPublishCredentialSweep(audit, { reclaimed: swept });
       return runPublishCredentialCommand(command, {
         credential,
+        audit,
         resolveWorkspace: async (workspaceReference: string) => {
           const workspace = await resolveWorkspaceReference(workspaceReference);
           return workspace.ok

@@ -1,10 +1,11 @@
 # Approved Push Path — Credential Mediation (S2 design)
 
-Status: **S2a, S2b and S2c implemented; S2d not implemented.** S1 shipped in #552 and
-covers every credential-free transport. This document designs the remaining
-slice of #297:
-item 1 of the requested behavior, "supported credential-helper
-mediation/approval if appropriate", for HTTP(S) targets.
+Status: **S2a, S2b, S2c and S2d implemented.** S1 shipped in #552 and covers
+every credential-free transport. This document records the design of the S2
+slice of #297: item 1 of the requested behavior, "supported credential-helper
+mediation/approval if appropriate", for HTTP(S) targets. The operator procedure
+for rotation and incident response is
+[PUBLISH_CREDENTIAL_RUNBOOK.md](PUBLISH_CREDENTIAL_RUNBOOK.md).
 
 S1 deliberately injects nothing and keeps asking the same question: *who is
 allowed to make a credential available to a Git child, and how is that bounded?*
@@ -398,6 +399,17 @@ secret to an unapproved host.
 20. The expiry sweep deletes a lease whose TTL passed without any `revoke`,
     and asserts the `publish-<leaseId>` entry is gone from the SecretStore, not
     only that the ledger row is marked expired.
+21. A credential-bound publish writes exactly one `publish_credential_use` row
+    naming the lease, workspace, remote, approval, branch, expected SHA, host
+    set, username and push-URL fingerprint, and the row contains no secret.
+22. A failed push records its result code and reason; an audit insert that
+    throws cannot change the publish result.
+23. `grant` and `revoke` write their lifecycle rows only after the state change;
+    an audit insert that throws cannot change the command result.
+24. The sweep writes a row only when it reclaimed a lease, or when the sweep
+    port itself raised; the runbook documents inspection, rotation, emergency
+    revocation and the audit queries, and states that the SQLite adapter fails
+    closed to a zero sweep so an outage is quiet rather than audited.
 
 ## 8. Slices
 
@@ -406,7 +418,7 @@ secret to an unapproved host.
 | S2a | `PublishCredentialPort` implemented over the existing `SecretStore` port (`SecretToolSecretStore`, Linux Secret Service; no plaintext file, no new engine) with `publish-<leaseId>` keys, the lease ledger row, the operator CLI (`grant`/`revoke`/`status`) and grant/revoke/open tests | yes, no behavior change |
 | S2b | helper entry point, emitted into the release artifact by `scripts/materialize-runtime-release.sh` so `<deployment>/publish-credential-helper` exists after promotion, + direct-invocation tests (no network) | yes |
 | S2c | guard allowlist with the three authorization modes (`diagnostic`, `publish`, `verify`), `-c` argv on push and on both `ls-remote` paths, fingerprint-bound receipt, lease-for-the-spawn + revocation, end-to-end private HTTPS fixture | yes, the only slice that can publish over HTTP(S) |
-| S2d | audit row, docs, operator runbook for rotating a token | yes |
+| S2d | non-secret `grant`/`use`/`revoke`/`sweep` audit rows, the docs status update and `docs/PUBLISH_CREDENTIAL_RUNBOOK.md` for rotating a token | yes |
 
 S2c changes contracts that currently say the opposite, so it ships the wording
 too: the `git_publish` description ("HTTP(S) targets that could run a credential
@@ -461,6 +473,18 @@ What S2c actually shipped, so S2d builds on the same seams:
 | Spend | `GitService.publish` reads the receipt before contacting the remote, refuses `publish-credential-unavailable` for a consumed receipt, re-resolves the push-host fingerprint and refuses `publish-target-changed` before opening any lease, then requires the same live lease and passes its material to `adapter.publish` |
 | Revocation | `GitService.publish` revokes the lease in a `finally` after success, push failure, timeout or abort; a failed revoke falls back to the TTL sweep |
 | Runtime wiring | `apps/cli/src/runtime/stdio-mcp-runtime.ts` shares one `SqlitePublishCredentialRepository` between `GitService` and the expiry sweep, and injects the promoted-release classifier into `GitAdapter` |
+
+What S2d actually shipped, so an operator can explain every credential:
+
+| Concern | S2d placement |
+|---|---|
+| Audit input and port | `PublishAuditInput` and `PublishAuditSink` in `packages/audit/src/audit-types.ts`; the input is a closed list of non-secret fields, so a caller cannot pass the secret through it |
+| Audit projection | `AuditService.recordPublish` in `packages/audit/src/audit-service.ts`; the existing redactor still runs over `targetSummary` and `metadata` |
+| Publish spend row | `GitService.publish` writes one `publish_credential_use` row in `finally`, after revoke, for a bound receipt: lease, approval, branch, expected SHA, hosts, username, fingerprint, result and reason |
+| Grant and revoke rows | `unified-mpc publish-credential` writes `publish_credential_grant` / `publish_credential_revoke` after the state change; a failed grant or revoke writes none |
+| Sweep rows | `startPublishCredentialSweep` writes `publish_credential_sweep` when it reclaimed a lease or the sweep port raised; an empty hourly sweep stays quiet, and the SQLite adapter fails closed to a zero sweep instead of raising |
+| Failure policy | A failed audit insert never changes a publish, grant, revoke or sweep result; the credential state change stands |
+| Operator guide | `docs/PUBLISH_CREDENTIAL_RUNBOOK.md`: inspection, normal rotation, emergency revocation, audit queries and troubleshooting |
 
 ## 9. Non-goals
 

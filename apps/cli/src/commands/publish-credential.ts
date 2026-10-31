@@ -4,6 +4,7 @@ import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { PublishAuditInput, PublishAuditSink } from '@unified-mpc/audit';
 import {
   appError,
   err,
@@ -71,6 +72,12 @@ export interface PublishCredentialCommandRunner {
   readonly resolvePushUrls: (workspaceRoot: string, remote: string) => Promise<Result<readonly string[]>>;
   readonly readSecret: () => Promise<Result<string>>;
   readonly resolveDeployment: () => Promise<Result<PublishCredentialDeployment>>;
+  /**
+   * Non-secret lifecycle audit sink (#297 S2d). The credential CLI runs in its
+   * own process, so it builds its own `AuditService` over the same SQLite
+   * ledger the stdio runtime writes to; tests leave this out.
+   */
+  readonly audit?: PublishAuditSink;
   readonly now?: () => number;
   readonly createLeaseId?: () => string;
   readonly inspect?: (leaseId: string) => Promise<Result<PublishCredentialInspection | null>>;
@@ -252,6 +259,20 @@ async function runGrant(
   const granted = await runner.credential.grant(lease, secret.value);
   if (!granted.ok) return fail(granted.error, writeError);
 
+  // The lease is already live, so a failed audit write must not report the
+  // grant as failed. It records the non-secret binding only (#297 S2d).
+  await recordPublishAudit(runner.audit, {
+    actorId: 'publish-credential-cli',
+    actorName: 'unified-mpc publish-credential',
+    workspaceId: lease.workspaceId,
+    action: 'publish_credential_grant',
+    remote: lease.remote,
+    leaseId: lease.leaseId,
+    hosts: lease.hosts,
+    username: lease.username,
+    resultCode: 'SUCCESS',
+  });
+
   write(`publish credential granted: ${lease.leaseId}`);
   write(`workspace: ${lease.workspaceId}`);
   write(`remote: ${lease.remote}`);
@@ -268,10 +289,59 @@ async function runRevoke(
   writeError: (text: string) => void,
 ): Promise<number> {
   const now = runner.now?.() ?? Date.now();
+  // Delete first, then decide what to report. `revoke` deletes the Secret
+  // Service entry before it touches the ledger, so the emergency action must
+  // never be gated on a ledger read: a transient read error would otherwise
+  // block the one command that kills a leaked token.
   const revoked = await runner.credential.revoke(leaseId, now);
   if (!revoked.ok) return fail(revoked.error, writeError);
+  if (runner.inspect !== undefined) {
+    const existing = await runner.inspect(leaseId);
+    if (!existing.ok) {
+      // The secret is deleted at this point, but the ledger cannot say that
+      // this id ever named a lease. A plain SUCCESS would let a typo read as a
+      // completed revocation, so record the delete without claiming success.
+      await recordPublishAudit(runner.audit, {
+        actorId: 'publish-credential-cli',
+        actorName: 'unified-mpc publish-credential',
+        action: 'publish_credential_revoke',
+        leaseId,
+        resultCode: 'UNVERIFIED',
+        reason: 'ledger-unreadable',
+      });
+      return fail(unverifiedRevoke(leaseId), writeError);
+    }
+    // Only a successful read of "no row" refuses the claim. The secret is
+    // already gone at this point, so the refusal costs nothing; it stops a
+    // mistyped id from printing success and writing a durable SUCCESS row for
+    // a lease that was never revoked (#297 S2d). An already-revoked lease
+    // still reports success, because revocation is idempotent.
+    if (existing.value === null) return fail(unknownLease(leaseId), writeError);
+  }
+  // Revocation is idempotent, so the audit row records the operator action
+  // without claiming the lease was live.
+  await recordPublishAudit(runner.audit, {
+    actorId: 'publish-credential-cli',
+    actorName: 'unified-mpc publish-credential',
+    action: 'publish_credential_revoke',
+    leaseId,
+    resultCode: 'SUCCESS',
+  });
   write(`publish credential revoked: ${leaseId}`);
   return 0;
+}
+
+/** Best effort: an audit outage never changes the operator-visible result. */
+async function recordPublishAudit(
+  audit: PublishAuditSink | undefined,
+  input: PublishAuditInput,
+): Promise<void> {
+  if (audit === undefined) return;
+  try {
+    await audit.recordPublish(input);
+  } catch {
+    // The credential state change already happened; the next write can retry.
+  }
 }
 
 async function runStatus(
@@ -353,6 +423,24 @@ function unsupported(message: string): AppError {
 
 function invalidSecret(message: string): AppError {
   return appError('INVALID_INPUT', message, false, { reason: 'publish-credential-invalid' });
+}
+
+function unknownLease(leaseId: string): AppError {
+  return appError(
+    'INVALID_INPUT',
+    `No publish credential lease is recorded for ${leaseId}`,
+    false,
+    { reason: 'publish-credential-not-found' },
+  );
+}
+
+function unverifiedRevoke(leaseId: string): AppError {
+  return appError(
+    'INTERNAL_ERROR',
+    `The publish credential entry for ${leaseId} was deleted, but the lease could not be confirmed`,
+    true,
+    { reason: 'publish-credential-unverified' },
+  );
 }
 
 function fail(error: AppError, writeError: (text: string) => void): number {

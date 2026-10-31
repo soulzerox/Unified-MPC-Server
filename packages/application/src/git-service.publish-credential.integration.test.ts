@@ -372,6 +372,9 @@ describe('GitService publish credential end to end', () => {
           error: { code: 'PERMISSION_DENIED', details: { reason: 'publish-target-changed' } },
         });
       await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+      // A refusal happens before the audited spend, so no use row may appear:
+      // a row here would claim a lease was spent that never left the store.
+      expect(auditRows).toHaveLength(0);
       const receipt = await approvals.read(approved.value.approvalId);
       expect(receipt?.consumedAt).toBeNull();
     } finally {

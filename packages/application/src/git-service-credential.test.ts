@@ -195,6 +195,7 @@ describe('GitService publish credentials', () => {
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: new FakeApprovalLedger(),
       publishCredentials: new FakeCredentialPort(),
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -214,6 +215,7 @@ describe('GitService publish credentials', () => {
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: new FakeApprovalLedger(),
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -235,6 +237,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -262,6 +265,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -484,6 +488,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -517,6 +522,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -548,6 +554,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 

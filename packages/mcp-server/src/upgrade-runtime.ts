@@ -3517,8 +3517,37 @@ function decodeBase64Artifact(value: string, label: string): Result<Buffer> {
   return ok(decoded);
 }
 
-function permissionDecision(action: string): { readonly action: string; readonly decision: 'allow' | 'ask'; readonly class: string; readonly contextAccess: 'unrestricted' } {
+/**
+ * Matches the ways a caller names a publish: the tool names `git_publish`,
+ * `git_publish_preflight` and `publish_approve`, the dotted action class
+ * `git.publish`, and the shell-shaped `git push origin HEAD:...` the original
+ * #297 report used.
+ */
+const PUBLISH_ACTION = /(?:^|[.\s:_-])(?:git[.\s:_-]?(?:push|publish)|publish[.\s:_-]?approve)(?=$|[.\s:_-])/;
+
+/**
+ * The two actions that mint or spend a single-use publish receipt. A shell
+ * `git push` is not one of them — it is denied outright, not approvable — and
+ * the preflight only reports, so neither may claim a receipt.
+ */
+const PUBLISH_RECEIPT_ACTIONS = new Set(['git_publish', 'git.publish', 'publish_approve', 'publish.approve']);
+
+function permissionDecision(action: string): { readonly action: string; readonly decision: 'allow' | 'ask'; readonly class: string; readonly contextAccess: 'unrestricted'; readonly approval?: 'single-use-receipt' } {
   const normalized = action.toLowerCase();
+  // #297 item 3: policy allows a publish, but never by policy alone — the call
+  // still needs a single-use receipt minted by a human-confirmed approval. The
+  // old answer classified `git push` as "read-or-safe", which read as "this
+  // goes through". Runtime transport/credential readiness is deliberately not
+  // probed here (D6): `git_publish_preflight` reports that separately.
+  if (PUBLISH_ACTION.test(normalized)) {
+    return {
+      action,
+      decision: 'allow',
+      class: 'publish',
+      contextAccess: 'unrestricted',
+      ...(PUBLISH_RECEIPT_ACTIONS.has(normalized) ? { approval: 'single-use-receipt' } : {}),
+    };
+  }
   const dangerousAction = /(delete|destructive|admin|system\.admin|shell\.destructive|git\.destructive)/.test(normalized);
   return { action, decision: dangerousAction ? 'ask' : 'allow', class: dangerousAction ? 'dangerous' : 'read-or-safe', contextAccess: 'unrestricted' };
 }

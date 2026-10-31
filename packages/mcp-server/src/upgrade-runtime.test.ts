@@ -584,8 +584,30 @@ describe('upgrade runtime', () => {
     const runtime = new UpgradeRuntimeService({}, actor);
     const read = await runtime.execute('permission_check', { action: 'filesystem.read' });
     const remove = await runtime.execute('permission_check', { action: 'filesystem.delete' });
-    expect(read).toMatchObject({ ok: true, value: { decision: 'allow', contextAccess: 'unrestricted' } });
-    expect(remove).toMatchObject({ ok: true, value: { decision: 'ask', contextAccess: 'unrestricted' } });
+    expect(read).toMatchObject({ ok: true, value: { decision: 'allow', class: 'read-or-safe', contextAccess: 'unrestricted' } });
+    expect(remove).toMatchObject({ ok: true, value: { decision: 'ask', class: 'dangerous', contextAccess: 'unrestricted' } });
+  });
+
+  it('names the receipt a publish needs instead of calling it a safe read', async () => {
+    const runtime = new UpgradeRuntimeService({}, actor);
+    // Every publish shape is classified as a publish, never as a safe read.
+    for (const action of ['git push origin HEAD:refs/heads/goal/publish', 'git_publish', 'publish_approve', 'git.publish', 'git_publish_preflight']) {
+      await expect(runtime.execute('permission_check', { action })).resolves.toMatchObject({
+        ok: true,
+        value: { action, decision: 'allow', class: 'publish', contextAccess: 'unrestricted' },
+      });
+    }
+    // Only the actions that mint or spend a receipt name one. A shell push is
+    // denied outright and the preflight only reports, so neither may claim it.
+    for (const action of ['git_publish', 'publish_approve']) {
+      await expect(runtime.execute('permission_check', { action }))
+        .resolves.toMatchObject({ ok: true, value: { approval: 'single-use-receipt' } });
+    }
+    for (const action of ['git push origin HEAD:refs/heads/goal/publish', 'git_publish_preflight']) {
+      const probe = await runtime.execute('permission_check', { action });
+      if (!probe.ok) throw new Error('permission_check must answer');
+      expect(Object.prototype.hasOwnProperty.call(probe.value, 'approval')).toBe(false);
+    }
   });
 
   it('keeps hooks create-only and makes plugin mutations persistent when runtime state is configured', async () => {

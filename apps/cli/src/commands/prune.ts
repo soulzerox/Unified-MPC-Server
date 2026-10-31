@@ -7,6 +7,7 @@ import type {
   PruneSkillInput,
   PruneSkillResult,
 } from '@unified-mpc/extensions';
+import { missingOptionValue, unexpectedOption } from './options.js';
 
 export interface PruneSkillCommand {
   readonly kind: 'prune-skill';
@@ -43,16 +44,22 @@ export function parsePruneSkillArgs(args: readonly string[]): Result<PruneSkillC
   let workspaceRoot: string | undefined;
 
   for (let i = 1; i < args.length; i += 1) {
-    const flag = args[i];
-    if (flag === '--targets' && args[i + 1] !== undefined) {
-      targets = args[i + 1]!.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--targets') {
+      if (value === undefined) return missingOptionValue(flag);
+      targets = value.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
       i += 1;
-    } else if (flag === '--scope' && args[i + 1] !== undefined) {
-      scope = args[i + 1]!.trim() as InstallScope;
+    } else if (flag === '--scope') {
+      if (value === undefined) return missingOptionValue(flag);
+      scope = value.trim() as InstallScope;
       i += 1;
-    } else if (flag === '--workspace' && args[i + 1] !== undefined) {
-      workspaceRoot = args[i + 1]!.trim();
+    } else if (flag === '--workspace') {
+      if (value === undefined) return missingOptionValue(flag);
+      workspaceRoot = value.trim();
       i += 1;
+    } else {
+      return unexpectedOption(flag);
     }
   }
 
@@ -84,18 +91,24 @@ export function parsePruneServerArgs(args: readonly string[]): Result<PruneServe
   let killProcess = true;
 
   for (let i = 1; i < args.length; i += 1) {
-    const flag = args[i];
-    if (flag === '--targets' && args[i + 1] !== undefined) {
-      targets = args[i + 1]!.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--targets') {
+      if (value === undefined) return missingOptionValue(flag);
+      targets = value.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
       i += 1;
-    } else if (flag === '--scope' && args[i + 1] !== undefined) {
-      scope = args[i + 1]!.trim() as InstallScope;
+    } else if (flag === '--scope') {
+      if (value === undefined) return missingOptionValue(flag);
+      scope = value.trim() as InstallScope;
       i += 1;
-    } else if (flag === '--workspace' && args[i + 1] !== undefined) {
-      workspaceRoot = args[i + 1]!.trim();
+    } else if (flag === '--workspace') {
+      if (value === undefined) return missingOptionValue(flag);
+      workspaceRoot = value.trim();
       i += 1;
     } else if (flag === '--no-kill') {
       killProcess = false;
+    } else {
+      return unexpectedOption(flag);
     }
   }
 

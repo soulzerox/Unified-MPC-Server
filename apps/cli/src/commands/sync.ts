@@ -1,5 +1,6 @@
 import { ok, type Result } from '@unified-mpc/domain';
 import type { IdeSyncService, SyncTarget } from '@unified-mpc/extensions';
+import { missingOptionValue, unexpectedOption } from './options.js';
 
 export interface SyncCommand {
   readonly kind: 'sync';
@@ -12,13 +13,18 @@ export function parseSyncArgs(args: readonly string[]): Result<SyncCommand> {
   let workspaceRoot: string | undefined;
 
   for (let i = 0; i < args.length; i += 1) {
-    const flag = args[i];
-    if (flag === '--targets' && args[i + 1] !== undefined) {
-      targets = args[i + 1]!.split(',').map((t) => t.trim() as SyncTarget).filter(Boolean);
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--targets') {
+      if (value === undefined) return missingOptionValue(flag);
+      targets = value.split(',').map((t) => t.trim() as SyncTarget).filter(Boolean);
       i += 1;
-    } else if (flag === '--workspace' && args[i + 1] !== undefined) {
-      workspaceRoot = args[i + 1]!.trim();
+    } else if (flag === '--workspace') {
+      if (value === undefined) return missingOptionValue(flag);
+      workspaceRoot = value.trim();
       i += 1;
+    } else {
+      return unexpectedOption(flag);
     }
   }
 

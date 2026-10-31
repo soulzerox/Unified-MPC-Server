@@ -7,6 +7,7 @@ import type {
   InstallTarget,
   InstallScope,
 } from '@unified-mpc/extensions';
+import { missingOptionValue, unexpectedOption } from './options.js';
 
 export interface InstallSkillCommand {
   readonly kind: 'install-skill';
@@ -45,22 +46,31 @@ export function parseInstallSkillArgs(args: readonly string[]): Result<InstallSk
   if (name.startsWith('-')) {
     return err(appError('INVALID_INPUT', `Skill name must not start with '-': "${name}"`));
   }
+  if (source.startsWith('-')) {
+    return err(appError('INVALID_INPUT', `Skill source must not start with '-': "${source}"`));
+  }
 
   let targets: InstallTarget[] = ['all'];
   let scope: InstallScope = 'global';
   let workspaceRoot: string | undefined;
 
   for (let i = 2; i < args.length; i += 1) {
-    const flag = args[i];
-    if (flag === '--targets' && args[i + 1] !== undefined) {
-      targets = args[i + 1]!.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--targets') {
+      if (value === undefined) return missingOptionValue(flag);
+      targets = value.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
       i += 1;
-    } else if (flag === '--scope' && args[i + 1] !== undefined) {
-      scope = args[i + 1]!.trim() as InstallScope;
+    } else if (flag === '--scope') {
+      if (value === undefined) return missingOptionValue(flag);
+      scope = value.trim() as InstallScope;
       i += 1;
-    } else if (flag === '--workspace' && args[i + 1] !== undefined) {
-      workspaceRoot = args[i + 1]!.trim();
+    } else if (flag === '--workspace') {
+      if (value === undefined) return missingOptionValue(flag);
+      workspaceRoot = value.trim();
       i += 1;
+    } else {
+      return unexpectedOption(flag);
     }
   }
 
@@ -99,19 +109,24 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
   let workspaceRoot: string | undefined;
 
   for (let i = 1; i < args.length; i += 1) {
-    const flag = args[i];
-    if (flag === '--command' && args[i + 1] !== undefined) {
-      command = args[i + 1]!.trim();
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--command') {
+      if (value === undefined) return missingOptionValue(flag);
+      command = value.trim();
       i += 1;
-    } else if (flag === '--source' && args[i + 1] !== undefined) {
-      source = args[i + 1]!.trim();
+    } else if (flag === '--source') {
+      if (value === undefined) return missingOptionValue(flag);
+      source = value.trim();
       i += 1;
-    } else if (flag === '--args' && args[i + 1] !== undefined) {
-      serverArgs = args[i + 1]!.split(',').map((a) => a.trim()).filter(Boolean);
+    } else if (flag === '--args') {
+      if (value === undefined) return missingOptionValue(flag);
+      serverArgs = value.split(',').map((a) => a.trim()).filter(Boolean);
       i += 1;
-    } else if (flag === '--env' && args[i + 1] !== undefined) {
+    } else if (flag === '--env') {
+      if (value === undefined) return missingOptionValue(flag);
       env = {};
-      const pairs = args[i + 1]!.split(',');
+      const pairs = value.split(',');
       for (const pair of pairs) {
         const [k, ...v] = pair.split('=');
         if (k !== undefined && k.trim().length > 0) {
@@ -119,24 +134,32 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
         }
       }
       i += 1;
-    } else if (flag === '--url' && args[i + 1] !== undefined) {
-      url = args[i + 1]!.trim();
+    } else if (flag === '--url') {
+      if (value === undefined) return missingOptionValue(flag);
+      url = value.trim();
       i += 1;
-    } else if (flag === '--transport' && args[i + 1] !== undefined) {
-      transport = args[i + 1]!.trim() as 'stdio' | 'sse' | 'http';
+    } else if (flag === '--transport') {
+      if (value === undefined) return missingOptionValue(flag);
+      transport = value.trim() as 'stdio' | 'sse' | 'http';
       i += 1;
-    } else if (flag === '--targets' && args[i + 1] !== undefined) {
-      targets = args[i + 1]!.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
+    } else if (flag === '--targets') {
+      if (value === undefined) return missingOptionValue(flag);
+      targets = value.split(',').map((t) => t.trim() as InstallTarget).filter(Boolean);
       i += 1;
-    } else if (flag === '--scope' && args[i + 1] !== undefined) {
-      scope = args[i + 1]!.trim() as InstallScope;
+    } else if (flag === '--scope') {
+      if (value === undefined) return missingOptionValue(flag);
+      scope = value.trim() as InstallScope;
       i += 1;
-    } else if (flag === '--cwd' && args[i + 1] !== undefined) {
-      cwd = args[i + 1]!.trim();
+    } else if (flag === '--cwd') {
+      if (value === undefined) return missingOptionValue(flag);
+      cwd = value.trim();
       i += 1;
-    } else if (flag === '--workspace' && args[i + 1] !== undefined) {
-      workspaceRoot = args[i + 1]!.trim();
+    } else if (flag === '--workspace') {
+      if (value === undefined) return missingOptionValue(flag);
+      workspaceRoot = value.trim();
       i += 1;
+    } else {
+      return unexpectedOption(flag);
     }
   }
 

@@ -188,3 +188,5 @@ The `unified-mpc` CLI adheres to a deterministic exit code contract:
 - `1`: Operational or runtime failure (e.g., command execution failed, connection refused).
 - `2`: Syntax, argument, or validation error (e.g., unknown flag, missing required argument).
 
+Unknown options are rejected, never ignored: `unified-mpc web --no-open` exits `2` with `Unknown option: --no-open` instead of starting the control plane on a default port.
+

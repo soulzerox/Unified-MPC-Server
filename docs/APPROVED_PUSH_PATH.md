@@ -181,11 +181,12 @@ credential-free and normally fails.
   a tool argument.
 - HTTPS credentials are host-owned as of S2c. S2a added the credential lease and
   its operator CLI, and S2b ships the helper artifact inside a promoted release
-  (see APPROVED_PUSH_PATH_CREDENTIALS.md). S2c installs that helper for one
-  spawn when a live lease is bound to the approval: `publish_approve` records
-  the resolved push-host fingerprint and the lease id, `git_publish` re-resolves
-  the push URLs (`publish-target-changed` on a mismatch), spends the receipt,
-  and revokes the lease after the push and its verification. Without a bound
+  (see APPROVED_PUSH_PATH_CREDENTIALS.md). S2c installs that helper for the
+  diagnostic default-branch read, the push spawn and its verification when a
+  live lease is bound to the approval: `publish_approve` records the resolved
+  push-host fingerprint and the lease id, `git_publish` re-resolves the push
+  URLs (`publish-target-changed` on a mismatch), spends the receipt, and
+  revokes the lease after the push and its verification. Without a bound
   lease an HTTP(S) target that could reach a configured helper stays denied.
 - No credential, token, URL userinfo, or helper path is written to the tool result,
   the activity log, the audit row, or any error message. `diagnosticConfigKey()`

@@ -51,7 +51,8 @@ username and expiry. It never prints the secret.
 ## 2. Inspect before rotating
 
 ```sh
-# One lease by id: metadata and state (active, revoked or expired).
+# One lease by id: metadata and state (active or revoked). An expired lease is
+# already reclaimed by the command's own sweep and reports not-found.
 unified-mpc publish-credential status <leaseId>
 
 # The remote's push target; grant refuses anything but exactly one HTTPS URL.
@@ -91,8 +92,10 @@ secret from it.
    ```
 
    Revocation is idempotent and writes a `publish_credential_revoke` audit row.
-   A lease id that was never granted is refused with no row: only a real
-   revocation is reported as one.
+   An id that was never granted is refused with no row: only a real revocation
+   is reported as one. A lease that already outlived its TTL has no row left,
+   because every credential command sweeps first, so `revoke` reports not-found
+   and the token is already deleted.
 3. **Grant the replacement lease** with the procedure in section 1. The new
    lease is a new id; never reuse the old id.
 4. **Preflight the exact target** with `git_publish_preflight`. A live lease on
@@ -107,7 +110,9 @@ secret from it.
    unified-mpc publish-credential status <newLeaseId>
    ```
 
-   The state must be `revoked` (or `expired` if the publish outlived the TTL).
+   The state must be `revoked`. A lease that outlived its TTL was already
+   reclaimed by the command's sweep, so this reports `not found` instead — the
+   secret is gone either way.
 7. **Delete the old provider token** after the old lease is revoked or expired.
    The provider-side delete is the only action that makes a leaked token
    unusable everywhere.

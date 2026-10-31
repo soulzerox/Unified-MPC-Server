@@ -289,17 +289,21 @@ async function runRevoke(
   writeError: (text: string) => void,
 ): Promise<number> {
   const now = runner.now?.() ?? Date.now();
-  // An unknown lease is refused instead of reported as revoked: on the
-  // emergency-rotation path a mistyped id would otherwise print success and
-  // leave a durable SUCCESS row while the leaked token stays live (#297 S2d).
-  // An already-revoked lease still succeeds, because revocation is idempotent.
-  if (runner.inspect !== undefined) {
-    const existing = await runner.inspect(leaseId);
-    if (!existing.ok) return fail(existing.error, writeError);
-    if (existing.value === null) return fail(unknownLease(leaseId), writeError);
-  }
+  // Delete first, then decide what to report. `revoke` deletes the Secret
+  // Service entry before it touches the ledger, so the emergency action must
+  // never be gated on a ledger read: a transient read error would otherwise
+  // block the one command that kills a leaked token.
   const revoked = await runner.credential.revoke(leaseId, now);
   if (!revoked.ok) return fail(revoked.error, writeError);
+  if (runner.inspect !== undefined) {
+    const existing = await runner.inspect(leaseId);
+    // Only a successful read of "no row" refuses the claim. The secret is
+    // already gone at this point, so the refusal costs nothing; it stops a
+    // mistyped id from printing success and writing a durable SUCCESS row for
+    // a lease that was never revoked (#297 S2d). An already-revoked lease
+    // still reports success, because revocation is idempotent.
+    if (existing.ok && existing.value === null) return fail(unknownLease(leaseId), writeError);
+  }
   // Revocation is idempotent, so the audit row records the operator action
   // without claiming the lease was live.
   await recordPublishAudit(runner.audit, {

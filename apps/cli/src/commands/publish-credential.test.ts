@@ -322,8 +322,25 @@ describe('publish-credential revoke and status', () => {
       output: '',
       errors: 'publish-credential-not-found: No publish credential lease is recorded for lease-unknown',
     });
-    expect(recorded.revokes).toEqual([]);
+    // The delete still ran: killing the secret must never wait on a ledger read.
+    expect(recorded.revokes).toEqual(['lease-unknown']);
     expect(events).toEqual([]);
+  });
+
+  it('still revokes when the ledger read fails, and reports the revoke', async () => {
+    const recorded = createPort();
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const runner = createRunner(recorded.port, {
+      audit,
+      inspect: async () => err(appError('INTERNAL_ERROR', 'The ledger is unavailable')),
+    });
+    await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({
+      code: 0,
+      output: 'publish credential revoked: lease-1',
+    });
+    expect(recorded.revokes).toEqual(['lease-1']);
+    expect(events).toMatchObject([{ action: 'publish_credential_revoke', resultCode: 'SUCCESS' }]);
   });
 
   it('still revokes an already-revoked lease when inspect reports it', async () => {

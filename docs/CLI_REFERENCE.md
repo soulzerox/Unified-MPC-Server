@@ -167,12 +167,19 @@ emergency revocation.
 unified-mpc publish-credential grant <remote> \
   --workspace <id-or-path> --username <user> --ttl <seconds>
 
-# Revoke a lease (idempotent). Removes the Secret Service entry.
+# Revoke a lease (idempotent). Removes the Secret Service entry first, then
+# tombstones the row. An id that was never granted is refused with no audit row.
 unified-mpc publish-credential revoke <leaseId>
 
 # Show lease metadata and state without the secret.
 unified-mpc publish-credential status <leaseId>
 ```
+
+Every `publish-credential` command first sweeps leases whose TTL has passed, so
+an expired lease is already gone by the time the command runs: `revoke` and
+`status` then report `publish-credential-not-found`, and there is no token left
+to delete. `status` can still show `revoked` for a lease that was revoked before
+its TTL.
 
 `grant` writes a `publish_credential_grant` audit row, `revoke` writes
 `publish_credential_revoke`, and a credential-bound publish writes

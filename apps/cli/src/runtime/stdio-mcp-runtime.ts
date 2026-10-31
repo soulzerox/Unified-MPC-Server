@@ -298,9 +298,10 @@ export function createStdioMcpRuntime(
     }
     return { scope: { workspaceId: current.id, rootPath: current.rootPath } };
   };
-  // #297 S2d: one audit sink for the publish spend, the operator CLI and the
-  // expiry sweep. It must exist before `GitService` so a spend can always name
-  // its lease and outcome.
+  // #297 S2d: one audit sink for the publish spend and the expiry sweep. It
+  // must exist before `GitService` so a spend can always name its lease and
+  // outcome. The credential CLI runs in its own process and builds a second
+  // `AuditService` over the same SQLite ledger.
   const auditRepository = new SqliteAuditRepository(database);
   const auditService = new AuditService(auditRepository);
   const publishApprovals = new SqlitePublishApprovalRepository(database);

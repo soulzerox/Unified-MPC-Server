@@ -134,6 +134,22 @@ describe('SqlitePublishCredentialRepository', () => {
     expect(ledgerRows(database)).toEqual([]);
   });
 
+  it('deletes the secret before it tombstones the row, so a failed ledger write still kills the token', async () => {
+    const { database, store, repository } = setup();
+    await expect(repository.grant(lease(), SECRET)).resolves.toMatchObject({ ok: true });
+    database.connection.exec(`
+      CREATE TRIGGER reject_publish_credential_revoke BEFORE UPDATE ON publish_credential_leases
+      BEGIN SELECT RAISE(ABORT, 'rejected'); END;
+    `);
+    const result = await repository.revoke('lease-1', NOW + 1);
+    expect(result.ok ? undefined : result.error.details?.reason).toBe('publish-credential-store-unavailable');
+    // The CLI infers "the entry was deleted" from this reason, so the delete
+    // has to run first: a failed tombstone must not leave the token alive.
+    expect(store.values.has('publish-lease-1')).toBe(false);
+    expect(database.connection.prepare('SELECT revoked_at FROM publish_credential_leases WHERE lease_id = ?').get('lease-1'))
+      .toEqual({ revoked_at: null });
+  });
+
   it('refuses a duplicate lease id without clobbering the stored secret', async () => {
     const { store, repository } = setup();
     await expect(repository.grant(lease(), SECRET)).resolves.toMatchObject({ ok: true });

@@ -599,7 +599,7 @@ describe('upgrade runtime', () => {
     }
     // Only the actions that mint or spend a receipt name one. A shell push is
     // denied outright and the preflight only reports, so neither may claim it.
-    for (const action of ['git_publish', 'publish_approve']) {
+    for (const action of ['git_publish', 'git.publish', 'publish_approve', 'publish.approve', ' git_publish ']) {
       await expect(runtime.execute('permission_check', { action }))
         .resolves.toMatchObject({ ok: true, value: { approval: 'single-use-receipt' } });
     }
@@ -608,6 +608,16 @@ describe('upgrade runtime', () => {
       if (!probe.ok) throw new Error('permission_check must answer');
       expect(Object.prototype.hasOwnProperty.call(probe.value, 'approval')).toBe(false);
     }
+    // A near-miss must not be promoted to a publish: only the publish verbs do.
+    for (const action of ['git_pull', 'filesystem.publish']) {
+      await expect(runtime.execute('permission_check', { action }))
+        .resolves.toMatchObject({ ok: true, value: { decision: 'allow', class: 'read-or-safe' } });
+    }
+    // A destructive publish is a delete first, and keeps the base answer.
+    const forceDelete = await runtime.execute('permission_check', { action: 'git push --delete origin goal/publish' });
+    if (!forceDelete.ok) throw new Error('permission_check must answer');
+    expect(forceDelete.value).toMatchObject({ decision: 'ask', class: 'dangerous' });
+    expect(Object.prototype.hasOwnProperty.call(forceDelete.value, 'approval')).toBe(false);
   });
 
   it('keeps hooks create-only and makes plugin mutations persistent when runtime state is configured', async () => {

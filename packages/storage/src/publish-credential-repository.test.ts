@@ -170,4 +170,42 @@ describe('SqlitePublishCredentialRepository', () => {
       value: { lease: lease(), revokedAt: null },
     });
   });
+
+  it('finds the newest live lease for one workspace and remote', async () => {
+    const { repository } = setup();
+    await repository.grant(lease(), SECRET);
+    await repository.grant(lease({ leaseId: 'lease-2', createdAt: NOW + 1_000 }), SECRET);
+    await repository.grant(lease({ leaseId: 'lease-3', remote: 'upstream' }), SECRET);
+    await expect(repository.findLive('workspace-1', 'origin', NOW + 2_000)).resolves.toEqual({
+      ok: true,
+      value: lease({ leaseId: 'lease-2', createdAt: NOW + 1_000 }),
+    });
+    await expect(repository.findLive('workspace-1', 'origin', NOW + 15 * 60_000)).resolves.toEqual({
+      ok: true,
+      value: null,
+    });
+    await expect(repository.findLive('workspace-1', 'upstream', NOW)).resolves.toEqual({
+      ok: true,
+      value: lease({ leaseId: 'lease-3', remote: 'upstream' }),
+    });
+  });
+
+  it('does not report a revoked lease as live', async () => {
+    const { repository } = setup();
+    await repository.grant(lease(), SECRET);
+    await repository.revoke('lease-1', NOW + 1);
+    await expect(repository.findLive('workspace-1', 'origin', NOW + 2)).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('refuses a malformed live-lease lookup without touching the ledger', async () => {
+    const { repository } = setup();
+    for (const [workspaceId, remote, now] of [
+      ['', 'origin', NOW],
+      ['workspace-1', '../origin', NOW],
+      ['workspace-1', 'origin', -1],
+    ] as const) {
+      const result = await repository.findLive(workspaceId, remote, now);
+      expect(result.ok).toBe(false);
+    }
+  });
 });

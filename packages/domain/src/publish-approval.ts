@@ -16,6 +16,12 @@ export interface PublishApprovalBinding {
 /** Read-only lookup for diagnostics and preflight. A failed lookup is not an approval. */
 export interface PublishApprovalLookupPort {
   inspect(binding: PublishApprovalBinding, now: number): Promise<PublishApprovalState>;
+  /**
+   * The stored receipt, when the ledger can answer. The publish path uses it to
+   * learn the credential binding the human approved; a receipt that cannot be
+   * read is treated as credential-free and still has to be spent.
+   */
+  read?(approvalId: string): Promise<PublishApprovalRecord | null>;
 }
 
 /**
@@ -28,6 +34,18 @@ export interface PublishApprovalRecord extends PublishApprovalBinding {
   readonly approvedBy: string;
   readonly approvedAt: number;
   readonly expiresAt: number;
+  /**
+   * The resolved push-host fingerprint the human approved (#297 §6). Present
+   * only on a credential-bound receipt: the publish path re-resolves the push
+   * URLs and refuses with `publish-target-changed` when they differ, so
+   * rewriting `remote.<name>.url` cannot redirect the lease.
+   */
+  readonly pushUrlFingerprint?: string;
+  /**
+   * The live lease this receipt may spend. Absent on a credential-free receipt,
+   * and a receipt naming a lease that is no longer live publishes nothing.
+   */
+  readonly leaseId?: string;
 }
 
 /**

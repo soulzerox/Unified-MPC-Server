@@ -1,4 +1,6 @@
 import {
+  isPublishCredentialHostFingerprint,
+  isPublishCredentialLeaseId,
   isValidPublishBinding,
   type PublishApprovalAuthorityPort,
   type PublishApprovalBinding,
@@ -22,11 +24,13 @@ interface ApprovalRow {
   approved_at: number;
   expires_at: number;
   consumed_at: number | null;
+  push_url_fingerprint: string | null;
+  lease_id: string | null;
 }
 
 const SELECT_APPROVAL = `
   SELECT approval_id, workspace_id, remote, branch, expected_sha, approved_by,
-    approved_at, expires_at, consumed_at
+    approved_at, expires_at, consumed_at, push_url_fingerprint, lease_id
   FROM publish_approvals WHERE approval_id = ?
 `;
 
@@ -40,11 +44,17 @@ function bounded(value: unknown, max: number): value is string {
  * The publish path revalidates against the live remote before it spawns Git.
  */
 function validRecord(record: PublishApprovalRecord): boolean {
-  return bounded(record.approvalId, 128)
+  if (!(bounded(record.approvalId, 128)
     && isValidPublishBinding(record)
     && bounded(record.approvedBy, 256)
     && Number.isSafeInteger(record.approvedAt) && record.approvedAt >= 0
-    && Number.isSafeInteger(record.expiresAt) && record.expiresAt > record.approvedAt;
+    && Number.isSafeInteger(record.expiresAt) && record.expiresAt > record.approvedAt)) return false;
+  // A credential binding is all-or-nothing: a receipt that names a host set
+  // without the lease that answers for it (or the reverse) can never be spent.
+  const fingerprint = record.pushUrlFingerprint;
+  const leaseId = record.leaseId;
+  if (fingerprint === undefined && leaseId === undefined) return true;
+  return isPublishCredentialHostFingerprint(fingerprint) && isPublishCredentialLeaseId(leaseId);
 }
 
 function sameBinding(row: ApprovalRow, record: PublishApprovalRecord): boolean {
@@ -120,10 +130,11 @@ export class SqlitePublishApprovalRepository implements PublishApprovalLookupPor
       const inserted = conn.prepare(`
         INSERT INTO publish_approvals (
           approval_id, workspace_id, remote, branch, expected_sha, approved_by,
-          approved_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          approved_at, expires_at, push_url_fingerprint, lease_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(record.approvalId, record.workspaceId, record.remote, record.branch,
-        record.expectedSha, record.approvedBy, record.approvedAt, record.expiresAt);
+        record.expectedSha, record.approvedBy, record.approvedAt, record.expiresAt,
+        record.pushUrlFingerprint ?? null, record.leaseId ?? null);
       if (Number(inserted.changes) !== 1) {
         conn.exec('ROLLBACK;');
         return false;
@@ -165,6 +176,10 @@ export class SqlitePublishApprovalRepository implements PublishApprovalLookupPor
       approvalId: row.approval_id, workspaceId: row.workspace_id, remote: row.remote,
       branch: row.branch, expectedSha: row.expected_sha, approvedBy: row.approved_by,
       approvedAt: row.approved_at, expiresAt: row.expires_at, consumedAt: row.consumed_at,
+      ...(row.push_url_fingerprint === null || row.lease_id === null ? {} : {
+        pushUrlFingerprint: row.push_url_fingerprint,
+        leaseId: row.lease_id,
+      }),
     };
   }
 

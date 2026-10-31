@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Result } from './errors.js';
 import { isPublishRemoteName } from './publish-approval.js';
 
@@ -36,9 +37,53 @@ export interface PublishCredentialPort {
   grant(lease: PublishCredentialLease, secret: string): Promise<Result<void>>;
   /** Host-side: open one live lease. Unknown, revoked and expired leases answer null. */
   open(leaseId: string, now: number): Promise<Result<PublishCredentialMaterial | null>>;
+  /**
+   * Host-side: the newest live lease for one workspace and remote, if any. The
+   * preflight and the approval use it to learn whether a credential exists for
+   * this target without reading the secret; `open` still gates the value.
+   */
+  findLive(workspaceId: string, remote: string, now: number): Promise<Result<PublishCredentialLease | null>>;
   /** Host-side: remove the secret and mark the lease revoked, idempotently. */
   revoke(leaseId: string, now: number): Promise<Result<void>>;
 }
+
+/**
+ * The fixed helper file name inside a deployment root (#297 §2). The guard
+ * compares the real path of the helper an invocation installs to
+ * `<deployment>/publish-credential-helper`, so the name is a contract, not a
+ * configuration value.
+ */
+export const PUBLISH_CREDENTIAL_HELPER_NAME = 'publish-credential-helper';
+
+/**
+ * Why one Git invocation may install the host helper (#297 §4). The three modes
+ * exist because three different Gits need the credential at three moments:
+ *
+ * - `diagnostic`: the pre-approval `ls-remote` that resolves default branches.
+ * - `publish`: the push itself, tied to the receipt it consumed.
+ * - `verify`: the post-push `ls-remote`, tied to the same receipt and to the
+ *   nonce minted for the publish spawn that is still running.
+ *
+ * The mode is never a tool argument: only `GitService.publish` can mint one, and
+ * the Git adapter keeps the one-shot nonce that makes it usable.
+ */
+export type PublishCredentialAuthorization =
+  | {
+    readonly kind: 'diagnostic';
+    readonly lease: PublishCredentialLease;
+  }
+  | {
+    readonly kind: 'publish';
+    readonly lease: PublishCredentialLease;
+    readonly approvalId: string;
+    readonly spendNonce: string;
+  }
+  | {
+    readonly kind: 'verify';
+    readonly lease: PublishCredentialLease;
+    readonly approvalId: string;
+    readonly spendNonce: string;
+  };
 
 /**
  * Lease ids are charset-safe because the id becomes part of a SecretStore key.
@@ -47,6 +92,8 @@ export interface PublishCredentialPort {
  * longer id would be accepted here and then fail inside the secret store.
  */
 const PUBLISH_CREDENTIAL_LEASE_ID = /^[A-Za-z0-9._-]{1,120}$/u;
+/** Approval ids and spend nonces are opaque, bounded, charset-safe tokens. */
+const PUBLISH_CREDENTIAL_AUTHORIZATION_TOKEN = /^[A-Za-z0-9._-]{1,128}$/u;
 const PUBLISH_CREDENTIAL_HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const PUBLISH_CREDENTIAL_PORT = /^[1-9][0-9]{0,4}$/u;
 const MAX_PUBLISH_CREDENTIAL_SECRET = 8_192;
@@ -118,4 +165,71 @@ export function isValidPublishCredentialLease(lease: PublishCredentialLease): bo
     && isPublishCredentialTimestamp(lease.createdAt)
     && isPublishCredentialTimestamp(lease.expiresAt)
     && lease.expiresAt > lease.createdAt;
+}
+
+/** Approval ids and spend nonces are opaque tokens, never URLs or paths. */
+export function isPublishCredentialAuthorizationToken(value: unknown): value is string {
+  return typeof value === 'string' && PUBLISH_CREDENTIAL_AUTHORIZATION_TOKEN.test(value);
+}
+
+/**
+ * Shape-check an authorization before a Git child is allowed to install the
+ * helper. A `publish` or `verify` authorization must name the receipt it belongs
+ * to and the nonce minted for that spawn; `diagnostic` has neither because it
+ * runs before a receipt exists.
+ */
+export function isPublishCredentialAuthorization(value: unknown): value is PublishCredentialAuthorization {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  const lease = record.lease;
+  if (typeof lease !== 'object' || lease === null) return false;
+  if (!isValidPublishCredentialLease(lease as PublishCredentialLease)) return false;
+  if (record.kind === 'diagnostic') return true;
+  if (record.kind !== 'publish' && record.kind !== 'verify') return false;
+  return isPublishCredentialAuthorizationToken(record.approvalId)
+    && isPublishCredentialAuthorizationToken(record.spendNonce);
+}
+
+/**
+ * Normalize one resolved push URL to the lease host shape: lowercase host plus a
+ * non-default port, with `:443` dropped. Userinfo and path never reach the
+ * comparison, so a URL carrying a token cannot make two hosts look equal.
+ * Anything that is not an `https` URL with a plain DNS host answers null and is
+ * refused by the caller.
+ */
+export function normalizePublishCredentialPushHost(target: unknown): string | null {
+  if (typeof target !== 'string' || target.length === 0 || target.length > 4_096) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(target);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:') return null;
+  const host = parsed.hostname.toLowerCase();
+  const port = parsed.port === '' || parsed.port === '443' ? '' : `:${parsed.port}`;
+  const normalized = `${host}${port}`;
+  return isPublishCredentialHost(normalized) ? normalized : null;
+}
+
+const PUBLISH_CREDENTIAL_HOST_FINGERPRINT = /^sha256:[a-f0-9]{64}$/u;
+
+/**
+ * The receipt's host binding (#297 §6): one stable digest of the resolved push
+ * host set, so the receipt names *where* a credential may go without recording
+ * a URL that could carry userinfo or a token. Hosts are normalized, deduplicated
+ * and sorted first, so argument order and a trailing `:443` cannot change the
+ * fingerprint. An empty set or a host that is not a credential target answers
+ * null and the caller fails closed.
+ */
+export function fingerprintPublishCredentialHosts(hosts: readonly string[]): string | null {
+  if (!Array.isArray(hosts) || hosts.length === 0) return null;
+  const normalized = [...new Set(hosts)].sort();
+  if (!normalized.every((host) => isPublishCredentialHost(host))) return null;
+  return `sha256:${createHash('sha256').update(normalized.join('\n')).digest('hex')}`;
+}
+
+/** Shape of a stored receipt fingerprint; never a URL or a bare host. */
+export function isPublishCredentialHostFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && PUBLISH_CREDENTIAL_HOST_FINGERPRINT.test(value);
 }

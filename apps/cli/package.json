@@ -15,6 +15,7 @@
     "@unified-mpc/codex": "workspace:*",
     "@unified-mpc/domain": "workspace:*",
     "@unified-mpc/extensions": "workspace:*",
+    "@unified-mpc/git": "workspace:*",
     "@unified-mpc/mcp-server": "workspace:*",
     "@unified-mpc/permissions": "workspace:*",
     "@unified-mpc/shared": "workspace:*",

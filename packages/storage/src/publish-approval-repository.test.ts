@@ -12,6 +12,8 @@ const HEAD = 'a'.repeat(40);
 const NEXT_HEAD = 'b'.repeat(64);
 const NOW = 1_780_000_000_000;
 const TTL_MS = 15 * 60_000;
+const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
+const LEASE_ID = 'lease-1';
 
 function approval(overrides: Partial<PublishApprovalRecord> = {}): PublishApprovalRecord {
   return {
@@ -197,5 +199,31 @@ describe('SqlitePublishApprovalRepository', () => {
     };
     expect(() => insertDirect('direct-1', WORKSPACE, NOW)).toThrow();
     expect(() => insertDirect('direct-2', 'missing-workspace', NOW + 1_000)).toThrow();
+  });
+
+  it('round-trips the credential binding a receipt was minted with', async () => {
+    const { repository } = await setup();
+    const bound = approval({ pushUrlFingerprint: FINGERPRINT, leaseId: LEASE_ID });
+    await expect(repository.record(bound)).resolves.toBe(true);
+    await expect(repository.read('approval-1')).resolves.toEqual({ ...bound, consumedAt: null });
+  });
+
+  it('refuses a half-bound or malformed credential receipt without writing', async () => {
+    const { repository } = await setup();
+    await expect(repository.record(approval({ pushUrlFingerprint: FINGERPRINT }))).resolves.toBe(false);
+    await expect(repository.record(approval({ leaseId: LEASE_ID }))).resolves.toBe(false);
+    await expect(repository.record(approval({ pushUrlFingerprint: 'sha256:not-a-digest', leaseId: LEASE_ID })))
+      .resolves.toBe(false);
+    await expect(repository.record(approval({ pushUrlFingerprint: FINGERPRINT, leaseId: 'bad lease id' })))
+      .resolves.toBe(false);
+    await expect(repository.read('approval-1')).resolves.toBeNull();
+  });
+
+  it('keeps a credential binding spendable only for its exact binding', async () => {
+    const { repository } = await setup();
+    const bound = approval({ pushUrlFingerprint: FINGERPRINT, leaseId: LEASE_ID });
+    await repository.record(bound);
+    await expect(repository.consume('approval-1', binding(), NOW + 1_000)).resolves.toBe(true);
+    await expect(repository.read('approval-1')).resolves.toEqual({ ...bound, consumedAt: NOW + 1_000 });
   });
 });

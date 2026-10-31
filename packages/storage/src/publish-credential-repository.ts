@@ -2,6 +2,7 @@ import {
   appError,
   err,
   isPublishCredentialLeaseId,
+  isPublishRemoteName,
   isValidPublishCredentialLease,
   isPublishCredentialSecret,
   isPublishCredentialTimestamp,
@@ -32,6 +33,14 @@ interface CredentialRow {
 const SELECT_CREDENTIAL = `
   SELECT lease_id, workspace_id, remote, hosts, username, created_at, expires_at, revoked_at
   FROM publish_credential_leases WHERE lease_id = ?
+`;
+
+const SELECT_LIVE_LEASE = `
+  SELECT lease_id, workspace_id, remote, hosts, username, created_at, expires_at, revoked_at
+  FROM publish_credential_leases
+  WHERE workspace_id = ? AND remote = ? AND revoked_at IS NULL AND expires_at > ?
+  ORDER BY created_at DESC, lease_id DESC
+  LIMIT 1
 `;
 
 const SELECT_LIVE_CREDENTIAL = `
@@ -130,6 +139,28 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
     const lease = rowToLease(row);
     if (!isValidPublishCredentialLease(lease) || lease.expiresAt <= now) return ok(null);
     return ok({ lease, secret });
+  }
+
+  /**
+   * The newest live lease for one workspace and remote. Metadata only: the
+   * secret still has to pass through `open`, which re-checks the expiry, so a
+   * diagnostic can ask "is there a lease?" without receiving a credential.
+   */
+  public async findLive(workspaceId: string, remote: string, now: number): Promise<Result<PublishCredentialLease | null>> {
+    if (typeof workspaceId !== 'string' || workspaceId.length === 0 || workspaceId.length > 128
+      || !isPublishRemoteName(remote) || !isPublishCredentialTimestamp(now)) {
+      return err(invalidLease('The publish credential lease lookup is invalid'));
+    }
+    let row: CredentialRow | undefined;
+    try {
+      row = this.options.database.connection.prepare(SELECT_LIVE_LEASE).get(workspaceId, remote, now) as
+        CredentialRow | undefined;
+    } catch {
+      return err(ledgerUnavailable());
+    }
+    if (row === undefined) return ok(null);
+    const lease = rowToLease(row);
+    return ok(isValidPublishCredentialLease(lease) && lease.expiresAt > now ? lease : null);
   }
 
   /** Deletes the secret first, then tombstones the row. Safe to call twice. */

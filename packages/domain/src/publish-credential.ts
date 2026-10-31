@@ -43,7 +43,17 @@ export interface PublishCredentialPort {
    * this target without reading the secret; `open` still gates the value.
    */
   findLive(workspaceId: string, remote: string, now: number): Promise<Result<PublishCredentialLease | null>>;
-  /** Host-side: remove the secret and mark the lease revoked, idempotently. */
+  /**
+   * Host-side: remove the secret and mark the lease revoked, idempotently.
+   *
+   * The order is part of the contract: the Secret Service entry is deleted
+   * before the ledger tombstone. A failure that reports
+   * `publish-credential-store-unavailable` therefore means the delete already
+   * happened and only the tombstone failed — the CLI tells the operator "the
+   * entry was deleted" from that reason. An implementation must not reverse
+   * the two steps, and a failed delete keeps the other reason
+   * (`publish-credential-unavailable`), because the token may still be live.
+   */
   revoke(leaseId: string, now: number): Promise<Result<void>>;
 }
 

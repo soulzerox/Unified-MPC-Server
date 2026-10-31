@@ -294,7 +294,24 @@ async function runRevoke(
   // never be gated on a ledger read: a transient read error would otherwise
   // block the one command that kills a leaked token.
   const revoked = await runner.credential.revoke(leaseId, now);
-  if (!revoked.ok) return fail(revoked.error, writeError);
+  if (!revoked.ok) {
+    // A failed `revoke` is not proof that the token survived: the port deletes
+    // the Secret Service entry before it updates the ledger, so a ledger-stage
+    // failure leaves the secret gone and the row still active. Record the
+    // attempt without claiming success, and report the half that completed —
+    // "store unavailable" alone reads as "nothing was deleted", which is the
+    // wrong story during an incident (#558 review).
+    const secretDeleted = revoked.error.details?.reason === 'publish-credential-store-unavailable';
+    await recordPublishAudit(runner.audit, {
+      actorId: 'publish-credential-cli',
+      actorName: 'unified-mpc publish-credential',
+      action: 'publish_credential_revoke',
+      leaseId,
+      resultCode: 'UNVERIFIED',
+      reason: secretDeleted ? 'ledger-update-failed' : 'revoke-failed',
+    });
+    return fail(secretDeleted ? unverifiedRevoke(leaseId) : revoked.error, writeError);
+  }
   if (runner.inspect !== undefined) {
     const existing = await runner.inspect(leaseId);
     if (!existing.ok) {

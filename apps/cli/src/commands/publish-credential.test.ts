@@ -350,6 +350,61 @@ describe('publish-credential revoke and status', () => {
     }]);
   });
 
+  it('records the delete when the ledger cannot be marked revoked', async () => {
+    const recorded = createPort();
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const runner = createRunner({
+      ...recorded.port,
+      // The port deletes the secret first, so this failure means the token is
+      // gone while the ledger still calls the lease live.
+      revoke: async (): Promise<Result<void>> => err(appError(
+        'INTERNAL_ERROR',
+        'The publish credential ledger is unavailable',
+        true,
+        { reason: 'publish-credential-store-unavailable' },
+      )),
+    }, { audit });
+    await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({
+      code: 1,
+      output: '',
+      errors: 'publish-credential-unverified: The publish credential entry for lease-1 was deleted, but the lease could not be confirmed',
+    });
+    expect(events).toMatchObject([{
+      action: 'publish_credential_revoke',
+      leaseId: 'lease-1',
+      resultCode: 'UNVERIFIED',
+      reason: 'ledger-update-failed',
+    }]);
+  });
+
+  it('records a revoke that never reached the secret store as a failed attempt', async () => {
+    const recorded = createPort();
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const runner = createRunner({
+      ...recorded.port,
+      revoke: async (): Promise<Result<void>> => err(appError(
+        'SECRET_ACCESS_DENIED',
+        'Linux Secret Service is unavailable',
+        true,
+        { reason: 'publish-credential-unavailable' },
+      )),
+    }, { audit });
+    await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({
+      code: 1,
+      output: '',
+      errors: 'publish-credential-unavailable: Linux Secret Service is unavailable',
+    });
+    // Nothing was deleted here, so the row must not suggest the token is gone.
+    expect(events).toMatchObject([{
+      action: 'publish_credential_revoke',
+      leaseId: 'lease-1',
+      resultCode: 'UNVERIFIED',
+      reason: 'revoke-failed',
+    }]);
+  });
+
   it('still revokes an already-revoked lease when inspect reports it', async () => {
     const recorded = createPort();
     const events: PublishAuditInput[] = [];

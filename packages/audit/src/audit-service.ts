@@ -73,6 +73,7 @@ export class AuditService {
         ...(input.pushUrlFingerprint === undefined ? {} : { pushUrlFingerprint: input.pushUrlFingerprint }),
         ...(input.reason === undefined ? {} : { reason: input.reason }),
         ...(input.reclaimed === undefined ? {} : { reclaimed: input.reclaimed }),
+        ...(input.leaseRevokeFailed === undefined ? {} : { leaseRevokeFailed: input.leaseRevokeFailed }),
       },
     });
   }

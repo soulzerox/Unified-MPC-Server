@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { PublishAuditInput } from '@unified-mpc/audit';
 import type { PublishCredentialLease } from '@unified-mpc/domain';
 import { GitAdapter, type GitPublishCredentialDeployment } from '@unified-mpc/git';
 import {
@@ -228,10 +229,12 @@ describe('GitService publish credential end to end', () => {
         resolvePublishCredentialDeployment: async (): Promise<GitPublishCredentialDeployment> => ({ root: deploymentRoot, promoted: true }),
         now: (): number => Date.now(),
       });
+      const auditRows: PublishAuditInput[] = [];
       const service = new GitService(workspaces, undefined, adapter, {
         publishApprovals: approvals,
         publishApprovalAuthority: approvals,
         publishCredentials: credentials,
+        publishAudit: { recordPublish: async (input: PublishAuditInput): Promise<void> => { auditRows.push(input); } },
         now: (): number => Date.now(),
       });
       const actor = { clientId: 'e2e', clientName: 'e2e' };
@@ -273,6 +276,22 @@ describe('GitService publish credential end to end', () => {
       const receipt = await approvals.read(approved.value.approvalId);
       expect(receipt).toMatchObject({ leaseId: 'lease-e2e' });
       expect(receipt?.consumedAt).not.toBeNull();
+
+      // One non-secret use row per credential-bound spend, written after the
+      // lease was revoked, naming the exact receipt binding (#297 S2d).
+      expect(auditRows).toMatchObject([{
+        action: 'publish_credential_use',
+        leaseId: 'lease-e2e',
+        approvalId: approved.value.approvalId,
+        branch: 'goal/publish',
+        expectedSha: head,
+        hosts: [host],
+        username: 'git',
+        resultCode: 'SUCCESS',
+      }]);
+      expect(auditRows[0]?.reason).toBeUndefined();
+      expect(auditRows[0]?.leaseRevokeFailed).toBeUndefined();
+      expect(JSON.stringify(auditRows)).not.toContain('e2e-secret-token');
     } finally {
       database.close();
     }
@@ -328,10 +347,12 @@ describe('GitService publish credential end to end', () => {
         resolvePublishCredentialDeployment: async (): Promise<GitPublishCredentialDeployment> => ({ root: deploymentRoot, promoted: true }),
         now: (): number => Date.now(),
       });
+      const auditRows: PublishAuditInput[] = [];
       const service = new GitService(workspaces, undefined, adapter, {
         publishApprovals: approvals,
         publishApprovalAuthority: approvals,
         publishCredentials: credentials,
+        publishAudit: { recordPublish: async (input: PublishAuditInput): Promise<void> => { auditRows.push(input); } },
         now: (): number => Date.now(),
       });
       const actor = { clientId: 'e2e', clientName: 'e2e' };

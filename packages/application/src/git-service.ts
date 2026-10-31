@@ -107,25 +107,44 @@ const MAX_PUBLISH_APPROVAL_TTL_SECONDS = 15 * 60;
 /** A receipt read for the publish path; `consumedAt` is present when the ledger exposes it. */
 type PublishReceipt = PublishApprovalRecord & { readonly consumedAt?: number | null };
 
-export interface GitServiceOptions {
+export interface GitServiceOptionsBase {
   /** Host-owned approval ledger. Omitted keeps `approval: "missing"`. */
   readonly publishApprovals?: PublishApprovalLookupPort;
   /** Spend/mint side of the ledger, kept separate from the read-only lookup. */
   readonly publishApprovalAuthority?: PublishApprovalAuthorityPort;
-  /**
-   * Host-owned credential leases (#297 S2c). Omitted keeps every publish
-   * credential-free, exactly like S1: no lease is opened, no helper is
-   * installed and the adapter's guard decides.
-   */
-  readonly publishCredentials?: PublishCredentialPort;
-  /**
-   * Audit sink for credential-bound publishes (#297 S2d). The input carries
-   * lease and receipt metadata only; the secret never enters this port.
-   */
-  readonly publishAudit?: PublishAuditSink;
   /** Test seam for a deterministic preflight clock. */
   readonly now?: () => number;
 }
+
+/**
+ * A credential store is only useful with somewhere to record the spend: a
+ * service that holds leases but no sink would spend a leased secret and leave
+ * no row, so `publishCredentials` and `publishAudit` are required together
+ * (#297 S2d). Credential-free services keep the sink optional.
+ */
+export type GitServiceOptions = GitServiceOptionsBase & (
+  | {
+    /** Omitted keeps every publish credential-free, exactly like S1. */
+    readonly publishCredentials?: undefined;
+    /**
+     * Audit sink for credential-bound publishes. The input carries lease and
+     * receipt metadata only; the secret never enters this port.
+     */
+    readonly publishAudit?: PublishAuditSink;
+  }
+  | {
+    /**
+     * Host-owned credential leases (#297 S2c): no lease is opened, no helper
+     * is installed and the adapter's guard decides when omitted.
+     */
+    readonly publishCredentials: PublishCredentialPort;
+    /**
+     * Audit sink for credential-bound publishes (#297 S2d). Required with a
+     * credential store so a spend can always name its lease and outcome.
+     */
+    readonly publishAudit: PublishAuditSink;
+  }
+);
 
 export class GitService {
   public constructor(
@@ -552,10 +571,16 @@ export class GitService {
       reason = 'publish-unexpected-error';
       throw error;
     } finally {
+      let leaseRevokeFailed = false;
       try {
-        await this.options.publishCredentials?.revoke(spend.lease.leaseId, this.publishNow());
+        const revoked = await this.options.publishCredentials?.revoke(spend.lease.leaseId, this.publishNow());
+        // `revoke` reports failure as an error result, not a throw, so an
+        // unchecked await would drop a failed release silently and let the
+        // row claim a clean spend.
+        if (revoked !== undefined && !revoked.ok) leaseRevokeFailed = true;
       } catch {
         // Reclamation falls back to the TTL sweep; the push result stands.
+        leaseRevokeFailed = true;
       }
       // The audit row is written after the spend so it can name the exact
       // lease and outcome. It never carries the secret and never changes the
@@ -564,6 +589,7 @@ export class GitService {
         ...auditBase,
         resultCode,
         ...(reason === undefined ? {} : { reason }),
+        ...(leaseRevokeFailed ? { leaseRevokeFailed: true } : {}),
         durationMs: Math.max(0, this.publishNow() - auditStartedAt),
       });
     }

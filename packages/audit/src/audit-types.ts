@@ -126,6 +126,12 @@ export interface PublishAuditInput {
   readonly resultCode: string;
   readonly reason?: string;
   readonly reclaimed?: number;
+  /**
+   * Set when the spend could not release its lease. The publish result still
+   * stands; the flag keeps the row from implying a clean spend while the
+   * lease lives until its TTL sweep (#297 S2d).
+   */
+  readonly leaseRevokeFailed?: boolean;
   readonly durationMs?: number;
 }
 

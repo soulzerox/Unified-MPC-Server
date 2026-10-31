@@ -1050,11 +1050,13 @@ export class GitAdapter {
       if (targets.length === 0) return true;
       return targets.some((target) => !isSupportedRemoteTarget(target) || usesCredentialHelper(target));
     }
-    // Not a configured remote. A bare name that does not resolve is a push Git
-    // refuses, so it keeps the fail-closed answer instead of being read as a
-    // local path; only a real target is judged by its own transport (#548
-    // review). `file://` and a local path never consult a helper, HTTP(S) does,
-    // and an unsupported transport such as `ext::` stays fail-closed.
+    // Not a configured remote. An argument with no scheme and no path
+    // separator is treated as a name: a bare name, a slashless local path such
+    // as `sibling.git`, and a slashless scp-like target all stay reported
+    // instead of being guessed from the literal. Only a real target is judged
+    // by its own transport (#548 review). `file://` and a local path never
+    // consult a helper, HTTP(S) does, and an unsupported transport such as
+    // `ext::` stays fail-closed.
     if (!isInlinePushTarget(remote)) return true;
     // A `url.<base>.insteadOf` rewrite applies to a command-line target too, so
     // a matching rewrite can turn a helper-free target into an HTTP(S) push that
@@ -1067,7 +1069,8 @@ export class GitAdapter {
   /**
    * `url.<base>.insteadOf` / `pushInsteadOf` rewrite a target before the
    * transport is chosen. Any configured prefix that matches makes the final
-   * transport unknowable from the literal, which is the fail-closed answer.
+   * transport unknowable from the literal, which is the fail-closed answer. An
+   * empty value is legal and prefixes every target, so it matches too.
    */
   private async pushTargetIsRewritten(cwd: string, target: string, signal?: AbortSignal): Promise<boolean> {
     const rewrites = await this.runner.run(
@@ -1080,8 +1083,7 @@ export class GitAdapter {
     return rewrites.stdout.split(/\r?\n/).some((line) => {
       const separator = line.indexOf(' ');
       if (separator === -1) return false;
-      const prefix = line.slice(separator + 1);
-      return prefix.length > 0 && target.startsWith(prefix);
+      return target.startsWith(line.slice(separator + 1));
     });
   }
 
@@ -1487,8 +1489,8 @@ function isValidRemoteName(remote: string): boolean {
 
 /**
  * `git push` takes a remote name or a target. A target carries a scheme or a
- * path separator; anything else is a name, and a name that did not resolve is a
- * push Git refuses, so it must not be read as a local path (#548 review).
+ * path separator; anything else is treated as a name, and an unresolved name is
+ * reported rather than read as a local path (#548 review).
  */
 function isInlinePushTarget(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*::/i.test(target)

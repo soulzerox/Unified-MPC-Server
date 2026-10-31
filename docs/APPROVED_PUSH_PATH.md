@@ -73,14 +73,18 @@ Every argument is first resolved as a remote name through
 broader than the adapter's (`foo+bar` and `foo@bar` are valid names). Only an
 argument Git does not resolve is treated as a positional target (`git push
 file:///tmp/bare.git main`, `git push /tmp/bare.git main`), and then the target
-itself is classified by the table above. A bare name that does not resolve is
-still reported: Git refuses that push, so it is not read as a local path.
+itself is classified by the table above. An argument with no scheme and no path
+separator is treated as a name, so it stays reported when it does not resolve:
+that covers a bare name, a slashless local path such as `sibling.git`, and a
+slashless scp-like target such as `git@host:repo.git`. Those pushes are denied
+on the conservative side rather than guessed from the literal.
 
 Two rewrites can change the transport before the table applies. `url.<base>.insteadOf`
 rewrites a command-line target as well as a configured remote, so a `file://`
 target that matches a rewrite can become an HTTP(S) push that runs the helper;
 any matching `url.<base>.insteadOf` or `url.<base>.pushInsteadOf` prefix is
-therefore reported (fail closed) instead of being trusted as the literal.
+therefore reported (fail closed) instead of being trusted as the literal. An
+empty prefix is legal in Git and matches every target, so it is reported too.
 `git remote get-url` already returns the rewritten URL for a remote name.
 
 Two facts make a model-driven `git push` unsupportable even with approval:

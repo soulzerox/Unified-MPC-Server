@@ -9,18 +9,22 @@ This document defines the supported alternative for issue #297: a host-mediated
 publish path that a Goal session can use after explicit human authorization, with
 credentials that never reach the model, the transcript, or a log.
 
-Status: **S1 implemented.** `git_publish_preflight` (read-only) ships the diagnostics
-half described in section 6, migration `042_publish_approvals` ships the durable
-approval ledger described in section 5, and the two-tool pair `publish_approve` +
-`git_publish` ships the publish half. `publish_approve` mints one single-use receipt
-for an exact workspace/remote/branch/SHA binding after `userConfirmed: true`, and
-`git_publish` spends it to push that exact commit to that exact branch through
-host-built argv. The credential-mediation slice (item 1 of the requested behavior)
-is designed, and its first two slices are implemented: S2a (the lease port, the
-SecretStore-backed ledger, the operator CLI and the expiry sweep) and S2b (the
-credential helper emitted into a promoted release). Nothing installs that helper
-on a Git invocation yet, so no HTTP(S) target gains a credential path in this
-state: see [APPROVED_PUSH_PATH_CREDENTIALS.md](APPROVED_PUSH_PATH_CREDENTIALS.md).
+Status: **S1 and the S2 slices implemented.** `git_publish_preflight` (read-only)
+ships the diagnostics half described in section 6, migration
+`042_publish_approvals` ships the durable approval ledger described in section 5,
+and the two-tool pair `publish_approve` + `git_publish` ships the publish half.
+`publish_approve` mints one single-use receipt for an exact
+workspace/remote/branch/SHA binding after `userConfirmed: true`, and `git_publish`
+spends it to push that exact commit to that exact branch through host-built argv.
+The credential-mediation slice (item 1 of the requested behavior) is implemented
+in four parts: S2a (the lease port, the SecretStore-backed ledger, the operator CLI
+and the expiry sweep), S2b (the credential helper emitted into a promoted release),
+S2c (a receipt bound to the resolved push-host fingerprint and lease id, the
+promoted helper installed for the diagnostic default-branch read, the publish
+spawn and its verification, and the lease revoked afterwards) and S2d (non-secret grant/use/revoke/sweep audit rows
+and the operator runbook). Without a live lease bound to the receipt, an HTTP(S)
+target that could reach a configured helper is still denied, and `git push` itself
+is unchanged: see [APPROVED_PUSH_PATH_CREDENTIALS.md](APPROVED_PUSH_PATH_CREDENTIALS.md).
 
 Trust model B: `userConfirmed: true` is the calling model's assertion of an explicit
 chat approval, not an independently verified human verdict. Every built-in profile
@@ -114,7 +118,7 @@ Two facts make a model-driven `git push` unsupportable even with approval:
 | D2 | The host builds and executes the Git invocation, not the caller. | The caller supplies `workspaceId`, `remote`, `branch` and an expected commit SHA — never argv, config, or environment. |
 | D3 | Authority is a durable approval receipt, not a boolean. | Mirrors the `guarded_pr_merge` evidence chain: the caller cannot supply the verdict. |
 | D4 | One remote, one branch, one exact SHA per approval. | No force, tags, deletes, `--all`, `--mirror`, or default/protected branches. A moved head invalidates the receipt. |
-| D5 | Credentials, when a later slice supports them, are injected by the host into the child process only. S1 injects none because it publishes only credential-free transports. | Secrets stay out of argv, the model context, tool results, and logs. |
+| D5 | Credentials for a receipt-bound HTTP(S) lease are injected by the host into the child process only (S2c). S1 injects none because it publishes only credential-free transports. | Secrets stay out of argv, the model context, tool results, and logs. |
 | D6 | `permission_check` stays policy-only; runtime readiness is reported separately. | It is a compatibility shim (`upgrade-catalog.ts`), not a place to grow Git probing. |
 | D7 | No fallback. A failed publish never degrades to `shell`, `gh`, or a disabled helper. | The workaround in #297 (human publishes from their own terminal) stays the only manual escape. |
 
@@ -145,15 +149,16 @@ never prompts from inside the adapter. Spending happens before the spawn, so a r
 after the spend loses the receipt and refuses rather than pushing twice. Both tools sit
 behind the scheduled-continuation goal-lease fence at the tool boundary, so a live
 rolling-goal fence requires the current `goalLease` before a receipt can be minted or
-spent. An in-path lease check, credential injection and a separate audit row are later
-slices, not S1.
+spent. An in-path lease check, credential injection and a separate audit row arrived
+in S2c and S2d, not S1.
 
 ## 4. Credential handling
 
 S1 injected no credentials at all. S2c now injects one host-owned credential,
 and only for a receipt-bound HTTP(S) lease: the publish path opens the lease the
-human approved, installs the promoted helper for exactly one spawn, and revokes
-the lease in a `finally` after the push and its verification. A credential-free
+human approved, installs the promoted helper for the diagnostic default-branch
+read, the push spawn and its verification, and revokes the lease in a `finally`
+after the push and its verification. A credential-free
 target (SSH, `git://`, `file://`, local path) still publishes without any
 host-supplied secret. HTTP(S) is not rejected outright by name; it is denied
 when a configured credential helper could run for a resolved target and no
@@ -176,11 +181,12 @@ credential-free and normally fails.
   a tool argument.
 - HTTPS credentials are host-owned as of S2c. S2a added the credential lease and
   its operator CLI, and S2b ships the helper artifact inside a promoted release
-  (see APPROVED_PUSH_PATH_CREDENTIALS.md). S2c installs that helper for one
-  spawn when a live lease is bound to the approval: `publish_approve` records
-  the resolved push-host fingerprint and the lease id, `git_publish` re-resolves
-  the push URLs (`publish-target-changed` on a mismatch), spends the receipt,
-  and revokes the lease after the push and its verification. Without a bound
+  (see APPROVED_PUSH_PATH_CREDENTIALS.md). S2c installs that helper for the
+  diagnostic default-branch read, the push spawn and its verification when a
+  live lease is bound to the approval: `publish_approve` records the resolved
+  push-host fingerprint and the lease id, `git_publish` re-resolves the push
+  URLs (`publish-target-changed` on a mismatch), spends the receipt, and
+  revokes the lease after the push and its verification. Without a bound
   lease an HTTP(S) target that could reach a configured helper stays denied.
 - No credential, token, URL userinfo, or helper path is written to the tool result,
   the activity log, the audit row, or any error message. `diagnosticConfigKey()`

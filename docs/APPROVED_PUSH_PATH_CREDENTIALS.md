@@ -470,7 +470,7 @@ What S2c actually shipped, so S2d builds on the same seams:
 | Host binding | `fingerprintPublishCredentialHosts` in `packages/domain/src/publish-credential.ts`: a sorted, deduplicated `sha256:` digest of normalized hosts, never a URL |
 | Receipt binding | `044_publish_approval_fingerprint` adds nullable `push_url_fingerprint` and `lease_id`; a half-bound or malformed pair is refused by `SqlitePublishApprovalRepository.record` |
 | Live lease lookup | `PublishCredentialPort.findLive(workspaceId, remote, now)` returns metadata only; `open` still gates the secret |
-| Preflight | `GitService.publishPreflight` opens a diagnostic lease; with none, a `push-credential-helper` block is reported as `publish-credential-required` |
+| Preflight | `GitService.publishPreflight` opens the live lease's material for a diagnostic authorization; with none, a `push-credential-helper` block is reported as `publish-credential-required` |
 | Approve | `GitService.approvePublish` resolves the push-host fingerprint, refuses `publish-target-changed` when it differs from the lease hosts, and stores the lease id with `min(receipt TTL, lease TTL)` |
 | Spend | `GitService.publish` reads the receipt before contacting the remote, refuses `publish-credential-unavailable` for a consumed receipt, re-resolves the push-host fingerprint and refuses `publish-target-changed` before opening any lease, then requires the same live lease and passes its material to `adapter.publish` |
 | Revocation | `GitService.publish` revokes the lease in a `finally` after success, push failure, timeout or abort; a failed revoke falls back to the TTL sweep |

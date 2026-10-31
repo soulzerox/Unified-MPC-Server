@@ -163,10 +163,10 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 Commands:
   status                                 Display overall system and workspace status
   sync [--targets <t...>]                Synchronize runtime policy rules across IDEs
-  install skill --name <n> --source <s>  Install an agent skill
-  install server --name <n> ...          Install an executable MCP server
-  prune skill --name <n>                 Prune an installed skill
-  prune server --name <n>                Prune an installed MCP server
+  install skill <name> <source>          Install an agent skill
+  install server <name> ...              Install an executable MCP server
+  prune skill <name>                     Prune an installed skill
+  prune server <name>                    Prune an installed MCP server
   storage recover                        Recover one unambiguous historical SQLite database safely
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease

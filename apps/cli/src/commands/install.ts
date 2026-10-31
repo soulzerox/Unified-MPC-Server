@@ -42,6 +42,9 @@ export function parseInstallSkillArgs(args: readonly string[]): Result<InstallSk
   if (name.length === 0 || source.length === 0) {
     return err(appError('INVALID_INPUT', 'Skill name and source path are required'));
   }
+  if (name.startsWith('-')) {
+    return err(appError('INVALID_INPUT', `Skill name must not start with '-': "${name}"`));
+  }
 
   let targets: InstallTarget[] = ['all'];
   let scope: InstallScope = 'global';
@@ -79,6 +82,9 @@ export function parseInstallServerArgs(args: readonly string[]): Result<InstallS
   const name = args[0]!.trim();
   if (name.length === 0) {
     return err(appError('INVALID_INPUT', 'Server name is required'));
+  }
+  if (name.startsWith('-')) {
+    return err(appError('INVALID_INPUT', `Server name must not start with '-': "${name}"`));
   }
 
   let transport: 'stdio' | 'sse' | 'http' | undefined;

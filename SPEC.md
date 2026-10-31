@@ -194,9 +194,9 @@ The native CLI binary (`unified-mpc`) provides complete command-line control for
 - **Standalone Binary**: Includes shebang `#!/usr/bin/env node` and auto-wires default production dependencies (`createDefaultCliDependencies`) connecting SQLite storage, workspace services, and dynamic extensions.
 - **Command Dispatcher**:
   - `unified-mpc status`: Displays overall system health, active SQLite goals, and workspace status.
-  - `unified-mpc install skill --name <n> --source <s> [--targets <t>] [--scope <global|workspace>]`: Ingests markdown skills without daemon processes.
-  - `unified-mpc install server --name <n> --transport <stdio|sse|http> --command <cmd> [--args <a...>]`: Mounts executable MCP servers.
-  - `unified-mpc prune skill --name <n>` & `unified-mpc prune server --name <n>`: Atomically uninstalls packages and purges configuration entries.
+  - `unified-mpc install skill <name> <source> [--targets <t>] [--scope <global|workspace>]`: Ingests markdown skills without daemon processes.
+  - `unified-mpc install server <name> --transport <stdio|sse|http> --command <cmd> [--args <a...>]`: Mounts executable MCP servers.
+  - `unified-mpc prune skill <name>` & `unified-mpc prune server <name>`: Atomically uninstalls packages and purges configuration entries.
   - `unified-mpc sync [--targets <t...>]`: Compiles and pushes the persisted P1–Pn runtime policy order to all connected IDE configuration files simultaneously.
   - `unified-mpc web [--port <p>] [--no-open]`: Boots the Local Web Control Plane on loopback.
   - `unified-mpc tools list` & `tools call <tool> <args-json>`: Directly calls namespaced downstream MCP tools headlessly.

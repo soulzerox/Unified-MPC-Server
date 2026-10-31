@@ -87,12 +87,12 @@ pnpm cli sync --targets cursor,cline,antigravity
 
 **ติดตั้ง Skill:**
 ```bash
-pnpm cli install skill --name my-skill --source ./path/to/my-skill --targets antigravity --scope workspace
+pnpm cli install skill my-skill ./path/to/my-skill --targets antigravity --scope workspace
 ```
 
 **ติดตั้ง MCP Server:**
 ```bash
-pnpm cli install server --name sqlite-db \
+pnpm cli install server sqlite-db \
   --transport stdio \
   --command npx \
   --args "-y mcp-server-sqlite --db /tmp/test.db" \
@@ -102,8 +102,8 @@ pnpm cli install server --name sqlite-db \
 ### 3.5 ลบส่วนขยายที่ไม่ใช้งาน (`prune`)
 ล้างข้อมูล Skill หรือ Server ออกจากระบบอย่างปลอดภัย:
 ```bash
-pnpm cli prune --skill obsolete-skill --target all
-pnpm cli prune --server deprecated-server --target all
+pnpm cli prune skill obsolete-skill --targets all
+pnpm cli prune server deprecated-server --targets all
 ```
 
 ### 3.6 เริ่มต้น Web Control Plane (`web`)

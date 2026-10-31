@@ -34,6 +34,9 @@ export function parsePruneSkillArgs(args: readonly string[]): Result<PruneSkillC
   if (name.length === 0) {
     return err(appError('INVALID_INPUT', 'Skill name is required'));
   }
+  if (name.startsWith('-')) {
+    return err(appError('INVALID_INPUT', `Skill name must not start with '-': "${name}"`));
+  }
 
   let targets: InstallTarget[] = ['all'];
   let scope: InstallScope | undefined;
@@ -70,6 +73,9 @@ export function parsePruneServerArgs(args: readonly string[]): Result<PruneServe
   const name = args[0]!.trim();
   if (name.length === 0) {
     return err(appError('INVALID_INPUT', 'Server name is required'));
+  }
+  if (name.startsWith('-')) {
+    return err(appError('INVALID_INPUT', `Server name must not start with '-': "${name}"`));
   }
 
   let targets: InstallTarget[] = ['all'];

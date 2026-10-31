@@ -156,8 +156,9 @@ in S2c and S2d, not S1.
 
 S1 injected no credentials at all. S2c now injects one host-owned credential,
 and only for a receipt-bound HTTP(S) lease: the publish path opens the lease the
-human approved, installs the promoted helper for exactly one spawn, and revokes
-the lease in a `finally` after the push and its verification. A credential-free
+human approved, installs the promoted helper for the diagnostic default-branch
+read, the push spawn and its verification, and revokes the lease in a `finally`
+after the push and its verification. A credential-free
 target (SSH, `git://`, `file://`, local path) still publishes without any
 host-supplied secret. HTTP(S) is not rejected outright by name; it is denied
 when a configured credential helper could run for a resolved target and no

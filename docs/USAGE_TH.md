@@ -103,7 +103,7 @@ pnpm cli install server sqlite-db \
 ล้างข้อมูล Skill หรือ Server ออกจากระบบอย่างปลอดภัย:
 ```bash
 pnpm cli prune skill obsolete-skill --targets all
-pnpm cli prune --server deprecated-server --target all
+pnpm cli prune server deprecated-server --targets all
 ```
 
 ### 3.6 เริ่มต้น Web Control Plane (`web`)

@@ -134,6 +134,13 @@ lease query in section 2. Revoking a lease removes the Secret Service entry and
 makes the next `open` return no material. A publish already holding the opened
 material keeps it only for that spawn; the receipt is single-use.
 
+If `revoke` exits non-zero, the `publish_credential_revoke` row — when one was
+written — names which half completed. `revoke-failed` means the Secret Service
+delete itself did not happen: the token may still be live, so repair the Secret
+Service and run `revoke` again. `ledger-update-failed` or `ledger-unreadable`
+means the entry is already gone and only the tombstone is missing: delete the
+provider token now and let the TTL sweep reclaim the row.
+
 Do not rotate by overwriting a lease id, editing the ledger, or writing a
 `publish-<id>` Secret Service entry by hand. Use `grant` and `revoke` so the
 audit trail and the expiry sweep stay consistent.
@@ -190,7 +197,7 @@ row per publish.
 |---|---|
 | `publish-credential-unsupported` | The deployment is a canonical checkout, `UNIFIED_MPC_ROOT` is unset, the push URL is not HTTPS, or the remote has no push URL. Grant from a promoted release with exactly one HTTPS push URL. |
 | `push-target-ambiguous` | The remote resolves to more than one push URL. Name one target or switch the remote to one URL; credential targets cannot half-succeed. |
-| `publish-credential-unavailable` | No live lease, the lease expired or was revoked, the receipt names a different lease, or Secret Service is unavailable. Inspect with `status`, then grant a new lease. |
+| `publish-credential-unavailable` | No live lease, the lease expired or was revoked, the receipt names a different lease, or Secret Service is unavailable. From `revoke` it means the Secret Service delete itself failed (`UNVERIFIED` / `revoke-failed`): the token may still be live, so repair the Secret Service and retry `revoke` rather than granting a new lease. Otherwise inspect with `status`, then grant a new lease. |
 | `publish-credential-required` | The preflight sees a helper-configured HTTP(S) target and no live lease. Grant a lease first. |
 | `publish-target-changed` | `remote.origin.url` changed after the grant or approval. Re-resolve the URL, grant for the new host if it is intended, and approve the new binding. |
 | `push-credential-helper` | The guard still refuses the operation, or the helper is not the host-owned executable of the running release. Check the deployment and the remote transport. |

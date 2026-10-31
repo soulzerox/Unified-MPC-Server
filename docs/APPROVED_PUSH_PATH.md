@@ -20,8 +20,8 @@ The credential-mediation slice (item 1 of the requested behavior) is implemented
 in four parts: S2a (the lease port, the SecretStore-backed ledger, the operator CLI
 and the expiry sweep), S2b (the credential helper emitted into a promoted release),
 S2c (a receipt bound to the resolved push-host fingerprint and lease id, the
-promoted helper installed for exactly the publish spawn and its verification, and
-the lease revoked afterwards) and S2d (non-secret grant/use/revoke/sweep audit rows
+promoted helper installed for the diagnostic default-branch read, the publish
+spawn and its verification, and the lease revoked afterwards) and S2d (non-secret grant/use/revoke/sweep audit rows
 and the operator runbook). Without a live lease bound to the receipt, an HTTP(S)
 target that could reach a configured helper is still denied, and `git push` itself
 is unchanged: see [APPROVED_PUSH_PATH_CREDENTIALS.md](APPROVED_PUSH_PATH_CREDENTIALS.md).

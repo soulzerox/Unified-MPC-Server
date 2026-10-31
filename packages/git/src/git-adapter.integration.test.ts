@@ -572,6 +572,23 @@ describe('GitAdapter integration', () => {
         },
       });
     }
+
+    // pushInsteadOf is a separate key and Git applies it to a command-line
+    // target as well, so the alternation in the guard is not decoration.
+    await execFileAsync('git', ['config', '--unset', 'url.https://example.invalid/.insteadOf'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'url.https://example.invalid/.pushInsteadOf', `file://${root}/`], { cwd: root, windowsHide: true });
+    await expect(adapter.validatePushSafety(root, `file://${bare}`)).resolves.toMatchObject({
+      ok: false,
+      error: { details: { reason: 'push-credential-helper', key: 'credential.helper' } },
+    });
+    await expect(adapter.validatePushSafety(root, bare)).resolves.toMatchObject({ ok: true });
+    await execFileAsync('git', ['config', 'url.https://example.invalid/.pushInsteadOf', ''], { cwd: root, windowsHide: true });
+    for (const target of [`file://${bare}`, bare]) {
+      await expect(adapter.validatePushSafety(root, target)).resolves.toMatchObject({
+        ok: false,
+        error: { details: { reason: 'push-credential-helper', key: 'credential.helper' } },
+      });
+    }
   }, 15_000);
 
   it('reduces a host-only credential helper scope to the URL key pattern', async () => {

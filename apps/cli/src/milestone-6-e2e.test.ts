@@ -18,7 +18,9 @@ const baseCliEnv = {
   NODE_NO_WARNINGS: '1',
 };
 
-describe('Milestone 6 - Unified CLI End-to-End Smoketest', () => {
+// Every case spawns `node dist/index.js`; a cold start costs ~2s on an idle host and
+// more than 5s while the rest of the merge profile is compiling or testing in parallel.
+describe('Milestone 6 - Unified CLI End-to-End Smoketest', { timeout: 30_000 }, () => {
   it('executes "unified-mpc status" via node subprocess and returns exit code 0', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'm6-e2e-status-'));
     temporaryRoots.push(root);

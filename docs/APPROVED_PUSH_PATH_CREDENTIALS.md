@@ -404,8 +404,10 @@ secret to an unapproved host.
     set, username and push-URL fingerprint, and the row contains no secret.
 22. A failed push records its result code and reason; an audit insert that
     throws cannot change the publish result.
-23. `grant` and `revoke` write their lifecycle rows only after the state change;
-    an audit insert that throws cannot change the command result.
+23. `grant` and `revoke` write their lifecycle rows after the state change; a
+    revoke that fails after the Secret Service delete still writes an
+    `UNVERIFIED` row, because the token is already gone; an audit insert that
+    throws cannot change the command result.
 24. The sweep writes a row only when it reclaimed a lease, or when the sweep
     port itself raised; the runbook documents inspection, rotation, emergency
     revocation and the audit queries, and states that the SQLite adapter fails
@@ -481,7 +483,7 @@ What S2d actually shipped, so an operator can explain every credential:
 | Audit input and port | `PublishAuditInput` and `PublishAuditSink` in `packages/audit/src/audit-types.ts`; the input is a closed list of non-secret fields, so a caller cannot pass the secret through it |
 | Audit projection | `AuditService.recordPublish` in `packages/audit/src/audit-service.ts`; the existing redactor still runs over `targetSummary` and `metadata` |
 | Publish spend row | `GitService.publish` writes one `publish_credential_use` row in `finally`, after the release attempt, for a bound receipt: lease, approval, branch, expected SHA, hosts, username, fingerprint, result and reason, plus `leaseRevokeFailed` when that release failed |
-| Grant and revoke rows | `unified-mpc publish-credential` writes `publish_credential_grant` / `publish_credential_revoke` after the state change; a failed grant or revoke writes none |
+| Grant and revoke rows | `unified-mpc publish-credential` writes `publish_credential_grant` / `publish_credential_revoke` after the state change; a failed grant writes none, and a failed revoke writes an `UNVERIFIED` row naming the stage that failed (`revoke-failed` or `ledger-update-failed`) |
 | Sweep rows | `startPublishCredentialSweep` writes `publish_credential_sweep` when it reclaimed a lease or the sweep port raised; an empty hourly sweep stays quiet, and the SQLite adapter fails closed to a zero sweep instead of raising |
 | Failure policy | A failed audit insert never changes a publish, grant, revoke or sweep result; the credential state change stands |
 | Operator guide | `docs/PUBLISH_CREDENTIAL_RUNBOOK.md`: inspection, normal rotation, emergency revocation, audit queries and troubleshooting |

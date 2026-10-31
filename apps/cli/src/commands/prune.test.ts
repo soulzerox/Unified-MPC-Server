@@ -33,6 +33,13 @@ describe('prune CLI commands', () => {
       const parsed = parsePruneSkillArgs([]);
       expect(parsed.ok).toBe(false);
     });
+
+    it('rejects an option-like name instead of treating it as the skill name', () => {
+      const parsed = parsePruneSkillArgs(['--name', 'my-skill']);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.error.message).toContain('must not start with');
+    });
   });
 
   describe('parsePruneServerArgs', () => {

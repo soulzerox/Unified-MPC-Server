@@ -44,6 +44,13 @@ describe('install CLI commands', () => {
       const parsed = parseInstallSkillArgs(['my-skill']);
       expect(parsed.ok).toBe(false);
     });
+
+    it('rejects an option-like name instead of installing under it', () => {
+      const parsed = parseInstallSkillArgs(['--name', 'my-skill', '--source', '/path/to/skill']);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.error.message).toContain('must not start with');
+    });
   });
 
   describe('parseInstallServerArgs', () => {

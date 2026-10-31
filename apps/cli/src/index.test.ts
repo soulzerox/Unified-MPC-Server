@@ -150,6 +150,9 @@ describe('CLI default dependency lifecycle', () => {
       const code = await runCli(['help'], { ...createDefaultCliDependencies(), write: (text) => output.push(text) });
       expect(code).toBe(0);
       expect(output[0]).toContain('Usage: unified-mpc');
+      expect(output[0]).toContain('install skill <name> <source>');
+      expect(output[0]).toContain('prune skill <name>');
+      expect(output[0]).not.toContain('install skill --name');
       await expect(readdir(root)).resolves.toEqual([]);
     } finally {
       if (previous === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;

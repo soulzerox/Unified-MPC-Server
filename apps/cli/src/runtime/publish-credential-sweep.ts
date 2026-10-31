@@ -1,3 +1,5 @@
+import type { PublishAuditSink } from '@unified-mpc/audit';
+
 /**
  * Reclamation of expired publish credential leases (#297 §5).
  *
@@ -22,9 +24,36 @@ export interface PublishCredentialSweepOptions {
   readonly leases: PublishCredentialLeaseSweeper;
   readonly now?: () => number;
   readonly intervalMs?: number;
+  /** Non-secret lifecycle audit sink (#297 S2d). Empty sweeps stay quiet. */
+  readonly audit?: PublishAuditSink;
   /** Fires after every successful sweep so the host can log the reclaimed count. */
   readonly onSwept?: (count: number) => void;
   readonly onError?: (error: unknown) => void;
+}
+
+/**
+ * Record a sweep only when it changed something. A sweep that reclaimed
+ * nothing runs every hour and would otherwise bury the credential trail in
+ * rows that say "nothing happened". Failures are always recorded.
+ */
+export async function recordPublishCredentialSweep(
+  audit: PublishAuditSink | undefined,
+  outcome: { readonly reclaimed: number; readonly failed?: boolean },
+): Promise<void> {
+  if (audit === undefined) return;
+  if (outcome.reclaimed === 0 && outcome.failed !== true) return;
+  try {
+    await audit.recordPublish({
+      actorId: 'publish-credential-sweep',
+      actorName: 'publish credential expiry sweep',
+      action: 'publish_credential_sweep',
+      resultCode: outcome.failed === true ? 'INTERNAL_ERROR' : 'SUCCESS',
+      reason: outcome.failed === true ? 'sweep-failed' : 'expired-lease-reclaimed',
+      reclaimed: outcome.reclaimed,
+    });
+  } catch {
+    // Audit is evidence, not a fence: a failed write never changes the sweep.
+  }
 }
 
 export interface PublishCredentialSweepHandle {
@@ -45,9 +74,11 @@ export function startPublishCredentialSweep(
     try {
       const swept = await options.leases.sweepExpired(now());
       options.onSwept?.(swept);
+      await recordPublishCredentialSweep(options.audit, { reclaimed: swept });
       return swept;
     } catch (error: unknown) {
       options.onError?.(error);
+      await recordPublishCredentialSweep(options.audit, { reclaimed: 0, failed: true });
       return 0;
     }
   };

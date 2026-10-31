@@ -5,6 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PublishAuditInput } from '@unified-mpc/audit';
 import {
   appError,
   err,
@@ -215,7 +216,9 @@ describe('publish-credential grant', () => {
 
   it('grants a lease without ever printing the secret', async () => {
     const recorded = createPort();
-    const result = await run(grantArgs(), createRunner(recorded.port));
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const result = await run(grantArgs(), createRunner(recorded.port, { audit }));
     expect(result.code).toBe(0);
     expect(result.errors).toBe('');
     expect(result.output).toContain('publish credential granted: lease-1');
@@ -232,6 +235,28 @@ describe('publish-credential grant', () => {
       createdAt: NOW,
       expiresAt: NOW + 900_000,
     });
+    expect(events).toEqual([{
+      actorId: 'publish-credential-cli',
+      actorName: 'unified-mpc publish-credential',
+      workspaceId: 'workspace-1',
+      action: 'publish_credential_grant',
+      remote: 'origin',
+      leaseId: 'lease-1',
+      hosts: ['github.com'],
+      username: 'git',
+      resultCode: 'SUCCESS',
+    }]);
+    expect(JSON.stringify(events)).not.toContain(SECRET);
+  });
+
+  it('keeps a successful grant when the audit write fails', async () => {
+    const recorded = createPort();
+    const result = await run(grantArgs(), createRunner(recorded.port, {
+      audit: { recordPublish: async (): Promise<void> => { throw new Error('audit unavailable'); } },
+    }));
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('publish credential granted: lease-1');
+    expect(recorded.grants).toHaveLength(1);
   });
 
   it('keeps a non-default port in the resolved host set', async () => {
@@ -258,15 +283,33 @@ describe('publish-credential grant', () => {
 });
 
 describe('publish-credential revoke and status', () => {
-  it('revokes a lease idempotently', async () => {
+  it('revokes a lease idempotently and audits the operator action', async () => {
     const recorded = createPort();
-    const runner = createRunner(recorded.port);
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const runner = createRunner(recorded.port, { audit });
     await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({
       code: 0,
       output: 'publish credential revoked: lease-1',
     });
     await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({ code: 0 });
     expect(recorded.revokes).toEqual(['lease-1', 'lease-1']);
+    expect(events).toEqual([
+      {
+        actorId: 'publish-credential-cli',
+        actorName: 'unified-mpc publish-credential',
+        action: 'publish_credential_revoke',
+        leaseId: 'lease-1',
+        resultCode: 'SUCCESS',
+      },
+      {
+        actorId: 'publish-credential-cli',
+        actorName: 'unified-mpc publish-credential',
+        action: 'publish_credential_revoke',
+        leaseId: 'lease-1',
+        resultCode: 'SUCCESS',
+      },
+    ]);
   });
 
   it('prints lease metadata and state but never the secret', async () => {

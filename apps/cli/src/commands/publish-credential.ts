@@ -4,6 +4,7 @@ import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { PublishAuditInput, PublishAuditSink } from '@unified-mpc/audit';
 import {
   appError,
   err,
@@ -71,6 +72,11 @@ export interface PublishCredentialCommandRunner {
   readonly resolvePushUrls: (workspaceRoot: string, remote: string) => Promise<Result<readonly string[]>>;
   readonly readSecret: () => Promise<Result<string>>;
   readonly resolveDeployment: () => Promise<Result<PublishCredentialDeployment>>;
+  /**
+   * Non-secret lifecycle audit sink (#297 S2d). The runtime wires the same
+   * `AuditService` the publish path uses; tests leave it out.
+   */
+  readonly audit?: PublishAuditSink;
   readonly now?: () => number;
   readonly createLeaseId?: () => string;
   readonly inspect?: (leaseId: string) => Promise<Result<PublishCredentialInspection | null>>;
@@ -252,6 +258,20 @@ async function runGrant(
   const granted = await runner.credential.grant(lease, secret.value);
   if (!granted.ok) return fail(granted.error, writeError);
 
+  // The lease is already live, so a failed audit write must not report the
+  // grant as failed. It records the non-secret binding only (#297 S2d).
+  await recordPublishAudit(runner.audit, {
+    actorId: 'publish-credential-cli',
+    actorName: 'unified-mpc publish-credential',
+    workspaceId: lease.workspaceId,
+    action: 'publish_credential_grant',
+    remote: lease.remote,
+    leaseId: lease.leaseId,
+    hosts: lease.hosts,
+    username: lease.username,
+    resultCode: 'SUCCESS',
+  });
+
   write(`publish credential granted: ${lease.leaseId}`);
   write(`workspace: ${lease.workspaceId}`);
   write(`remote: ${lease.remote}`);
@@ -270,8 +290,30 @@ async function runRevoke(
   const now = runner.now?.() ?? Date.now();
   const revoked = await runner.credential.revoke(leaseId, now);
   if (!revoked.ok) return fail(revoked.error, writeError);
+  // Revocation is idempotent, so the audit row records the operator action
+  // without claiming the lease was live.
+  await recordPublishAudit(runner.audit, {
+    actorId: 'publish-credential-cli',
+    actorName: 'unified-mpc publish-credential',
+    action: 'publish_credential_revoke',
+    leaseId,
+    resultCode: 'SUCCESS',
+  });
   write(`publish credential revoked: ${leaseId}`);
   return 0;
+}
+
+/** Best effort: an audit outage never changes the operator-visible result. */
+async function recordPublishAudit(
+  audit: PublishAuditSink | undefined,
+  input: PublishAuditInput,
+): Promise<void> {
+  if (audit === undefined) return;
+  try {
+    await audit.recordPublish(input);
+  } catch {
+    // The credential state change already happened; the next write can retry.
+  }
 }
 
 async function runStatus(

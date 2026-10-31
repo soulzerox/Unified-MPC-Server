@@ -500,6 +500,12 @@ describe('GitAdapter integration', () => {
         details: { reason: 'push-credential-helper', key: 'credential.helper' },
       },
     });
+    // A slashless argument is a name, even a dot-prefixed one, so it stays
+    // reported instead of being guessed as a local path.
+    await expect(adapter.validatePushSafety(root, '..')).resolves.toMatchObject({
+      ok: false,
+      error: { details: { reason: 'push-credential-helper' } },
+    });
   }, 15_000);
 
   it('resolves a remote name Git accepts even when the adapter grammar rejects it', async () => {

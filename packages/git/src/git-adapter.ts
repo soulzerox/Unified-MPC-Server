@@ -1496,9 +1496,7 @@ function isInlinePushTarget(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*::/i.test(target)
     || target.includes('://')
     || target.includes('/')
-    || target.includes('\\')
-    || target.startsWith('.')
-    || target.startsWith('~');
+    || target.includes('\\');
 }
 
 /**

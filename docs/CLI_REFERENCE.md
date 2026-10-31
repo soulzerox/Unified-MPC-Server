@@ -154,7 +154,34 @@ $ unified-mpc tools call tool_categories '{}'
 
 ---
 
-## 7. Exit Code Contract
+## 7. Publish Credential Commands
+
+The operator surface for the host-owned HTTP(S) publish credential (#297). The
+secret is read from stdin only, never from argv or the environment. Grant
+requires a promoted release; see
+[PUBLISH_CREDENTIAL_RUNBOOK.md](PUBLISH_CREDENTIAL_RUNBOOK.md) for rotation and
+emergency revocation.
+
+```bash
+# Grant one short-lived lease. The command prompts without echo on a TTY.
+unified-mpc publish-credential grant <remote> \
+  --workspace <id-or-path> --username <user> --ttl <seconds>
+
+# Revoke a lease (idempotent). Removes the Secret Service entry.
+unified-mpc publish-credential revoke <leaseId>
+
+# Show lease metadata and state without the secret.
+unified-mpc publish-credential status <leaseId>
+```
+
+`grant` writes a `publish_credential_grant` audit row, `revoke` writes
+`publish_credential_revoke`, and a credential-bound publish writes
+`publish_credential_use`. The audit rows carry lease metadata only; the secret
+never enters them.
+
+---
+
+## 8. Exit Code Contract
 
 The `unified-mpc` CLI adheres to a deterministic exit code contract:
 - `0`: Success / normal termination.

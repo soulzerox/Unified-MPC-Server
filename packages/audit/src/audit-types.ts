@@ -97,6 +97,47 @@ export interface CodexRunAuditInput {
   readonly durationMs: number;
 }
 
+/** Host-owned publish credential lifecycle events (#297 S2d). */
+export type PublishAuditAction =
+  | 'publish_credential_grant'
+  | 'publish_credential_revoke'
+  | 'publish_credential_use'
+  | 'publish_credential_sweep';
+
+/**
+ * One non-secret credential audit row. The secret never enters this input:
+ * only lease metadata, the approval binding and the outcome are recorded, so
+ * the audit log can explain a publish without becoming a credential store.
+ */
+export interface PublishAuditInput {
+  readonly timestamp?: string;
+  readonly actorId: string;
+  readonly actorName: string;
+  readonly workspaceId?: string;
+  readonly action: PublishAuditAction;
+  readonly remote?: string;
+  readonly leaseId?: string;
+  readonly approvalId?: string;
+  readonly branch?: string;
+  readonly expectedSha?: string;
+  readonly hosts?: readonly string[];
+  readonly username?: string;
+  readonly pushUrlFingerprint?: string;
+  readonly resultCode: string;
+  readonly reason?: string;
+  readonly reclaimed?: number;
+  readonly durationMs?: number;
+}
+
+/**
+ * The narrow audit port a publish-credential lifecycle caller needs. Keeping
+ * it structural lets the application, the runtime sweep and the CLI share the
+ * same sink without importing the whole `AuditService`.
+ */
+export interface PublishAuditSink {
+  recordPublish(input: PublishAuditInput): Promise<void>;
+}
+
 export interface McpToolAuditInput {
   readonly timestamp?: string;
   readonly actorId: string;

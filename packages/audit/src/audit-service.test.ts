@@ -126,4 +126,57 @@ describe('AuditService', () => {
     });
     expect(JSON.stringify(repository.events[0])).not.toContain('must-never-leak');
   });
+
+  it('records a credential-bound publish use without the secret', async () => {
+    const repository = new MemoryAuditRepository();
+    await new AuditService(repository).recordPublish({
+      actorId: 'client-1', actorName: 'goal-worker',
+      workspaceId: 'workspace-1', action: 'publish_credential_use',
+      remote: 'origin', leaseId: 'lease-1', approvalId: 'approval-1',
+      branch: 'goal/publish', expectedSha: 'a'.repeat(40),
+      hosts: ['github.com'], username: 'git',
+      pushUrlFingerprint: `sha256:${'b'.repeat(64)}`,
+      resultCode: 'SUCCESS', durationMs: 42,
+    });
+
+    expect(repository.events[0]).toMatchObject({
+      action: 'publish_credential_use',
+      workspaceId: 'workspace-1',
+      targetSummary: 'workspace=workspace-1 remote=origin lease=lease-1 approval=approval-1',
+      resultCode: 'SUCCESS',
+      durationMs: 42,
+      metadata: {
+        remote: 'origin', leaseId: 'lease-1', approvalId: 'approval-1',
+        branch: 'goal/publish', expectedSha: 'a'.repeat(40),
+        hosts: ['github.com'], username: 'git',
+        pushUrlFingerprint: `sha256:${'b'.repeat(64)}`,
+      },
+    });
+    const serialized = JSON.stringify(repository.events[0]);
+    expect(serialized).not.toContain('ghs_');
+    expect(serialized).not.toContain('secret');
+    expect(serialized).not.toContain('password');
+  });
+
+  it('records a revoke reason and a sweep count without a secret field', async () => {
+    const repository = new MemoryAuditRepository();
+    const service = new AuditService(repository);
+    await service.recordPublish({
+      actorId: 'publish-credential-cli', actorName: 'unified-mpc publish-credential',
+      action: 'publish_credential_revoke', workspaceId: 'workspace-1',
+      leaseId: 'lease-1', resultCode: 'SUCCESS', reason: 'operator-revoked',
+    });
+    await service.recordPublish({
+      actorId: 'publish-credential-sweep', actorName: 'publish credential expiry sweep',
+      action: 'publish_credential_sweep', resultCode: 'SUCCESS', reclaimed: 2,
+    });
+
+    expect(repository.events[0]?.metadata).toMatchObject({ leaseId: 'lease-1', reason: 'operator-revoked' });
+    expect(repository.events[1]).toMatchObject({
+      action: 'publish_credential_sweep',
+      resultCode: 'SUCCESS',
+      metadata: { reclaimed: 2 },
+    });
+    expect(JSON.stringify(repository.events)).not.toContain('secret');
+  });
 });

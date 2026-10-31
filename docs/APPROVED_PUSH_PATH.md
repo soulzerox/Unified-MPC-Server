@@ -124,13 +124,15 @@ slices, not S1.
 
 ## 4. Credential handling
 
-S1 injects no credentials at all: there is no helper, no token, and no host-owned SSH
-key in this slice. A credential-free target (SSH, `git://`, `file://`, local path)
-publishes without any host-supplied secret. HTTP(S) is not rejected outright by name;
-it is denied whenever a resolved target could run a credential helper, which is the
-only case where Git would consult one. With no helper configured the push runs without
-credentials and normally fails, except when the repository's own remote URL embeds
-userinfo — a user-configured credential that this slice neither supplies nor strips.
+S1 injected no credentials at all. S2c now injects one host-owned credential,
+and only for a receipt-bound HTTP(S) lease: the publish path opens the lease the
+human approved, installs the promoted helper for exactly one spawn, and revokes
+the lease in a `finally` after the push and its verification. A credential-free
+target (SSH, `git://`, `file://`, local path) still publishes without any
+host-supplied secret. HTTP(S) is not rejected outright by name; it is denied
+when a configured credential helper could run for a resolved target and no
+bound lease authorizes it, and with no helper configured the push runs
+credential-free and normally fails.
 
 - The Git child runs with `GIT_TERMINAL_PROMPT=0`, so it can never stop for an
   interactive prompt.
@@ -146,13 +148,14 @@ userinfo — a user-configured credential that this slice neither supplies nor s
   every annotated tag reachable from the approved commit, so the receipt would bound one
   branch while the remote also gained tags. The flag is host-built and not settable from
   a tool argument.
-- HTTPS credentials, host-owned key paths and helper injection are a later slice and
-  are not implemented. S2a added the credential lease and its operator CLI, and S2b
-  ships the helper artifact inside a promoted release (see
-  APPROVED_PUSH_PATH_CREDENTIALS.md), but nothing installs that helper on a Git
-  invocation yet. Until then an HTTP(S) target that could reach a helper stays
-  denied by the same guard, so nothing in this slice can publish over an
-  authenticated HTTP(S) transport.
+- HTTPS credentials are host-owned as of S2c. S2a added the credential lease and
+  its operator CLI, and S2b ships the helper artifact inside a promoted release
+  (see APPROVED_PUSH_PATH_CREDENTIALS.md). S2c installs that helper for one
+  spawn when a live lease is bound to the approval: `publish_approve` records
+  the resolved push-host fingerprint and the lease id, `git_publish` re-resolves
+  the push URLs (`publish-target-changed` on a mismatch), spends the receipt,
+  and revokes the lease after the push and its verification. Without a bound
+  lease an HTTP(S) target that could reach a configured helper stays denied.
 - No credential, token, URL userinfo, or helper path is written to the tool result,
   the activity log, the audit row, or any error message. `diagnosticConfigKey()`
   reduces free-form config subsections to a pattern, and `firstCredentialConfigKey()`

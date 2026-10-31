@@ -86,6 +86,9 @@ importers:
       '@unified-mpc/extensions':
         specifier: workspace:*
         version: link:../../packages/extensions
+      '@unified-mpc/git':
+        specifier: workspace:*
+        version: link:../../packages/git
       '@unified-mpc/mcp-server':
         specifier: workspace:*
         version: link:../../packages/mcp-server

@@ -49,6 +49,7 @@ import { WORKSPACE_ADMISSION_AUTHORITY_MIGRATION_SQL } from './migrations/worksp
 import { HEAVY_JOB_QUEUE_MIGRATION_SQL } from './migrations/heavy-job-queue-migration.js';
 import { PUBLISH_APPROVAL_MIGRATION_SQL } from './migrations/publish-approval-migration.js';
 import { PUBLISH_CREDENTIAL_MIGRATION_SQL } from './migrations/publish-credential-migration.js';
+import { PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL } from './migrations/publish-approval-fingerprint-migration.js';
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -76,7 +77,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '043_publish_credential_leases' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '044_publish_approval_fingerprint' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -151,7 +152,8 @@ export class SqliteDatabase {
       reclaimFreePages: true,
     });
     this.applyMigration({ id: '042_publish_approvals', sql: PUBLISH_APPROVAL_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: PUBLISH_CREDENTIAL_MIGRATION_SQL });
+    this.applyMigration({ id: '043_publish_credential_leases', sql: PUBLISH_CREDENTIAL_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

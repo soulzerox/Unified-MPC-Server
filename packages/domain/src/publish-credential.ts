@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Result } from './errors.js';
 import { isPublishRemoteName } from './publish-approval.js';
 
@@ -36,6 +37,12 @@ export interface PublishCredentialPort {
   grant(lease: PublishCredentialLease, secret: string): Promise<Result<void>>;
   /** Host-side: open one live lease. Unknown, revoked and expired leases answer null. */
   open(leaseId: string, now: number): Promise<Result<PublishCredentialMaterial | null>>;
+  /**
+   * Host-side: the newest live lease for one workspace and remote, if any. The
+   * preflight and the approval use it to learn whether a credential exists for
+   * this target without reading the secret; `open` still gates the value.
+   */
+  findLive(workspaceId: string, remote: string, now: number): Promise<Result<PublishCredentialLease | null>>;
   /** Host-side: remove the secret and mark the lease revoked, idempotently. */
   revoke(leaseId: string, now: number): Promise<Result<void>>;
 }
@@ -205,3 +212,24 @@ export function normalizePublishCredentialPushHost(target: unknown): string | nu
   return isPublishCredentialHost(normalized) ? normalized : null;
 }
 
+const PUBLISH_CREDENTIAL_HOST_FINGERPRINT = /^sha256:[a-f0-9]{64}$/u;
+
+/**
+ * The receipt's host binding (#297 §6): one stable digest of the resolved push
+ * host set, so the receipt names *where* a credential may go without recording
+ * a URL that could carry userinfo or a token. Hosts are normalized, deduplicated
+ * and sorted first, so argument order and a trailing `:443` cannot change the
+ * fingerprint. An empty set or a host that is not a credential target answers
+ * null and the caller fails closed.
+ */
+export function fingerprintPublishCredentialHosts(hosts: readonly string[]): string | null {
+  if (!Array.isArray(hosts) || hosts.length === 0) return null;
+  const normalized = [...new Set(hosts)].sort();
+  if (!normalized.every((host) => isPublishCredentialHost(host))) return null;
+  return `sha256:${createHash('sha256').update(normalized.join('\n')).digest('hex')}`;
+}
+
+/** Shape of a stored receipt fingerprint; never a URL or a bare host. */
+export function isPublishCredentialHostFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && PUBLISH_CREDENTIAL_HOST_FINGERPRINT.test(value);
+}

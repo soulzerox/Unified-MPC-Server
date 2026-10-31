@@ -41,6 +41,7 @@ import {
   GoalWorkspaceRetentionEvidenceSealingService,
   createGoalWorktreeReconciliationPort,
 } from '@unified-mpc/application';
+import { GitAdapter, type GitPublishCredentialDeployment } from '@unified-mpc/git';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
 import {
   createPlatformCapabilitySet,
@@ -118,6 +119,7 @@ import {
 } from './github-merge-reconciliation-poller.js';
 import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import { startPublishCredentialSweep } from './publish-credential-sweep.js';
+import { resolvePublishCredentialDeployment } from '../commands/publish-credential.js';
 import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest } from '@unified-mpc/mcp-server';
 import { createTrustedGoalRelocationHostFence, type TrustedGoalRelocationHostActor } from './goal-relocation-host-fence.js';
 
@@ -297,9 +299,24 @@ export function createStdioMcpRuntime(
     return { scope: { workspaceId: current.id, rootPath: current.rootPath } };
   };
   const publishApprovals = new SqlitePublishApprovalRepository(database);
-  const gitService = new GitService(workspaceRepository, undefined, undefined, {
+  // #297 S2c: the same lease ledger backs the publish path and the expiry sweep.
+  const publishCredentials = new SqlitePublishCredentialRepository({
+    database,
+    secretStore: new SecretToolSecretStore(),
+  });
+  // The adapter proves the helper belongs to the running promoted release; a
+  // canonical checkout or an unset runtime root keeps every credential path
+  // closed. The service passes only the opened material, never a tool value.
+  const gitAdapter = new GitAdapter(undefined, {
+    resolvePublishCredentialDeployment: async (): Promise<GitPublishCredentialDeployment> => {
+      const deployment = await resolvePublishCredentialDeployment();
+      return { root: deployment.root, promoted: deployment.promoted };
+    },
+  });
+  const gitService = new GitService(workspaceRepository, undefined, gitAdapter, {
     publishApprovals,
     publishApprovalAuthority: publishApprovals,
+    publishCredentials,
   });
   const custodyActor: FileActor = {
     clientId: 'trusted-goal-custody-runtime', clientName: 'Unified Goal Custody Runtime',
@@ -1029,12 +1046,7 @@ export function createStdioMcpRuntime(
   // refuses an expired lease, so this timer is what actually deletes an abandoned
   // `publish-<leaseId>` secret. It runs on start and hourly, never blocks boot,
   // and never rejects: a Secret Service outage must not take the runtime down.
-  const publishCredentialSweep = startPublishCredentialSweep({
-    leases: new SqlitePublishCredentialRepository({
-      database,
-      secretStore: new SecretToolSecretStore(),
-    }),
-  });
+  const publishCredentialSweep = startPublishCredentialSweep({ leases: publishCredentials });
   const recoveryReady = Promise.all([
     fileRecoveryReady,
     goalRuntimeRecoveryReady,

@@ -1,6 +1,6 @@
 # Approved Push Path — Credential Mediation (S2 design)
 
-Status: **S2a and S2b implemented; S2c–S2d not implemented.** S1 shipped in #552 and
+Status: **S2a, S2b and S2c implemented; S2d not implemented.** S1 shipped in #552 and
 covers every credential-free transport. This document designs the remaining
 slice of #297:
 item 1 of the requested behavior, "supported credential-helper
@@ -448,6 +448,19 @@ What S2b actually shipped, so S2c builds on the same seams:
 | Process entry | `apps/cli/src/bin/publish-credential-helper.ts` → `dist/bin/publish-credential-helper.js` |
 | Deployment artifact | `scripts/materialize-runtime-release.sh` emits `<deployment>/publish-credential-helper` (mode `0555`) and fails when the compiled entry is missing |
 | Tests | Contract tests over injected I/O plus one real spawn of the built entry: success, forged host, expired lease, wrong lease id, missing descriptor, `store`/`erase`, empty stdout/stderr and a secret absent from argv and the environment |
+
+What S2c actually shipped, so S2d builds on the same seams:
+
+| Concern | S2c placement |
+|---|---|
+| Host binding | `fingerprintPublishCredentialHosts` in `packages/domain/src/publish-credential.ts`: a sorted, deduplicated `sha256:` digest of normalized hosts, never a URL |
+| Receipt binding | `044_publish_approval_fingerprint` adds nullable `push_url_fingerprint` and `lease_id`; a half-bound or malformed pair is refused by `SqlitePublishApprovalRepository.record` |
+| Live lease lookup | `PublishCredentialPort.findLive(workspaceId, remote, now)` returns metadata only; `open` still gates the secret |
+| Preflight | `GitService.publishPreflight` opens a diagnostic lease; with none, a `push-credential-helper` block is reported as `publish-credential-required` |
+| Approve | `GitService.approvePublish` resolves the push-host fingerprint, refuses `publish-target-changed` when it differs from the lease hosts, and stores the lease id with `min(receipt TTL, lease TTL)` |
+| Spend | `GitService.publish` reads the receipt before contacting the remote, refuses `publish-credential-unavailable` for a consumed receipt, re-resolves the push-host fingerprint and refuses `publish-target-changed` before opening any lease, then requires the same live lease and passes its material to `adapter.publish` |
+| Revocation | `GitService.publish` revokes the lease in a `finally` after success, push failure, timeout or abort; a failed revoke falls back to the TTL sweep |
+| Runtime wiring | `apps/cli/src/runtime/stdio-mcp-runtime.ts` shares one `SqlitePublishCredentialRepository` between `GitService` and the expiry sweep, and injects the promoted-release classifier into `GitAdapter` |
 
 ## 9. Non-goals
 

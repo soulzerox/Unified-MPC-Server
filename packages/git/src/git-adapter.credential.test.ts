@@ -2,7 +2,11 @@ import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { PublishCredentialLease, PublishCredentialMaterial } from '@unified-mpc/domain';
+import {
+  fingerprintPublishCredentialHosts,
+  type PublishCredentialLease,
+  type PublishCredentialMaterial,
+} from '@unified-mpc/domain';
 import { GitAdapter, type GitAdapterOptions } from './git-adapter.js';
 import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js';
 
@@ -302,5 +306,41 @@ describe('GitAdapter publish credential allowlist', () => {
     const pushCall = runner.calls.find((call) => call.args.includes('push'));
     expect(pushCall?.args[0]).toBe('push');
     expect(pushCall?.options?.descriptor).toBeUndefined();
+  });
+
+  it('fingerprints one https push host without recording userinfo or the default port', async () => {
+    const runner = new ScriptedRunner((args) => (args[0] === 'remote' && args[1] === 'get-url'
+      ? { exitCode: 0, stdout: 'https://user:token@github.com:443/soulzerox/repo.git\n', stderr: '' }
+      : undefined));
+    const adapter = new GitAdapter(runner);
+
+    await expect(adapter.publishTargetFingerprint('/repo', 'origin')).resolves.toEqual({
+      ok: true,
+      value: fingerprintPublishCredentialHosts(['github.com']),
+    });
+  });
+
+  it('refuses a credential target with more than one push URL', async () => {
+    const runner = new ScriptedRunner((args) => (args[0] === 'remote' && args[1] === 'get-url'
+      ? { exitCode: 0, stdout: 'https://github.com/a.git\nhttps://github.com/b.git\n', stderr: '' }
+      : undefined));
+    const adapter = new GitAdapter(runner);
+
+    await expect(adapter.publishTargetFingerprint('/repo', 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'PERMISSION_DENIED', details: { reason: 'push-target-ambiguous' } },
+    });
+  });
+
+  it('refuses a non-https credential target', async () => {
+    const runner = new ScriptedRunner((args) => (args[0] === 'remote' && args[1] === 'get-url'
+      ? { exitCode: 0, stdout: 'http://github.com/a.git\n', stderr: '' }
+      : undefined));
+    const adapter = new GitAdapter(runner);
+
+    await expect(adapter.publishTargetFingerprint('/repo', 'origin')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'UNSUPPORTED_TARGET', details: { reason: 'publish-credential-unsupported' } },
+    });
   });
 });

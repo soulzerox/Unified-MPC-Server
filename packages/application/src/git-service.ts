@@ -8,6 +8,7 @@ import {
   isFullBypassAuthorization,
   isPublishBranchName,
   isPublishObjectId,
+  fingerprintPublishCredentialHosts,
   isPublishRemoteName,
   isValidPublishBinding,
   ok,
@@ -17,6 +18,9 @@ import {
   type PublishApprovalLookupPort,
   type PublishApprovalRecord,
   type PublishApprovalState,
+  type PublishCredentialLease,
+  type PublishCredentialMaterial,
+  type PublishCredentialPort,
   type Result,
 } from '@unified-mpc/domain';
 import {
@@ -99,11 +103,20 @@ const DEFAULT_PUBLISH_APPROVAL_TTL_SECONDS = 15 * 60;
 const MIN_PUBLISH_APPROVAL_TTL_SECONDS = 30;
 const MAX_PUBLISH_APPROVAL_TTL_SECONDS = 15 * 60;
 
+/** A receipt read for the publish path; `consumedAt` is present when the ledger exposes it. */
+type PublishReceipt = PublishApprovalRecord & { readonly consumedAt?: number | null };
+
 export interface GitServiceOptions {
   /** Host-owned approval ledger. Omitted keeps `approval: "missing"`. */
   readonly publishApprovals?: PublishApprovalLookupPort;
   /** Spend/mint side of the ledger, kept separate from the read-only lookup. */
   readonly publishApprovalAuthority?: PublishApprovalAuthorityPort;
+  /**
+   * Host-owned credential leases (#297 S2c). Omitted keeps every publish
+   * credential-free, exactly like S1: no lease is opened, no helper is
+   * installed and the adapter's guard decides.
+   */
+  readonly publishCredentials?: PublishCredentialPort;
   /** Test seam for a deterministic preflight clock. */
   readonly now?: () => number;
 }
@@ -182,7 +195,12 @@ export class GitService {
     if (!workspace.ok) return workspace;
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd);
     if (!cwd.ok) return cwd;
-    const preflight = await this.adapter.publishPreflight(cwd.value, request.remote, request.branch, { signal });
+    const credential = await this.openPublishCredential(workspace.value.id, request.remote, this.publishNow());
+    if (!credential.ok) return credential;
+    const preflight = await this.adapter.publishPreflight(cwd.value, request.remote, request.branch, {
+      signal,
+      ...(credential.value === null ? {} : { credential: { approvalId: 'diagnostic', material: credential.value } }),
+    });
     if (!preflight.ok) return preflight;
     const approval = await this.inspectPublishApproval(
       workspace.value.id,
@@ -190,7 +208,15 @@ export class GitService {
       request.branch,
       preflight.value.head,
     );
-    return ok({ ...preflight.value, approval });
+    // #297 S2c: a helper-configured HTTP(S) target that the guard blocks is
+    // exactly the case a live lease resolves. Name the missing step instead of
+    // repeating the guard's configuration verdict, and leave every other
+    // runtime block untouched.
+    const runtime = credential.value === null && !preflight.value.runtime.ready
+      && preflight.value.runtime.reason === 'push-credential-helper'
+      ? { ...preflight.value.runtime, reason: 'publish-credential-required' }
+      : preflight.value.runtime;
+    return ok({ ...preflight.value, runtime, approval });
   }
 
   /**
@@ -229,12 +255,25 @@ export class GitService {
         reason: 'publish-approval-store-unavailable',
       }));
     }
+    const now = this.options.now?.() ?? Date.now();
+    if (!Number.isSafeInteger(now) || now < 0) {
+      return err(appError('INTERNAL_ERROR', 'Publish approval clock is invalid', true));
+    }
+
+    // A lease that already exists binds this receipt to one host set and one
+    // short expiry (#297 §5). Without a lease the receipt stays credential-free
+    // and S1 behaviour is unchanged.
+    const credential = await this.openPublishCredential(workspace.value.id, binding.value.remote, now);
+    if (!credential.ok) return credential;
 
     const preflight = await this.adapter.publishPreflight(
       cwd.value,
       binding.value.remote,
       binding.value.branch,
-      { signal },
+      {
+        signal,
+        ...(credential.value === null ? {} : { credential: { approvalId: 'diagnostic', material: credential.value } }),
+      },
     );
     if (!preflight.ok) return preflight;
     const runtimeDenial = publishRuntimeDenial(preflight.value.runtime);
@@ -264,9 +303,27 @@ export class GitService {
       ));
     }
 
-    const now = this.options.now?.() ?? Date.now();
-    if (!Number.isSafeInteger(now) || now < 0) {
-      return err(appError('INTERNAL_ERROR', 'Publish approval clock is invalid', true));
+    let credentialBinding: { readonly pushUrlFingerprint: string; readonly leaseId: string } | undefined;
+    if (credential.value !== null) {
+      const fingerprint = await this.adapter.publishTargetFingerprint(
+        cwd.value,
+        binding.value.remote,
+        signal,
+      );
+      if (!fingerprint.ok) return fingerprint;
+      const granted = fingerprintPublishCredentialHosts(credential.value.lease.hosts);
+      if (granted === null || granted !== fingerprint.value) {
+        return err(appError(
+          'PERMISSION_DENIED',
+          'Publish target changed after the credential lease was granted',
+          false,
+          { reason: 'publish-target-changed' },
+        ));
+      }
+      credentialBinding = {
+        pushUrlFingerprint: fingerprint.value,
+        leaseId: credential.value.lease.leaseId,
+      };
     }
     const record: PublishApprovalRecord = {
       approvalId: randomUUID(),
@@ -276,7 +333,11 @@ export class GitService {
       expectedSha: binding.value.expectedSha,
       approvedBy: publishApprover(actor),
       approvedAt: now,
-      expiresAt: now + (ttlSeconds * 1000),
+      // The receipt can never outlive the secret it may spend.
+      expiresAt: credential.value === null
+        ? now + (ttlSeconds * 1000)
+        : Math.min(now + (ttlSeconds * 1000), credential.value.lease.expiresAt),
+      ...(credentialBinding === undefined ? {} : credentialBinding),
     };
     let recorded: boolean;
     try {
@@ -321,11 +382,62 @@ export class GitService {
     const cwd = await this.resolveCwd(request.workspaceId, request.cwd);
     if (!cwd.ok) return cwd;
 
+    const now = this.options.now?.() ?? Date.now();
+    if (!Number.isSafeInteger(now) || now < 0) {
+      return err(appError('INTERNAL_ERROR', 'Publish approval clock is invalid', true));
+    }
+
+    // The receipt the human approved may be credential-bound (#297 §6). The
+    // host binding is checked first: `.git/config` is agent-writable, so a
+    // redirect after approval must fail with `publish-target-changed` before
+    // any credential or remote contact, and without spending the receipt.
+    const receipt = await this.readPublishReceipt(request.approvalId);
+    const bound = receipt !== null
+      && receipt.leaseId !== undefined
+      && receipt.pushUrlFingerprint !== undefined;
+    if (bound && receipt.consumedAt !== undefined && receipt.consumedAt !== null) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Publish requires the live credential lease this approval was bound to',
+        false,
+        { reason: 'publish-credential-unavailable' },
+      ));
+    }
+    if (bound) {
+      const fingerprint = await this.adapter.publishTargetFingerprint(
+        cwd.value,
+        binding.value.remote,
+        signal,
+      );
+      if (!fingerprint.ok) return fingerprint;
+      if (fingerprint.value !== receipt.pushUrlFingerprint) {
+        return err(appError(
+          'PERMISSION_DENIED',
+          'Publish target changed after the approval was minted',
+          false,
+          { reason: 'publish-target-changed' },
+        ));
+      }
+    }
+    const credential = await this.openPublishCredential(workspace.value.id, binding.value.remote, now);
+    if (!credential.ok) return credential;
+    if (bound && (credential.value === null || credential.value.lease.leaseId !== receipt.leaseId)) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'Publish requires the live credential lease this approval was bound to',
+        false,
+        { reason: 'publish-credential-unavailable' },
+      ));
+    }
+
     const preflight = await this.adapter.publishPreflight(
       cwd.value,
       binding.value.remote,
       binding.value.branch,
-      { signal },
+      {
+        signal,
+        ...(credential.value === null ? {} : { credential: { approvalId: 'diagnostic', material: credential.value } }),
+      },
     );
     if (!preflight.ok) return preflight;
     const runtimeDenial = publishRuntimeDenial(preflight.value.runtime);
@@ -355,7 +467,14 @@ export class GitService {
       ));
     }
 
-    const now = this.options.now?.() ?? Date.now();
+    // The receipt is bound to the fingerprint checked before the credential was
+    // opened, so the spend below is exactly the lease the human approved. An
+    // unbound receipt never delivers a credential, even when one is live.
+    let spend: PublishCredentialMaterial | null = null;
+    if (bound) {
+      spend = credential.value;
+    }
+
     const publishBinding: PublishApprovalBinding = {
       workspaceId: workspace.value.id,
       ...binding.value,
@@ -365,8 +484,7 @@ export class GitService {
     }
     let spent: boolean;
     try {
-      spent = Number.isSafeInteger(now) && now >= 0
-        && await authority.consume(request.approvalId, publishBinding, now);
+      spent = await authority.consume(request.approvalId, publishBinding, now);
     } catch {
       return err(appError('INTERNAL_ERROR', 'Publish approval could not be spent', true));
     }
@@ -379,13 +497,89 @@ export class GitService {
       ));
     }
 
-    const published = await this.adapter.publish(cwd.value, {
+    const publishRequest = {
       remote: binding.value.remote,
       branch: binding.value.branch,
       expectedSha: binding.value.expectedSha,
-    }, { signal });
-    if (!published.ok) return published;
-    return ok({ ...published.value, approvalId: request.approvalId });
+    };
+    if (spend === null) {
+      const published = await this.adapter.publish(cwd.value, publishRequest, { signal });
+      if (!published.ok) return published;
+      return ok({ ...published.value, approvalId: request.approvalId });
+    }
+
+    // Lease-for-the-spawn (#297 §5): the secret lives for one push plus its
+    // verification, and the lease is revoked on success, failure, timeout and
+    // abort. A failed revoke is bounded by the lease TTL and the expiry sweep,
+    // so it must not turn a completed push into a reported failure.
+    try {
+      const published = await this.adapter.publish(cwd.value, publishRequest, {
+        signal,
+        credential: { approvalId: request.approvalId, material: spend },
+      });
+      if (!published.ok) return published;
+      return ok({ ...published.value, approvalId: request.approvalId });
+    } finally {
+      try {
+        await this.options.publishCredentials?.revoke(spend.lease.leaseId, this.publishNow());
+      } catch {
+        // Reclamation falls back to the TTL sweep; the push result stands.
+      }
+    }
+  }
+
+  /**
+   * The live lease for one workspace and remote, opened for a diagnostic read.
+   * A missing port answers null, so a service without a credential store is
+   * exactly S1. A lease row whose secret is already gone also answers null: a
+   * credential-bound receipt then refuses with `publish-credential-unavailable`.
+   */
+  private async openPublishCredential(
+    workspaceId: string,
+    remote: string,
+    now: number,
+  ): Promise<Result<PublishCredentialMaterial | null>> {
+    const port = this.options.publishCredentials;
+    if (port === undefined) return ok(null);
+    let lease: PublishCredentialLease | null;
+    try {
+      const found = await port.findLive(workspaceId, remote, now);
+      if (!found.ok) return found;
+      lease = found.value;
+    } catch {
+      return err(appError('INTERNAL_ERROR', 'The publish credential lease could not be read', true, {
+        reason: 'publish-credential-store-unavailable',
+      }));
+    }
+    if (lease === null) return ok(null);
+    try {
+      return await port.open(lease.leaseId, now);
+    } catch {
+      return err(appError('INTERNAL_ERROR', 'The publish credential lease could not be opened', true, {
+        reason: 'publish-credential-store-unavailable',
+      }));
+    }
+  }
+
+  /**
+   * The stored receipt, when the ledger can answer. A ledger without the
+   * optional read, a failed read or an unknown id answers null: the receipt is
+   * then treated as credential-free and still has to be spent.
+   */
+  private async readPublishReceipt(approvalId: string): Promise<PublishReceipt | null> {
+    const read = this.options.publishApprovals?.read;
+    if (typeof read !== 'function') return null;
+    try {
+      return await read.call(this.options.publishApprovals, approvalId);
+    } catch {
+      return null;
+    }
+  }
+
+  /** A clock for cleanup paths that must not fail after the push completed. */
+  private publishNow(): number {
+    const now = this.options.now?.() ?? Date.now();
+    return Number.isSafeInteger(now) && now >= 0 ? now : Date.now();
   }
 
   /** Shape-check a caller-supplied binding before any workspace or ledger read. */

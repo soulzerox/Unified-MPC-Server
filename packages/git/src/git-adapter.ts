@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   appError,
   err,
+  fingerprintPublishCredentialHosts,
   isPublishCredentialAuthorization,
   normalizePublishCredentialPushHost,
   ok,
@@ -1046,6 +1047,48 @@ export class GitAdapter {
     const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
     if (targets.length === 0) return true;
     return targets.some((target) => !isSupportedRemoteTarget(target) || usesCredentialHelper(target));
+  }
+
+  /**
+   * The host binding a credential receipt records (#297 §6). A credential
+   * target resolves to exactly one push URL: a lease names one host, and a
+   * remote that fans out to several hosts could half-succeed after the receipt
+   * was spent. The answer is a digest of the normalized host, so a URL carrying
+   * userinfo can never be stored on the receipt.
+   */
+  public async publishTargetFingerprint(cwd: string, remote: string, signal?: AbortSignal): Promise<Result<string>> {
+    if (!isValidRemoteName(remote)) return err(appError('INVALID_INPUT', 'Git publish remote is invalid'));
+    const pushUrls = await this.runner.run(
+      ['remote', 'get-url', '--push', '--all', remote],
+      cwd,
+      this.signalOptions(signal),
+    );
+    const error = this.mapError(pushUrls);
+    if (error !== null) return error;
+    const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+    if (targets.length === 0) return err(appError('CONFLICT', 'Git publish remote could not be resolved', true));
+    if (targets.length > 1) {
+      return err(appError(
+        'PERMISSION_DENIED',
+        'A credential publish target must resolve to exactly one push URL',
+        false,
+        { reason: 'push-target-ambiguous' },
+      ));
+    }
+    const host = normalizePublishCredentialPushHost(targets[0]);
+    if (host === null) {
+      return err(appError(
+        'UNSUPPORTED_TARGET',
+        'A credential publish target must be an https push URL',
+        false,
+        { reason: 'publish-credential-unsupported' },
+      ));
+    }
+    const fingerprint = fingerprintPublishCredentialHosts([host]);
+    if (fingerprint === null) {
+      return err(appError('INTERNAL_ERROR', 'Git publish target fingerprint could not be computed', true));
+    }
+    return ok(fingerprint);
   }
 
   /**

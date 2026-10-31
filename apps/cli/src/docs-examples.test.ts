@@ -136,8 +136,9 @@ function replayDependencies(calls: string[]): CliDependencies {
       calls.push('toolsCall');
       return ok({ replayed: true });
     },
-    publishCredential: async (): Promise<number> => {
+    publishCredential: async (_command, write): Promise<number> => {
       calls.push('publishCredential');
+      write('publish credential replayed');
       return 0;
     },
   };

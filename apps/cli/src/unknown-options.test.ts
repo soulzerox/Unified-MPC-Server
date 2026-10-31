@@ -20,7 +20,9 @@ describe('CLI option validation', () => {
     ['prune scope without a value', ['prune', 'skill', 'my-skill', '--scope'], 'Missing value for option: --scope'],
     ['extra tools list argument', ['tools', 'list', 'extra'], 'Unexpected argument: extra'],
     ['extra tools call argument', ['tools', 'call', 'echo', '{}', 'extra'], 'Unexpected argument: extra'],
-    ['unknown flag on a fixed-shape command', ['status', '--json'], 'Unknown unified-mpc command'],
+    ['unknown flag on a fixed-shape command', ['status', '--json'], 'Unknown option: --json'],
+    ['unknown flag on doctor', ['doctor', '--json'], 'Unknown option: --json'],
+    ['extra argument after codex doctor', ['codex', 'doctor', 'extra'], 'Unexpected argument: extra'],
   ];
 
   for (const [label, args, expected] of rejected) {

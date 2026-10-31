@@ -1041,17 +1041,48 @@ export class GitAdapter {
    * helper skip the credential check.
    */
   private async pushTargetsMayUseCredentialHelper(cwd: string, remote: string, signal?: AbortSignal): Promise<boolean> {
-    // An inline positional target (`git push file:///tmp/bare.git main`) is not
-    // a remote name, so there is no configured URL to resolve: judge the target
-    // itself. Only HTTP(S) and ext:: consult a helper, so a `file://` URL or a
-    // local path must not be denied for a helper that can never run (#548
-    // review); an unsupported transport stays fail-closed.
-    if (!isValidRemoteName(remote)) return !isSupportedRemoteTarget(remote) || usesCredentialHelper(remote);
+    // Resolve first, for every argument: Git accepts remote names outside the
+    // conservative grammar the rest of the adapter uses (`foo+bar`, `foo@bar`),
+    // and such a name can carry an HTTPS push URL that runs the helper.
     const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd, this.signalOptions(signal));
-    if (pushUrls.exitCode !== 0) return true;
-    const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
-    if (targets.length === 0) return true;
-    return targets.some((target) => !isSupportedRemoteTarget(target) || usesCredentialHelper(target));
+    if (pushUrls.exitCode === 0) {
+      const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);
+      if (targets.length === 0) return true;
+      return targets.some((target) => !isSupportedRemoteTarget(target) || usesCredentialHelper(target));
+    }
+    // Not a configured remote. A bare name that does not resolve is a push Git
+    // refuses, so it keeps the fail-closed answer instead of being read as a
+    // local path; only a real target is judged by its own transport (#548
+    // review). `file://` and a local path never consult a helper, HTTP(S) does,
+    // and an unsupported transport such as `ext::` stays fail-closed.
+    if (!isInlinePushTarget(remote)) return true;
+    // A `url.<base>.insteadOf` rewrite applies to a command-line target too, so
+    // a matching rewrite can turn a helper-free target into an HTTP(S) push that
+    // runs the helper. The rewritten transport is not knowable here, so it
+    // fails closed.
+    if (await this.pushTargetIsRewritten(cwd, remote, signal)) return true;
+    return !isSupportedRemoteTarget(remote) || usesCredentialHelper(remote);
+  }
+
+  /**
+   * `url.<base>.insteadOf` / `pushInsteadOf` rewrite a target before the
+   * transport is chosen. Any configured prefix that matches makes the final
+   * transport unknowable from the literal, which is the fail-closed answer.
+   */
+  private async pushTargetIsRewritten(cwd: string, target: string, signal?: AbortSignal): Promise<boolean> {
+    const rewrites = await this.runner.run(
+      ['config', '--get-regexp', '^url\\..*\\.(insteadof|pushinsteadof)$'],
+      cwd,
+      this.signalOptions(signal),
+    );
+    if (rewrites.exitCode === 1) return false;
+    if (rewrites.exitCode !== 0) return true;
+    return rewrites.stdout.split(/\r?\n/).some((line) => {
+      const separator = line.indexOf(' ');
+      if (separator === -1) return false;
+      const prefix = line.slice(separator + 1);
+      return prefix.length > 0 && target.startsWith(prefix);
+    });
   }
 
   /**
@@ -1452,6 +1483,20 @@ function firstConfigKey(output: string, fallback: string): string {
 
 function isValidRemoteName(remote: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(remote);
+}
+
+/**
+ * `git push` takes a remote name or a target. A target carries a scheme or a
+ * path separator; anything else is a name, and a name that did not resolve is a
+ * push Git refuses, so it must not be read as a local path (#548 review).
+ */
+function isInlinePushTarget(target: string): boolean {
+  return /^[a-z][a-z0-9+.-]*::/i.test(target)
+    || target.includes('://')
+    || target.includes('/')
+    || target.includes('\\')
+    || target.startsWith('.')
+    || target.startsWith('~');
 }
 
 /**

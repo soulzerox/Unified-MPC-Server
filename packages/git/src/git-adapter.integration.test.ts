@@ -487,9 +487,9 @@ describe('GitAdapter integration', () => {
     await execFileAsync('git', ['init', '--bare', bare], { cwd: root, windowsHide: true });
 
     const adapter = new GitAdapter(new DirectGitRunner());
-    // A positional target has no configured URL to resolve. A local path and a
-    // file:// URL can never consult a helper, so the configured helper above
-    // must not deny them.
+    // A positional target is not a configured remote. A local path and a file://
+    // URL never consult a helper, so the configured helper above must not deny
+    // them.
     await expect(adapter.validatePushSafety(root, bare)).resolves.toMatchObject({ ok: true });
     await expect(adapter.validatePushSafety(root, `file://${bare}`)).resolves.toMatchObject({ ok: true });
     // An HTTP(S) positional target does consult one, so it stays guarded.
@@ -500,6 +500,49 @@ describe('GitAdapter integration', () => {
         details: { reason: 'push-credential-helper', key: 'credential.helper' },
       },
     });
+  }, 15_000);
+
+  it('resolves a remote name Git accepts even when the adapter grammar rejects it', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    // `+` is valid in a Git remote name but outside the adapter's conservative
+    // grammar, so the name must be resolved instead of read as a local path.
+    await execFileAsync('git', ['remote', 'add', 'foo+bar', 'https://example.invalid/owner/repo.git'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: root, windowsHide: true });
+
+    await expect(new GitAdapter(new DirectGitRunner()).validatePushSafety(root, 'foo+bar')).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+  }, 15_000);
+
+  it('fails closed when a url rewrite can change an inline target transport', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: root, windowsHide: true });
+    const bare = path.join(root, 'bare.git');
+    await execFileAsync('git', ['init', '--bare', bare], { cwd: root, windowsHide: true });
+    // Git applies this rewrite to a command-line target too, so the literal
+    // file:// URL would become an HTTP(S) push that can run the helper.
+    await execFileAsync('git', ['config', 'url.https://example.invalid/.insteadOf', `file://${root}/`], { cwd: root, windowsHide: true });
+
+    const adapter = new GitAdapter(new DirectGitRunner());
+    await expect(adapter.validatePushSafety(root, `file://${bare}`)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+    // A target the rewrite does not match is still judged by its own transport.
+    await expect(adapter.validatePushSafety(root, bare)).resolves.toMatchObject({ ok: true });
   }, 15_000);
 
   it('reduces a host-only credential helper scope to the URL key pattern', async () => {

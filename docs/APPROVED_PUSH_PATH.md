@@ -68,10 +68,20 @@ denial, the key redaction, and the rest of the executable-config checks are
 unchanged there, and the approved path in this document is still the only way to
 publish over an authenticated HTTP(S) transport.
 
-A positional target (`git push file:///tmp/bare.git main`, `git push
-/tmp/bare.git main`) is not a remote name, so there is no configured URL to
-resolve: the target itself is classified by the same table. Only a remote name
-such as `origin` is resolved through its push URLs.
+Every argument is first resolved as a remote name through
+`git remote get-url --push --all`, because Git's own remote-name grammar is
+broader than the adapter's (`foo+bar` and `foo@bar` are valid names). Only an
+argument Git does not resolve is treated as a positional target (`git push
+file:///tmp/bare.git main`, `git push /tmp/bare.git main`), and then the target
+itself is classified by the table above. A bare name that does not resolve is
+still reported: Git refuses that push, so it is not read as a local path.
+
+Two rewrites can change the transport before the table applies. `url.<base>.insteadOf`
+rewrites a command-line target as well as a configured remote, so a `file://`
+target that matches a rewrite can become an HTTP(S) push that runs the helper;
+any matching `url.<base>.insteadOf` or `url.<base>.pushInsteadOf` prefix is
+therefore reported (fail closed) instead of being trusted as the literal.
+`git remote get-url` already returns the rewritten URL for a remote name.
 
 Two facts make a model-driven `git push` unsupportable even with approval:
 

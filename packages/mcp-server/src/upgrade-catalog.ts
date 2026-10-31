@@ -133,7 +133,7 @@ export const UPGRADE_TOOL_CATALOG: readonly UpgradeToolCatalogEntry[] = [
   execute('delegate_cancel', 23, 'Cancel an owned delegated agent task.', ['agent', 'delegate'], { availability: 'optional', requirements: ['configured owned agent-swarm provider'], supportsCancel: true, auditTarget: 'agent-swarm' }),
   read('delegate_result', 23, 'Read an owned delegated agent result.', ['agent', 'delegate'], { availability: 'optional', requirements: ['configured owned agent-swarm provider'], auditTarget: 'agent-swarm' }),
   execute('parallel_delegate', 24, 'Run up to four isolated read-only agent tasks through the owned swarm provider with explicit dependency/collision metadata.', ['agent', 'parallel'], { availability: 'optional', requirements: ['configured owned agent-swarm provider', 'ownership ledger'], supportsCancel: true, auditTarget: 'agent-swarm' }),
-  read('permission_check', 25, 'Evaluate an action class without limiting allowed context reads.', ['permission', 'policy']),
+  read('permission_check', 25, 'Evaluate an action class without limiting allowed context reads. Publish actions are classified as `publish`, and the tools that mint or spend a single-use receipt name it; runtime transport and credential readiness stays in git_publish_preflight.', ['permission', 'policy']),
   read('permission_profile', 25, 'Return the active Permission v2 profile.', ['permission', 'policy']),
   read('live_logs_query', 26, 'Query bounded structured MCP activity events with tool, workspace, phase, result, call/trace correlation filters.', ['logs', 'audit']),
   read('live_logs_status', 26, 'Return the built-in MCP activity-log pipeline health and bounded source status.', ['logs', 'audit']),

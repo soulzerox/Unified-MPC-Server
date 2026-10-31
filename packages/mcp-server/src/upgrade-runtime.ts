@@ -3517,9 +3517,47 @@ function decodeBase64Artifact(value: string, label: string): Result<Buffer> {
   return ok(decoded);
 }
 
-function permissionDecision(action: string): { readonly action: string; readonly decision: 'allow' | 'ask'; readonly class: string; readonly contextAccess: 'unrestricted' } {
-  const normalized = action.toLowerCase();
-  const dangerousAction = /(delete|destructive|admin|system\.admin|shell\.destructive|git\.destructive)/.test(normalized);
+/**
+ * Matches the ways a caller names a publish: the tool names `git_publish`,
+ * `git_publish_preflight` and `publish_approve`, the dotted action class
+ * `git.publish`, and the shell-shaped `git push origin HEAD:...` the original
+ * #297 report used.
+ */
+const PUBLISH_ACTION = /(?:^|[.\s:_-])(?:git[.\s:_-]?(?:push|publish)|publish[.\s:_-]?approve)(?=$|[.\s:_-])/;
+
+/**
+ * The two actions that mint or spend a single-use publish receipt. A shell
+ * `git push` is not one of them — it is denied outright, not approvable — and
+ * the preflight only reports, so neither may claim a receipt.
+ */
+const PUBLISH_RECEIPT_ACTIONS = new Set(['git_publish', 'git.publish', 'publish_approve', 'publish.approve']);
+
+const DESTRUCTIVE_ACTION = /(delete|destructive|admin|system\.admin|shell\.destructive|git\.destructive)/;
+
+function permissionDecision(action: string): { readonly action: string; readonly decision: 'allow' | 'ask'; readonly class: string; readonly contextAccess: 'unrestricted'; readonly approval?: 'single-use-receipt' } {
+  // Trimmed once, so the classification regex and the exact receipt lookup
+  // judge the same string: `" git_publish "` must not classify as a publish
+  // while silently dropping the receipt it exists to name.
+  const normalized = action.trim().toLowerCase();
+  const dangerousAction = DESTRUCTIVE_ACTION.test(normalized);
+  // A destructive publish stays destructive: `git push --delete origin <branch>`
+  // is a delete first, and relabelling it an ungated publish would recreate the
+  // allow-vs-gate mismatch #297 reports, pointing the other way.
+  //
+  // #297 item 3: policy allows a publish, but never by policy alone — the call
+  // still needs a single-use receipt minted by a human-confirmed approval. The
+  // old answer classified `git push` as "read-or-safe", which read as "this
+  // goes through". Runtime transport/credential readiness is deliberately not
+  // probed here (D6): `git_publish_preflight` reports that separately.
+  if (!dangerousAction && PUBLISH_ACTION.test(normalized)) {
+    return {
+      action,
+      decision: 'allow',
+      class: 'publish',
+      contextAccess: 'unrestricted',
+      ...(PUBLISH_RECEIPT_ACTIONS.has(normalized) ? { approval: 'single-use-receipt' } : {}),
+    };
+  }
   return { action, decision: dangerousAction ? 'ask' : 'allow', class: dangerousAction ? 'dangerous' : 'read-or-safe', contextAccess: 'unrestricted' };
 }
 

@@ -133,6 +133,13 @@ describe('install CLI commands', () => {
       const parsed = parseInstallServerArgs([]);
       expect(parsed.ok).toBe(false);
     });
+
+    it('rejects an option-like name instead of installing under it', () => {
+      const parsed = parseInstallServerArgs(['--name', 'sqlite', '--command', 'mcp-server-sqlite']);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.error.message).toContain('must not start with');
+    });
   });
 
   describe('runInstallSkill', () => {

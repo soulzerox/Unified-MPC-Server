@@ -202,27 +202,27 @@ unified-mpc sync
 unified-mpc sync --targets antigravity,cursor,cline
 
 # Install an Agent Skill (local folder or HTTPS Git repository)
-unified-mpc install skill --name my-skill --source /path/to/skill-folder --targets all
-unified-mpc install skill --name remote-skill --source https://github.com/example/remote-skill.git --targets cursor
+unified-mpc install skill my-skill /path/to/skill-folder --targets all
+unified-mpc install skill remote-skill https://github.com/example/remote-skill.git --targets cursor
 
 # Install an executable MCP Server from an explicit command
-unified-mpc install server --name sqlite-db \
+unified-mpc install server sqlite-db \
   --transport stdio \
   --command npx \
   --args "-y mcp-server-sqlite --db /tmp/dev.db" \
   --targets antigravity,cursor
 
 # Or register a self-contained/prebuilt MCP server from an HTTPS Git repository
-unified-mpc install server --name remote-mcp \
+unified-mpc install server remote-mcp \
   --transport stdio \
   --source https://github.com/example/remote-mcp.git \
   --targets cursor
 
 # Atomically prune a Skill
-unified-mpc prune skill --name my-skill
+unified-mpc prune skill my-skill
 
 # Atomically prune an MCP Server (terminates process and purges IDE configs)
-unified-mpc prune server --name sqlite-db
+unified-mpc prune server sqlite-db
 
 # Launch the Local Web Control Plane
 unified-mpc web --port 3000

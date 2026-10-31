@@ -151,8 +151,10 @@ describe('CLI default dependency lifecycle', () => {
       expect(code).toBe(0);
       expect(output[0]).toContain('Usage: unified-mpc');
       expect(output[0]).toContain('install skill <name> <source>');
+      expect(output[0]).toContain('install server <name>');
       expect(output[0]).toContain('prune skill <name>');
-      expect(output[0]).not.toContain('install skill --name');
+      expect(output[0]).toContain('prune server <name>');
+      expect(output[0]).not.toContain('--name');
       await expect(readdir(root)).resolves.toEqual([]);
     } finally {
       if (previous === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;

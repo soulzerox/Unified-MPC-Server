@@ -58,6 +58,7 @@ import {
   type PublishCredentialCommand,
 } from './commands/publish-credential.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from './build-provenance.js';
+import { unexpectedOption } from './commands/options.js';
 
 export { formatDoctorReport } from './commands/doctor.js';
 export { createStdioMcpRuntime, type StdioMcpRuntime } from './runtime/stdio-mcp-runtime.js';
@@ -132,9 +133,15 @@ export interface CliDependencies {
 
 export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h' || args[0] === 'help') return ok({ kind: 'help' });
-  if (args.length === 1 && args[0] === 'status') return ok({ kind: 'status' });
-  if (args[0] === 'doctor' && args.length === 1) return ok({ kind: 'doctor' });
-  if (args[0] === 'codex' && args[1] === 'doctor' && args.length === 2) return ok({ kind: 'codex-doctor' });
+  if (args[0] === 'status') {
+    return args.length === 1 ? ok({ kind: 'status' }) : unexpectedOption(args[1]!);
+  }
+  if (args[0] === 'doctor') {
+    return args.length === 1 ? ok({ kind: 'doctor' }) : unexpectedOption(args[1]!);
+  }
+  if (args[0] === 'codex' && args[1] === 'doctor') {
+    return args.length === 2 ? ok({ kind: 'codex-doctor' }) : unexpectedOption(args[2]!);
+  }
   if (args[0] === 'workspace') return parseWorkspaceArgs(args);
   if (args[0] === 'mcp') return parseMcpArgs(args);
   if (args[0] === 'install') return parseInstallArgs(args.slice(1));

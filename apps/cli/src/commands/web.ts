@@ -49,6 +49,7 @@ import { WorkspaceService, isMachineRootPath, isProjectWorkspace, workspaceLifec
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
+import { missingOptionValue, unexpectedOption } from './options.js';
 
 export interface WebCommand {
   readonly kind: 'web';
@@ -64,9 +65,11 @@ export function parseWebArgs(args: readonly string[]): Result<WebCommand> {
   let port = 3000;
 
   for (let i = 0; i < args.length; i += 1) {
-    const flag = args[i];
-    if (flag === '--port' && args[i + 1] !== undefined) {
-      const parsedPort = Number.parseInt(args[i + 1]!, 10);
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--port') {
+      if (value === undefined) return missingOptionValue(flag);
+      const parsedPort = Number.parseInt(value, 10);
       if (Number.isNaN(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
         return err(appError('INVALID_INPUT', 'Port must be a valid number between 0 and 65535'));
       }
@@ -74,6 +77,8 @@ export function parseWebArgs(args: readonly string[]): Result<WebCommand> {
       i += 1;
     } else if (flag === '--host') {
       return err(appError('INVALID_INPUT', 'Web control plane binds to 127.0.0.1; --host is not supported'));
+    } else {
+      return unexpectedOption(flag);
     }
   }
 

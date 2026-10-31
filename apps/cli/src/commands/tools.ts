@@ -1,4 +1,5 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { unexpectedOption } from './options.js';
 
 export type ToolsCommand =
   | { readonly kind: 'tools-list' }
@@ -24,6 +25,7 @@ export function parseToolsArgs(args: readonly string[]): Result<ToolsCommand> {
 
   const subcommand = args[0];
   if (subcommand === 'list') {
+    if (args.length > 1) return unexpectedOption(args[1]!);
     return ok({ kind: 'tools-list' });
   }
 
@@ -31,6 +33,7 @@ export function parseToolsArgs(args: readonly string[]): Result<ToolsCommand> {
     if (args.length < 2 || args[1]!.trim().length === 0) {
       return err(appError('INVALID_INPUT', 'Usage: unified-mpc tools call <name> [jsonArgs]'));
     }
+    if (args.length > 3) return unexpectedOption(args[3]!);
     const toolName = args[1]!.trim();
     let toolArgs: Record<string, unknown> = {};
     if (args.length >= 3 && args[2] !== undefined) {

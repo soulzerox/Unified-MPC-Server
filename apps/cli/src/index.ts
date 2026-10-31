@@ -161,7 +161,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       write(`Usage: unified-mpc <command> [options]
 
 Commands:
-  status                                 Display overall system and workspace status
+  status                                 Report the registered workspace count
   sync [--targets <t...>]                Synchronize runtime policy rules across IDEs
   install skill <name> <source>          Install an agent skill
   install server <name> ...              Install an executable MCP server

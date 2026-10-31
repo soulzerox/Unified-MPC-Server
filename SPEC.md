@@ -193,13 +193,13 @@ Goal ownership is a separate 10-minute fenced lease. An unexpired lease may be r
 The native CLI binary (`unified-mpc`) provides complete command-line control for human developers and headless AI agents (Claude Code, OpenCode CLI, Agy CLI):
 - **Standalone Binary**: Includes shebang `#!/usr/bin/env node` and auto-wires default production dependencies (`createDefaultCliDependencies`) connecting SQLite storage, workspace services, and dynamic extensions.
 - **Command Dispatcher**:
-  - `unified-mpc status`: Displays overall system health, active SQLite goals, and workspace status.
+  - `unified-mpc status`: Prints the number of registered workspaces; `doctor` covers diagnostics.
   - `unified-mpc install skill <name> <source> [--targets <t>] [--scope <global|workspace>]`: Ingests markdown skills without daemon processes.
-  - `unified-mpc install server <name> --transport stdio --command <cmd> [--args <a...>] [--env <KEY=VAL,...>]`: Mounts an executable MCP server that the CLI launches.
+  - `unified-mpc install server <name> --transport stdio --command <cmd> [--args <arg1,arg2,...>] [--env <KEY=VAL,...>]`: Mounts an executable MCP server that the CLI launches.
   - `unified-mpc install server <name> --transport <sse|http> --url <url>`: Mounts an already-running MCP server by URL; `sse`/`http` transports take no `--command`.
   - `unified-mpc prune skill <name>` & `unified-mpc prune server <name>`: Atomically uninstalls packages and purges configuration entries.
   - `unified-mpc sync [--targets <t...>]`: Compiles and pushes the persisted P1–Pn runtime policy order to all connected IDE configuration files simultaneously.
-  - `unified-mpc web [--port <p>] [--no-open]`: Boots the Local Web Control Plane on loopback.
+  - `unified-mpc web [--port <p>]`: Boots the Local Web Control Plane on loopback; it never opens a browser.
   - `unified-mpc tools list` & `tools call <tool> <args-json>`: Directly calls namespaced downstream MCP tools headlessly.
 - **Deterministic Exit Code Contract**:
   - `0`: Success / normal termination.

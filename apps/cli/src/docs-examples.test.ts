@@ -46,6 +46,16 @@ describe('documented CLI examples', () => {
         it(`parses: ${example}`, () => {
           const parsed = parseCliArgs(tokenize(example).slice(1));
           expect(parsed.ok, parsed.ok ? undefined : `${example} -> ${parsed.error.message}`).toBe(true);
+          if (!parsed.ok) return;
+          // `--args` splits on commas, so one element containing spaces means the
+          // example teaches a form that installs a single bogus argv element.
+          const commandArgs = (parsed.value as { args?: readonly string[] }).args;
+          if (Array.isArray(commandArgs)) {
+            expect(
+              commandArgs.filter((argument) => argument.includes(' ')),
+              `${example} -> ${JSON.stringify(commandArgs)}`,
+            ).toEqual([]);
+          }
         });
       }
     });

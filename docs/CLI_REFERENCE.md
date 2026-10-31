@@ -176,13 +176,16 @@ unified-mpc publish-credential status <leaseId>
 ```
 
 Every `publish-credential` command first sweeps leases whose TTL has passed, so
-an expired lease is already gone by the time the command runs: `revoke` and
-`status` then report `publish-credential-not-found`, and there is no token left
-to delete. `status` can still show `revoked` for a lease that was revoked before
-its TTL.
+a lease that already expired usually has no row left: `revoke` exits 1 with
+`publish-credential-not-found`, and `status` prints `publish credential not
+found` and exits 0. `status` can still report `state: expired` for a row that
+outlived its TTL, for example when the sweep could not delete its secret, and
+`revoked` for a lease revoked before its TTL.
 
 `grant` writes a `publish_credential_grant` audit row, `revoke` writes
-`publish_credential_revoke`, and a credential-bound publish writes
+`publish_credential_revoke` with result code `SUCCESS`, or `UNVERIFIED` when the
+secret was deleted but the lease could not be read back, and a credential-bound
+publish writes
 `publish_credential_use`. The audit rows carry lease metadata only; the secret
 never enters them.
 

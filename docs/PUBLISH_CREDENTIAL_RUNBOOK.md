@@ -51,8 +51,9 @@ username and expiry. It never prints the secret.
 ## 2. Inspect before rotating
 
 ```sh
-# One lease by id: metadata and state (active or revoked). An expired lease is
-# already reclaimed by the command's own sweep and reports not-found.
+# One lease by id: metadata and state (active or revoked). A lease whose TTL
+# passed is usually already reclaimed by the command's own sweep and reads
+# not-found; a row the sweep could not delete still reports `expired`.
 unified-mpc publish-credential status <leaseId>
 
 # The remote's push target; grant refuses anything but exactly one HTTPS URL.
@@ -110,9 +111,10 @@ secret from it.
    unified-mpc publish-credential status <newLeaseId>
    ```
 
-   The state must be `revoked`. A lease that outlived its TTL was already
-   reclaimed by the command's sweep, so this reports `not found` instead — the
-   secret is gone either way.
+   The state must be `revoked`. A lease that outlived its TTL was usually
+   reclaimed by the command's sweep already, so this prints `publish credential
+   not found` and exits 0 — check the ledger query in section 4 before assuming
+   the revocation failed.
 7. **Delete the old provider token** after the old lease is revoked or expired.
    The provider-side delete is the only action that makes a leaked token
    unusable everywhere.
@@ -149,7 +151,7 @@ reclaimed count and duration. The secret never enters the audit input.
 |---|---|
 | `publish_credential_grant` | After `grant` stored the lease and secret. A failed grant writes no row. |
 | `publish_credential_use` | Exactly once per credential-bound `git_publish` spend, after the lease is revoked, with the push result and reason. |
-| `publish_credential_revoke` | After `revoke` completed. An already-revoked lease still succeeds, because revocation is idempotent. A lease id that was never granted is refused and writes no row. |
+| `publish_credential_revoke` | After `revoke` completed. An already-revoked lease still succeeds, because revocation is idempotent. A lease id that was never granted is refused and writes no row. If the secret delete succeeds but the lease cannot be read back, the row carries result code `UNVERIFIED` and the command exits non-zero. |
 | `publish_credential_sweep` | Only when the sweep reclaimed at least one lease. Empty sweeps stay quiet; the SQLite repository keeps a row whose secret delete failed for the next sweep, so a retry is not audited until it actually reclaims something. A failed ledger read or secret-store outage is also quiet, because `sweepExpired` fails closed to 0 — during an outage, check `status` and the logs rather than expecting a sweep row. |
 
 Inspect the trail:
@@ -190,6 +192,8 @@ row per publish.
 | `publish-credential-required` | The preflight sees a helper-configured HTTP(S) target and no live lease. Grant a lease first. |
 | `publish-target-changed` | `remote.origin.url` changed after the grant or approval. Re-resolve the URL, grant for the new host if it is intended, and approve the new binding. |
 | `push-credential-helper` | The guard still refuses the operation, or the helper is not the host-owned executable of the running release. Check the deployment and the remote transport. |
+| `publish-credential-not-found` | The lease id is not in the ledger. It was mistyped, or its TTL passed and the pre-command sweep already reclaimed it. Nothing was revoked; check the ledger query in section 4. |
+| `publish-credential-unverified` | The Secret Service entry was deleted, but the ledger could not confirm the lease. The token is gone from this host; check the `UNVERIFIED` audit row and delete the provider token if the host cannot be trusted. |
 | Lease stays `active` after a publish | The push may have failed before the spend, or the revoke failed and the TTL sweep will reclaim it. Inspect the publish result and the audit row, then `revoke` explicitly if needed. |
 
 ---

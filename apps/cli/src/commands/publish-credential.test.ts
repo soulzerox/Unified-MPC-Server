@@ -327,7 +327,7 @@ describe('publish-credential revoke and status', () => {
     expect(events).toEqual([]);
   });
 
-  it('still revokes when the ledger read fails, and reports the revoke', async () => {
+  it('deletes the secret but refuses to claim success when the ledger read fails', async () => {
     const recorded = createPort();
     const events: PublishAuditInput[] = [];
     const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
@@ -336,11 +336,18 @@ describe('publish-credential revoke and status', () => {
       inspect: async () => err(appError('INTERNAL_ERROR', 'The ledger is unavailable')),
     });
     await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({
-      code: 0,
-      output: 'publish credential revoked: lease-1',
+      code: 1,
+      output: '',
+      errors: 'publish-credential-unverified: The publish credential entry for lease-1 was deleted, but the lease could not be confirmed',
     });
+    // The emergency delete still ran; only the claim is withheld.
     expect(recorded.revokes).toEqual(['lease-1']);
-    expect(events).toMatchObject([{ action: 'publish_credential_revoke', resultCode: 'SUCCESS' }]);
+    expect(events).toMatchObject([{
+      action: 'publish_credential_revoke',
+      leaseId: 'lease-1',
+      resultCode: 'UNVERIFIED',
+      reason: 'ledger-unreadable',
+    }]);
   });
 
   it('still revokes an already-revoked lease when inspect reports it', async () => {

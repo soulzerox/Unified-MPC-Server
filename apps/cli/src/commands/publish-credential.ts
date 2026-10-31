@@ -297,12 +297,26 @@ async function runRevoke(
   if (!revoked.ok) return fail(revoked.error, writeError);
   if (runner.inspect !== undefined) {
     const existing = await runner.inspect(leaseId);
+    if (!existing.ok) {
+      // The secret is deleted at this point, but the ledger cannot say that
+      // this id ever named a lease. A plain SUCCESS would let a typo read as a
+      // completed revocation, so record the delete without claiming success.
+      await recordPublishAudit(runner.audit, {
+        actorId: 'publish-credential-cli',
+        actorName: 'unified-mpc publish-credential',
+        action: 'publish_credential_revoke',
+        leaseId,
+        resultCode: 'UNVERIFIED',
+        reason: 'ledger-unreadable',
+      });
+      return fail(unverifiedRevoke(leaseId), writeError);
+    }
     // Only a successful read of "no row" refuses the claim. The secret is
     // already gone at this point, so the refusal costs nothing; it stops a
     // mistyped id from printing success and writing a durable SUCCESS row for
     // a lease that was never revoked (#297 S2d). An already-revoked lease
     // still reports success, because revocation is idempotent.
-    if (existing.ok && existing.value === null) return fail(unknownLease(leaseId), writeError);
+    if (existing.value === null) return fail(unknownLease(leaseId), writeError);
   }
   // Revocation is idempotent, so the audit row records the operator action
   // without claiming the lease was live.
@@ -417,6 +431,15 @@ function unknownLease(leaseId: string): AppError {
     `No publish credential lease is recorded for ${leaseId}`,
     false,
     { reason: 'publish-credential-not-found' },
+  );
+}
+
+function unverifiedRevoke(leaseId: string): AppError {
+  return appError(
+    'INTERNAL_ERROR',
+    `The publish credential entry for ${leaseId} was deleted, but the lease could not be confirmed`,
+    true,
+    { reason: 'publish-credential-unverified' },
   );
 }
 

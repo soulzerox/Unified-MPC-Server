@@ -87,6 +87,13 @@ therefore reported (fail closed) instead of being trusted as the literal. An
 empty prefix is legal in Git and matches every target, so it is reported too.
 `git remote get-url` already returns the rewritten URL for a remote name.
 
+This is a guard-level contract. The `git` tool still refuses a positional target
+before it spawns: `resolveDefaultBranches` looks the argument up as a remote name
+and denies with `Repository default branch could not be resolved safely` when it
+does not resolve. So the change makes `push-credential-helper` stop
+mis-describing a local push, it does not make `git push /tmp/bare.git main` an
+accepted `git` tool form.
+
 Two facts make a model-driven `git push` unsupportable even with approval:
 
 1. The helper runs in the same process tree as the model's command. Approval does

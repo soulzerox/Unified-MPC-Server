@@ -184,7 +184,8 @@ outlived its TTL, for example when the sweep could not delete its secret, and
 
 `grant` writes a `publish_credential_grant` audit row, `revoke` writes
 `publish_credential_revoke` with result code `SUCCESS`, or `UNVERIFIED` when the
-secret was deleted but the lease could not be read back, and a credential-bound
+secret was deleted but the lease could not be read back or marked revoked (and
+also when the Secret Service delete itself failed), and a credential-bound
 publish writes
 `publish_credential_use`. The audit rows carry lease metadata only; the secret
 never enters them.

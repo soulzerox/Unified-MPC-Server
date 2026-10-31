@@ -57,13 +57,9 @@ pnpm cli doctor
 ไบนารี CLI (`apps/cli`) สามารถเรียกใช้ผ่าน `pnpm cli <subcommand>` หรือลิงก์ผ่าน `unified-mpc`:
 
 ### 3.1 ตรวจสอบสถานะระบบ (`status`)
-แสดงข้อมูลภาพรวมของระบบ, ค่าคอนฟิก, แพลตฟอร์ม, และสถานะของ Gateway:
+แสดงจำนวน workspace ที่ลงทะเบียนไว้ในฐานข้อมูล (การวินิจฉัยเชิงลึกใช้ `doctor`):
 ```bash
 pnpm cli status
-```
-*ต้องการผลลัพธ์เป็น JSON:*
-```bash
-pnpm cli status --json
 ```
 
 ### 3.2 วินิจฉัยสภาพแวดล้อม (`doctor`)
@@ -95,7 +91,7 @@ pnpm cli install skill my-skill ./path/to/my-skill --targets antigravity --scope
 pnpm cli install server sqlite-db \
   --transport stdio \
   --command npx \
-  --args "-y mcp-server-sqlite --db /tmp/test.db" \
+  --args "-y,mcp-server-sqlite,--db,/tmp/test.db" \
   --targets cursor
 ```
 

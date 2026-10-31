@@ -190,9 +190,8 @@ pnpm cli doctor
 The binary can be invoked directly via `pnpm cli <command>` or linked globally as `unified-mpc`:
 
 ```bash
-# Display system overview, configurations, and gateway status
+# Display how many workspaces are registered
 unified-mpc status
-unified-mpc status --json
 
 # Run comprehensive system diagnostics and path permission checks
 unified-mpc doctor
@@ -209,7 +208,7 @@ unified-mpc install skill remote-skill https://github.com/example/remote-skill.g
 unified-mpc install server sqlite-db \
   --transport stdio \
   --command npx \
-  --args "-y mcp-server-sqlite --db /tmp/dev.db" \
+  --args "-y,mcp-server-sqlite,--db,/tmp/dev.db" \
   --targets antigravity,cursor
 
 # Or register a self-contained/prebuilt MCP server from an HTTPS Git repository

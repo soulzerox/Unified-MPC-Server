@@ -12,11 +12,10 @@ unified-mpc <command> [subcommand] [flags]
 ## 1. System Commands
 
 ### `unified-mpc status`
-Outputs overall server health, active SQLite database state, and registered workspace inventory.
+Prints the number of registered workspaces. For diagnostics, use `doctor`.
 ```bash
 $ unified-mpc status
-Unified MPC Server status:
-  workspaces: 1
+workspaces: 1
 ```
 
 ### `unified-mpc doctor`

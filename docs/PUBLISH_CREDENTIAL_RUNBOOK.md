@@ -91,6 +91,8 @@ secret from it.
    ```
 
    Revocation is idempotent and writes a `publish_credential_revoke` audit row.
+   A lease id that was never granted is refused with no row: only a real
+   revocation is reported as one.
 3. **Grant the replacement lease** with the procedure in section 1. The new
    lease is a new id; never reuse the old id.
 4. **Preflight the exact target** with `git_publish_preflight`. A live lease on
@@ -142,8 +144,8 @@ reclaimed count and duration. The secret never enters the audit input.
 |---|---|
 | `publish_credential_grant` | After `grant` stored the lease and secret. A failed grant writes no row. |
 | `publish_credential_use` | Exactly once per credential-bound `git_publish` spend, after the lease is revoked, with the push result and reason. |
-| `publish_credential_revoke` | After `revoke` completed (including an idempotent revoke of an already-revoked lease). |
-| `publish_credential_sweep` | Only when the sweep reclaimed at least one lease, or when the sweep itself raised an error. Empty sweeps stay quiet; the SQLite repository keeps a row whose secret delete failed for the next sweep, so a retry is not audited until it actually reclaims something. |
+| `publish_credential_revoke` | After `revoke` completed. An already-revoked lease still succeeds, because revocation is idempotent. A lease id that was never granted is refused and writes no row. |
+| `publish_credential_sweep` | Only when the sweep reclaimed at least one lease. Empty sweeps stay quiet; the SQLite repository keeps a row whose secret delete failed for the next sweep, so a retry is not audited until it actually reclaims something. A failed ledger read or secret-store outage is also quiet, because `sweepExpired` fails closed to 0 — during an outage, check `status` and the logs rather than expecting a sweep row. |
 
 Inspect the trail:
 

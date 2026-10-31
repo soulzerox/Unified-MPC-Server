@@ -73,8 +73,9 @@ export interface PublishCredentialCommandRunner {
   readonly readSecret: () => Promise<Result<string>>;
   readonly resolveDeployment: () => Promise<Result<PublishCredentialDeployment>>;
   /**
-   * Non-secret lifecycle audit sink (#297 S2d). The runtime wires the same
-   * `AuditService` the publish path uses; tests leave it out.
+   * Non-secret lifecycle audit sink (#297 S2d). The credential CLI runs in its
+   * own process, so it builds its own `AuditService` over the same SQLite
+   * ledger the stdio runtime writes to; tests leave this out.
    */
   readonly audit?: PublishAuditSink;
   readonly now?: () => number;
@@ -288,6 +289,15 @@ async function runRevoke(
   writeError: (text: string) => void,
 ): Promise<number> {
   const now = runner.now?.() ?? Date.now();
+  // An unknown lease is refused instead of reported as revoked: on the
+  // emergency-rotation path a mistyped id would otherwise print success and
+  // leave a durable SUCCESS row while the leaked token stays live (#297 S2d).
+  // An already-revoked lease still succeeds, because revocation is idempotent.
+  if (runner.inspect !== undefined) {
+    const existing = await runner.inspect(leaseId);
+    if (!existing.ok) return fail(existing.error, writeError);
+    if (existing.value === null) return fail(unknownLease(leaseId), writeError);
+  }
   const revoked = await runner.credential.revoke(leaseId, now);
   if (!revoked.ok) return fail(revoked.error, writeError);
   // Revocation is idempotent, so the audit row records the operator action
@@ -395,6 +405,15 @@ function unsupported(message: string): AppError {
 
 function invalidSecret(message: string): AppError {
   return appError('INVALID_INPUT', message, false, { reason: 'publish-credential-invalid' });
+}
+
+function unknownLease(leaseId: string): AppError {
+  return appError(
+    'INVALID_INPUT',
+    `No publish credential lease is recorded for ${leaseId}`,
+    false,
+    { reason: 'publish-credential-not-found' },
+  );
 }
 
 function fail(error: AppError, writeError: (text: string) => void): number {

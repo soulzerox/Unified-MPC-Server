@@ -406,9 +406,10 @@ secret to an unapproved host.
     throws cannot change the publish result.
 23. `grant` and `revoke` write their lifecycle rows only after the state change;
     an audit insert that throws cannot change the command result.
-24. The sweep writes a row only when it reclaimed a lease or failed; the
-    runbook documents inspection, rotation, emergency revocation and the audit
-    queries.
+24. The sweep writes a row only when it reclaimed a lease, or when the sweep
+    port itself raised; the runbook documents inspection, rotation, emergency
+    revocation and the audit queries, and states that the SQLite adapter fails
+    closed to a zero sweep so an outage is quiet rather than audited.
 
 ## 8. Slices
 
@@ -481,7 +482,7 @@ What S2d actually shipped, so an operator can explain every credential:
 | Audit projection | `AuditService.recordPublish` in `packages/audit/src/audit-service.ts`; the existing redactor still runs over `targetSummary` and `metadata` |
 | Publish spend row | `GitService.publish` writes one `publish_credential_use` row in `finally`, after revoke, for a bound receipt: lease, approval, branch, expected SHA, hosts, username, fingerprint, result and reason |
 | Grant and revoke rows | `unified-mpc publish-credential` writes `publish_credential_grant` / `publish_credential_revoke` after the state change; a failed grant or revoke writes none |
-| Sweep rows | `startPublishCredentialSweep` writes `publish_credential_sweep` when it reclaimed a lease or failed; an empty hourly sweep stays quiet |
+| Sweep rows | `startPublishCredentialSweep` writes `publish_credential_sweep` when it reclaimed a lease or the sweep port raised; an empty hourly sweep stays quiet, and the SQLite adapter fails closed to a zero sweep instead of raising |
 | Failure policy | A failed audit insert never changes a publish, grant, revoke or sweep result; the credential state change stands |
 | Operator guide | `docs/PUBLISH_CREDENTIAL_RUNBOOK.md`: inspection, normal rotation, emergency revocation, audit queries and troubleshooting |
 

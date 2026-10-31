@@ -312,6 +312,42 @@ describe('publish-credential revoke and status', () => {
     ]);
   });
 
+  it('refuses an unknown lease instead of reporting a revoke that never happened', async () => {
+    const recorded = createPort();
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const runner = createRunner(recorded.port, { audit, inspect: async () => ok(null) });
+    await expect(run(['revoke', 'lease-unknown'], runner)).resolves.toMatchObject({
+      code: 1,
+      output: '',
+      errors: 'publish-credential-not-found: No publish credential lease is recorded for lease-unknown',
+    });
+    expect(recorded.revokes).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('still revokes an already-revoked lease when inspect reports it', async () => {
+    const recorded = createPort();
+    const events: PublishAuditInput[] = [];
+    const audit = { recordPublish: async (input: PublishAuditInput): Promise<void> => { events.push(input); } };
+    const lease = {
+      leaseId: 'lease-1',
+      workspaceId: 'workspace-1',
+      remote: 'origin',
+      hosts: ['github.com'],
+      username: 'git',
+      createdAt: NOW - 1_000,
+      expiresAt: NOW + 900_000,
+    };
+    const runner = createRunner(recorded.port, {
+      audit,
+      inspect: async () => ok({ lease, revokedAt: NOW - 500 }),
+    });
+    await expect(run(['revoke', 'lease-1'], runner)).resolves.toMatchObject({ code: 0 });
+    expect(recorded.revokes).toEqual(['lease-1']);
+    expect(events).toMatchObject([{ action: 'publish_credential_revoke', resultCode: 'SUCCESS' }]);
+  });
+
   it('prints lease metadata and state but never the secret', async () => {
     const recorded = createPort();
     const result = await run(['status', 'lease-1'], createRunner(recorded.port, {

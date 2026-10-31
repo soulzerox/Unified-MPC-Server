@@ -78,6 +78,9 @@ export function startPublishCredentialSweep(
       return swept;
     } catch (error: unknown) {
       options.onError?.(error);
+      // Unreachable through the shipped SQLite adapter, which fails its own
+      // reads closed to a zero sweep instead of raising: this branch guards a
+      // port that can raise, so an outage stays audited rather than silent.
       await recordPublishCredentialSweep(options.audit, { reclaimed: 0, failed: true });
       return 0;
     }

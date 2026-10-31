@@ -19,12 +19,10 @@ workspaces: 1
 ```
 
 ### `unified-mpc doctor`
-Performs comprehensive operational diagnostics on core databases, capabilities, and system dependencies.
+Performs comprehensive operational diagnostics on core databases, capabilities, and system dependencies. It prints one `[STATUS] id: message` line per check and exits non-zero when a required check fails.
 ```bash
 $ unified-mpc doctor
-Unified MPC Doctor Report:
-  [PASS] database: Unified MCP core operational
-Exit code: 0
+[PASS] database: Unified MCP core operational
 ```
 
 ---
@@ -123,19 +121,11 @@ unified-mpc web --port 3000
 ## 6. Headless Tool Execution Commands
 
 ### `unified-mpc tools list`
-Outputs JSON list of all available tools across connected downstream MCP servers.
+Prints one tab-separated `name<TAB>description` line per available downstream tool.
 ```bash
 $ unified-mpc tools list
-[
-  {
-    "name": "read_file",
-    "description": "Read file contents"
-  },
-  {
-    "name": "tool_categories",
-    "description": "List tool categories"
-  }
-]
+read_file	Read file contents
+tool_categories	List tool categories
 ```
 
 ### `unified-mpc tools call`

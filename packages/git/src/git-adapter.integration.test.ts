@@ -477,6 +477,31 @@ describe('GitAdapter integration', () => {
     });
   }, 20_000);
 
+  it('judges an inline push target by its own transport instead of assuming a helper', async () => {
+    if (!gitAvailable) return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));
+    temporaryRoots.push(root);
+    await execFileAsync('git', ['init'], { cwd: root, windowsHide: true });
+    await execFileAsync('git', ['config', 'credential.helper', '!true'], { cwd: root, windowsHide: true });
+    const bare = path.join(root, 'bare.git');
+    await execFileAsync('git', ['init', '--bare', bare], { cwd: root, windowsHide: true });
+
+    const adapter = new GitAdapter(new DirectGitRunner());
+    // A positional target has no configured URL to resolve. A local path and a
+    // file:// URL can never consult a helper, so the configured helper above
+    // must not deny them.
+    await expect(adapter.validatePushSafety(root, bare)).resolves.toMatchObject({ ok: true });
+    await expect(adapter.validatePushSafety(root, `file://${bare}`)).resolves.toMatchObject({ ok: true });
+    // An HTTP(S) positional target does consult one, so it stays guarded.
+    await expect(adapter.validatePushSafety(root, 'https://example.invalid/owner/repo.git')).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        details: { reason: 'push-credential-helper', key: 'credential.helper' },
+      },
+    });
+  }, 15_000);
+
   it('reduces a host-only credential helper scope to the URL key pattern', async () => {
     if (!gitAvailable) return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-git-'));

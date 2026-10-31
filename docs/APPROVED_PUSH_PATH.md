@@ -68,6 +68,11 @@ denial, the key redaction, and the rest of the executable-config checks are
 unchanged there, and the approved path in this document is still the only way to
 publish over an authenticated HTTP(S) transport.
 
+A positional target (`git push file:///tmp/bare.git main`, `git push
+/tmp/bare.git main`) is not a remote name, so there is no configured URL to
+resolve: the target itself is classified by the same table. Only a remote name
+such as `origin` is resolved through its push URLs.
+
 Two facts make a model-driven `git push` unsupportable even with approval:
 
 1. The helper runs in the same process tree as the model's command. Approval does

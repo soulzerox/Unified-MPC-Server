@@ -1041,7 +1041,12 @@ export class GitAdapter {
    * helper skip the credential check.
    */
   private async pushTargetsMayUseCredentialHelper(cwd: string, remote: string, signal?: AbortSignal): Promise<boolean> {
-    if (!isValidRemoteName(remote)) return true;
+    // An inline positional target (`git push file:///tmp/bare.git main`) is not
+    // a remote name, so there is no configured URL to resolve: judge the target
+    // itself. Only HTTP(S) and ext:: consult a helper, so a `file://` URL or a
+    // local path must not be denied for a helper that can never run (#548
+    // review); an unsupported transport stays fail-closed.
+    if (!isValidRemoteName(remote)) return !isSupportedRemoteTarget(remote) || usesCredentialHelper(remote);
     const pushUrls = await this.runner.run(['remote', 'get-url', '--push', '--all', remote], cwd, this.signalOptions(signal));
     if (pushUrls.exitCode !== 0) return true;
     const targets = pushUrls.stdout.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0);

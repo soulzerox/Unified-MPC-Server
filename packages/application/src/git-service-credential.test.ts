@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PublishAuditInput, PublishAuditSink } from '@unified-mpc/audit';
 import {
+  appError,
   fingerprintPublishCredentialHosts,
   type PublishApprovalAuthorityPort,
   type PublishApprovalBinding,
@@ -72,6 +73,8 @@ class FakeCredentialPort implements PublishCredentialPort {
   public readonly live = new Map<string, PublishCredentialMaterial>();
   public readonly revoked: Array<{ leaseId: string; now: number }> = [];
   public findLiveCalls = 0;
+  public failRevoke = false;
+  public throwRevoke = false;
 
   public async grant(): Promise<Result<void>> {
     return { ok: true, value: undefined };
@@ -94,6 +97,10 @@ class FakeCredentialPort implements PublishCredentialPort {
 
   public async revoke(leaseId: string, now: number): Promise<Result<void>> {
     this.revoked.push({ leaseId, now });
+    if (this.throwRevoke) throw new Error('revoke crashed');
+    if (this.failRevoke) {
+      return { ok: false, error: appError('INTERNAL_ERROR', 'The ledger is unavailable') };
+    }
     this.live.delete(leaseId);
     return { ok: true, value: undefined };
   }
@@ -188,6 +195,7 @@ describe('GitService publish credentials', () => {
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: new FakeApprovalLedger(),
       publishCredentials: new FakeCredentialPort(),
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -207,6 +215,7 @@ describe('GitService publish credentials', () => {
     const service = new GitService(repository(workspace), undefined, fake.adapter, {
       publishApprovals: new FakeApprovalLedger(),
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -228,6 +237,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -255,6 +265,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -314,6 +325,79 @@ describe('GitService publish credentials', () => {
       durationMs: 0,
     }]);
     expect(JSON.stringify(audit.events)).not.toContain('secret-token');
+  });
+
+  it('flags a failed lease release without changing the publish result', async () => {
+    const workspace = await createWorkspace();
+    const credentials = new FakeCredentialPort();
+    credentials.live.set('lease-1', material());
+    credentials.failRevoke = true;
+    const ledger = new FakeApprovalLedger();
+    ledger.records.set('approval-1', {
+      ...bindingRequest,
+      approvalId: 'approval-1',
+      approvedBy: 'host',
+      approvedAt: NOW,
+      expiresAt: NOW + 60_000,
+      leaseId: 'lease-1',
+      pushUrlFingerprint: FINGERPRINT,
+    });
+    const fake = adapter();
+    const audit = new RecordingAudit();
+    const service = new GitService(repository(workspace), undefined, fake.adapter, {
+      publishApprovals: ledger,
+      publishApprovalAuthority: ledger,
+      publishCredentials: credentials,
+      publishAudit: audit,
+      now: (): number => NOW,
+    });
+
+    // `revoke` reports failure as an error result, not a throw: the push still
+    // succeeds and the row records that the lease outlived the spend.
+    await expect(service.publish(actor, { ...bindingRequest, approvalId: 'approval-1' }))
+      .resolves.toMatchObject({ ok: true, value: { approvalId: 'approval-1' } });
+    expect(credentials.revoked).toEqual([{ leaseId: 'lease-1', now: NOW }]);
+    expect(audit.events).toMatchObject([{
+      action: 'publish_credential_use',
+      resultCode: 'SUCCESS',
+      leaseRevokeFailed: true,
+    }]);
+  });
+
+  it('flags a lease release that throws instead of returning a result', async () => {
+    const workspace = await createWorkspace();
+    const credentials = new FakeCredentialPort();
+    credentials.live.set('lease-1', material());
+    credentials.throwRevoke = true;
+    const ledger = new FakeApprovalLedger();
+    ledger.records.set('approval-1', {
+      ...bindingRequest,
+      approvalId: 'approval-1',
+      approvedBy: 'host',
+      approvedAt: NOW,
+      expiresAt: NOW + 60_000,
+      leaseId: 'lease-1',
+      pushUrlFingerprint: FINGERPRINT,
+    });
+    const fake = adapter();
+    const audit = new RecordingAudit();
+    const service = new GitService(repository(workspace), undefined, fake.adapter, {
+      publishApprovals: ledger,
+      publishApprovalAuthority: ledger,
+      publishCredentials: credentials,
+      publishAudit: audit,
+      now: (): number => NOW,
+    });
+
+    // A throwing release is the other failure shape: the row must still say the
+    // lease outlived the spend, and the completed push must still stand.
+    await expect(service.publish(actor, { ...bindingRequest, approvalId: 'approval-1' }))
+      .resolves.toMatchObject({ ok: true, value: { approvalId: 'approval-1' } });
+    expect(audit.events).toMatchObject([{
+      action: 'publish_credential_use',
+      resultCode: 'SUCCESS',
+      leaseRevokeFailed: true,
+    }]);
   });
 
   it('revokes the lease after a failed push and keeps the failure', async () => {
@@ -404,6 +488,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -437,6 +522,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 
@@ -468,6 +554,7 @@ describe('GitService publish credentials', () => {
       publishApprovals: ledger,
       publishApprovalAuthority: ledger,
       publishCredentials: credentials,
+      publishAudit: new RecordingAudit(),
       now: (): number => NOW,
     });
 

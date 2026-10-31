@@ -145,12 +145,13 @@ audit trail and the expiry sweep stay consistent.
 `publish_credential_*` rows are written to `audit_events`. The metadata is a
 closed list of non-secret fields: lease id, workspace, remote, hosts, username,
 approval id, branch, expected SHA, push-URL fingerprint, result code, reason,
-reclaimed count and duration. The secret never enters the audit input.
+`leaseRevokeFailed`, reclaimed count and duration. The secret never enters the
+audit input.
 
 | Action | When it is written |
 |---|---|
 | `publish_credential_grant` | After `grant` stored the lease and secret. A failed grant writes no row. |
-| `publish_credential_use` | Exactly once per credential-bound `git_publish` spend, after the lease is revoked, with the push result and reason. |
+| `publish_credential_use` | Exactly once per credential-bound `git_publish` spend, after the lease release attempt, with the push result and reason. A failed release sets `leaseRevokeFailed: true` on the row; the push result still stands and the TTL sweep reclaims the lease. |
 | `publish_credential_revoke` | After `revoke` completed. An already-revoked lease still succeeds, because revocation is idempotent. A lease id that was never granted is refused and writes no row. If the secret delete succeeds but the lease cannot be read back, the row carries result code `UNVERIFIED` and the command exits non-zero. |
 | `publish_credential_sweep` | Only when the sweep reclaimed at least one lease. Empty sweeps stay quiet; the SQLite repository keeps a row whose secret delete failed for the next sweep, so a retry is not audited until it actually reclaims something. A failed ledger read or secret-store outage is also quiet, because `sweepExpired` fails closed to 0 — during an outage, check `status` and the logs rather than expecting a sweep row. |
 
@@ -162,7 +163,8 @@ SELECT timestamp,
        action,
        result_code,
        json_extract(metadata_json, '$.leaseId') AS lease_id,
-       json_extract(metadata_json, '$.reason') AS reason
+       json_extract(metadata_json, '$.reason') AS reason,
+       json_extract(metadata_json, '$.leaseRevokeFailed') AS lease_revoke_failed
 FROM audit_events
 WHERE action LIKE 'publish_credential%'
 ORDER BY timestamp DESC
@@ -194,7 +196,7 @@ row per publish.
 | `push-credential-helper` | The guard still refuses the operation, or the helper is not the host-owned executable of the running release. Check the deployment and the remote transport. |
 | `publish-credential-not-found` | The lease id is not in the ledger. It was mistyped, or its TTL passed and the pre-command sweep already reclaimed it. Nothing was revoked; check the ledger query in section 4. |
 | `publish-credential-unverified` | The Secret Service entry was deleted, but the ledger could not confirm the lease. The token is gone from this host; check the `UNVERIFIED` audit row and delete the provider token if the host cannot be trusted. |
-| Lease stays `active` after a publish | The push may have failed before the spend, or the revoke failed and the TTL sweep will reclaim it. Inspect the publish result and the audit row, then `revoke` explicitly if needed. |
+| Lease stays `active` after a publish | The push may have failed before the spend, or the release failed and the TTL sweep will reclaim it. Inspect the publish result and the `publish_credential_use` row: `leaseRevokeFailed: true` means the release failed, so `revoke` explicitly if the lease must die now. |
 
 ---
 

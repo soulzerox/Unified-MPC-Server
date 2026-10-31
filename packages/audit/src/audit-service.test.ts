@@ -136,7 +136,7 @@ describe('AuditService', () => {
       branch: 'goal/publish', expectedSha: 'a'.repeat(40),
       hosts: ['github.com'], username: 'git',
       pushUrlFingerprint: `sha256:${'b'.repeat(64)}`,
-      resultCode: 'SUCCESS', durationMs: 42,
+      resultCode: 'SUCCESS', durationMs: 42, leaseRevokeFailed: true,
     });
 
     expect(repository.events[0]).toMatchObject({
@@ -150,6 +150,7 @@ describe('AuditService', () => {
         branch: 'goal/publish', expectedSha: 'a'.repeat(40),
         hosts: ['github.com'], username: 'git',
         pushUrlFingerprint: `sha256:${'b'.repeat(64)}`,
+        leaseRevokeFailed: true,
       },
     });
     const serialized = JSON.stringify(repository.events[0]);

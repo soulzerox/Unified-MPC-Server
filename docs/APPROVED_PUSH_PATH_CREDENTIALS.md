@@ -480,7 +480,7 @@ What S2d actually shipped, so an operator can explain every credential:
 |---|---|
 | Audit input and port | `PublishAuditInput` and `PublishAuditSink` in `packages/audit/src/audit-types.ts`; the input is a closed list of non-secret fields, so a caller cannot pass the secret through it |
 | Audit projection | `AuditService.recordPublish` in `packages/audit/src/audit-service.ts`; the existing redactor still runs over `targetSummary` and `metadata` |
-| Publish spend row | `GitService.publish` writes one `publish_credential_use` row in `finally`, after revoke, for a bound receipt: lease, approval, branch, expected SHA, hosts, username, fingerprint, result and reason |
+| Publish spend row | `GitService.publish` writes one `publish_credential_use` row in `finally`, after the release attempt, for a bound receipt: lease, approval, branch, expected SHA, hosts, username, fingerprint, result and reason, plus `leaseRevokeFailed` when that release failed |
 | Grant and revoke rows | `unified-mpc publish-credential` writes `publish_credential_grant` / `publish_credential_revoke` after the state change; a failed grant or revoke writes none |
 | Sweep rows | `startPublishCredentialSweep` writes `publish_credential_sweep` when it reclaimed a lease or the sweep port raised; an empty hourly sweep stays quiet, and the SQLite adapter fails closed to a zero sweep instead of raising |
 | Failure policy | A failed audit insert never changes a publish, grant, revoke or sweep result; the credential state change stands |

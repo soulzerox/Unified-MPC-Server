@@ -145,7 +145,8 @@ audit trail and the expiry sweep stay consistent.
 `publish_credential_*` rows are written to `audit_events`. The metadata is a
 closed list of non-secret fields: lease id, workspace, remote, hosts, username,
 approval id, branch, expected SHA, push-URL fingerprint, result code, reason,
-reclaimed count and duration. The secret never enters the audit input.
+`leaseRevokeFailed`, reclaimed count and duration. The secret never enters the
+audit input.
 
 | Action | When it is written |
 |---|---|
@@ -162,7 +163,8 @@ SELECT timestamp,
        action,
        result_code,
        json_extract(metadata_json, '$.leaseId') AS lease_id,
-       json_extract(metadata_json, '$.reason') AS reason
+       json_extract(metadata_json, '$.reason') AS reason,
+       json_extract(metadata_json, '$.leaseRevokeFailed') AS lease_revoke_failed
 FROM audit_events
 WHERE action LIKE 'publish_credential%'
 ORDER BY timestamp DESC

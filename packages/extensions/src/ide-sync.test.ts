@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_POLICIES, IdeSyncService } from './ide-sync.js';
+import { DEFAULT_POLICIES, IdeSyncService, type SyncTarget } from './ide-sync.js';
 import { configuredPolicies } from './runtime-policy.js';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 
@@ -73,6 +73,60 @@ describe('IdeSyncService', () => {
     expect(compiled).toContain('| P2 | session-start:ask-matt | ask-matt |');
   });
 
+  it('rejects an unknown sync target instead of reporting a silent no-op', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-'));
+    temporaryRoots.push(root);
+    const service = new IdeSyncService({
+      homeDir: path.join(root, 'home'),
+      workspaceRoot: path.join(root, 'workspace'),
+    });
+
+    // The CLI casts `--targets` values into the closed SyncTarget union, so a
+    // typo reaches the service as an unknown name. Reporting success with zero
+    // files would leave the user believing the policy had been synced.
+    const result = await service.sync(['curser' as SyncTarget]);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('UNSUPPORTED_TARGET');
+    expect(result.error.message).toBe(
+      'Unsupported target(s): curser. Supported targets: all, cursor, cline, claude, antigravity, opencode, codex, omp, agents',
+    );
+  });
+
+  it('rejects an empty sync target list instead of reporting a silent no-op', async () => {
+    const service = new IdeSyncService({});
+
+    const result = await service.sync([]);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('INVALID_INPUT');
+    expect(result.error.message).toBe('At least one target must be specified');
+  });
+
+  it('synchronizes the documented codex target into the Codex home and the workspace AGENTS.md', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const service = new IdeSyncService({ homeDir: home, workspaceRoot: workspace });
+
+    const result = await service.sync(['codex']);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Codex reads `$CODEX_HOME/AGENTS.md` globally and `<repo>/AGENTS.md` per project.
+    expect(await readFile(path.join(home, '.codex', 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+    expect(await readFile(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+    expect(result.value.updatedFiles).toEqual([
+      path.join(workspace, 'AGENTS.md'),
+      path.join(home, '.codex', 'AGENTS.md'),
+    ]);
+    // The OpenCode global file belongs to the opencode target, not to codex.
+    await expect(readFile(path.join(home, '.config', 'opencode', 'AGENTS.md'), 'utf8')).rejects.toThrow();
+  });
+
   it('atomically synchronizes policies across all universal clients', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-'));
     temporaryRoots.push(root);
@@ -139,6 +193,11 @@ describe('IdeSyncService', () => {
     const ompWsFile = path.join(workspace, '.omp', 'system.md');
     const ompWsContent = await readFile(ompWsFile, 'utf8');
     expect(ompWsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
+
+    // 7. Codex: ~/.codex/AGENTS.md
+    const codexGlobalFile = path.join(home, '.codex', 'AGENTS.md');
+    const codexGlobalContent = await readFile(codexGlobalFile, 'utf8');
+    expect(codexGlobalContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
   });
 
   it('updates policy block idempotently without duplicating content', async () => {

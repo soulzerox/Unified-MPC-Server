@@ -15,7 +15,9 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = RUNTIME_DEFAULT_POLICIES
 export const POLICY_BLOCK_START = '<!-- MCP-POLICY-START -->';
 export const POLICY_BLOCK_END = '<!-- MCP-POLICY-END -->';
 
-export type SyncTarget = 'all' | 'cursor' | 'cline' | 'claude' | 'antigravity' | 'opencode' | 'omp' | 'agents';
+export const SYNC_TARGETS = ['all', 'cursor', 'cline', 'claude', 'antigravity', 'opencode', 'codex', 'omp', 'agents'] as const;
+
+export type SyncTarget = (typeof SYNC_TARGETS)[number];
 
 export interface IdeSyncOptions {
   readonly homeDir?: string;
@@ -73,6 +75,8 @@ export class IdeSyncService {
   }
 
   public async sync(targets: readonly SyncTarget[] = ['all']): Promise<Result<{ readonly updatedFiles: readonly string[] }>> {
+    const invalidTargets = validateSyncTargets(targets);
+    if (invalidTargets !== undefined) return err(invalidTargets);
     const updatedFiles: string[] = [];
     const isAll = targets.includes('all');
     const compiled = this.compile((await this.policySnapshot()).policies);
@@ -123,16 +127,25 @@ export class IdeSyncService {
         }
       }
 
-      // 4. OpenCode / Freebuff / Agents / Codex
-      if (isAll || targets.includes('opencode') || targets.includes('agents')) {
+      // 4. OpenCode / Freebuff / Agents / Codex share the AGENTS.md convention.
+      if (isAll || targets.includes('opencode') || targets.includes('agents') || targets.includes('codex')) {
         if (this.workspace !== undefined) {
           const agentsFile = path.join(this.workspace, 'AGENTS.md');
           await updateFileWithBlock(agentsFile, compiled);
           updatedFiles.push(agentsFile);
         }
+      }
+      if (isAll || targets.includes('opencode') || targets.includes('agents')) {
         const opencodeAgents = path.join(this.home, '.config', 'opencode', 'AGENTS.md');
         await updateFileWithBlock(opencodeAgents, compiled);
         updatedFiles.push(opencodeAgents);
+      }
+      // Codex reads global instructions from `$CODEX_HOME/AGENTS.md`, which
+      // defaults to `~/.codex/AGENTS.md`.
+      if (isAll || targets.includes('codex')) {
+        const codexAgents = path.join(this.home, '.codex', 'AGENTS.md');
+        await updateFileWithBlock(codexAgents, compiled);
+        updatedFiles.push(codexAgents);
       }
 
       // 5. Claude
@@ -162,6 +175,25 @@ export class IdeSyncService {
       return err(appError('INTERNAL_ERROR', `Failed to sync IDE policies: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
+}
+
+/**
+ * `--targets` values reach the service through a type cast in the CLI, so an
+ * unknown name must be refused here. Without this check `sync` writes nothing
+ * and still reports success, leaving the caller convinced that the policy was
+ * synchronized. Mirrors the install and prune target validation.
+ */
+function validateSyncTargets(targets: readonly SyncTarget[]): ReturnType<typeof appError> | undefined {
+  if (targets.length === 0) return appError('INVALID_INPUT', 'At least one target must be specified');
+  const supported = new Set<string>(SYNC_TARGETS);
+  const invalid = [...new Set(targets.filter((target) => !supported.has(target)))];
+  if (invalid.length === 0) return undefined;
+  return appError(
+    'UNSUPPORTED_TARGET',
+    `Unsupported target(s): ${invalid.join(', ')}. Supported targets: ${SYNC_TARGETS.join(', ')}`,
+    false,
+    { invalidTargets: invalid.join(', '), supportedTargets: SYNC_TARGETS.join(', ') },
+  );
 }
 
 export function replaceOrAppendPolicyBlock(existing: string, policyBlock: string): string {

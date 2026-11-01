@@ -680,6 +680,41 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
       'utf8',
     )).rejects.toThrow();
   });
+
+  it('rejects a client-only Skill install whose declared name differs from the install name (#294)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-skill-name-client-target-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const sourceDir = path.join(root, 'renamed-source');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, 'SKILL.md'),
+      '---\nname: canonical-skill\ndescription: Canonical name\n---\n# Canonical\n',
+      'utf8',
+    );
+
+    const result = await new InstallerService({
+      homeDir: home,
+      dataDir: path.join(root, 'data'),
+    }).installSkill({
+      name: 'legacy-alias',
+      source: sourceDir,
+      targets: ['cursor'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('CONFLICT');
+    expect(result.error.details).toMatchObject({
+      reason: 'skill-name-conflict',
+      skillName: 'legacy-alias',
+      declaredName: 'canonical-skill',
+    });
+    await expect(readFile(
+      path.join(home, '.cursor', 'skills', 'legacy-alias', 'SKILL.md'),
+      'utf8',
+    )).rejects.toThrow();
+  });
 });
 
 describe('InstallerService - Server Ingestion Pipeline', () => {

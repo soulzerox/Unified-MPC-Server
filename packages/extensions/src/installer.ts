@@ -105,10 +105,10 @@ function validateTargets(targets: readonly InstallTarget[] | undefined): ReturnT
 }
 
 /**
- * Issue #294: a canonical Skill's ID comes from the install name while the
- * catalog advertises the `name:` declared in SKILL.md. The two must be the
- * same identity, otherwise a second install can advertise an existing Skill
- * under another ID and `skills_list` shows one logical name twice.
+ * Issue #294: a Skill's ID comes from the install name while every catalog
+ * advertises the `name:` declared in SKILL.md. The two must be the same
+ * identity, otherwise a second install can advertise an existing Skill under
+ * another ID and a catalog lists one logical name twice.
  */
 function declaredSkillNameConflict(content: string, installName: string): AppError | undefined {
   const declaredName = parseSkillMarkdown(content, installName).name.trim();
@@ -250,12 +250,20 @@ export class InstallerService {
       return err(appError('FILE_NOT_FOUND', `Skill source or SKILL.md not found at ${resolvedSource}`));
     }
 
+    let skillMarkdown: string;
     try {
-      const content = await readFile(sourceSkillFile, 'utf8');
-      parseSkillMarkdown(content, skillName);
+      skillMarkdown = await readFile(sourceSkillFile, 'utf8');
+      parseSkillMarkdown(skillMarkdown, skillName);
     } catch (error) {
       return err(appError('INVALID_INPUT', `Failed to parse skill markdown: ${error instanceof Error ? error.message : String(error)}`));
     }
+
+    // Issue #294: every catalog advertises the `name:` declared in SKILL.md, not
+    // the directory it was copied into, so the install name must be that same
+    // identity for *all* targets. Checking here keeps a client-only install from
+    // writing a second directory that a client lists under an existing name.
+    const declaredNameError = declaredSkillNameConflict(skillMarkdown, skillName);
+    if (declaredNameError !== undefined) return err(declaredNameError);
 
     const compatibility = await this.validateDeclaredCompatibility(sourceSkillDir);
     if (!compatibility.ok) return err(compatibility.error);
@@ -346,11 +354,8 @@ export class InstallerService {
           `Failed to validate staged canonical Skill markdown: ${error instanceof Error ? error.message : String(error)}`,
         ));
       }
-      // Issue #294: the catalog advertises the declared SKILL.md name, while
-      // the ID comes from the install name. Installing under any other name
-      // lets two IDs advertise one logical Skill, so keep them identical.
-      const declaredNameError = declaredSkillNameConflict(stagedSkillMarkdown, skillName);
-      if (declaredNameError !== undefined) return err(declaredNameError);
+      // Issue #294: the declared-name check ran once in installSkillFromResolvedSource
+      // for every target, before any directory was written.
 
       const compatibility = await this.validateDeclaredCompatibility(stagedSkillDir);
       if (!compatibility.ok) return err(compatibility.error);

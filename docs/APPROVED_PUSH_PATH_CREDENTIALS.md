@@ -235,13 +235,17 @@ tool and `git push` never pass one, so nothing on that surface relaxes.
 
 Both `publish` and `verify` are keyed to the receipt **this spawn consumed**, not
 to a live receipt: S1 commits `consumed_at` before the push spawns, so a
-"live receipt" condition could never hold at guard time. The publish path mints
-the `spendNonce` in the same step that consumes the receipt — that is
-`GitService.publish`, which owns `PublishApprovalAuthorityPort.consume` and
-hands the adapter only `{ remote, branch, expectedSha }` today. The nonce and
-the lease live in a registry owned by that service; the adapter receives the
-resulting one-shot `authorization` (which carries the approval id only so the
-guard can match it) and nothing else from the ledger.
+"live receipt" condition could never hold at guard time. `GitService.publish`
+consumes the receipt through `PublishApprovalAuthorityPort.consume` and hands the
+adapter `{ remote, branch, expectedSha }` plus, for a credential-bound receipt,
+`credential: { approvalId, material }`. `GitAdapter.publish` mints the
+`spendNonce` with `randomUUID` when it receives that credential, records
+`{ approvalId, leaseId, kind: 'publish', consumed: false }` in its own
+`publishAuthorizations` registry, and builds the guard's `authorization` from the
+same nonce. The guard flips the entry to `consumed: true` for the publish spawn,
+the adapter rewrites it as `kind: 'verify', consumed: true` before the
+verification read, and the `finally` block deletes it, so a nonce never outlives
+the sequence that owns it.
 The nonce is never accepted from a caller, a tool argument or the environment, and
 dies with the spawn. The two modes differ only in what the Git child is allowed
 to do — `publish` spawns the push, `verify` performs one `ls-remote` after it

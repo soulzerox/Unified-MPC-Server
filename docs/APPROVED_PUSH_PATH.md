@@ -244,12 +244,19 @@ head, sanitized targets, default branches and `protectedBranch`:
   "targets": ["https://github.com"],
   "defaultBranches": [],
   "protectedBranch": false,
-  "runtime": { "ready": false, "reason": "push-credential-helper", "key": "credential.<url>.helper" },
+  "runtime": { "ready": false, "reason": "publish-credential-required", "key": "credential.<url>.helper" },
   "approval": "missing"
 }
 ```
 
 A blocked verdict carries no branch list: the guard runs before any remote contact, so a runtime that cannot publish never triggers `ls-remote`. A ready preflight carries the resolved `defaultBranches` and the matching `protectedBranch`.
+
+`runtime.reason` is the service's verdict, not the guard's. When no live host
+credential lease exists and the guard answered `push-credential-helper`,
+`GitService.publishPreflight` reports `publish-credential-required`, because the
+step a publish is missing is the lease, not the configuration. `git push` on the
+same target still reports `push-credential-helper`: that surface has no lease
+path, so naming one would be a lie.
 
 It does not return a `policy` field: reaching the tool already means policy allowed
 the action, and the tool cannot publish anything. `approval` is read from

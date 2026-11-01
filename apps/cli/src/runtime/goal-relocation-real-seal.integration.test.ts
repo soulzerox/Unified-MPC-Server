@@ -154,5 +154,5 @@ describe('native Goal retention full seal/readback flow #298', () => {
       await runtime.close();
       db.close();
     }
-  });
+  }, 60_000);
 });

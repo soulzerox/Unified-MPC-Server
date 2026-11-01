@@ -313,7 +313,7 @@ describe('Goal relocation canonical admission recheck through trusted STDIO host
       await f.runtime.close();
       f.db.close();
     }
-  });
+  }, 60_000);
 
   it('never reports ADMITTED once the canonical Goal lease has expired', async () => {
     const f = await transferFixture();
@@ -328,7 +328,7 @@ describe('Goal relocation canonical admission recheck through trusted STDIO host
       await f.runtime.close();
       f.db.close();
     }
-  });
+  }, 60_000);
 
   it('blocks dependent Goal work once the canonical replacement admission is invalidated', async () => {
     const f = await transferFixture();

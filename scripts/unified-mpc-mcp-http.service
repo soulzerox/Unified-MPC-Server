@@ -13,11 +13,11 @@ Environment=UNIFIED_MPC_PORT=18765
 EnvironmentFile=-%h/.config/unified-mpc/service.env
 ExecStartPre=/usr/bin/test -d ${UNIFIED_MPC_WORKSPACE}
 ExecStart=/usr/bin/bash %h/.config/unified-mpc/launch-runtime.sh mcp-http ${UNIFIED_MPC_ROOT}
-ExecStartPost=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:18765/_unified-mpc/identity
+ExecStartPost=/usr/bin/curl --fail --silent --show-error --retry 120 --retry-delay 1 --retry-connrefused http://127.0.0.1:18765/_unified-mpc/identity
 Restart=on-failure
 RestartPreventExitStatus=78
 RestartSec=5
-TimeoutStartSec=45
+TimeoutStartSec=150
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

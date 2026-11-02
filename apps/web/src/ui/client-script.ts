@@ -1020,7 +1020,7 @@ export function getClientScriptJs(): string {
               const selected = document.createElement('span');
               selected.className = 'badge badge-optional';
               selected.style.marginLeft = '6px';
-              selected.textContent = 'Selected';
+              selected.textContent = 'Preferred goal';
               goalsCell.appendChild(selected);
             }
           }

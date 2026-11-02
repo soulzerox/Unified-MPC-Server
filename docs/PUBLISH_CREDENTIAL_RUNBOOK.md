@@ -17,7 +17,7 @@ commit. The secret lives only in the Linux Secret Service under
 | Requirement | Why |
 |---|---|
 | A promoted release | `publish-credential grant` refuses a canonical checkout or an unset `UNIFIED_MPC_ROOT` with `publish-credential-unsupported`. The helper must live in an immutable, host-owned release directory. |
-| Linux Secret Service | The secret is stored through `SecretToolSecretStore`. If it is unavailable, `grant` fails closed with `publish-credential-unavailable` and stores nothing. |
+| Linux Secret Service | The secret is stored through `SecretToolSecretStore`. A missing daemon fails closed with `publish-credential-unavailable`; a running daemon with a locked collection fails closed with `publish-credential-locked` and stores nothing either way. Neither case leaves a ledger row behind. |
 | One HTTPS push URL | A remote with zero or more than one push URL is refused (`publish-credential-unsupported` or `push-target-ambiguous`). SSH remotes keep the credential-free S1 path. |
 | A registered workspace | `--workspace` accepts the workspace id, root path or real root path. |
 | Provider-side token | Use a least-privilege token scoped to the repository and with an expiry. The host never mints or refreshes provider tokens. |
@@ -198,6 +198,7 @@ row per publish.
 | `publish-credential-unsupported` | The deployment is a canonical checkout, `UNIFIED_MPC_ROOT` is unset, the push URL is not HTTPS, or the remote has no push URL. Grant from a promoted release with exactly one HTTPS push URL. |
 | `push-target-ambiguous` | The remote resolves to more than one push URL. Name one target or switch the remote to one URL; credential targets cannot half-succeed. |
 | `publish-credential-unavailable` | No live lease, the lease expired or was revoked, the receipt names a different lease, or Secret Service is unavailable. From `revoke` it means the Secret Service delete itself failed (`UNVERIFIED` / `revoke-failed`): the token may still be live, so repair the Secret Service and retry `revoke` rather than granting a new lease. Otherwise inspect with `status`, then grant a new lease. |
+| `publish-credential-locked` | Secret Service is running but its collection is locked, so no lease can be written, read or revoked. Unlock the keyring (`gnome-keyring-daemon`/`secret-tool` in the same session) and retry. Nothing was stored: a failed grant also deletes the ledger row it wrote. From `open` this means `git_publish` cannot see the lease even though the ledger row may still exist, so the lease answers nothing until the collection is unlocked or the TTL passes. |
 | `publish-credential-required` | The preflight sees a helper-configured HTTP(S) target and no live lease. Grant a lease first. |
 | `publish-target-changed` | `remote.origin.url` changed after the grant or approval. Re-resolve the URL, grant for the new host if it is intended, and approve the new binding. |
 | `push-credential-helper` | The guard still refuses the operation, or the helper is not the host-owned executable of the running release. Check the deployment and the remote transport. |

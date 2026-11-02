@@ -51,8 +51,10 @@ export interface PublishCredentialPort {
    * `publish-credential-store-unavailable` therefore means the delete already
    * happened and only the tombstone failed — the CLI tells the operator "the
    * entry was deleted" from that reason. An implementation must not reverse
-   * the two steps, and a failed delete keeps the other reason
-   * (`publish-credential-unavailable`), because the token may still be live.
+   * the two steps, and a failed delete keeps one of the two failed-delete
+   * verdicts (`publish-credential-unavailable`, or
+   * `publish-credential-locked` when the keyring collection is locked), because
+   * the token may still be live.
    */
   revoke(leaseId: string, now: number): Promise<Result<void>>;
 }

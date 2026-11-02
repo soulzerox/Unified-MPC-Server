@@ -20,6 +20,29 @@ export interface SecretToolSecretStoreOptions {
 
 type SecretToolRunner = (args: readonly string[], input?: string) => Promise<string>;
 
+/**
+ * Why a Secret Service call failed. The publish path reports these separately
+ * because the operator fix differs: install the daemon, unlock the collection,
+ * or retry (#297 §3).
+ */
+export type SecretStoreFailureReason =
+  | 'secret-store-missing'
+  | 'secret-store-locked'
+  | 'secret-store-timeout'
+  | 'secret-store-failed';
+
+export class SecretStoreError extends Error {
+  public constructor(readonly reason: SecretStoreFailureReason, message: string) {
+    super(message);
+    this.name = 'SecretStoreError';
+  }
+}
+
+/** Reason for a failed SecretStore call, or null when the error is not ours. */
+export function secretStoreFailureReason(error: unknown): SecretStoreFailureReason | null {
+  return error instanceof SecretStoreError ? error.reason : null;
+}
+
 /** Stores secrets in Linux Secret Service through secret-tool. Never writes plaintext files. */
 export class SecretToolSecretStore implements SecretStore {
   private readonly service: string;
@@ -45,10 +68,11 @@ export class SecretToolSecretStore implements SecretStore {
       const value = await this.run(['lookup', 'service', this.service, 'key', normalized]);
       return value.trim().length === 0 ? null : value.trim();
     } catch (error: unknown) {
-      if (isSecretToolNotFound(error)) throw new Error('Linux Secret Service is unavailable: secret-tool was not found');
       if (error instanceof Error && /No secret found/i.test(error.message)) return null;
-      if (isMissingSecret(error)) return null;
-      throw new Error('Linux Secret Service lookup failed');
+      // `secret-tool` exits 1 for an absent item *and* for a locked collection,
+      // so the classification decides before "missing" is assumed (#297).
+      if (classifySecretStoreFailure(error) === 'secret-store-failed' && isMissingSecret(error)) return null;
+      throw secretStoreError('lookup', error);
     }
   }
 
@@ -58,8 +82,7 @@ export class SecretToolSecretStore implements SecretStore {
     try {
       await this.run(['store', '--label', 'Unified-MPC-Server secret', 'service', this.service, 'key', normalized], value);
     } catch (error: unknown) {
-      if (isSecretToolNotFound(error)) throw new Error('Linux Secret Service is unavailable: secret-tool was not found');
-      throw new Error('Linux Secret Service write failed');
+      throw secretStoreError('write', error);
     }
   }
 
@@ -68,10 +91,9 @@ export class SecretToolSecretStore implements SecretStore {
     try {
       await this.run(['clear', 'service', this.service, 'key', normalized]);
     } catch (error: unknown) {
-      if (isSecretToolNotFound(error)) throw new Error('Linux Secret Service is unavailable: secret-tool was not found');
       if (error instanceof Error && /No secret found/i.test(error.message)) return;
-      if (isMissingSecret(error)) return;
-      throw new Error('Linux Secret Service delete failed');
+      if (classifySecretStoreFailure(error) === 'secret-store-failed' && isMissingSecret(error)) return;
+      throw secretStoreError('delete', error);
     }
   }
 }
@@ -108,6 +130,36 @@ function runSecretTool(command: string, args: readonly string[], input?: string)
     if (input !== undefined) child.stdin.end(input, 'utf8');
     else child.stdin.end();
   });
+}
+
+/**
+ * Classify one `secret-tool` failure. `secret-tool` reports a locked collection
+ * on stderr ("Cannot create an item in a locked collection") and the daemon's
+ * absence as an ENOENT spawn error, so the two are distinguishable without
+ * asking the caller to guess.
+ */
+export function classifySecretStoreFailure(error: unknown): SecretStoreFailureReason {
+  if (isSecretToolNotFound(error)) return 'secret-store-missing';
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (/timed out/i.test(message)) return 'secret-store-timeout';
+  if (/locked/i.test(message)) return 'secret-store-locked';
+  if (/was not found|command not found|ENOENT/i.test(message)) return 'secret-store-missing';
+  return 'secret-store-failed';
+}
+
+function secretStoreError(operation: 'lookup' | 'write' | 'delete', error: unknown): SecretStoreError {
+  const reason = classifySecretStoreFailure(error);
+  // A missing binary and an unreachable D-Bus service both mean "the service is
+  // unavailable", but only the first is about `secret-tool` itself (#297).
+  const missing = isSecretToolNotFound(error) ? 'secret-tool was not found' : 'the Secret Service is not reachable';
+  const cause = reason === 'secret-store-locked'
+    ? ': the collection is locked'
+    : reason === 'secret-store-missing'
+      ? `: ${missing}`
+      : reason === 'secret-store-timeout'
+        ? ': secret-tool timed out'
+        : '';
+  return new SecretStoreError(reason, `Linux Secret Service ${operation} failed${cause}`);
 }
 
 function isSecretToolNotFound(error: unknown): boolean {

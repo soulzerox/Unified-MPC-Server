@@ -425,6 +425,34 @@ export async function createExclusiveFile(directory, fileName, contents) {
   }
 }
 
+/**
+ * Create the one receipt file for a head and prove it is the only one.
+ *
+ * The atomic create picks the single writer. The rescan then catches a receipt
+ * written by an older gate under the `<head>-<pr>-<reviewId>` name, which would
+ * not collide with the new name. The exclusion is read back from the file that
+ * was just written, so no caller can pass the wrong review id and withdraw its
+ * own receipt.
+ */
+export async function writeReviewReceipt({ directory, receipt }) {
+  const fileName = `${receipt.headSha.slice(0, 12)}-${receipt.prNumber}.json`;
+  const write = await createExclusiveFile(directory, fileName, `${JSON.stringify(receipt, null, 2)}\n`);
+  if (!write.created) {
+    return {
+      written: false,
+      path: write.path,
+      blockers: receiptUniquenessBlockers((await readJsonDirectory(directory)).records, receipt.headSha),
+    };
+  }
+  const own = JSON.parse(await readFile(write.path, 'utf8'));
+  const duplicated = receiptUniquenessBlockers((await readJsonDirectory(directory)).records, receipt.headSha, own.reviewId);
+  if (duplicated.length > 0) {
+    await rm(write.path, { force: true });
+    return { written: false, path: write.path, blockers: duplicated };
+  }
+  return { written: true, path: write.path, blockers: [] };
+}
+
 export function renderCapsuleMarkdown(capsule) {
   const files = capsule.changedFiles.map((file) => `- \`${file.path}\` (+${file.additions}/-${file.deletions})`);
   const verification = capsule.verification === null
@@ -670,28 +698,13 @@ async function recordCommand(options) {
   };
 
   await mkdir(RECEIPT_ROOT, { recursive: true });
-  // One file name per head, so the create below is the whole concurrency
-  // control: `link` fails for every recorder except the first.
-  const write = await createExclusiveFile(
-    RECEIPT_ROOT,
-    `${pr.headRefOid.slice(0, 12)}-${pr.number}.json`,
-    `${JSON.stringify(receipt, null, 2)}\n`,
-  );
-  if (!write.created) {
-    const raced = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
+  // One file name per head, so the create is the whole concurrency control:
+  // `link` fails for every recorder except the first.
+  const write = await writeReviewReceipt({ directory: RECEIPT_ROOT, receipt });
+  if (!write.written) {
     console.error('refusing to record this review:');
-    if (raced.length > 0) for (const blocker of raced) console.error(`  - ${blocker}`);
+    if (write.blockers.length > 0) for (const blocker of write.blockers) console.error(`  - ${blocker}`);
     else console.error(`  - ${path.relative(ROOT, write.path)} already exists for this head; a new review needs a new head`);
-    return 1;
-  }
-  // A receipt written by an older gate under the `<head>-<pr>-<reviewId>` name
-  // would not collide with this one, so re-scan and withdraw rather than leave
-  // two receipts for one head.
-  const duplicated = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid, reviewId);
-  if (duplicated.length > 0) {
-    await rm(write.path, { force: true });
-    console.error('refusing to record this review:');
-    for (const blocker of duplicated) console.error(`  - ${blocker}`);
     return 1;
   }
   const receiptPath = write.path;

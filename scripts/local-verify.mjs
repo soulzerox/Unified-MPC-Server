@@ -25,7 +25,9 @@ const MAX_LOG_CHARS = 2 * 1024 * 1024;
 const PNPM = 'corepack';
 const PNPM_PREFIX = ['pnpm@10.15.0'];
 
-export const PROFILE_VERSION = 2;
+// Bump when a profile's step set changes, so a durable receipt names the exact
+// set of steps it vouches for.
+export const PROFILE_VERSION = 3;
 export const PROFILES = ['merge', 'targeted'];
 
 /**
@@ -43,6 +45,9 @@ export const STEP_DEFINITIONS = [
   { name: 'build', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, 'build'] },
   { name: 'test:workspace', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/workspace', 'test'] },
   { name: 'test:storage', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/storage', 'test'] },
+  // `extensions` precedes `mcp-server` because the server and the CLI depend on
+  // it: a failure there is the cheaper, more specific signal.
+  { name: 'test:extensions', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/extensions', 'test'] },
   { name: 'test:mcp-server', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/mcp-server', 'test'] },
   { name: 'test:cli', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/cli', 'test'] },
   { name: 'version', profiles: ['merge'], command: ['node', 'scripts/check-version-consistency.mjs'] },

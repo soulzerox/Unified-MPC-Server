@@ -68,10 +68,9 @@ export class SecretToolSecretStore implements SecretStore {
       const value = await this.run(['lookup', 'service', this.service, 'key', normalized]);
       return value.trim().length === 0 ? null : value.trim();
     } catch (error: unknown) {
-      if (error instanceof Error && /No secret found/i.test(error.message)) return null;
-      // `secret-tool` exits 1 for an absent item *and* for a locked collection,
-      // so the classification decides before "missing" is assumed (#297).
-      if (classifySecretStoreFailure(error) === 'secret-store-failed' && isMissingSecret(error)) return null;
+      // `secret-tool` exits 1 for an absent item *and* for real failures such as
+      // a locked collection, so the diagnostic decides, not the exit code.
+      if (classifySecretStoreFailure(error) === 'secret-store-failed' && isAbsentSecret(error)) return null;
       throw secretStoreError('lookup', error);
     }
   }
@@ -91,8 +90,7 @@ export class SecretToolSecretStore implements SecretStore {
     try {
       await this.run(['clear', 'service', this.service, 'key', normalized]);
     } catch (error: unknown) {
-      if (error instanceof Error && /No secret found/i.test(error.message)) return;
-      if (classifySecretStoreFailure(error) === 'secret-store-failed' && isMissingSecret(error)) return;
+      if (classifySecretStoreFailure(error) === 'secret-store-failed' && isAbsentSecret(error)) return;
       throw secretStoreError('delete', error);
     }
   }
@@ -123,6 +121,9 @@ function runSecretTool(command: string, args: readonly string[], input?: string)
       if (code === 0) resolve(stdout);
       else {
         const failure = new Error(stderr || `secret-tool exited with code ${code ?? 'unknown'}`);
+        // Raw stderr is kept so "absent" can be decided from the diagnostic
+        // instead of the exit code (#583).
+        Object.assign(failure, { secretToolStderr: stderr });
         if (code !== null) Object.assign(failure, { secretToolExitCode: code });
         reject(failure);
       }
@@ -166,12 +167,22 @@ function isSecretToolNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
-/** secret-tool lookup/clear exit with status 1 when the item does not exist (empty stdout/stderr). */
-function isMissingSecret(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'secretToolExitCode' in error &&
-    (error as { secretToolExitCode?: number }).secretToolExitCode === 1
-  );
+/**
+ * Whether a failure means "this item does not exist" rather than "the store
+ * failed". `secret-tool` exits 1 for both, so only a failure that carries no
+ * diagnostic of its own (empty stderr, or an explicit "No secret found") counts
+ * as absent; anything else is reported with its classified reason (#583).
+ */
+function isAbsentSecret(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { secretToolExitCode, secretToolStderr } = error as {
+    secretToolExitCode?: number;
+    secretToolStderr?: string;
+  };
+  if (secretToolExitCode !== 1) return false;
+  const diagnostic = (secretToolStderr ?? (error instanceof Error ? error.message : '')).trim();
+  if (diagnostic.length === 0) return true;
+  if (/No secret found/i.test(diagnostic)) return true;
+  // A runner that only reports the code leaves this synthetic message behind.
+  return /^secret-tool exited with code 1$/u.test(diagnostic);
 }

@@ -106,4 +106,33 @@ describe('SecretToolSecretStore', () => {
     await expect(emptyStore.get('token')).resolves.toBeNull();
     await expect(emptyStore.delete('token')).resolves.toBeUndefined();
   });
+
+  it('reports an unrecognised exit-1 diagnostic instead of an absent secret (#583)', async () => {
+    // A real miss exits 1 with empty stderr, so a failure that does carry a
+    // diagnostic we cannot classify is still a failure: `open` must not answer
+    // null and `revoke` must not report success without deleting the token.
+    const opaque = Object.assign(new Error('The unlock prompt was dismissed'), {
+      secretToolExitCode: 1,
+      secretToolStderr: 'The unlock prompt was dismissed',
+    });
+    const store = new SecretToolSecretStore({
+      run: async (): Promise<string> => {
+        throw opaque;
+      },
+    });
+    await expect(store.get('token')).rejects.toMatchObject({ reason: 'secret-store-failed' });
+    await expect(store.delete('token')).rejects.toMatchObject({ reason: 'secret-store-failed' });
+
+    const miss = Object.assign(new Error('secret-tool exited with code 1'), {
+      secretToolExitCode: 1,
+      secretToolStderr: '',
+    });
+    const emptyStore = new SecretToolSecretStore({
+      run: async (): Promise<string> => {
+        throw miss;
+      },
+    });
+    await expect(emptyStore.get('token')).resolves.toBeNull();
+    await expect(emptyStore.delete('token')).resolves.toBeUndefined();
+  });
 });

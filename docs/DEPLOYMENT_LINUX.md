@@ -120,6 +120,26 @@ still invalidate the cache and force a cold pass.
 Leave it at `0` unless retrieval quality, not write authorization, is the
 problem you are solving; the gate opens either way.
 
+### Thai-RAG reads during another workspace's index
+
+The provider runs one index job at a time across all workspaces on the host.
+While that slot is busy, read-only code queries (`code_search`, `code_context`,
+`code_blast_radius`) and `pre_edit_context` are still answered for a workspace
+that is already indexed: Unified proves the registered root and its
+`sources/<id>` alias still match before serving, and the provider answers from
+that workspace's own active generation.
+
+The bypass is deliberately narrow:
+
+| request | answer while another workspace indexes |
+|---|---|
+| read-only code query, workspace ready | served from that workspace's index |
+| read-only code query, workspace queued for its own reindex | `CONFLICT` (`workspace-indexing`) |
+| `code_index`, `index_status`, `cancel_index` | unchanged, serialized behind the active job |
+
+A workspace whose source alias was replaced or relinked fails closed and is
+verified again instead of being answered from a stale index.
+
 ### Heavy job queue (#145)
 
 Declared heavy work runs through one durable queue shared by the MCP HTTP and

@@ -6,12 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { discoverPackages } from './check-workspace-dependencies.mjs';
 import {
   PROFILE_VERSION,
+  assertProfileStepSet,
   buildReceipt,
   diffFingerprint,
   gatedTestSuites,
   mergeReadiness,
   parseArgs,
+  profileStepSetVerdict,
   profileSteps,
+  stepSetDigest,
   summarize,
   truncateLog,
 } from './local-verify.mjs';
@@ -63,6 +66,58 @@ test('merge profile runs every gate in a deterministic order', () => {
   ]);
   assert.equal(new Set(names).size, names.length);
   assert.ok(names.indexOf('build') < names.indexOf('test:mcp-server'), 'build precedes package tests');
+});
+
+test('the profile version names the exact merge step set', () => {
+  const stepNames = profileSteps('merge').map((step) => step.name);
+  const verdict = profileStepSetVerdict({ version: PROFILE_VERSION, stepNames });
+
+  assert.equal(verdict.ok, true, verdict.reason);
+  assert.equal(verdict.digest, stepSetDigest(stepNames));
+  assert.doesNotThrow(() => assertProfileStepSet());
+});
+
+test('a changed step set cannot reuse the recorded profile version', () => {
+  const stepNames = profileSteps('merge').map((step) => step.name);
+
+  const added = [...stepNames, 'test:new-package'];
+  const addedVerdict = profileStepSetVerdict({ version: PROFILE_VERSION, stepNames: added });
+  assert.equal(addedVerdict.ok, false, 'a new step must force a version bump');
+  assert.match(addedVerdict.reason, new RegExp(`version ${PROFILE_VERSION}`));
+  assert.notEqual(addedVerdict.digest, stepSetDigest(stepNames), 'a new step changes the digest');
+  assert.throws(
+    () => assertProfileStepSet({ version: PROFILE_VERSION, stepNames: added }),
+    /Bump PROFILE_VERSION/,
+  );
+
+  const reordered = [...stepNames].reverse();
+  assert.equal(
+    profileStepSetVerdict({ version: PROFILE_VERSION, stepNames: reordered }).ok,
+    false,
+    'step order is part of the recorded set',
+  );
+
+  const removed = stepNames.slice(1);
+  assert.equal(
+    profileStepSetVerdict({ version: PROFILE_VERSION, stepNames: removed }).ok,
+    false,
+    'a removed step must force a version bump',
+  );
+});
+
+test('a profile version with no recorded step set is refused', () => {
+  const stepNames = profileSteps('merge').map((step) => step.name);
+  const unrecorded = PROFILE_VERSION + 1;
+  const verdict = profileStepSetVerdict({ version: unrecorded, stepNames });
+
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.reason, /no recorded step set/);
+  assert.throws(() => assertProfileStepSet({ version: unrecorded, stepNames }), /Bump PROFILE_VERSION/);
+  assert.equal(
+    profileStepSetVerdict({ version: PROFILE_VERSION, stepNames }).ok,
+    true,
+    'the recorded version keeps passing for its own set',
+  );
 });
 
 test('every workspace project with a test script runs in the merge profile', () => {

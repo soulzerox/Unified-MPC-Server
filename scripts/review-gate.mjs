@@ -2,9 +2,8 @@
 /* global process, console, Buffer, URL */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -396,40 +395,26 @@ export function receiptUniquenessBlockers(receipts, headSha) {
 /**
  * `record` enforces one receipt per head by scanning the receipt directory and
  * then writing a new file. Two reviewer processes running that scan at the same
- * time would both pass `receiptUniquenessBlockers`, so the recheck and the
- * write share an atomic directory lock (#536). The directory create is the
- * atomic step: it either succeeds for exactly one process or answers EEXIST.
- *
- * A lock left behind by a killed process is reclaimed after `staleMs`, and a
- * live one makes the loser fail closed with a retry message instead of writing
- * a second receipt.
+ * time would both pass `receiptUniquenessBlockers`, and a lock that guards the
+ * scan cannot close the race by itself: any stale-lock policy that removes a
+ * lock can remove one that a peer just acquired, which puts two writers back
+ * inside (#536). So the receipt file is created with `link`, which the
+ * filesystem refuses when the target already exists. Exactly one writer wins,
+ * with no lock to go stale, and a process killed mid-write leaves only a
+ * `.tmp-*` file that no reader parses.
  */
-export async function withDirectoryLock(lockPath, action, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const retryMs = options.retryMs ?? 50;
-  const staleMs = options.staleMs ?? 60_000;
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      await mkdir(lockPath);
-      break;
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
-      const stats = await stat(lockPath).catch(() => undefined);
-      if (stats !== undefined && Date.now() - stats.mtimeMs > staleMs) {
-        await rm(lockPath, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`another review is still recording for this head (${path.basename(lockPath)}); re-run this command`);
-      }
-      await delay(retryMs);
-    }
-  }
+export async function createExclusiveFile(directory, fileName, contents) {
+  const target = path.join(directory, fileName);
+  const temporary = `${target}.tmp-${randomUUID().slice(0, 8)}`;
+  await writeFile(temporary, contents, 'utf8');
   try {
-    return await action();
+    await link(temporary, target);
+    return { created: true, path: target };
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    return { created: false, path: target };
   } finally {
-    await rm(lockPath, { recursive: true, force: true });
+    await rm(temporary, { force: true });
   }
 }
 
@@ -678,26 +663,31 @@ async function recordCommand(options) {
   };
 
   await mkdir(RECEIPT_ROOT, { recursive: true });
-  const outcome = await withDirectoryLock(
-    path.join(RECEIPT_ROOT, `.lock-${pr.headRefOid.slice(0, 12)}-${pr.number}`),
-    async () => {
-      // Recheck inside the lock: the earlier scan only shaped the error message,
-      // it cannot prove another recorder has not written since.
-      const raced = receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
-      if (raced.length > 0) return { blockers: raced };
-      const receiptPath = path.join(RECEIPT_ROOT, `${pr.headRefOid.slice(0, 12)}-${pr.number}-${reviewId}.json`);
-      const temporaryPath = `${receiptPath}.tmp-${reviewId.slice(0, 8)}`;
-      await writeFile(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-      await rename(temporaryPath, receiptPath);
-      return { receiptPath };
-    },
+  // One file name per head, so the create below is the whole concurrency
+  // control: `link` fails for every recorder except the first.
+  const write = await createExclusiveFile(
+    RECEIPT_ROOT,
+    `${pr.headRefOid.slice(0, 12)}-${pr.number}.json`,
+    `${JSON.stringify(receipt, null, 2)}\n`,
   );
-  if (outcome.blockers !== undefined) {
+  if (!write.created) {
+    const raced = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
     console.error('refusing to record this review:');
-    for (const blocker of outcome.blockers) console.error(`  - ${blocker}`);
+    if (raced.length > 0) for (const blocker of raced) console.error(`  - ${blocker}`);
+    else console.error(`  - ${path.relative(ROOT, write.path)} already exists for this head; a new review needs a new head`);
     return 1;
   }
-  const receiptPath = outcome.receiptPath;
+  // A receipt written by an older gate under the `<head>-<pr>-<reviewId>` name
+  // would not collide with this one, so re-scan and withdraw rather than leave
+  // two receipts for one head.
+  const duplicated = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
+  if (duplicated.length > 0) {
+    await rm(write.path, { force: true });
+    console.error('refusing to record this review:');
+    for (const blocker of duplicated) console.error(`  - ${blocker}`);
+    return 1;
+  }
+  const receiptPath = write.path;
 
   console.log(`\n${summarizeReceipt(receipt, path.relative(ROOT, receiptPath))}`);
   if (derived.verdict !== 'clean') {

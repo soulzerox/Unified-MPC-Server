@@ -1285,12 +1285,16 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
   });
 });
 
-/** Run `body` with environment overrides applied, restoring them afterwards. */
-async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => Promise<T>): Promise<T> {
+/**
+ * Run `body` with environment overrides applied, restoring them afterwards.
+ * An `undefined` value unsets the key for the duration of `body`.
+ */
+async function withEnv<T>(overrides: Readonly<Record<string, string | undefined>>, body: () => Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(overrides)) {
     previous.set(key, process.env[key]);
-    process.env[key] = value;
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
   try {
     return await body();
@@ -1336,6 +1340,77 @@ describe('InstallerService - Codex home resolution', () => {
       expect(result.value.installedPaths).toContain(expected);
       expect(await readFile(expected, 'utf8')).toContain('# Codex Skill');
       await expect(readFile(path.join(isolatedHome, '.codex', 'skills', 'codex-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+    });
+  });
+
+  it('falls back to <home>/.codex for codex skill installs when CODEX_HOME is unset', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-codex-default-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    // HOME is isolated so the assertion describes the real default without
+    // writing into the operator's own ~/.codex.
+    const isolatedHome = path.join(root, 'isolated-home');
+    const source = await writeCodexSkillSource(root);
+
+    await withEnv({ CODEX_HOME: undefined, HOME: isolatedHome }, async () => {
+      const result = await new InstallerService({ dataDir }).installSkill({
+        name: 'codex-skill',
+        source,
+        targets: ['codex'],
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const expected = path.join(isolatedHome, '.codex', 'skills', 'codex-skill', 'SKILL.md');
+      expect(result.value.installedPaths).toContain(expected);
+      expect(await readFile(expected, 'utf8')).toContain('# Codex Skill');
+    });
+  });
+
+  it('treats an empty or blank CODEX_HOME as unset for codex installs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-codex-blank-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const isolatedHome = path.join(root, 'isolated-home');
+    const source = await writeCodexSkillSource(root);
+    const expected = path.join(isolatedHome, '.codex', 'skills', 'codex-skill', 'SKILL.md');
+
+    for (const configured of ['', '   ']) {
+      await withEnv({ CODEX_HOME: configured, HOME: isolatedHome }, async () => {
+        const result = await new InstallerService({ dataDir }).installSkill({
+          name: 'codex-skill',
+          source,
+          targets: ['codex'],
+        });
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.installedPaths).toContain(expected);
+        expect(await readFile(expected, 'utf8')).toContain('# Codex Skill');
+      });
+    }
+  });
+
+  it('falls back to <home>/.codex for the codex mcp.json when CODEX_HOME is unset', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-codex-mcp-default-'));
+    temporaryRoots.push(root);
+    const dataDir = path.join(root, 'data');
+    const isolatedHome = path.join(root, 'isolated-home');
+
+    await withEnv({ CODEX_HOME: undefined, HOME: isolatedHome }, async () => {
+      const result = await new InstallerService({ dataDir }).installServer({
+        name: 'codex-child',
+        transport: 'stdio',
+        command: 'node',
+        targets: ['codex'],
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const expected = path.join(isolatedHome, '.codex', 'mcp.json');
+      expect(result.value.updatedConfigFiles).toContain(expected);
+      const config = JSON.parse(await readFile(expected, 'utf8')) as { mcpServers: Record<string, { command?: string }> };
+      expect(config.mcpServers['codex-child']?.command).toBe('node');
     });
   });
 

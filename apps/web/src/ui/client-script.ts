@@ -1683,11 +1683,17 @@ export function getClientScriptJs(): string {
         }
       }
 
+      let gatewayStatusSeq = 0;
+      let gatewayStatusAppliedSeq = 0;
+
       async function loadGatewayStatus() {
+        const seq = ++gatewayStatusSeq;
         try {
-          const res = await fetch('/api/chatgpt-gateway/status');
+          const res = await fetchWithTimeout('/api/chatgpt-gateway/status');
           if (!res.ok) throw new Error('Gateway status failed');
           const data = await res.json();
+          if (seq <= gatewayStatusAppliedSeq) return;
+          gatewayStatusAppliedSeq = seq;
           const state = data.state || 'STOPPED';
           const bridgeEl = document.getElementById('bridge-state');
           const connectBtn = document.getElementById('connect-btn');
@@ -1753,6 +1759,8 @@ export function getClientScriptJs(): string {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
         } catch (err) {
+          if (seq <= gatewayStatusAppliedSeq) return;
+          gatewayStatusAppliedSeq = seq;
           renderGatewayUnavailable();
           if (isBackendTransportError(err)) noteBackendUnavailable(err);
           else console.error(err);

@@ -212,8 +212,12 @@ fresh reviewer     separate context, read-only, capsule + repo at that head
         v
 record --findings  validate identity, skill hash, file anchors, severities,
                    recompute the verdict, write
-                   .unified-mpc/reviews/receipts/<head12>-<N>-<reviewId>.json
+                   .unified-mpc/reviews/receipts/<head12>-<N>.json
 ```
+
+The receipt name is one per head and `record` creates it with a hard link, so
+two concurrent recorders cannot both write: the filesystem refuses the second
+create and that recorder gets the uniqueness refusal instead of a second receipt.
 
 ### Capsule
 

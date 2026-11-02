@@ -386,8 +386,15 @@ export function capsuleIntegrityBlockers({ capsule, patch, filesText }) {
   return blockers;
 }
 
-export function receiptUniquenessBlockers(receipts, headSha) {
-  const existing = receipts.filter((receipt) => receipt?.headSha === headSha);
+/**
+ * `record` rescans after its atomic create to catch a receipt written under the
+ * older `<head>-<pr>-<reviewId>` name. That rescan must not count the receipt it
+ * just wrote, so the caller passes its own `reviewId` to exclude; the pre-create
+ * scan passes nothing and still sees every receipt for the head.
+ */
+export function receiptUniquenessBlockers(receipts, headSha, excludeReviewId) {
+  const existing = receipts.filter((receipt) => receipt?.headSha === headSha
+    && (excludeReviewId === undefined || receipt?.reviewId !== excludeReviewId));
   if (existing.length === 0) return [];
   return [`a review receipt already exists for ${headSha.slice(0, 12)} (${String(existing[0]?.reviewId)}); a new review needs a new head`];
 }
@@ -680,7 +687,7 @@ async function recordCommand(options) {
   // A receipt written by an older gate under the `<head>-<pr>-<reviewId>` name
   // would not collide with this one, so re-scan and withdraw rather than leave
   // two receipts for one head.
-  const duplicated = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
+  const duplicated = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid, reviewId);
   if (duplicated.length > 0) {
     await rm(write.path, { force: true });
     console.error('refusing to record this review:');

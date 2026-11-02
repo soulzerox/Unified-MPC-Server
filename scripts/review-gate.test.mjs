@@ -259,6 +259,24 @@ test('record refuses a second review for the same head', () => {
   assert.match(receiptUniquenessBlockers([receipt()], HEAD).join('\n'), /a new review needs a new head/);
 });
 
+test('the post-create rescan ignores the receipt it just wrote', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
+  const own = receipt({ reviewId: 'own-review' });
+  const write = await createExclusiveFile(root, 'aaaaaaaaaaaa-536.json', JSON.stringify(own));
+  assert.equal(write.created, true);
+  const readRecords = async () => Promise.all((await readdir(root))
+    .filter((name) => name.endsWith('.json'))
+    .map(async (name) => JSON.parse(await readFile(path.join(root, name), 'utf8'))));
+  // The recorder's own atomic receipt is not a duplicate of itself.
+  assert.deepEqual(receiptUniquenessBlockers(await readRecords(), HEAD, 'own-review'), []);
+  // An older receipt under the legacy `<head>-<pr>-<reviewId>` name still counts.
+  await writeFile(path.join(root, 'aaaaaaaaaaaa-536-legacy.json'), JSON.stringify(receipt({ reviewId: 'legacy-review' })));
+  assert.match(
+    receiptUniquenessBlockers(await readRecords(), HEAD, 'own-review').join('\n'),
+    /a new review needs a new head/,
+  );
+});
+
 test('racing recorders create exactly one receipt file', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
   const attempts = Array.from({ length: 8 }, (_, index) => `writer-${index}`);

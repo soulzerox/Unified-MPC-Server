@@ -159,7 +159,9 @@ describe('IdeSyncService', () => {
     };
 
     const service = new IdeSyncService({ homeDir: path.join(root, 'home'), settings });
-    const snapshot = await service.policySnapshot();
+    // McpConfigLoader also reads the ambient XDG config root; pin it so a
+    // developer machine cannot add auto-discovered servers to the snapshot.
+    const snapshot = await withEnv({ XDG_CONFIG_HOME: path.join(root, 'xdg') }, () => service.policySnapshot());
 
     // Without an explicit policy list the persisted selection is the source of
     // truth; falling back to the built-in defaults silently dropped it from the
@@ -189,7 +191,7 @@ describe('IdeSyncService', () => {
       settings,
       policies: [DEFAULT_POLICIES[0]!],
     });
-    const snapshot = await service.policySnapshot();
+    const snapshot = await withEnv({ XDG_CONFIG_HOME: path.join(root, 'xdg') }, () => service.policySnapshot());
 
     expect(snapshot.policies.map((policy) => policy.id)).toEqual(['session-start:ask-matt']);
   });

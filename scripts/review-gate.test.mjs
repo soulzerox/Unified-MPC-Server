@@ -20,6 +20,7 @@ import {
   reviewFingerprint,
   reviewVerdict,
   validateFindings,
+  writeReviewReceipt,
 } from './review-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -299,6 +300,28 @@ test('a temp file left by a killed recorder is not a receipt', async () => {
   const second = await createExclusiveFile(root, 'aaaaaaaaaaaa-536.json', 'duplicate');
   assert.equal(second.created, false);
   assert.equal(await readFile(second.path, 'utf8'), 'complete');
+});
+
+test('writing a receipt keeps it and withdraws on a legacy duplicate', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
+  const own = receipt({ reviewId: 'own-review' });
+  const first = await writeReviewReceipt({ directory: root, receipt: own });
+  assert.equal(first.written, true);
+  assert.deepEqual(first.blockers, []);
+  assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.json')), ['aaaaaaaaaaaa-536.json']);
+
+  // A second recorder loses the atomic create.
+  const second = await writeReviewReceipt({ directory: root, receipt: receipt({ reviewId: 'other-review' }) });
+  assert.equal(second.written, false);
+  assert.match(second.blockers.join('\n'), /a new review needs a new head/);
+
+  // A receipt under the legacy name for the same head withdraws the new write.
+  const legacyRoot = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
+  await writeFile(path.join(legacyRoot, 'aaaaaaaaaaaa-536-legacy.json'), JSON.stringify(receipt({ reviewId: 'legacy-review' })));
+  const third = await writeReviewReceipt({ directory: legacyRoot, receipt: own });
+  assert.equal(third.written, false);
+  assert.match(third.blockers.join('\n'), /a new review needs a new head/);
+  assert.deepEqual((await readdir(legacyRoot)).filter((name) => name.endsWith('.json')), ['aaaaaaaaaaaa-536-legacy.json']);
 });
 
 test('cleanTreeBlockers names a moved HEAD and a dirty tree', () => {

@@ -13,15 +13,20 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-/** Run `body` with `CODEX_HOME` set, restoring the previous value afterwards. */
-async function withCodexHome<T>(codexHome: string, body: () => Promise<T>): Promise<T> {
-  const previous = process.env.CODEX_HOME;
-  process.env.CODEX_HOME = codexHome;
+/** Run `body` with environment overrides applied, restoring them afterwards. */
+async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
   try {
     return await body();
   } finally {
-    if (previous === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previous;
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
@@ -124,7 +129,7 @@ describe('IdeSyncService', () => {
     const workspace = path.join(root, 'workspace');
     const decoyCodexHome = path.join(root, 'decoy-codex-home');
     // A pinned home is authoritative: an ambient CODEX_HOME must not redirect it.
-    await withCodexHome(decoyCodexHome, async () => {
+    await withEnv({ CODEX_HOME: decoyCodexHome }, async () => {
       const service = new IdeSyncService({ homeDir: home, workspaceRoot: workspace });
 
       const result = await service.sync(['codex']);
@@ -149,8 +154,11 @@ describe('IdeSyncService', () => {
     temporaryRoots.push(root);
     const codexHome = path.join(root, 'custom-codex-home');
     const workspace = path.join(root, 'workspace');
+    // HOME is isolated too: if CODEX_HOME resolution regresses, the fallback must
+    // land in a temporary directory rather than the developer's real ~/.codex.
+    const isolatedHome = path.join(root, 'isolated-home');
 
-    await withCodexHome(codexHome, async () => {
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
       const service = new IdeSyncService({ workspaceRoot: workspace });
 
       const result = await service.sync(['codex']);
@@ -159,7 +167,29 @@ describe('IdeSyncService', () => {
       if (!result.ok) return;
       expect(result.value.updatedFiles).toContain(path.join(codexHome, 'AGENTS.md'));
       expect(await readFile(path.join(codexHome, 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+      await expect(readFile(path.join(isolatedHome, '.codex', 'AGENTS.md'), 'utf8')).rejects.toThrow();
     });
+  });
+
+  it('writes the OpenCode global AGENTS.md for the opencode target alone', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const service = new IdeSyncService({ homeDir: home, workspaceRoot: workspace });
+
+    // `all` short-circuits every predicate, so only a specific target proves the
+    // opencode/agents branch of the AGENTS.md split.
+    const result = await service.sync(['opencode']);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.updatedFiles).toEqual([
+      path.join(workspace, 'AGENTS.md'),
+      path.join(home, '.config', 'opencode', 'AGENTS.md'),
+    ]);
+    expect(await readFile(path.join(home, '.config', 'opencode', 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+    await expect(readFile(path.join(home, '.codex', 'AGENTS.md'), 'utf8')).rejects.toThrow();
   });
 
   it('atomically synchronizes policies across all universal clients', async () => {
@@ -215,8 +245,8 @@ describe('IdeSyncService', () => {
     expect(agentsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
     expect(agentsContent).toContain('<!-- MCP-POLICY-END -->');
 
-    // The OpenCode global file is written for opencode/agents and must not be
-    // dropped from that branch by a future refactor of the AGENTS.md split.
+    // The OpenCode global file is also written by `all`; the dedicated
+    // `sync(['opencode'])` test is what actually guards that branch predicate.
     const opencodeGlobalFile = path.join(home, '.config', 'opencode', 'AGENTS.md');
     const opencodeGlobalContent = await readFile(opencodeGlobalFile, 'utf8');
     expect(opencodeGlobalContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');

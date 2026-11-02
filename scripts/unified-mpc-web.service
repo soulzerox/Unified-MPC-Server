@@ -5,7 +5,7 @@ Wants=network-online.target
 Requires=unified-mpc-mcp-http.service
 After=network-online.target unified-mpc-mcp-http.service
 PartOf=unified-mpc.service
-StartLimitIntervalSec=10min
+StartLimitIntervalSec=20min
 StartLimitBurst=5
 
 [Service]

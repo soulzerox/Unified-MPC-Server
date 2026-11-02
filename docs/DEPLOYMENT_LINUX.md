@@ -381,6 +381,8 @@ The MCP unit waits for `http://127.0.0.1:18765/_unified-mpc/identity` before sys
 
 Both readiness probes spend up to 120 s, and both units set `TimeoutStartSec=150` so that budget fits inside the startup deadline. The Web unit also runs with `WatchdogSec=30`, and systemd arms that watchdog as soon as the service starts — before the readiness probe finishes — so its probe pings `WATCHDOG=1` between attempts; a quiet probe would be killed after 30 s however long its budget is. A cold Node compile cache plus workspace admission can take 40 s or more after a fresh build; with the earlier 30 s probe the readiness check gave up first, and the restart loop kept interrupting startup before the cache could warm. Raise the probe budget as well as `TimeoutStartSec` when widening this margin: a longer deadline alone does not help because the probe itself gives up first.
 
+Both units also set `StartLimitIntervalSec=20min` and `StartLimitBurst=5`. A failed readiness now costs the 120 s probe plus `RestartSec=5`, so five failed starts span about ten minutes; the window has to stay wider than that or it resets before the burst is ever reached and a permanently broken unit would restart forever.
+
 The units intentionally use systemd's default control-group kill behavior rather than `KillMode=process`, so spawned descendants are not orphaned when a service is stopped.
 
 ## 5. Gateway desired state and reboot behavior

@@ -858,5 +858,34 @@ describe('PrunerService - Codex home resolution', () => {
       await expect(stat(path.join(decoyCodexHome, 'skills', 'codex-skill'))).rejects.toThrow();
     });
   });
+
+  it('prunes the codex server entry from the CODEX_HOME mcp.json', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-mcp-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'custom-codex-home');
+    const isolatedHome = path.join(root, 'isolated-home');
+    await mkdir(codexHome, { recursive: true });
+    const configFile = path.join(codexHome, 'mcp.json');
+    await writeFile(
+      configFile,
+      JSON.stringify({ mcpServers: { 'codex-child': { command: 'node' }, keep: { command: 'node' } } }, null, 2),
+      'utf8',
+    );
+
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
+      const result = await new PrunerService({}).pruneServer({
+        name: 'codex-child',
+        targets: ['codex'],
+        scope: 'global',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const config = JSON.parse(await readFile(configFile, 'utf8')) as { mcpServers: Record<string, unknown> };
+      expect(config.mcpServers['codex-child']).toBeUndefined();
+      expect(config.mcpServers.keep).toBeDefined();
+      await expect(stat(path.join(isolatedHome, '.codex', 'mcp.json'))).rejects.toThrow();
+    });
+  });
 });
 

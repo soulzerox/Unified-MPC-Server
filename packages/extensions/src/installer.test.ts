@@ -1361,5 +1361,30 @@ describe('InstallerService - Codex home resolution', () => {
       await expect(readFile(path.join(decoyCodexHome, 'skills', 'codex-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
     });
   });
+
+  it('writes the codex mcp.json into CODEX_HOME when no home directory is pinned', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-codex-mcp-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'custom-codex-home');
+    const dataDir = path.join(root, 'data');
+    const isolatedHome = path.join(root, 'isolated-home');
+
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
+      const result = await new InstallerService({ dataDir }).installServer({
+        name: 'codex-child',
+        transport: 'stdio',
+        command: 'node',
+        targets: ['codex'],
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const expected = path.join(codexHome, 'mcp.json');
+      expect(result.value.updatedConfigFiles).toContain(expected);
+      const config = JSON.parse(await readFile(expected, 'utf8')) as { mcpServers: Record<string, { command?: string }> };
+      expect(config.mcpServers['codex-child']?.command).toBe('node');
+      await expect(readFile(path.join(isolatedHome, '.codex', 'mcp.json'), 'utf8')).rejects.toThrow();
+    });
+  });
 });
 

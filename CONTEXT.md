@@ -101,7 +101,7 @@ Unified-MPC-Server natively discovers downstream servers, aggregates skills, and
 8. **OpenAI Codex CLI**:
    - Surfaces: CLI Tool.
    - Adapter: `packages/codex/` (`codex-discovery.ts`).
-   - Skill Folders: `~/.codex/skills/`, `~/.codex/plugins/cache/`.
+   - Skill Folders: `$CODEX_HOME/skills/`, `$CODEX_HOME/plugins/cache/` (default `~/.codex`), plus `$CODEX_HOME/AGENTS.md` for the policy block.
    - Rules: `AGENTS.md`.
 
 ---

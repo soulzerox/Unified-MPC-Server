@@ -6,7 +6,7 @@ Unified-MPC-Server acts as the single source of truth for MCP configurations, ag
 
 ## Supported Client Matrix
 
-The policy engine and installer support 7 major AI developer environments natively on Linux:
+The policy engine and installer support 8 major AI developer environments natively on Linux:
 
 | Environment | Config / Rule Target File | Scope | Format |
 |---|---|---|---|
@@ -14,7 +14,8 @@ The policy engine and installer support 7 major AI developer environments native
 | **Cursor** | `${WORKSPACE}/.cursor/rules/00-mandatory-policy.mdc` | Workspace | MDC (Frontmatter + Markdown) |
 | **Claude Code / Desktop** | `~/.claude/CLAUDE.md`<br>`${WORKSPACE}/CLAUDE.md` | Global & Workspace | Markdown Policy Block |
 | **Cline (VS Code)** | `~/.cline/rules/mcp-policy.md`<br>`${WORKSPACE}/.clinerules` | Global & Workspace | Markdown Policy Block |
-| **OpenCode / Codex** | `~/.config/opencode/AGENTS.md`<br>`${WORKSPACE}/AGENTS.md` | Global & Workspace | Markdown Policy Block |
+| **OpenCode / Freebuff** | `~/.config/opencode/AGENTS.md`<br>`${WORKSPACE}/AGENTS.md` | Global & Workspace | Markdown Policy Block |
+| **Codex** | `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`)<br>`${WORKSPACE}/AGENTS.md` | Global & Workspace | Markdown Policy Block |
 | **Oh My Pi (OMP)** | `${WORKSPACE}/.omp/system.md` | Workspace | Markdown Policy Block |
 | **Standard Agents** | `${WORKSPACE}/AGENTS.md` | Workspace | Markdown Policy Block |
 
@@ -66,7 +67,7 @@ Policy synchronization preserves user-customized instructions in target rule fil
 Synchronize all connected clients or specific IDE targets:
 
 ```bash
-# Sync all 7 IDE environments
+# Sync all 8 IDE environments
 pnpm cli sync
 
 # Sync specific clients

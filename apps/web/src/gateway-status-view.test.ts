@@ -119,7 +119,7 @@ describe('gateway status projection', () => {
 
   it('does not render a static success badge for the loopback origin', () => {
     const html = renderDashboardHtml();
-    expect(html).toContain('ORIGIN: LOOPBACK');
+    expect(html).toContain('LOOPBACK');
     expect(html).not.toContain('ORIGIN: OK');
   });
 });

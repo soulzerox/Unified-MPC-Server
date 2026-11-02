@@ -80,7 +80,7 @@ export function renderCanvasTopologySvg(): string {
         <rect x="14" y="48" width="70" height="15" rx="3" fill="rgba(16, 185, 129, 0.15)" />
         <text x="19" y="59" font-family="'JetBrains Mono', monospace" font-size="8" font-weight="600" fill="#10B981">PORT: 18765</text>
         <rect x="90" y="48" width="56" height="15" rx="3" fill="rgba(59, 130, 246, 0.15)" />
-        <text x="96" y="59" font-family="'JetBrains Mono', monospace" font-size="8" font-weight="600" fill="#60A5FA">ORIGIN: LOOPBACK</text>
+        <text x="96" y="59" font-family="'JetBrains Mono', monospace" font-size="8" font-weight="600" fill="#60A5FA">LOOPBACK</text>
       </g>
 
       <!-- RIGHT TOP NODE: ChatGPT Companion Gateway -->

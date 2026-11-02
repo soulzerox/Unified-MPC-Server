@@ -89,8 +89,12 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("preferredGoalId === goal.goalId ? 'Preferred' : 'Select Goal'");
     expect(html).toContain('Preferred goal');
     expect(html).toContain("selected.textContent = 'Preferred goal'");
+    expect(html).toContain("preferred.textContent = 'Preferred goal'");
     expect(html).toContain('Preferred goal updated; execution was not started');
+    expect(html).toContain('Selection scope does not start, pause, or cancel project execution');
     expect(html).toContain('Unregister this project from Unified-MPC');
+    expect(html).toContain('without deleting its source directory or changing runtime execution');
+    expect(html).toContain('does not stop or cancel running work');
     expect(html).toContain('Project unregistered from Unified-MPC');
     expect(html).toContain("emptyRow(7, 'Failed to load projects: '");
     expect(html).not.toContain("emptyRow(6, 'Failed to load projects: '");

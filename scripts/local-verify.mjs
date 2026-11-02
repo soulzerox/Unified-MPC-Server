@@ -26,9 +26,21 @@ const PNPM = 'corepack';
 const PNPM_PREFIX = ['pnpm@10.15.0'];
 
 // Bump when a profile's step set changes, so a durable receipt names the exact
-// set of steps it vouches for.
+// set of steps it vouches for. The number alone is not evidence: every version
+// must also record the digest of the step set it ran, and a mismatch refuses
+// the merge profile instead of reusing a stale number (#579 review).
 export const PROFILE_VERSION = 4;
 export const PROFILES = ['merge', 'targeted'];
+
+/**
+ * Digest of the ordered merge-profile step names, recorded per version. A
+ * receipt is evidence for the steps that produced it, so adding, removing or
+ * reordering a step without recording a new version must fail. Entries are
+ * append-only: a changed step set gets a new version, never an edited digest.
+ */
+const RECORDED_STEP_SET_DIGESTS = new Map([
+  [4, 'sha256:215be23752cd3f3b58ee52280d87a98aa212bf8565f954fb63dee052812f8f5f'],
+]);
 
 const testStep = (packageName) => ({
   name: `test:${packageName.replace('@unified-mpc/', '')}`,
@@ -91,10 +103,55 @@ export function gatedTestSuites() {
   return gated;
 }
 
+/** Ordered merge step names, read straight from the definitions (no validation). */
+function mergeStepNames() {
+  return STEP_DEFINITIONS
+    .filter((step) => step.profiles.includes('merge'))
+    .map((step) => step.name);
+}
+
+/** Rough content address for an ordered step set. */
+export function stepSetDigest(stepNames) {
+  return `sha256:${createHash('sha256').update(stepNames.join('\n'), 'utf8').digest('hex')}`;
+}
+
+/**
+ * Compare a profile version with the step set it claims to vouch for.
+ * Returns `{ ok, digest, reason }` instead of throwing so callers can report a
+ * precise drift message and tests can assert on it.
+ */
+export function profileStepSetVerdict({ version = PROFILE_VERSION, stepNames = mergeStepNames() } = {}) {
+  const digest = stepSetDigest(stepNames);
+  const recorded = RECORDED_STEP_SET_DIGESTS.get(version);
+  if (recorded === undefined) {
+    return { ok: false, digest, reason: `profile version ${version} has no recorded step set` };
+  }
+  if (recorded !== digest) {
+    return {
+      ok: false,
+      digest,
+      reason: `profile version ${version} records ${recorded} but the merge profile is ${digest} (${stepNames.length} steps)`,
+    };
+  }
+  return { ok: true, digest, reason: `profile version ${version} records the ${stepNames.length} merge steps` };
+}
+
+/** Throw unless the current version names the exact merge step set. */
+export function assertProfileStepSet(options) {
+  const verdict = profileStepSetVerdict(options);
+  if (!verdict.ok) {
+    throw new Error(`${verdict.reason}. Bump PROFILE_VERSION and record ${verdict.digest} for the new step set.`);
+  }
+  return verdict;
+}
+
 export function profileSteps(profile) {
   if (!PROFILES.includes(profile)) {
     throw new RangeError(`unknown profile '${profile}'`);
   }
+  // The merge profile is the only one that can report `mergeReady`, so refuse
+  // to hand out its steps for a version that does not describe them.
+  if (profile === 'merge') assertProfileStepSet();
   return STEP_DEFINITIONS
     .filter((step) => step.profiles.includes(profile))
     .map((step) => ({ name: step.name, command: [...step.command] }));

@@ -581,5 +581,11 @@ describe('stuck index job reap (issue #202)', () => {
     expect(persisted.jobs.some((job) => job.jobId === completed[0])).toBe(false);
     expect(persisted.jobs.length).toBeLessThanOrEqual(201);
     await expect(store.get(completed[0]!, 'owner-a', WS)).resolves.toBeNull();
+
+    // A job that started before the whole history but finishes last must
+    // survive the write that records its own completion.
+    clock += 1_000;
+    await store.complete(running.jobId, { indexed: 999 }, 'owner-a');
+    await expect(store.get(running.jobId, 'owner-a', WS)).resolves.toMatchObject({ status: 'completed', result: { indexed: 999 } });
   });
 });

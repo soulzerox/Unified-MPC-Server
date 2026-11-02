@@ -135,7 +135,8 @@ The bypass is deliberately narrow:
 |---|---|
 | read-only code query, workspace ready | served from that workspace's index |
 | read-only code query, workspace queued for its own reindex | `CONFLICT` (`workspace-indexing`) |
-| `code_index`, `index_status`, `cancel_index` | unchanged, serialized behind the active job |
+| `code_index` | unchanged, serialized behind the active job |
+| `index_status` / `cancel_index` | unchanged; status reads the durable mirror and cancellation targets its own job |
 
 A workspace whose source alias was replaced or relinked fails closed and is
 verified again instead of being answered from a stale index.

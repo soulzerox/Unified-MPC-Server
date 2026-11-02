@@ -387,8 +387,9 @@ export class ThaiRagIndexJobStore {
   private pruneTerminalJobs(): void {
     const terminal = [...this.jobs.values()].filter((job) => !ACTIVE_JOB_STATUSES.has(job.status));
     if (terminal.length <= TERMINAL_JOB_RETENTION) return;
-    // Newest first: the recent receipts are the ones an operator still reads.
-    terminal.sort((left, right) => String(right.startedAt).localeCompare(String(left.startedAt)));
+    // Newest completion first: the receipt an operator just received must
+    // survive the write that recorded it, even when the job started hours ago.
+    terminal.sort((left, right) => terminalOrder(right).localeCompare(terminalOrder(left)));
     for (const job of terminal.slice(TERMINAL_JOB_RETENTION)) this.jobs.delete(job.jobId);
   }
 
@@ -399,6 +400,10 @@ export class ThaiRagIndexJobStore {
     await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, this.filePath);
   }
+}
+
+function terminalOrder(job: ThaiRagIndexJob): string {
+  return job.finishedAt ?? job.startedAt;
 }
 
 function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndexJob; readonly migrated: boolean } | null {

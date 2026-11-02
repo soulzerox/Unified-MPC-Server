@@ -379,6 +379,8 @@ A successful run prints `BOOT_PERSISTENCE_READY`. This means `Linger=yes`, the a
 
 The MCP unit waits for `http://127.0.0.1:18765/_unified-mpc/identity` before systemd considers its startup sequence complete. The Web unit is ordered after it, so the dashboard does not race a not-yet-listening MCP origin during normal boot.
 
+Both readiness probes spend up to 120 s, and both units set `TimeoutStartSec=150` so that budget fits inside the startup deadline. The Web unit also runs with `WatchdogSec=30`, and systemd arms that watchdog as soon as the service starts — before the readiness probe finishes — so its probe pings `WATCHDOG=1` between attempts; a quiet probe would be killed after 30 s however long its budget is. A cold Node compile cache plus workspace admission can take 40 s or more after a fresh build; with the earlier 30 s probe the readiness check gave up first, and the restart loop kept interrupting startup before the cache could warm. Raise the probe budget as well as `TimeoutStartSec` when widening this margin: a longer deadline alone does not help because the probe itself gives up first.
+
 The units intentionally use systemd's default control-group kill behavior rather than `KillMode=process`, so spawned descendants are not orphaned when a service is stopped.
 
 ## 5. Gateway desired state and reboot behavior

@@ -1645,6 +1645,44 @@ export function getClientScriptJs(): string {
         }
       }
 
+      function renderGatewayUnavailable() {
+        const statBridge = document.getElementById('stat-bridge-state');
+        if (statBridge) {
+          statBridge.textContent = 'UNKNOWN';
+          statBridge.style.color = 'var(--status-offline)';
+        }
+        const bridgeEl = document.getElementById('bridge-state');
+        if (bridgeEl) {
+          bridgeEl.textContent = 'UNKNOWN';
+          bridgeEl.style.color = 'var(--text-secondary)';
+        }
+        const tunnelEl = document.getElementById('tunnel-url');
+        if (tunnelEl) tunnelEl.textContent = 'Unknown';
+        const viewTunnelUrl = document.getElementById('chatgpt-view-tunnel-url');
+        if (viewTunnelUrl) viewTunnelUrl.textContent = 'Unknown';
+        const viewTunnelBadge = document.getElementById('chatgpt-view-tunnel-badge');
+        if (viewTunnelBadge) {
+          viewTunnelBadge.textContent = 'Status Unknown';
+          viewTunnelBadge.className = 'badge mono badge-state';
+        }
+        for (const step of ['stopped', 'initializing', 'healthy', 'connected']) {
+          const el = document.getElementById('step-' + step);
+          if (el) {
+            el.style.borderColor = 'var(--border-subtle)';
+            el.style.background = 'var(--surface-2)';
+          }
+        }
+        const canvasDot = document.getElementById('canvas-gateway-dot');
+        if (canvasDot) canvasDot.setAttribute('fill', '#EF4444');
+        for (const id of ['connect-btn', 'chatgpt-view-connect-btn']) {
+          const btn = document.getElementById(id);
+          if (btn) {
+            btn.disabled = true;
+            btn.title = 'Gateway status unavailable';
+          }
+        }
+      }
+
       async function loadGatewayStatus() {
         try {
           const res = await fetch('/api/chatgpt-gateway/status');
@@ -1715,6 +1753,7 @@ export function getClientScriptJs(): string {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
         } catch (err) {
+          renderGatewayUnavailable();
           if (isBackendTransportError(err)) noteBackendUnavailable(err);
           else console.error(err);
         }

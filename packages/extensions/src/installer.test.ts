@@ -1285,3 +1285,81 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
   });
 });
 
+/** Run `body` with environment overrides applied, restoring them afterwards. */
+async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    return await body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+describe('InstallerService - Codex home resolution', () => {
+  async function writeCodexSkillSource(root: string): Promise<string> {
+    const sourceDir = path.join(root, 'source-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, 'SKILL.md'),
+      '---\nname: codex-skill\ndescription: Codex skill\n---\n# Codex Skill\n',
+      'utf8',
+    );
+    return sourceDir;
+  }
+
+  it('installs a codex skill into CODEX_HOME when no home directory is pinned', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-codex-home-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'custom-codex-home');
+    const dataDir = path.join(root, 'data');
+    // HOME is isolated so a regression cannot write into the real ~/.codex.
+    const isolatedHome = path.join(root, 'isolated-home');
+    const source = await writeCodexSkillSource(root);
+
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
+      const result = await new InstallerService({ dataDir }).installSkill({
+        name: 'codex-skill',
+        source,
+        targets: ['codex'],
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const expected = path.join(codexHome, 'skills', 'codex-skill', 'SKILL.md');
+      expect(result.value.installedPaths).toContain(expected);
+      expect(await readFile(expected, 'utf8')).toContain('# Codex Skill');
+      await expect(readFile(path.join(isolatedHome, '.codex', 'skills', 'codex-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+    });
+  });
+
+  it('prefers a pinned home directory over CODEX_HOME for codex installs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-codex-pinned-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const decoyCodexHome = path.join(root, 'decoy-codex-home');
+    const source = await writeCodexSkillSource(root);
+
+    await withEnv({ CODEX_HOME: decoyCodexHome }, async () => {
+      const result = await new InstallerService({ homeDir: home, dataDir }).installSkill({
+        name: 'codex-skill',
+        source,
+        targets: ['codex'],
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const expected = path.join(home, '.codex', 'skills', 'codex-skill', 'SKILL.md');
+      expect(result.value.installedPaths).toContain(expected);
+      await expect(readFile(path.join(decoyCodexHome, 'skills', 'codex-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+    });
+  });
+});
+

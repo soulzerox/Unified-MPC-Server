@@ -19,7 +19,7 @@ import { fingerprintCanonicalSkillDirectory } from './canonical-skill-migration-
 import { parseSkillMarkdown } from './skill-catalog.js';
 import { exclusionReason, stripJsonComments } from './mcp-config-loader.js';
 import { fingerprintExternalMcpValue } from './mcp-session-manager.js';
-import { writeAtomic } from './ide-sync.js';
+import { resolveCodexHome, writeAtomic } from './ide-sync.js';
 import { withConfigMutationTransaction } from './config-mutation-lock.js';
 
 export type InstallTarget = 'unified-mpc' | 'antigravity' | 'cursor' | 'claude' | 'codex' | 'cline' | 'opencode' | 'all';
@@ -123,6 +123,7 @@ function declaredSkillNameConflict(content: string, installName: string): AppErr
 
 export class InstallerService {
   private readonly home: string;
+  private readonly codexHome: string;
   private readonly appData: string;
   private readonly workspace: string | undefined;
   private readonly dataDir: string;
@@ -133,6 +134,7 @@ export class InstallerService {
 
   public constructor(options: InstallerServiceOptions = {}) {
     this.home = options.homeDir ?? os.homedir();
+    this.codexHome = resolveCodexHome(this.home, options.homeDir);
     this.appData = options.appDataDir?.trim() ?? path.join(this.home, '.config');
     this.workspace = options.workspaceRoot?.trim();
     this.dataDir = options.dataDir?.trim() ?? path.join(this.home, '.local', 'share', 'unified-mpc');
@@ -577,7 +579,7 @@ export class InstallerService {
       case 'opencode':
         return path.join(this.home, '.config', 'opencode', 'skill', skillName);
       case 'codex':
-        return path.join(this.home, '.codex', 'skills', skillName);
+        return path.join(this.codexHome, 'skills', skillName);
       default:
         return undefined;
     }
@@ -938,7 +940,7 @@ export class InstallerService {
       case 'opencode':
         return path.join(this.home, '.config', 'opencode', 'opencode.json');
       case 'codex':
-        return path.join(this.home, '.codex', 'mcp.json');
+        return path.join(this.codexHome, 'mcp.json');
       default:
         return undefined;
     }

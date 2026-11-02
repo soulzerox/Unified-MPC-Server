@@ -27,13 +27,24 @@ const PNPM_PREFIX = ['pnpm@10.15.0'];
 
 // Bump when a profile's step set changes, so a durable receipt names the exact
 // set of steps it vouches for.
-export const PROFILE_VERSION = 3;
+export const PROFILE_VERSION = 4;
 export const PROFILES = ['merge', 'targeted'];
+
+const testStep = (packageName) => ({
+  name: `test:${packageName.replace('@unified-mpc/', '')}`,
+  profiles: ['merge'],
+  command: [PNPM, ...PNPM_PREFIX, '--filter', packageName, 'test'],
+});
 
 /**
  * Ordered profile steps. `diff-check` runs first because it is the cheapest
  * failure, and `build` runs before every package test because the suites import
  * built workspace output.
+ *
+ * Package suites run in dependency order — each one after everything it depends
+ * on — so a broken dependency names a single package instead of cascading into
+ * its consumers. Every workspace project that defines a `test` script belongs
+ * in this list; `local-verify.test.mjs` fails when one is missing.
  */
 export const STEP_DEFINITIONS = [
   { name: 'diff-check', profiles: ['targeted', 'merge'], command: ['git', 'diff', '--check'] },
@@ -43,17 +54,42 @@ export const STEP_DEFINITIONS = [
   // must fail fast, and these suites need no workspace output.
   { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs'] },
   { name: 'build', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, 'build'] },
-  { name: 'test:workspace', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/workspace', 'test'] },
-  { name: 'test:storage', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/storage', 'test'] },
-  // `extensions` precedes `mcp-server` because the server and the CLI depend on
-  // it: a failure there is the cheaper, more specific signal.
-  { name: 'test:extensions', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/extensions', 'test'] },
-  { name: 'test:mcp-server', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/mcp-server', 'test'] },
-  { name: 'test:cli', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, '--filter', '@unified-mpc/cli', 'test'] },
+  testStep('@unified-mpc/audit'),
+  testStep('@unified-mpc/domain'),
+  testStep('@unified-mpc/ipc-contracts'),
+  testStep('@unified-mpc/shared'),
+  testStep('@unified-mpc/cf-gateway'),
+  testStep('@unified-mpc/permissions'),
+  testStep('@unified-mpc/process'),
+  testStep('@unified-mpc/project'),
+  testStep('@unified-mpc/workspace'),
+  testStep('@unified-mpc/capabilities'),
+  testStep('@unified-mpc/codex'),
+  testStep('@unified-mpc/filesystem'),
+  testStep('@unified-mpc/git'),
+  testStep('@unified-mpc/search'),
+  testStep('@unified-mpc/storage'),
+  testStep('@unified-mpc/thai-rag'),
+  testStep('@unified-mpc/application'),
+  testStep('@unified-mpc/extensions'),
+  testStep('@unified-mpc/mcp-server'),
+  testStep('@unified-mpc/web'),
+  testStep('@unified-mpc/cli'),
   { name: 'version', profiles: ['merge'], command: ['node', 'scripts/check-version-consistency.mjs'] },
   { name: 'docs:tools', profiles: ['merge'], command: ['node', 'scripts/generate-tool-catalog.mjs', '--check'] },
   { name: 'provenance', profiles: ['merge'], command: ['node', 'scripts/check-dist-provenance-freshness.mjs'] },
 ];
+
+/** Package names the merge profile runs a `test` script for. */
+export function gatedTestSuites() {
+  const gated = new Set();
+  for (const step of STEP_DEFINITIONS) {
+    const filterIndex = step.command.indexOf('--filter');
+    if (filterIndex === -1 || step.command.at(-1) !== 'test') continue;
+    gated.add(step.command[filterIndex + 1]);
+  }
+  return gated;
+}
 
 export function profileSteps(profile) {
   if (!PROFILES.includes(profile)) {

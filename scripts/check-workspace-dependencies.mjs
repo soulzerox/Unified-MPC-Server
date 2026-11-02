@@ -37,7 +37,7 @@ export function checkWorkspaceDependencies(root) {
       || left.sourcePath.localeCompare(right.sourcePath));
 }
 
-function discoverPackages(root) {
+export function discoverPackages(root) {
   const result = new Map();
   for (const group of ['apps', 'packages']) {
     const groupRoot = path.join(root, group);

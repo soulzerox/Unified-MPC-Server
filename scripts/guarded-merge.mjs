@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
-import { diffFingerprint } from './local-verify.mjs';
+import { PROFILE_VERSION, diffFingerprint } from './local-verify.mjs';
 import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint } from './review-gate.mjs';
 
 /**
@@ -124,6 +124,11 @@ export function evaluateEligibility({ pr, receipt, review, reviewSkill, reviewFi
     if (receipt.mergeReady !== true) blockers.push('local verification receipt is not merge-ready');
     if (receipt.dirty !== false) blockers.push('local verification receipt was produced from a dirty worktree');
     if (receipt.profile !== 'merge') blockers.push(`local verification receipt used the '${String(receipt.profile)}' profile`);
+    // A bumped PROFILE_VERSION means the step set changed, so an older receipt
+    // vouched for steps this profile no longer runs.
+    if (receipt.profileVersion !== PROFILE_VERSION) {
+      blockers.push(`local verification receipt used profile version ${String(receipt.profileVersion)}, current is ${PROFILE_VERSION}`);
+    }
     if (receipt.diffFingerprint !== headFingerprint) blockers.push('receipt fingerprint does not match the PR head');
   }
 

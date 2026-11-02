@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type PolicyEntry, type RuntimePolicySnapshot } from './types.js';
-import { DEFAULT_POLICIES as RUNTIME_DEFAULT_POLICIES, reconcileRuntimePolicies } from './runtime-policy.js';
+import { DEFAULT_POLICIES as RUNTIME_DEFAULT_POLICIES, configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { SkillCatalog } from './skill-catalog.js';
 
@@ -37,8 +37,11 @@ export class IdeSyncService {
     this.home = options.homeDir ?? os.homedir();
     this.codexHome = resolveCodexHome(this.home, options.homeDir);
     this.workspace = options.workspaceRoot?.trim();
-    this.policies = options.policies ?? DEFAULT_POLICIES;
     this.settings = options.settings ?? DEFAULT_EXTENSIONS_SETTINGS;
+    // An explicit policy list wins. Otherwise the persisted settings are
+    // authoritative: falling back to the built-in defaults here silently
+    // dropped a user's saved policy selection from the generated artifacts.
+    this.policies = options.policies ?? configuredPolicies(this.settings);
   }
 
   public compile(policies: readonly PolicyEntry[] = this.policies): string {

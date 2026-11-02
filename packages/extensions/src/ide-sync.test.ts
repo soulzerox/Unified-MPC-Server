@@ -141,6 +141,59 @@ describe('IdeSyncService', () => {
     expect(policies.some((policy) => policy.resourceId === 'thai-rag-mcp')).toBe(false);
   });
 
+  it('uses persisted policies when no explicit policy list is supplied', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-settings-'));
+    temporaryRoots.push(root);
+    const settings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      policies: [
+        {
+          id: 'custom:server',
+          resourceId: 'custom-server',
+          resourceType: 'server' as const,
+          mandatory: true,
+          enforcement: 'EVERY_SESSION',
+          directive: 'Keep the user-defined server available.',
+        },
+      ],
+    };
+
+    const service = new IdeSyncService({ homeDir: path.join(root, 'home'), settings });
+    const snapshot = await service.policySnapshot();
+
+    // Without an explicit policy list the persisted selection is the source of
+    // truth; falling back to the built-in defaults silently dropped it from the
+    // generated client artifacts.
+    expect(snapshot.policies.some((policy) => policy.id === 'custom:server')).toBe(true);
+  });
+
+  it('still lets an explicit policy list override persisted policies', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-override-'));
+    temporaryRoots.push(root);
+    const settings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      policies: [
+        {
+          id: 'custom:server',
+          resourceId: 'custom-server',
+          resourceType: 'server' as const,
+          mandatory: true,
+          enforcement: 'EVERY_SESSION',
+          directive: 'Keep the user-defined server available.',
+        },
+      ],
+    };
+
+    const service = new IdeSyncService({
+      homeDir: path.join(root, 'home'),
+      settings,
+      policies: [DEFAULT_POLICIES[0]!],
+    });
+    const snapshot = await service.policySnapshot();
+
+    expect(snapshot.policies.map((policy) => policy.id)).toEqual(['session-start:ask-matt']);
+  });
+
   it('derives P1-Pn from the user-selected array order instead of renaming policy ids', () => {
     const service = new IdeSyncService({ policies: [DEFAULT_POLICIES[1]!, DEFAULT_POLICIES[0]!] });
     const compiled = service.compile();

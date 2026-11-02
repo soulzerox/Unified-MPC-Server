@@ -2,8 +2,9 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_POLICIES, IdeSyncService, type SyncTarget } from './ide-sync.js';
+import { DEFAULT_POLICIES, IdeSyncService, resolveCodexHome, type SyncTarget } from './ide-sync.js';
 import { configuredPolicies } from './runtime-policy.js';
+import { SkillCatalog } from './skill-catalog.js';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 
 const temporaryRoots: string[] = [];
@@ -13,12 +14,13 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-/** Run `body` with environment overrides applied, restoring them afterwards. */
-async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => Promise<T>): Promise<T> {
+/** Run `body` with environment overrides applied, restoring them afterwards. A `undefined` value unsets the key. */
+async function withEnv<T>(overrides: Readonly<Record<string, string | undefined>>, body: () => Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(overrides)) {
     previous.set(key, process.env[key]);
-    process.env[key] = value;
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
   try {
     return await body();
@@ -29,6 +31,63 @@ async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () 
     }
   }
 }
+
+describe('resolveCodexHome', () => {
+  const home = path.join(path.sep, 'tmp', 'codex-home-resolution', 'home');
+
+  it('falls back to <home>/.codex when CODEX_HOME is unset, empty or blank', async () => {
+    const expected = path.join(home, '.codex');
+    // All three states mean "not configured", so every one of them must land on
+    // the documented default instead of producing an empty or cwd-relative root.
+    for (const configured of [undefined, '', '   ']) {
+      await withEnv({ CODEX_HOME: configured }, async () => {
+        expect(resolveCodexHome(home, undefined)).toBe(expected);
+      });
+    }
+  });
+
+  it('resolves a relative CODEX_HOME against the working directory instead of dropping it', async () => {
+    await withEnv({ CODEX_HOME: 'relative-codex-home' }, async () => {
+      expect(resolveCodexHome(home, undefined)).toBe(path.resolve('relative-codex-home'));
+    });
+  });
+
+  it('ignores the ambient CODEX_HOME when the caller pins a home directory', async () => {
+    // Callers pass the pinned home as both arguments, so the second parameter
+    // acts as the "do not read the environment" signal.
+    const pinned = path.join(path.sep, 'tmp', 'codex-home-resolution', 'pinned');
+    await withEnv({ CODEX_HOME: path.join(path.sep, 'tmp', 'ambient-codex-home') }, async () => {
+      expect(resolveCodexHome(pinned, pinned)).toBe(path.join(pinned, '.codex'));
+    });
+  });
+
+  it('applies the same resolution in SkillCatalog, whose copy cannot call this helper', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'codex-home-parity-'));
+    temporaryRoots.push(root);
+    const isolatedHome = path.join(root, 'isolated-home');
+    const codexHome = path.join(root, 'custom-codex-home');
+    const skillDir = path.join(codexHome, 'skills', 'parity-skill');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: parity-skill\ndescription: Parity skill\n---\n# Parity\n',
+      'utf8',
+    );
+
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
+      // No pinned homeDir, so the catalog exercises its inline copy of the
+      // resolution against the ambient variable.
+      const catalog = new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
+      const listed = await catalog.list({ query: 'parity' });
+
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return;
+      const skill = listed.value.skills.find((entry) => entry.name === 'parity-skill');
+      expect(skill?.id).toBe('codex-skills/parity-skill');
+      expect(skill?.rootPath).toBe(path.join(resolveCodexHome(os.homedir(), undefined), 'skills'));
+    });
+  });
+});
 
 describe('IdeSyncService', () => {
   it('classifies vetted optional child inspection tools as read-only without including mutations', () => {

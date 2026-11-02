@@ -789,12 +789,16 @@ describe('PrunerService - Server Pruning Pipeline', () => {
   });
 });
 
-/** Run `body` with environment overrides applied, restoring them afterwards. */
-async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => Promise<T>): Promise<T> {
+/**
+ * Run `body` with environment overrides applied, restoring them afterwards.
+ * An `undefined` value unsets the key for the duration of `body`.
+ */
+async function withEnv<T>(overrides: Readonly<Record<string, string | undefined>>, body: () => Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(overrides)) {
     previous.set(key, process.env[key]);
-    process.env[key] = value;
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
   try {
     return await body();
@@ -833,6 +837,77 @@ describe('PrunerService - Codex home resolution', () => {
       if (!result.ok) return;
       expect(result.value.removedPaths).toContain(skillDir);
       await expect(stat(skillDir)).rejects.toThrow();
+    });
+  });
+
+  it('falls back to <home>/.codex for codex skill prunes when CODEX_HOME is unset', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-default-'));
+    temporaryRoots.push(root);
+    // HOME is isolated so the default path is asserted without deleting
+    // anything from the operator's own ~/.codex.
+    const isolatedHome = path.join(root, 'isolated-home');
+    const skillDir = await seedCodexSkill(path.join(isolatedHome, '.codex'));
+
+    await withEnv({ CODEX_HOME: undefined, HOME: isolatedHome }, async () => {
+      const result = await new PrunerService({}).pruneSkill({
+        name: 'codex-skill',
+        targets: ['codex'],
+        scope: 'global',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.removedPaths).toContain(skillDir);
+      await expect(stat(skillDir)).rejects.toThrow();
+    });
+  });
+
+  it('treats an empty or blank CODEX_HOME as unset for codex prunes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-blank-'));
+    temporaryRoots.push(root);
+    const isolatedHome = path.join(root, 'isolated-home');
+
+    for (const configured of ['', '   ']) {
+      const skillDir = await seedCodexSkill(path.join(isolatedHome, '.codex'));
+      await withEnv({ CODEX_HOME: configured, HOME: isolatedHome }, async () => {
+        const result = await new PrunerService({}).pruneSkill({
+          name: 'codex-skill',
+          targets: ['codex'],
+          scope: 'global',
+        });
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.removedPaths).toContain(skillDir);
+        await expect(stat(skillDir)).rejects.toThrow();
+      });
+    }
+  });
+
+  it('falls back to <home>/.codex for the codex mcp.json entry when CODEX_HOME is unset', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-mcp-default-'));
+    temporaryRoots.push(root);
+    const isolatedHome = path.join(root, 'isolated-home');
+    const configFile = path.join(isolatedHome, '.codex', 'mcp.json');
+    await mkdir(path.dirname(configFile), { recursive: true });
+    await writeFile(
+      configFile,
+      JSON.stringify({ mcpServers: { 'codex-child': { command: 'node' }, keep: { command: 'node' } } }, null, 2),
+      'utf8',
+    );
+
+    await withEnv({ CODEX_HOME: undefined, HOME: isolatedHome }, async () => {
+      const result = await new PrunerService({}).pruneServer({
+        name: 'codex-child',
+        targets: ['codex'],
+        scope: 'global',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const config = JSON.parse(await readFile(configFile, 'utf8')) as { mcpServers: Record<string, unknown> };
+      expect(config.mcpServers['codex-child']).toBeUndefined();
+      expect(config.mcpServers.keep).toBeDefined();
     });
   });
 

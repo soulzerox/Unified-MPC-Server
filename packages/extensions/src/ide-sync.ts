@@ -185,7 +185,7 @@ export class IdeSyncService {
  * pin `homeDir`: an explicit home is authoritative, so tests and embedded
  * callers are never redirected by the ambient environment.
  */
-function resolveCodexHome(home: string, explicitHome: string | undefined): string {
+export function resolveCodexHome(home: string, explicitHome: string | undefined): string {
   const configured = explicitHome === undefined ? process.env.CODEX_HOME?.trim() : undefined;
   return configured === undefined || configured.length === 0 ? path.join(home, '.codex') : path.resolve(configured);
 }

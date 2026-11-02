@@ -789,3 +789,103 @@ describe('PrunerService - Server Pruning Pipeline', () => {
   });
 });
 
+/** Run `body` with environment overrides applied, restoring them afterwards. */
+async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    return await body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+describe('PrunerService - Codex home resolution', () => {
+  async function seedCodexSkill(codexHome: string): Promise<string> {
+    const skillDir = path.join(codexHome, 'skills', 'codex-skill');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(path.join(skillDir, 'SKILL.md'), '# Codex Skill\n', 'utf8');
+    return skillDir;
+  }
+
+  it('prunes a codex skill from CODEX_HOME when no home directory is pinned', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-home-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'custom-codex-home');
+    // HOME is isolated so a regression cannot delete anything from the real ~/.codex.
+    const isolatedHome = path.join(root, 'isolated-home');
+    const skillDir = await seedCodexSkill(codexHome);
+
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
+      const result = await new PrunerService({}).pruneSkill({
+        name: 'codex-skill',
+        targets: ['codex'],
+        scope: 'global',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.removedPaths).toContain(skillDir);
+      await expect(stat(skillDir)).rejects.toThrow();
+    });
+  });
+
+  it('prefers a pinned home directory over CODEX_HOME for codex prunes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-pinned-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const decoyCodexHome = path.join(root, 'decoy-codex-home');
+    const skillDir = await seedCodexSkill(path.join(home, '.codex'));
+
+    await withEnv({ CODEX_HOME: decoyCodexHome }, async () => {
+      const result = await new PrunerService({ homeDir: home }).pruneSkill({
+        name: 'codex-skill',
+        targets: ['codex'],
+        scope: 'global',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.removedPaths).toContain(skillDir);
+      await expect(stat(skillDir)).rejects.toThrow();
+      // The ambient CODEX_HOME must not be touched.
+      await expect(stat(path.join(decoyCodexHome, 'skills', 'codex-skill'))).rejects.toThrow();
+    });
+  });
+
+  it('prunes the codex server entry from the CODEX_HOME mcp.json', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'pruner-codex-mcp-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'custom-codex-home');
+    const isolatedHome = path.join(root, 'isolated-home');
+    await mkdir(codexHome, { recursive: true });
+    const configFile = path.join(codexHome, 'mcp.json');
+    await writeFile(
+      configFile,
+      JSON.stringify({ mcpServers: { 'codex-child': { command: 'node' }, keep: { command: 'node' } } }, null, 2),
+      'utf8',
+    );
+
+    await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, async () => {
+      const result = await new PrunerService({}).pruneServer({
+        name: 'codex-child',
+        targets: ['codex'],
+        scope: 'global',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const config = JSON.parse(await readFile(configFile, 'utf8')) as { mcpServers: Record<string, unknown> };
+      expect(config.mcpServers['codex-child']).toBeUndefined();
+      expect(config.mcpServers.keep).toBeDefined();
+      await expect(stat(path.join(isolatedHome, '.codex', 'mcp.json'))).rejects.toThrow();
+    });
+  });
+});
+

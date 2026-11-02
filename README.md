@@ -154,7 +154,7 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 | **OpenCode** | CLI, VS Code Extension | `~/.config/opencode/opencode.jsonc`<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md`<br>`~/.config/opencode/AGENTS.md` |
 | **Freebuff** | Desktop Agent | Loopback HTTP or workspace state | `.agents/skills/`<br>`<workspace>/skills/` | `AGENTS.md` |
 | **Oh My Pi (OMP)** | Terminal Agent CLI | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
-| **Codex CLI** | CLI Tool | Standard Codex Engine | `~/.codex/skills/`<br>`~/.codex/plugins/cache/` | `AGENTS.md` |
+| **Codex CLI** | CLI Tool | Standard Codex Engine | `$CODEX_HOME/skills/`<br>`$CODEX_HOME/plugins/cache/` (default `~/.codex`) | `AGENTS.md`<br>`$CODEX_HOME/AGENTS.md` |
 
 ---
 

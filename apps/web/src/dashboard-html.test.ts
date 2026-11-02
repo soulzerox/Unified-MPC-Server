@@ -85,6 +85,12 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain("active ? 'In Scope' : 'Out of Scope'");
     expect(html).toContain("primary ? 'Default' : '—'");
     expect(html).toContain('Set Default');
+    expect(html).toContain("active ? 'Remove from Scope' : 'Add to Scope'");
+    expect(html).toContain("preferredGoalId === goal.goalId ? 'Preferred' : 'Select Goal'");
+    expect(html).toContain('Preferred goal');
+    expect(html).toContain('Preferred goal updated; execution was not started');
+    expect(html).toContain('Unregister this project from Unified-MPC');
+    expect(html).toContain('Project unregistered from Unified-MPC');
     expect(html).toContain("emptyRow(7, 'Failed to load projects: '");
     expect(html).not.toContain("emptyRow(6, 'Failed to load projects: '");
     expect(html).toContain("'/goal-runtime'");

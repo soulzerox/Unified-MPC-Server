@@ -1030,9 +1030,9 @@ export function getClientScriptJs(): string {
           const activeButton = document.createElement('button');
           activeButton.type = 'button';
           activeButton.className = active ? 'btn btn-secondary btn-sm' : 'btn btn-sm';
-          activeButton.textContent = active ? 'Remove Scope' : 'Add Scope';
+          activeButton.textContent = active ? 'Remove from Scope' : 'Add to Scope';
           activeButton.disabled = primary;
-          activeButton.title = primary ? 'Set another Default project before removing this project from Web scope' : '';
+          activeButton.title = primary ? 'Set another Default project before removing this project from Web scope' : 'Selection scope does not start, pause, or cancel project execution';
           activeButton.addEventListener('click', () => updateWorkspaceSelection(workspace.id, active ? 'deactivate' : 'activate'));
           action.appendChild(activeButton);
           if (!primary) {
@@ -1048,8 +1048,8 @@ export function getClientScriptJs(): string {
           removeButton.type = 'button';
           removeButton.className = 'btn btn-secondary btn-sm';
           removeButton.style.marginLeft = '8px';
-          removeButton.textContent = 'Remove';
-          removeButton.title = 'Remove this project from Unified-MPC without deleting its source directory';
+          removeButton.textContent = 'Unregister';
+          removeButton.title = 'Unregister this project from Unified-MPC without deleting its source directory or changing runtime execution';
           removeButton.addEventListener('click', () => removeWorkspace(workspace.id, workspace.displayName || workspace.id));
           action.appendChild(removeButton);
           row.appendChild(action);
@@ -1112,7 +1112,7 @@ export function getClientScriptJs(): string {
           const preferred = document.createElement('span');
           preferred.className = 'badge badge-healthy';
           preferred.style.marginLeft = '6px';
-          preferred.textContent = 'Selected to continue';
+          preferred.textContent = 'Preferred goal';
           title.appendChild(preferred);
         }
         header.appendChild(title);
@@ -1180,7 +1180,7 @@ export function getClientScriptJs(): string {
         continueButton.type = 'button';
         continueButton.className = 'btn btn-sm goal-continue-btn';
         continueButton.disabled = preferredGoalId === goal.goalId;
-        continueButton.textContent = preferredGoalId === goal.goalId ? 'Selected' : 'Select Goal';
+        continueButton.textContent = preferredGoalId === goal.goalId ? 'Preferred' : 'Select Goal';
         continueButton.title = 'Select this preferred goal for Web context only; this does not start or resume runtime execution';
         continueButton.addEventListener('click', () => continueWorkspaceGoal(workspaceId, goal.goalId));
         actions.appendChild(continueButton);
@@ -1268,7 +1268,7 @@ export function getClientScriptJs(): string {
           const current = workspaceGoals.get(workspaceId);
           if (current) workspaceGoals.set(workspaceId, { ...current, preferredGoalId: data.preferredGoalId || goalId });
           renderWorkspaces();
-          showToast('Goal selected for continuation');
+          showToast('Preferred goal updated; execution was not started');
           logEvent('SUCCESS', 'Preferred goal selected for ' + workspaceId + ': ' + (data.goal.goalKey || goalId));
         } catch (err) {
           showToast('Goal selection failed: ' + err.message, true);
@@ -1318,15 +1318,15 @@ export function getClientScriptJs(): string {
       }
 
       async function removeWorkspace(workspaceId, displayName) {
-        const confirmed = window.confirm('Remove "' + displayName + '" from Unified-MPC? The source directory will not be deleted.');
+        const confirmed = window.confirm('Unregister "' + displayName + '" from Unified-MPC? The source directory will not be deleted, and this does not stop or cancel running work.');
         if (!confirmed) return;
         try {
           const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId);
           const res = await mutationJson(endpoint, { method: 'DELETE' });
           const data = await res.json();
-          if (!res.ok) throw new Error(errorMessage(data, 'Project removal failed'));
+          if (!res.ok) throw new Error(errorMessage(data, 'Project unregistration failed'));
           await loadWorkspaces();
-          showToast('Project removed from Unified-MPC');
+          showToast('Project unregistered from Unified-MPC');
           logEvent('SUCCESS', 'Workspace registration removed for ' + workspaceId + '; source files were not deleted');
         } catch (err) {
           if (isRequestTimeout(err)) {
@@ -1334,7 +1334,7 @@ export function getClientScriptJs(): string {
               const reconciled = await fetchWorkspaceState();
               applyWorkspaceState(reconciled, false);
               if (!cachedWorkspaces.some((workspace) => workspace.id === workspaceId)) {
-                showToast('Project removed from Unified-MPC');
+                showToast('Project unregistered from Unified-MPC');
                 logEvent('SUCCESS', 'Workspace removal reconciled after response timeout for ' + workspaceId);
                 return;
               }
@@ -1347,7 +1347,7 @@ export function getClientScriptJs(): string {
               return;
             }
           }
-          showToast('Project removal failed: ' + err.message, true);
+          showToast('Project unregistration failed: ' + err.message, true);
           logEvent('ERROR', 'Workspace removal failed: ' + err.message);
         }
       }

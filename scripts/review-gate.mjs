@@ -2,7 +2,7 @@
 /* global process, console, Buffer, URL */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -386,10 +386,43 @@ export function capsuleIntegrityBlockers({ capsule, patch, filesText }) {
   return blockers;
 }
 
-export function receiptUniquenessBlockers(receipts, headSha) {
-  const existing = receipts.filter((receipt) => receipt?.headSha === headSha);
+/**
+ * `record` rescans after its atomic create to catch a receipt written under the
+ * older `<head>-<pr>-<reviewId>` name. That rescan must not count the receipt it
+ * just wrote, so the caller passes its own `reviewId` to exclude; the pre-create
+ * scan passes nothing and still sees every receipt for the head.
+ */
+export function receiptUniquenessBlockers(receipts, headSha, excludeReviewId) {
+  const existing = receipts.filter((receipt) => receipt?.headSha === headSha
+    && (excludeReviewId === undefined || receipt?.reviewId !== excludeReviewId));
   if (existing.length === 0) return [];
   return [`a review receipt already exists for ${headSha.slice(0, 12)} (${String(existing[0]?.reviewId)}); a new review needs a new head`];
+}
+
+/**
+ * `record` enforces one receipt per head by scanning the receipt directory and
+ * then writing a new file. Two reviewer processes running that scan at the same
+ * time would both pass `receiptUniquenessBlockers`, and a lock that guards the
+ * scan cannot close the race by itself: any stale-lock policy that removes a
+ * lock can remove one that a peer just acquired, which puts two writers back
+ * inside (#536). So the receipt file is created with `link`, which the
+ * filesystem refuses when the target already exists. Exactly one writer wins,
+ * with no lock to go stale, and a process killed mid-write leaves only a
+ * `.tmp-*` file that no reader parses.
+ */
+export async function createExclusiveFile(directory, fileName, contents) {
+  const target = path.join(directory, fileName);
+  const temporary = `${target}.tmp-${randomUUID().slice(0, 8)}`;
+  await writeFile(temporary, contents, 'utf8');
+  try {
+    await link(temporary, target);
+    return { created: true, path: target };
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    return { created: false, path: target };
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export function renderCapsuleMarkdown(capsule) {
@@ -637,10 +670,31 @@ async function recordCommand(options) {
   };
 
   await mkdir(RECEIPT_ROOT, { recursive: true });
-  const receiptPath = path.join(RECEIPT_ROOT, `${pr.headRefOid.slice(0, 12)}-${pr.number}-${reviewId}.json`);
-  const temporaryPath = `${receiptPath}.tmp-${reviewId.slice(0, 8)}`;
-  await writeFile(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-  await rename(temporaryPath, receiptPath);
+  // One file name per head, so the create below is the whole concurrency
+  // control: `link` fails for every recorder except the first.
+  const write = await createExclusiveFile(
+    RECEIPT_ROOT,
+    `${pr.headRefOid.slice(0, 12)}-${pr.number}.json`,
+    `${JSON.stringify(receipt, null, 2)}\n`,
+  );
+  if (!write.created) {
+    const raced = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
+    console.error('refusing to record this review:');
+    if (raced.length > 0) for (const blocker of raced) console.error(`  - ${blocker}`);
+    else console.error(`  - ${path.relative(ROOT, write.path)} already exists for this head; a new review needs a new head`);
+    return 1;
+  }
+  // A receipt written by an older gate under the `<head>-<pr>-<reviewId>` name
+  // would not collide with this one, so re-scan and withdraw rather than leave
+  // two receipts for one head.
+  const duplicated = await receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid, reviewId);
+  if (duplicated.length > 0) {
+    await rm(write.path, { force: true });
+    console.error('refusing to record this review:');
+    for (const blocker of duplicated) console.error(`  - ${blocker}`);
+    return 1;
+  }
+  const receiptPath = write.path;
 
   console.log(`\n${summarizeReceipt(receipt, path.relative(ROOT, receiptPath))}`);
   if (derived.verdict !== 'clean') {

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -6,6 +9,7 @@ import {
   SKILL_ID,
   capsuleIntegrityBlockers,
   cleanTreeBlockers,
+  createExclusiveFile,
   evaluateReviewEvidence,
   findReviewReceipt,
   issueRefsFrom,
@@ -253,6 +257,48 @@ test('record refuses a second review for the same head', () => {
   assert.deepEqual(receiptUniquenessBlockers([], HEAD), []);
   assert.deepEqual(receiptUniquenessBlockers([receipt({ headSha: 'd'.repeat(40) })], HEAD), []);
   assert.match(receiptUniquenessBlockers([receipt()], HEAD).join('\n'), /a new review needs a new head/);
+});
+
+test('the post-create rescan ignores the receipt it just wrote', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
+  const own = receipt({ reviewId: 'own-review' });
+  const write = await createExclusiveFile(root, 'aaaaaaaaaaaa-536.json', JSON.stringify(own));
+  assert.equal(write.created, true);
+  const readRecords = async () => Promise.all((await readdir(root))
+    .filter((name) => name.endsWith('.json'))
+    .map(async (name) => JSON.parse(await readFile(path.join(root, name), 'utf8'))));
+  // The recorder's own atomic receipt is not a duplicate of itself.
+  assert.deepEqual(receiptUniquenessBlockers(await readRecords(), HEAD, 'own-review'), []);
+  // An older receipt under the legacy `<head>-<pr>-<reviewId>` name still counts.
+  await writeFile(path.join(root, 'aaaaaaaaaaaa-536-legacy.json'), JSON.stringify(receipt({ reviewId: 'legacy-review' })));
+  assert.match(
+    receiptUniquenessBlockers(await readRecords(), HEAD, 'own-review').join('\n'),
+    /a new review needs a new head/,
+  );
+});
+
+test('racing recorders create exactly one receipt file', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
+  const attempts = Array.from({ length: 8 }, (_, index) => `writer-${index}`);
+  const results = await Promise.all(attempts.map((body) => createExclusiveFile(root, 'aaaaaaaaaaaa-536.json', body)));
+  assert.equal(results.filter((result) => result.created).length, 1);
+  assert.equal(results.filter((result) => !result.created).length, 7);
+  const winnerIndex = results.findIndex((result) => result.created);
+  assert.equal(await readFile(results[winnerIndex].path, 'utf8'), attempts[winnerIndex]);
+  assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.json')), ['aaaaaaaaaaaa-536.json']);
+  assert.deepEqual((await readdir(root)).filter((name) => name.includes('.tmp-')), []);
+});
+
+test('a temp file left by a killed recorder is not a receipt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-receipt-'));
+  await writeFile(path.join(root, 'aaaaaaaaaaaa-536.json.tmp-deadbeef'), 'half written', 'utf8');
+  const first = await createExclusiveFile(root, 'aaaaaaaaaaaa-536.json', 'complete');
+  assert.equal(first.created, true);
+  assert.equal(await readFile(first.path, 'utf8'), 'complete');
+  assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.json')), ['aaaaaaaaaaaa-536.json']);
+  const second = await createExclusiveFile(root, 'aaaaaaaaaaaa-536.json', 'duplicate');
+  assert.equal(second.created, false);
+  assert.equal(await readFile(second.path, 'utf8'), 'complete');
 });
 
 test('cleanTreeBlockers names a moved HEAD and a dirty tree', () => {

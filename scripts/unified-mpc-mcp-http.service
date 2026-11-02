@@ -4,6 +4,8 @@ Documentation=https://github.com/soulzerox/Unified-MPC-Server
 Wants=network-online.target
 After=network-online.target
 PartOf=unified-mpc.service
+StartLimitIntervalSec=20min
+StartLimitBurst=5
 
 [Service]
 Type=simple

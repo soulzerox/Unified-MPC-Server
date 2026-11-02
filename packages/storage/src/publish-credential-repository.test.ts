@@ -2,27 +2,30 @@ import { describe, expect, it } from 'vitest';
 import type { PublishCredentialLease } from '@unified-mpc/domain';
 import { SqliteDatabase } from './database.js';
 import { SqlitePublishCredentialRepository } from './publish-credential-repository.js';
-import type { SecretStore } from './secret-store.js';
+import { SecretStoreError, type SecretStore } from './secret-store.js';
 
 const NOW = 1_780_000_000_000;
 const SECRET = 'super-secret-token-value';
 
 class FakeSecretStore implements SecretStore {
   public readonly values = new Map<string, string>();
+  public failGet = false;
   public failSet = false;
   public failDelete = false;
+  public failWith: Error | null = null;
 
   public async get(key: string): Promise<string | null> {
+    if (this.failGet) throw this.failWith ?? new Error('Secret Service unavailable');
     return this.values.get(key) ?? null;
   }
 
   public async set(key: string, value: string): Promise<void> {
-    if (this.failSet) throw new Error('Secret Service unavailable');
+    if (this.failSet) throw this.failWith ?? new Error('Secret Service unavailable');
     this.values.set(key, value);
   }
 
   public async delete(key: string): Promise<void> {
-    if (this.failDelete) throw new Error('Secret Service unavailable');
+    if (this.failDelete) throw this.failWith ?? new Error('Secret Service unavailable');
     this.values.delete(key);
   }
 }
@@ -176,6 +179,33 @@ describe('SqlitePublishCredentialRepository', () => {
     const result = await repository.grant(lease(), SECRET);
     expect(result.ok).toBe(false);
     expect(result.ok ? undefined : result.error.details?.reason).toBe('publish-credential-unavailable');
+  });
+
+  it('reports a locked keyring from open and revoke, not only from grant (#297)', async () => {
+    const { store, repository } = setup();
+    await expect(repository.grant(lease(), SECRET)).resolves.toMatchObject({ ok: true });
+    const locked = new SecretStoreError('secret-store-locked', 'Linux Secret Service lookup failed: the collection is locked');
+
+    store.failGet = true;
+    store.failWith = locked;
+    const opened = await repository.open('lease-1', NOW);
+    expect(opened.ok ? undefined : opened.error.details?.reason).toBe('publish-credential-locked');
+
+    store.failDelete = true;
+    const revoked = await repository.revoke('lease-1', NOW);
+    expect(revoked.ok ? undefined : revoked.error.details?.reason).toBe('publish-credential-locked');
+  });
+
+  it('reports a locked keyring collection separately from a missing service (#297)', async () => {
+    const { database, store, repository } = setup();
+    store.failSet = true;
+    store.failWith = new SecretStoreError('secret-store-locked', 'Linux Secret Service write failed: the collection is locked');
+    const result = await repository.grant(lease(), SECRET);
+    expect(result.ok).toBe(false);
+    expect(result.ok ? undefined : result.error.details?.reason).toBe('publish-credential-locked');
+    expect(result.ok ? undefined : result.error.message).toMatch(/locked/i);
+    expect(ledgerRows(database)).toEqual([]);
+    expect(store.values.size).toBe(0);
   });
 
   it('inspects metadata without returning the secret', async () => {

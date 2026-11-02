@@ -14,7 +14,7 @@ import {
   type Result,
 } from '@unified-mpc/domain';
 import type { SqliteDatabase } from './database.js';
-import type { SecretStore } from './secret-store.js';
+import { secretStoreFailureReason, type SecretStore } from './secret-store.js';
 
 /** SecretStore key prefix; the lease id is charset-safe on its own. */
 const SECRET_KEY_PREFIX = 'publish-';
@@ -109,9 +109,9 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
     try {
       await this.options.secretStore.set(secretKey(lease.leaseId), secret);
       return ok(undefined);
-    } catch {
+    } catch (error: unknown) {
       this.deleteRow(lease.leaseId);
-      return err(secretServiceUnavailable());
+      return err(secretServiceFailure(error));
     }
   }
 
@@ -131,8 +131,8 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
     let secret: string | null;
     try {
       secret = await this.options.secretStore.get(secretKey(leaseId));
-    } catch {
-      return err(secretServiceUnavailable());
+    } catch (error: unknown) {
+      return err(secretServiceFailure(error));
     }
     if (secret === null || secret.length === 0) return ok(null);
 
@@ -170,8 +170,8 @@ export class SqlitePublishCredentialRepository implements PublishCredentialPort 
     }
     try {
       await this.options.secretStore.delete(secretKey(leaseId));
-    } catch {
-      return err(secretServiceUnavailable());
+    } catch (error: unknown) {
+      return err(secretServiceFailure(error));
     }
     try {
       this.options.database.connection.prepare(`
@@ -278,6 +278,25 @@ function leaseConflict(): AppError {
   return appError('CONFLICT', 'A publish credential lease with this id already exists', false, {
     reason: 'publish-credential-conflict',
   });
+}
+
+/**
+ * A locked keyring is not a missing one: the daemon answered and refused, so
+ * the operator fix is `unlock`, not `install` (#297 §3).
+ */
+function secretServiceFailure(error: unknown): AppError {
+  return secretStoreFailureReason(error) === 'secret-store-locked'
+    ? secretServiceLocked()
+    : secretServiceUnavailable();
+}
+
+function secretServiceLocked(): AppError {
+  return appError(
+    'SECRET_ACCESS_DENIED',
+    'Linux Secret Service collection is locked; unlock the keyring and retry',
+    true,
+    { reason: 'publish-credential-locked' },
+  );
 }
 
 function secretServiceUnavailable(): AppError {

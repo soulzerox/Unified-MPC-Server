@@ -28,12 +28,14 @@ export interface IdeSyncOptions {
 
 export class IdeSyncService {
   private readonly home: string;
+  private readonly codexHome: string;
   private readonly workspace: string | undefined;
   private readonly policies: readonly PolicyEntry[];
   private readonly settings: ExtensionsSettings;
 
   public constructor(options: IdeSyncOptions = {}) {
     this.home = options.homeDir ?? os.homedir();
+    this.codexHome = resolveCodexHome(this.home, options.homeDir);
     this.workspace = options.workspaceRoot?.trim();
     this.policies = options.policies ?? DEFAULT_POLICIES;
     this.settings = options.settings ?? DEFAULT_EXTENSIONS_SETTINGS;
@@ -143,7 +145,7 @@ export class IdeSyncService {
       // Codex reads global instructions from `$CODEX_HOME/AGENTS.md`, which
       // defaults to `~/.codex/AGENTS.md`.
       if (isAll || targets.includes('codex')) {
-        const codexAgents = path.join(this.home, '.codex', 'AGENTS.md');
+        const codexAgents = path.join(this.codexHome, 'AGENTS.md');
         await updateFileWithBlock(codexAgents, compiled);
         updatedFiles.push(codexAgents);
       }
@@ -175,6 +177,17 @@ export class IdeSyncService {
       return err(appError('INTERNAL_ERROR', `Failed to sync IDE policies: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
+}
+
+/**
+ * Codex reads global instructions from `$CODEX_HOME/AGENTS.md`. Honor that
+ * variable the same way `SkillCatalog` does, but only when the caller did not
+ * pin `homeDir`: an explicit home is authoritative, so tests and embedded
+ * callers are never redirected by the ambient environment.
+ */
+function resolveCodexHome(home: string, explicitHome: string | undefined): string {
+  const configured = explicitHome === undefined ? process.env.CODEX_HOME?.trim() : undefined;
+  return configured === undefined || configured.length === 0 ? path.join(home, '.codex') : path.resolve(configured);
 }
 
 /**

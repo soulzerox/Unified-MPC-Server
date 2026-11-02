@@ -13,6 +13,18 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+/** Run `body` with `CODEX_HOME` set, restoring the previous value afterwards. */
+async function withCodexHome<T>(codexHome: string, body: () => Promise<T>): Promise<T> {
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  }
+}
+
 describe('IdeSyncService', () => {
   it('classifies vetted optional child inspection tools as read-only without including mutations', () => {
     const context7 = DEFAULT_POLICIES.find((policy) => policy.id === 'optional:context7');
@@ -110,21 +122,44 @@ describe('IdeSyncService', () => {
     temporaryRoots.push(root);
     const home = path.join(root, 'home');
     const workspace = path.join(root, 'workspace');
-    const service = new IdeSyncService({ homeDir: home, workspaceRoot: workspace });
+    const decoyCodexHome = path.join(root, 'decoy-codex-home');
+    // A pinned home is authoritative: an ambient CODEX_HOME must not redirect it.
+    await withCodexHome(decoyCodexHome, async () => {
+      const service = new IdeSyncService({ homeDir: home, workspaceRoot: workspace });
 
-    const result = await service.sync(['codex']);
+      const result = await service.sync(['codex']);
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    // Codex reads `$CODEX_HOME/AGENTS.md` globally and `<repo>/AGENTS.md` per project.
-    expect(await readFile(path.join(home, '.codex', 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
-    expect(await readFile(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
-    expect(result.value.updatedFiles).toEqual([
-      path.join(workspace, 'AGENTS.md'),
-      path.join(home, '.codex', 'AGENTS.md'),
-    ]);
-    // The OpenCode global file belongs to the opencode target, not to codex.
-    await expect(readFile(path.join(home, '.config', 'opencode', 'AGENTS.md'), 'utf8')).rejects.toThrow();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // Codex reads `$CODEX_HOME/AGENTS.md` globally and `<repo>/AGENTS.md` per project.
+      expect(await readFile(path.join(home, '.codex', 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+      expect(await readFile(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+      expect(result.value.updatedFiles).toEqual([
+        path.join(workspace, 'AGENTS.md'),
+        path.join(home, '.codex', 'AGENTS.md'),
+      ]);
+      // The OpenCode global file belongs to the opencode target, not to codex.
+      await expect(readFile(path.join(home, '.config', 'opencode', 'AGENTS.md'), 'utf8')).rejects.toThrow();
+      await expect(readFile(path.join(decoyCodexHome, 'AGENTS.md'), 'utf8')).rejects.toThrow();
+    });
+  });
+
+  it('honors CODEX_HOME for the codex target when no home directory is pinned', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-ide-sync-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'custom-codex-home');
+    const workspace = path.join(root, 'workspace');
+
+    await withCodexHome(codexHome, async () => {
+      const service = new IdeSyncService({ workspaceRoot: workspace });
+
+      const result = await service.sync(['codex']);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.updatedFiles).toContain(path.join(codexHome, 'AGENTS.md'));
+      expect(await readFile(path.join(codexHome, 'AGENTS.md'), 'utf8')).toContain('<!-- MCP-POLICY-START -->');
+    });
   });
 
   it('atomically synchronizes policies across all universal clients', async () => {
@@ -179,6 +214,12 @@ describe('IdeSyncService', () => {
     expect(agentsContent).toContain('<!-- MCP-POLICY-START -->');
     expect(agentsContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
     expect(agentsContent).toContain('<!-- MCP-POLICY-END -->');
+
+    // The OpenCode global file is written for opencode/agents and must not be
+    // dropped from that branch by a future refactor of the AGENTS.md split.
+    const opencodeGlobalFile = path.join(home, '.config', 'opencode', 'AGENTS.md');
+    const opencodeGlobalContent = await readFile(opencodeGlobalFile, 'utf8');
+    expect(opencodeGlobalContent).toContain('| P2 | memory:workspace-selective | native-memory | capability | ON_DEMAND | Optional |');
 
     // 5. Claude: ~/.claude/CLAUDE.md & workspace CLAUDE.md
     const claudeGlobalFile = path.join(home, '.claude', 'CLAUDE.md');

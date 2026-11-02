@@ -1,16 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+import { discoverPackages } from './check-workspace-dependencies.mjs';
 import {
   PROFILE_VERSION,
   buildReceipt,
   diffFingerprint,
+  gatedTestSuites,
   mergeReadiness,
   parseArgs,
   profileSteps,
   summarize,
   truncateLog,
 } from './local-verify.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const STEP = (name, status = 'passed') => ({
   name,
@@ -30,10 +36,26 @@ test('merge profile runs every gate in a deterministic order', () => {
     'lint',
     'test:merge-gate',
     'build',
+    'test:audit',
+    'test:domain',
+    'test:ipc-contracts',
+    'test:shared',
+    'test:cf-gateway',
+    'test:permissions',
+    'test:process',
+    'test:project',
     'test:workspace',
+    'test:capabilities',
+    'test:codex',
+    'test:filesystem',
+    'test:git',
+    'test:search',
     'test:storage',
+    'test:thai-rag',
+    'test:application',
     'test:extensions',
     'test:mcp-server',
+    'test:web',
     'test:cli',
     'version',
     'docs:tools',
@@ -41,6 +63,56 @@ test('merge profile runs every gate in a deterministic order', () => {
   ]);
   assert.equal(new Set(names).size, names.length);
   assert.ok(names.indexOf('build') < names.indexOf('test:mcp-server'), 'build precedes package tests');
+});
+
+test('every workspace project with a test script runs in the merge profile', () => {
+  const projects = discoverPackages(ROOT);
+  const withTests = [...projects]
+    .filter(([, workspacePackage]) => typeof workspacePackage.manifest.scripts?.test === 'string')
+    .map(([packageName]) => packageName)
+    .sort();
+  const gated = gatedTestSuites();
+
+  assert.deepEqual(
+    withTests.filter((packageName) => !gated.has(packageName)),
+    [],
+    'a workspace project with a test script must be added to STEP_DEFINITIONS',
+  );
+  assert.deepEqual(
+    [...gated].filter((packageName) => !withTests.includes(packageName)).sort(),
+    [],
+    'STEP_DEFINITIONS runs a test script for a project that no longer defines one',
+  );
+});
+
+test('every gated suite runs after the workspace packages it depends on', () => {
+  const projects = discoverPackages(ROOT);
+  const positions = new Map();
+  for (const [index, step] of profileSteps('merge').entries()) {
+    const filterIndex = step.command.indexOf('--filter');
+    if (filterIndex === -1 || step.command.at(-1) !== 'test') continue;
+    positions.set(step.command[filterIndex + 1], index);
+  }
+
+  const violations = [];
+  for (const [packageName, position] of positions) {
+    const manifest = projects.get(packageName)?.manifest ?? {};
+    const workspaceDependencies = [
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+      ...Object.keys(manifest.peerDependencies ?? {}),
+    ].filter((dependency) => projects.has(dependency));
+    for (const dependency of workspaceDependencies) {
+      const dependencyPosition = positions.get(dependency);
+      // A dependency without a suite is covered by the workspace `build` step.
+      if (dependencyPosition === undefined) continue;
+      if (dependencyPosition >= position) {
+        violations.push(`${packageName} is gated before its dependency ${dependency}`);
+      }
+    }
+  }
+
+  assert.deepEqual(violations, [], 'a suite must run after the suites of the packages it depends on');
 });
 
 test('targeted profile is a fast subset with no build or package suite', () => {

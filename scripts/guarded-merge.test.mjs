@@ -8,6 +8,7 @@ import {
   parseArgs,
   parseRepositoryFromRemote,
 } from './guarded-merge.mjs';
+import { PROFILE_VERSION } from './local-verify.mjs';
 import { reviewFingerprint } from './review-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -47,6 +48,7 @@ const REVIEW = {
 const RECEIPT = {
   verificationId: 'verification-1',
   profile: 'merge',
+  profileVersion: PROFILE_VERSION,
   headSha: HEAD,
   dirty: false,
   mergeReady: true,
@@ -134,6 +136,10 @@ test('a missing, stale or weak receipt blocks the merge', () => {
   assert.match(evaluate({ receipt: { ...RECEIPT, mergeReady: false } }).blockers.join('\n'), /not merge-ready/);
   assert.match(evaluate({ receipt: { ...RECEIPT, dirty: true } }).blockers.join('\n'), /dirty worktree/);
   assert.match(evaluate({ receipt: { ...RECEIPT, profile: 'targeted' } }).blockers.join('\n'), /'targeted' profile/);
+  assert.match(
+    evaluate({ receipt: { ...RECEIPT, profileVersion: PROFILE_VERSION - 1 } }).blockers.join('\n'),
+    /profile version \d+, current is \d+/,
+  );
   assert.match(evaluate({ receipt: { ...RECEIPT, headSha: 'c'.repeat(40) } }).blockers.join('\n'), /different head/);
   assert.match(
     evaluate({ receipt: { ...RECEIPT, diffFingerprint: expectedFingerprint('c'.repeat(40)) } }).blockers.join('\n'),

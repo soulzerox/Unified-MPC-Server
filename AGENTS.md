@@ -20,12 +20,13 @@ corepack pnpm@10.15.0 verify:local
 ```
 
 It runs `diff-check`, `typecheck`, `lint`, the merge-gate unit tests, `build`,
-the `workspace`, `storage`, `extensions`, `mcp-server` and `cli` suites, then
-version consistency, the tool catalog check and `dist` provenance freshness. It
-refuses a dirty worktree because provenance and the build-provenance test
-describe the committed tree, and it writes a durable receipt to
-`.unified-mpc/local-verify/` (`headSha`, `diffFingerprint`, per-step exit codes,
-bounded log refs, `mergeReady`).
+the test suite of **every workspace project that defines one** in dependency
+order, then version consistency, the tool catalog check and `dist` provenance
+freshness. A project with a `test` script that is missing from the profile fails
+the merge-gate tests, so the list cannot drift. It refuses a dirty worktree
+because provenance and the build-provenance test describe the committed tree,
+and it writes a durable receipt to `.unified-mpc/local-verify/` (`headSha`,
+`diffFingerprint`, per-step exit codes, bounded log refs, `mergeReady`).
 
 For fast iteration before committing, use the subset:
 

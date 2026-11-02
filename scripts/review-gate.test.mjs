@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, stat, utimes } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   CATEGORIES,
@@ -16,6 +20,7 @@ import {
   reviewFingerprint,
   reviewVerdict,
   validateFindings,
+  withDirectoryLock,
 } from './review-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -253,6 +258,43 @@ test('record refuses a second review for the same head', () => {
   assert.deepEqual(receiptUniquenessBlockers([], HEAD), []);
   assert.deepEqual(receiptUniquenessBlockers([receipt({ headSha: 'd'.repeat(40) })], HEAD), []);
   assert.match(receiptUniquenessBlockers([receipt()], HEAD).join('\n'), /a new review needs a new head/);
+});
+
+test('the receipt lock serializes concurrent recorders', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-lock-'));
+  const lockPath = path.join(root, '.lock-head');
+  let active = 0;
+  let maxActive = 0;
+  await Promise.all([1, 2, 3].map(async () => {
+    await withDirectoryLock(lockPath, async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await delay(10);
+      active -= 1;
+    }, { retryMs: 2 });
+  }));
+  assert.equal(maxActive, 1);
+  await assert.rejects(stat(lockPath), { code: 'ENOENT' });
+});
+
+test('a stale receipt lock is reclaimed, a live one fails closed', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-lock-'));
+  const stalePath = path.join(root, '.lock-stale');
+  await mkdir(stalePath);
+  const old = new Date(Date.now() - 120_000);
+  await utimes(stalePath, old, old);
+  let ranStale = 0;
+  await withDirectoryLock(stalePath, async () => { ranStale += 1; }, { retryMs: 2, staleMs: 60_000 });
+  assert.equal(ranStale, 1);
+
+  const livePath = path.join(root, '.lock-live');
+  await mkdir(livePath);
+  let ranLive = 0;
+  await assert.rejects(
+    withDirectoryLock(livePath, async () => { ranLive += 1; }, { retryMs: 2, timeoutMs: 30, staleMs: 60_000 }),
+    /still recording/,
+  );
+  assert.equal(ranLive, 0);
 });
 
 test('cleanTreeBlockers names a moved HEAD and a dirty tree', () => {

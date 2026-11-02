@@ -2,8 +2,9 @@
 /* global process, console, Buffer, URL */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -392,6 +393,46 @@ export function receiptUniquenessBlockers(receipts, headSha) {
   return [`a review receipt already exists for ${headSha.slice(0, 12)} (${String(existing[0]?.reviewId)}); a new review needs a new head`];
 }
 
+/**
+ * `record` enforces one receipt per head by scanning the receipt directory and
+ * then writing a new file. Two reviewer processes running that scan at the same
+ * time would both pass `receiptUniquenessBlockers`, so the recheck and the
+ * write share an atomic directory lock (#536). The directory create is the
+ * atomic step: it either succeeds for exactly one process or answers EEXIST.
+ *
+ * A lock left behind by a killed process is reclaimed after `staleMs`, and a
+ * live one makes the loser fail closed with a retry message instead of writing
+ * a second receipt.
+ */
+export async function withDirectoryLock(lockPath, action, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const retryMs = options.retryMs ?? 50;
+  const staleMs = options.staleMs ?? 60_000;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await mkdir(lockPath);
+      break;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      const stats = await stat(lockPath).catch(() => undefined);
+      if (stats !== undefined && Date.now() - stats.mtimeMs > staleMs) {
+        await rm(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`another review is still recording for this head (${path.basename(lockPath)}); re-run this command`);
+      }
+      await delay(retryMs);
+    }
+  }
+  try {
+    return await action();
+  } finally {
+    await rm(lockPath, { recursive: true, force: true });
+  }
+}
+
 export function renderCapsuleMarkdown(capsule) {
   const files = capsule.changedFiles.map((file) => `- \`${file.path}\` (+${file.additions}/-${file.deletions})`);
   const verification = capsule.verification === null
@@ -637,10 +678,26 @@ async function recordCommand(options) {
   };
 
   await mkdir(RECEIPT_ROOT, { recursive: true });
-  const receiptPath = path.join(RECEIPT_ROOT, `${pr.headRefOid.slice(0, 12)}-${pr.number}-${reviewId}.json`);
-  const temporaryPath = `${receiptPath}.tmp-${reviewId.slice(0, 8)}`;
-  await writeFile(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-  await rename(temporaryPath, receiptPath);
+  const outcome = await withDirectoryLock(
+    path.join(RECEIPT_ROOT, `.lock-${pr.headRefOid.slice(0, 12)}-${pr.number}`),
+    async () => {
+      // Recheck inside the lock: the earlier scan only shaped the error message,
+      // it cannot prove another recorder has not written since.
+      const raced = receiptUniquenessBlockers((await readJsonDirectory(RECEIPT_ROOT)).records, pr.headRefOid);
+      if (raced.length > 0) return { blockers: raced };
+      const receiptPath = path.join(RECEIPT_ROOT, `${pr.headRefOid.slice(0, 12)}-${pr.number}-${reviewId}.json`);
+      const temporaryPath = `${receiptPath}.tmp-${reviewId.slice(0, 8)}`;
+      await writeFile(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+      await rename(temporaryPath, receiptPath);
+      return { receiptPath };
+    },
+  );
+  if (outcome.blockers !== undefined) {
+    console.error('refusing to record this review:');
+    for (const blocker of outcome.blockers) console.error(`  - ${blocker}`);
+    return 1;
+  }
+  const receiptPath = outcome.receiptPath;
 
   console.log(`\n${summarizeReceipt(receipt, path.relative(ROOT, receiptPath))}`);
   if (derived.verdict !== 'clean') {

@@ -387,10 +387,11 @@ export function capsuleIntegrityBlockers({ capsule, patch, filesText }) {
 }
 
 /**
- * `record` rescans after its atomic create to catch a receipt written under the
- * older `<head>-<pr>-<reviewId>` name. That rescan must not count the receipt it
- * just wrote, so the caller passes its own `reviewId` to exclude; the pre-create
- * scan passes nothing and still sees every receipt for the head.
+ * Count the receipts that already claim a head. `record` calls this with no
+ * exclusion for its pre-create scan. `writeReviewReceipt` rescans after its
+ * atomic create to catch a receipt written under the older
+ * `<head>-<pr>-<reviewId>` name and passes the id read back from the file it
+ * just wrote, so its own receipt never counts against it.
  */
 export function receiptUniquenessBlockers(receipts, headSha, excludeReviewId) {
   const existing = receipts.filter((receipt) => receipt?.headSha === headSha

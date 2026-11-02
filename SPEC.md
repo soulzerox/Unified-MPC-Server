@@ -101,7 +101,7 @@ The discovery, aggregation, and policy sync subsystem (`packages/extensions`) ac
 | **Cursor** | Editor / IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`<workspace>/.cursor/skills/` | `.cursor/rules/00-mandatory-policy.mdc` |
 | **Claude** | Claude Desktop, Claude Code CLI | `~/.config/Claude/claude_desktop_config.json` | `~/.claude/skills/`<br>`<workspace>/.claude/skills/` | `~/.claude/CLAUDE.md`<br>`<workspace>/CLAUDE.md` |
 | **Oh My Pi (OMP)** | CLI / Terminal Agent | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
-| **Codex CLI** | CLI Tool | Standard Codex Engine | `$CODEX_HOME/skills/`<br>`$CODEX_HOME/plugins/cache/` (default `~/.codex`) | `AGENTS.md`<br>`$CODEX_HOME/AGENTS.md` |
+| **Codex CLI** | CLI Tool | Not ingested; managed write target `$CODEX_HOME/mcp.json` (default `~/.codex/mcp.json`)<br>`<workspace>/.codex/mcp.json` | `$CODEX_HOME/skills/`<br>`$CODEX_HOME/plugins/cache/`<br>`<workspace>/.codex/skills/` | `AGENTS.md`<br>`$CODEX_HOME/AGENTS.md` |
 
 - **Unified Downstream Multiplexer (`McpConfigLoader`)**: Ingests server definitions from all configured client configs, canonicalizes server names, filters self-references, and mounts them into the local runtime.
 - **Universal Skill Catalog (`SkillCatalog`)**: Discovers and indexes markdown skill manuals across all client skill roots, providing unified listing and content retrieval.

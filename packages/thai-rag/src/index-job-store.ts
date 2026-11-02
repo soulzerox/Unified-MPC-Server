@@ -13,6 +13,10 @@ export type ThaiRagReindexReason =
   | 'explicit_force_reindex';
 
 const ACTIVE_JOB_STATUSES = new Set<ThaiRagIndexJobStatus>(['running', 'cancelling']);
+// Terminal rows are diagnostics, not history. The file is rewritten in full on
+// every heartbeat, so an unbounded list turns each one-second progress write
+// into a megabyte-scale serialisation. Active rows are never pruned.
+const TERMINAL_JOB_RETENTION = 200;
 const REINDEX_REASONS = new Set<ThaiRagReindexReason>([
   'startup_verification',
   'alias_created_or_repaired',
@@ -380,7 +384,16 @@ export class ThaiRagIndexJobStore {
     return next;
   }
 
+  private pruneTerminalJobs(): void {
+    const terminal = [...this.jobs.values()].filter((job) => !ACTIVE_JOB_STATUSES.has(job.status));
+    if (terminal.length <= TERMINAL_JOB_RETENTION) return;
+    // Newest first: the recent receipts are the ones an operator still reads.
+    terminal.sort((left, right) => String(right.startedAt).localeCompare(String(left.startedAt)));
+    for (const job of terminal.slice(TERMINAL_JOB_RETENTION)) this.jobs.delete(job.jobId);
+  }
+
   private async persist(): Promise<void> {
+    this.pruneTerminalJobs();
     const payload: JobFile = { schemaVersion: 3, jobs: [...this.jobs.values()] };
     const temporary = `${this.filePath}.tmp-${process.pid}-${randomUUID()}`;
     await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });

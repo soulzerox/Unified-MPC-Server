@@ -557,4 +557,35 @@ describe('stuck index job reap (issue #202)', () => {
     await expect(replacement.active(stuckOwner)).resolves.toEqual([]);
     await expect(replacement.get(job.jobId, stuckOwner, WS)).resolves.toMatchObject({ status: 'interrupted' });
   });
+
+  it('keeps the newest terminal receipts and never prunes an active job', async () => {
+    const WS = '11111111-1111-4111-8111-111111111111';
+    const dataRoot = await root();
+    let clock = Date.parse('2026-10-30T00:00:00.000Z');
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock));
+    // The active row is the oldest in the file; retention must still keep it.
+    const running = await store.create(WS, false, 'owner-a');
+    const completed: string[] = [];
+    for (let index = 0; index < 205; index += 1) {
+      clock += 1_000;
+      const job = await store.create(WS, false, 'owner-a');
+      await store.complete(job.jobId, { indexed: index }, 'owner-a');
+      completed.push(job.jobId);
+    }
+
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; status: string }>;
+    };
+    expect(persisted.jobs.some((job) => job.jobId === running.jobId)).toBe(true);
+    expect(persisted.jobs.some((job) => job.jobId === completed.at(-1))).toBe(true);
+    expect(persisted.jobs.some((job) => job.jobId === completed[0])).toBe(false);
+    expect(persisted.jobs.length).toBeLessThanOrEqual(201);
+    await expect(store.get(completed[0]!, 'owner-a', WS)).resolves.toBeNull();
+
+    // A job that started before the whole history but finishes last must
+    // survive the write that records its own completion.
+    clock += 1_000;
+    await store.complete(running.jobId, { indexed: 999 }, 'owner-a');
+    await expect(store.get(running.jobId, 'owner-a', WS)).resolves.toMatchObject({ status: 'completed', result: { indexed: 999 } });
+  });
 });

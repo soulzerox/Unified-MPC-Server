@@ -115,6 +115,12 @@ const INDEX_GATE_EXEMPT_TOOLS = new Set([
   // touches the code generation the indexer owns (issue #470).
   'memory_reconcile',
 ]);
+// Read-only code queries answer from the active generation of their own
+// workspace. Another workspace's index run is not a reason to fail them once
+// `canServeReadyWorkspaceDuringIndex` proves this workspace is ready, so a
+// long index in one project cannot take code search away from every other
+// project on the host.
+const READY_WORKSPACE_READ_TOOLS = new Set(['code_search', 'code_context', 'code_blast_radius']);
 
 export interface NativeThaiRagWorkspace {
   readonly id: string;
@@ -473,7 +479,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return this.readProviderOwnedIndexJob(jobId, workspace.value, budget);
     }
     const bypassBusyRefresh = INDEX_GATE_EXEMPT_TOOLS.has(tool)
-      || (tool === 'pre_edit_context' && await this.canServeReadyWorkspaceDuringIndex(args));
+      || ((tool === 'pre_edit_context' || READY_WORKSPACE_READ_TOOLS.has(tool))
+        && await this.canServeReadyWorkspaceDuringIndex(args));
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : undefined;
     const refreshed = tool === 'cancel_index' || bypassBusyRefresh
       ? ok(undefined)

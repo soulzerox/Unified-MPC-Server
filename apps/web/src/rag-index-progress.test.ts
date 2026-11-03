@@ -80,7 +80,7 @@ describe('headless-safe native Thai-RAG progress', () => {
   it('renders an accessible progress bar that polls independently of Tk DISPLAY', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('id="rag-index-jobs"');
-    expect(html).toContain("fetch('/api/rag-index-jobs')");
+    expect(html).toContain("fetchWithTimeout('/api/rag-index-jobs')");
     expect(html).toContain("document.createElement('progress')");
     expect(html).toContain('aria-label');
     expect(html).toContain('setInterval(loadRagIndexJobs, 5000)');

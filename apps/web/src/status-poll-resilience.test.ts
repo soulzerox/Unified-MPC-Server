@@ -1,0 +1,336 @@
+import { describe, expect, it } from 'vitest';
+import { getClientScriptJs } from './ui/client-script.js';
+
+type FakeNode = {
+  textContent: string;
+  innerHTML: string;
+  className: string;
+  title: string;
+  value: number;
+  max: number;
+  scrollTop: number;
+  scrollHeight: number;
+  style: Record<string, string>;
+  attrs: Record<string, string>;
+  children: FakeNode[];
+  setAttribute(name: string, value: string): void;
+  getAttribute(name: string): string | undefined;
+  appendChild(child: FakeNode): void;
+  replaceChildren(): void;
+};
+
+function fakeNode(): FakeNode {
+  return {
+    textContent: '',
+    innerHTML: '',
+    className: '',
+    title: '',
+    value: 0,
+    max: 0,
+    scrollTop: 0,
+    scrollHeight: 0,
+    style: {},
+    attrs: {},
+    children: [],
+    setAttribute(name: string, value: string): void {
+      this.attrs[name] = value;
+    },
+    getAttribute(name: string): string | undefined {
+      return this.attrs[name];
+    },
+    appendChild(child: FakeNode): void {
+      this.children.push(child);
+    },
+    replaceChildren(): void {
+      this.children = [];
+    },
+  };
+}
+
+function extractFunction(script: string, name: string): string {
+  const marker = `function ${name}(`;
+  let start = script.indexOf(marker);
+  if (start < 0) throw new Error(`function ${name} is missing from the client script`);
+  if (script.slice(start - 6, start) === 'async ') start -= 6;
+  const openParen = script.indexOf('(', start);
+  let parenDepth = 0;
+  let bodyStart = -1;
+  for (let index = openParen; index < script.length; index += 1) {
+    if (script[index] === '(') parenDepth += 1;
+    else if (script[index] === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) {
+        bodyStart = script.indexOf('{', index);
+        break;
+      }
+    }
+  }
+  let depth = 0;
+  for (let index = bodyStart; index < script.length; index += 1) {
+    if (script[index] === '{') depth += 1;
+    else if (script[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return script.slice(start, index + 1);
+    }
+  }
+  throw new Error(`function ${name} is not balanced in the client script`);
+}
+
+const POLL_TIMEOUT_MS = 20;
+const SETTLE_GUARD_MS = 2000;
+
+type RecordedFetch = {
+  urls: string[];
+  fetchWithTimeout: (url: string, init?: RequestInit) => Promise<Response>;
+};
+
+/**
+ * Builds the shipped `fetchWithTimeout` against a controllable transport, and records every
+ * helper call so a poller that reaches the network directly (bypassing the timeout) is visible.
+ */
+function recordedFetchWithTimeout(
+  transport: (url: string, init: RequestInit) => Promise<Response>,
+): RecordedFetch {
+  const script = getClientScriptJs();
+  const factory = new Function(
+    'fetch',
+    `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
+  );
+  const real = factory(transport) as (
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+  ) => Promise<Response>;
+  const urls: string[] = [];
+  return {
+    urls,
+    fetchWithTimeout: (url: string, init: RequestInit = {}): Promise<Response> => {
+      urls.push(url);
+      return real(url, init, POLL_TIMEOUT_MS);
+    },
+  };
+}
+
+/** A transport that accepts the request and never answers, like a stalled control plane. */
+function hangingTransport(): (url: string, init: RequestInit) => Promise<Response> {
+  return (_url: string, init: RequestInit = {}): Promise<Response> =>
+    new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => {
+        reject(new DOMException('Aborted', 'AbortError'));
+      });
+    });
+}
+
+function healthyStatusResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async (): Promise<Record<string, unknown>> => ({
+      status: 'UP',
+      gateway: {
+        state: 'BRIDGE_HEALTHY',
+        connectorRegistration: { state: 'registered' },
+        endToEndState: 'verified',
+        localPort: 18765,
+      },
+    }),
+  } as unknown as Response;
+}
+
+function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  elements: Map<string, FakeNode>;
+  recorded: RecordedFetch;
+  loadStatus: () => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const elements = new Map(
+    ['build-commit', 'status-led', 'servers-telemetry', 'stat-loopback-port'].map((id) => [
+      id,
+      fakeNode(),
+    ]),
+  );
+  const document = {
+    getElementById: (id: string): FakeNode | null => elements.get(id) ?? null,
+  };
+  const recorded = recordedFetchWithTimeout(transport);
+  const factory = new Function(
+    'document',
+    'fetchWithTimeout',
+    'isBackendTransportError',
+    'noteBackendUnavailable',
+    'noteBackendAvailable',
+    'logEvent',
+    `let statusRefreshInFlight = false;\n${extractFunction(script, 'loadStatus')}\nreturn loadStatus;`,
+  );
+  const loadStatus = factory(
+    document,
+    recorded.fetchWithTimeout,
+    () => false,
+    () => {},
+    () => {},
+    () => {},
+  ) as () => Promise<void>;
+  return { elements, recorded, loadStatus };
+}
+
+function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  container: FakeNode;
+  recorded: RecordedFetch;
+  loadRagIndexJobs: () => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const container = fakeNode();
+  const document = {
+    getElementById: (id: string): FakeNode | null => (id === 'rag-index-jobs' ? container : null),
+    createElement: (): FakeNode => fakeNode(),
+  };
+  const recorded = recordedFetchWithTimeout(transport);
+  const factory = new Function(
+    'document',
+    'fetchWithTimeout',
+    `let ragProgressInFlight = false;\n${extractFunction(script, 'loadRagIndexJobs')}\nreturn loadRagIndexJobs;`,
+  );
+  const loadRagIndexJobs = factory(document, recorded.fetchWithTimeout) as () => Promise<void>;
+  return { container, recorded, loadRagIndexJobs };
+}
+
+describe('background poll resilience', () => {
+  it('releases the status in-flight guard after a hung poll times out', async () => {
+    let hang = true;
+    const transport = (url: string, init: RequestInit): Promise<Response> => {
+      if (hang) return hangingTransport()(url, init);
+      return Promise.resolve(healthyStatusResponse());
+    };
+    const { elements, recorded, loadStatus } = buildStatusSandbox(transport);
+
+    await Promise.race([
+      loadStatus(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a hung /api/status request wedged the status poller')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/status']);
+    expect(elements.get('status-led')?.className).toBe('led offline');
+    expect(elements.get('servers-telemetry')?.textContent).toContain(
+      'Unable to reach backend: Request timed out after',
+    );
+
+    hang = false;
+    await loadStatus();
+
+    expect(recorded.urls).toEqual(['/api/status', '/api/status']);
+    expect(elements.get('status-led')?.className).toBe('led');
+    expect(elements.get('servers-telemetry')?.innerHTML).toContain('Control Plane Reachability');
+    expect(elements.get('stat-loopback-port')?.textContent).toBe('18765');
+  });
+
+  it('does not wedge the in-flight guard on a failed status poll', async () => {
+    let mode: 'healthy' | 'http-error' = 'healthy';
+    const { elements, recorded, loadStatus } = buildStatusSandbox(async () => {
+      if (mode === 'http-error') {
+        return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      }
+      return healthyStatusResponse();
+    });
+
+    await loadStatus();
+    expect(elements.get('status-led')?.className).toBe('led');
+
+    mode = 'http-error';
+    await loadStatus();
+    expect(elements.get('status-led')?.className).toBe('led offline');
+    expect(recorded.urls).toEqual(['/api/status', '/api/status']);
+
+    await loadStatus();
+    expect(recorded.urls).toEqual(['/api/status', '/api/status', '/api/status']);
+  });
+
+  it('reports unreadable index progress instead of freezing it when the poll hangs', async () => {
+    let hang = true;
+    const transport = (url: string, init: RequestInit): Promise<Response> => {
+      if (hang) return hangingTransport()(url, init);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ available: true, jobs: [] }),
+      } as unknown as Response);
+    };
+    const { container, recorded, loadRagIndexJobs } = buildRagIndexSandbox(transport);
+
+    await Promise.race([
+      loadRagIndexJobs(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a hung /api/rag-index-jobs request wedged index progress')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/rag-index-jobs']);
+    expect(container.textContent).toBe('Unable to read native index progress');
+
+    hang = false;
+    await loadRagIndexJobs();
+
+    expect(recorded.urls).toEqual(['/api/rag-index-jobs', '/api/rag-index-jobs']);
+    expect(container.textContent).toBe('No native index jobs');
+  });
+
+  it('bounds the runtime diagnostics and server log polls by the timeout helper', async () => {
+    const script = getClientScriptJs();
+    const recorded = recordedFetchWithTimeout(hangingTransport());
+    const texts: string[][] = [];
+    const setText = (id: string, value: string): void => {
+      texts.push([id, value]);
+    };
+    const document = {
+      getElementById: (): FakeNode | null => fakeNode(),
+    };
+    const diagnosticsFactory = new Function(
+      'document',
+      'fetchWithTimeout',
+      'setText',
+      'formatBytes',
+      'renderRuntimeRetention',
+      'emptyRow',
+      'errorMessage',
+      `${extractFunction(script, 'loadRuntimeDiagnostics')}\nreturn loadRuntimeDiagnostics;`,
+    );
+    const loadRuntimeDiagnostics = diagnosticsFactory(
+      document,
+      recorded.fetchWithTimeout,
+      setText,
+      () => '0 B',
+      () => {},
+      () => fakeNode(),
+      () => 'unavailable',
+    ) as () => Promise<void>;
+
+    const logsFactory = new Function(
+      'document',
+      'fetchWithTimeout',
+      'renderLogs',
+      `let currentLogs = [];\n${extractFunction(script, 'fetchServerLogs')}\nreturn fetchServerLogs;`,
+    );
+    const fetchServerLogs = logsFactory(document, recorded.fetchWithTimeout, () => {}) as () => Promise<void>;
+
+    await Promise.race([
+      Promise.all([loadRuntimeDiagnostics(), fetchServerLogs()]),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a hung diagnostics or log poll never settled')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/runtime-diagnostics', '/api/logs']);
+    expect(texts).toContainEqual(['stat-runtime-rss', 'unavailable']);
+    expect(texts).toContainEqual(['runtime-diagnostics-source', 'unavailable']);
+  });
+});

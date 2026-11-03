@@ -121,9 +121,11 @@ export function probePortAvailability(port: number): Promise<PortAvailability> {
 }
 
 /**
- * `PATH` lookup without spawning a shell. Missing entries and non-executable
- * files are skipped: a `doctor` probe must report what the runtime can launch,
- * not fail on the first directory it cannot read.
+ * `PATH` lookup without spawning a shell. Missing entries, non-executable
+ * files, and executable directories are skipped: a `doctor` probe must report
+ * what the runtime can launch, not fail on the first directory it cannot read.
+ * This mirrors `PathExecutableResolver` in `@unified-mpc/process`, which the
+ * runtime itself uses and which also requires a regular file.
  */
 export function resolveOnPath(executable: string, environment: NodeJS.ProcessEnv = process.env): string | null {
   if (executable.trim().length === 0) return null;
@@ -132,6 +134,7 @@ export function resolveOnPath(executable: string, environment: NodeJS.ProcessEnv
     const candidate = path.join(entry, executable);
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
+      if (!fs.statSync(candidate).isFile()) continue;
       return candidate;
     } catch {
       // Keep looking.

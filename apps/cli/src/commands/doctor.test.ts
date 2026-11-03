@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -133,6 +133,19 @@ describe('doctor host lookups', () => {
 
       expect(resolveOnPath('fake-rg', { PATH: `/nonexistent:${directory}` })).toBe(binary);
       expect(resolveOnPath('fake-rg', { PATH: '/nonexistent' })).toBeNull();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('skips an executable directory with the requested name', () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'doctor-path-'));
+    try {
+      // A directory is executable but cannot be spawned, so it must not be
+      // reported as a ready binary by the probes.
+      mkdirSync(path.join(directory, 'fake-rg'), { mode: 0o755 });
+
+      expect(resolveOnPath('fake-rg', { PATH: directory })).toBeNull();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

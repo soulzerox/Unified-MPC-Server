@@ -242,6 +242,32 @@ describe('gateway status projection', () => {
     expect(elements.get('stat-bridge-state')?.textContent).toBe('BRIDGE_HEALTHY');
   });
 
+  it('ignores an older success that a newer failure superseded', async () => {
+    let resolveFirst: ((response: Response) => void) | undefined;
+    let calls = 0;
+    const fetchImpl = (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve(failedResponse());
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+    const first = loadGatewayStatus();
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+
+    resolveFirst?.(healthyResponse());
+    await first;
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
+  });
+
   it('fails closed when a request times out with no newer applied response', async () => {
     const calls: string[] = [];
     const timeoutError = Object.assign(new Error('Request timed out after 8000ms'), {

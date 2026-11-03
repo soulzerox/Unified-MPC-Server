@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getClientScriptJs } from './ui/client-script.js';
+import { getClientScriptJs, transitionBackendConnectionState } from './ui/client-script.js';
 
 type FakeNode = {
   textContent: string;
@@ -187,6 +187,112 @@ function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promi
   return { elements, recorded, backendUnavailable, loadStatus };
 }
 
+/**
+ * Wires the shipped availability helpers, `loadStatus`, `loadGatewayStatus` and the
+ * per-workspace goal-runtime refresh into one scope, so a test can observe what a
+ * single stalled endpoint does to the shared log.
+ */
+function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  recorded: RecordedFetch;
+  logs: string[];
+  loadStatus: () => Promise<void>;
+  loadGatewayStatus: () => Promise<void>;
+  runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
+  syncWorkspaceRuntimeStreams: () => void;
+  clearWorkspaceRuntimeState: (workspaceId: string) => void;
+  setCachedWorkspaces: (ids: string[]) => void;
+} {
+  const script = getClientScriptJs();
+  const recorded = recordedFetchWithTimeout(transport);
+  const logs: string[] = [];
+  const document = { getElementById: (): null => null };
+  function FakeEventSource(): void {
+    // The stream itself is not under test; only the per-workspace bookkeeping around it.
+  }
+  FakeEventSource.prototype.addEventListener = (): void => {};
+  FakeEventSource.prototype.close = (): void => {};
+  const factory = new Function(
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'document',
+    'logEvent',
+    'console',
+    'renderGatewayUnavailable',
+    'transitionBackendConnectionState',
+    'errorMessage',
+    'applyWorkspaceRuntimeSnapshot',
+    'renderWorkspaces',
+    'EventSource',
+    'refreshWorkspaceRuntime',
+    'noteWorkspaceRuntimeEvent',
+    `let backendConnectionState = 'unknown';\n`
+      + `const endpointConnectionStates = new Map();\n`
+      + `let statusRefreshInFlight = false;\n`
+      + `let gatewayStatusSeq = 0;\n`
+      + `let gatewayStatusAppliedSeq = 0;\n`
+      + `let cachedWorkspaces = [{ id: 'ws-1' }, { id: 'ws-2' }];\n`
+      + `function setCachedWorkspaces(ids) { cachedWorkspaces = ids.map(function (id) { return { id: id }; }); }\n`
+      + `const workspaceRuntimeRefreshControllers = new Map();\n`
+      + `const workspaceRuntimeRefreshPending = new Map();\n`
+      + `const workspaceRuntimeTargets = new Map();\n`
+      + `const workspaceRuntimeCatchupAttempts = new Map();\n`
+      + `const workspaceRuntimeCatchupTimers = new Map();\n`
+      + `const workspaceRuntime = new Map();\n`
+      + `let workspaceRuntimeStream = null;\n`
+      + `let workspaceRuntimeStreamWorkspaceKey = '';\n`
+      + `let workspaceRuntimeFallbackTimer = null;\n`
+      + `let workspaceRuntimeFallbackIndex = 0;\n`
+      + `${extractFunction(script, 'isRequestTimeout')}\n`
+      + `${extractFunction(script, 'isBackendTransportError')}\n`
+      + `${extractFunction(script, 'noteBackendUnavailable')}\n`
+      + `${extractFunction(script, 'noteBackendAvailable')}\n`
+      + `${extractFunction(script, 'noteEndpointUnavailable')}\n`
+      + `${extractFunction(script, 'noteEndpointAvailable')}\n`
+      + `${extractFunction(script, 'pruneWorkspaceEndpointStates')}\n`
+      + `${extractFunction(script, 'stopWorkspaceRuntimeFallback')}\n`
+      + `${extractFunction(script, 'scheduleWorkspaceRuntimeFallback')}\n`
+      + `${extractFunction(script, 'closeWorkspaceRuntimeStream')}\n`
+      + `${extractFunction(script, 'clearWorkspaceRuntimeState')}\n`
+      + `${extractFunction(script, 'syncWorkspaceRuntimeStreams')}\n`
+      + `${extractFunction(script, 'loadStatus')}\n`
+      + `${extractFunction(script, 'loadGatewayStatus')}\n`
+      + `${extractFunction(script, 'runWorkspaceRuntimeRefresh')}\n`
+      + `return { loadStatus, loadGatewayStatus, runWorkspaceRuntimeRefresh, syncWorkspaceRuntimeStreams, clearWorkspaceRuntimeState, setCachedWorkspaces };`,
+  );
+  const built = factory(
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    document,
+    (level: string, message: string) => logs.push(level + ' ' + message),
+    { error: () => {} },
+    () => {},
+    transitionBackendConnectionState,
+    (_data: unknown, fallback: string) => fallback,
+    () => {},
+    () => {},
+    FakeEventSource,
+    () => Promise.resolve(),
+    () => {},
+  ) as {
+    loadStatus: () => Promise<void>;
+    loadGatewayStatus: () => Promise<void>;
+    runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
+    syncWorkspaceRuntimeStreams: () => void;
+    clearWorkspaceRuntimeState: (workspaceId: string) => void;
+    setCachedWorkspaces: (ids: string[]) => void;
+  };
+  return {
+    recorded,
+    logs,
+    loadStatus: built.loadStatus,
+    loadGatewayStatus: built.loadGatewayStatus,
+    runWorkspaceRuntimeRefresh: built.runWorkspaceRuntimeRefresh,
+    syncWorkspaceRuntimeStreams: built.syncWorkspaceRuntimeStreams,
+    clearWorkspaceRuntimeState: built.clearWorkspaceRuntimeState,
+    setCachedWorkspaces: built.setCachedWorkspaces,
+  };
+}
+
 function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
   container: FakeNode;
   recorded: RecordedFetch;
@@ -218,18 +324,24 @@ function buildRuntimeRefreshSandbox(
 ): {
   recorded: RecordedFetch;
   backendUnavailable: Error[];
+  endpointUnavailable: Array<{ endpoint: string; error: Error }>;
+  endpointAvailable: string[];
   runtime: Map<string, unknown>;
   runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
 } {
   const script = getClientScriptJs();
   const recorded = recordedFetchWithTimeout(transport);
   const backendUnavailable: Error[] = [];
+  const endpointUnavailable: Array<{ endpoint: string; error: Error }> = [];
+  const endpointAvailable: string[] = [];
   const runtime = new Map<string, unknown>();
   const factory = new Function(
     'fetchWithTimeout',
     'readJsonWithTimeout',
     'isBackendTransportError',
     'noteBackendUnavailable',
+    'noteEndpointUnavailable',
+    'noteEndpointAvailable',
     'logEvent',
     'errorMessage',
     'cachedWorkspaces',
@@ -244,6 +356,8 @@ function buildRuntimeRefreshSandbox(
     recorded.readJsonWithTimeout,
     () => true,
     (err: Error) => backendUnavailable.push(err),
+    (endpoint: string, error: Error) => endpointUnavailable.push({ endpoint, error }),
+    (endpoint: string) => endpointAvailable.push(endpoint),
     () => {},
     (_data: unknown, fallback: string) => fallback,
     [{ id: 'ws-1' }],
@@ -252,7 +366,14 @@ function buildRuntimeRefreshSandbox(
     (workspaceId: string, data: unknown) => runtime.set(workspaceId, data),
     () => {},
   ) as (workspaceId: string) => Promise<void>;
-  return { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh };
+  return {
+    recorded,
+    backendUnavailable,
+    endpointUnavailable,
+    endpointAvailable,
+    runtime,
+    runWorkspaceRuntimeRefresh,
+  };
 }
 
 function buildMutationSandbox(
@@ -771,7 +892,7 @@ describe('background poll resilience', () => {
         status: 200,
         json: async (): Promise<Record<string, unknown>> => ({ snapshots: [], cursor: null }),
       } as unknown as Response);
-    const { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh } =
+    const { recorded, backendUnavailable, endpointUnavailable, endpointAvailable, runtime, runWorkspaceRuntimeRefresh } =
       buildRuntimeRefreshSandbox(transport);
 
     await Promise.race([
@@ -785,8 +906,10 @@ describe('background poll resilience', () => {
     ]);
 
     expect(recorded.urls).toEqual(['/api/workspaces/ws-1/goal-runtime']);
-    expect(backendUnavailable).toHaveLength(1);
-    expect((backendUnavailable[0] as { code?: string }).code).toBe('request_timeout');
+    expect(backendUnavailable).toHaveLength(0);
+    expect(endpointUnavailable).toHaveLength(1);
+    expect(endpointUnavailable[0]?.endpoint).toBe('Project goal runtime');
+    expect((endpointUnavailable[0]?.error as { code?: string }).code).toBe('request_timeout');
     expect(runtime.get('ws-1')).toMatchObject({
       error: expect.stringContaining('Response body timed out after'),
     });
@@ -799,6 +922,7 @@ describe('background poll resilience', () => {
       '/api/workspaces/ws-1/goal-runtime',
     ]);
     expect(runtime.get('ws-1')).toEqual({ snapshots: [], cursor: null });
+    expect(endpointAvailable).toEqual(['Project goal runtime']);
   });
 
   it('releases the index-progress guard when a response body stalls mid-stream', async () => {
@@ -854,6 +978,131 @@ describe('background poll resilience', () => {
     await loadStatus();
     expect(backendUnavailable).toHaveLength(1);
     expect(backendUnavailable[0]?.message).toContain('Request timed out after');
+  });
+
+  it('logs a gateway-only outage once instead of once per status cycle', async () => {
+    let statusMode: 'healthy' | 'stalled' = 'healthy';
+    let gatewayMode: 'healthy' | 'stalled' = 'stalled';
+    const transport = (url: string): Promise<Response> => {
+      if (url === '/api/status') {
+        return Promise.resolve(statusMode === 'healthy' ? healthyStatusResponse() : stalledBodyResponse());
+      }
+      return Promise.resolve(
+        gatewayMode === 'healthy'
+          ? ({
+              ok: true,
+              status: 200,
+              json: async (): Promise<Record<string, unknown>> => ({ state: 'BRIDGE_HEALTHY' }),
+            } as unknown as Response)
+          : stalledBodyResponse(),
+      );
+    };
+    const { logs, loadStatus, loadGatewayStatus } = buildAvailabilitySandbox(transport);
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await loadStatus();
+      await loadGatewayStatus();
+    }
+
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toEqual([
+      'ERROR ChatGPT gateway unavailable: Response body timed out after 20ms',
+    ]);
+    expect(logs.some((line) => line.includes('Backend unavailable'))).toBe(false);
+    expect(logs.some((line) => line.startsWith('SUCCESS'))).toBe(false);
+
+    gatewayMode = 'healthy';
+    await loadGatewayStatus();
+    await loadGatewayStatus();
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
+      'SUCCESS ChatGPT gateway restored',
+    ]);
+
+    statusMode = 'stalled';
+    gatewayMode = 'stalled';
+    await loadStatus();
+    await loadStatus();
+    await loadGatewayStatus();
+
+    expect(logs.filter((line) => line.includes('Backend unavailable'))).toEqual([
+      'ERROR Backend unavailable: Response body timed out after 20ms',
+    ]);
+    // The probe already reported the outage; the stalled endpoint adds nothing.
+    expect(logs.filter((line) => line.includes('ChatGPT gateway unavailable'))).toHaveLength(1);
+
+    // Once the probe recovers, a gateway that is still stalled is reported again:
+    // the suppression must not swallow the endpoint's own outage for good.
+    statusMode = 'healthy';
+    await loadStatus();
+    await loadGatewayStatus();
+
+    expect(logs.filter((line) => line.includes('ChatGPT gateway unavailable'))).toHaveLength(2);
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
+      'SUCCESS ChatGPT gateway restored',
+      'SUCCESS Backend connection restored',
+    ]);
+  });
+
+  it('keeps a healthy project from reporting recovery for a stalled sibling', async () => {
+    let siblingMode: 'healthy' | 'stalled' = 'stalled';
+    const healthyRuntime = (): Response =>
+      ({
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ snapshots: [], cursor: null }),
+      } as unknown as Response);
+    const transport = (url: string): Promise<Response> => {
+      if (url === '/api/workspaces/ws-2/goal-runtime') {
+        return Promise.resolve(siblingMode === 'stalled' ? stalledBodyResponse() : healthyRuntime());
+      }
+      return Promise.resolve(healthyRuntime());
+    };
+    const {
+      logs,
+      runWorkspaceRuntimeRefresh,
+      syncWorkspaceRuntimeStreams,
+      clearWorkspaceRuntimeState,
+      setCachedWorkspaces,
+    } = buildAvailabilitySandbox(transport);
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await runWorkspaceRuntimeRefresh('ws-1');
+      await runWorkspaceRuntimeRefresh('ws-2');
+    }
+
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toEqual([
+      'ERROR Project goal runtime unavailable: Response body timed out after 20ms',
+    ]);
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([]);
+
+    siblingMode = 'healthy';
+    await runWorkspaceRuntimeRefresh('ws-2');
+    await runWorkspaceRuntimeRefresh('ws-2');
+
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
+      'SUCCESS Project goal runtime restored',
+    ]);
+
+    // Unregistering ws-2 while it is still stalled drops its remembered transition: a
+    // relink restores the same id, so a stale "unavailable" would swallow the next real
+    // failure and then log a recovery nobody saw.
+    siblingMode = 'stalled';
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(2);
+
+    setCachedWorkspaces(['ws-1']);
+    syncWorkspaceRuntimeStreams();
+    setCachedWorkspaces(['ws-1', 'ws-2']);
+    syncWorkspaceRuntimeStreams();
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(3);
+
+    clearWorkspaceRuntimeState('ws-2');
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(4);
+
+    siblingMode = 'healthy';
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toHaveLength(2);
   });
 });
 

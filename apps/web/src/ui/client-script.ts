@@ -241,12 +241,19 @@ export function getClientScriptJs(): string {
       }
 
       let backendConnectionState = 'unknown';
+      const endpointConnectionStates = new Map();
       let statusRefreshInFlight = false;
 
       function isBackendTransportError(err) {
         return err instanceof TypeError || err?.message === 'Failed to fetch' || isRequestTimeout(err);
       }
 
+      /**
+       * Only the 5 s /api/status poll is the backend probe, so its ERROR/SUCCESS pair
+       * describes a whole-backend outage. Every other poller reports its own endpoint
+       * through the helpers below: they share this state, so a single stalled endpoint
+       * used to log an ERROR/SUCCESS pair on every status cycle.
+       */
       function noteBackendUnavailable(err) {
         const transition = transitionBackendConnectionState(backendConnectionState, 'unavailable');
         backendConnectionState = transition.state;
@@ -260,6 +267,47 @@ export function getClientScriptJs(): string {
         backendConnectionState = transition.state;
         if (transition.event === 'recovered') {
           logEvent('SUCCESS', 'Backend connection restored');
+        }
+      }
+
+      /**
+       * Per-endpoint transitions. The key defaults to the label but exists because one
+       * label can cover several independent endpoints: the goal-runtime poller runs
+       * once per registered project, so its transitions are keyed per workspace and a
+       * healthy project cannot report a recovery that another project has not reached.
+       */
+      function noteEndpointUnavailable(endpoint, err, key = endpoint) {
+        // The probe already reported a whole-backend outage; an endpoint failing
+        // because of it must not add a second line on every cycle.
+        if (backendConnectionState === 'unavailable') return;
+        const transition = transitionBackendConnectionState(endpointConnectionStates.get(key) || 'unknown', 'unavailable');
+        endpointConnectionStates.set(key, transition.state);
+        if (transition.event === 'unavailable') {
+          logEvent('ERROR', endpoint + ' unavailable: ' + (err?.message || String(err)));
+        }
+      }
+
+      function noteEndpointAvailable(endpoint, key = endpoint) {
+        const transition = transitionBackendConnectionState(endpointConnectionStates.get(key) || 'unknown', 'available');
+        endpointConnectionStates.set(key, transition.state);
+        if (transition.event === 'recovered') {
+          logEvent('SUCCESS', endpoint + ' restored');
+        }
+      }
+
+      /**
+       * The goal-runtime keys share the lifecycle of the other per-workspace state: a
+       * workspace that is no longer registered must not keep a transition. Unregister
+       * only archives the row and relinking restores the same id, so a remembered
+       * "unavailable" would swallow the first real failure after the relink and then
+       * log a recovery nobody saw.
+       */
+      function pruneWorkspaceEndpointStates(registeredIds) {
+        const prefix = 'goal-runtime:';
+        for (const key of [...endpointConnectionStates.keys()]) {
+          if (key.startsWith(prefix) && !registeredIds.has(key.slice(prefix.length))) {
+            endpointConnectionStates.delete(key);
+          }
         }
       }
 
@@ -701,6 +749,7 @@ export function getClientScriptJs(): string {
           if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
           if (controller.signal.aborted) return;
           applyWorkspaceRuntimeSnapshot(workspaceId, data);
+          noteEndpointAvailable('Project goal runtime', 'goal-runtime:' + workspaceId);
         } catch (err) {
           if (controller.signal.aborted) return;
           const current = workspaceRuntime.get(workspaceId);
@@ -710,7 +759,7 @@ export function getClientScriptJs(): string {
             error: err.message,
           });
           renderWorkspaces();
-          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          if (isBackendTransportError(err)) noteEndpointUnavailable('Project goal runtime', err, 'goal-runtime:' + workspaceId);
           else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
         } finally {
           if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
@@ -798,6 +847,7 @@ export function getClientScriptJs(): string {
         const timer = workspaceRuntimeCatchupTimers.get(workspaceId);
         if (timer) clearTimeout(timer);
         workspaceRuntimeCatchupTimers.delete(workspaceId);
+        endpointConnectionStates.delete('goal-runtime:' + workspaceId);
       }
 
       function stopWorkspaceRuntimeFallback() {
@@ -828,6 +878,7 @@ export function getClientScriptJs(): string {
 
       function syncWorkspaceRuntimeStreams() {
         const registeredIds = new Set(cachedWorkspaces.map((workspace) => workspace.id));
+        pruneWorkspaceEndpointStates(registeredIds);
         for (const workspaceId of [...workspaceRuntimeRefreshControllers.keys()]) {
           if (!registeredIds.has(workspaceId)) clearWorkspaceRuntimeState(workspaceId);
         }
@@ -1795,11 +1846,12 @@ export function getClientScriptJs(): string {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
           gatewayStatusAppliedSeq = seq;
+          noteEndpointAvailable('ChatGPT gateway');
         } catch (err) {
           if (seq <= gatewayStatusAppliedSeq) return;
           renderGatewayUnavailable();
           gatewayStatusAppliedSeq = seq;
-          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          if (isBackendTransportError(err)) noteEndpointUnavailable('ChatGPT gateway', err);
           else console.error(err);
         }
       }

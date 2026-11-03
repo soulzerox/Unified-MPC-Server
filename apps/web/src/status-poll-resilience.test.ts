@@ -12,11 +12,12 @@ type FakeNode = {
   scrollHeight: number;
   style: Record<string, string>;
   attrs: Record<string, string>;
+  dataset: Record<string, string>;
   children: FakeNode[];
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | undefined;
   appendChild(child: FakeNode): void;
-  replaceChildren(): void;
+  replaceChildren(...nodes: FakeNode[]): void;
 };
 
 function fakeNode(): FakeNode {
@@ -31,6 +32,7 @@ function fakeNode(): FakeNode {
     scrollHeight: 0,
     style: {},
     attrs: {},
+    dataset: {},
     children: [],
     setAttribute(name: string, value: string): void {
       this.attrs[name] = value;
@@ -41,8 +43,8 @@ function fakeNode(): FakeNode {
     appendChild(child: FakeNode): void {
       this.children.push(child);
     },
-    replaceChildren(): void {
-      this.children = [];
+    replaceChildren(...nodes: FakeNode[]): void {
+      this.children = nodes;
     },
   };
 }
@@ -287,6 +289,166 @@ function buildMutationSandbox(
     data: Record<string, unknown>;
   }>;
   return { recorded, toasts, logs, mutationJson };
+}
+
+/** A document that hands back the elements a boot read touches. */
+function bootDocument(ids: string[]): {
+  elements: Map<string, FakeNode>;
+  document: { getElementById(id: string): FakeNode | null; createElement(): FakeNode };
+} {
+  const elements = new Map(ids.map((id) => [id, fakeNode()]));
+  return {
+    elements,
+    document: {
+      getElementById: (id: string): FakeNode | null => elements.get(id) ?? null,
+      createElement: (): FakeNode => fakeNode(),
+    },
+  };
+}
+
+function buildSettingsSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  elements: Map<string, FakeNode>;
+  recorded: RecordedFetch;
+  logs: string[];
+  loadSettings: () => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const { elements, document } = bootDocument(['settings-persistence-status']);
+  const recorded = recordedFetchWithTimeout(transport);
+  const logs: string[] = [];
+  const factory = new Function(
+    'document',
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'logEvent',
+    `${extractFunction(script, 'loadSettings')}\nreturn loadSettings;`,
+  );
+  const loadSettings = factory(
+    document,
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    (level: string, message: string) => logs.push(level + ' ' + message),
+  ) as () => Promise<void>;
+  return { elements, recorded, logs, loadSettings };
+}
+
+function buildGoalsSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  recorded: RecordedFetch;
+  logs: string[];
+  workspaceGoals: Map<string, { goals: unknown[]; preferredGoalId: string | null; error: string | null }>;
+  loadingWorkspaceGoals: Set<string>;
+  loadWorkspaceGoals: (workspaceId: string) => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const recorded = recordedFetchWithTimeout(transport);
+  const logs: string[] = [];
+  const loadingWorkspaceGoals = new Set<string>();
+  const workspaceGoals = new Map<
+    string,
+    { goals: unknown[]; preferredGoalId: string | null; error: string | null }
+  >();
+  const factory = new Function(
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'errorMessage',
+    'logEvent',
+    'workspaceGoals',
+    'loadingWorkspaceGoals',
+    'renderWorkspaces',
+    `${extractFunction(script, 'loadWorkspaceGoals')}\nreturn loadWorkspaceGoals;`,
+  );
+  const loadWorkspaceGoals = factory(
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    (_data: unknown, fallback: string) => fallback,
+    (level: string, message: string) => logs.push(level + ' ' + message),
+    workspaceGoals,
+    loadingWorkspaceGoals,
+    () => {},
+  ) as (workspaceId: string) => Promise<void>;
+  return { recorded, logs, workspaceGoals, loadingWorkspaceGoals, loadWorkspaceGoals };
+}
+
+function buildInventorySandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  elements: Map<string, FakeNode>;
+  recorded: RecordedFetch;
+  logs: string[];
+  loadInventory: () => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const { elements, document } = bootDocument([
+    'server-table-body',
+    'skill-table-body',
+    'server-table-detailed-body',
+    'skill-table-detailed-body',
+    'canonical-server-diagnostics-body',
+    'canonical-skill-diagnostics-body',
+    'stat-servers-count',
+    'stat-skills-count',
+  ]);
+  const recorded = recordedFetchWithTimeout(transport);
+  const logs: string[] = [];
+  const factory = new Function(
+    'document',
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'logEvent',
+    'renderServerTables',
+    'renderSkillTables',
+    'renderCanonicalExtensionDiagnostics',
+    `let cachedServers = [];\n`
+      + `let cachedSkills = [];\n`
+      + `let cachedCanonicalExtensions = null;\n`
+      + `${extractFunction(script, 'emptyRow')}\n`
+      + `${extractFunction(script, 'loadInventory')}\nreturn loadInventory;`,
+  );
+  const loadInventory = factory(
+    document,
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    (level: string, message: string) => logs.push(level + ' ' + message),
+    () => {},
+    () => {},
+    () => {},
+  ) as () => Promise<void>;
+  return { elements, recorded, logs, loadInventory };
+}
+
+function buildPanelReadSandbox(
+  transport: (url: string, init: RequestInit) => Promise<Response>,
+  functionName: 'loadPolicies' | 'loadCleanupEvaluations',
+  ids: string[],
+): {
+  elements: Map<string, FakeNode>;
+  recorded: RecordedFetch;
+  logs: string[];
+  read: () => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const { elements, document } = bootDocument(ids);
+  const recorded = recordedFetchWithTimeout(transport);
+  const logs: string[] = [];
+  const factory = new Function(
+    'document',
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'errorMessage',
+    'logEvent',
+    'cachedPolicies',
+    'renderPolicyTables',
+    `${extractFunction(script, 'emptyRow')}\n`
+      + `${extractFunction(script, functionName)}\nreturn ${functionName};`,
+  );
+  const read = factory(
+    document,
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    (_data: unknown, fallback: string) => fallback,
+    (level: string, message: string) => logs.push(level + ' ' + message),
+    [],
+    () => {},
+  ) as () => Promise<void>;
+  return { elements, recorded, logs, read };
 }
 
 /** A response whose headers arrive immediately but whose body never settles. */
@@ -692,5 +854,185 @@ describe('background poll resilience', () => {
     await loadStatus();
     expect(backendUnavailable).toHaveLength(1);
     expect(backendUnavailable[0]?.message).toContain('Request timed out after');
+  });
+});
+
+describe('boot read resilience', () => {
+  it('fails the settings boot read instead of hanging when the body stalls', async () => {
+    const { elements, recorded, logs, loadSettings } = buildSettingsSandbox(() =>
+      Promise.resolve(stalledBodyResponse()),
+    );
+
+    await Promise.race([
+      loadSettings(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled /api/settings body wedged the settings panel')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/settings']);
+    const status = elements.get('settings-persistence-status');
+    expect(status?.textContent).toBe('Persisted configuration load failed');
+    expect(status?.dataset.state).toBe('load_failed');
+    expect(
+      logs.some(
+        (line) =>
+          line.startsWith('WARN Settings unavailable:')
+          && line.includes('Response body timed out after'),
+      ),
+    ).toBe(true);
+  });
+
+  it('clears the goal loading pin when the goals body stalls', async () => {
+    let stall = true;
+    const transport = (): Promise<Response> =>
+      Promise.resolve(
+        stall
+          ? stalledBodyResponse()
+          : ({
+              ok: true,
+              status: 200,
+              json: async (): Promise<Record<string, unknown>> => ({
+                goals: [{ id: 'goal-1' }],
+                preferredGoalId: 'goal-1',
+              }),
+            } as unknown as Response),
+      );
+    const { recorded, logs, workspaceGoals, loadingWorkspaceGoals, loadWorkspaceGoals } =
+      buildGoalsSandbox(transport);
+
+    await Promise.race([
+      loadWorkspaceGoals('ws-1'),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled goals body pinned the project row')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/workspaces/ws-1/goals']);
+    expect([...loadingWorkspaceGoals]).toEqual([]);
+    expect(workspaceGoals.get('ws-1')?.error).toContain('Response body timed out after');
+    expect(logs.some((line) => line.startsWith('ERROR Goal refresh failed for ws-1'))).toBe(true);
+
+    stall = false;
+    await loadWorkspaceGoals('ws-1');
+
+    expect(workspaceGoals.get('ws-1')).toEqual({
+      goals: [{ id: 'goal-1' }],
+      preferredGoalId: 'goal-1',
+      error: null,
+    });
+    expect([...loadingWorkspaceGoals]).toEqual([]);
+  });
+
+  it('bounds every inventory read so a stalled body cannot block the tables', async () => {
+    let stall = true;
+    const transport = (url: string): Promise<Response> =>
+      Promise.resolve(
+        stall
+          ? stalledBodyResponse()
+          : ({
+              ok: true,
+              status: 200,
+              json: async (): Promise<Record<string, unknown>> => {
+                if (url === '/api/servers') return { servers: [{ id: 'server-1' }] };
+                if (url === '/api/skills') return { skills: [{ name: 'skill-1' }] };
+                return {
+                  mcpServers: { entries: [{ id: 'server-1' }] },
+                  skills: { entries: [{ name: 'skill-1' }] },
+                };
+              },
+            } as unknown as Response),
+      );
+    const { elements, recorded, logs, loadInventory } = buildInventorySandbox(transport);
+
+    await Promise.race([
+      loadInventory(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled inventory body wedged the inventory tables')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual([
+      '/api/servers',
+      '/api/skills',
+      '/api/extensions/canonical',
+    ]);
+    expect(
+      logs.some(
+        (line) =>
+          line.startsWith('ERROR Inventory refresh error:')
+          && line.includes('Response body timed out after'),
+      ),
+    ).toBe(true);
+
+    stall = false;
+    await loadInventory();
+
+    expect(recorded.urls).toHaveLength(6);
+    expect(elements.get('stat-servers-count')?.textContent).toBe('1');
+    expect(elements.get('stat-skills-count')?.textContent).toBe('1');
+  });
+
+  it('bounds the policy read and reports it in the table', async () => {
+    const { elements, recorded, logs, read } = buildPanelReadSandbox(
+      () => Promise.resolve(stalledBodyResponse()),
+      'loadPolicies',
+      ['policy-table-body', 'policies-detailed-table-body'],
+    );
+
+    await Promise.race([
+      read(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled /api/policies body wedged the policy table')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/policies']);
+    expect(logs).toEqual([]);
+    expect(elements.get('policy-table-body')?.children[0]?.children[0]?.textContent).toContain(
+      'Failed to load policies: Response body timed out after',
+    );
+  });
+
+  it('bounds the cleanup evaluation read and reports it in the table', async () => {
+    const { elements, recorded, logs, read } = buildPanelReadSandbox(
+      () => Promise.resolve(stalledBodyResponse()),
+      'loadCleanupEvaluations',
+      ['cleanup-evaluations-body'],
+    );
+
+    await Promise.race([
+      read(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled cleanup read wedged the cleanup table')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/workspaces/cleanup-evaluations']);
+    expect(
+      logs.some(
+        (line) =>
+          line.startsWith('WARN Cleanup evaluation refresh failed:')
+          && line.includes('Response body timed out after'),
+      ),
+    ).toBe(true);
+    expect(elements.get('cleanup-evaluations-body')?.children[0]?.children[0]?.textContent).toContain(
+      'Failed to load cleanup evaluations: Response body timed out after',
+    );
   });
 });

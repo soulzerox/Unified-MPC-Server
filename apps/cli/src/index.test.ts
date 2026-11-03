@@ -644,6 +644,40 @@ describe('CLI execution dispatcher', () => {
     expect(errors).toEqual(['Policy repair failed for /home/user/.codex/AGENTS.md: EACCES']);
   });
 
+  it('reports every failed artifact even when nothing was repaired', async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      web: async (options) => ok({
+        handle: { close: async () => {} },
+        url: `http://127.0.0.1:${options?.port ?? 3000}`,
+        policyRepair: {
+          scanned: 11,
+          updated: [],
+          unchanged: [],
+          skipped: [],
+          failed: [
+            { file: '/workspace/AGENTS.md', message: 'EACCES' },
+            { file: '/home/user/.claude/CLAUDE.md', message: 'EISDIR' },
+          ],
+        },
+      }),
+      write: (text) => output.push(text),
+      writeError: (text) => errors.push(text),
+    };
+
+    // A run where every stale artifact was unreadable repairs nothing, so the
+    // per-file diagnostics must not hide behind the repaired-count guard.
+    const code = await runCli(['web', '--port', '18765'], deps);
+    expect(code).toBe(0);
+    expect(output).toEqual(['Control Plane running on http://127.0.0.1:18765']);
+    expect(errors).toEqual([
+      'Policy repair failed for /workspace/AGENTS.md: EACCES',
+      'Policy repair failed for /home/user/.claude/CLAUDE.md: EISDIR',
+    ]);
+  });
+
   it('stays quiet when startup policy repair changed nothing', async () => {
     const output: string[] = [];
     const deps: CliDependencies = {

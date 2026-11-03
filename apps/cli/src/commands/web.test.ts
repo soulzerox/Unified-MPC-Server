@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
+import { POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
 import { describe, expect, it } from 'vitest';
 import { createGoalControl, createWebGoalRuntimeProjection, runWeb, parseWebArgs } from './web.js';
@@ -338,6 +339,61 @@ describe('web CLI command', () => {
         expect(result.error.message).toContain('STORAGE_IDENTITY_DRIFT:');
         expect(result.error.message).toContain(historicalPath);
         expect(existsSync(path.join(canonical, 'unified-mpc.sqlite'))).toBe(false);
+      } finally {
+        if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+        else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgDataHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('repairs managed policy artifacts before listening only when the opt-in flag is set', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-policy-repair-'));
+      const workspaceRoot = path.join(root, 'workspace');
+      const home = path.join(root, 'home');
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(home, { recursive: true });
+      const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      const previousHome = process.env.HOME;
+      const previousXdgDataHome = process.env.XDG_DATA_HOME;
+      process.env.UNIFIED_MPC_DATA_PATH = path.join(root, 'data');
+      process.env.HOME = home;
+      process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+      const agentsFile = path.join(workspaceRoot, 'AGENTS.md');
+      const claudeGlobal = path.join(home, '.claude', 'CLAUDE.md');
+      const staleBlock = `${POLICY_BLOCK_START}\n| P1 | child:memory | memory | server | REALTIME | ✅ YES |\n${POLICY_BLOCK_END}\n`;
+      await writeFile(agentsFile, `# Project notes\n\nKeep me.\n\n${staleBlock}`, 'utf8');
+      await mkdir(path.dirname(claudeGlobal), { recursive: true });
+      await writeFile(claudeGlobal, `# Global notes\n\nKeep me too.\n\n${staleBlock}`, 'utf8');
+
+      try {
+        const withoutOptIn = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] });
+        expect(withoutOptIn.ok).toBe(true);
+        if (!withoutOptIn.ok) return;
+        expect(withoutOptIn.value.policyRepair).toBeUndefined();
+        await withoutOptIn.value.handle.close();
+        expect(await readFile(agentsFile, 'utf8')).toContain('child:memory');
+
+        const result = await runWeb(
+          { port: 0, repairManagedPolicies: true },
+          { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] },
+        );
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        try {
+          // The control plane owns the host-global files and the selected
+          // workspace root: six workspace targets plus five global ones.
+          expect(result.value.policyRepair?.scanned).toBe(11);
+          expect(result.value.policyRepair?.updated).toEqual(expect.arrayContaining([agentsFile, claudeGlobal]));
+          expect(result.value.policyRepair?.failed).toEqual([]);
+          expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
+          expect(await readFile(claudeGlobal, 'utf8')).toContain('memory:workspace-selective');
+        } finally {
+          await result.value.handle.close();
+        }
       } finally {
         if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
         else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;

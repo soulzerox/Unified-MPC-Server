@@ -112,14 +112,20 @@ control plane owns those files. Workspace artifacts are repaired by both paths.
 `repairManagedBlocks` differs from `sync` in three ways that matter for an
 upgrade:
 
-- It only rewrites an artifact that already exists **and** already contains a
-  complete `<!-- MCP-POLICY-START -->` … `<!-- MCP-POLICY-END -->` block. That
-  gate covers the whole-file targets (`.cursor/rules/00-mandatory-policy.mdc`,
-  `~/.gemini/antigravity/rules/mcp-policy.md`) too, and a file with only one of
-  the two markers is skipped rather than having a second block appended. It
-  never creates a file and never appends a managed block, so an upgrade cannot
-  start instructing an IDE or CLI the user never configured. Use `sync` (or the
-  WebUI "Sync Policies" action) to opt in to a new target.
+- It only rewrites an artifact that already exists **and** already carries
+  exactly one ordered `<!-- MCP-POLICY-START -->` … `<!-- MCP-POLICY-END -->`
+  block. That gate covers the whole-file targets
+  (`.cursor/rules/00-mandatory-policy.mdc`,
+  `~/.gemini/antigravity/rules/mcp-policy.md`) too. Every other shape is
+  ambiguous and is left byte-identical and reported in `skipped[]`: a file with
+  only one of the two markers, a file whose closing marker precedes its opening
+  marker, and a file that repeats a marker. Rewriting part of an ambiguous file
+  is exactly how an automatic repair would append a second block or leave a
+  stale one behind, so it never creates a file and never appends a managed
+  block. An upgrade therefore cannot start instructing an IDE or CLI the user
+  never configured. Use `sync` (or the WebUI "Sync Policies" action) to opt in
+  to a new target; if an artifact does carry a duplicated block, delete the
+  extra pair once and the next startup repairs it.
 - Every write is atomic and every target is independent. One unreadable file is
   reported in `failed[]` without aborting the remaining repairs.
 - It compiles from the same `policySnapshot()` as `sync`, so startup repair and

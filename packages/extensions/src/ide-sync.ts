@@ -207,11 +207,21 @@ export class IdeSyncService {
       }
 
       // The marker gate is the whole safety property of this path: an artifact
-      // is only ours to rewrite when it already carries a complete managed
+      // is only ours to rewrite when it carries exactly one ordered managed
       // block. That covers the whole-file kinds (`cursor-file`,
-      // `generated-file`) too, and it refuses a half-written file that has only
-      // one marker instead of appending a second block to it.
-      if (!existing.includes(POLICY_BLOCK_START) || !existing.includes(POLICY_BLOCK_END)) {
+      // `generated-file`) too. Every other shape is ambiguous — a half-written
+      // file with one marker, a closing marker that precedes the opening one,
+      // a file that repeats a marker — and rewriting part of an ambiguous file
+      // is exactly how repair would append a second block or leave a stale one
+      // behind, so all of them stay byte-identical and are reported as skipped.
+      const startIndex = existing.indexOf(POLICY_BLOCK_START);
+      const endIndex = existing.indexOf(POLICY_BLOCK_END);
+      const ambiguousBlock = startIndex === -1
+        || endIndex === -1
+        || endIndex < startIndex
+        || existing.indexOf(POLICY_BLOCK_START, startIndex + POLICY_BLOCK_START.length) !== -1
+        || existing.indexOf(POLICY_BLOCK_END, endIndex + POLICY_BLOCK_END.length) !== -1;
+      if (ambiguousBlock) {
         skipped.push(target.file);
         continue;
       }

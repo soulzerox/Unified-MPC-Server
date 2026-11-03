@@ -121,8 +121,9 @@ export async function runWeb(
     })();
     bootstrapNonSecretSettings(settings);
     // #4: the control plane rewrites and renders the persisted extensions
-    // document, so reconcile it before the server exposes any policy surface.
-    ensureExtensionsSettingsMigrated(settings, EXTENSIONS_SETTINGS_KEY);
+    // document, so reconcile the same store the server will read before it
+    // exposes any policy surface.
+    ensureExtensionsSettingsMigrated(serverOptions?.settingsRepository ?? settings, EXTENSIONS_SETTINGS_KEY);
     const lifecycleCandidates = await workspaceService.list();
     const protectedByOpenGoal: string[] = [];
     const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();

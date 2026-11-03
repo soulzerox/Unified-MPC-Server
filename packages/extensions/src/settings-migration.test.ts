@@ -198,6 +198,18 @@ describe('extensions settings migration', () => {
     expect(configuredPolicies(result.settings).some((policy) => policy.resourceId === 'memory')).toBe(false);
   });
 
+  it('never turns a preserved ambiguous Godkiller pin into a mandatory child', () => {
+    const result = migrateExtensionsSettings({
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      settingsVersion: 1,
+      mandatoryMcpServers: ['godkiller'],
+      policies: [CUSTOM_SERVER_POLICY],
+    });
+    expect(result.settings.mandatoryMcpServers).toEqual(['godkiller']);
+    expect(result.notices.map((notice) => notice.code)).toContain('ambiguous-mandatory-server-preserved');
+    expect(configuredPolicies(result.settings).some((policy) => policy.resourceId === 'godkiller' && policy.mandatory)).toBe(false);
+  });
+
   it('keeps unrelated mandatory server names and unrelated policies', () => {
     const result = migrateExtensionsSettings({
       ...DEFAULT_EXTENSIONS_SETTINGS,

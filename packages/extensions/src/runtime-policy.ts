@@ -31,6 +31,14 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
   { id: 'optional:ui-skills', resourceId: 'ui-skills', resourceType: 'skill', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use UI/UX and frontend best-practice guidance when designing or implementing user interfaces.' },
 ]);
 
+/**
+ * Retired built-in mandatory server ids. A name with ambiguous provenance may be
+ * preserved in the document, but it must never synthesize a mandatory child pin
+ * again; Godkiller is an on-demand safety check and memory/RAG are native
+ * capabilities, not child servers.
+ */
+const RETIRED_MANDATORY_SERVER_IDS: ReadonlySet<string> = new Set(['memory', 'thai-rag-mcp', 'godkiller']);
+
 export function configuredPolicies(settings: ExtensionsSettings): readonly PolicyEntry[] {
   const legacyMandatoryNames = new Set(settings.mandatoryMcpServers.map((name) => name.trim().toLowerCase()).filter(Boolean));
   // A user-defined server may legitimately reuse a retired built-in name; only
@@ -52,7 +60,7 @@ export function configuredPolicies(settings: ExtensionsSettings): readonly Polic
     const name = rawName.trim();
     const key = name.toLowerCase();
     if (name.length === 0 || configuredServers.has(key)) continue;
-    if (NATIVE_PROVIDER_SERVER_IDS.has(key) && !userConfiguredServers.has(key)) continue;
+    if (RETIRED_MANDATORY_SERVER_IDS.has(key) && !userConfiguredServers.has(key)) continue;
     configured.push(defaultMandatoryServers.get(key) ?? {
       id: `legacy:mandatory:${key}`,
       resourceId: name,

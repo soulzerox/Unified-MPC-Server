@@ -73,7 +73,9 @@ A retired mandatory name is removed only when:
 When a saved policy list is present but does not cover the retired name, the name
 is preserved and the run reports `ambiguous-mandatory-server-preserved`. The
 preserved name is inert: `configuredPolicies` will not create a mandatory child
-pin for a retired native id that is not an explicit `extraMcpServers` entry.
+pin for any retired built-in id (`memory`, `thai-rag-mcp`, `godkiller`) that is
+not an explicit `extraMcpServers` entry. Godkiller is an on-demand safety check,
+not a mandatory child server.
 
 Similarly, a malformed JSON document is reported as `invalid-settings-json` and
 left untouched; it is never replaced by defaults or half-written.

@@ -678,6 +678,26 @@ describe('CLI execution dispatcher', () => {
     ]);
   });
 
+  it('reports a whole-run policy repair failure without changing the exit code', async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      web: async (options) => ok({
+        handle: { close: async () => {} },
+        url: `http://127.0.0.1:${options?.port ?? 3000}`,
+        policyRepairError: 'Failed to lock managed policy files: timed out',
+      }),
+      write: (text) => output.push(text),
+      writeError: (text) => errors.push(text),
+    };
+
+    const code = await runCli(['web', '--port', '18765'], deps);
+    expect(code).toBe(0);
+    expect(output).toEqual(['Control Plane running on http://127.0.0.1:18765']);
+    expect(errors).toEqual(['Policy repair failed: Failed to lock managed policy files: timed out']);
+  });
+
   it('stays quiet when startup policy repair changed nothing', async () => {
     const output: string[] = [];
     const deps: CliDependencies = {

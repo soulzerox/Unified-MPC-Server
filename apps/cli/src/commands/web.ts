@@ -60,8 +60,13 @@ export interface WebCommand {
 export interface WebRunResult {
   readonly handle: CliServerHandle;
   readonly url: string;
-  /** Present when startup policy repair was requested; failures are data, not fatal. */
+  /** Present when startup policy repair was requested; per-file failures are inside the report. */
   readonly policyRepair?: ManagedPolicyRepairReport;
+  /**
+   * Set when the repair pass itself could not run (for example a lock timeout).
+   * The control plane still starts; the CLI reports this instead of dropping it.
+   */
+  readonly policyRepairError?: string;
 }
 
 /** `repairManagedPolicies` is opt-in so an embedded host never rewrites user files implicitly. */
@@ -141,6 +146,7 @@ export async function runWeb(
     // user never configured. A failed target is reported in the result, never
     // fatal: the control plane still starts.
     let policyRepair: ManagedPolicyRepairReport | undefined;
+    let policyRepairError: string | undefined;
     if (options.repairManagedPolicies === true) {
       const repairSettings = parseExtensionsSettings((serverOptions?.settingsRepository ?? settings).get(EXTENSIONS_SETTINGS_KEY));
       // The control plane serves one configured root at a time, matching the
@@ -154,6 +160,7 @@ export async function runWeb(
         workspaceRoot: repairWorkspaceRoot,
       }).repairManagedBlocks({ includeGlobalTargets: true });
       if (repaired.ok) policyRepair = repaired.value;
+      else policyRepairError = repaired.error.message;
     }
     const lifecycleCandidates = await workspaceService.list();
     const protectedByOpenGoal: string[] = [];
@@ -208,6 +215,7 @@ export async function runWeb(
       handle: server,
       url,
       ...(policyRepair === undefined ? {} : { policyRepair }),
+      ...(policyRepairError === undefined ? {} : { policyRepairError }),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

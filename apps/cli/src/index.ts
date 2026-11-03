@@ -343,6 +343,9 @@ Commands:
         if (repaired.updated.length > 0) write(`Repaired ${repaired.updated.length} generated policy artifact(s) at startup`);
         for (const failure of repaired.failed) writeError(`Policy repair failed for ${failure.file}: ${failure.message}`);
       }
+      if (result.value.policyRepairError !== undefined) {
+        writeError(`Policy repair failed: ${result.value.policyRepairError}`);
+      }
       write(`Control Plane running on ${result.value.url}`);
       return 0;
     }

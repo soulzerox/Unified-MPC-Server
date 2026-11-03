@@ -276,11 +276,22 @@ export function createStdioMcpRuntime(
     workspaceRoot: workspace.realRootPath || workspace.rootPath,
     settings: parseExtensionsSettings(settingsRepository.get(EXTENSIONS_SETTINGS_KEY)),
   }).repairManagedBlocks({ includeGlobalTargets: false }).then(
-    (result): ManagedPolicyRepairReport | undefined => result.ok ? result.value : undefined,
-    // A best-effort upgrade must never take the session host down. Per-file
-    // failures are already reported inside the Result; a thrown pass is not
-    // actionable here and must not surface as an unhandled rejection.
-    (): undefined => undefined,
+    (result): ManagedPolicyRepairReport | undefined => {
+      if (result.ok) return result.value;
+      // A failed pass has no per-file report, so the whole-run reason would
+      // otherwise disappear. stdout carries the MCP protocol; stderr is the
+      // only safe diagnostics channel for this process.
+      process.stderr.write(`Unified-MPC managed policy repair failed: ${result.error.message}\n`);
+      return undefined;
+    },
+    (error: unknown): undefined => {
+      // A best-effort upgrade must never take the session host down. A thrown
+      // pass is still surfaced on stderr instead of becoming an unhandled
+      // rejection or disappearing.
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Unified-MPC managed policy repair failed: ${message}\n`);
+      return undefined;
+    },
   );
   const workspaceSelection = new WorkspaceSelectionService(
     workspaceRepository,

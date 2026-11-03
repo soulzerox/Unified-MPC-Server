@@ -428,9 +428,9 @@ export function getClientScriptJs(): string {
 
       async function loadPolicies() {
         try {
-          const res = await fetch('/api/policies');
+          const res = await fetchWithTimeout('/api/policies');
           if (!res.ok) throw new Error('Policies request failed');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           cachedPolicies = (data.policies || []).map((policy) => ({
             ...policy,
             requiredTools: Array.isArray(policy.requiredTools) ? [...policy.requiredTools] : [],
@@ -988,7 +988,7 @@ export function getClientScriptJs(): string {
         if (!body) return;
         try {
           const res = await fetchWithTimeout('/api/workspaces/cleanup-evaluations');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (!res.ok) throw new Error(errorMessage(data, 'Cleanup evaluation request failed'));
           const evaluations = Array.isArray(data.evaluations) ? data.evaluations : [];
           body.replaceChildren();
@@ -1281,7 +1281,7 @@ export function getClientScriptJs(): string {
         const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goals';
         try {
           const res = await fetchWithTimeout(endpoint);
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (!res.ok) throw new Error(errorMessage(data, 'Goal request failed'));
           workspaceGoals.set(workspaceId, {
             goals: Array.isArray(data.goals) ? data.goals : [],
@@ -1399,14 +1399,14 @@ export function getClientScriptJs(): string {
 
         try {
           const [serversRes, skillsRes, canonicalRes] = await Promise.all([
-            fetch('/api/servers'),
-            fetch('/api/skills'),
-            fetch('/api/extensions/canonical'),
+            fetchWithTimeout('/api/servers'),
+            fetchWithTimeout('/api/skills'),
+            fetchWithTimeout('/api/extensions/canonical'),
           ]);
           if (!serversRes.ok || !skillsRes.ok || !canonicalRes.ok) throw new Error('Inventory request failed');
-          cachedServers = (await serversRes.json()).servers || [];
-          cachedSkills = (await skillsRes.json()).skills || [];
-          cachedCanonicalExtensions = await canonicalRes.json();
+          cachedServers = (await readJsonWithTimeout(serversRes)).servers || [];
+          cachedSkills = (await readJsonWithTimeout(skillsRes)).skills || [];
+          cachedCanonicalExtensions = await readJsonWithTimeout(canonicalRes);
 
           // Canonical installed-state drives inventory counts; runtime projections remain available for prune actions.
           const serversCountEl = document.getElementById('stat-servers-count');
@@ -1806,9 +1806,9 @@ export function getClientScriptJs(): string {
 
       async function loadSettings() {
         try {
-          const res = await fetch('/api/settings');
+          const res = await fetchWithTimeout('/api/settings');
           if (!res.ok) throw new Error('Settings request failed');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           const settings = data.settings || {};
           const persistence = data.persistence || {};
           for (const [id, value] of [

@@ -143,7 +143,7 @@ describe('Dashboard HTML Reactive SPA', () => {
     expect(html).toContain('policy-save-btn');
     expect(html).toContain('policy-priority-input');
     expect(html).toContain('savePolicies');
-    expect(html).toContain("fetch('/api/policies'");
+    expect(html).toContain("fetchWithTimeout('/api/policies'");
   });
 
   it('keeps extension inventory and pruning in WebUI but removes all install surfaces', () => {

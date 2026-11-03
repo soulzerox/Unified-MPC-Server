@@ -27,5 +27,5 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
 10. **[Publish Credential Mediation (S2 design)](APPROVED_PUSH_PATH_CREDENTIALS.md)**:
    The S2 slice of #297: a host-owned credential helper, a receipt-bound grant, the guard allowlist and the revocation lifecycle. S2a (lease port, SecretStore ledger, operator CLI, expiry sweep), S2b (the `publish-credential-helper` artifact inside a promoted release), S2c (fingerprint-bound receipt, the live lease's material opened for the diagnostic default-branch read, and a helper-scoped push plus verification with revocation) and S2d (non-secret grant/use/revoke/sweep audit rows and the [token-rotation runbook](PUBLISH_CREDENTIAL_RUNBOOK.md)) are implemented.
 11. **[Extensions Settings Migration](EXTENSIONS_SETTINGS_MIGRATION.md)**:
-   The versioned startup reconciliation for persisted `extensions` settings after the mandatory child `memory` / `thai-rag-mcp` topology was retired: schema marker, provenance rule, ambiguous-document handling and notice codes (issue #4).
+   The versioned startup reconciliation after the mandatory child `memory` / `thai-rag-mcp` topology was retired: the schema and settings markers, provenance rule, ambiguous-document handling, notice codes, the inert child-pin surface, and interruption/concurrency recovery (issue #4).
 

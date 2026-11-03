@@ -7,7 +7,8 @@ import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain'
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
-import { describe, expect, it } from 'vitest';
+import { ControlPlaneServer } from '@unified-mpc/web';
+import { describe, expect, it, vi } from 'vitest';
 import { createGoalControl, createWebGoalRuntimeProjection, runWeb, parseWebArgs } from './web.js';
 
 describe('web CLI command', () => {
@@ -359,9 +360,13 @@ describe('web CLI command', () => {
       const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
       const previousHome = process.env.HOME;
       const previousXdgDataHome = process.env.XDG_DATA_HOME;
+      const previousCodexHome = process.env.CODEX_HOME;
       process.env.UNIFIED_MPC_DATA_PATH = path.join(root, 'data');
       process.env.HOME = home;
       process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+      // `resolveCodexHome` reads CODEX_HOME before HOME, so leaving it set
+      // would point the codex-global target at the developer's real file.
+      delete process.env.CODEX_HOME;
       const agentsFile = path.join(workspaceRoot, 'AGENTS.md');
       const claudeGlobal = path.join(home, '.claude', 'CLAUDE.md');
       const staleBlock = `${POLICY_BLOCK_START}\n| P1 | child:memory | memory | server | REALTIME | ✅ YES |\n${POLICY_BLOCK_END}\n`;
@@ -370,29 +375,45 @@ describe('web CLI command', () => {
       await writeFile(claudeGlobal, `# Global notes\n\nKeep me too.\n\n${staleBlock}`, 'utf8');
 
       try {
-        const withoutOptIn = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] });
-        expect(withoutOptIn.ok).toBe(true);
-        if (!withoutOptIn.ok) return;
-        expect(withoutOptIn.value.policyRepair).toBeUndefined();
-        await withoutOptIn.value.handle.close();
-        expect(await readFile(agentsFile, 'utf8')).toContain('child:memory');
-
-        const result = await runWeb(
-          { port: 0, repairManagedPolicies: true },
-          { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] },
-        );
-        expect(result.ok).toBe(true);
-        if (!result.ok) return;
+        // Observe the artifacts exactly when `listen()` is entered: a repair
+        // that moved after the server started would snapshot the stale file
+        // even though every assertion below still held.
+        const listenEntrySnapshots: string[] = [];
+        const originalListen = ControlPlaneServer.prototype.listen;
+        const listenSpy = vi.spyOn(ControlPlaneServer.prototype, 'listen').mockImplementation(async function (this: ControlPlaneServer) {
+          listenEntrySnapshots.push(await readFile(agentsFile, 'utf8'));
+          return originalListen.call(this);
+        });
         try {
-          // The control plane owns the host-global files and the selected
-          // workspace root: six workspace targets plus five global ones.
-          expect(result.value.policyRepair?.scanned).toBe(11);
-          expect(result.value.policyRepair?.updated).toEqual(expect.arrayContaining([agentsFile, claudeGlobal]));
-          expect(result.value.policyRepair?.failed).toEqual([]);
-          expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
-          expect(await readFile(claudeGlobal, 'utf8')).toContain('memory:workspace-selective');
+          const withoutOptIn = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] });
+          expect(withoutOptIn.ok).toBe(true);
+          if (!withoutOptIn.ok) return;
+          expect(withoutOptIn.value.policyRepair).toBeUndefined();
+          await withoutOptIn.value.handle.close();
+          expect(await readFile(agentsFile, 'utf8')).toContain('child:memory');
+
+          const result = await runWeb(
+            { port: 0, repairManagedPolicies: true },
+            { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] },
+          );
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          try {
+            // The control plane owns the host-global files and the selected
+            // workspace root: six workspace targets plus five global ones.
+            expect(result.value.policyRepair?.scanned).toBe(11);
+            expect(result.value.policyRepair?.updated).toEqual(expect.arrayContaining([agentsFile, claudeGlobal]));
+            expect(result.value.policyRepair?.failed).toEqual([]);
+            expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
+            expect(await readFile(claudeGlobal, 'utf8')).toContain('memory:workspace-selective');
+          } finally {
+            await result.value.handle.close();
+          }
+          expect(listenEntrySnapshots).toHaveLength(2);
+          expect(listenEntrySnapshots[0]).toContain('child:memory');
+          expect(listenEntrySnapshots[1]).toContain('memory:workspace-selective');
         } finally {
-          await result.value.handle.close();
+          listenSpy.mockRestore();
         }
       } finally {
         if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
@@ -401,6 +422,52 @@ describe('web CLI command', () => {
         else process.env.HOME = previousHome;
         if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = previousXdgDataHome;
+        if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previousCodexHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('falls back to process.cwd() for the repair root when no workspace root is configured', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-policy-repair-cwd-'));
+      const workspaceRoot = path.join(root, 'cwd');
+      const home = path.join(root, 'home');
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(home, { recursive: true });
+      const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      const previousHome = process.env.HOME;
+      const previousXdgDataHome = process.env.XDG_DATA_HOME;
+      const previousCodexHome = process.env.CODEX_HOME;
+      const previousCwd = process.cwd();
+      process.env.UNIFIED_MPC_DATA_PATH = path.join(root, 'data');
+      process.env.HOME = home;
+      process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+      delete process.env.CODEX_HOME;
+      const agentsFile = path.join(workspaceRoot, 'AGENTS.md');
+      await writeFile(agentsFile, `# Project notes\n\n${POLICY_BLOCK_START}\n| P1 | child:memory | memory | server | REALTIME | ✅ YES |\n${POLICY_BLOCK_END}\n`, 'utf8');
+      process.chdir(workspaceRoot);
+      try {
+        // The production CLI calls runWeb with no serverOptions, so the repair
+        // has to mirror ControlPlaneServer's own `process.cwd()` default.
+        const result = await runWeb({ port: 0, repairManagedPolicies: true }, { goalRuntimeRead: {} as never });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        try {
+          expect(result.value.policyRepair?.updated).toContain(agentsFile);
+          expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
+        } finally {
+          await result.value.handle.close();
+        }
+      } finally {
+        process.chdir(previousCwd);
+        if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+        else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgDataHome;
+        if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previousCodexHome;
         await rm(root, { recursive: true, force: true });
       }
     });

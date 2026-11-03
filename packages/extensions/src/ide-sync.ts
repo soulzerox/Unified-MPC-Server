@@ -41,7 +41,7 @@ export interface ManagedPolicyRepairReport {
   readonly scanned: number;
   readonly updated: readonly string[];
   readonly unchanged: readonly string[];
-  /** Files that do not exist or carry no managed block, so they were left alone. */
+  /** Files left alone: absent targets, and existing artifacts whose markers are ambiguous. */
   readonly skipped: readonly string[];
   readonly failed: readonly { readonly file: string; readonly message: string }[];
 }

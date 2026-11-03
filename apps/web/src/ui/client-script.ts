@@ -949,7 +949,7 @@ export function getClientScriptJs(): string {
 
       async function fetchWorkspaceState() {
         const res = await fetchWithTimeout('/api/workspaces');
-        const data = await res.json();
+        const data = await readJsonWithTimeout(res);
         if (!res.ok) throw new Error(errorMessage(data, 'Workspace request failed'));
         return data;
       }

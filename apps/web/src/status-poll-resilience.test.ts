@@ -466,6 +466,44 @@ describe('background poll resilience', () => {
     expect(elements.get('stat-loopback-port')?.textContent).toBe('18765');
   });
 
+  it('bounds the workspace-state read that a timeout reconciliation awaits', async () => {
+    let stallBody = true;
+    const transport = (): Promise<Response> =>
+      Promise.resolve(stallBody ? stalledBodyResponse() : {
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ workspaces: [], selection: null }),
+      } as unknown as Response);
+    const recorded = recordedFetchWithTimeout(transport);
+    const factory = new Function(
+      'fetchWithTimeout',
+      'readJsonWithTimeout',
+      'errorMessage',
+      `${extractFunction(getClientScriptJs(), 'fetchWorkspaceState')}\nreturn fetchWorkspaceState;`,
+    );
+    const fetchWorkspaceState = factory(
+      recorded.fetchWithTimeout,
+      recorded.readJsonWithTimeout,
+      (_data: unknown, fallback: string) => fallback,
+    ) as () => Promise<Record<string, unknown>>;
+
+    await Promise.race([
+      expect(fetchWorkspaceState()).rejects.toMatchObject({ code: 'request_timeout' }),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled /api/workspaces body wedged reconciliation')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/workspaces']);
+
+    stallBody = false;
+    await expect(fetchWorkspaceState()).resolves.toEqual({ workspaces: [], selection: null });
+    expect(recorded.urls).toEqual(['/api/workspaces', '/api/workspaces']);
+  });
+
   it('releases the goal-runtime refresh slot when a response body stalls mid-stream', async () => {
     let stallBody = true;
     const transport = (): Promise<Response> =>

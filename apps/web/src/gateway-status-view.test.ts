@@ -291,6 +291,52 @@ describe('gateway status projection', () => {
     }
   });
 
+  it('fails closed when an older request times out while a newer one is still pending', async () => {
+    let rejectOlder: ((error: Error) => void) | undefined;
+    let resolveNewer: ((response: Response) => void) | undefined;
+    let calls = 0;
+    const timeoutError = Object.assign(new Error('Request timed out after 8000ms'), {
+      code: 'request_timeout',
+    });
+    const fetchImpl = (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(healthyResponse());
+      if (calls === 2) {
+        return new Promise<Response>((_resolve, reject) => {
+          rejectOlder = reject;
+        });
+      }
+      return new Promise<Response>((resolve) => {
+        resolveNewer = resolve;
+      });
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+      await loadGatewayStatus();
+      expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+
+      const older = loadGatewayStatus();
+      const newer = loadGatewayStatus();
+
+      rejectOlder?.(timeoutError);
+      await older;
+      expect(calls).toBe(3);
+      expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+      expect(elements.get('connect-btn')?.disabled).toBe(true);
+      expect(elements.get('connect-btn')?.title).toBe('Gateway status unavailable');
+      expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
+
+      resolveNewer?.(healthyResponse());
+      await newer;
+      expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+      expect(elements.get('connect-btn')?.disabled).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('aborts a hung request through the real timeout helper', async () => {
     const script = getClientScriptJs();
     const factory = new Function(

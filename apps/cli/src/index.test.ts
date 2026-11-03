@@ -610,6 +610,57 @@ describe('CLI execution dispatcher', () => {
     expect(output[0]).toBe('Control Plane running on http://127.0.0.1:18765');
   });
 
+  it('reports startup policy repairs and failures without changing the exit code', async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+    let received: Parameters<NonNullable<CliDependencies['web']>>[0];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      web: async (options) => {
+        received = options;
+        return ok({
+          handle: { close: async () => {} },
+          url: `http://127.0.0.1:${options?.port ?? 3000}`,
+          policyRepair: {
+            scanned: 11,
+            updated: ['/workspace/AGENTS.md', '/home/user/.claude/CLAUDE.md'],
+            unchanged: [],
+            skipped: [],
+            failed: [{ file: '/home/user/.codex/AGENTS.md', message: 'EACCES' }],
+          },
+        });
+      },
+      write: (text) => output.push(text),
+      writeError: (text) => errors.push(text),
+    };
+
+    const code = await runCli(['web', '--port', '18765'], deps);
+    expect(code).toBe(0);
+    expect(received).toEqual({ port: 18765, repairManagedPolicies: true });
+    expect(output).toEqual([
+      'Repaired 2 generated policy artifact(s) at startup',
+      'Control Plane running on http://127.0.0.1:18765',
+    ]);
+    expect(errors).toEqual(['Policy repair failed for /home/user/.codex/AGENTS.md: EACCES']);
+  });
+
+  it('stays quiet when startup policy repair changed nothing', async () => {
+    const output: string[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      web: async (options) => ok({
+        handle: { close: async () => {} },
+        url: `http://127.0.0.1:${options?.port ?? 3000}`,
+        policyRepair: { scanned: 11, updated: [], unchanged: [], skipped: [], failed: [] },
+      }),
+      write: (text) => output.push(text),
+    };
+
+    const code = await runCli(['web', '--port', '18765'], deps);
+    expect(code).toBe(0);
+    expect(output).toEqual(['Control Plane running on http://127.0.0.1:18765']);
+  });
+
   it('executes tools list command', async () => {
     const output: string[] = [];
     const deps: CliDependencies = {

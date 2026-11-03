@@ -82,6 +82,7 @@ const SETTLE_GUARD_MS = 2000;
 type RecordedFetch = {
   urls: string[];
   fetchWithTimeout: (url: string, init?: RequestInit) => Promise<Response>;
+  readJsonWithTimeout: (res: Response) => Promise<Record<string, unknown>>;
 };
 
 /**
@@ -101,6 +102,14 @@ function recordedFetchWithTimeout(
     init: RequestInit,
     timeoutMs: number,
   ) => Promise<Response>;
+  const bodyFactory = new Function(
+    `const REQUEST_TIMEOUT_MS = 8000;\n`
+      + `${extractFunction(script, 'readJsonWithTimeout')}\nreturn readJsonWithTimeout;`,
+  );
+  const realBody = bodyFactory() as (
+    res: Response,
+    timeoutMs: number,
+  ) => Promise<Record<string, unknown>>;
   const urls: string[] = [];
   return {
     urls,
@@ -108,6 +117,8 @@ function recordedFetchWithTimeout(
       urls.push(url);
       return real(url, init, POLL_TIMEOUT_MS);
     },
+    readJsonWithTimeout: (res: Response): Promise<Record<string, unknown>> =>
+      realBody(res, POLL_TIMEOUT_MS),
   };
 }
 
@@ -140,6 +151,7 @@ function healthyStatusResponse(): Response {
 function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
   elements: Map<string, FakeNode>;
   recorded: RecordedFetch;
+  backendUnavailable: Error[];
   loadStatus: () => Promise<void>;
 } {
   const script = getClientScriptJs();
@@ -153,24 +165,28 @@ function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promi
     getElementById: (id: string): FakeNode | null => elements.get(id) ?? null,
   };
   const recorded = recordedFetchWithTimeout(transport);
+  const backendUnavailable: Error[] = [];
   const factory = new Function(
     'document',
     'fetchWithTimeout',
-    'isBackendTransportError',
+    'readJsonWithTimeout',
     'noteBackendUnavailable',
     'noteBackendAvailable',
     'logEvent',
-    `let statusRefreshInFlight = false;\n${extractFunction(script, 'loadStatus')}\nreturn loadStatus;`,
+    `${extractFunction(script, 'isRequestTimeout')}\n`
+      + `${extractFunction(script, 'isBackendTransportError')}\n`
+      + `let statusRefreshInFlight = false;\n`
+      + `${extractFunction(script, 'loadStatus')}\nreturn loadStatus;`,
   );
   const loadStatus = factory(
     document,
     recorded.fetchWithTimeout,
-    () => false,
-    () => {},
+    recorded.readJsonWithTimeout,
+    (err: Error) => backendUnavailable.push(err),
     () => {},
     () => {},
   ) as () => Promise<void>;
-  return { elements, recorded, loadStatus };
+  return { elements, recorded, backendUnavailable, loadStatus };
 }
 
 function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
@@ -188,9 +204,14 @@ function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Pro
   const factory = new Function(
     'document',
     'fetchWithTimeout',
+    'readJsonWithTimeout',
     `let ragProgressInFlight = false;\n${extractFunction(script, 'loadRagIndexJobs')}\nreturn loadRagIndexJobs;`,
   );
-  const loadRagIndexJobs = factory(document, recorded.fetchWithTimeout) as () => Promise<void>;
+  const loadRagIndexJobs = factory(
+    document,
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+  ) as () => Promise<void>;
   return { container, recorded, loadRagIndexJobs };
 }
 
@@ -294,6 +315,7 @@ describe('background poll resilience', () => {
     const diagnosticsFactory = new Function(
       'document',
       'fetchWithTimeout',
+      'readJsonWithTimeout',
       'setText',
       'formatBytes',
       'renderRuntimeRetention',
@@ -304,6 +326,7 @@ describe('background poll resilience', () => {
     const loadRuntimeDiagnostics = diagnosticsFactory(
       document,
       recorded.fetchWithTimeout,
+      recorded.readJsonWithTimeout,
       setText,
       () => '0 B',
       () => {},
@@ -314,10 +337,16 @@ describe('background poll resilience', () => {
     const logsFactory = new Function(
       'document',
       'fetchWithTimeout',
+      'readJsonWithTimeout',
       'renderLogs',
       `let currentLogs = [];\n${extractFunction(script, 'fetchServerLogs')}\nreturn fetchServerLogs;`,
     );
-    const fetchServerLogs = logsFactory(document, recorded.fetchWithTimeout, () => {}) as () => Promise<void>;
+    const fetchServerLogs = logsFactory(
+      document,
+      recorded.fetchWithTimeout,
+      recorded.readJsonWithTimeout,
+      () => {},
+    ) as () => Promise<void>;
 
     await Promise.race([
       Promise.all([loadRuntimeDiagnostics(), fetchServerLogs()]),
@@ -332,5 +361,68 @@ describe('background poll resilience', () => {
     expect(recorded.urls).toEqual(['/api/runtime-diagnostics', '/api/logs']);
     expect(texts).toContainEqual(['stat-runtime-rss', 'unavailable']);
     expect(texts).toContainEqual(['runtime-diagnostics-source', 'unavailable']);
+  });
+
+  it('times out a response body that stalls mid-stream instead of pinning the guard', async () => {
+    let stallBody = true;
+    const transport = (): Promise<Response> => {
+      if (stallBody) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: (): Promise<Record<string, unknown>> => new Promise<Record<string, unknown>>(() => {}),
+        } as unknown as Response);
+      }
+      return Promise.resolve(healthyStatusResponse());
+    };
+    const { elements, recorded, loadStatus } = buildStatusSandbox(transport);
+
+    await Promise.race([
+      loadStatus(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled response body wedged the status poller')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/status']);
+    expect(elements.get('status-led')?.className).toBe('led offline');
+    expect(elements.get('servers-telemetry')?.textContent).toContain(
+      'Unable to reach backend: Response body timed out after',
+    );
+
+    stallBody = false;
+    await loadStatus();
+
+    expect(recorded.urls).toEqual(['/api/status', '/api/status']);
+    expect(elements.get('status-led')?.className).toBe('led');
+    expect(elements.get('stat-loopback-port')?.textContent).toBe('18765');
+  });
+
+  it('classifies a request timeout as a backend transport failure', async () => {
+    let mode: 'hang' | 'http-error' | 'healthy' = 'hang';
+    const transport = (url: string, init: RequestInit): Promise<Response> => {
+      if (mode === 'hang') return hangingTransport()(url, init);
+      if (mode === 'http-error') {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({}) } as unknown as Response);
+      }
+      return Promise.resolve(healthyStatusResponse());
+    };
+    const { backendUnavailable, loadStatus } = buildStatusSandbox(transport);
+
+    await loadStatus();
+    expect(backendUnavailable).toHaveLength(1);
+    expect((backendUnavailable[0] as { code?: string }).code).toBe('request_timeout');
+
+    mode = 'http-error';
+    await loadStatus();
+    expect(backendUnavailable).toHaveLength(1);
+
+    mode = 'healthy';
+    await loadStatus();
+    expect(backendUnavailable).toHaveLength(1);
+    expect(backendUnavailable[0]?.message).toContain('Request timed out after');
   });
 });

@@ -93,32 +93,28 @@ function recordedFetchWithTimeout(
   transport: (url: string, init: RequestInit) => Promise<Response>,
 ): RecordedFetch {
   const script = getClientScriptJs();
+  // Both helpers must share one controller registry, exactly like the shipped pair.
   const factory = new Function(
     'fetch',
-    `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
-  );
-  const real = factory(transport) as (
-    url: string,
-    init: RequestInit,
-    timeoutMs: number,
-  ) => Promise<Response>;
-  const bodyFactory = new Function(
     `const REQUEST_TIMEOUT_MS = 8000;\n`
-      + `${extractFunction(script, 'readJsonWithTimeout')}\nreturn readJsonWithTimeout;`,
+      + `const fetchControllers = new WeakMap();\n`
+      + `${extractFunction(script, 'fetchWithTimeout')}\n`
+      + `${extractFunction(script, 'readJsonWithTimeout')}\n`
+      + `return { fetchWithTimeout, readJsonWithTimeout };`,
   );
-  const realBody = bodyFactory() as (
-    res: Response,
-    timeoutMs: number,
-  ) => Promise<Record<string, unknown>>;
+  const real = factory(transport) as {
+    fetchWithTimeout: (url: string, init: RequestInit, timeoutMs: number) => Promise<Response>;
+    readJsonWithTimeout: (res: Response, timeoutMs: number) => Promise<Record<string, unknown>>;
+  };
   const urls: string[] = [];
   return {
     urls,
     fetchWithTimeout: (url: string, init: RequestInit = {}): Promise<Response> => {
       urls.push(url);
-      return real(url, init, POLL_TIMEOUT_MS);
+      return real.fetchWithTimeout(url, init, POLL_TIMEOUT_MS);
     },
     readJsonWithTimeout: (res: Response): Promise<Record<string, unknown>> =>
-      realBody(res, POLL_TIMEOUT_MS),
+      real.readJsonWithTimeout(res, POLL_TIMEOUT_MS),
   };
 }
 
@@ -427,18 +423,15 @@ describe('background poll resilience', () => {
 
   it('times out a response body that stalls mid-stream instead of pinning the guard', async () => {
     let stallBody = true;
-    let cancelledBody = false;
-    const transport = (): Promise<Response> => {
+    let abortedStalledRequest = false;
+    const transport = (_url: string, init: RequestInit): Promise<Response> => {
       if (stallBody) {
+        init.signal?.addEventListener('abort', () => {
+          abortedStalledRequest = true;
+        });
         return Promise.resolve({
           ok: true,
           status: 200,
-          body: {
-            cancel: (): Promise<void> => {
-              cancelledBody = true;
-              return Promise.resolve();
-            },
-          },
           json: (): Promise<Record<string, unknown>> => new Promise<Record<string, unknown>>(() => {}),
         } as unknown as Response);
       }
@@ -461,7 +454,9 @@ describe('background poll resilience', () => {
     expect(elements.get('servers-telemetry')?.textContent).toContain(
       'Unable to reach backend: Response body timed out after',
     );
-    expect(cancelledBody).toBe(true);
+    // A locked body stream cannot be cancelled, so the deadline must abort the request
+    // itself; otherwise every stalled poll holds its connection open.
+    expect(abortedStalledRequest).toBe(true);
 
     stallBody = false;
     await loadStatus();

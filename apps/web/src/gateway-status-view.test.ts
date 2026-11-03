@@ -142,6 +142,7 @@ function loadGatewayStatusForTest(
 function shortBodyReader(timeoutMs = 20): (res: Response) => Promise<Record<string, unknown>> {
   const factory = new Function(
     `const REQUEST_TIMEOUT_MS = 8000;\n`
+      + `const fetchControllers = new WeakMap();\n`
       + `${extractFunction(getClientScriptJs(), 'readJsonWithTimeout')}\nreturn readJsonWithTimeout;`,
   );
   const realBody = factory() as (
@@ -361,7 +362,9 @@ describe('gateway status projection', () => {
     const script = getClientScriptJs();
     const factory = new Function(
       'fetch',
-      `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
+      `const REQUEST_TIMEOUT_MS = 8000;\n`
+        + `const fetchControllers = new WeakMap();\n`
+        + `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
     );
     const hangingFetch = (_url: string, init: RequestInit = {}): Promise<Response> =>
       new Promise<Response>((_resolve, reject) => {

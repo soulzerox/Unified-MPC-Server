@@ -114,6 +114,13 @@ export function getClientScriptJs(): string {
         return err?.code === 'request_timeout';
       }
 
+      /**
+       * fetchWithTimeout clears its own timer once headers arrive, so a stalled body
+       * would otherwise outlive the poll. Keep the request's controller reachable from
+       * the response so the body deadline can abort the request and release the socket.
+       */
+      const fetchControllers = new WeakMap();
+
       async function fetchWithTimeout(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
         const controller = new AbortController();
         const upstreamSignal = init?.signal;
@@ -128,7 +135,9 @@ export function getClientScriptJs(): string {
           controller.abort();
         }, timeoutMs);
         try {
-          return await fetch(url, { ...init, signal: controller.signal });
+          const response = await fetch(url, { ...init, signal: controller.signal });
+          fetchControllers.set(response, controller);
+          return response;
         } catch (err) {
           if (timedOut) {
             const timeoutError = new Error('Request timed out after ' + timeoutMs + 'ms');
@@ -145,7 +154,8 @@ export function getClientScriptJs(): string {
       /**
        * fetchWithTimeout stops timing once response headers arrive, so a body that
        * stalls mid-stream would leave the res.json() await pending forever and pin
-       * every in-flight poll guard closed. Race the body read against the same budget.
+       * every in-flight poll guard closed. Race the body read against the same budget
+       * and abort the request, since a locked body stream cannot be cancelled directly.
        */
       async function readJsonWithTimeout(res, timeoutMs = REQUEST_TIMEOUT_MS) {
         let timer;
@@ -153,17 +163,19 @@ export function getClientScriptJs(): string {
           timer = setTimeout(() => {
             const timeoutError = new Error('Response body timed out after ' + timeoutMs + 'ms');
             timeoutError.code = 'request_timeout';
-            // Release the socket: a half-read body would otherwise stay open for the page lifetime.
-            Promise.resolve(res.body?.cancel?.()).catch(() => {});
             reject(timeoutError);
+            // A locked body stream cannot be cancelled, so abort the request itself.
+            fetchControllers.get(res)?.abort();
+            fetchControllers.delete(res);
           }, timeoutMs);
         });
-        const body = res.json();
-        body.catch(() => {});
         try {
+          const body = res.json();
+          body.catch(() => {});
           return await Promise.race([body, deadline]);
         } finally {
           clearTimeout(timer);
+          fetchControllers.delete(res);
         }
       }
 

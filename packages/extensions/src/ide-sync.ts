@@ -26,6 +26,39 @@ export interface IdeSyncOptions {
   readonly settings?: ExtensionsSettings;
 }
 
+export interface ManagedPolicyRepairOptions {
+  /**
+   * Host-global instruction files (`~/.claude`, `~/.config/opencode`, `~/.codex`,
+   * `~/.cline`, `~/.gemini`) are only repaired by the long-lived control plane.
+   * A per-session stdio host repairs the active workspace only, so starting a
+   * child process never rewrites instructions that belong to every project.
+   */
+  readonly includeGlobalTargets?: boolean;
+}
+
+export interface ManagedPolicyRepairReport {
+  /** Targets considered for this run, including the ones that were absent. */
+  readonly scanned: number;
+  readonly updated: readonly string[];
+  readonly unchanged: readonly string[];
+  /** Files that do not exist or carry no managed block, so they were left alone. */
+  readonly skipped: readonly string[];
+  readonly failed: readonly { readonly file: string; readonly message: string }[];
+}
+
+/**
+ * One managed-policy artifact. `sync` creates it, `repair` only rewrites an
+ * artifact that is already there: an upgrade must never invent instruction
+ * files the user never had.
+ */
+interface ManagedPolicyTarget {
+  readonly id: string;
+  readonly file: string;
+  readonly kind: 'managed-block' | 'cursor-file' | 'generated-file';
+  /** `sync` target names that own this artifact. */
+  readonly syncTargets: readonly SyncTarget[];
+}
+
 export class IdeSyncService {
   private readonly home: string;
   private readonly codexHome: string;
@@ -79,6 +112,41 @@ export class IdeSyncService {
     return reconcileRuntimePolicies(settings, servers, skills);
   }
 
+  /**
+   * Every generated artifact this service owns. Paths live here only, so `sync`
+   * and `repairManagedBlocks` can never disagree about which files are managed.
+   */
+  private managedPolicyTargets(includeGlobalTargets: boolean = true): readonly ManagedPolicyTarget[] {
+    const targets: ManagedPolicyTarget[] = [];
+    if (this.workspace !== undefined) {
+      targets.push(
+        // 1. Cursor reads a whole generated rule file.
+        { id: 'cursor-workspace', file: path.join(this.workspace, '.cursor', 'rules', '00-mandatory-policy.mdc'), kind: 'cursor-file', syncTargets: ['cursor'] },
+        // 2. Cline keeps user rules and one managed block.
+        { id: 'cline-workspace', file: path.join(this.workspace, '.clinerules'), kind: 'managed-block', syncTargets: ['cline'] },
+        // 3. Antigravity workspace rules.
+        { id: 'antigravity-workspace', file: path.join(this.workspace, 'GEMINI.md'), kind: 'managed-block', syncTargets: ['antigravity'] },
+        // 4. OpenCode / Freebuff / Agents / Codex share the AGENTS.md convention.
+        { id: 'agents-workspace', file: path.join(this.workspace, 'AGENTS.md'), kind: 'managed-block', syncTargets: ['opencode', 'agents', 'codex'] },
+        // 5. Claude workspace memory.
+        { id: 'claude-workspace', file: path.join(this.workspace, 'CLAUDE.md'), kind: 'managed-block', syncTargets: ['claude'] },
+        // 6. Oh My Pi system prompt.
+        { id: 'omp-workspace', file: path.join(this.workspace, '.omp', 'system.md'), kind: 'managed-block', syncTargets: ['omp'] },
+      );
+    }
+    if (includeGlobalTargets) {
+      targets.push(
+        { id: 'cline-global', file: path.join(this.home, '.cline', 'rules', 'mcp-policy.md'), kind: 'managed-block', syncTargets: ['cline'] },
+        { id: 'antigravity-global', file: path.join(this.home, '.gemini', 'antigravity', 'rules', 'mcp-policy.md'), kind: 'generated-file', syncTargets: ['antigravity'] },
+        { id: 'opencode-global', file: path.join(this.home, '.config', 'opencode', 'AGENTS.md'), kind: 'managed-block', syncTargets: ['opencode', 'agents'] },
+        // Codex reads global instructions from `$CODEX_HOME/AGENTS.md`.
+        { id: 'codex-global', file: path.join(this.codexHome, 'AGENTS.md'), kind: 'managed-block', syncTargets: ['codex'] },
+        { id: 'claude-global', file: path.join(this.home, '.claude', 'CLAUDE.md'), kind: 'managed-block', syncTargets: ['claude'] },
+      );
+    }
+    return targets;
+  }
+
   public async sync(targets: readonly SyncTarget[] = ['all']): Promise<Result<{ readonly updatedFiles: readonly string[] }>> {
     const invalidTargets = validateSyncTargets(targets);
     if (invalidTargets !== undefined) return err(invalidTargets);
@@ -87,92 +155,14 @@ export class IdeSyncService {
     const compiled = this.compile((await this.policySnapshot()).policies);
 
     try {
-      // 1. Cursor
-      if (isAll || targets.includes('cursor')) {
-        if (this.workspace !== undefined) {
-          const cursorFile = path.join(this.workspace, '.cursor', 'rules', '00-mandatory-policy.mdc');
-          const cursorContent = [
-            '---',
-            'description: Mandatory MCP Server and Skill Execution Priority Policy',
-            'globs: *',
-            'alwaysApply: true',
-            '---',
-            '',
-            compiled,
-            '',
-          ].join('\n');
-          await writeAtomic(cursorFile, cursorContent);
-          updatedFiles.push(cursorFile);
+      for (const target of this.managedPolicyTargets()) {
+        if (!isAll && !target.syncTargets.some((name) => targets.includes(name))) continue;
+        if (target.kind === 'managed-block') {
+          await updateFileWithBlock(target.file, compiled);
+        } else {
+          await writeAtomic(target.file, renderGeneratedFile(target.kind, compiled));
         }
-      }
-
-      // 2. Cline
-      if (isAll || targets.includes('cline')) {
-        if (this.workspace !== undefined) {
-          const clineWsFile = path.join(this.workspace, '.clinerules');
-          await updateFileWithBlock(clineWsFile, compiled);
-          updatedFiles.push(clineWsFile);
-        }
-        const clineHomeDir = path.join(this.home, '.cline', 'rules');
-        const clineHomeFile = path.join(clineHomeDir, 'mcp-policy.md');
-        await updateFileWithBlock(clineHomeFile, compiled);
-        updatedFiles.push(clineHomeFile);
-      }
-
-      // 3. Antigravity
-      if (isAll || targets.includes('antigravity')) {
-        const agRuleFile = path.join(this.home, '.gemini', 'antigravity', 'rules', 'mcp-policy.md');
-        await writeAtomic(agRuleFile, `${compiled}\n`);
-        updatedFiles.push(agRuleFile);
-
-        if (this.workspace !== undefined) {
-          const agWsGemini = path.join(this.workspace, 'GEMINI.md');
-          await updateFileWithBlock(agWsGemini, compiled);
-          updatedFiles.push(agWsGemini);
-        }
-      }
-
-      // 4. OpenCode / Freebuff / Agents / Codex share the AGENTS.md convention.
-      if (isAll || targets.includes('opencode') || targets.includes('agents') || targets.includes('codex')) {
-        if (this.workspace !== undefined) {
-          const agentsFile = path.join(this.workspace, 'AGENTS.md');
-          await updateFileWithBlock(agentsFile, compiled);
-          updatedFiles.push(agentsFile);
-        }
-      }
-      if (isAll || targets.includes('opencode') || targets.includes('agents')) {
-        const opencodeAgents = path.join(this.home, '.config', 'opencode', 'AGENTS.md');
-        await updateFileWithBlock(opencodeAgents, compiled);
-        updatedFiles.push(opencodeAgents);
-      }
-      // Codex reads global instructions from `$CODEX_HOME/AGENTS.md`, which
-      // defaults to `~/.codex/AGENTS.md`.
-      if (isAll || targets.includes('codex')) {
-        const codexAgents = path.join(this.codexHome, 'AGENTS.md');
-        await updateFileWithBlock(codexAgents, compiled);
-        updatedFiles.push(codexAgents);
-      }
-
-      // 5. Claude
-      if (isAll || targets.includes('claude')) {
-        const claudeGlobal = path.join(this.home, '.claude', 'CLAUDE.md');
-        await updateFileWithBlock(claudeGlobal, compiled);
-        updatedFiles.push(claudeGlobal);
-
-        if (this.workspace !== undefined) {
-          const claudeWs = path.join(this.workspace, 'CLAUDE.md');
-          await updateFileWithBlock(claudeWs, compiled);
-          updatedFiles.push(claudeWs);
-        }
-      }
-
-      // 6. Oh My Pi
-      if (isAll || targets.includes('omp')) {
-        if (this.workspace !== undefined) {
-          const ompWs = path.join(this.workspace, '.omp', 'system.md');
-          await updateFileWithBlock(ompWs, compiled);
-          updatedFiles.push(ompWs);
-        }
+        updatedFiles.push(target.file);
       }
 
       return ok({ updatedFiles });
@@ -180,6 +170,94 @@ export class IdeSyncService {
       return err(appError('INTERNAL_ERROR', `Failed to sync IDE policies: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
+
+  /**
+   * Upgrade repair for already-generated artifacts (issue #4 §4): rewrite a
+   * managed block that still describes the retired mandatory child topology.
+   *
+   * Unlike `sync` this never creates a file and never appends a block to a file
+   * that has none, so a host that upgrades cannot suddenly start instructing an
+   * IDE it never configured. Every write is atomic and every target is
+   * independent: one unreadable file is reported instead of aborting the run.
+   */
+  public async repairManagedBlocks(
+    options: ManagedPolicyRepairOptions = {},
+  ): Promise<Result<ManagedPolicyRepairReport>> {
+    const targets = this.managedPolicyTargets(options.includeGlobalTargets ?? true);
+    let compiled: string;
+    try {
+      compiled = this.compile((await this.policySnapshot()).policies);
+    } catch (error) {
+      return err(appError('INTERNAL_ERROR', `Failed to compile IDE policies: ${errorMessage(error)}`));
+    }
+
+    const updated: string[] = [];
+    const unchanged: string[] = [];
+    const skipped: string[] = [];
+    const failed: { file: string; message: string }[] = [];
+
+    for (const target of targets) {
+      let existing: string;
+      try {
+        existing = await readFile(target.file, 'utf8');
+      } catch (error) {
+        if (isMissingFile(error)) skipped.push(target.file);
+        else failed.push({ file: target.file, message: errorMessage(error) });
+        continue;
+      }
+
+      // The marker gate is the whole safety property of this path: an artifact
+      // is only ours to rewrite when it already carries a complete managed
+      // block. That covers the whole-file kinds (`cursor-file`,
+      // `generated-file`) too, and it refuses a half-written file that has only
+      // one marker instead of appending a second block to it.
+      if (!existing.includes(POLICY_BLOCK_START) || !existing.includes(POLICY_BLOCK_END)) {
+        skipped.push(target.file);
+        continue;
+      }
+
+      const expected = target.kind === 'managed-block'
+        ? replaceOrAppendPolicyBlock(existing, compiled)
+        : renderGeneratedFile(target.kind, compiled);
+      if (expected === existing) {
+        unchanged.push(target.file);
+        continue;
+      }
+
+      try {
+        await writeAtomic(target.file, expected);
+        updated.push(target.file);
+      } catch (error) {
+        failed.push({ file: target.file, message: errorMessage(error) });
+      }
+    }
+
+    return ok({ scanned: targets.length, updated, unchanged, skipped, failed });
+  }
+}
+
+function renderGeneratedFile(kind: 'cursor-file' | 'generated-file', compiled: string): string {
+  if (kind === 'cursor-file') {
+    return [
+      '---',
+      'description: Mandatory MCP Server and Skill Execution Priority Policy',
+      'globs: *',
+      'alwaysApply: true',
+      '---',
+      '',
+      compiled,
+      '',
+    ].join('\n');
+  }
+  return `${compiled}\n`;
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

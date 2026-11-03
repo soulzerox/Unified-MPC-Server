@@ -46,7 +46,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { WorkspaceService, isMachineRootPath, isProjectWorkspace, workspaceLifecycleKind } from '@unified-mpc/workspace';
-import { EXTENSIONS_SETTINGS_KEY, ensureExtensionsSettingsMigrated } from '@unified-mpc/extensions';
+import { EXTENSIONS_SETTINGS_KEY, IdeSyncService, ensureExtensionsSettingsMigrated, parseExtensionsSettings, type ManagedPolicyRepairReport } from '@unified-mpc/extensions';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
@@ -60,6 +60,14 @@ export interface WebCommand {
 export interface WebRunResult {
   readonly handle: CliServerHandle;
   readonly url: string;
+  /** Present when startup policy repair was requested; failures are data, not fatal. */
+  readonly policyRepair?: ManagedPolicyRepairReport;
+}
+
+/** `repairManagedPolicies` is opt-in so an embedded host never rewrites user files implicitly. */
+export interface WebRunOptions {
+  readonly port?: number;
+  readonly repairManagedPolicies?: boolean;
 }
 
 export function parseWebArgs(args: readonly string[]): Result<WebCommand> {
@@ -90,7 +98,7 @@ export function parseWebArgs(args: readonly string[]): Result<WebCommand> {
 }
 
 export async function runWeb(
-  options: { port?: number } = {},
+  options: WebRunOptions = {},
   serverOptions?: ControlPlaneServerOptions,
 ): Promise<Result<WebRunResult>> {
   try {
@@ -124,6 +132,29 @@ export async function runWeb(
     // document, so reconcile the same store the server will read before it
     // exposes any policy surface.
     ensureExtensionsSettingsMigrated(serverOptions?.settingsRepository ?? settings, EXTENSIONS_SETTINGS_KEY);
+    // #4 §4: an upgrade must not leave generated client policy artifacts
+    // describing the retired mandatory child topology until someone presses
+    // "Sync Policies". The control plane is the only entry point allowed to
+    // repair host-global instruction files; per-session stdio hosts repair
+    // their own workspace. Repair only rewrites an existing managed block and
+    // never creates or appends one, so it cannot start instructing a client the
+    // user never configured. A failed target is reported in the result, never
+    // fatal: the control plane still starts.
+    let policyRepair: ManagedPolicyRepairReport | undefined;
+    if (options.repairManagedPolicies === true) {
+      const repairSettings = parseExtensionsSettings((serverOptions?.settingsRepository ?? settings).get(EXTENSIONS_SETTINGS_KEY));
+      // The control plane serves one configured root at a time, matching the
+      // manual sync endpoint; other workspaces converge through their own
+      // session startup repair. `ControlPlaneServer` defaults a missing root set
+      // to `process.cwd()`, so mirror that instead of silently repairing no
+      // workspace artifact at all.
+      const repairWorkspaceRoot = serverOptions?.workspaceRoots?.[0] ?? process.cwd();
+      const repaired = await new IdeSyncService({
+        settings: repairSettings,
+        workspaceRoot: repairWorkspaceRoot,
+      }).repairManagedBlocks({ includeGlobalTargets: true });
+      if (repaired.ok) policyRepair = repaired.value;
+    }
     const lifecycleCandidates = await workspaceService.list();
     const protectedByOpenGoal: string[] = [];
     const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
@@ -176,6 +207,7 @@ export async function runWeb(
     return ok({
       handle: server,
       url,
+      ...(policyRepair === undefined ? {} : { policyRepair }),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

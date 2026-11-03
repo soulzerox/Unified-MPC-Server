@@ -46,7 +46,7 @@ import {
   type PruneServerCommand,
 } from './commands/prune.js';
 import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
-import { parseWebArgs, runWeb, type WebCommand, type WebRunResult } from './commands/web.js';
+import { parseWebArgs, runWeb, type WebCommand, type WebRunOptions, type WebRunResult } from './commands/web.js';
 import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/tools.js';
 import { parseStorageArgs, type StorageRecoverCommand } from './commands/storage.js';
 import {
@@ -124,7 +124,7 @@ export interface CliDependencies {
     write: (text: string) => void,
     writeError: (text: string) => void,
   ): Promise<number>;
-  web?(options?: { port?: number }): Promise<Result<WebRunResult>>;
+  web?(options?: WebRunOptions): Promise<Result<WebRunResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
   readonly write?: (text: string) => void;
@@ -331,10 +331,17 @@ Commands:
     }
     case 'web': {
       const launch = dependencies.web ?? runWeb;
-      const result = await launch({ port: parsed.value.port });
+      // The control plane is the only startup path that owns host-global
+      // instruction files, so it opts into the #4 §4 managed-block repair.
+      const result = await launch({ port: parsed.value.port, repairManagedPolicies: true });
       if (!result.ok) {
         writeError(result.error.message);
         return 1;
+      }
+      const repaired = result.value.policyRepair;
+      if (repaired !== undefined) {
+        if (repaired.updated.length > 0) write(`Repaired ${repaired.updated.length} generated policy artifact(s) at startup`);
+        for (const failure of repaired.failed) writeError(`Policy repair failed for ${failure.file}: ${failure.message}`);
       }
       write(`Control Plane running on ${result.value.url}`);
       return 0;
@@ -647,7 +654,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         inspect: (leaseId: string) => credential.inspect(leaseId),
       }, write, writeError);
     },
-    web: async (options?: { port?: number }): Promise<Result<WebRunResult>> => runWeb(options),
+    web: async (options?: WebRunOptions): Promise<Result<WebRunResult>> => runWeb(options),
     toolsList: async (): Promise<readonly ToolSummary[]> => {
       const registry = await getToolRegistry();
       return registry.listExposedDefinitions().map((tool) => {

@@ -253,6 +253,42 @@ function buildRuntimeRefreshSandbox(
   return { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh };
 }
 
+function buildMutationSandbox(
+  transport: (url: string, init: RequestInit) => Promise<Response>,
+): {
+  recorded: RecordedFetch;
+  toasts: string[];
+  logs: string[];
+  mutationJson: (url: string, init?: RequestInit) => Promise<{
+    res: Response;
+    data: Record<string, unknown>;
+  }>;
+} {
+  const script = getClientScriptJs();
+  const recorded = recordedFetchWithTimeout(transport);
+  const toasts: string[] = [];
+  const logs: string[] = [];
+  const factory = new Function(
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'showToast',
+    'logEvent',
+    'window',
+    `${extractFunction(script, 'mutationJson')}\nreturn mutationJson;`,
+  );
+  const mutationJson = factory(
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    (message: string) => toasts.push(message),
+    (level: string, message: string) => logs.push(level + ' ' + message),
+    { location: { reload: () => {} } },
+  ) as (url: string, init?: RequestInit) => Promise<{
+    res: Response;
+    data: Record<string, unknown>;
+  }>;
+  return { recorded, toasts, logs, mutationJson };
+}
+
 /** A response whose headers arrive immediately but whose body never settles. */
 function stalledBodyResponse(): Response {
   return {
@@ -502,6 +538,67 @@ describe('background poll resilience', () => {
     stallBody = false;
     await expect(fetchWorkspaceState()).resolves.toEqual({ workspaces: [], selection: null });
     expect(recorded.urls).toEqual(['/api/workspaces', '/api/workspaces']);
+  });
+
+  it('bounds the mutation body so a user action cannot hang after the headers arrive', async () => {
+    let stallBody = true;
+    const transport = (): Promise<Response> =>
+      Promise.resolve(stallBody ? stalledBodyResponse() : {
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ ok: true, value: { updatedFiles: [] } }),
+      } as unknown as Response);
+    const { recorded, mutationJson } = buildMutationSandbox(transport);
+
+    await Promise.race([
+      expect(mutationJson('/api/policies/sync', { method: 'POST' })).rejects.toMatchObject({
+        code: 'request_timeout',
+      }),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled mutation body wedged the action')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/policies/sync']);
+
+    stallBody = false;
+    const { res, data } = await mutationJson('/api/policies/sync', { method: 'POST' });
+
+    expect(res.ok).toBe(true);
+    expect(data).toEqual({ ok: true, value: { updatedFiles: [] } });
+    expect(recorded.urls).toEqual(['/api/policies/sync', '/api/policies/sync']);
+  });
+
+  it('settles a gateway stop action when the mutation body stalls', async () => {
+    const transport = (): Promise<Response> => Promise.resolve(stalledBodyResponse());
+    const { toasts, logs, mutationJson } = buildMutationSandbox(transport);
+    const script = getClientScriptJs();
+    const factory = new Function(
+      'mutationJson',
+      'showToast',
+      'logEvent',
+      'loadGatewayStatus',
+      `${extractFunction(script, 'stopGateway')}\nreturn stopGateway;`,
+    );
+    const stopGateway = factory(
+      mutationJson,
+      (message: string) => toasts.push(message),
+      (level: string, message: string) => logs.push(level + ' ' + message),
+      () => {},
+    ) as () => Promise<void>;
+
+    await Promise.race([
+      stopGateway(),
+      new Promise((_resolve, reject) => {
+        setTimeout(() => reject(new Error('a stalled gateway stop never settled')), SETTLE_GUARD_MS);
+      }),
+    ]);
+
+    expect(toasts.some((toast) => toast.includes('Response body timed out after'))).toBe(true);
+    expect(logs.some((line) => line.startsWith('ERROR Stop gateway exception'))).toBe(true);
   });
 
   it('releases the goal-runtime refresh slot when a response body stalls mid-stream', async () => {

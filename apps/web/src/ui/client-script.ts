@@ -179,6 +179,11 @@ export function getClientScriptJs(): string {
         }
       }
 
+      /**
+       * Reads the mutation body here rather than at the call site, so every mutation is
+       * bounded: fetchWithTimeout stops timing once headers arrive, and a body that stalls
+       * would otherwise leave the action pending with no toast and no log.
+       */
       async function mutationJson(url, init) {
         const res = await fetchWithTimeout(url, init);
         if (res.status === 401) {
@@ -186,7 +191,8 @@ export function getClientScriptJs(): string {
           logEvent('WARN', 'Capability expired; reloading dashboard');
           window.location.reload();
         }
-        return res;
+        const data = await readJsonWithTimeout(res);
+        return { res, data };
       }
 
       function logEvent(level, msg) {
@@ -633,12 +639,11 @@ export function getClientScriptJs(): string {
 
       async function savePolicies(quiet = false) {
         try {
-          const res = await mutationJson('/api/policies', {
+          const { res, data: snapshot } = await mutationJson('/api/policies', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(persistablePolicies()),
           });
-          const snapshot = await res.json();
           if (!res.ok || !snapshot || !Array.isArray(snapshot.policies)) {
             throw new Error(errorMessage(snapshot, 'Failed to save policies'));
           }
@@ -1295,8 +1300,7 @@ export function getClientScriptJs(): string {
       async function continueWorkspaceGoal(workspaceId, goalId) {
         try {
           const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/goals/' + encodeURIComponent(goalId) + '/continue';
-          const res = await mutationJson(endpoint, { method: 'PUT' });
-          const data = await res.json();
+          const { res, data } = await mutationJson(endpoint, { method: 'PUT' });
           if (!res.ok || !data.goal) throw new Error(errorMessage(data, 'Goal continuation selection failed'));
           workspaceSelection = data.selection || workspaceSelection;
           cachedWorkspaces = cachedWorkspaces.map((workspace) => workspace.id === workspaceId
@@ -1317,8 +1321,7 @@ export function getClientScriptJs(): string {
         try {
           const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId) + '/' + (operation === 'primary' ? 'primary' : 'active');
           const method = operation === 'deactivate' ? 'DELETE' : 'PUT';
-          const res = await mutationJson(endpoint, { method });
-          const data = await res.json();
+          const { res, data } = await mutationJson(endpoint, { method });
           if (!res.ok || !data.selection) throw new Error(errorMessage(data, 'Workspace selection failed'));
           workspaceSelection = data.selection;
           renderWorkspaces();
@@ -1359,8 +1362,7 @@ export function getClientScriptJs(): string {
         if (!confirmed) return;
         try {
           const endpoint = '/api/workspaces/' + encodeURIComponent(workspaceId);
-          const res = await mutationJson(endpoint, { method: 'DELETE' });
-          const data = await res.json();
+          const { res, data } = await mutationJson(endpoint, { method: 'DELETE' });
           if (!res.ok) throw new Error(errorMessage(data, 'Project unregistration failed'));
           await loadWorkspaces();
           showToast('Project unregistered from Unified-MPC');
@@ -1646,12 +1648,11 @@ export function getClientScriptJs(): string {
         if (!window.confirm('Prune server ' + server.name + '?')) return;
         try {
           logEvent('INFO', 'Initiating server prune for ' + server.name + ' (' + server.serverId + ')');
-          const res = await mutationJson('/api/servers/prune', {
+          const { res, data: result } = await mutationJson('/api/servers/prune', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ serverId: server.serverId }),
           });
-          const result = await res.json();
           if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Server prune failed'));
           showToast('Pruned server ' + server.name);
           logEvent('SUCCESS', 'Server ' + server.name + ' pruned successfully');
@@ -1666,12 +1667,11 @@ export function getClientScriptJs(): string {
         if (!window.confirm('Prune skill ' + skill.name + '?')) return;
         try {
           logEvent('INFO', 'Initiating skill prune for ' + skill.name);
-          const res = await mutationJson('/api/skills/prune', {
+          const { res, data: result } = await mutationJson('/api/skills/prune', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: skill.name }),
           });
-          const result = await res.json();
           if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Skill prune failed'));
           showToast('Pruned skill ' + skill.name);
           logEvent('SUCCESS', 'Skill ' + skill.name + ' pruned successfully');
@@ -1866,8 +1866,7 @@ export function getClientScriptJs(): string {
         const token = document.getElementById('settings-api-token')?.value || '';
         if (token) body.apiToken = token;
         try {
-          const res = await mutationJson('/api/cloudflare/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-          const result = await res.json();
+          const { res, data: result } = await mutationJson('/api/cloudflare/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           if (!res.ok || !result.ok) throw new Error(errorMessage(result, 'Cloudflare setup failed'));
           document.getElementById('settings-api-token').value = '';
           showToast('Cloudflare tunnel configured and gateway healthy');
@@ -1881,12 +1880,11 @@ export function getClientScriptJs(): string {
           if (!(await savePolicies(true))) return;
           showToast('Syncing policies across IDE targets...');
           logEvent('INFO', 'Synchronizing policies across IDE targets (all)');
-          const res = await mutationJson('/api/policies/sync', {
+          const { data: result } = await mutationJson('/api/policies/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ targets: ['all'] }),
           });
-          const result = await res.json();
           if (result.ok) {
             const count = result.value?.updatedFiles?.length || 0;
             showToast('Synchronized ' + count + ' policy files!');
@@ -1904,7 +1902,7 @@ export function getClientScriptJs(): string {
       async function connectChatGPT() {
         try {
           logEvent('INFO', 'Initiating connection to ChatGPT Web...');
-          const res = await mutationJson('/api/chatgpt-web/connect', { method: 'POST' });
+          const { res, data } = await mutationJson('/api/chatgpt-web/connect', { method: 'POST' });
           if (res.status === 401) {
             showToast('Dashboard session expired; reloading...', true);
             logEvent('WARN', 'Capability expired; reloading dashboard');
@@ -1912,13 +1910,11 @@ export function getClientScriptJs(): string {
             return;
           }
           if (res.status === 412) {
-            const errData = await res.json();
-            const message = errorMessage(errData, 'Bridge is not ready');
+            const message = errorMessage(data, 'Bridge is not ready');
             showToast('Hard Gate Blocked (412): ' + message, true);
             logEvent('WARN', 'Hard Gate Blocked (412): ' + message);
             return;
           }
-          const data = await res.json();
           if (res.ok) {
             showToast('Connected to ChatGPT Web successfully!');
             logEvent('SUCCESS', 'Connected to ChatGPT Web successfully');
@@ -1937,14 +1933,13 @@ export function getClientScriptJs(): string {
         try {
           showToast('Starting ChatGPT Gateway...');
           logEvent('INFO', 'Dispatching gateway start request');
-          const res = await mutationJson('/api/chatgpt-gateway/start', { method: 'POST' });
+          const { res, data: result } = await mutationJson('/api/chatgpt-gateway/start', { method: 'POST' });
           if (res.status === 401) {
             showToast('Dashboard session expired; reloading...', true);
             logEvent('WARN', 'Capability expired; reloading dashboard');
             window.location.reload();
             return;
           }
-          const result = await res.json();
           const message = errorMessage(result, 'Gateway start failed');
           showToast(result.ok ? 'Gateway started!' : 'Failed: ' + message, !result.ok);
           logEvent(result.ok ? 'SUCCESS' : 'ERROR', result.ok ? 'Gateway started' : 'Gateway start failed: ' + message);
@@ -1959,8 +1954,7 @@ export function getClientScriptJs(): string {
         try {
           showToast('Stopping ChatGPT Gateway...');
           logEvent('INFO', 'Dispatching gateway stop request');
-          const res = await mutationJson('/api/chatgpt-gateway/stop', { method: 'POST' });
-          const result = await res.json();
+          await mutationJson('/api/chatgpt-gateway/stop', { method: 'POST' });
           showToast('Gateway stopped');
           logEvent('INFO', 'Gateway stopped');
           loadGatewayStatus();
@@ -1972,8 +1966,7 @@ export function getClientScriptJs(): string {
 
       async function disconnectChatGPT() {
         try {
-          const res = await mutationJson('/api/chatgpt-web/disconnect', { method: 'POST' });
-          const result = await res.json();
+          const { res, data: result } = await mutationJson('/api/chatgpt-web/disconnect', { method: 'POST' });
           if (!res.ok) throw new Error(errorMessage(result, 'Disconnect failed'));
           showToast('ChatGPT Web session disconnected');
           loadGatewayStatus();

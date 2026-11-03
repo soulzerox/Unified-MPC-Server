@@ -3,6 +3,19 @@ import { appError, err, type Result } from '@unified-mpc/domain';
 import { DEFAULT_LEGACY_SESSION_TTL_MS, startMcpHttp, type McpHttpServerHandle, type McpHttpServerOptions } from '@unified-mpc/mcp-server';
 import type { Workspace } from '@unified-mpc/workspace';
 
+/** The loopback port the HTTP MCP runtime binds unless `UNIFIED_MPC_PORT` overrides it. */
+export const DEFAULT_MCP_HTTP_PORT = 18_765;
+
+/**
+ * `UNIFIED_MPC_PORT` is operator input, so an unusable value must not crash the
+ * runtime: fall back to the documented default instead. `doctor` uses the same
+ * parser so its port check describes the port the runtime would actually bind.
+ */
+export function resolveMcpHttpPort(environment: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(environment.UNIFIED_MPC_PORT ?? DEFAULT_MCP_HTTP_PORT);
+  return Number.isInteger(value) && value >= 0 && value <= 65_535 ? value : DEFAULT_MCP_HTTP_PORT;
+}
+
 export interface ConfiguredWorkspaceResolver {
   resolve(reference: string): Promise<Result<Workspace>>;
 }

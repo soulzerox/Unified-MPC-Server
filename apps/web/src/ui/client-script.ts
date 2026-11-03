@@ -153,6 +153,8 @@ export function getClientScriptJs(): string {
           timer = setTimeout(() => {
             const timeoutError = new Error('Response body timed out after ' + timeoutMs + 'ms');
             timeoutError.code = 'request_timeout';
+            // Release the socket: a half-read body would otherwise stay open for the page lifetime.
+            Promise.resolve(res.body?.cancel?.()).catch(() => {});
             reject(timeoutError);
           }, timeoutMs);
         });
@@ -678,7 +680,7 @@ export function getClientScriptJs(): string {
         workspaceRuntimeRefreshControllers.set(workspaceId, controller);
         try {
           const res = await fetchWithTimeout(endpoint, { signal: controller.signal });
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
           if (controller.signal.aborted) return;
           applyWorkspaceRuntimeSnapshot(workspaceId, data);
@@ -1714,7 +1716,7 @@ export function getClientScriptJs(): string {
         try {
           const res = await fetchWithTimeout('/api/chatgpt-gateway/status');
           if (!res.ok) throw new Error('Gateway status failed');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (seq <= gatewayStatusAppliedSeq) return;
           const state = data.state || 'STOPPED';
           const bridgeEl = document.getElementById('bridge-state');

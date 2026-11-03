@@ -24,6 +24,8 @@ import { RETIRE_AUTO_MACHINE_ROOTS_MIGRATION_SQL } from './migrations/retire-aut
 import { AGENT_SWARM_MIGRATION_SQL } from './migrations/agent-swarm-migration.js';
 import { RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/recurring-scheduled-continuation-migration.js';
 import { GOAL_PONYTAIL_MODE_MIGRATION_SQL } from './migrations/goal-ponytail-mode-migration.js';
+import { TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/turn_persistence_migration.js';
+import { RETIRE_TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/retire_turn_persistence_migration.js';
 import { GOAL_EXECUTION_MIGRATION_SQL } from './migrations/goal-execution-migration.js';
 import { GOAL_RUNTIME_EVENT_MIGRATION_SQL } from './migrations/goal-runtime-event-migration.js';
 import { GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL } from './migrations/goal-runtime-snapshot-migration.js';
@@ -77,7 +79,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '044_publish_approval_fingerprint' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '045_retire_turn_persistence' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -123,6 +125,7 @@ export class SqliteDatabase {
     this.applyMigration({ id: '015_agent_swarm', sql: AGENT_SWARM_MIGRATION_SQL });
     this.applyMigration({ id: '016_recurring_scheduled_continuation', sql: RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL });
     this.applyMigration({ id: '017_goal_ponytail_mode', sql: GOAL_PONYTAIL_MODE_MIGRATION_SQL });
+    this.applyMigration({ id: '018_turn_persistence', sql: TURN_PERSISTENCE_MIGRATION_SQL });
     this.applyMigration({ id: '018_goal_executions', sql: GOAL_EXECUTION_MIGRATION_SQL });
     this.applyMigration({ id: '019_goal_runtime_events', sql: GOAL_RUNTIME_EVENT_MIGRATION_SQL });
     this.applyMigration({ id: '020_goal_runtime_snapshots', sql: GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL });
@@ -153,7 +156,12 @@ export class SqliteDatabase {
     });
     this.applyMigration({ id: '042_publish_approvals', sql: PUBLISH_APPROVAL_MIGRATION_SQL });
     this.applyMigration({ id: '043_publish_credential_leases', sql: PUBLISH_CREDENTIAL_MIGRATION_SQL });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL });
+    this.applyMigration({ id: '044_publish_approval_fingerprint', sql: PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL });
+    this.applyMigration({
+      id: CURRENT_SCHEMA_MIGRATION_ID,
+      sql: RETIRE_TURN_PERSISTENCE_MIGRATION_SQL,
+      reclaimFreePages: true,
+    });
   }
 
   private ensureDirectory(): void {

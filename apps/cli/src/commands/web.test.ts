@@ -3,9 +3,9 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { GoalRecord, WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, err, type GoalRecord, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
-import { POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
+import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
 import { ControlPlaneServer } from '@unified-mpc/web';
 import { describe, expect, it, vi } from 'vitest';
@@ -414,6 +414,29 @@ describe('web CLI command', () => {
           expect(listenEntrySnapshots[1]).toContain('memory:workspace-selective');
         } finally {
           listenSpy.mockRestore();
+        }
+
+        // A whole-run failure (for example the shared lock timing out) has no
+        // per-file report; the result must still carry it so the CLI can show
+        // it instead of silently starting without a repair.
+        const repairFailure = vi.spyOn(IdeSyncService.prototype, 'repairManagedBlocks').mockResolvedValue(
+          err(appError('CONFLICT', 'Failed to lock managed policy files: timed out')),
+        );
+        try {
+          const failed = await runWeb(
+            { port: 0, repairManagedPolicies: true },
+            { goalRuntimeRead: {} as never, workspaceRoots: [workspaceRoot] },
+          );
+          expect(failed.ok).toBe(true);
+          if (!failed.ok) return;
+          try {
+            expect(failed.value.policyRepair).toBeUndefined();
+            expect(failed.value.policyRepairError).toBe('Failed to lock managed policy files: timed out');
+          } finally {
+            await failed.value.handle.close();
+          }
+        } finally {
+          repairFailure.mockRestore();
         }
       } finally {
         if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;

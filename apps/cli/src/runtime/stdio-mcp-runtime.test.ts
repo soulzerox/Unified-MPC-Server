@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SqliteDatabase,
   SqliteGoalRepository,
@@ -14,7 +14,7 @@ import {
 } from '@unified-mpc/storage';
 import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
-import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY, EXTENSIONS_SETTINGS_SCHEMA_VERSION, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
+import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY, EXTENSIONS_SETTINGS_SCHEMA_VERSION, IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
@@ -815,6 +815,32 @@ describe('stdio MCP runtime', () => {
       else process.env.HOME = previousHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+    }
+  }, 30_000);
+
+
+  it('writes a whole-run managed policy repair failure to stderr', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-policy-repair-failure-'));
+    temporaryRoots.push(dataPath);
+    const repairFailure = vi.spyOn(IdeSyncService.prototype, 'repairManagedBlocks').mockResolvedValue(
+      err(appError('CONFLICT', 'Failed to lock managed policy files: timed out')),
+    );
+    const stderr: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      stderr.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof process.stderr.write);
+
+    const runtime = createStdioMcpRuntime(dataPath, workspace);
+    try {
+      await expect(runtime.managedPolicyRepairReady).resolves.toBeUndefined();
+      expect(stderr.join('')).toContain(
+        'Unified-MPC managed policy repair failed: Failed to lock managed policy files: timed out',
+      );
+    } finally {
+      await runtime.close();
+      stderrSpy.mockRestore();
+      repairFailure.mockRestore();
     }
   }, 30_000);
 

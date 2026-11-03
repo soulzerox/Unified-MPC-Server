@@ -1,8 +1,15 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from './ide-sync.js';
+import { withConfigMutationTransaction } from './config-mutation-lock.js';
+import {
+  DEFAULT_POLICIES,
+  IdeSyncService,
+  POLICY_BLOCK_END,
+  POLICY_BLOCK_START,
+  replaceOrAppendPolicyBlock,
+} from './ide-sync.js';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
 
 const temporaryRoots: string[] = [];
@@ -70,6 +77,78 @@ describe('IdeSyncService.repairManagedBlocks', () => {
     expect(repaired).not.toContain('pre-edit:thai-rag');
     expect(repaired.match(new RegExp(POLICY_BLOCK_START, 'g'))).toHaveLength(1);
     expect(repaired.match(new RegExp(POLICY_BLOCK_END, 'g'))).toHaveLength(1);
+  });
+
+  it('leaves one complete block when two repairs with different policies race on the same file', async () => {
+    const { home, workspace } = await makeRoots();
+    const agentsFile = path.join(workspace, 'AGENTS.md');
+    const original = `# Project notes\n\nKeep this line.\n\n${STALE_BLOCK}\n\nTail content stays.\n`;
+    await writeFile(agentsFile, original, 'utf8');
+
+    const memoryOnly = DEFAULT_POLICIES.filter((policy) => policy.id === 'memory:workspace-selective');
+    const preEditOnly = DEFAULT_POLICIES.filter((policy) => policy.id === 'code:pre-edit-context');
+    const first = new IdeSyncService({ homeDir: home, workspaceRoot: workspace, policies: memoryOnly });
+    const second = new IdeSyncService({ homeDir: home, workspaceRoot: workspace, policies: preEditOnly });
+
+    const results = await Promise.all([
+      first.repairManagedBlocks(),
+      second.repairManagedBlocks(),
+    ]);
+    for (const result of results) {
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(result.value.failed).toEqual([]);
+    }
+
+    const repaired = await readFile(agentsFile, 'utf8');
+    // A torn or mixed write would match neither complete document. The shared
+    // lock serializes the two read-modify-write passes, so the survivor is
+    // exactly one of them.
+    expect([
+      replaceOrAppendPolicyBlock(original, first.compile()),
+      replaceOrAppendPolicyBlock(original, second.compile()),
+    ]).toContain(repaired);
+    expect(repaired).toContain('# Project notes');
+    expect(repaired).toContain('Keep this line.');
+    expect(repaired).toContain('Tail content stays.');
+    expect(repaired.match(new RegExp(POLICY_BLOCK_START, 'g'))).toHaveLength(1);
+    expect(repaired.match(new RegExp(POLICY_BLOCK_END, 'g'))).toHaveLength(1);
+    expect((await readdir(workspace)).filter((name) => name.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('waits for an in-flight config mutation before repairing the same file', async () => {
+    const { home, workspace } = await makeRoots();
+    const agentsFile = path.join(workspace, 'AGENTS.md');
+    await writeFile(agentsFile, `# Project notes\n\n${STALE_BLOCK}\n`, 'utf8');
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let lockAcquired!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      lockAcquired = resolve;
+    });
+    const holder = withConfigMutationTransaction([agentsFile], async () => {
+      lockAcquired();
+      await gate;
+    });
+    await acquired;
+
+    let settled = false;
+    const repair = service(home, workspace).repairManagedBlocks().finally(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(settled).toBe(false);
+
+    release();
+    await holder;
+    const result = await repair;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.updated).toContain(agentsFile);
+    expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
   });
 
   it('is idempotent: a second repair reports the file as unchanged and rewrites nothing', async () => {

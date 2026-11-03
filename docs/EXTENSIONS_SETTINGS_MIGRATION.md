@@ -1,4 +1,4 @@
-# Extensions Settings and Policy Artifact Migration (Issue #4, slices 2-3)
+# Extensions Settings and Policy Artifact Migration (Issue #4)
 
 The persisted `extensions` settings document is reconciled at startup before any
 runtime policy, catalog or generated client block reads it. Already-generated
@@ -7,7 +7,21 @@ document describes the upgrade contract for installations written before the
 native-capability topology replaced the mandatory child `memory` /
 `thai-rag-mcp` servers.
 
-## Version marker
+## Startup reconciliation markers
+
+An upgrade is driven by two independent markers. Both are idempotent, so a start
+that dies between them converges on the next run instead of needing a manual
+repair.
+
+| State | Marker | Source of truth |
+| --- | --- | --- |
+| Database schema | the `schema_migrations` row `045_retire_turn_persistence` | `CURRENT_SCHEMA_MIGRATION_ID` in `packages/storage/src/database.ts` |
+| Settings document | `settingsVersion: 2` | `EXTENSIONS_SETTINGS_SCHEMA_VERSION` in `packages/extensions/src/types.ts` |
+
+The schema marker is the migration row itself: there is no separate "upgrade
+done" flag that can disagree with the migrations that actually ran. A database
+that already recorded the row skips it, and a clean install records it by
+applying every migration in order.
 
 ```json
 {
@@ -16,10 +30,9 @@ native-capability topology replaced the mandatory child `memory` /
 }
 ```
 
-`EXTENSIONS_SETTINGS_SCHEMA_VERSION` in `@unified-mpc/extensions` is the current
-version (`packages/extensions/src/types.ts`). A document without the marker is
-treated as pre-migration. The marker lives inside the existing settings JSON, so
-the reconciliation is one atomic row write and needs no extra table.
+The settings marker lives inside the existing settings JSON, so the
+reconciliation is one atomic row write and needs no extra table. A document
+without the marker is treated as pre-migration.
 
 Startup order:
 
@@ -93,7 +106,30 @@ left untouched; it is never replaced by defaults or half-written.
 | `ambiguous-mandatory-server-preserved` | A saved policy list does not prove built-in provenance, so the name was kept. |
 | `invalid-settings-json` | The persisted row is not a JSON object; no write happened. |
 
-## Generated client policy artifacts (slice 3)
+## Child MCP registry and pin state
+
+An upgrade must not keep a child server running, or required, because stale
+configuration still describes the old topology. Three properties provide that:
+
+- **No persisted pin store exists.** A connected child is pinned only in memory:
+  `McpSessionManager.pinnedServers` is a `Set` that starts empty in every new
+  process. `McpSessionManager.reconcile()` drops a pin as soon as the server is
+  disabled, excluded, removed, or its launch configuration changes, so a restart
+  cannot resume a topology that no longer appears in the reconciled settings.
+- **The persisted input is reconciled.** The only settings fields that describe
+  the child topology are `mandatoryMcpServers` and the policy list, and both are
+  migrated above. Retired names are removed unless a user-defined server
+  justifies keeping them.
+- **A preserved name stays inert.** `configuredPolicies` refuses to synthesize a
+  mandatory pin for a retired built-in id (`memory`, `thai-rag-mcp`,
+  `godkiller`) unless `extraMcpServers` defines that exact name. An
+  ambiguously-preserved entry therefore cannot resurrect the child topology.
+
+A user-installed server that legitimately reuses one of those names still works:
+it is reached through `extraMcpServers` and its own policy, never through the
+retired built-in default.
+
+## Generated client policy artifacts
 
 `IdeSyncService.repairManagedBlocks` converges artifacts that were generated
 before the settings migration. It runs automatically:
@@ -138,8 +174,59 @@ startup. The stdio runtime exposes the report as `managedPolicyRepairReady`;
 `runWeb` returns it as `policyRepair`; the CLI prints updated and failed counts
 before announcing the control-plane URL.
 
-## Out of scope in these slices
+## Interruption, concurrency and diagnostics
 
-These slices reconcile the persisted settings document and the generated
-artifacts it feeds. Concurrency/interrupted-migration recovery, clean-install
-parity tests and the child-registry pin surface remain tracked in issue #4.
+The migration is safe to interrupt and safe to start twice at the same time.
+
+- **Concurrent startups cannot corrupt the settings row or a managed block.**
+  Settings reconciliation is one row write of a deterministic document, so the
+  last writer produces the same bytes. Managed-block repair runs the whole
+  read-modify-write pass under the shared per-file config mutation lock
+  (`withConfigMutationLock`). Install, prune and canonical-registry writes take
+  the same lock through `withConfigMutationTransaction`, so a repair and a
+  concurrent mutation cannot interleave.
+- **A killed writer does not block later startups.** Lock owners are staged in a
+  private directory and published with one atomic `rename`, so a waiter never
+  observes a half-created lock. A lock is reclaimed only when every recorded
+  owner PID is provably dead, and an empty lock directory left by a release that
+  died between `unlink` and `rmdir` is reclaimed after a 5 s grace.
+- **An interrupted repair is retried on the next start.** `repairManagedBlocks`
+  rewrites an artifact only when it carries exactly one ordered managed block,
+  so a rerun converges without appending a second block. `sync` (or the WebUI
+  "Sync Policies" action) remains the explicit opt-in for a target that has no
+  block yet.
+- **A whole-run repair failure is reported, not dropped.** `runWeb` returns it as
+  `WebRunResult.policyRepairError` and the `web` command prints
+  `Policy repair failed: ...`; the stdio runtime writes
+  `Unified-MPC managed policy repair failed: ...` to stderr, keeping stdout for
+  the MCP protocol. A per-file failure still appears in `failed[]` and never
+  stops the remaining targets.
+- **A malformed settings row is reported, not rewritten.** It is surfaced as
+  `invalid-settings-json` and left untouched, so recovery is a repair of that one
+  JSON row rather than a manual schema edit.
+- **Destructive schema work is backed up and transactional.** Before the first
+  pending migration runs against an existing database, `SqliteDatabase` writes a
+  pre-migration backup when `backupDirectory` is configured. A migration and its
+  `schema_migrations` insert share one transaction, so a rollback cannot leave a
+  half-retired schema.
+
+## Upgrade notes
+
+1. Start any host once after upgrading: the CLI `web` command, the HTTP MCP
+   service, or a stdio MCP session. All three run the schema migrations and the
+   settings reconciliation; `web` also repairs the host-global generated policy
+   artifacts.
+2. Read the migration result before trusting the runtime. The settings report
+   carries `status` (`current`, `applied`, `invalid`) plus the notice codes
+   above, and the repair report carries `scanned`, `updated`, `unchanged`,
+   `skipped` and `failed`.
+3. Investigate any `*_preserved` notice before deleting a retained name. It
+   means the document did not prove built-in provenance, so the name may belong
+   to the user.
+4. Delete a duplicated managed block once if an artifact already carries two
+   marker pairs; the next startup repairs the single remaining block. A target
+   that has no managed block is only written by `sync`.
+5. Manual SQLite or JSON editing is not a supported recovery path for a normal
+   migration failure. `invalid-settings-json` is the one case that needs the
+   settings row repaired by hand, because the migration deliberately refuses to
+   replace a document it cannot parse.

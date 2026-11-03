@@ -1,11 +1,15 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { writeAtomic } from './atomic-write.js';
+import { withConfigMutationLock } from './config-mutation-lock.js';
 import { DEFAULT_EXTENSIONS_SETTINGS, type ExtensionsSettings, type PolicyEntry, type RuntimePolicySnapshot } from './types.js';
 import { DEFAULT_POLICIES as RUNTIME_DEFAULT_POLICIES, configuredPolicies, reconcileRuntimePolicies } from './runtime-policy.js';
 import { McpConfigLoader } from './mcp-config-loader.js';
 import { SkillCatalog } from './skill-catalog.js';
+
+export { writeAtomic } from './atomic-write.js';
 
 export type PolicyPriority = string;
 export type { PolicyEntry } from './types.js';
@@ -191,58 +195,70 @@ export class IdeSyncService {
       return err(appError('INTERNAL_ERROR', `Failed to compile IDE policies: ${errorMessage(error)}`));
     }
 
-    const updated: string[] = [];
-    const unchanged: string[] = [];
-    const skipped: string[] = [];
-    const failed: { file: string; message: string }[] = [];
+    // Serialize the read-modify-write pass with every other operation that
+    // holds these paths through the shared config mutation lock, including a
+    // second process starting against the same home/workspace. The block is
+    // compiled above from the settings snapshot this run started with; the lock
+    // guarantees no locked writer interleaves between reading a file and
+    // replacing it, so the survivor is always one complete repair result.
+    try {
+      return await withConfigMutationLock(targets.map((target) => target.file), async () => {
+        const updated: string[] = [];
+        const unchanged: string[] = [];
+        const skipped: string[] = [];
+        const failed: { file: string; message: string }[] = [];
 
-    for (const target of targets) {
-      let existing: string;
-      try {
-        existing = await readFile(target.file, 'utf8');
-      } catch (error) {
-        if (isMissingFile(error)) skipped.push(target.file);
-        else failed.push({ file: target.file, message: errorMessage(error) });
-        continue;
-      }
+        for (const target of targets) {
+          let existing: string;
+          try {
+            existing = await readFile(target.file, 'utf8');
+          } catch (error) {
+            if (isMissingFile(error)) skipped.push(target.file);
+            else failed.push({ file: target.file, message: errorMessage(error) });
+            continue;
+          }
 
-      // The marker gate is the whole safety property of this path: an artifact
-      // is only ours to rewrite when it carries exactly one ordered managed
-      // block. That covers the whole-file kinds (`cursor-file`,
-      // `generated-file`) too. Every other shape is ambiguous — a half-written
-      // file with one marker, a closing marker that precedes the opening one,
-      // a file that repeats a marker — and rewriting part of an ambiguous file
-      // is exactly how repair would append a second block or leave a stale one
-      // behind, so all of them stay byte-identical and are reported as skipped.
-      const startIndex = existing.indexOf(POLICY_BLOCK_START);
-      const endIndex = existing.indexOf(POLICY_BLOCK_END);
-      const ambiguousBlock = startIndex === -1
-        || endIndex === -1
-        || endIndex < startIndex
-        || existing.indexOf(POLICY_BLOCK_START, startIndex + POLICY_BLOCK_START.length) !== -1
-        || existing.indexOf(POLICY_BLOCK_END, endIndex + POLICY_BLOCK_END.length) !== -1;
-      if (ambiguousBlock) {
-        skipped.push(target.file);
-        continue;
-      }
+          // The marker gate is the whole safety property of this path: an artifact
+          // is only ours to rewrite when it carries exactly one ordered managed
+          // block. That covers the whole-file kinds (`cursor-file`,
+          // `generated-file`) too. Every other shape is ambiguous — a half-written
+          // file with one marker, a closing marker that precedes the opening one,
+          // a file that repeats a marker — and rewriting part of an ambiguous file
+          // is exactly how repair would append a second block or leave a stale one
+          // behind, so all of them stay byte-identical and are reported as skipped.
+          const startIndex = existing.indexOf(POLICY_BLOCK_START);
+          const endIndex = existing.indexOf(POLICY_BLOCK_END);
+          const ambiguousBlock = startIndex === -1
+            || endIndex === -1
+            || endIndex < startIndex
+            || existing.indexOf(POLICY_BLOCK_START, startIndex + POLICY_BLOCK_START.length) !== -1
+            || existing.indexOf(POLICY_BLOCK_END, endIndex + POLICY_BLOCK_END.length) !== -1;
+          if (ambiguousBlock) {
+            skipped.push(target.file);
+            continue;
+          }
 
-      const expected = target.kind === 'managed-block'
-        ? replaceOrAppendPolicyBlock(existing, compiled)
-        : renderGeneratedFile(target.kind, compiled);
-      if (expected === existing) {
-        unchanged.push(target.file);
-        continue;
-      }
+          const expected = target.kind === 'managed-block'
+            ? replaceOrAppendPolicyBlock(existing, compiled)
+            : renderGeneratedFile(target.kind, compiled);
+          if (expected === existing) {
+            unchanged.push(target.file);
+            continue;
+          }
 
-      try {
-        await writeAtomic(target.file, expected);
-        updated.push(target.file);
-      } catch (error) {
-        failed.push({ file: target.file, message: errorMessage(error) });
-      }
+          try {
+            await writeAtomic(target.file, expected);
+            updated.push(target.file);
+          } catch (error) {
+            failed.push({ file: target.file, message: errorMessage(error) });
+          }
+        }
+
+        return ok({ scanned: targets.length, updated, unchanged, skipped, failed });
+      });
+    } catch (error) {
+      return err(appError('INTERNAL_ERROR', `Failed to lock managed policy files: ${errorMessage(error)}`));
     }
-
-    return ok({ scanned: targets.length, updated, unchanged, skipped, failed });
   }
 }
 
@@ -326,20 +342,4 @@ async function updateFileWithBlock(filePath: string, policyBlock: string): Promi
   }
   const updated = replaceOrAppendPolicyBlock(existing, policyBlock);
   await writeAtomic(filePath, updated);
-}
-
-export async function writeAtomic(filePath: string, content: string): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-  try {
-    await writeFile(tempPath, content, 'utf8');
-    await rename(tempPath, filePath);
-  } catch (error) {
-    try {
-      await unlink(tempPath);
-    } catch {
-      // Ignore temp cleanup error
-    }
-    throw error;
-  }
 }

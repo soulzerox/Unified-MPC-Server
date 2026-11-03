@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { writeAtomic } from './ide-sync.js';
+import { writeAtomic } from './atomic-write.js';
 
 interface FileSnapshot {
   readonly path: string;
@@ -13,7 +13,13 @@ let mutationQueue = Promise.resolve();
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 30_000;
 
-export async function withConfigMutationTransaction<T>(
+/**
+ * Hold the shared per-file mutation locks without snapshotting or rolling the
+ * files back. Use this for a read-modify-write pass that already handles its
+ * own failures per file (for example the managed policy repair): it still
+ * serializes with `install`, `prune` and canonical registry writes.
+ */
+export async function withConfigMutationLock<T>(
   files: readonly string[],
   operation: () => Promise<T>,
 ): Promise<T> {
@@ -24,12 +30,27 @@ export async function withConfigMutationTransaction<T>(
   });
 
   await previous;
-  const transactionFiles = [...new Set(files.map((file) => path.resolve(file)))].sort();
+  const lockFiles = normalizeFiles(files);
   const releaseFileLocks: Array<() => Promise<void>> = [];
   try {
-    for (const file of transactionFiles) {
+    for (const file of lockFiles) {
       releaseFileLocks.push(await acquireFileLock(mutationLockPath(file)));
     }
+    return await operation();
+  } finally {
+    for (let index = releaseFileLocks.length - 1; index >= 0; index -= 1) {
+      await releaseFileLocks[index]!();
+    }
+    release();
+  }
+}
+
+export async function withConfigMutationTransaction<T>(
+  files: readonly string[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const transactionFiles = normalizeFiles(files);
+  return withConfigMutationLock(transactionFiles, async () => {
     const snapshots = await Promise.all(transactionFiles.map(captureFile));
     try {
       return await operation();
@@ -37,12 +58,11 @@ export async function withConfigMutationTransaction<T>(
       await Promise.all(snapshots.map(restoreFile));
       throw error;
     }
-  } finally {
-    for (let index = releaseFileLocks.length - 1; index >= 0; index -= 1) {
-      await releaseFileLocks[index]!();
-    }
-    release();
-  }
+  });
+}
+
+function normalizeFiles(files: readonly string[]): string[] {
+  return [...new Set(files.map((file) => path.resolve(file)))].sort();
 }
 
 function mutationLockPath(file: string): string {

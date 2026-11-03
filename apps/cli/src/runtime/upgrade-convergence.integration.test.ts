@@ -257,6 +257,11 @@ describe('upgrade convergence', () => {
     expect(repaired).toContain('code:pre-edit-context');
     expect(repaired).not.toContain('child:memory');
     expect(repaired).not.toContain('REALTIME');
+    // The block must be compiled from the three migrated persisted policies,
+    // not from DEFAULT_EXTENSIONS_SETTINGS, which shares the two capability
+    // rows but adds the mandatory session-start skill and the optional servers.
+    expect(repaired).not.toContain('session-start:ask-matt');
+    expect(repaired).not.toContain('optional:');
 
     // A second start on the already-converged install must change nothing.
     await withIsolatedHome(home, async () => {

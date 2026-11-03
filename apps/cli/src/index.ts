@@ -10,7 +10,7 @@ import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type StorageRecoveryResult } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -48,7 +48,8 @@ import {
 import { parseSyncArgs, runSync, type SyncCommand } from './commands/sync.js';
 import { parseWebArgs, runWeb, type WebCommand, type WebRunOptions, type WebRunResult } from './commands/web.js';
 import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/tools.js';
-import { parseStorageArgs, type StorageRecoverCommand } from './commands/storage.js';
+import { parseStorageArgs, type StorageCommand } from './commands/storage.js';
+import { runStorageMetricsCommand } from './commands/storage-metrics.js';
 import {
   parsePublishCredentialArgs,
   readPublishCredentialSecret,
@@ -88,7 +89,7 @@ export type CliCommand =
   | PruneSkillCommand
   | PruneServerCommand
   | SyncCommand
-  | StorageRecoverCommand
+  | StorageCommand
   | PublishCredentialCommand
   | WebCommand
   | ToolsCommand;
@@ -119,6 +120,7 @@ export interface CliDependencies {
   pruneServer?(input: PruneServerInput): Promise<Result<PruneServerResult>>;
   sync?(targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
   storageRecover?(): Promise<StorageRecoveryResult>;
+  storageMetrics?(): Promise<SqlitePhysicalMetrics>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -175,6 +177,7 @@ Commands:
   prune skill <name>                     Prune an installed skill
   prune server <name>                    Prune an installed MCP server
   storage recover                        Recover one unambiguous historical SQLite database safely
+  storage metrics [--json]               Report SQLite db/WAL/SHM bytes, page/freelist counts and compaction evidence
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
   publish-credential status <lease>      Show lease expiry and hosts without the secret
@@ -255,6 +258,14 @@ Commands:
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
       }
+    }
+    case 'storage-metrics': {
+      return runStorageMetricsCommand(
+        dependencies.storageMetrics === undefined ? undefined : { metrics: dependencies.storageMetrics },
+        parsed.value.json,
+        write,
+        writeError,
+      );
     }
     case 'publish-credential-grant':
     case 'publish-credential-revoke':
@@ -627,6 +638,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
     storageRecover: async (): Promise<StorageRecoveryResult> =>
       recoverHistoricalStorageIdentity(resolveDataPathFromShared()),
+    storageMetrics: async (): Promise<SqlitePhysicalMetrics> => getWorkspaceState().database.physicalMetrics(),
     publishCredential: async (
       command: PublishCredentialCommand,
       write: (text: string) => void,

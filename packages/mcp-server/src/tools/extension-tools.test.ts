@@ -3,6 +3,7 @@ import { appError, err, ok } from '@unified-mpc/domain';
 import { ContextEconomyRuntime } from '../context-economy.js';
 import { ToolRegistry } from '../tool-registry.js';
 import { skillTools } from './skill-tools.js';
+import { summarizeSkillCatalog } from './skill-summary.js';
 import type { McpToolContext } from './tool-types.js';
 import type { ExtensionsService } from '@unified-mpc/extensions';
 
@@ -268,6 +269,50 @@ describe('skills and mcp bridge tools', () => {
       services: {},
     } as unknown as McpToolContext).find((entry) => entry.name === 'skills_list')!.execute({}, new AbortController().signal);
     expect(missing).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+  });
+
+  it('reports two active skill ids that advertise one logical name', async () => {
+    const catalog = [
+      { id: 'local/ui-ux-pro-max', name: 'ui-ux-pro-max', description: 'a', source: 'local', trustTier: 'trusted' as const },
+      { id: 'gemini/ux-ui-promax-skill', name: 'ui-ux-pro-max', description: 'b', source: 'gemini', trustTier: 'trusted' as const },
+      { id: 'local/ask-matt', name: 'ask-matt', description: 'c', source: 'local', trustTier: 'trusted' as const },
+    ];
+    const context = {
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { extensions: { async listSkills() { return ok({ skills: catalog }); } } },
+    } as unknown as McpToolContext;
+    const tool = skillTools(context).find((entry) => entry.name === 'skills_list');
+    if (tool === undefined) throw new Error('skills_list is not registered');
+
+    const summary = await tool.execute({}, new AbortController().signal);
+    if (!summary.ok) throw new Error('expected a summary listing');
+    // The catalog advertises the declared name, so a second id with the same
+    // name is invisible in `skills` alone. The duplicate has to be named.
+    expect(summary.value).toMatchObject({
+      duplicateNames: [{ name: 'ui-ux-pro-max', ids: ['gemini/ux-ui-promax-skill', 'local/ui-ux-pro-max'] }],
+    });
+
+    const unique = await skillTools({
+      actor: { clientId: 'test', clientName: 'test' },
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { extensions: { async listSkills() { return ok({ skills: catalog.slice(2) }); } } },
+    } as unknown as McpToolContext).find((entry) => entry.name === 'skills_list')!.execute({}, new AbortController().signal);
+    if (!unique.ok) throw new Error('expected a summary listing');
+    expect(unique.value).toMatchObject({ duplicateNames: [] });
+  });
+
+  it('detects duplicate logical names across the whole catalog, not only the returned rows', () => {
+    // `skill_match` caps rows with `limit`; a collision that fell outside the
+    // cap would stay invisible exactly when the catalog is too large to read.
+    const summary = summarizeSkillCatalog([
+      { id: 'a/one', name: 'same-name', description: '', source: 'a' },
+      { id: 'b/two', name: 'same-name', description: '', source: 'b' },
+      { id: 'c/three', name: 'other', description: '', source: 'c' },
+    ], { limit: 1 });
+
+    expect(summary.returned).toBe(1);
+    expect(summary.duplicateNames).toEqual([{ name: 'same-name', ids: ['a/one', 'b/two'] }]);
   });
 
   it('keeps a large skill catalog well inside the registry tool-result budget', async () => {

@@ -224,7 +224,7 @@ export function getClientScriptJs(): string {
         if (statusRefreshInFlight) return;
         statusRefreshInFlight = true;
         try {
-          const res = await fetch('/api/status');
+          const res = await fetchWithTimeout('/api/status');
           if (!res.ok) throw new Error('Status request failed');
           const data = await res.json();
           noteBackendAvailable();
@@ -279,7 +279,7 @@ export function getClientScriptJs(): string {
         if (!container) return;
         ragProgressInFlight = true;
         try {
-          const response = await fetch('/api/rag-index-jobs');
+          const response = await fetchWithTimeout('/api/rag-index-jobs');
           if (!response.ok) throw new Error('Index status unavailable');
           const payload = await response.json();
           container.replaceChildren();
@@ -357,7 +357,7 @@ export function getClientScriptJs(): string {
 
       async function loadRuntimeDiagnostics() {
         try {
-          const res = await fetch('/api/runtime-diagnostics');
+          const res = await fetchWithTimeout('/api/runtime-diagnostics');
           const data = await res.json();
           if (!res.ok || data?.available !== true || !data.diagnostics) {
             throw new Error(errorMessage(data, 'MCP runtime diagnostics unavailable'));
@@ -1979,7 +1979,7 @@ export function getClientScriptJs(): string {
 
       async function fetchServerLogs() {
         try {
-          const res = await fetch('/api/logs');
+          const res = await fetchWithTimeout('/api/logs');
           if (res.ok) {
             const data = await res.json();
             if (Array.isArray(data.logs) && data.logs.length > 0) {

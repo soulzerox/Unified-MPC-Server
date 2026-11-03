@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getClientScriptJs } from './ui/client-script.js';
+import { getClientScriptJs, transitionBackendConnectionState } from './ui/client-script.js';
 
 type FakeNode = {
   textContent: string;
@@ -187,6 +187,55 @@ function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promi
   return { elements, recorded, backendUnavailable, loadStatus };
 }
 
+/**
+ * Wires the shipped availability helpers, `loadStatus` and `loadGatewayStatus` into one
+ * scope so a test can observe what a single stalled endpoint does to the shared log.
+ */
+function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
+  recorded: RecordedFetch;
+  logs: string[];
+  loadStatus: () => Promise<void>;
+  loadGatewayStatus: () => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const recorded = recordedFetchWithTimeout(transport);
+  const logs: string[] = [];
+  const document = { getElementById: (): null => null };
+  const factory = new Function(
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'document',
+    'logEvent',
+    'console',
+    'renderGatewayUnavailable',
+    'transitionBackendConnectionState',
+    `let backendConnectionState = 'unknown';\n`
+      + `const endpointConnectionStates = new Map();\n`
+      + `let statusRefreshInFlight = false;\n`
+      + `let gatewayStatusSeq = 0;\n`
+      + `let gatewayStatusAppliedSeq = 0;\n`
+      + `${extractFunction(script, 'isRequestTimeout')}\n`
+      + `${extractFunction(script, 'isBackendTransportError')}\n`
+      + `${extractFunction(script, 'noteBackendUnavailable')}\n`
+      + `${extractFunction(script, 'noteBackendAvailable')}\n`
+      + `${extractFunction(script, 'noteEndpointUnavailable')}\n`
+      + `${extractFunction(script, 'noteEndpointAvailable')}\n`
+      + `${extractFunction(script, 'loadStatus')}\n`
+      + `${extractFunction(script, 'loadGatewayStatus')}\n`
+      + `return { loadStatus, loadGatewayStatus };`,
+  );
+  const built = factory(
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    document,
+    (level: string, message: string) => logs.push(level + ' ' + message),
+    { error: () => {} },
+    () => {},
+    transitionBackendConnectionState,
+  ) as { loadStatus: () => Promise<void>; loadGatewayStatus: () => Promise<void> };
+  return { recorded, logs, loadStatus: built.loadStatus, loadGatewayStatus: built.loadGatewayStatus };
+}
+
 function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
   container: FakeNode;
   recorded: RecordedFetch;
@@ -218,18 +267,24 @@ function buildRuntimeRefreshSandbox(
 ): {
   recorded: RecordedFetch;
   backendUnavailable: Error[];
+  endpointUnavailable: Array<{ endpoint: string; error: Error }>;
+  endpointAvailable: string[];
   runtime: Map<string, unknown>;
   runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
 } {
   const script = getClientScriptJs();
   const recorded = recordedFetchWithTimeout(transport);
   const backendUnavailable: Error[] = [];
+  const endpointUnavailable: Array<{ endpoint: string; error: Error }> = [];
+  const endpointAvailable: string[] = [];
   const runtime = new Map<string, unknown>();
   const factory = new Function(
     'fetchWithTimeout',
     'readJsonWithTimeout',
     'isBackendTransportError',
     'noteBackendUnavailable',
+    'noteEndpointUnavailable',
+    'noteEndpointAvailable',
     'logEvent',
     'errorMessage',
     'cachedWorkspaces',
@@ -244,6 +299,8 @@ function buildRuntimeRefreshSandbox(
     recorded.readJsonWithTimeout,
     () => true,
     (err: Error) => backendUnavailable.push(err),
+    (endpoint: string, error: Error) => endpointUnavailable.push({ endpoint, error }),
+    (endpoint: string) => endpointAvailable.push(endpoint),
     () => {},
     (_data: unknown, fallback: string) => fallback,
     [{ id: 'ws-1' }],
@@ -252,7 +309,14 @@ function buildRuntimeRefreshSandbox(
     (workspaceId: string, data: unknown) => runtime.set(workspaceId, data),
     () => {},
   ) as (workspaceId: string) => Promise<void>;
-  return { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh };
+  return {
+    recorded,
+    backendUnavailable,
+    endpointUnavailable,
+    endpointAvailable,
+    runtime,
+    runWorkspaceRuntimeRefresh,
+  };
 }
 
 function buildMutationSandbox(
@@ -771,7 +835,7 @@ describe('background poll resilience', () => {
         status: 200,
         json: async (): Promise<Record<string, unknown>> => ({ snapshots: [], cursor: null }),
       } as unknown as Response);
-    const { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh } =
+    const { recorded, backendUnavailable, endpointUnavailable, endpointAvailable, runtime, runWorkspaceRuntimeRefresh } =
       buildRuntimeRefreshSandbox(transport);
 
     await Promise.race([
@@ -785,8 +849,10 @@ describe('background poll resilience', () => {
     ]);
 
     expect(recorded.urls).toEqual(['/api/workspaces/ws-1/goal-runtime']);
-    expect(backendUnavailable).toHaveLength(1);
-    expect((backendUnavailable[0] as { code?: string }).code).toBe('request_timeout');
+    expect(backendUnavailable).toHaveLength(0);
+    expect(endpointUnavailable).toHaveLength(1);
+    expect(endpointUnavailable[0]?.endpoint).toBe('Project goal runtime');
+    expect((endpointUnavailable[0]?.error as { code?: string }).code).toBe('request_timeout');
     expect(runtime.get('ws-1')).toMatchObject({
       error: expect.stringContaining('Response body timed out after'),
     });
@@ -799,6 +865,7 @@ describe('background poll resilience', () => {
       '/api/workspaces/ws-1/goal-runtime',
     ]);
     expect(runtime.get('ws-1')).toEqual({ snapshots: [], cursor: null });
+    expect(endpointAvailable).toEqual(['Project goal runtime']);
   });
 
   it('releases the index-progress guard when a response body stalls mid-stream', async () => {
@@ -854,6 +921,56 @@ describe('background poll resilience', () => {
     await loadStatus();
     expect(backendUnavailable).toHaveLength(1);
     expect(backendUnavailable[0]?.message).toContain('Request timed out after');
+  });
+
+  it('logs a gateway-only outage once instead of once per status cycle', async () => {
+    let statusMode: 'healthy' | 'stalled' = 'healthy';
+    let gatewayMode: 'healthy' | 'stalled' = 'stalled';
+    const transport = (url: string): Promise<Response> => {
+      if (url === '/api/status') {
+        return Promise.resolve(statusMode === 'healthy' ? healthyStatusResponse() : stalledBodyResponse());
+      }
+      return Promise.resolve(
+        gatewayMode === 'healthy'
+          ? ({
+              ok: true,
+              status: 200,
+              json: async (): Promise<Record<string, unknown>> => ({ state: 'BRIDGE_HEALTHY' }),
+            } as unknown as Response)
+          : stalledBodyResponse(),
+      );
+    };
+    const { logs, loadStatus, loadGatewayStatus } = buildAvailabilitySandbox(transport);
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await loadStatus();
+      await loadGatewayStatus();
+    }
+
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toEqual([
+      'ERROR ChatGPT gateway unavailable: Response body timed out after 20ms',
+    ]);
+    expect(logs.some((line) => line.includes('Backend unavailable'))).toBe(false);
+    expect(logs.some((line) => line.startsWith('SUCCESS'))).toBe(false);
+
+    gatewayMode = 'healthy';
+    await loadGatewayStatus();
+    await loadGatewayStatus();
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
+      'SUCCESS ChatGPT gateway restored',
+    ]);
+
+    statusMode = 'stalled';
+    gatewayMode = 'stalled';
+    await loadStatus();
+    await loadStatus();
+    await loadGatewayStatus();
+
+    expect(logs.filter((line) => line.includes('Backend unavailable'))).toEqual([
+      'ERROR Backend unavailable: Response body timed out after 20ms',
+    ]);
+    // The probe already reported the outage; the stalled endpoint adds nothing.
+    expect(logs.filter((line) => line.includes('ChatGPT gateway unavailable'))).toHaveLength(1);
   });
 });
 

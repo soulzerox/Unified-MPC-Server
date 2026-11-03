@@ -241,12 +241,19 @@ export function getClientScriptJs(): string {
       }
 
       let backendConnectionState = 'unknown';
+      const endpointConnectionStates = new Map();
       let statusRefreshInFlight = false;
 
       function isBackendTransportError(err) {
         return err instanceof TypeError || err?.message === 'Failed to fetch' || isRequestTimeout(err);
       }
 
+      /**
+       * Only the 5 s /api/status poll is the backend probe, so its ERROR/SUCCESS pair
+       * describes a whole-backend outage. Every other poller reports its own endpoint
+       * through the helpers below: they share this state, so a single stalled endpoint
+       * used to log an ERROR/SUCCESS pair on every status cycle.
+       */
       function noteBackendUnavailable(err) {
         const transition = transitionBackendConnectionState(backendConnectionState, 'unavailable');
         backendConnectionState = transition.state;
@@ -260,6 +267,25 @@ export function getClientScriptJs(): string {
         backendConnectionState = transition.state;
         if (transition.event === 'recovered') {
           logEvent('SUCCESS', 'Backend connection restored');
+        }
+      }
+
+      function noteEndpointUnavailable(endpoint, err) {
+        // The probe already reported a whole-backend outage; an endpoint failing
+        // because of it must not add a second line on every cycle.
+        if (backendConnectionState === 'unavailable') return;
+        const transition = transitionBackendConnectionState(endpointConnectionStates.get(endpoint) || 'unknown', 'unavailable');
+        endpointConnectionStates.set(endpoint, transition.state);
+        if (transition.event === 'unavailable') {
+          logEvent('ERROR', endpoint + ' unavailable: ' + (err?.message || String(err)));
+        }
+      }
+
+      function noteEndpointAvailable(endpoint) {
+        const transition = transitionBackendConnectionState(endpointConnectionStates.get(endpoint) || 'unknown', 'available');
+        endpointConnectionStates.set(endpoint, transition.state);
+        if (transition.event === 'recovered') {
+          logEvent('SUCCESS', endpoint + ' restored');
         }
       }
 
@@ -701,6 +727,7 @@ export function getClientScriptJs(): string {
           if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
           if (controller.signal.aborted) return;
           applyWorkspaceRuntimeSnapshot(workspaceId, data);
+          noteEndpointAvailable('Project goal runtime');
         } catch (err) {
           if (controller.signal.aborted) return;
           const current = workspaceRuntime.get(workspaceId);
@@ -710,7 +737,7 @@ export function getClientScriptJs(): string {
             error: err.message,
           });
           renderWorkspaces();
-          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          if (isBackendTransportError(err)) noteEndpointUnavailable('Project goal runtime', err);
           else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
         } finally {
           if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {
@@ -1795,11 +1822,12 @@ export function getClientScriptJs(): string {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
           gatewayStatusAppliedSeq = seq;
+          noteEndpointAvailable('ChatGPT gateway');
         } catch (err) {
           if (seq <= gatewayStatusAppliedSeq) return;
           renderGatewayUnavailable();
           gatewayStatusAppliedSeq = seq;
-          if (isBackendTransportError(err)) noteBackendUnavailable(err);
+          if (isBackendTransportError(err)) noteEndpointUnavailable('ChatGPT gateway', err);
           else console.error(err);
         }
       }

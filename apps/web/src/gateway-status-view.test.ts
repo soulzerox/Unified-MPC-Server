@@ -123,7 +123,8 @@ function loadGatewayStatusForTest(
     'fetchWithTimeout',
     'readJsonWithTimeout',
     'isBackendTransportError',
-    'noteBackendUnavailable',
+    'noteEndpointUnavailable',
+    'noteEndpointAvailable',
     `let gatewayStatusSeq = 0;\nlet gatewayStatusAppliedSeq = 0;\n${extractFunction(script, 'renderGatewayUnavailable')}\n${extractFunction(script, 'loadGatewayStatus')}\nreturn loadGatewayStatus;`,
   );
   const loadGatewayStatus = factory(
@@ -131,6 +132,7 @@ function loadGatewayStatusForTest(
     fetchImpl,
     readJsonWithTimeout,
     () => true,
+    () => {},
     () => {},
   ) as () => Promise<void>;
   return { elements, loadGatewayStatus };

@@ -31,12 +31,25 @@ export const DEFAULT_POLICIES: readonly PolicyEntry[] = Object.freeze([
   { id: 'optional:ui-skills', resourceId: 'ui-skills', resourceType: 'skill', mandatory: false, enforcement: 'ON_DEMAND', directive: 'Use UI/UX and frontend best-practice guidance when designing or implementing user interfaces.' },
 ]);
 
+/**
+ * Retired built-in mandatory server ids. A name with ambiguous provenance may be
+ * preserved in the document, but it must never synthesize a mandatory child pin
+ * again; Godkiller is an on-demand safety check and memory/RAG are native
+ * capabilities, not child servers.
+ */
+const RETIRED_MANDATORY_SERVER_IDS: ReadonlySet<string> = new Set(['memory', 'thai-rag-mcp', 'godkiller']);
+
 export function configuredPolicies(settings: ExtensionsSettings): readonly PolicyEntry[] {
   const legacyMandatoryNames = new Set(settings.mandatoryMcpServers.map((name) => name.trim().toLowerCase()).filter(Boolean));
+  // A user-defined server may legitimately reuse a retired built-in name; only
+  // the built-in topology is filtered, never the user's explicit configuration.
+  const userConfiguredServers = new Set(Object.keys(settings.extraMcpServers).map((name) => name.trim().toLowerCase()).filter(Boolean));
   const configured = (settings.policies === undefined
     ? DEFAULT_POLICIES.filter((policy) => policy.resourceType !== 'server' || !policy.mandatory || legacyMandatoryNames.has(policy.resourceId.trim().toLowerCase()))
     : [...settings.policies])
-    .filter((policy) => policy.resourceType !== 'server' || !NATIVE_PROVIDER_SERVER_IDS.has(policy.resourceId.trim().toLowerCase()));
+    .filter((policy) => policy.resourceType !== 'server'
+      || !NATIVE_PROVIDER_SERVER_IDS.has(policy.resourceId.trim().toLowerCase())
+      || userConfiguredServers.has(policy.resourceId.trim().toLowerCase()));
   const configuredServers = new Set(configured
     .filter((policy) => policy.resourceType === 'server')
     .map((policy) => policy.resourceId.trim().toLowerCase()));
@@ -46,7 +59,8 @@ export function configuredPolicies(settings: ExtensionsSettings): readonly Polic
   for (const rawName of settings.mandatoryMcpServers) {
     const name = rawName.trim();
     const key = name.toLowerCase();
-    if (name.length === 0 || configuredServers.has(key) || NATIVE_PROVIDER_SERVER_IDS.has(key)) continue;
+    if (name.length === 0 || configuredServers.has(key)) continue;
+    if (RETIRED_MANDATORY_SERVER_IDS.has(key) && !userConfiguredServers.has(key)) continue;
     configured.push(defaultMandatoryServers.get(key) ?? {
       id: `legacy:mandatory:${key}`,
       resourceId: name,
@@ -64,9 +78,11 @@ export function reconcileRuntimePolicies(settings: ExtensionsSettings, servers: 
   const configured = configuredPolicies(settings);
   const resolved: UnprioritizedResolvedPolicyEntry[] = configured.map((policy) => resolveConfiguredPolicy(policy, servers, skills));
   const coveredServers = new Set(configured.filter((policy) => policy.resourceType === 'server').map((policy) => policy.resourceId.trim().toLowerCase()));
+  const userConfiguredServers = new Set(Object.keys(settings.extraMcpServers).map((name) => name.trim().toLowerCase()).filter(Boolean));
   for (const server of servers) {
     const key = server.name.trim().toLowerCase();
-    if (!server.enabled || server.excluded || coveredServers.has(key) || NATIVE_PROVIDER_SERVER_IDS.has(key)) continue;
+    if (!server.enabled || server.excluded || coveredServers.has(key)) continue;
+    if (NATIVE_PROVIDER_SERVER_IDS.has(key) && !userConfiguredServers.has(key)) continue;
     resolved.push({ id: `auto:server:${key}`, resourceId: server.name, resourceType: 'server', mandatory: false, enforcement: 'AUTO_ROUTE', directive: `Inspect and use child MCP server ${server.name} automatically when its live tool catalog is relevant; do not wait for the user to name it.`, source: 'discovered', available: true, resolvedResourceId: server.name });
   }
   const policies: ResolvedPolicyEntry[] = resolved.map((policy, index) => ({ ...policy, priority: `P${index + 1}` }));

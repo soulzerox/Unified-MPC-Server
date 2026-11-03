@@ -48,6 +48,12 @@ export interface ExtensionsSettings {
   readonly extraMcpServers: Readonly<Record<string, McpServerLaunchConfig>>;
   readonly mandatoryMcpServers: readonly string[];
   readonly policies?: readonly PolicyEntry[];
+  /**
+   * Schema version of the persisted settings document. Documents written before
+   * the native-capability topology omit it; `settings-migration.ts` reconciles
+   * them to `EXTENSIONS_SETTINGS_SCHEMA_VERSION`.
+   */
+  readonly settingsVersion?: number;
 }
 
 export interface MandatoryMcpServerStatus {
@@ -175,6 +181,8 @@ export interface McpServerListItem {
 
 export const DEFAULT_MANDATORY_MCP_SERVERS = Object.freeze([] as const);
 
+export const EXTENSIONS_SETTINGS_SCHEMA_VERSION = 2;
+
 export const DEFAULT_EXTENSIONS_SETTINGS: ExtensionsSettings = Object.freeze({
   mode: 'enable_all',
   disabledServers: Object.freeze([]),
@@ -183,4 +191,5 @@ export const DEFAULT_EXTENSIONS_SETTINGS: ExtensionsSettings = Object.freeze({
   extraSkillRoots: Object.freeze([]),
   extraMcpServers: Object.freeze({}),
   mandatoryMcpServers: DEFAULT_MANDATORY_MCP_SERVERS,
+  settingsVersion: EXTENSIONS_SETTINGS_SCHEMA_VERSION,
 });

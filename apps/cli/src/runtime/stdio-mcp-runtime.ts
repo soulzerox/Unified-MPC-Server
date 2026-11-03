@@ -53,6 +53,7 @@ import {
   EXTENSIONS_SETTINGS_KEY,
   InstallerService,
   createLocalExtensionsService,
+  ensureExtensionsSettingsMigrated,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
 import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
@@ -250,6 +251,10 @@ export function createStdioMcpRuntime(
   const goalRepository = new SqliteGoalRepository(database);
   const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
   const settingsRepository = new SqliteSettingsRepository(database);
+  // #4: reconcile the persisted extensions document before any catalog, policy
+  // snapshot or generated client block reads it. Deterministic, so concurrent
+  // starts converge on the same bytes instead of racing.
+  ensureExtensionsSettingsMigrated(settingsRepository, EXTENSIONS_SETTINGS_KEY);
   const workspaceSelection = new WorkspaceSelectionService(
     workspaceRepository,
     workspace.id,

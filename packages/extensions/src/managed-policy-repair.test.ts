@@ -110,9 +110,11 @@ describe('IdeSyncService.repairManagedBlocks', () => {
 
   it('reports one unreadable target without stopping the remaining repairs', async () => {
     const { home, workspace } = await makeRoots();
-    const blockedHomeFile = path.join(home, '.claude', 'CLAUDE.md');
+    // The first target in iteration order fails, so an implementation that
+    // aborts on the first error cannot pass this test.
+    const blockedFile = path.join(workspace, '.cursor', 'rules', '00-mandatory-policy.mdc');
     // A directory where a file is expected makes the read fail for this target only.
-    await mkdir(blockedHomeFile, { recursive: true });
+    await mkdir(blockedFile, { recursive: true });
     const agentsFile = path.join(workspace, 'AGENTS.md');
     await writeFile(agentsFile, `${STALE_BLOCK}\n`, 'utf8');
 
@@ -120,9 +122,45 @@ describe('IdeSyncService.repairManagedBlocks', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.error.message);
 
+    expect(result.value.failed.map((entry) => entry.file)).toEqual([blockedFile]);
     expect(result.value.updated).toContain(agentsFile);
-    expect(result.value.failed.map((entry) => entry.file)).toContain(blockedHomeFile);
     expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
+  });
+
+  it('leaves whole-file artifacts alone when their content carries no managed block', async () => {
+    const { home, workspace } = await makeRoots();
+    const cursorFile = path.join(workspace, '.cursor', 'rules', '00-mandatory-policy.mdc');
+    const antigravityFile = path.join(home, '.gemini', 'antigravity', 'rules', 'mcp-policy.md');
+    const cursorContent = '---\nalwaysApply: true\n---\n\n# My own rules\n\nKeep me.\n';
+    const antigravityContent = '# Hand-written Antigravity rules\n\nKeep me too.\n';
+    await mkdir(path.dirname(cursorFile), { recursive: true });
+    await mkdir(path.dirname(antigravityFile), { recursive: true });
+    await writeFile(cursorFile, cursorContent, 'utf8');
+    await writeFile(antigravityFile, antigravityContent, 'utf8');
+
+    const result = await service(home, workspace).repairManagedBlocks();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.updated).toEqual([]);
+    expect(result.value.skipped).toContain(cursorFile);
+    expect(result.value.skipped).toContain(antigravityFile);
+    expect(await readFile(cursorFile, 'utf8')).toBe(cursorContent);
+    expect(await readFile(antigravityFile, 'utf8')).toBe(antigravityContent);
+  });
+
+  it('skips a half-written file that has an opening marker but no closing marker', async () => {
+    const { home, workspace } = await makeRoots();
+    const agentsFile = path.join(workspace, 'AGENTS.md');
+    const halfWritten = `# Project notes\n\n${POLICY_BLOCK_START}\n\nMissing the closing marker.\n`;
+    await writeFile(agentsFile, halfWritten, 'utf8');
+
+    const result = await service(home, workspace).repairManagedBlocks();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.skipped).toContain(agentsFile);
+    expect(await readFile(agentsFile, 'utf8')).toBe(halfWritten);
   });
 
   it('skips workspace targets when no workspace root is configured', async () => {

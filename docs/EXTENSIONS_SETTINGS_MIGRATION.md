@@ -101,7 +101,7 @@ before the settings migration. It runs automatically:
 | Entry point | Scope | Timing |
 | --- | --- | --- |
 | `createStdioMcpRuntime` | Active workspace only | Started right after the settings migration, awaited by `close()` |
-| `runWeb` with `repairManagedPolicies: true` (the CLI `web` command) | Host-global files plus the first configured `workspaceRoots` entry | Awaited before `ControlPlaneServer.listen()` |
+| `runWeb` with `repairManagedPolicies: true` (the CLI `web` command) | Host-global files plus the first configured `workspaceRoots` entry, defaulting to `process.cwd()` like `ControlPlaneServer` | Awaited before `ControlPlaneServer.listen()` |
 
 Scope split is deliberate. A per-session stdio host must never rewrite
 `~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or
@@ -112,11 +112,14 @@ control plane owns those files. Workspace artifacts are repaired by both paths.
 `repairManagedBlocks` differs from `sync` in three ways that matter for an
 upgrade:
 
-- It only rewrites an artifact that already exists **and** already contains
-  `<!-- MCP-POLICY-START -->`. It never creates a file and never appends a
-  managed block, so an upgrade cannot start instructing an IDE or CLI the user
-  never configured. Use `sync` (or the WebUI "Sync Policies" action) to opt in
-  to a new target.
+- It only rewrites an artifact that already exists **and** already contains a
+  complete `<!-- MCP-POLICY-START -->` … `<!-- MCP-POLICY-END -->` block. That
+  gate covers the whole-file targets (`.cursor/rules/00-mandatory-policy.mdc`,
+  `~/.gemini/antigravity/rules/mcp-policy.md`) too, and a file with only one of
+  the two markers is skipped rather than having a second block appended. It
+  never creates a file and never appends a managed block, so an upgrade cannot
+  start instructing an IDE or CLI the user never configured. Use `sync` (or the
+  WebUI "Sync Policies" action) to opt in to a new target.
 - Every write is atomic and every target is independent. One unreadable file is
   reported in `failed[]` without aborting the remaining repairs.
 - It compiles from the same `policySnapshot()` as `sync`, so startup repair and

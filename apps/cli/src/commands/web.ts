@@ -145,11 +145,13 @@ export async function runWeb(
       const repairSettings = parseExtensionsSettings((serverOptions?.settingsRepository ?? settings).get(EXTENSIONS_SETTINGS_KEY));
       // The control plane serves one configured root at a time, matching the
       // manual sync endpoint; other workspaces converge through their own
-      // session startup repair.
-      const repairWorkspaceRoot = serverOptions?.workspaceRoots?.[0];
+      // session startup repair. `ControlPlaneServer` defaults a missing root set
+      // to `process.cwd()`, so mirror that instead of silently repairing no
+      // workspace artifact at all.
+      const repairWorkspaceRoot = serverOptions?.workspaceRoots?.[0] ?? process.cwd();
       const repaired = await new IdeSyncService({
         settings: repairSettings,
-        ...(repairWorkspaceRoot === undefined ? {} : { workspaceRoot: repairWorkspaceRoot }),
+        workspaceRoot: repairWorkspaceRoot,
       }).repairManagedBlocks({ includeGlobalTargets: true });
       if (repaired.ok) policyRepair = repaired.value;
     }

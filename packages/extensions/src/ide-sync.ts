@@ -206,7 +206,12 @@ export class IdeSyncService {
         continue;
       }
 
-      if (target.kind === 'managed-block' && !existing.includes(POLICY_BLOCK_START)) {
+      // The marker gate is the whole safety property of this path: an artifact
+      // is only ours to rewrite when it already carries a complete managed
+      // block. That covers the whole-file kinds (`cursor-file`,
+      // `generated-file`) too, and it refuses a half-written file that has only
+      // one marker instead of appending a second block to it.
+      if (!existing.includes(POLICY_BLOCK_START) || !existing.includes(POLICY_BLOCK_END)) {
         skipped.push(target.file);
         continue;
       }

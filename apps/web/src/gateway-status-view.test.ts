@@ -106,7 +106,10 @@ function malformedResponse(): Response {
   } as unknown as Response;
 }
 
-function loadGatewayStatusForTest(fetchImpl: StatusFetch): {
+function loadGatewayStatusForTest(
+  fetchImpl: StatusFetch,
+  readJsonWithTimeout: (res: Response) => Promise<Record<string, unknown>>,
+): {
   elements: Map<string, FakeElement>;
   loadGatewayStatus: () => Promise<void>;
 } {
@@ -118,6 +121,7 @@ function loadGatewayStatusForTest(fetchImpl: StatusFetch): {
   const factory = new Function(
     'document',
     'fetchWithTimeout',
+    'readJsonWithTimeout',
     'isBackendTransportError',
     'noteBackendUnavailable',
     `let gatewayStatusSeq = 0;\nlet gatewayStatusAppliedSeq = 0;\n${extractFunction(script, 'renderGatewayUnavailable')}\n${extractFunction(script, 'loadGatewayStatus')}\nreturn loadGatewayStatus;`,
@@ -125,10 +129,27 @@ function loadGatewayStatusForTest(fetchImpl: StatusFetch): {
   const loadGatewayStatus = factory(
     document,
     fetchImpl,
+    readJsonWithTimeout,
     () => true,
     () => {},
   ) as () => Promise<void>;
   return { elements, loadGatewayStatus };
+}
+
+/**
+ * The shipped body reader with a short budget, so a stalled body is observable in a test.
+ */
+function shortBodyReader(timeoutMs = 20): (res: Response) => Promise<Record<string, unknown>> {
+  const factory = new Function(
+    `const REQUEST_TIMEOUT_MS = 8000;\n`
+      + `const fetchControllers = new WeakMap();\n`
+      + `${extractFunction(getClientScriptJs(), 'readJsonWithTimeout')}\nreturn readJsonWithTimeout;`,
+  );
+  const realBody = factory() as (
+    res: Response,
+    timeoutMs: number,
+  ) => Promise<Record<string, unknown>>;
+  return (res: Response): Promise<Record<string, unknown>> => realBody(res, timeoutMs);
 }
 
 describe('gateway status projection', () => {
@@ -138,7 +159,7 @@ describe('gateway status projection', () => {
       if (mode === 'transport-failure') throw new TypeError('fetch failed');
       return healthyResponse();
     };
-    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
     await loadGatewayStatus();
     expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
@@ -162,7 +183,7 @@ describe('gateway status projection', () => {
       if (mode === 'bad-json') return malformedResponse();
       return healthyResponse();
     };
-    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
     await loadGatewayStatus();
     expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
@@ -199,7 +220,7 @@ describe('gateway status projection', () => {
       }
       return healthyResponse();
     };
-    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
     await loadGatewayStatus();
     expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
@@ -229,7 +250,7 @@ describe('gateway status projection', () => {
       }
       return Promise.resolve(healthyResponse());
     };
-    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
     const first = loadGatewayStatus();
     await loadGatewayStatus();
@@ -254,7 +275,7 @@ describe('gateway status projection', () => {
       }
       return Promise.resolve(failedResponse());
     };
-    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
     const first = loadGatewayStatus();
     await loadGatewayStatus();
@@ -279,7 +300,7 @@ describe('gateway status projection', () => {
     };
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
-      const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+      const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
       await loadGatewayStatus();
       expect(calls).toEqual(['/api/chatgpt-gateway/status']);
@@ -312,7 +333,7 @@ describe('gateway status projection', () => {
     };
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
-      const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+      const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
 
       await loadGatewayStatus();
       expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
@@ -341,7 +362,9 @@ describe('gateway status projection', () => {
     const script = getClientScriptJs();
     const factory = new Function(
       'fetch',
-      `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
+      `const REQUEST_TIMEOUT_MS = 8000;\n`
+        + `const fetchControllers = new WeakMap();\n`
+        + `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
     );
     const hangingFetch = (_url: string, init: RequestInit = {}): Promise<Response> =>
       new Promise<Response>((_resolve, reject) => {
@@ -358,6 +381,42 @@ describe('gateway status projection', () => {
     await expect(fetchWithTimeout('/api/chatgpt-gateway/status', {}, 20)).rejects.toMatchObject({
       code: 'request_timeout',
     });
+  });
+
+  it('fails closed when a gateway response body stalls mid-stream', async () => {
+    let stallBody = false;
+    const fetchImpl = async (): Promise<Response> => {
+      if (stallBody) {
+        return {
+          ok: true,
+          status: 200,
+          json: (): Promise<Record<string, string>> => new Promise<Record<string, string>>(() => {}),
+        } as unknown as Response;
+      }
+      return healthyResponse();
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl, shortBodyReader());
+
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+
+    stallBody = true;
+    await Promise.race([
+      loadGatewayStatus(),
+      new Promise((_resolve, reject) => {
+        setTimeout(() => reject(new Error('a stalled gateway body left the surface healthy')), 2000);
+      }),
+    ]);
+
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+    expect(elements.get('connect-btn')?.title).toBe('Gateway status unavailable');
+
+    stallBody = false;
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
   });
 
   it('does not render a static success badge for the loopback origin', () => {

@@ -114,6 +114,13 @@ export function getClientScriptJs(): string {
         return err?.code === 'request_timeout';
       }
 
+      /**
+       * fetchWithTimeout clears its own timer once headers arrive, so a stalled body
+       * would otherwise outlive the poll. Keep the request's controller reachable from
+       * the response so the body deadline can abort the request and release the socket.
+       */
+      const fetchControllers = new WeakMap();
+
       async function fetchWithTimeout(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
         const controller = new AbortController();
         const upstreamSignal = init?.signal;
@@ -128,7 +135,9 @@ export function getClientScriptJs(): string {
           controller.abort();
         }, timeoutMs);
         try {
-          return await fetch(url, { ...init, signal: controller.signal });
+          const response = await fetch(url, { ...init, signal: controller.signal });
+          fetchControllers.set(response, controller);
+          return response;
         } catch (err) {
           if (timedOut) {
             const timeoutError = new Error('Request timed out after ' + timeoutMs + 'ms');
@@ -139,6 +148,34 @@ export function getClientScriptJs(): string {
         } finally {
           clearTimeout(timer);
           upstreamSignal?.removeEventListener?.('abort', forwardAbort);
+        }
+      }
+
+      /**
+       * fetchWithTimeout stops timing once response headers arrive, so a body that
+       * stalls mid-stream would leave the res.json() await pending forever and pin
+       * every in-flight poll guard closed. Race the body read against the same budget
+       * and abort the request, since a locked body stream cannot be cancelled directly.
+       */
+      async function readJsonWithTimeout(res, timeoutMs = REQUEST_TIMEOUT_MS) {
+        let timer;
+        const deadline = new Promise((_resolve, reject) => {
+          timer = setTimeout(() => {
+            const timeoutError = new Error('Response body timed out after ' + timeoutMs + 'ms');
+            timeoutError.code = 'request_timeout';
+            reject(timeoutError);
+            // A locked body stream cannot be cancelled, so abort the request itself.
+            fetchControllers.get(res)?.abort();
+            fetchControllers.delete(res);
+          }, timeoutMs);
+        });
+        try {
+          const body = res.json();
+          body.catch(() => {});
+          return await Promise.race([body, deadline]);
+        } finally {
+          clearTimeout(timer);
+          fetchControllers.delete(res);
         }
       }
 
@@ -201,7 +238,7 @@ export function getClientScriptJs(): string {
       let statusRefreshInFlight = false;
 
       function isBackendTransportError(err) {
-        return err instanceof TypeError || err?.message === 'Failed to fetch';
+        return err instanceof TypeError || err?.message === 'Failed to fetch' || isRequestTimeout(err);
       }
 
       function noteBackendUnavailable(err) {
@@ -226,7 +263,7 @@ export function getClientScriptJs(): string {
         try {
           const res = await fetchWithTimeout('/api/status');
           if (!res.ok) throw new Error('Status request failed');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           noteBackendAvailable();
           const identity = data.mcpIdentity;
           const buildCommit = document.getElementById('build-commit');
@@ -281,7 +318,7 @@ export function getClientScriptJs(): string {
         try {
           const response = await fetchWithTimeout('/api/rag-index-jobs');
           if (!response.ok) throw new Error('Index status unavailable');
-          const payload = await response.json();
+          const payload = await readJsonWithTimeout(response);
           container.replaceChildren();
           if (!payload.available) {
             container.textContent = 'Native index status not available';
@@ -358,7 +395,7 @@ export function getClientScriptJs(): string {
       async function loadRuntimeDiagnostics() {
         try {
           const res = await fetchWithTimeout('/api/runtime-diagnostics');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (!res.ok || data?.available !== true || !data.diagnostics) {
             throw new Error(errorMessage(data, 'MCP runtime diagnostics unavailable'));
           }
@@ -655,7 +692,7 @@ export function getClientScriptJs(): string {
         workspaceRuntimeRefreshControllers.set(workspaceId, controller);
         try {
           const res = await fetchWithTimeout(endpoint, { signal: controller.signal });
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
           if (controller.signal.aborted) return;
           applyWorkspaceRuntimeSnapshot(workspaceId, data);
@@ -1691,7 +1728,7 @@ export function getClientScriptJs(): string {
         try {
           const res = await fetchWithTimeout('/api/chatgpt-gateway/status');
           if (!res.ok) throw new Error('Gateway status failed');
-          const data = await res.json();
+          const data = await readJsonWithTimeout(res);
           if (seq <= gatewayStatusAppliedSeq) return;
           const state = data.state || 'STOPPED';
           const bridgeEl = document.getElementById('bridge-state');
@@ -1981,7 +2018,7 @@ export function getClientScriptJs(): string {
         try {
           const res = await fetchWithTimeout('/api/logs');
           if (res.ok) {
-            const data = await res.json();
+            const data = await readJsonWithTimeout(res);
             if (Array.isArray(data.logs) && data.logs.length > 0) {
               currentLogs = data.logs;
               renderLogs();

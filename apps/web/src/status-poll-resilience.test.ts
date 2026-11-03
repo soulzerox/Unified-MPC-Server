@@ -82,6 +82,7 @@ const SETTLE_GUARD_MS = 2000;
 type RecordedFetch = {
   urls: string[];
   fetchWithTimeout: (url: string, init?: RequestInit) => Promise<Response>;
+  readJsonWithTimeout: (res: Response) => Promise<Record<string, unknown>>;
 };
 
 /**
@@ -92,22 +93,28 @@ function recordedFetchWithTimeout(
   transport: (url: string, init: RequestInit) => Promise<Response>,
 ): RecordedFetch {
   const script = getClientScriptJs();
+  // Both helpers must share one controller registry, exactly like the shipped pair.
   const factory = new Function(
     'fetch',
-    `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
+    `const REQUEST_TIMEOUT_MS = 8000;\n`
+      + `const fetchControllers = new WeakMap();\n`
+      + `${extractFunction(script, 'fetchWithTimeout')}\n`
+      + `${extractFunction(script, 'readJsonWithTimeout')}\n`
+      + `return { fetchWithTimeout, readJsonWithTimeout };`,
   );
-  const real = factory(transport) as (
-    url: string,
-    init: RequestInit,
-    timeoutMs: number,
-  ) => Promise<Response>;
+  const real = factory(transport) as {
+    fetchWithTimeout: (url: string, init: RequestInit, timeoutMs: number) => Promise<Response>;
+    readJsonWithTimeout: (res: Response, timeoutMs: number) => Promise<Record<string, unknown>>;
+  };
   const urls: string[] = [];
   return {
     urls,
     fetchWithTimeout: (url: string, init: RequestInit = {}): Promise<Response> => {
       urls.push(url);
-      return real(url, init, POLL_TIMEOUT_MS);
+      return real.fetchWithTimeout(url, init, POLL_TIMEOUT_MS);
     },
+    readJsonWithTimeout: (res: Response): Promise<Record<string, unknown>> =>
+      real.readJsonWithTimeout(res, POLL_TIMEOUT_MS),
   };
 }
 
@@ -140,6 +147,7 @@ function healthyStatusResponse(): Response {
 function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
   elements: Map<string, FakeNode>;
   recorded: RecordedFetch;
+  backendUnavailable: Error[];
   loadStatus: () => Promise<void>;
 } {
   const script = getClientScriptJs();
@@ -153,24 +161,28 @@ function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promi
     getElementById: (id: string): FakeNode | null => elements.get(id) ?? null,
   };
   const recorded = recordedFetchWithTimeout(transport);
+  const backendUnavailable: Error[] = [];
   const factory = new Function(
     'document',
     'fetchWithTimeout',
-    'isBackendTransportError',
+    'readJsonWithTimeout',
     'noteBackendUnavailable',
     'noteBackendAvailable',
     'logEvent',
-    `let statusRefreshInFlight = false;\n${extractFunction(script, 'loadStatus')}\nreturn loadStatus;`,
+    `${extractFunction(script, 'isRequestTimeout')}\n`
+      + `${extractFunction(script, 'isBackendTransportError')}\n`
+      + `let statusRefreshInFlight = false;\n`
+      + `${extractFunction(script, 'loadStatus')}\nreturn loadStatus;`,
   );
   const loadStatus = factory(
     document,
     recorded.fetchWithTimeout,
-    () => false,
-    () => {},
+    recorded.readJsonWithTimeout,
+    (err: Error) => backendUnavailable.push(err),
     () => {},
     () => {},
   ) as () => Promise<void>;
-  return { elements, recorded, loadStatus };
+  return { elements, recorded, backendUnavailable, loadStatus };
 }
 
 function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
@@ -188,10 +200,66 @@ function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Pro
   const factory = new Function(
     'document',
     'fetchWithTimeout',
+    'readJsonWithTimeout',
     `let ragProgressInFlight = false;\n${extractFunction(script, 'loadRagIndexJobs')}\nreturn loadRagIndexJobs;`,
   );
-  const loadRagIndexJobs = factory(document, recorded.fetchWithTimeout) as () => Promise<void>;
+  const loadRagIndexJobs = factory(
+    document,
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+  ) as () => Promise<void>;
   return { container, recorded, loadRagIndexJobs };
+}
+
+function buildRuntimeRefreshSandbox(
+  transport: (url: string, init: RequestInit) => Promise<Response>,
+): {
+  recorded: RecordedFetch;
+  backendUnavailable: Error[];
+  runtime: Map<string, unknown>;
+  runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
+} {
+  const script = getClientScriptJs();
+  const recorded = recordedFetchWithTimeout(transport);
+  const backendUnavailable: Error[] = [];
+  const runtime = new Map<string, unknown>();
+  const factory = new Function(
+    'fetchWithTimeout',
+    'readJsonWithTimeout',
+    'isBackendTransportError',
+    'noteBackendUnavailable',
+    'logEvent',
+    'errorMessage',
+    'cachedWorkspaces',
+    'workspaceRuntimeRefreshControllers',
+    'workspaceRuntime',
+    'applyWorkspaceRuntimeSnapshot',
+    'renderWorkspaces',
+    `${extractFunction(script, 'runWorkspaceRuntimeRefresh')}\nreturn runWorkspaceRuntimeRefresh;`,
+  );
+  const runWorkspaceRuntimeRefresh = factory(
+    recorded.fetchWithTimeout,
+    recorded.readJsonWithTimeout,
+    () => true,
+    (err: Error) => backendUnavailable.push(err),
+    () => {},
+    (_data: unknown, fallback: string) => fallback,
+    [{ id: 'ws-1' }],
+    new Map(),
+    runtime,
+    (workspaceId: string, data: unknown) => runtime.set(workspaceId, data),
+    () => {},
+  ) as (workspaceId: string) => Promise<void>;
+  return { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh };
+}
+
+/** A response whose headers arrive immediately but whose body never settles. */
+function stalledBodyResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: (): Promise<Record<string, unknown>> => new Promise<Record<string, unknown>>(() => {}),
+  } as unknown as Response;
 }
 
 describe('background poll resilience', () => {
@@ -281,56 +349,213 @@ describe('background poll resilience', () => {
     expect(container.textContent).toBe('No native index jobs');
   });
 
-  it('bounds the runtime diagnostics and server log polls by the timeout helper', async () => {
-    const script = getClientScriptJs();
-    const recorded = recordedFetchWithTimeout(hangingTransport());
-    const texts: string[][] = [];
-    const setText = (id: string, value: string): void => {
-      texts.push([id, value]);
-    };
-    const document = {
-      getElementById: (): FakeNode | null => fakeNode(),
-    };
-    const diagnosticsFactory = new Function(
-      'document',
-      'fetchWithTimeout',
-      'setText',
-      'formatBytes',
-      'renderRuntimeRetention',
-      'emptyRow',
-      'errorMessage',
-      `${extractFunction(script, 'loadRuntimeDiagnostics')}\nreturn loadRuntimeDiagnostics;`,
-    );
-    const loadRuntimeDiagnostics = diagnosticsFactory(
-      document,
-      recorded.fetchWithTimeout,
-      setText,
-      () => '0 B',
-      () => {},
-      () => fakeNode(),
-      () => 'unavailable',
-    ) as () => Promise<void>;
+  const unresponsiveTransports: [
+    string,
+    (url: string, init: RequestInit) => Promise<Response>,
+  ][] = [
+    ['a transport that never answers', hangingTransport()],
+    ['a body that stalls mid-stream', (): Promise<Response> => Promise.resolve(stalledBodyResponse())],
+  ];
 
-    const logsFactory = new Function(
-      'document',
-      'fetchWithTimeout',
-      'renderLogs',
-      `let currentLogs = [];\n${extractFunction(script, 'fetchServerLogs')}\nreturn fetchServerLogs;`,
-    );
-    const fetchServerLogs = logsFactory(document, recorded.fetchWithTimeout, () => {}) as () => Promise<void>;
+  it.each(unresponsiveTransports)(
+    'bounds the runtime diagnostics and server log polls when %s',
+    async (_label, transport) => {
+      const script = getClientScriptJs();
+      const recorded = recordedFetchWithTimeout(transport);
+      const texts: string[][] = [];
+      const setText = (id: string, value: string): void => {
+        texts.push([id, value]);
+      };
+      const document = {
+        getElementById: (): FakeNode | null => fakeNode(),
+      };
+      const diagnosticsFactory = new Function(
+        'document',
+        'fetchWithTimeout',
+        'readJsonWithTimeout',
+        'setText',
+        'formatBytes',
+        'renderRuntimeRetention',
+        'emptyRow',
+        'errorMessage',
+        `${extractFunction(script, 'loadRuntimeDiagnostics')}\nreturn loadRuntimeDiagnostics;`,
+      );
+      const loadRuntimeDiagnostics = diagnosticsFactory(
+        document,
+        recorded.fetchWithTimeout,
+        recorded.readJsonWithTimeout,
+        setText,
+        () => '0 B',
+        () => {},
+        () => fakeNode(),
+        () => 'unavailable',
+      ) as () => Promise<void>;
+
+      const logsFactory = new Function(
+        'document',
+        'fetchWithTimeout',
+        'readJsonWithTimeout',
+        'renderLogs',
+        `let currentLogs = [];\n${extractFunction(script, 'fetchServerLogs')}\nreturn fetchServerLogs;`,
+      );
+      const fetchServerLogs = logsFactory(
+        document,
+        recorded.fetchWithTimeout,
+        recorded.readJsonWithTimeout,
+        () => {},
+      ) as () => Promise<void>;
+
+      await Promise.race([
+        Promise.all([loadRuntimeDiagnostics(), fetchServerLogs()]),
+        new Promise((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error('a hung diagnostics or log poll never settled')),
+            SETTLE_GUARD_MS,
+          );
+        }),
+      ]);
+
+      expect(recorded.urls).toEqual(['/api/runtime-diagnostics', '/api/logs']);
+      expect(texts).toContainEqual(['stat-runtime-rss', 'unavailable']);
+      expect(texts).toContainEqual(['runtime-diagnostics-source', 'unavailable']);
+    },
+  );
+
+  it('times out a response body that stalls mid-stream instead of pinning the guard', async () => {
+    let stallBody = true;
+    let abortedStalledRequest = false;
+    const transport = (_url: string, init: RequestInit): Promise<Response> => {
+      if (stallBody) {
+        init.signal?.addEventListener('abort', () => {
+          abortedStalledRequest = true;
+        });
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: (): Promise<Record<string, unknown>> => new Promise<Record<string, unknown>>(() => {}),
+        } as unknown as Response);
+      }
+      return Promise.resolve(healthyStatusResponse());
+    };
+    const { elements, recorded, loadStatus } = buildStatusSandbox(transport);
 
     await Promise.race([
-      Promise.all([loadRuntimeDiagnostics(), fetchServerLogs()]),
+      loadStatus(),
       new Promise((_resolve, reject) => {
         setTimeout(
-          () => reject(new Error('a hung diagnostics or log poll never settled')),
+          () => reject(new Error('a stalled response body wedged the status poller')),
           SETTLE_GUARD_MS,
         );
       }),
     ]);
 
-    expect(recorded.urls).toEqual(['/api/runtime-diagnostics', '/api/logs']);
-    expect(texts).toContainEqual(['stat-runtime-rss', 'unavailable']);
-    expect(texts).toContainEqual(['runtime-diagnostics-source', 'unavailable']);
+    expect(recorded.urls).toEqual(['/api/status']);
+    expect(elements.get('status-led')?.className).toBe('led offline');
+    expect(elements.get('servers-telemetry')?.textContent).toContain(
+      'Unable to reach backend: Response body timed out after',
+    );
+    // A locked body stream cannot be cancelled, so the deadline must abort the request
+    // itself; otherwise every stalled poll holds its connection open.
+    expect(abortedStalledRequest).toBe(true);
+
+    stallBody = false;
+    await loadStatus();
+
+    expect(recorded.urls).toEqual(['/api/status', '/api/status']);
+    expect(elements.get('status-led')?.className).toBe('led');
+    expect(elements.get('stat-loopback-port')?.textContent).toBe('18765');
+  });
+
+  it('releases the goal-runtime refresh slot when a response body stalls mid-stream', async () => {
+    let stallBody = true;
+    const transport = (): Promise<Response> =>
+      Promise.resolve(stallBody ? stalledBodyResponse() : {
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ snapshots: [], cursor: null }),
+      } as unknown as Response);
+    const { recorded, backendUnavailable, runtime, runWorkspaceRuntimeRefresh } =
+      buildRuntimeRefreshSandbox(transport);
+
+    await Promise.race([
+      runWorkspaceRuntimeRefresh('ws-1'),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled goal-runtime body wedged its refresh slot')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/workspaces/ws-1/goal-runtime']);
+    expect(backendUnavailable).toHaveLength(1);
+    expect((backendUnavailable[0] as { code?: string }).code).toBe('request_timeout');
+    expect(runtime.get('ws-1')).toMatchObject({
+      error: expect.stringContaining('Response body timed out after'),
+    });
+
+    stallBody = false;
+    await runWorkspaceRuntimeRefresh('ws-1');
+
+    expect(recorded.urls).toEqual([
+      '/api/workspaces/ws-1/goal-runtime',
+      '/api/workspaces/ws-1/goal-runtime',
+    ]);
+    expect(runtime.get('ws-1')).toEqual({ snapshots: [], cursor: null });
+  });
+
+  it('releases the index-progress guard when a response body stalls mid-stream', async () => {
+    let stallBody = true;
+    const transport = (): Promise<Response> =>
+      Promise.resolve(stallBody ? stalledBodyResponse() : {
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ available: true, jobs: [] }),
+      } as unknown as Response);
+    const { container, recorded, loadRagIndexJobs } = buildRagIndexSandbox(transport);
+
+    await Promise.race([
+      loadRagIndexJobs(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error('a stalled index-progress body wedged the poll')),
+          SETTLE_GUARD_MS,
+        );
+      }),
+    ]);
+
+    expect(recorded.urls).toEqual(['/api/rag-index-jobs']);
+    expect(container.textContent).toBe('Unable to read native index progress');
+
+    stallBody = false;
+    await loadRagIndexJobs();
+
+    expect(recorded.urls).toEqual(['/api/rag-index-jobs', '/api/rag-index-jobs']);
+    expect(container.textContent).toBe('No native index jobs');
+  });
+
+  it('classifies a request timeout as a backend transport failure', async () => {
+    let mode: 'hang' | 'http-error' | 'healthy' = 'hang';
+    const transport = (url: string, init: RequestInit): Promise<Response> => {
+      if (mode === 'hang') return hangingTransport()(url, init);
+      if (mode === 'http-error') {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({}) } as unknown as Response);
+      }
+      return Promise.resolve(healthyStatusResponse());
+    };
+    const { backendUnavailable, loadStatus } = buildStatusSandbox(transport);
+
+    await loadStatus();
+    expect(backendUnavailable).toHaveLength(1);
+    expect((backendUnavailable[0] as { code?: string }).code).toBe('request_timeout');
+
+    mode = 'http-error';
+    await loadStatus();
+    expect(backendUnavailable).toHaveLength(1);
+
+    mode = 'healthy';
+    await loadStatus();
+    expect(backendUnavailable).toHaveLength(1);
+    expect(backendUnavailable[0]?.message).toContain('Request timed out after');
   });
 });

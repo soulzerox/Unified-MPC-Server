@@ -163,6 +163,47 @@ describe('IdeSyncService.repairManagedBlocks', () => {
     expect(await readFile(agentsFile, 'utf8')).toBe(halfWritten);
   });
 
+  it('skips a file whose closing marker precedes its opening marker instead of appending a block', async () => {
+    const { home, workspace } = await makeRoots();
+    const agentsFile = path.join(workspace, 'AGENTS.md');
+    // The reversed pair passes a presence-only check and then falls into
+    // `replaceOrAppendPolicyBlock`'s append branch, writing a second block.
+    const reversed = `# Project notes\n\n${POLICY_BLOCK_END}\n\nQuoted markers in prose.\n\n${POLICY_BLOCK_START}\n`;
+    await writeFile(agentsFile, reversed, 'utf8');
+
+    const result = await service(home, workspace).repairManagedBlocks();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.updated).toEqual([]);
+    expect(result.value.skipped).toContain(agentsFile);
+    expect(await readFile(agentsFile, 'utf8')).toBe(reversed);
+  });
+
+  it('skips a file that repeats a marker instead of leaving a stale second block behind', async () => {
+    const { home, workspace } = await makeRoots();
+    const agentsFile = path.join(workspace, 'AGENTS.md');
+    // Replacing only the first pair would report `updated` once and then
+    // `unchanged` on every later pass while the second, stale block survives.
+    const duplicated = [
+      '# Project notes',
+      '',
+      `${POLICY_BLOCK_START}\n| P1 | child:memory | memory | server | REALTIME | ✅ YES |\n${POLICY_BLOCK_END}`,
+      '',
+      `${POLICY_BLOCK_START}\n| P1 | child:memory | memory | server | REALTIME | ✅ YES |\n${POLICY_BLOCK_END}`,
+      '',
+    ].join('\n');
+    await writeFile(agentsFile, duplicated, 'utf8');
+
+    const result = await service(home, workspace).repairManagedBlocks();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.updated).toEqual([]);
+    expect(result.value.skipped).toContain(agentsFile);
+    expect(await readFile(agentsFile, 'utf8')).toBe(duplicated);
+  });
+
   it('skips workspace targets when no workspace root is configured', async () => {
     const { home, workspace } = await makeRoots();
     const agentsFile = path.join(workspace, 'AGENTS.md');

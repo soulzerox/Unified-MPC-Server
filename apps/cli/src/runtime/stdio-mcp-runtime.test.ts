@@ -732,61 +732,92 @@ describe('stdio MCP runtime', () => {
   it('repairs a stale generated workspace policy block at startup and never touches global files', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-policy-repair-'));
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-policy-workspace-'));
-    temporaryRoots.push(dataPath, workspaceRoot);
-    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
-    // The settings document an upgraded install still has on disk: before the
-    // runtime reads its policy snapshot, startup must migrate it in place.
-    new SqliteSettingsRepository(database).set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
-      mode: 'enable_all',
-      mandatoryMcpServers: ['memory', 'thai-rag-mcp'],
-      policies: [
-        { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively.', requiredTools: ['search_nodes'] },
-        { id: 'pre-edit:thai-rag', resourceId: 'thai-rag-mcp', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Use local RAG automatically.', requiredTools: ['pre_edit_context'] },
-      ],
-    }));
-    database.close();
-    const agentsFile = path.join(workspaceRoot, 'AGENTS.md');
-    await writeFile(agentsFile, [
-      '# Project notes',
-      '',
-      'Keep this line.',
-      '',
-      POLICY_BLOCK_START,
-      '| P1 | child:memory | memory | server | REALTIME | ✅ YES |',
-      POLICY_BLOCK_END,
-      '',
-      'Tail content stays.',
-      '',
-    ].join('\n'), 'utf8');
-    const project = {
-      id: 'policy-repair-workspace',
-      displayName: 'policy repair',
-      rootPath: workspaceRoot,
-      realRootPath: workspaceRoot,
-      createdAt: '2026-11-03T00:00:00.000Z',
-    };
-
-    const runtime = createStdioMcpRuntime(dataPath, project);
+    // The runtime builds its IdeSyncService without an explicit home, so HOME
+    // decides which host-global instruction files it can even see. Pin it to a
+    // temp directory: otherwise this test reads the developer's real files, and
+    // a scope regression would rewrite them before any assertion could fail.
+    const fakeHome = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-policy-home-'));
+    temporaryRoots.push(dataPath, workspaceRoot, fakeHome);
+    const previousHome = process.env.HOME;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = fakeHome;
+    delete process.env.CODEX_HOME;
     try {
-      const report = await runtime.managedPolicyRepairReady;
-      expect(report).toBeDefined();
-      expect(report?.updated).toContain(agentsFile);
-      // Six workspace artifacts: a per-session host owns nothing host-global.
-      expect(report?.scanned).toBe(6);
-      expect(report?.failed).toEqual([]);
-    } finally {
-      await runtime.close();
-    }
+      const staleGlobalBlock = `${POLICY_BLOCK_START}\n| P1 | child:memory | memory | server | REALTIME | ✅ YES |\n${POLICY_BLOCK_END}\n`;
+      const claudeGlobal = path.join(fakeHome, '.claude', 'CLAUDE.md');
+      const opencodeGlobal = path.join(fakeHome, '.config', 'opencode', 'AGENTS.md');
+      const claudeContent = `# Global notes\n\nKeep me.\n\n${staleGlobalBlock}`;
+      const opencodeContent = `# Global OpenCode notes\n\nKeep me too.\n\n${staleGlobalBlock}`;
+      await mkdir(path.dirname(claudeGlobal), { recursive: true });
+      await mkdir(path.dirname(opencodeGlobal), { recursive: true });
+      await writeFile(claudeGlobal, claudeContent, 'utf8');
+      await writeFile(opencodeGlobal, opencodeContent, 'utf8');
 
-    const repaired = await readFile(agentsFile, 'utf8');
-    expect(repaired).toContain('# Project notes');
-    expect(repaired).toContain('Keep this line.');
-    expect(repaired).toContain('Tail content stays.');
-    expect(repaired).toContain('memory:workspace-selective');
-    expect(repaired).not.toContain('child:memory');
-    expect(repaired.match(new RegExp(POLICY_BLOCK_START, 'g'))).toHaveLength(1);
-    expect(repaired.match(new RegExp(POLICY_BLOCK_END, 'g'))).toHaveLength(1);
+      const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+      // The settings document an upgraded install still has on disk: before the
+      // runtime reads its policy snapshot, startup must migrate it in place.
+      new SqliteSettingsRepository(database).set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+        mode: 'enable_all',
+        mandatoryMcpServers: ['memory', 'thai-rag-mcp'],
+        policies: [
+          { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively.', requiredTools: ['search_nodes'] },
+          { id: 'pre-edit:thai-rag', resourceId: 'thai-rag-mcp', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Use local RAG automatically.', requiredTools: ['pre_edit_context'] },
+        ],
+      }));
+      database.close();
+      const agentsFile = path.join(workspaceRoot, 'AGENTS.md');
+      await writeFile(agentsFile, [
+        '# Project notes',
+        '',
+        'Keep this line.',
+        '',
+        POLICY_BLOCK_START,
+        '| P1 | child:memory | memory | server | REALTIME | ✅ YES |',
+        POLICY_BLOCK_END,
+        '',
+        'Tail content stays.',
+        '',
+      ].join('\n'), 'utf8');
+      const project = {
+        id: 'policy-repair-workspace',
+        displayName: 'policy repair',
+        rootPath: workspaceRoot,
+        realRootPath: workspaceRoot,
+        createdAt: '2026-11-03T00:00:00.000Z',
+      };
+
+      const runtime = createStdioMcpRuntime(dataPath, project);
+      try {
+        const report = await runtime.managedPolicyRepairReady;
+        expect(report).toBeDefined();
+        expect(report?.updated).toContain(agentsFile);
+        // Six workspace artifacts: a per-session host owns nothing host-global.
+        expect(report?.scanned).toBe(6);
+        expect(report?.failed).toEqual([]);
+      } finally {
+        await runtime.close();
+      }
+
+      const repaired = await readFile(agentsFile, 'utf8');
+      expect(repaired).toContain('# Project notes');
+      expect(repaired).toContain('Keep this line.');
+      expect(repaired).toContain('Tail content stays.');
+      expect(repaired).toContain('memory:workspace-selective');
+      expect(repaired).not.toContain('child:memory');
+      expect(repaired.match(new RegExp(POLICY_BLOCK_START, 'g'))).toHaveLength(1);
+      expect(repaired.match(new RegExp(POLICY_BLOCK_END, 'g'))).toHaveLength(1);
+      // The host-global files carry a stale block of their own, so any scope
+      // regression is visible byte-for-byte instead of only in `scanned`.
+      expect(await readFile(claudeGlobal, 'utf8')).toBe(claudeContent);
+      expect(await readFile(opencodeGlobal, 'utf8')).toBe(opencodeContent);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    }
   }, 30_000);
+
 
   it('wires durable goals and scheduled continuation orchestration from the same SQLite repository', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-continuation-'));

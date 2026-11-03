@@ -228,10 +228,11 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
       + `${extractFunction(script, 'noteBackendAvailable')}\n`
       + `${extractFunction(script, 'noteEndpointUnavailable')}\n`
       + `${extractFunction(script, 'noteEndpointAvailable')}\n`
+      + `${extractFunction(script, 'pruneWorkspaceEndpointStates')}\n`
       + `${extractFunction(script, 'loadStatus')}\n`
       + `${extractFunction(script, 'loadGatewayStatus')}\n`
       + `${extractFunction(script, 'runWorkspaceRuntimeRefresh')}\n`
-      + `return { loadStatus, loadGatewayStatus, runWorkspaceRuntimeRefresh };`,
+      + `return { loadStatus, loadGatewayStatus, runWorkspaceRuntimeRefresh, pruneWorkspaceEndpointStates };`,
   );
   const built = factory(
     recorded.fetchWithTimeout,
@@ -248,6 +249,7 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     loadStatus: () => Promise<void>;
     loadGatewayStatus: () => Promise<void>;
     runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
+    pruneWorkspaceEndpointStates: (registeredIds: Set<string>) => void;
   };
   return {
     recorded,
@@ -255,6 +257,7 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     loadStatus: built.loadStatus,
     loadGatewayStatus: built.loadGatewayStatus,
     runWorkspaceRuntimeRefresh: built.runWorkspaceRuntimeRefresh,
+    pruneWorkspaceEndpointStates: built.pruneWorkspaceEndpointStates,
   };
 }
 
@@ -1021,7 +1024,7 @@ describe('background poll resilience', () => {
       }
       return Promise.resolve(healthyRuntime());
     };
-    const { logs, runWorkspaceRuntimeRefresh } = buildAvailabilitySandbox(transport);
+    const { logs, runWorkspaceRuntimeRefresh, pruneWorkspaceEndpointStates } = buildAvailabilitySandbox(transport);
 
     for (let cycle = 0; cycle < 3; cycle += 1) {
       await runWorkspaceRuntimeRefresh('ws-1');
@@ -1040,6 +1043,22 @@ describe('background poll resilience', () => {
     expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
       'SUCCESS Project goal runtime restored',
     ]);
+
+    // Unregistering ws-2 while it is still stalled drops its remembered transition: a
+    // relink restores the same id, so a stale "unavailable" would swallow the next real
+    // failure and then log a recovery nobody saw.
+    siblingMode = 'stalled';
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(2);
+
+    pruneWorkspaceEndpointStates(new Set(['ws-1']));
+    pruneWorkspaceEndpointStates(new Set(['ws-1', 'ws-2']));
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(3);
+
+    siblingMode = 'healthy';
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toHaveLength(2);
   });
 });
 

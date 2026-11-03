@@ -295,6 +295,22 @@ export function getClientScriptJs(): string {
         }
       }
 
+      /**
+       * The goal-runtime keys share the lifecycle of the other per-workspace state: a
+       * workspace that is no longer registered must not keep a transition. Unregister
+       * only archives the row and relinking restores the same id, so a remembered
+       * "unavailable" would swallow the first real failure after the relink and then
+       * log a recovery nobody saw.
+       */
+      function pruneWorkspaceEndpointStates(registeredIds) {
+        const prefix = 'goal-runtime:';
+        for (const key of [...endpointConnectionStates.keys()]) {
+          if (key.startsWith(prefix) && !registeredIds.has(key.slice(prefix.length))) {
+            endpointConnectionStates.delete(key);
+          }
+        }
+      }
+
       async function loadStatus() {
         if (statusRefreshInFlight) return;
         statusRefreshInFlight = true;
@@ -831,6 +847,7 @@ export function getClientScriptJs(): string {
         const timer = workspaceRuntimeCatchupTimers.get(workspaceId);
         if (timer) clearTimeout(timer);
         workspaceRuntimeCatchupTimers.delete(workspaceId);
+        endpointConnectionStates.delete('goal-runtime:' + workspaceId);
       }
 
       function stopWorkspaceRuntimeFallback() {
@@ -861,6 +878,7 @@ export function getClientScriptJs(): string {
 
       function syncWorkspaceRuntimeStreams() {
         const registeredIds = new Set(cachedWorkspaces.map((workspace) => workspace.id));
+        pruneWorkspaceEndpointStates(registeredIds);
         for (const workspaceId of [...workspaceRuntimeRefreshControllers.keys()]) {
           if (!registeredIds.has(workspaceId)) clearWorkspaceRuntimeState(workspaceId);
         }

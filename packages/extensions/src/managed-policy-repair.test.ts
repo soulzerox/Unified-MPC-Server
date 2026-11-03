@@ -1,8 +1,10 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { withConfigMutationTransaction } from './config-mutation-lock.js';
+import { configMutationLockPath, withConfigMutationTransaction } from './config-mutation-lock.js';
 import {
   DEFAULT_POLICIES,
   IdeSyncService,
@@ -149,6 +151,41 @@ describe('IdeSyncService.repairManagedBlocks', () => {
     if (!result.ok) throw new Error(result.error.message);
     expect(result.value.updated).toContain(agentsFile);
     expect(await readFile(agentsFile, 'utf8')).toContain('memory:workspace-selective');
+  });
+
+  it('repairs the block after an interrupted repair leaves a stale lock behind', async () => {
+    const { home, workspace } = await makeRoots();
+    const agentsFile = path.join(workspace, 'AGENTS.md');
+    await writeFile(agentsFile, `# Project notes\n\n${STALE_BLOCK}\nTail stays.\n`, 'utf8');
+
+    // A writer killed between acquiring the lock and releasing it leaves the
+    // lock directory behind. Without reclaim, every later startup would wait
+    // the full 30 s deadline and skip the repair.
+    const dead = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const deadPid = dead.pid;
+    if (deadPid === undefined) throw new Error('child process did not expose a pid');
+    await new Promise<void>((resolve, reject) => {
+      dead.once('exit', () => resolve());
+      dead.once('error', reject);
+    });
+    const lockPath = configMutationLockPath(agentsFile);
+    await mkdir(lockPath, { mode: 0o700 });
+    await writeFile(path.join(lockPath, `${deadPid}-${randomUUID()}.owner`), `${deadPid}\n`);
+
+    try {
+      const result = await service(home, workspace).repairManagedBlocks({ includeGlobalTargets: false });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(result.value.updated).toContain(agentsFile);
+
+      const repaired = await readFile(agentsFile, 'utf8');
+      expect(repaired).toContain('memory:workspace-selective');
+      expect(repaired).not.toContain('child:memory');
+      expect(repaired).toContain('# Project notes');
+      expect(repaired).toContain('Tail stays.');
+    } finally {
+      await rm(lockPath, { recursive: true, force: true });
+    }
   });
 
   it('is idempotent: a second repair reports the file as unchanged and rewrites nothing', async () => {

@@ -63,7 +63,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - `corepack pnpm --filter @unified-mpc/cli typecheck` — passed, `EXIT_CODE=0`.
 - Targeted ESLint for changed extension source/test files — passed, `EXIT_CODE=0`.
 - Extension transaction regression: `corepack pnpm --filter @unified-mpc/extensions test` — 9 test files, 81 tests passed, `EXIT_CODE=0`; covers Recovery Trash, rollback, OS-lock self-check, shared install/prune serialization, config rollback, and malformed-config fail-closed behavior.
-- Extension transaction uses an OS lock keyed by config set plus an in-process queue; acquisition times out fail-closed rather than reclaiming a possibly reused PID's lock. `node scripts/test-config-mutation-lock.mjs` verifies two separate processes serialize.
+- Extension transaction uses an OS lock keyed by config set plus an in-process queue. A new acquisition publishes a fully populated owner directory with one atomic rename, so waiters never observe a half-created lock. Acquisition reclaims a lock only when the recorded owner PID is provably gone; a live or unverifiable owner still times out fail-closed. `node scripts/test-config-mutation-lock.mjs` verifies two separate processes serialize.
 - Purge data moves into Recovery Trash with a recovery ID before completion. Session/config failure restores moved paths when possible; errors expose `recoveryStatus` as `partial` or `rollback_failed`.
 - Release gate `corepack pnpm release:verify` passed locally on the exact clean commit; live ChatGPT Web/Cloudflare evidence remains operator-gated.
 
@@ -72,7 +72,7 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - Workspace-scoped pruner recovery records now use Recovery Center layout and version-2 metadata when an explicit `workspaceId` is supplied. Global prune records retain legacy metadata; runtime wiring must supply a registered workspace identity before those records can appear in Recovery Center.
 - Recovery metadata is written before payload rename and promoted to `restored` only after restore side effects succeed. Startup reconciliation is accepted as report-only: unsafe entries block startup, orphan payloads remain operator-visible, and `recoveryReady` is the runnable gate. No automatic destructive transition is permitted without provider identity evidence.
 - External MCP execution is fail-closed without current descriptor/catalog fingerprints. Child calls enforce declared input/output schema checks, 1 MiB argument and 8 MiB result limits, and a safe inherited environment allowlist.
-- Config mutation lock uses a per-acquisition owner file and removes only its own owner record. Cross-process serialization self-check passes.
+- Config mutation lock publishes a staged owner directory atomically, removes only its own owner record on release, and reclaims a lock only when the recorded owner PID is provably dead. Cross-process serialization self-check passes.
 - Checkpoint key storage validates and hardens every existing parent ancestor and requires key file mode `0600`.
 - `release:verify` prints and validates exact `HEAD`, rejects dirty trees, and accepts optional `RELEASE_EXPECTED_SHA`. CI actions are pinned to immutable commit SHAs.
 

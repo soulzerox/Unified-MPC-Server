@@ -46,6 +46,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { WorkspaceService, isMachineRootPath, isProjectWorkspace, workspaceLifecycleKind } from '@unified-mpc/workspace';
+import { EXTENSIONS_SETTINGS_KEY, ensureExtensionsSettingsMigrated } from '@unified-mpc/extensions';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
@@ -119,6 +120,9 @@ export async function runWeb(
       };
     })();
     bootstrapNonSecretSettings(settings);
+    // #4: the control plane rewrites and renders the persisted extensions
+    // document, so reconcile it before the server exposes any policy surface.
+    ensureExtensionsSettingsMigrated(settings, EXTENSIONS_SETTINGS_KEY);
     const lifecycleCandidates = await workspaceService.list();
     const protectedByOpenGoal: string[] = [];
     const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();

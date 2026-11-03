@@ -14,7 +14,7 @@ import {
 } from '@unified-mpc/storage';
 import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
-import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY } from '@unified-mpc/extensions';
+import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY, EXTENSIONS_SETTINGS_SCHEMA_VERSION } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
@@ -686,6 +686,48 @@ describe('stdio MCP runtime', () => {
       await persistedRuntime.close();
     }
   }, 15_000);
+
+  it('reconciles persisted pre-native-capability extensions settings at startup', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-extensions-migration-'));
+    temporaryRoots.push(dataPath);
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    new SqliteSettingsRepository(database).set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+      mode: 'enable_all',
+      mandatoryMcpServers: ['memory', 'thai-rag-mcp', 'godkiller'],
+      policies: [
+        { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively.', requiredTools: ['search_nodes'] },
+        { id: 'pre-edit:thai-rag', resourceId: 'thai-rag-mcp', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Use local RAG automatically.', requiredTools: ['pre_edit_context'] },
+        { id: 'code-safety:godkiller', resourceId: 'godkiller', resourceType: 'server', mandatory: true, enforcement: 'SAFETY_PRE_CHECK', directive: 'Use Godkiller before code mutations.', requiredTools: ['gk_task'] },
+      ],
+    }));
+    database.close();
+
+    const first = createStdioMcpRuntime(dataPath, workspace);
+    await first.close();
+    const second = createStdioMcpRuntime(dataPath, workspace);
+    await second.close();
+
+    const reopened = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    try {
+      const persisted = JSON.parse(new SqliteSettingsRepository(reopened).get(EXTENSIONS_SETTINGS_KEY)!) as {
+        settingsVersion: number;
+        mandatoryMcpServers: string[];
+        policies: Array<{ id: string; resourceType: string; mandatory: boolean; enforcement: string }>;
+      };
+      expect(persisted.settingsVersion).toBe(EXTENSIONS_SETTINGS_SCHEMA_VERSION);
+      expect(persisted.mandatoryMcpServers).toEqual([]);
+      expect(persisted.policies.map((policy) => policy.id)).toEqual([
+        'memory:workspace-selective',
+        'code:pre-edit-context',
+        'code-safety:godkiller',
+      ]);
+      expect(persisted.policies[0]).toMatchObject({ resourceType: 'capability', mandatory: false, enforcement: 'ON_DEMAND' });
+      expect(persisted.policies[1]).toMatchObject({ resourceType: 'capability', mandatory: true, enforcement: 'SAFETY_PRE_CHECK' });
+      expect(persisted.policies[2]).toMatchObject({ resourceType: 'server', mandatory: false, enforcement: 'ON_DEMAND' });
+    } finally {
+      reopened.close();
+    }
+  }, 30_000);
 
   it('wires durable goals and scheduled continuation orchestration from the same SQLite repository', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-continuation-'));

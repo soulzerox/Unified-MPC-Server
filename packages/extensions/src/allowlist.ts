@@ -17,6 +17,11 @@ export function parseExtensionsSettings(raw: string | null | undefined): Extensi
       mandatoryMcpServers: record.mandatoryMcpServers === undefined
         ? DEFAULT_EXTENSIONS_SETTINGS.mandatoryMcpServers
         : stringArray(record.mandatoryMcpServers),
+      ...(typeof record.settingsVersion === 'number'
+        && Number.isInteger(record.settingsVersion)
+        && record.settingsVersion >= 0
+        ? { settingsVersion: record.settingsVersion }
+        : {}),
       ...(record.policies === undefined ? {} : { policies: policyArray(record.policies) }),
     };
   } catch {

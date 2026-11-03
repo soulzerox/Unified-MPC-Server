@@ -270,20 +270,26 @@ export function getClientScriptJs(): string {
         }
       }
 
-      function noteEndpointUnavailable(endpoint, err) {
+      /**
+       * Per-endpoint transitions. The key defaults to the label but exists because one
+       * label can cover several independent endpoints: the goal-runtime poller runs
+       * once per registered project, so its transitions are keyed per workspace and a
+       * healthy project cannot report a recovery that another project has not reached.
+       */
+      function noteEndpointUnavailable(endpoint, err, key = endpoint) {
         // The probe already reported a whole-backend outage; an endpoint failing
         // because of it must not add a second line on every cycle.
         if (backendConnectionState === 'unavailable') return;
-        const transition = transitionBackendConnectionState(endpointConnectionStates.get(endpoint) || 'unknown', 'unavailable');
-        endpointConnectionStates.set(endpoint, transition.state);
+        const transition = transitionBackendConnectionState(endpointConnectionStates.get(key) || 'unknown', 'unavailable');
+        endpointConnectionStates.set(key, transition.state);
         if (transition.event === 'unavailable') {
           logEvent('ERROR', endpoint + ' unavailable: ' + (err?.message || String(err)));
         }
       }
 
-      function noteEndpointAvailable(endpoint) {
-        const transition = transitionBackendConnectionState(endpointConnectionStates.get(endpoint) || 'unknown', 'available');
-        endpointConnectionStates.set(endpoint, transition.state);
+      function noteEndpointAvailable(endpoint, key = endpoint) {
+        const transition = transitionBackendConnectionState(endpointConnectionStates.get(key) || 'unknown', 'available');
+        endpointConnectionStates.set(key, transition.state);
         if (transition.event === 'recovered') {
           logEvent('SUCCESS', endpoint + ' restored');
         }
@@ -727,7 +733,7 @@ export function getClientScriptJs(): string {
           if (!res.ok) throw new Error(errorMessage(data, 'Goal runtime request failed'));
           if (controller.signal.aborted) return;
           applyWorkspaceRuntimeSnapshot(workspaceId, data);
-          noteEndpointAvailable('Project goal runtime');
+          noteEndpointAvailable('Project goal runtime', 'goal-runtime:' + workspaceId);
         } catch (err) {
           if (controller.signal.aborted) return;
           const current = workspaceRuntime.get(workspaceId);
@@ -737,7 +743,7 @@ export function getClientScriptJs(): string {
             error: err.message,
           });
           renderWorkspaces();
-          if (isBackendTransportError(err)) noteEndpointUnavailable('Project goal runtime', err);
+          if (isBackendTransportError(err)) noteEndpointUnavailable('Project goal runtime', err, 'goal-runtime:' + workspaceId);
           else logEvent('WARN', 'Goal runtime refresh failed for ' + workspaceId + ': ' + err.message);
         } finally {
           if (workspaceRuntimeRefreshControllers.get(workspaceId) === controller) {

@@ -188,14 +188,16 @@ function buildStatusSandbox(transport: (url: string, init: RequestInit) => Promi
 }
 
 /**
- * Wires the shipped availability helpers, `loadStatus` and `loadGatewayStatus` into one
- * scope so a test can observe what a single stalled endpoint does to the shared log.
+ * Wires the shipped availability helpers, `loadStatus`, `loadGatewayStatus` and the
+ * per-workspace goal-runtime refresh into one scope, so a test can observe what a
+ * single stalled endpoint does to the shared log.
  */
 function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
   recorded: RecordedFetch;
   logs: string[];
   loadStatus: () => Promise<void>;
   loadGatewayStatus: () => Promise<void>;
+  runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
 } {
   const script = getClientScriptJs();
   const recorded = recordedFetchWithTimeout(transport);
@@ -209,11 +211,17 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     'console',
     'renderGatewayUnavailable',
     'transitionBackendConnectionState',
+    'errorMessage',
+    'applyWorkspaceRuntimeSnapshot',
+    'renderWorkspaces',
     `let backendConnectionState = 'unknown';\n`
       + `const endpointConnectionStates = new Map();\n`
       + `let statusRefreshInFlight = false;\n`
       + `let gatewayStatusSeq = 0;\n`
       + `let gatewayStatusAppliedSeq = 0;\n`
+      + `let cachedWorkspaces = [{ id: 'ws-1' }, { id: 'ws-2' }];\n`
+      + `const workspaceRuntimeRefreshControllers = new Map();\n`
+      + `const workspaceRuntime = new Map();\n`
       + `${extractFunction(script, 'isRequestTimeout')}\n`
       + `${extractFunction(script, 'isBackendTransportError')}\n`
       + `${extractFunction(script, 'noteBackendUnavailable')}\n`
@@ -222,7 +230,8 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
       + `${extractFunction(script, 'noteEndpointAvailable')}\n`
       + `${extractFunction(script, 'loadStatus')}\n`
       + `${extractFunction(script, 'loadGatewayStatus')}\n`
-      + `return { loadStatus, loadGatewayStatus };`,
+      + `${extractFunction(script, 'runWorkspaceRuntimeRefresh')}\n`
+      + `return { loadStatus, loadGatewayStatus, runWorkspaceRuntimeRefresh };`,
   );
   const built = factory(
     recorded.fetchWithTimeout,
@@ -232,8 +241,21 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     { error: () => {} },
     () => {},
     transitionBackendConnectionState,
-  ) as { loadStatus: () => Promise<void>; loadGatewayStatus: () => Promise<void> };
-  return { recorded, logs, loadStatus: built.loadStatus, loadGatewayStatus: built.loadGatewayStatus };
+    (_data: unknown, fallback: string) => fallback,
+    () => {},
+    () => {},
+  ) as {
+    loadStatus: () => Promise<void>;
+    loadGatewayStatus: () => Promise<void>;
+    runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
+  };
+  return {
+    recorded,
+    logs,
+    loadStatus: built.loadStatus,
+    loadGatewayStatus: built.loadGatewayStatus,
+    runWorkspaceRuntimeRefresh: built.runWorkspaceRuntimeRefresh,
+  };
 }
 
 function buildRagIndexSandbox(transport: (url: string, init: RequestInit) => Promise<Response>): {
@@ -971,6 +993,53 @@ describe('background poll resilience', () => {
     ]);
     // The probe already reported the outage; the stalled endpoint adds nothing.
     expect(logs.filter((line) => line.includes('ChatGPT gateway unavailable'))).toHaveLength(1);
+
+    // Once the probe recovers, a gateway that is still stalled is reported again:
+    // the suppression must not swallow the endpoint's own outage for good.
+    statusMode = 'healthy';
+    await loadStatus();
+    await loadGatewayStatus();
+
+    expect(logs.filter((line) => line.includes('ChatGPT gateway unavailable'))).toHaveLength(2);
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
+      'SUCCESS ChatGPT gateway restored',
+      'SUCCESS Backend connection restored',
+    ]);
+  });
+
+  it('keeps a healthy project from reporting recovery for a stalled sibling', async () => {
+    let siblingMode: 'healthy' | 'stalled' = 'stalled';
+    const healthyRuntime = (): Response =>
+      ({
+        ok: true,
+        status: 200,
+        json: async (): Promise<Record<string, unknown>> => ({ snapshots: [], cursor: null }),
+      } as unknown as Response);
+    const transport = (url: string): Promise<Response> => {
+      if (url === '/api/workspaces/ws-2/goal-runtime') {
+        return Promise.resolve(siblingMode === 'stalled' ? stalledBodyResponse() : healthyRuntime());
+      }
+      return Promise.resolve(healthyRuntime());
+    };
+    const { logs, runWorkspaceRuntimeRefresh } = buildAvailabilitySandbox(transport);
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await runWorkspaceRuntimeRefresh('ws-1');
+      await runWorkspaceRuntimeRefresh('ws-2');
+    }
+
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toEqual([
+      'ERROR Project goal runtime unavailable: Response body timed out after 20ms',
+    ]);
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([]);
+
+    siblingMode = 'healthy';
+    await runWorkspaceRuntimeRefresh('ws-2');
+    await runWorkspaceRuntimeRefresh('ws-2');
+
+    expect(logs.filter((line) => line.startsWith('SUCCESS'))).toEqual([
+      'SUCCESS Project goal runtime restored',
+    ]);
   });
 });
 

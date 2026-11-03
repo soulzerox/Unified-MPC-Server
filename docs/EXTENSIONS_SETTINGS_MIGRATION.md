@@ -32,7 +32,12 @@ compute the same document and the last write does not change the result.
 
 ## What is migrated
 
-For persisted built-in/default provenance only:
+Only a document below version 2 is migrated. A document that already carries
+`settingsVersion: 2` is authoritative user state and is returned unchanged, so a
+policy the user re-enables (for example a mandatory Godkiller policy saved from
+the WebUI) is never forced back to a legacy default on restart.
+
+For pre-versioned documents with built-in/default provenance only:
 
 | Before | After |
 | --- | --- |

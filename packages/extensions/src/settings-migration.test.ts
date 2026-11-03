@@ -132,14 +132,13 @@ describe('extensions settings migration', () => {
 
   it('preserves a user-defined MCP server that reuses a retired built-in name', () => {
     const settings = legacySettings({
-      settingsVersion: EXTENSIONS_SETTINGS_SCHEMA_VERSION,
+      settingsVersion: 1,
       extraMcpServers: { memory: { command: 'node', args: ['custom-memory.js'] } },
       mandatoryMcpServers: ['memory'],
       policies: [{ ...LEGACY_MEMORY_POLICY, directive: 'Use my own memory server.' }],
     });
 
     const result = migrateExtensionsSettings(settings);
-    expect(result.changed).toBe(false);
     expect(result.settings.mandatoryMcpServers).toEqual(['memory']);
     expect(result.settings.policies).toEqual([{ ...LEGACY_MEMORY_POLICY, directive: 'Use my own memory server.' }]);
     expect(result.notices.map((notice) => notice.code)).toEqual(expect.arrayContaining([
@@ -151,6 +150,38 @@ describe('extensions settings migration', () => {
     expect(configuredPolicies(result.settings)).toEqual([
       expect.objectContaining({ id: 'child:memory', resourceId: 'memory', resourceType: 'server' }),
     ]);
+  });
+
+  it('never rewrites a current-version document, including a re-enabled Godkiller', () => {
+    const userPolicy: PolicyEntry = {
+      id: 'code-safety:godkiller',
+      resourceId: 'godkiller',
+      resourceType: 'server',
+      mandatory: true,
+      enforcement: 'SAFETY_PRE_CHECK',
+      directive: 'Use Godkiller before code mutations.',
+      requiredTools: ['gk_task'],
+    };
+    const settings: ExtensionsSettings = {
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      settingsVersion: EXTENSIONS_SETTINGS_SCHEMA_VERSION,
+      mandatoryMcpServers: ['godkiller', 'memory'],
+      policies: [userPolicy],
+    };
+    const result = migrateExtensionsSettings(settings);
+    expect(result.changed).toBe(false);
+    expect(result.settings).toBe(settings);
+    expect(result.notices).toEqual([]);
+  });
+
+  it('removes retired default names from a pre-policy document', () => {
+    const result = migrateExtensionsSettings({
+      ...DEFAULT_EXTENSIONS_SETTINGS,
+      settingsVersion: undefined,
+      mandatoryMcpServers: ['memory', 'thai-rag-mcp'],
+    });
+    expect(result.settings.mandatoryMcpServers).toEqual([]);
+    expect(result.changed).toBe(true);
   });
 
   it('preserves an ambiguous legacy name instead of deleting possible user data', () => {

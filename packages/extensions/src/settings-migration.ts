@@ -77,9 +77,16 @@ function userConfiguredServerNames(settings: ExtensionsSettings): ReadonlySet<st
  * schema version and no legacy rows returns `changed: false`.
  */
 export function migrateExtensionsSettings(settings: ExtensionsSettings): ExtensionsSettingsMigrationResult {
+  // A document that already carries the current version is authoritative user
+  // state. Migrations only ever run against pre-versioned documents, so a v2
+  // policy the user re-enables is never forced back to its legacy default.
+  if ((settings.settingsVersion ?? 0) >= EXTENSIONS_SETTINGS_SCHEMA_VERSION) {
+    return { settings, changed: false, notices: [] };
+  }
+
   const notices: ExtensionsSettingsMigrationNotice[] = [];
   const userServers = userConfiguredServerNames(settings);
-  let changed = settings.settingsVersion !== EXTENSIONS_SETTINGS_SCHEMA_VERSION;
+  let changed = true;
 
   // Policies first: a migrated built-in policy is the strong provenance signal
   // that allows the matching mandatory-server pin to be removed.
@@ -194,7 +201,18 @@ function migratePolicy(
 
   // #6d55129 moved Godkiller from a mandatory pre-edit child to an on-demand
   // safety check; persisted documents still carry the old mandatory shape.
-  if (policy.id === 'code-safety:godkiller' && policy.resourceType === 'server' && policy.mandatory) {
+  if (policy.id === 'code-safety:godkiller'
+    && policy.resourceType === 'server'
+    && resourceKey === 'godkiller'
+    && policy.mandatory) {
+    if (userServers.has(resourceKey)) {
+      notices.push({
+        code: 'user-defined-policy-preserved',
+        message: `Kept policy ${policy.id} because ${policy.resourceId} is a user-defined MCP server.`,
+        resourceId: policy.resourceId,
+      });
+      return { policy, migrated: false };
+    }
     const replacement = defaultPolicy('code-safety:godkiller');
     if (replacement !== undefined) {
       notices.push({

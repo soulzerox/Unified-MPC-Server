@@ -187,6 +187,36 @@ describe('gateway status projection', () => {
     expect(elements.get('connect-btn')?.disabled).toBe(true);
   });
 
+  it('fails closed when a 200 body cannot be projected', async () => {
+    let mode: 'healthy' | 'unprojectable' = 'healthy';
+    const fetchImpl = async (): Promise<Response> => {
+      if (mode === 'unprojectable') {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => null,
+        } as unknown as Response;
+      }
+      return healthyResponse();
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+
+    mode = 'unprojectable';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
+
+    mode = 'healthy';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+  });
+
   it('ignores an older response that a newer applied response superseded', async () => {
     let resolveFirst: ((response: Response) => void) | undefined;
     let calls = 0;

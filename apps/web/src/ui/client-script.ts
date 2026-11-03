@@ -1693,7 +1693,6 @@ export function getClientScriptJs(): string {
           if (!res.ok) throw new Error('Gateway status failed');
           const data = await res.json();
           if (seq <= gatewayStatusAppliedSeq) return;
-          gatewayStatusAppliedSeq = seq;
           const state = data.state || 'STOPPED';
           const bridgeEl = document.getElementById('bridge-state');
           const connectBtn = document.getElementById('connect-btn');
@@ -1758,10 +1757,11 @@ export function getClientScriptJs(): string {
           if (bridgeEl) {
             bridgeEl.style.color = isHealthy ? 'var(--status-healthy)' : state === 'INITIALIZING' ? 'var(--status-syncing)' : 'var(--text-secondary)';
           }
+          gatewayStatusAppliedSeq = seq;
         } catch (err) {
           if (seq <= gatewayStatusAppliedSeq) return;
-          gatewayStatusAppliedSeq = seq;
           renderGatewayUnavailable();
+          gatewayStatusAppliedSeq = seq;
           if (isBackendTransportError(err)) noteBackendUnavailable(err);
           else console.error(err);
         }

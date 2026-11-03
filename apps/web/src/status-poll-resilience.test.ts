@@ -198,11 +198,19 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
   loadStatus: () => Promise<void>;
   loadGatewayStatus: () => Promise<void>;
   runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
+  syncWorkspaceRuntimeStreams: () => void;
+  clearWorkspaceRuntimeState: (workspaceId: string) => void;
+  setCachedWorkspaces: (ids: string[]) => void;
 } {
   const script = getClientScriptJs();
   const recorded = recordedFetchWithTimeout(transport);
   const logs: string[] = [];
   const document = { getElementById: (): null => null };
+  function FakeEventSource(): void {
+    // The stream itself is not under test; only the per-workspace bookkeeping around it.
+  }
+  FakeEventSource.prototype.addEventListener = (): void => {};
+  FakeEventSource.prototype.close = (): void => {};
   const factory = new Function(
     'fetchWithTimeout',
     'readJsonWithTimeout',
@@ -214,14 +222,26 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     'errorMessage',
     'applyWorkspaceRuntimeSnapshot',
     'renderWorkspaces',
+    'EventSource',
+    'refreshWorkspaceRuntime',
+    'noteWorkspaceRuntimeEvent',
     `let backendConnectionState = 'unknown';\n`
       + `const endpointConnectionStates = new Map();\n`
       + `let statusRefreshInFlight = false;\n`
       + `let gatewayStatusSeq = 0;\n`
       + `let gatewayStatusAppliedSeq = 0;\n`
       + `let cachedWorkspaces = [{ id: 'ws-1' }, { id: 'ws-2' }];\n`
+      + `function setCachedWorkspaces(ids) { cachedWorkspaces = ids.map(function (id) { return { id: id }; }); }\n`
       + `const workspaceRuntimeRefreshControllers = new Map();\n`
+      + `const workspaceRuntimeRefreshPending = new Map();\n`
+      + `const workspaceRuntimeTargets = new Map();\n`
+      + `const workspaceRuntimeCatchupAttempts = new Map();\n`
+      + `const workspaceRuntimeCatchupTimers = new Map();\n`
       + `const workspaceRuntime = new Map();\n`
+      + `let workspaceRuntimeStream = null;\n`
+      + `let workspaceRuntimeStreamWorkspaceKey = '';\n`
+      + `let workspaceRuntimeFallbackTimer = null;\n`
+      + `let workspaceRuntimeFallbackIndex = 0;\n`
       + `${extractFunction(script, 'isRequestTimeout')}\n`
       + `${extractFunction(script, 'isBackendTransportError')}\n`
       + `${extractFunction(script, 'noteBackendUnavailable')}\n`
@@ -229,10 +249,15 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
       + `${extractFunction(script, 'noteEndpointUnavailable')}\n`
       + `${extractFunction(script, 'noteEndpointAvailable')}\n`
       + `${extractFunction(script, 'pruneWorkspaceEndpointStates')}\n`
+      + `${extractFunction(script, 'stopWorkspaceRuntimeFallback')}\n`
+      + `${extractFunction(script, 'scheduleWorkspaceRuntimeFallback')}\n`
+      + `${extractFunction(script, 'closeWorkspaceRuntimeStream')}\n`
+      + `${extractFunction(script, 'clearWorkspaceRuntimeState')}\n`
+      + `${extractFunction(script, 'syncWorkspaceRuntimeStreams')}\n`
       + `${extractFunction(script, 'loadStatus')}\n`
       + `${extractFunction(script, 'loadGatewayStatus')}\n`
       + `${extractFunction(script, 'runWorkspaceRuntimeRefresh')}\n`
-      + `return { loadStatus, loadGatewayStatus, runWorkspaceRuntimeRefresh, pruneWorkspaceEndpointStates };`,
+      + `return { loadStatus, loadGatewayStatus, runWorkspaceRuntimeRefresh, syncWorkspaceRuntimeStreams, clearWorkspaceRuntimeState, setCachedWorkspaces };`,
   );
   const built = factory(
     recorded.fetchWithTimeout,
@@ -245,11 +270,16 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     (_data: unknown, fallback: string) => fallback,
     () => {},
     () => {},
+    FakeEventSource,
+    () => Promise.resolve(),
+    () => {},
   ) as {
     loadStatus: () => Promise<void>;
     loadGatewayStatus: () => Promise<void>;
     runWorkspaceRuntimeRefresh: (workspaceId: string) => Promise<void>;
-    pruneWorkspaceEndpointStates: (registeredIds: Set<string>) => void;
+    syncWorkspaceRuntimeStreams: () => void;
+    clearWorkspaceRuntimeState: (workspaceId: string) => void;
+    setCachedWorkspaces: (ids: string[]) => void;
   };
   return {
     recorded,
@@ -257,7 +287,9 @@ function buildAvailabilitySandbox(transport: (url: string, init: RequestInit) =>
     loadStatus: built.loadStatus,
     loadGatewayStatus: built.loadGatewayStatus,
     runWorkspaceRuntimeRefresh: built.runWorkspaceRuntimeRefresh,
-    pruneWorkspaceEndpointStates: built.pruneWorkspaceEndpointStates,
+    syncWorkspaceRuntimeStreams: built.syncWorkspaceRuntimeStreams,
+    clearWorkspaceRuntimeState: built.clearWorkspaceRuntimeState,
+    setCachedWorkspaces: built.setCachedWorkspaces,
   };
 }
 
@@ -1024,7 +1056,13 @@ describe('background poll resilience', () => {
       }
       return Promise.resolve(healthyRuntime());
     };
-    const { logs, runWorkspaceRuntimeRefresh, pruneWorkspaceEndpointStates } = buildAvailabilitySandbox(transport);
+    const {
+      logs,
+      runWorkspaceRuntimeRefresh,
+      syncWorkspaceRuntimeStreams,
+      clearWorkspaceRuntimeState,
+      setCachedWorkspaces,
+    } = buildAvailabilitySandbox(transport);
 
     for (let cycle = 0; cycle < 3; cycle += 1) {
       await runWorkspaceRuntimeRefresh('ws-1');
@@ -1051,10 +1089,16 @@ describe('background poll resilience', () => {
     await runWorkspaceRuntimeRefresh('ws-2');
     expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(2);
 
-    pruneWorkspaceEndpointStates(new Set(['ws-1']));
-    pruneWorkspaceEndpointStates(new Set(['ws-1', 'ws-2']));
+    setCachedWorkspaces(['ws-1']);
+    syncWorkspaceRuntimeStreams();
+    setCachedWorkspaces(['ws-1', 'ws-2']);
+    syncWorkspaceRuntimeStreams();
     await runWorkspaceRuntimeRefresh('ws-2');
     expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(3);
+
+    clearWorkspaceRuntimeState('ws-2');
+    await runWorkspaceRuntimeRefresh('ws-2');
+    expect(logs.filter((line) => line.startsWith('ERROR'))).toHaveLength(4);
 
     siblingMode = 'healthy';
     await runWorkspaceRuntimeRefresh('ws-2');

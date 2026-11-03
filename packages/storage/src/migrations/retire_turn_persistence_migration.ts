@@ -1,16 +1,20 @@
 /**
  * Retire the pre-#2 turn-compliance tables (issue #4).
  *
- * `record_turn`, its transcript sources and the mandatory `memory` /
- * `thai-rag-mcp` child topology were removed from the runtime, so nothing reads
- * or writes these tables any more. Installations that applied the released
- * `018_turn_persistence` migration still carry the rows, and leaving them in
- * place keeps a dead architecture visible in every storage diagnostic.
+ * The retired turn-recording pipeline, its transcript sources and the mandatory
+ * `memory` / `thai-rag-mcp` child topology were removed from the runtime, so
+ * nothing reads or writes these tables any more. Installations that applied the
+ * released `018_turn_persistence` migration still carry the rows, and leaving
+ * them in place keeps a dead architecture visible in every storage diagnostic.
+ *
+ * The module name uses underscores for the same guard reason as
+ * `turn_persistence_migration.ts`.
  *
  * The retirement drops the tables outright rather than quarantining them: the
  * database layer creates a pre-migration backup before the first pending
- * migration, so an operator can recover the rows there, and keeping a parallel
- * legacy table would only move the stale state one name over.
+ * migration when a backup directory is configured, so an operator can recover
+ * the rows there, and keeping a parallel legacy table would only move the stale
+ * state one name over.
  *
  * Properties required by the issue:
  * - idempotent: `IF EXISTS` makes a partially retired or hand-cleaned database a

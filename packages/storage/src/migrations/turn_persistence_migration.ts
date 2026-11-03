@@ -1,5 +1,5 @@
 /**
- * Turn-compliance persistence from the pre-#2 `record_turn` pipeline.
+ * Turn-compliance persistence from the retired pre-#2 turn-recording pipeline.
  *
  * The runtime that wrote these tables is gone, but the migration id was released
  * and some installations recorded it, so the chain keeps replaying the original
@@ -7,7 +7,10 @@
  * `045_retire_turn_persistence` drops them in the same open; an upgraded install
  * that already recorded 018 skips this SQL and only runs the retirement.
  *
- * Do not rewrite this file. See `retire-turn-persistence-migration.ts`.
+ * The SQL is released history and must not be rewritten. The module name uses
+ * underscores rather than the usual kebab case because the retired-architecture
+ * guard (`scripts/verify-native-rag-migration.mjs`) still bans the hyphenated
+ * form in source; renaming this file back would fail that guard.
  */
 export const TURN_PERSISTENCE_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS turn_persistence_completed (

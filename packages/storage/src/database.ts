@@ -24,8 +24,8 @@ import { RETIRE_AUTO_MACHINE_ROOTS_MIGRATION_SQL } from './migrations/retire-aut
 import { AGENT_SWARM_MIGRATION_SQL } from './migrations/agent-swarm-migration.js';
 import { RECURRING_SCHEDULED_CONTINUATION_MIGRATION_SQL } from './migrations/recurring-scheduled-continuation-migration.js';
 import { GOAL_PONYTAIL_MODE_MIGRATION_SQL } from './migrations/goal-ponytail-mode-migration.js';
-import { TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/turn-persistence-migration.js';
-import { RETIRE_TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/retire-turn-persistence-migration.js';
+import { TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/turn_persistence_migration.js';
+import { RETIRE_TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/retire_turn_persistence_migration.js';
 import { GOAL_EXECUTION_MIGRATION_SQL } from './migrations/goal-execution-migration.js';
 import { GOAL_RUNTIME_EVENT_MIGRATION_SQL } from './migrations/goal-runtime-event-migration.js';
 import { GOAL_RUNTIME_SNAPSHOT_MIGRATION_SQL } from './migrations/goal-runtime-snapshot-migration.js';

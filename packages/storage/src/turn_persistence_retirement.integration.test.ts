@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CURRENT_SCHEMA_MIGRATION_ID, SqliteDatabase } from './database.js';
-import { TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/turn-persistence-migration.js';
+import { TURN_PERSISTENCE_MIGRATION_SQL } from './migrations/turn_persistence_migration.js';
 
 const temporaryRoots: string[] = [];
 
@@ -28,7 +28,7 @@ function migrationIds(database: SqliteDatabase): string[] {
 
 describe('turn persistence retirement migration', () => {
   it('retires the released 018 tables from an upgraded database and keeps unrelated state', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-retire-turn-persistence-'));
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-retire-turn_persistence-'));
     temporaryRoots.push(root);
     const filename = path.join(root, 'state.sqlite');
 

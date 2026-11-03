@@ -123,6 +123,8 @@ export {
   replaceOrAppendPolicyBlock,
   writeAtomic,
   type IdeSyncOptions,
+  type ManagedPolicyRepairOptions,
+  type ManagedPolicyRepairReport,
   type PolicyEntry,
   type PolicyPriority,
   type SyncTarget,

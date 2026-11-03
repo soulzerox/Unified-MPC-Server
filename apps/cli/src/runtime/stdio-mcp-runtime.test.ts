@@ -14,7 +14,7 @@ import {
 } from '@unified-mpc/storage';
 import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
-import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY, EXTENSIONS_SETTINGS_SCHEMA_VERSION } from '@unified-mpc/extensions';
+import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY, EXTENSIONS_SETTINGS_SCHEMA_VERSION, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
@@ -727,6 +727,65 @@ describe('stdio MCP runtime', () => {
     } finally {
       reopened.close();
     }
+  }, 30_000);
+
+  it('repairs a stale generated workspace policy block at startup and never touches global files', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-policy-repair-'));
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-policy-workspace-'));
+    temporaryRoots.push(dataPath, workspaceRoot);
+    const database = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    // The settings document an upgraded install still has on disk: before the
+    // runtime reads its policy snapshot, startup must migrate it in place.
+    new SqliteSettingsRepository(database).set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+      mode: 'enable_all',
+      mandatoryMcpServers: ['memory', 'thai-rag-mcp'],
+      policies: [
+        { id: 'child:memory', resourceId: 'memory', resourceType: 'server', mandatory: true, enforcement: 'REALTIME', directive: 'Use working memory proactively.', requiredTools: ['search_nodes'] },
+        { id: 'pre-edit:thai-rag', resourceId: 'thai-rag-mcp', resourceType: 'server', mandatory: true, enforcement: 'EVERY_SESSION', directive: 'Use local RAG automatically.', requiredTools: ['pre_edit_context'] },
+      ],
+    }));
+    database.close();
+    const agentsFile = path.join(workspaceRoot, 'AGENTS.md');
+    await writeFile(agentsFile, [
+      '# Project notes',
+      '',
+      'Keep this line.',
+      '',
+      POLICY_BLOCK_START,
+      '| P1 | child:memory | memory | server | REALTIME | ✅ YES |',
+      POLICY_BLOCK_END,
+      '',
+      'Tail content stays.',
+      '',
+    ].join('\n'), 'utf8');
+    const project = {
+      id: 'policy-repair-workspace',
+      displayName: 'policy repair',
+      rootPath: workspaceRoot,
+      realRootPath: workspaceRoot,
+      createdAt: '2026-11-03T00:00:00.000Z',
+    };
+
+    const runtime = createStdioMcpRuntime(dataPath, project);
+    try {
+      const report = await runtime.managedPolicyRepairReady;
+      expect(report).toBeDefined();
+      expect(report?.updated).toContain(agentsFile);
+      // Six workspace artifacts: a per-session host owns nothing host-global.
+      expect(report?.scanned).toBe(6);
+      expect(report?.failed).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+
+    const repaired = await readFile(agentsFile, 'utf8');
+    expect(repaired).toContain('# Project notes');
+    expect(repaired).toContain('Keep this line.');
+    expect(repaired).toContain('Tail content stays.');
+    expect(repaired).toContain('memory:workspace-selective');
+    expect(repaired).not.toContain('child:memory');
+    expect(repaired.match(new RegExp(POLICY_BLOCK_START, 'g'))).toHaveLength(1);
+    expect(repaired.match(new RegExp(POLICY_BLOCK_END, 'g'))).toHaveLength(1);
   }, 30_000);
 
   it('wires durable goals and scheduled continuation orchestration from the same SQLite repository', async () => {

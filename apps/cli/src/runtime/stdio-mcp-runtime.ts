@@ -51,10 +51,13 @@ import {
 import { ALLOW_AI_DELETE_SETTING_KEY, DESTRUCTIVE_AUTO_APPROVAL_SETTING_KEY, DEFAULT_CODEX_TOOLS_ENABLED, DEFAULT_MCP_CALL_TIMEOUT_MS, DEFAULT_MCP_IDLE_TIMEOUT_MS, DEFAULT_PROCESS_TIMEOUT_MS, DEFAULT_MCP_POLL_WAIT_SECONDS, DEFAULT_PONYTAIL_MODE, DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, USER_SETTING_KEYS, parseBooleanSetting, parseCustomPermissionSettings, parseDestructiveAutoApprovalPolicy, parseIntegerSetting, parsePathList, parsePonytailMode, parseStringRecordSetting, type DestructiveAutoApprovalPolicy, type PonytailMode } from '@unified-mpc/shared';
 import {
   EXTENSIONS_SETTINGS_KEY,
+  IdeSyncService,
   InstallerService,
   createLocalExtensionsService,
   ensureExtensionsSettingsMigrated,
+  parseExtensionsSettings,
   type ExtensionsService,
+  type ManagedPolicyRepairReport,
 } from '@unified-mpc/extensions';
 import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
@@ -134,6 +137,13 @@ export interface StdioMcpRuntime {
   readonly goalRetentionEvidenceSealing?: GoalWorkspaceRetentionEvidenceSealingService;
   readonly actor: FileActor;
   readonly extensions: ExtensionsService;
+  /**
+   * #4 §4: one-shot repair of generated workspace policy artifacts that still
+   * describe the retired mandatory child topology. Global instruction files are
+   * never touched here; the long-lived control plane owns those. `close()`
+   * awaits the same promise, so a host can also observe the report directly.
+   */
+  readonly managedPolicyRepairReady: Promise<ManagedPolicyRepairReport | undefined>;
   readonly activityTracker: ActivityTracker;
   readonly activityReady: Promise<void>;
   readonly recoveryReady: Promise<void>;
@@ -255,6 +265,23 @@ export function createStdioMcpRuntime(
   // snapshot or generated client block reads it. Deterministic, so concurrent
   // starts converge on the same bytes instead of racing.
   ensureExtensionsSettingsMigrated(settingsRepository, EXTENSIONS_SETTINGS_KEY);
+  // #4 §4: an upgraded install keeps the managed policy block it generated
+  // before the native-capability topology existed. Repair the active workspace
+  // once, in the background, so a session start converges the block without the
+  // user pressing "Sync Policies". Repair only rewrites an existing managed
+  // block and never creates or appends one, and global instruction files are
+  // deliberately out of scope: a per-session child process must not rewrite
+  // instructions that belong to every project. That is the control plane's job.
+  const managedPolicyRepairReady: Promise<ManagedPolicyRepairReport | undefined> = new IdeSyncService({
+    workspaceRoot: workspace.realRootPath || workspace.rootPath,
+    settings: parseExtensionsSettings(settingsRepository.get(EXTENSIONS_SETTINGS_KEY)),
+  }).repairManagedBlocks({ includeGlobalTargets: false }).then(
+    (result): ManagedPolicyRepairReport | undefined => result.ok ? result.value : undefined,
+    // A best-effort upgrade must never take the session host down. Per-file
+    // failures are already reported inside the Result; a thrown pass is not
+    // actionable here and must not surface as an unhandled rejection.
+    (): undefined => undefined,
+  );
   const workspaceSelection = new WorkspaceSelectionService(
     workspaceRepository,
     workspace.id,
@@ -1206,6 +1233,7 @@ export function createStdioMcpRuntime(
     ...(goalRetentionEvidenceSealing === undefined ? {} : { goalRetentionEvidenceSealing }),
     actor,
     extensions,
+    managedPolicyRepairReady,
     activityTracker,
     activityReady,
     recoveryReady,
@@ -1232,6 +1260,7 @@ export function createStdioMcpRuntime(
       workspaceAuthorityWatcher.close();
       stopToolAvailabilityWatch();
       await recoveryReady.catch(() => undefined);
+      await managedPolicyRepairReady;
       managedResourceRecovery.close();
       clearInterval(heavyJobQueueRecoveryTimer);
       heavyJobQueue.close();

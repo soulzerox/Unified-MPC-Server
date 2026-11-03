@@ -1,9 +1,11 @@
-# Extensions Settings Migration (Issue #4, slice 2)
+# Extensions Settings and Policy Artifact Migration (Issue #4, slices 2-3)
 
 The persisted `extensions` settings document is reconciled at startup before any
-runtime policy, catalog or generated client block reads it. This document
-describes the upgrade contract for documents written before the native-capability
-topology replaced the mandatory child `memory` / `thai-rag-mcp` servers.
+runtime policy, catalog or generated client block reads it. Already-generated
+client policy artifacts are then repaired from the reconciled settings. This
+document describes the upgrade contract for installations written before the
+native-capability topology replaced the mandatory child `memory` /
+`thai-rag-mcp` servers.
 
 ## Version marker
 
@@ -91,8 +93,44 @@ left untouched; it is never replaced by defaults or half-written.
 | `ambiguous-mandatory-server-preserved` | A saved policy list does not prove built-in provenance, so the name was kept. |
 | `invalid-settings-json` | The persisted row is not a JSON object; no write happened. |
 
-## Out of scope in this slice
+## Generated client policy artifacts (slice 3)
 
-This slice reconciles the persisted settings document only. Generated IDE policy
-blocks, discovered child registry pins and the startup reconciliation marker for
-those surfaces remain tracked in issue #4.
+`IdeSyncService.repairManagedBlocks` converges artifacts that were generated
+before the settings migration. It runs automatically:
+
+| Entry point | Scope | Timing |
+| --- | --- | --- |
+| `createStdioMcpRuntime` | Active workspace only | Started right after the settings migration, awaited by `close()` |
+| `runWeb` with `repairManagedPolicies: true` (the CLI `web` command) | Host-global files plus the first configured `workspaceRoots` entry | Awaited before `ControlPlaneServer.listen()` |
+
+Scope split is deliberate. A per-session stdio host must never rewrite
+`~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or
+the other host-global instruction files: starting one project's session cannot
+be allowed to change instructions that belong to every project. The long-lived
+control plane owns those files. Workspace artifacts are repaired by both paths.
+
+`repairManagedBlocks` differs from `sync` in three ways that matter for an
+upgrade:
+
+- It only rewrites an artifact that already exists **and** already contains
+  `<!-- MCP-POLICY-START -->`. It never creates a file and never appends a
+  managed block, so an upgrade cannot start instructing an IDE or CLI the user
+  never configured. Use `sync` (or the WebUI "Sync Policies" action) to opt in
+  to a new target.
+- Every write is atomic and every target is independent. One unreadable file is
+  reported in `failed[]` without aborting the remaining repairs.
+- It compiles from the same `policySnapshot()` as `sync`, so startup repair and
+  a later manual sync converge on identical bytes. Running it again reports the
+  artifact as `unchanged` and rewrites nothing.
+
+The result is a `ManagedPolicyRepairReport` with `scanned`, `updated`,
+`unchanged`, `skipped` and `failed` entries. A failed repair never blocks
+startup. The stdio runtime exposes the report as `managedPolicyRepairReady`;
+`runWeb` returns it as `policyRepair`; the CLI prints updated and failed counts
+before announcing the control-plane URL.
+
+## Out of scope in these slices
+
+These slices reconcile the persisted settings document and the generated
+artifacts it feeds. Concurrency/interrupted-migration recovery, clean-install
+parity tests and the child-registry pin surface remain tracked in issue #4.

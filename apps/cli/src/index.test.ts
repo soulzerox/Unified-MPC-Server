@@ -49,6 +49,10 @@ describe('CLI argument parser', () => {
     expect(parseCliArgs(['codex', 'doctor'])).toEqual({ ok: true, value: { kind: 'codex-doctor' } });
     expect(parseCliArgs(['storage', 'recover'])).toEqual({ ok: true, value: { kind: 'storage-recover' } });
     expect(parseCliArgs(['storage', 'recover', 'extra'])).toMatchObject({ ok: false });
+    expect(parseCliArgs(['storage', 'metrics'])).toEqual({ ok: true, value: { kind: 'storage-metrics', json: false } });
+    expect(parseCliArgs(['storage', 'metrics', '--json'])).toEqual({ ok: true, value: { kind: 'storage-metrics', json: true } });
+    expect(parseCliArgs(['storage', 'metrics', '--json', 'extra'])).toMatchObject({ ok: false });
+    expect(parseCliArgs(['storage', 'metrics', '--everything'])).toMatchObject({ ok: false });
   });
 
   it('parses bifurcated install commands', () => {
@@ -579,6 +583,68 @@ describe('CLI execution dispatcher', () => {
       'storage recovered: /home/user/.local/share/unified-mpc/unified-mpc.sqlite -> /srv/unified-mpc/unified-mpc.sqlite',
       'provenance: /srv/unified-mpc/storage-recovery.json',
     ]);
+  });
+
+  it('executes storage metrics with bounded physical-space evidence', async () => {
+    const output: string[] = [];
+    const metrics = {
+      measuredAt: '2026-11-03T21:00:00.000Z',
+      inMemory: false,
+      databasePath: '/srv/unified-mpc/unified-mpc.sqlite',
+      databaseBytes: 12_345_678,
+      walBytes: 4_096,
+      shmBytes: 32_768,
+      pageSizeBytes: 4096,
+      pageCount: 3014,
+      freelistCount: 12,
+      freelistBytes: 49_152,
+      liveBytes: 12_296_526,
+      freelistRatio: 12 / 3014,
+      checkpoint: { mode: 'passive', busy: false, walPages: 1, checkpointedPages: 1, truncated: false },
+      compactionRecommended: false,
+      compactionReason: null,
+    };
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      storageMetrics: async () => metrics,
+      write: (text) => output.push(text),
+    };
+
+    const code = await runCli(['storage', 'metrics'], deps);
+    expect(code).toBe(0);
+    expect(output).toEqual([
+      'database\t/srv/unified-mpc/unified-mpc.sqlite',
+      'bytes\tdb=12345678 wal=4096 shm=32768 live=12296526',
+      'pages\tsize=4096 count=3014 freelist=12 (49152 bytes, 0.0040)',
+      'checkpoint\tmode=passive busy=false walPages=1 checkpointedPages=1 truncated=false',
+      'compaction\trecommended=false reason=none',
+    ]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['storage', 'metrics', '--json'], {
+      ...baseDependencies,
+      storageMetrics: async () => metrics,
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(json).toHaveLength(1);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual(metrics);
+  });
+
+  it('reports unavailable and failing storage metrics without crashing the CLI dispatcher', async () => {
+    const errors: string[] = [];
+    const unavailable = await runCli(['storage', 'metrics'], { ...baseDependencies, writeError: (text) => errors.push(text) });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Storage metrics service is not available']);
+
+    const thrown: string[] = [];
+    const failed = await runCli(['storage', 'metrics'], {
+      ...baseDependencies,
+      storageMetrics: async () => { throw new Error('database is locked'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(failed).toBe(1);
+    expect(thrown).toEqual(['database is locked']);
   });
 
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {

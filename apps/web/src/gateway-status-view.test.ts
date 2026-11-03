@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { getClientScriptJs } from './ui/client-script.js';
 
@@ -12,6 +12,8 @@ type FakeElement = {
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | undefined;
 };
+
+type StatusFetch = (url: string) => Promise<Response>;
 
 function fakeElement(): FakeElement {
   return {
@@ -35,8 +37,21 @@ function extractFunction(script: string, name: string): string {
   let start = script.indexOf(marker);
   if (start < 0) throw new Error(`function ${name} is missing from the client script`);
   if (script.slice(start - 6, start) === 'async ') start -= 6;
+  const openParen = script.indexOf('(', start);
+  let parenDepth = 0;
+  let bodyStart = -1;
+  for (let index = openParen; index < script.length; index += 1) {
+    if (script[index] === '(') parenDepth += 1;
+    else if (script[index] === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) {
+        bodyStart = script.indexOf('{', index);
+        break;
+      }
+    }
+  }
   let depth = 0;
-  for (let index = script.indexOf('{', start); index < script.length; index += 1) {
+  for (let index = bodyStart; index < script.length; index += 1) {
     if (script[index] === '{') depth += 1;
     else if (script[index] === '}') {
       depth -= 1;
@@ -61,7 +76,37 @@ const elementIds = [
   'chatgpt-view-connect-btn',
 ];
 
-function loadGatewayStatusForTest(fetchImpl: typeof fetch): {
+function healthyResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async (): Promise<Record<string, string>> => ({
+      state: 'BRIDGE_HEALTHY',
+      tunnelUrl: 'https://tunnel.example',
+      mcpUrl: 'https://mcp.example',
+    }),
+  } as unknown as Response;
+}
+
+function failedResponse(): Response {
+  return {
+    ok: false,
+    status: 500,
+    json: async (): Promise<Record<string, string>> => ({}),
+  } as unknown as Response;
+}
+
+function malformedResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async (): Promise<Record<string, string>> => {
+      throw new SyntaxError('Unexpected token < in JSON');
+    },
+  } as unknown as Response;
+}
+
+function loadGatewayStatusForTest(fetchImpl: StatusFetch): {
   elements: Map<string, FakeElement>;
   loadGatewayStatus: () => Promise<void>;
 } {
@@ -72,15 +117,15 @@ function loadGatewayStatusForTest(fetchImpl: typeof fetch): {
   };
   const factory = new Function(
     'document',
-    'fetch',
+    'fetchWithTimeout',
     'isBackendTransportError',
     'noteBackendUnavailable',
-    `${extractFunction(script, 'renderGatewayUnavailable')}\n${extractFunction(script, 'loadGatewayStatus')}\nreturn loadGatewayStatus;`,
+    `let gatewayStatusSeq = 0;\nlet gatewayStatusAppliedSeq = 0;\n${extractFunction(script, 'renderGatewayUnavailable')}\n${extractFunction(script, 'loadGatewayStatus')}\nreturn loadGatewayStatus;`,
   );
   const loadGatewayStatus = factory(
     document,
     fetchImpl,
-    (error: unknown) => error instanceof TypeError,
+    () => true,
     () => {},
   ) as () => Promise<void>;
   return { elements, loadGatewayStatus };
@@ -91,16 +136,9 @@ describe('gateway status projection', () => {
     let mode: 'healthy' | 'transport-failure' = 'healthy';
     const fetchImpl = async (): Promise<Response> => {
       if (mode === 'transport-failure') throw new TypeError('fetch failed');
-      return {
-        ok: true,
-        json: async (): Promise<Record<string, string>> => ({
-          state: 'BRIDGE_HEALTHY',
-          tunnelUrl: 'https://tunnel.example',
-          mcpUrl: 'https://mcp.example',
-        }),
-      } as unknown as Response;
+      return healthyResponse();
     };
-    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl as typeof fetch);
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
 
     await loadGatewayStatus();
     expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
@@ -115,6 +153,165 @@ describe('gateway status projection', () => {
     expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
     expect(elements.get('bridge-state')?.textContent).toBe('UNKNOWN');
     expect(elements.get('chatgpt-view-tunnel-badge')?.textContent).toBe('Status Unknown');
+  });
+
+  it('fails closed on HTTP errors and malformed payloads, then recovers', async () => {
+    let mode: 'healthy' | 'http-error' | 'bad-json' = 'healthy';
+    const fetchImpl = async (): Promise<Response> => {
+      if (mode === 'http-error') return failedResponse();
+      if (mode === 'bad-json') return malformedResponse();
+      return healthyResponse();
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+
+    mode = 'http-error';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
+
+    mode = 'healthy';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+    expect(elements.get('connect-btn')?.title).toBe('Ready to connect');
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('BRIDGE_HEALTHY');
+    expect(elements.get('chatgpt-view-tunnel-badge')?.textContent).toBe('Active Tunnel');
+
+    mode = 'bad-json';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+  });
+
+  it('fails closed when a 200 body cannot be projected', async () => {
+    let mode: 'healthy' | 'unprojectable' = 'healthy';
+    const fetchImpl = async (): Promise<Response> => {
+      if (mode === 'unprojectable') {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => null,
+        } as unknown as Response;
+      }
+      return healthyResponse();
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+
+    mode = 'unprojectable';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
+
+    mode = 'healthy';
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+  });
+
+  it('ignores an older response that a newer applied response superseded', async () => {
+    let resolveFirst: ((response: Response) => void) | undefined;
+    let calls = 0;
+    const fetchImpl = (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve(healthyResponse());
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+    const first = loadGatewayStatus();
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+
+    resolveFirst?.(failedResponse());
+    await first;
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#10B981');
+    expect(elements.get('connect-btn')?.disabled).toBe(false);
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('BRIDGE_HEALTHY');
+  });
+
+  it('ignores an older success that a newer failure superseded', async () => {
+    let resolveFirst: ((response: Response) => void) | undefined;
+    let calls = 0;
+    const fetchImpl = (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve(failedResponse());
+    };
+    const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+    const first = loadGatewayStatus();
+    await loadGatewayStatus();
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+
+    resolveFirst?.(healthyResponse());
+    await first;
+    expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+    expect(elements.get('connect-btn')?.disabled).toBe(true);
+    expect(elements.get('stat-bridge-state')?.textContent).toBe('UNKNOWN');
+  });
+
+  it('fails closed when a request times out with no newer applied response', async () => {
+    const calls: string[] = [];
+    const timeoutError = Object.assign(new Error('Request timed out after 8000ms'), {
+      code: 'request_timeout',
+    });
+    const fetchImpl = async (url: string): Promise<Response> => {
+      calls.push(url);
+      throw timeoutError;
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { elements, loadGatewayStatus } = loadGatewayStatusForTest(fetchImpl);
+
+      await loadGatewayStatus();
+      expect(calls).toEqual(['/api/chatgpt-gateway/status']);
+      expect(elements.get('canvas-gateway-dot')?.attrs.fill).toBe('#EF4444');
+      expect(elements.get('connect-btn')?.disabled).toBe(true);
+      expect(elements.get('connect-btn')?.title).toBe('Gateway status unavailable');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('aborts a hung request through the real timeout helper', async () => {
+    const script = getClientScriptJs();
+    const factory = new Function(
+      'fetch',
+      `${extractFunction(script, 'fetchWithTimeout')}\nreturn fetchWithTimeout;`,
+    );
+    const hangingFetch = (_url: string, init: RequestInit = {}): Promise<Response> =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          reject(new DOMException('Aborted', 'AbortError'));
+        });
+      });
+    const fetchWithTimeout = factory(hangingFetch) as (
+      url: string,
+      init: RequestInit,
+      timeoutMs: number,
+    ) => Promise<Response>;
+
+    await expect(fetchWithTimeout('/api/chatgpt-gateway/status', {}, 20)).rejects.toMatchObject({
+      code: 'request_timeout',
+    });
   });
 
   it('does not render a static success badge for the loopback origin', () => {

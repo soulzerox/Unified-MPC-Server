@@ -3,10 +3,12 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { CanonicalManifestStore } from './canonical-manifest-store.js';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import {
   advanceRevisionFromGit,
   classifySourcePath,
+  legacyRepositoryIdForRemoteUrl,
   repositoryIdForRemoteUrl,
   type CanonicalGitRevision,
   type CanonicalGitSource,
@@ -297,12 +299,63 @@ describe('repository identity from remote URL (#210 §1)', () => {
     expect(repositoryIdForRemoteUrl('git@github.com:example/repo')).toBe(base);
     expect(repositoryIdForRemoteUrl('git@github.com:example/repo.git/')).toBe(base);
     expect(repositoryIdForRemoteUrl('  git@github.com:example/repo.git  ')).toBe(base);
+    // The same repository over HTTPS, SSH URL syntax or a different case must
+    // not become a second trust boundary: a checkout whose URL form changes
+    // would otherwise be refused by the ref it already bound.
+    expect(repositoryIdForRemoteUrl('https://github.com/example/repo')).toBe(base);
+    expect(repositoryIdForRemoteUrl('https://github.com/example/repo.git')).toBe(base);
+    expect(repositoryIdForRemoteUrl('ssh://git@github.com/example/repo.git')).toBe(base);
+    expect(repositoryIdForRemoteUrl('git@github.com:Example/Repo.git')).toBe(base);
     expect(repositoryIdForRemoteUrl('git@github.com:example/other.git')).not.toBe(base);
     expect(base.startsWith('repo:v1:')).toBe(true);
   });
 
   it('refuses an empty remote', () => {
     expect(() => repositoryIdForRemoteUrl('   ')).toThrow(TypeError);
+  });
+
+  it('keeps the released derivation only for adopting pre-migration refs', () => {
+    // The formula shipped on main hashed the trimmed remote text, so a ref
+    // written by `index revision advance` before normalization is bound to it.
+    expect(legacyRepositoryIdForRemoteUrl('git@github.com:example/repo.git'))
+      .toBe(`repo:v1:${sha256('git@github.com:example/repo')}`);
+    expect(legacyRepositoryIdForRemoteUrl('  git@github.com:example/repo.git/ '))
+      .toBe(`repo:v1:${sha256('git@github.com:example/repo')}`);
+    expect(legacyRepositoryIdForRemoteUrl('https://github.com/Example/Repo.git'))
+      .toBe(`repo:v1:${sha256('https://github.com/Example/Repo')}`);
+    expect(legacyRepositoryIdForRemoteUrl('git@github.com:example/repo.git'))
+      .not.toBe(repositoryIdForRemoteUrl('git@github.com:example/repo.git'));
+    expect(() => legacyRepositoryIdForRemoteUrl('  ')).toThrow(TypeError);
+  });
+
+  it('adopts a ref bound to the released identity and re-binds it', async () => {
+    const root = await tempRoot();
+    try {
+      const source = new FakeGit({ 'src/a.ts': 'a' });
+      const legacy = legacyRepositoryIdForRemoteUrl(REMOTE);
+      const first = await advanceRevisionFromGit({
+        root, source, targetRef: REF, repositoryId: legacy, now: new Date('2026-11-04T00:00:00.000Z'),
+      });
+      expect(first.status).toBe('promoted');
+      if (first.status !== 'promoted') return;
+      const manifests = new CanonicalManifestStore(root);
+      const refs = new CanonicalRefStore(root);
+      expect((await manifests.get((await refs.read(REF))!.manifestId))?.repositoryId).toBe(legacy);
+
+      // The default path derives the normalized id. The old binding is the
+      // same remote under the released derivation, so it is adopted once and
+      // the ref is re-bound instead of being refused forever.
+      const second = await advanceRevisionFromGit({
+        root, source, targetRef: REF, now: new Date('2026-11-04T01:00:00.000Z'),
+      });
+      expect(second.status).toBe('promoted');
+      if (second.status !== 'promoted') return;
+      const current = repositoryIdForRemoteUrl(REMOTE);
+      expect(second.repositoryId).toBe(current);
+      expect((await manifests.get((await refs.read(REF))!.manifestId))?.repositoryId).toBe(current);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

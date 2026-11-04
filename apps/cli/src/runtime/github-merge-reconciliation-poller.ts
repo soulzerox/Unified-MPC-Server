@@ -2,7 +2,8 @@ import type {
   AutomaticMergeReconciliationService,
   ObservedMergeReconciliationResult,
 } from '@unified-mpc/application';
-import type { RepositoryMergePolicy } from '@unified-mpc/domain';
+import type { MergeReconciliationRecord, RepositoryMergePolicy } from '@unified-mpc/domain';
+import type { CanonicalAdvanceAfterMerge } from './canonical-merge-advance.js';
 import type { GitHubApiReader } from './github-merge-observer.js';
 
 export const MERGE_RECONCILIATION_POLL_STATE_KEY = 'merge_reconciliation_poll_state_v1';
@@ -49,7 +50,36 @@ export interface GitHubClosedPullRequestFeed {
 export interface MergeReconciliationPollerOptions {
   readonly pollIntervalMs?: number;
   readonly now?: () => Date;
+  /**
+   * Advance the canonical ref for the repository after a merge is reconciled
+   * (#210 §3). Absent means the poller only records merges; the operator then
+   * drives advancement with `index revision advance`.
+   */
+  readonly canonicalAdvance?: CanonicalAdvanceAfterMerge;
+  /**
+   * Receives every pass summary, including scheduled ones. Without it a
+   * scheduled poll discards its outcome, which would make a refused advance
+   * invisible; the runtime wires this to its log.
+   */
+  readonly onSummary?: (summary: MergeReconciliationPollSummary) => void;
 }
+
+/**
+ * What the runtime did with the canonical ref after reconciling merges in one
+ * repository. Reported rather than thrown: a failed advance is not a failed
+ * reconciliation, but it must never be silent (§11).
+ */
+export type MergeReconciliationPollCanonicalAdvance =
+  | {
+    readonly status: 'advanced' | 'noop';
+    readonly ref: string;
+    readonly commitSha: string;
+    readonly manifestId: string;
+    /** Artifact registration is metadata over a moved ref; its failure is reported, not swallowed. */
+    readonly artifacts: { readonly status: 'registered' | 'refused'; readonly reason?: string };
+  }
+  | { readonly status: 'refused'; readonly reason: string }
+  | { readonly status: 'skipped'; readonly reason: 'no_merge' | 'not_wired' | 'inspect_required' };
 
 export interface MergeReconciliationPollRepositorySummary {
   readonly repository: string;
@@ -59,6 +89,7 @@ export interface MergeReconciliationPollRepositorySummary {
   readonly policyBreaches: number;
   readonly ignoredHistorical: number;
   readonly cursorAdvanced: boolean;
+  readonly canonicalAdvance: MergeReconciliationPollCanonicalAdvance;
   readonly inspectReason?: string;
 }
 
@@ -69,6 +100,8 @@ export interface MergeReconciliationPollSummary {
 export class GitHubMergeReconciliationPoller {
   private readonly pollIntervalMs: number;
   private readonly now: () => Date;
+  private readonly canonicalAdvance: CanonicalAdvanceAfterMerge | undefined;
+  private readonly onSummary: ((summary: MergeReconciliationPollSummary) => void) | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
   private closed = false;
@@ -82,6 +115,8 @@ export class GitHubMergeReconciliationPoller {
   ) {
     this.pollIntervalMs = normalizePollInterval(options.pollIntervalMs);
     this.now = options.now ?? ((): Date => new Date());
+    this.canonicalAdvance = options.canonicalAdvance;
+    this.onSummary = options.onSummary;
   }
 
   public async start(): Promise<MergeReconciliationPollSummary> {
@@ -108,9 +143,21 @@ export class GitHubMergeReconciliationPoller {
       for (const policy of policies) {
         repositories.push(await this.reconcileRepository(policy));
       }
-      return { repositories };
+      const summary: MergeReconciliationPollSummary = { repositories };
+      this.emitSummary(summary);
+      return summary;
     } finally {
       this.running = false;
+    }
+  }
+
+  /** An observer must never be able to break the poll it is observing. */
+  private emitSummary(summary: MergeReconciliationPollSummary): void {
+    if (this.onSummary === undefined) return;
+    try {
+      this.onSummary(summary);
+    } catch {
+      // Deliberately ignored: reporting is best-effort, reconciliation is not.
     }
   }
 
@@ -157,6 +204,7 @@ export class GitHubMergeReconciliationPoller {
 
     let reconciled = 0;
     let policyBreaches = 0;
+    let newestMerged: { readonly mergedAt: number; readonly commitSha: string } | undefined;
     const terminalAtTimestamp = new Map<string, Set<number>>();
     for (const entry of historical) markTerminal(terminalAtTimestamp, entry);
 
@@ -177,6 +225,7 @@ export class GitHubMergeReconciliationPoller {
           policyBreaches,
           ignoredHistorical: historical.length,
           inspectReason: 'reconciliation_error',
+          canonicalAdvance: { status: 'skipped', reason: 'inspect_required' },
         };
       }
 
@@ -188,12 +237,27 @@ export class GitHubMergeReconciliationPoller {
           policyBreaches,
           ignoredHistorical: historical.length,
           inspectReason: result.reason,
+          canonicalAdvance: { status: 'skipped', reason: 'inspect_required' },
         };
       }
-      if (result.status === 'reconciled') reconciled += 1;
-      else policyBreaches += 1;
+      if (result.status === 'reconciled') {
+        reconciled += 1;
+        // `updatedAt` is feed order, not merge order: a comment or label on an
+        // older pull request moves it later. The newest merge is therefore
+        // chosen by `mergedAt`, and the ancestry check in the advance step
+        // still has to confirm it on the fetched branch.
+        const mergeSha = observedMergeSha(result.record);
+        if (mergeSha !== undefined) {
+          const mergedAt = update.mergedAt === undefined ? Number.NEGATIVE_INFINITY : Date.parse(update.mergedAt);
+          if (newestMerged === undefined || mergedAt >= newestMerged.mergedAt) {
+            newestMerged = { mergedAt, commitSha: mergeSha };
+          }
+        }
+      } else policyBreaches += 1;
       markTerminal(terminalAtTimestamp, update);
     }
+
+    const canonicalAdvance = await this.advanceCanonicalRef(policy, newestMerged?.commitSha);
 
     const nextCursor = advanceCursor(cursor, feedResult.updates, terminalAtTimestamp);
     let cursorAdvanced = false;
@@ -208,6 +272,7 @@ export class GitHubMergeReconciliationPoller {
           reconciled,
           policyBreaches,
           ignoredHistorical: historical.length,
+          canonicalAdvance,
         };
       }
     }
@@ -220,7 +285,35 @@ export class GitHubMergeReconciliationPoller {
       policyBreaches,
       ignoredHistorical: historical.length,
       cursorAdvanced,
+      canonicalAdvance,
     };
+  }
+
+  /**
+   * One advance per repository per poll, not per pull request: the gate reads
+   * the branch head, so advancing once after the pass is the same result as
+   * advancing per merge but without replaying the expensive hashing pass.
+   */
+  private async advanceCanonicalRef(
+    policy: RepositoryMergePolicy,
+    mergedCommitSha: string | undefined,
+  ): Promise<MergeReconciliationPollCanonicalAdvance> {
+    if (this.canonicalAdvance === undefined) return { status: 'skipped', reason: 'not_wired' };
+    if (mergedCommitSha === undefined) return { status: 'skipped', reason: 'no_merge' };
+    try {
+      const outcome = await this.canonicalAdvance({ policy, expectedCommitSha: mergedCommitSha });
+      return outcome.status === 'refused'
+        ? { status: 'refused', reason: outcome.reason }
+        : {
+          status: outcome.status,
+          ref: outcome.ref,
+          commitSha: outcome.commitSha,
+          manifestId: outcome.manifestId,
+          artifacts: outcome.artifacts,
+        };
+    } catch (error) {
+      return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   private schedulePoll(): void {
@@ -430,7 +523,20 @@ function summary(
     policyBreaches: 0,
     ignoredHistorical: 0,
     cursorAdvanced: false,
+    canonicalAdvance: { status: 'skipped', reason: 'no_merge' },
   };
+}
+
+/**
+ * The exact commit a reconciled merge produced, or undefined when the
+ * observation carried none. Read through an explicit optional shape: a
+ * reconciliation stub may hand back a record without an observation, and an
+ * absent sha must mean "do not advance", never a thrown poll.
+ */
+function observedMergeSha(record: MergeReconciliationRecord): string | undefined {
+  const observation = (record as { observation?: { mergeSha?: unknown } }).observation;
+  const mergeSha = observation?.mergeSha;
+  return typeof mergeSha === 'string' && mergeSha.trim().length > 0 ? mergeSha.trim() : undefined;
 }
 
 function floorToSecond(value: Date): Date {

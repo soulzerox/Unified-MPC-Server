@@ -12,6 +12,12 @@ import { CanonicalManifestStore, type StoredManifest } from './canonical-manifes
 export interface AdvanceRevisionInput {
   readonly canonicalRef: string;
   readonly repositoryId: string;
+  /**
+   * Repository ids an already-bound ref may carry in addition to
+   * `repositoryId`. A one-time identity migration names the previous id here;
+   * anything else is a different repository and is refused.
+   */
+  readonly adoptedRepositoryIds?: readonly string[];
   readonly revisionId: string;
   readonly commitSha: string;
   readonly targetEntries: readonly { readonly path: string; readonly contentHash: string }[];
@@ -47,12 +53,13 @@ function sorted(values: readonly string[]): string[] {
  * than re-embedded — the core "3/695 changed files must not rebuild"
  * guarantee.
  *
- * Fail-closed rules: an active ref without a readable base manifest, or a
- * base/target entry whose content hash is unverifiable, is rejected before
- * anything is written. The manifest is persisted before the ref moves, so
- * a reader that follows the ref always finds its manifest; a losing
- * promotion therefore leaves one unreferenced manifest, which is an
- * ordinary GC candidate.
+ * Fail-closed rules: a ref bound to a different repository (only the ids named
+ * by `adoptedRepositoryIds` may migrate it), an active ref without a readable
+ * base manifest, or a base/target entry whose content hash is unverifiable, is
+ * rejected before anything is written. The manifest is persisted before the ref
+ * moves, so a reader that follows the ref always finds its manifest; a losing
+ * promotion therefore leaves one unreferenced manifest, which is an ordinary GC
+ * candidate.
  */
 export async function advanceCanonicalRevision(
   manifests: CanonicalManifestStore,
@@ -63,6 +70,21 @@ export async function advanceCanonicalRevision(
   const base = live === null ? null : await manifests.get(live.manifestId);
   if (live !== null && base === null) {
     return { status: 'rejected', reason: `active ref ${input.canonicalRef} has no readable base manifest`, ...EMPTY };
+  }
+  // The ref belongs to one repository. Checked against the same read the
+  // promotion CAS uses, so a repository that took the ref over after the
+  // caller's own binding check is refused here instead of replacing it: the
+  // gate compares commit/tree/manifest ids only, and a target from another
+  // repository matches none of them but is still a legal promotion.
+  const acceptedRepositoryIds = input.adoptedRepositoryIds === undefined
+    ? [input.repositoryId]
+    : [input.repositoryId, ...input.adoptedRepositoryIds];
+  if (base !== null && !acceptedRepositoryIds.includes(base.repositoryId)) {
+    return {
+      status: 'rejected',
+      reason: `active ref ${input.canonicalRef} is bound to ${base.repositoryId}, not ${input.repositoryId}`,
+      ...EMPTY,
+    };
   }
 
   const target = sorted(input.targetEntries.map((entry) => entry.path));
@@ -109,7 +131,10 @@ export async function advanceCanonicalRevision(
 
   const decision = await refs.promote(input.canonicalRef, {
     expectedCurrent: input.expectedCurrent,
-    current: live,
+    // No `current`: the store must compare against the state on disk at promote
+    // time. Passing the snapshot read here would make the comparison
+    // self-referential (`expectedCurrent === current` by construction) and let
+    // two advances that read the same snapshot both win.
     target: state,
     targetVerified: input.targetVerified,
   });

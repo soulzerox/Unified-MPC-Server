@@ -100,6 +100,55 @@ describe('advance canonical revision (#210 U16)', () => {
     }
   });
 
+  it('conflicts when the ref changed on disk after the caller read it', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('c'.repeat(40)),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+      const winner = await refs.read(REF);
+
+      // The gate's own read sees "never promoted" while the store's promote-time
+      // read sees the winner. Comparing the expectation against the caller's
+      // snapshot instead of the ref on disk would promote over the winner.
+      const staleView = new (class extends CanonicalRefStore {
+        private first = true;
+        public override async read(
+          ...args: Parameters<CanonicalRefStore['read']>
+        ): Promise<Awaited<ReturnType<CanonicalRefStore['read']>>> {
+          if (this.first) {
+            this.first = false;
+            return null;
+          }
+          return super.read(...args);
+        }
+      })(dir);
+
+      const result = await advanceCanonicalRevision(manifests, staleView, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('e'.repeat(40)),
+        commitSha: 'e'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('9') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T02:00:00.000Z',
+      });
+
+      expect(result).toMatchObject({ status: 'conflict' });
+      expect(await refs.read(REF)).toEqual(winner);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('is a no-op when the target equals the active revision', async () => {
     const { refs, manifests, dir } = await tempPair();
     try {
@@ -216,6 +265,83 @@ describe('advance canonical revision (#210 U16)', () => {
       });
       expect(result).toMatchObject({ status: 'rejected' });
       expect((await refs.read(REF))!.commitSha).toBe('c'.repeat(40));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to take over a ref bound to another repository', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('c'.repeat(40)),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+      const current = await refs.read(REF);
+      const other = 'repo_other123';
+
+      // The caller's own pre-fetch binding check can be stale: a second
+      // repository may have bound the ref while that caller was fetching. The
+      // advance must refuse against the state it actually read, not overwrite
+      // the first repository's ref.
+      const result = await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: other,
+        revisionId: canonicalRevisionId({
+          repositoryId: other, commitSha: 'd'.repeat(40), treeOid: 'd'.repeat(40), targetRef: REF, parents: [],
+        }),
+        commitSha: 'd'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('9') }],
+        expectedCurrent: current,
+        targetVerified: true,
+        createdAt: '2026-10-17T05:00:00.000Z',
+      });
+
+      expect(result).toMatchObject({ status: 'rejected', reason: expect.stringMatching(/bound to repo_abc123/) });
+      expect(await refs.read(REF)).toEqual(current);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('adopts a named previous repository id and re-binds the ref to the current one', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      const legacy = 'repo_legacy123';
+      await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: legacy,
+        revisionId: canonicalRevisionId({
+          repositoryId: legacy, commitSha: 'c'.repeat(40), treeOid: 'c'.repeat(40), targetRef: REF, parents: [],
+        }),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+
+      const result = await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        adoptedRepositoryIds: [legacy],
+        revisionId: revisionId('d'.repeat(40)),
+        commitSha: 'd'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: await refs.read(REF),
+        targetVerified: true,
+        createdAt: '2026-10-17T06:00:00.000Z',
+      });
+
+      expect(result.status).toBe('promoted');
+      const live = await refs.read(REF);
+      expect((await manifests.get(live!.manifestId))?.repositoryId).toBe(REPO);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

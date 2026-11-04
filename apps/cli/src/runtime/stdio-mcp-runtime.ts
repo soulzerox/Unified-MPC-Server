@@ -109,6 +109,7 @@ import {
   type GitHubMergeApi,
 } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApiReader } from './github-merge-observer.js';
+import { createCanonicalMergeAdvance } from './canonical-merge-advance.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
@@ -697,6 +698,32 @@ export function createStdioMcpRuntime(
     createGitHubClosedPullRequestFeed(githubApi),
     createSettingsMergeReconciliationPollStateStore(settingsRepository),
     automaticMergeReconciliation,
+    {
+      // #210 §3: a reconciled merge is the runtime event that advances the
+      // canonical ref. Policies without `checkoutPath` still reconcile; they
+      // report `refused` instead of advancing a checkout nobody named.
+      canonicalAdvance: createCanonicalMergeAdvance({ canonicalRoot: path.join(dataPath, 'canonical') }),
+      // The scheduled pass has no caller reading its summary, so a refused
+      // advance is surfaced here or not at all.
+      onSummary: (summary): void => {
+        for (const entry of summary.repositories) {
+          if (entry.canonicalAdvance.status === 'refused') {
+            process.stderr.write(
+              `Unified-MPC canonical advance refused repository=${entry.repository} reason=${entry.canonicalAdvance.reason}\n`,
+            );
+            continue;
+          }
+          // The ref moved, so this is not a refusal — but a registration gap
+          // would otherwise leave no trace in an unattended pass.
+          if (entry.canonicalAdvance.status !== 'skipped'
+            && entry.canonicalAdvance.artifacts.status === 'refused') {
+            process.stderr.write(
+              `Unified-MPC canonical advance registered no artifacts repository=${entry.repository} reason=${entry.canonicalAdvance.artifacts.reason ?? 'unknown'}\n`,
+            );
+          }
+        }
+      },
+    },
   );
   const codexService = new CodexService(workspaceRepository, {
     auditService,

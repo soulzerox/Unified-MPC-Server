@@ -158,6 +158,93 @@ request proves what GitHub is merging. Both must match the same commit:
   another host, or an SSH resolution failure fails closed as a repository
   mismatch instead of trusting the remote URL text.
 
+### Canonical advancement after a merge
+
+A policy may name the local checkout the runtime reads after it reconciles a
+merge:
+
+```json
+{
+  "repository": "owner/repo",
+  "defaultBranch": "main",
+  "verificationMode": "local_exact_head",
+  "requiredGates": [{ "name": "test", "source": "local_command" }],
+  "reviewPolicy": { "required": true, "acceptedOutcomes": ["clean_llm_review"] },
+  "checkoutPath": "/srv/checkouts/repo"
+}
+```
+
+`checkoutPath` is the only field this section adds; the other fields are
+required by the policy parser, and an entry missing one invalidates the whole
+policy list rather than only itself.
+
+`checkoutPath` must be absolute. A relative value is refused by the parser
+because it would resolve against whatever directory the daemon started in, so
+the same policy could read two different repositories.
+
+One canonical ref holds one repository: refs are keyed by Git ref path
+(`refs/remotes/origin/main`) and carry no repository id, so the binding is per
+ref. A second policy whose checkout is a different repository advancing the
+*same* branch therefore refuses with `bound to <repository id>` instead of
+replacing the first ref and unrooting its manifest from GC. A policy with a
+different `defaultBranch` targets a different ref and is admitted — the guard
+is per ref, not per store root. The advance repeats the check against the state
+it actually reads, so a second repository that binds the ref while this checkout
+is fetching is refused too, not just the one that was already bound.
+
+The repository id is derived from the checkout's remote URL. GitHub's SSH,
+`ssh://` and HTTPS spellings of one repository hash to one id, so a checkout
+that changes spelling does not become a second trust boundary. A ref written by
+the released `index revision advance` is bound to the pre-normalization
+derivation for the same remote; the next advance adopts that id and re-binds the
+ref to the normalized one instead of refusing the store forever. An SSH host
+alias that resolves to github.com is not normalized, because resolving it needs
+`ssh -G` side effects; such a checkout passes `--repository-id` explicitly.
+
+When a merge reconciles as `reconciled` and the observation carries its merge
+commit, the poller runs the advancement gate once for that repository:
+
+1. refuse unless the checkout's `origin` resolves to a github.com repository
+   equal to the policy's `repository` — a shared or mistyped `checkoutPath`
+   must not fetch another repository's branch and bind the ref to it;
+2. `git fetch` the exact branch into `refs/remotes/origin/<defaultBranch>`;
+3. refuse unless the fetched ref contains the merge commit as an ancestor — a
+   lagging clone must not move the canonical ref backwards;
+4. run `advanceRevisionFromGit`, which classifies the delta against the active
+   manifest, persists the new manifest, CAS-promotes the ref and registers
+   artifacts. The advance is pinned to the commit step 3 approved: the gate
+   resolves the ref again, so a fetch that lands in between refuses instead of
+   promoting a commit nothing checked. The CAS compares the pre-hash state with
+   the ref as it is on disk at promote time, so two pollers advancing the same
+   branch cannot both win.
+
+The newest merge is chosen by `mergedAt`, not by feed order: a comment or label
+moves a pull request later in the `updatedAt` feed without merging anything.
+
+The outcome is reported in the poll summary as `canonicalAdvance`:
+
+| Value | Meaning |
+|---|---|
+| `advanced` | the ref moved to the fetched branch head, which contains the merged commit; the report carries the manifest id |
+| `noop` | the ref already pointed at an equivalent manifest |
+| `refused` | reason included — including a policy with no `checkoutPath`; the merge still reconciled, nothing was advanced |
+| `skipped / no_merge` | no merge reconciled in this pass |
+| `skipped / not_wired` | the runtime has no canonical root |
+| `skipped / inspect_required` | a merge needed inspection, so the pass advanced nothing |
+
+A refused advance is never silent and never a failed reconciliation: the two
+records are separate, so an operator can see that a merge landed while the
+canonical ref did not follow it. The HTTP runtime logs one line per refusal
+(`Unified-MPC canonical advance refused repository=… reason=…`) for every pass,
+including scheduled ones. Without `checkoutPath` the gate stays operator-driven
+through `unified-mpc index revision advance`.
+
+Artifact registration is metadata over a ref that has already moved: a refused
+registration is reported in `canonicalAdvance.artifacts` and logged
+(`… registered no artifacts repository=… reason=…`), and never rewrites the
+advance as a refusal — the ref did move, and saying otherwise would hide it.
+
+
 ---
 
 ## 6. Repository-Level Companion (`pnpm merge:pr`)

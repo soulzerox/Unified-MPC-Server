@@ -210,7 +210,11 @@ export class MergeReconciliationService {
       reconciliationRef: reconciliationRef(request.observation),
       ...(receiptRef === undefined ? {} : { receiptRef }),
       ...(receipt === undefined ? {} : { receipt }),
-      policy: request.policy,
+      // Records are immutable evidence compared byte-for-byte by the store, so
+      // a runtime-only field must not enter them: adding `checkoutPath` to a
+      // policy would otherwise make every already-recorded merge conflict with
+      // its own re-observation and stall the poll cursor forever.
+      policy: evidencePolicy(request.policy),
       expectedMergeMethod: request.expectedMergeMethod,
       observation: request.observation,
       decision,
@@ -253,4 +257,18 @@ export class MergeReconciliationService {
 function reconciliationRef(observation: MergeObservation): string {
   const identity = observation.mergeSha ?? observation.headSha;
   return `merge-reconciliation:${observation.repository}#${observation.pullRequest}@${identity}`;
+}
+
+/**
+ * The policy as evidence.
+ *
+ * `checkoutPath` tells the runtime *where* to read Git; it does not describe
+ * the merge, so it is not part of what a record attests. Keeping it out means a
+ * policy that later adopts or moves the field still re-observes the same merge
+ * as the same evidence instead of conflicting with its own history.
+ */
+function evidencePolicy(policy: RepositoryMergePolicy): RepositoryMergePolicy {
+  const { checkoutPath: _checkoutPath, ...evidence } = policy;
+  void _checkoutPath;
+  return evidence;
 }

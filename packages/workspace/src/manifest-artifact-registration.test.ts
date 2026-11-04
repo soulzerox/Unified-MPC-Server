@@ -208,6 +208,31 @@ describe('manifest -> file artifact registration (#210 §1/§2/§8)', () => {
     }
   });
 
+  it('reports a store failure instead of throwing after the ref moved', async () => {
+    const { dir, manifests } = await scenario();
+    try {
+      const manifest = manifestFor('c'.repeat(40), [{ path: 'src/a.ts', contentHash: H('1') }]);
+      await manifests.put(manifest);
+      // Registration runs after the ref was promoted. A store error there must
+      // come back as a reported refusal, not as an exception the caller cannot
+      // place; `has` is the first store call the pass makes.
+      class FailingArtifactStore extends CanonicalArtifactStore {
+        public override async has(): Promise<boolean> {
+          throw new Error('artifact store is read-only');
+        }
+      }
+      const store = new FailingArtifactStore(dir);
+
+      const report = await registerManifestArtifacts({
+        manifests, store, manifestId: manifest.manifestId, now: NOW, classifications: [classOf('src/a.ts')],
+      });
+
+      expect(report).toMatchObject({ status: 'refused', reason: 'artifact store is read-only' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('treats a classification change as a different artifact for the same content', async () => {
     const { dir, manifests, store } = await scenario();
     try {

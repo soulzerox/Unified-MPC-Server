@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { CanonicalRefState } from '@unified-mpc/domain';
@@ -14,6 +14,11 @@ const C101: CanonicalRefState = {
   commitSha: 'd'.repeat(40),
   treeOid: 'e'.repeat(40),
   manifestId: 'man:v1:' + 'f'.repeat(64),
+};
+const C102: CanonicalRefState = {
+  commitSha: '1'.repeat(40),
+  treeOid: '2'.repeat(40),
+  manifestId: 'man:v1:' + '3'.repeat(64),
 };
 
 async function tempStore(): Promise<{ store: CanonicalRefStore; dir: string }> {
@@ -49,6 +54,84 @@ describe('durable canonical ref store (#210 U7)', () => {
       });
       const reopened = new CanonicalRefStore(dir);
       expect(await reopened.read('refs/remotes/origin/main')).toEqual(C100);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes two promoters holding the same expected state', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      await store.promote('refs/remotes/origin/main', {
+        expectedCurrent: null,
+        current: null,
+        target: C100,
+        targetVerified: true,
+      });
+      // Both read C100 and both want to promote: only one may win, or the loser
+      // reports a promotion the ref no longer holds.
+      const decisions = await Promise.all([
+        store.promote('refs/remotes/origin/main', { expectedCurrent: C100, target: C101, targetVerified: true }),
+        store.promote('refs/remotes/origin/main', { expectedCurrent: C100, target: C102, targetVerified: true }),
+      ]);
+
+      expect(decisions.filter((decision) => decision.action === 'promote')).toHaveLength(1);
+      expect(decisions.filter((decision) => decision.action === 'conflict')).toHaveLength(1);
+      const live = await store.read('refs/remotes/origin/main');
+      expect([C101, C102]).toContainEqual(live);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims a lock left by a crashed promoter and leaves no lock behind', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      const lockPath = path.join(dir, 'refs', 'remotes', 'origin', 'main.json.lock');
+      await mkdir(path.dirname(lockPath), { recursive: true });
+      await writeFile(lockPath, 'dead-promoter\n', 'utf8');
+      const longAgo = new Date(Date.now() - 5 * 60_000);
+      await utimes(lockPath, longAgo, longAgo);
+
+      const decision = await store.promote('refs/remotes/origin/main', {
+        expectedCurrent: null,
+        current: null,
+        target: C100,
+        targetVerified: true,
+      });
+
+      // The stale lock is removed by token, not by path: the promoter that
+      // reclaims it must also own what it deletes.
+      expect(decision.action).toBe('promote');
+      expect(await store.read('refs/remotes/origin/main')).toEqual(C100);
+      await expect(readFile(lockPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('releases the lock when a promotion is rejected', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      const rejected = await store.promote('refs/remotes/origin/main', {
+        expectedCurrent: null,
+        current: null,
+        target: C100,
+        targetVerified: false,
+      });
+      expect(rejected.action).toBe('reject_unverified');
+
+      // A rejection must not strand the ref behind a lock that only goes stale
+      // after a minute.
+      const lockPath = path.join(dir, 'refs', 'remotes', 'origin', 'main.json.lock');
+      await expect(readFile(lockPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      const promoted = await store.promote('refs/remotes/origin/main', {
+        expectedCurrent: null,
+        current: null,
+        target: C100,
+        targetVerified: true,
+      });
+      expect(promoted.action).toBe('promote');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

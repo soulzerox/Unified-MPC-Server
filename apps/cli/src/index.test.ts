@@ -1415,12 +1415,18 @@ describe('CLI execution dispatcher', () => {
     process.env.HOME = home;
     process.env.XDG_DATA_HOME = path.join(root, 'xdg');
     try {
-      const { repositoryId, manifest, deadArtifactKey, deadHash } = await seedCanonicalGcFixture(dataPath);
+      const { repositoryId, manifest, deadArtifactKey } = await seedCanonicalGcFixture(dataPath);
       const quarantine = new ArtifactQuarantineStore(canonical);
-      await quarantine.quarantine([
-        deadHash,
-        { kind: 'artifact-key', repositoryId, artifactKey: deadArtifactKey },
-      ], { now: new Date('2026-11-01T00:00:00.000Z'), graceMs: 60_000 });
+      // A due row that is not one of the dead artifact's identities: a pass
+      // that ran would add the dead rows (`index gc`) or release this one
+      // (`index gc expire`), so the ledger state distinguishes refusal from
+      // work that happened and was undone. Re-quarantining the dead rows would
+      // instead dedupe and leave the same length.
+      const expirableHash = '9'.repeat(64);
+      await quarantine.quarantine([expirableHash], {
+        now: new Date('2026-11-01T00:00:00.000Z'),
+        graceMs: 60_000,
+      });
 
       // A prunable row proves the refusal keeps destructive work undone, not
       // merely that it happens to have nothing to do.
@@ -1456,6 +1462,7 @@ describe('CLI execution dispatcher', () => {
       await mkdir(path.join(canonical, 'index-jobs'), { recursive: true });
       await writeFile(path.join(canonical, 'index-jobs', 'jobs.json'), '{not json', 'utf8');
 
+      const lease = new GcLeaseStore(canonical);
       for (const args of [
         ['index', 'revision', 'prune', '--apply'],
         ['index', 'gc', '--apply', '--grace', '1h'],
@@ -1474,15 +1481,20 @@ describe('CLI execution dispatcher', () => {
         // JSON), but it must be the ledger refusal, not a bare dispatcher error.
         expect(output.join('\n')).toContain('refused');
         expect(output.join('\n')).toContain('index job ledger');
+        // A released lease also reads null, so inspect the record: `free`
+        // means no pass ever acquired it, while `released` would mean the verb
+        // ran its destructive pass and released the fence afterwards.
+        expect(await lease.inspect()).toEqual({ status: 'free' });
       }
 
       // No manifest was pruned, no row was quarantined or released, no artifact
       // was deleted and no lease was taken by any of the refused verbs.
       expect(await manifests.get(stale.manifestId)).not.toBeNull();
       expect(await manifests.get(manifest.manifestId)).not.toBeNull();
-      expect(await quarantine.list()).toHaveLength(2);
+      expect(await quarantine.list()).toEqual([
+        expect.objectContaining({ kind: 'content-hash', hash: expirableHash }),
+      ]);
       await expect(new CanonicalArtifactStore(canonical).has(repositoryId, deadArtifactKey)).resolves.toBe(true);
-      expect(await new GcLeaseStore(canonical).read()).toBeNull();
 
       // JSON mode reports the refusal instead of emitting nothing at all.
       const json: string[] = [];

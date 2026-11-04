@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, CanonicalRevisionListReport, GitRevisionAdvanceResult } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GitRevisionAdvanceResult } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -75,6 +75,8 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc storage metrics(?:\s|$)/, kind: 'storage-metrics', dispatch: 'storageMetrics' },
   { pattern: /^unified-mpc index revision advance(?:\s|$)/, kind: 'index-revision-advance', dispatch: 'indexRevisionAdvance' },
   { pattern: /^unified-mpc index revision list(?:\s|$)/, kind: 'index-revision-list', dispatch: 'canonicalRevisionList' },
+  { pattern: /^unified-mpc index revision pin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
+  { pattern: /^unified-mpc index revision unpin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
 ];
 
@@ -227,6 +229,14 @@ function replayDependencies(calls: string[]): CliDependencies {
           overlayGoalIds: [],
           indexJobOperationIds: [],
         }],
+      };
+    },
+    canonicalRevisionPin: async (input): Promise<CanonicalRevisionPinReport> => {
+      calls.push('canonicalRevisionPin');
+      return {
+        manifestId: input.manifestId,
+        action: input.action === 'pin' ? 'pinned' : 'unpinned',
+        pins: input.action === 'pin' ? ['user-pin'] : [],
       };
     },
   };

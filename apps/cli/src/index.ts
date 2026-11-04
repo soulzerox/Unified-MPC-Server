@@ -15,10 +15,13 @@ import {
   CanonicalRefStore,
   GoalOverlayStore,
   IndexJobLedger,
+  pinCanonicalRevision,
   RevisionPinRegistry,
+  unpinCanonicalRevision,
   WorkspaceService,
   type CanonicalStatusReport,
   type CanonicalRevisionListReport,
+  type CanonicalRevisionPinReport,
   type GitRevisionAdvanceResult,
   type Workspace,
 } from '@unified-mpc/workspace';
@@ -83,6 +86,11 @@ import {
   parseIndexRevisionListArgs,
   type IndexRevisionListCommand,
 } from './commands/index-revision-list.js';
+import {
+  formatCanonicalRevisionPin,
+  parseIndexRevisionPinArgs,
+  type IndexRevisionPinCommand,
+} from './commands/index-revision-pin.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -105,6 +113,7 @@ export * from './commands/tools.js';
 export * from './commands/storage.js';
 export * from './commands/index-revision.js';
 export * from './commands/index-revision-list.js';
+export * from './commands/index-revision-pin.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -128,6 +137,7 @@ export type CliCommand =
   | StorageCommand
   | IndexRevisionCommand
   | IndexRevisionListCommand
+  | IndexRevisionPinCommand
   | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
@@ -166,6 +176,11 @@ export interface CliDependencies {
   }): Promise<GitRevisionAdvanceResult>;
   canonicalStatus?(): Promise<CanonicalStatusReport>;
   canonicalRevisionList?(): Promise<CanonicalRevisionListReport>;
+  canonicalRevisionPin?(input: {
+    readonly action: 'pin' | 'unpin';
+    readonly manifestId: string;
+    readonly note?: string;
+  }): Promise<CanonicalRevisionPinReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -199,8 +214,9 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
     if (args[1] === 'revision') {
       if (args[2] === 'list') return parseIndexRevisionListArgs(args.slice(1));
+      if (args[2] === 'pin' || args[2] === 'unpin') return parseIndexRevisionPinArgs(args.slice(1));
       if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
-      return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|advance ...'));
+      return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|advance ...'));
     }
     return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision ...'));
   }
@@ -234,6 +250,8 @@ Commands:
   storage metrics [--json]               Report SQLite db/WAL/SHM bytes, page/freelist counts and compaction evidence
   index revision advance [--ref <ref>]   Advance the canonical revision pointer from an exact Git tree
   index revision list [--json]           List stored revision manifests and what still references them
+  index revision pin <manifest-id>       Pin a revision with the operator reason
+  index revision unpin <manifest-id>     Remove the operator pin from a revision
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -349,6 +367,24 @@ Commands:
       try {
         const report = await dependencies.canonicalRevisionList();
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionList(report));
+        return 0;
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-revision-pin': {
+      if (dependencies.canonicalRevisionPin === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.canonicalRevisionPin({
+          action: parsed.value.action,
+          manifestId: parsed.value.manifestId,
+          ...(parsed.value.note === undefined ? {} : { note: parsed.value.note }),
+        });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPin(report));
         return 0;
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
@@ -783,6 +819,21 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         overlays: new GoalOverlayStore(root),
         jobs: new IndexJobLedger(root),
       });
+    },
+    canonicalRevisionPin: async (input): Promise<CanonicalRevisionPinReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      const deps = {
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+      };
+      return input.action === 'pin'
+        ? pinCanonicalRevision(deps, {
+          manifestId: input.manifestId,
+          ...(input.note === undefined ? {} : { note: input.note }),
+        })
+        : unpinCanonicalRevision(deps, { manifestId: input.manifestId });
     },
     publishCredential: async (
       command: PublishCredentialCommand,

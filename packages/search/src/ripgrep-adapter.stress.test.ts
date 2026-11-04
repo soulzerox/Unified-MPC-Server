@@ -53,6 +53,20 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
+/**
+ * A lazy collection would leave the last search's garbage in `heapUsed`, so the
+ * retention assertion would measure V8 scheduling instead of what the adapter
+ * still holds. `packages/search/vitest.config.ts` exposes `gc()` to the worker;
+ * assert it is there so that config cannot drift away silently.
+ */
+function collectGarbage(): void {
+  const gc = (globalThis as { gc?: () => void }).gc;
+  if (typeof gc !== 'function') {
+    throw new Error('the heap-retention stress test requires a worker started with --expose-gc');
+  }
+  gc();
+}
+
 function textFile(token: string): string {
   const line = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor\n';
   const lines = Math.ceil(CORPUS_FILE_BYTES / line.length);
@@ -132,6 +146,7 @@ describe('fallback search peak memory stress', () => {
   it('does not retain heap across repeated searches', async () => {
     await adapter.searchText({ rootPath, query: 'needle-' });
     await settle();
+    collectGarbage();
     const baseline = process.memoryUsage().heapUsed;
 
     for (let index = 0; index < 3; index += 1) {
@@ -140,6 +155,7 @@ describe('fallback search peak memory stress', () => {
       await settle();
     }
 
+    collectGarbage();
     expect(Math.max(0, process.memoryUsage().heapUsed - baseline)).toBeLessThan(RETENTION_ALLOWANCE);
   }, 120_000);
 });

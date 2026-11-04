@@ -24,6 +24,32 @@ export type GcLeaseAcquireResult =
   | { readonly status: 'denied'; readonly reason: 'held'; readonly holder: string; readonly expiresAt: string }
   | { readonly status: 'denied'; readonly reason: 'corrupt' };
 
+/**
+ * Read-only view of the lease record for operator surfaces (#210 §7).
+ *
+ * Unlike `read()`, which answers the fence question and therefore reports a
+ * missing and a corrupt record alike as "no lease", this keeps them apart: a
+ * corrupt record is named, and a released record is still described so an
+ * operator can see who finished and when.
+ */
+export type GcLeaseInspection =
+  | { readonly status: 'free' }
+  | {
+    readonly status: 'held';
+    readonly ownerId: string;
+    readonly generation: number;
+    readonly acquiredAt: string;
+    readonly expiresAt: string;
+  }
+  | {
+    readonly status: 'released';
+    readonly ownerId: string;
+    readonly generation: number;
+    readonly expiresAt: string;
+    readonly releasedAt: string;
+  }
+  | { readonly status: 'corrupt' };
+
 export interface GcLeaseFenceInput {
   readonly ownerId: string;
   readonly generation: number;
@@ -85,6 +111,36 @@ export class GcLeaseStore {
   public async read(): Promise<GcLeaseState | null> {
     const state = await this.readRaw();
     return state !== null && state.releasedAt === undefined ? state : null;
+  }
+
+  /**
+   * Read-only operator projection (#210 §7): free, held, released or corrupt.
+   *
+   * `read()` answers "may I start a destructive pass?" and collapses a missing
+   * and a corrupt record into "no lease". Inspecting an operator surface needs
+   * the difference, because a corrupt record means the next `--apply` will
+   * refuse. Never acquires, renews or releases.
+   */
+  public async inspect(): Promise<GcLeaseInspection> {
+    const { state, corrupt } = await this.readFenced();
+    if (corrupt) return { status: 'corrupt' };
+    if (state === null) return { status: 'free' };
+    if (state.releasedAt !== undefined) {
+      return {
+        status: 'released',
+        ownerId: state.ownerId,
+        generation: state.generation,
+        expiresAt: state.expiresAt,
+        releasedAt: state.releasedAt,
+      };
+    }
+    return {
+      status: 'held',
+      ownerId: state.ownerId,
+      generation: state.generation,
+      acquiredAt: state.acquiredAt,
+      expiresAt: state.expiresAt,
+    };
   }
 
   private async readRaw(): Promise<GcLeaseState | null> {

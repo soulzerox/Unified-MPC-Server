@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GcExpireReport, GitRevisionAdvanceResult, RevisionPruneReport } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, RevisionPruneReport } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -79,6 +79,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index revision unpin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index revision prune(?:\s|$)/, kind: 'index-revision-prune', dispatch: 'indexRevisionPrune' },
   { pattern: /^unified-mpc index gc expire(?:\s|$)/, kind: 'index-gc-expire', dispatch: 'indexGcExpire' },
+  { pattern: /^unified-mpc index gc status(?:\s|$)/, kind: 'index-gc-status', dispatch: 'indexGcStatus' },
   { pattern: /^unified-mpc index gc(?:\s|$)/, kind: 'index-gc', dispatch: 'indexGc' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
 ];
@@ -269,6 +270,28 @@ function replayDependencies(calls: string[]): CliDependencies {
         expired: [`${'3'.repeat(64)}`, { kind: 'artifact-key', repositoryId: 'repo:v1:documented', artifactKey: `file:v1:${'4'.repeat(64)}` }],
         deleted: [],
         retained: [`${'5'.repeat(64)}`],
+      };
+    },
+    indexGcStatus: async (): Promise<GcStatusReport> => {
+      calls.push('indexGcStatus');
+      return {
+        status: 'healthy',
+        lease: { status: 'free' },
+        quarantine: {
+          total: 2,
+          due: 1,
+          inGrace: 1,
+          rows: [
+            { target: `${'4'.repeat(64)}`, quarantinedAt: '2026-11-04T00:00:00.000Z', graceMs: 604_800_000, expiresAt: '2026-11-11T00:00:00.000Z', due: true },
+            {
+              target: { kind: 'artifact-key', repositoryId: 'repo:v1:documented', artifactKey: `file:v1:${'9'.repeat(64)}` },
+              quarantinedAt: '2026-11-04T00:00:00.000Z',
+              graceMs: 604_800_000,
+              expiresAt: '2026-11-11T00:00:00.000Z',
+              due: false,
+            },
+          ],
+        },
       };
     },
   };

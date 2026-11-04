@@ -467,7 +467,10 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         set: async (): Promise<void> => {},
         delete: async (): Promise<void> => {},
       },
-      gatewayRestoreStallMs: 25,
+      // A one-second window keeps the "recovering, then stalled" split real
+      // without racing scheduler jitter: with a 25 ms window the first fetch
+      // could already land past the deadline on a loaded CI machine.
+      gatewayRestoreStallMs: 1_000,
     });
 
     await stalledServer.listen();
@@ -480,14 +483,14 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
         gatewayState: 'STOPPED',
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
       const stalled = await fetch(`http://127.0.0.1:${stalledServer.port}/_unified-mpc/gateway-supervision`);
       expect(stalled.status).toBe(503);
       expect(await stalled.json()).toMatchObject({
         status: 'stalled',
         supervised: true,
         gatewayState: 'STOPPED',
-        stallAfterMs: 25,
+        stallAfterMs: 1_000,
       });
     } finally {
       await stalledServer.close();

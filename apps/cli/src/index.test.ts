@@ -1364,6 +1364,45 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('refuses a GC pass when an artifact record cannot be read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-corrupt-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await seedCanonicalGcFixture(dataPath);
+      // A skipped record would hide both a candidate and the bindings that keep
+      // live artifacts reachable, so the pass must refuse before quarantining.
+      await writeFile(path.join(canonical, 'artifacts', 'corrupt.json'), '{not json', 'utf8');
+
+      const output: string[] = [];
+      const errors: string[] = [];
+      const code = await runCli(['index', 'gc', '--apply', '--grace', '1h'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => errors.push(text),
+      });
+      expect(errors, errors.join('\n')).toEqual([]);
+      expect(code).toBe(1);
+      expect(output.join('\n')).toContain('refused cannot read canonical artifact corrupt.json');
+      expect(await new ArtifactQuarantineStore(canonical).list()).toEqual([]);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('applies a revision prune through the real canonical stores under the cleanup lease', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-prune-apply-'));
     const dataPath = path.join(root, 'data');

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId, fileArtifactId } from '@unified-mpc/domain';
@@ -449,6 +449,36 @@ describe('expire artifact-key rows (#210 §1/U23)', () => {
       });
       expect(deletedArtifacts).toEqual([{ repositoryId: REPO, artifactKey: shared.artifactKey }]);
       expect(await fixture.artifacts.has(OTHER_REPO, elsewhere.artifactKey)).toBe(true);
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses instead of deleting a live artifact whose record cannot be read', async () => {
+    const fixture = await artifactFixture();
+    try {
+      // A second readable artifact bound to the live manifest keeps the
+      // referenced set non-empty. The quarantined artifact is also bound to that
+      // manifest, but its own record is corrupt, so a tolerant read would drop
+      // its binding and call a live artifact unreachable.
+      const liveTwo = fileArtifact(REPO, 'e'.repeat(64), [fixture.liveManifestId]);
+      await fixture.artifacts.put(liveTwo);
+      await fixture.quarantine.quarantine([keyTarget(fixture.live)], { now: at(0), graceMs: GRACE });
+      const artifactsDir = path.join(fixture.dir, 'artifacts');
+      const liveFile = (await readdir(artifactsDir)).find((file) => file.endsWith(`${fixture.live.artifactKey}.json`));
+      if (liveFile === undefined) throw new Error('expected the live artifact record');
+      await writeFile(path.join(artifactsDir, liveFile), '{not json', 'utf8');
+
+      const deletedArtifacts: string[] = [];
+      const result = await expireGcQuarantine(fixture.stores, {
+        indexJobManifestIds: [], now: at(GRACE * 2), graceMs: GRACE, dryRun: false,
+        deleteStoredArtifact: async (_repositoryId, artifactKey) => { deletedArtifacts.push(artifactKey); },
+      });
+      expect(result).toMatchObject({ status: 'refused' });
+      if (result.status !== 'refused') throw new Error('unexpected');
+      expect(result.reason).toMatch(/cannot read canonical artifact/);
+      expect(deletedArtifacts).toEqual([]);
+      expect(await fixture.quarantine.list()).toHaveLength(1);
     } finally {
       await rm(fixture.dir, { recursive: true, force: true });
     }

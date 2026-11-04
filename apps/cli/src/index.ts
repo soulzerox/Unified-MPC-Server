@@ -36,6 +36,7 @@ import {
   type GitRevisionAdvanceResult,
   type LogicalSpaceReport,
   type RevisionPruneReport,
+  type StoredArtifact,
   type Workspace,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
@@ -1039,7 +1040,14 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       assertStorageIdentitySafe(dataPath);
       const root = path.join(dataPath, 'canonical');
       const artifacts = new CanonicalArtifactStore(root);
-      const stored = await artifacts.list();
+      // A GC plan must read the whole store: a skipped corrupt record hides
+      // both a candidate and the bindings that keep live artifacts reachable.
+      let stored: StoredArtifact[];
+      try {
+        stored = await artifacts.list({ strict: true });
+      } catch (error) {
+        return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
+      }
       const contentHashes = new Set<string>();
       const artifactCandidates: { repositoryId: string; artifactKey: string }[] = [];
       const seen = new Set<string>();

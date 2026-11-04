@@ -238,6 +238,25 @@ describe('canonical artifact store (#210 §1/§6)', () => {
     });
   });
 
+  it('makes the reachability projections strict on request', async () => {
+    await withStore(async (store, root) => {
+      const m1 = 'man:v1:' + '1'.repeat(64);
+      const good = fileArtifact({ bindings: [{ path: 'src/a.ts', manifestId: m1 }] });
+      await store.put(good);
+      await writeFile(path.join(root, 'artifacts', 'corrupt.json'), '{not json', 'utf8');
+
+      // A GC verdict must not read a skipped record as "no bindings": the
+      // tolerant projection still works for operator surfaces, the strict one
+      // refuses instead of dropping the record's evidence.
+      expect(await store.listRepository(REPO)).toEqual([good]);
+      expect(await store.artifactKeysReferencedBy([m1])).toEqual([good.artifactKey]);
+      await expect(store.listRepository(REPO, { strict: true }))
+        .rejects.toThrow(/cannot read canonical artifact corrupt\.json/);
+      await expect(store.artifactKeysReferencedBy([m1], REPO, { strict: true }))
+        .rejects.toThrow(/cannot read canonical artifact corrupt\.json/);
+    });
+  });
+
   it('treats a missing artifacts directory as an empty strict listing', async () => {
     await withStore(async (store) => {
       // Nothing has been written yet: "no records" is a real answer, not a

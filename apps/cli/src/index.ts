@@ -23,6 +23,7 @@ import {
   logicalSpaceReportFromRoot,
   pinCanonicalRevision,
   pruneRevisionManifests,
+  repairCanonicalStore,
   RevisionPinRegistry,
   runGcCycle,
   unpinCanonicalRevision,
@@ -30,6 +31,7 @@ import {
   type CanonicalStatusReport,
   type CanonicalRevisionListReport,
   type CanonicalRevisionPinReport,
+  type CanonicalStoreRepairReport,
   type GcCycleReport,
   type GcExpireReport,
   type GcStatusReport,
@@ -112,6 +114,12 @@ import {
   type IndexRevisionPruneCommand,
 } from './commands/index-revision-prune.js';
 import {
+  formatCanonicalStoreRepair,
+  indexRepairExitCode,
+  parseIndexRepairArgs,
+  type IndexRepairCommand,
+} from './commands/index-repair.js';
+import {
   formatIndexGc,
   indexGcExitCode,
   parseIndexGcArgs,
@@ -159,6 +167,7 @@ export * from './commands/index-revision.js';
 export * from './commands/index-revision-list.js';
 export * from './commands/index-revision-pin.js';
 export * from './commands/index-revision-prune.js';
+export * from './commands/index-repair.js';
 export * from './commands/index-gc.js';
 export * from './commands/index-gc-expire.js';
 export * from './commands/publish-credential.js';
@@ -186,6 +195,7 @@ export type CliCommand =
   | IndexRevisionListCommand
   | IndexRevisionPinCommand
   | IndexRevisionPruneCommand
+  | IndexRepairCommand
   | IndexGcCommand
   | IndexGcExpireCommand
   | IndexGcStatusCommand
@@ -237,6 +247,9 @@ export interface CliDependencies {
   indexRevisionPrune?(input: {
     readonly dryRun: boolean;
   }): Promise<RevisionPruneReport>;
+  indexRepair?(input: {
+    readonly dryRun: boolean;
+  }): Promise<CanonicalStoreRepairReport>;
   indexGc?(input: {
     readonly dryRun: boolean;
     readonly graceMs: number;
@@ -276,6 +289,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
+    if (args[1] === 'repair') return parseIndexRepairArgs(args.slice(1));
     if (args[1] === 'space') return parseIndexSpaceArgs(args.slice(1));
     if (args[1] === 'gc') {
       if (args[2] === 'expire') return parseIndexGcExpireArgs(args.slice(1));
@@ -289,7 +303,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
       if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
       return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|prune|advance ...'));
     }
-    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|space|revision|gc ...'));
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|space|revision|gc|repair ...'));
   }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
@@ -324,6 +338,7 @@ Commands:
   index revision pin <manifest-id>       Pin a revision with the operator reason
   index revision unpin <manifest-id>     Remove the operator pin from a revision
   index revision prune --dry-run|--apply Plan or apply the prune of unreferenced revisions
+  index repair --dry-run|--apply        Plan or remove pins whose revision manifest is missing
   index gc --dry-run                     Plan artifact GC reachability without quarantining
   index gc --apply [--grace <duration>]  Quarantine unreachable artifacts under the GC lease
   index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
@@ -478,6 +493,20 @@ Commands:
         const report = await dependencies.indexRevisionPrune({ dryRun: parsed.value.dryRun });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPrune(report, parsed.value.dryRun));
         return indexRevisionPruneExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-repair': {
+      if (dependencies.indexRepair === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexRepair({ dryRun: parsed.value.dryRun });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalStoreRepair(report));
+        return indexRepairExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -1062,6 +1091,26 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         indexJobManifestIds: ledger.manifestIds,
+        dryRun: input.dryRun,
+        now: new Date(),
+        ...(lease === undefined ? {} : { lease }),
+      });
+    },
+    indexRepair: async (input): Promise<CanonicalStoreRepairReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      // Only the removal pass takes the U28 fence; a dry run stays read-only
+      // and unfenced. The strict manifest store makes a corrupt row abort the
+      // plan instead of reading as "missing" and dropping a live pin.
+      const lease = input.dryRun
+        ? undefined
+        : { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS };
+      return repairCanonicalStore({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root, { strictReads: true }),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
         dryRun: input.dryRun,
         now: new Date(),
         ...(lease === undefined ? {} : { lease }),

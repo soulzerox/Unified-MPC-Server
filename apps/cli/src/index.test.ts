@@ -1660,6 +1660,159 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('plans and applies an orphan pin repair through the real canonical stores', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-repair-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await seedCanonicalGcFixture(dataPath);
+      const pins = new RevisionPinRegistry(canonical);
+      const orphan = `man:v1:${'a'.repeat(64)}`;
+      await pins.pin(orphan, 'rollback', 'last known good');
+      await pins.pin(orphan, 'user-pin', 'keep');
+
+      const plan: string[] = [];
+      const planErrors: string[] = [];
+      const planCode = await runCli(['index', 'repair', '--dry-run'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => plan.push(text),
+        writeError: (text) => planErrors.push(text),
+      });
+      expect(planErrors, planErrors.join('\n')).toEqual([]);
+      expect(planCode, plan.join('\n')).toBe(0);
+      expect(plan[0]).toContain('planned (dry-run) orphan-pins 1');
+      expect(plan[0]).toContain(`repair ${orphan} rollback,user-pin`);
+      expect(await pins.isPinned(orphan)).toBe(true);
+      // A dry run never takes the destructive fence.
+      expect(await new GcLeaseStore(canonical).inspect()).toEqual({ status: 'free' });
+
+      const output: string[] = [];
+      const applyErrors: string[] = [];
+      const code = await runCli(['index', 'repair', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => applyErrors.push(text),
+      });
+      expect(applyErrors, applyErrors.join('\n')).toEqual([]);
+      expect(code, output.join('\n')).toBe(0);
+      expect(output[0]).toContain('applied orphan-pins 1');
+      expect(output[0]).toContain(`removed ${orphan} rollback,user-pin`);
+      expect(await pins.isPinned(orphan)).toBe(false);
+      // The pass released its lease, so the next destructive pass is not blocked.
+      expect(await new GcLeaseStore(canonical).read()).toBeNull();
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to remove a pin whose manifest row cannot be read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-repair-corrupt-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await seedCanonicalGcFixture(dataPath);
+      const pins = new RevisionPinRegistry(canonical);
+      const corrupt = `man:v1:${'f'.repeat(64)}`;
+      await pins.pin(corrupt, 'user-pin', 'corrupt row');
+      await writeFile(path.join(canonical, 'manifests', `${corrupt}.json`), '{not a manifest', 'utf8');
+
+      const output: string[] = [];
+      const errors: string[] = [];
+      const code = await runCli(['index', 'repair', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => errors.push(text),
+      });
+      // A corrupt row must abort the whole plan instead of reading as missing
+      // and dropping evidence the store cannot prove is orphaned.
+      expect(code).toBe(1);
+      expect(output).toEqual([]);
+      expect(errors.join('\n')).toContain(`cannot read canonical manifest ${corrupt}`);
+      expect(await pins.isPinned(corrupt)).toBe(true);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs the orphan pin but exits 1 while a dangling ref remains', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-repair-dangling-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await seedCanonicalGcFixture(dataPath);
+      const refs = new CanonicalRefStore(canonical);
+      const ghost = `man:v1:${'b'.repeat(64)}`;
+      const current = await refs.read(GC_FIXTURE_REF);
+      await refs.promote(GC_FIXTURE_REF, {
+        expectedCurrent: current,
+        target: { commitSha: 'd'.repeat(40), treeOid: 'd'.repeat(40), manifestId: ghost },
+        targetVerified: true,
+      });
+      const pins = new RevisionPinRegistry(canonical);
+      const orphan = `man:v1:${'a'.repeat(64)}`;
+      await pins.pin(orphan, 'user-pin', 'orphan');
+
+      const output: string[] = [];
+      const errors: string[] = [];
+      const code = await runCli(['index', 'repair', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => errors.push(text),
+      });
+      expect(errors, errors.join('\n')).toEqual([]);
+      // The repairable half is done, but the store is still degraded and the
+      // exit code must say so.
+      expect(code, output.join('\n')).toBe(1);
+      expect(output[0]).toContain('applied orphan-pins 1');
+      expect(output[0]).toContain(`removed ${orphan} user-pin`);
+      expect(output[0]).toContain('dangling-refs 1');
+      expect(output[0]).toContain(`  ${GC_FIXTURE_REF} ${ghost}`);
+      expect(await pins.isPinned(orphan)).toBe(false);
+      expect((await refs.read(GC_FIXTURE_REF))!.manifestId).toBe(ghost);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('applies quarantine expiry through the real canonical stores and deletes artifact records', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-expire-'));
     const dataPath = path.join(root, 'data');

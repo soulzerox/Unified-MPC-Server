@@ -921,6 +921,65 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual([`unknown revision manifest: ${manifestId}`]);
   });
 
+  it('plans a revision prune in dry-run mode and fails like every other index command', async () => {
+    const stale = `man:v1:${'a'.repeat(64)}`;
+    const live = `man:v1:${'b'.repeat(64)}`;
+    const outputs: string[] = [];
+    let seenDryRun: boolean | undefined;
+    const code = await runCli(['index', 'revision', 'prune', '--dry-run'], {
+      ...baseDependencies,
+      indexRevisionPrune: async (input) => {
+        seenDryRun = input.dryRun;
+        return {
+          status: 'planned',
+          pruneable: [stale],
+          removed: [],
+          retained: [{ manifestId: live, reason: 'canonical-ref' }],
+        };
+      },
+      write: (text) => outputs.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seenDryRun).toBe(true);
+    expect(outputs).toEqual([
+      `planned (dry-run) pruneable 1 retained 1\nprune ${stale}\nretain ${live} canonical-ref`,
+    ]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'revision', 'prune', '--dry-run', '--json'], {
+      ...baseDependencies,
+      indexRevisionPrune: async () => ({ status: 'planned', pruneable: [], removed: [], retained: [] }),
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual({ status: 'planned', pruneable: [], removed: [], retained: [] });
+
+    const usage: string[] = [];
+    const usageCode = await runCli(['index', 'revision', 'prune'], {
+      ...baseDependencies,
+      writeError: (text) => usage.push(text),
+    });
+    expect(usageCode).toBe(2);
+    expect(usage[0]).toContain('index revision prune --dry-run');
+
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'revision', 'prune', '--dry-run'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'revision', 'prune', '--dry-run'], {
+      ...baseDependencies,
+      indexRevisionPrune: async () => { throw new Error('canonical store is unreadable'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['canonical store is unreadable']);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

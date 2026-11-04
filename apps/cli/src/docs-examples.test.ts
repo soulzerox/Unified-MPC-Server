@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GitRevisionAdvanceResult } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GitRevisionAdvanceResult, RevisionPruneReport } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -77,6 +77,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index revision list(?:\s|$)/, kind: 'index-revision-list', dispatch: 'canonicalRevisionList' },
   { pattern: /^unified-mpc index revision pin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index revision unpin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
+  { pattern: /^unified-mpc index revision prune(?:\s|$)/, kind: 'index-revision-prune', dispatch: 'indexRevisionPrune' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
 ];
 
@@ -237,6 +238,15 @@ function replayDependencies(calls: string[]): CliDependencies {
         manifestId: input.manifestId,
         action: input.action === 'pin' ? 'pinned' : 'unpinned',
         pins: input.action === 'pin' ? ['user-pin'] : [],
+      };
+    },
+    indexRevisionPrune: async (): Promise<RevisionPruneReport> => {
+      calls.push('indexRevisionPrune');
+      return {
+        status: 'planned',
+        pruneable: [`man:v1:${'1'.repeat(64)}`],
+        removed: [],
+        retained: [{ manifestId: `man:v1:${'0'.repeat(64)}`, reason: 'canonical-ref' }],
       };
     },
   };

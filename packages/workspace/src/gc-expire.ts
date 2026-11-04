@@ -12,7 +12,7 @@ import type {
 import { quarantineDeadline, quarantineEntryTarget } from './artifact-quarantine.js';
 import type { CanonicalArtifactStore } from './canonical-artifact-store.js';
 import { collectRetainedManifestIds, planRepositoryArtifactGc } from './artifact-key-gc.js';
-import type { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseHeartbeat, type GcLeaseStore } from './gc-lease.js';
 import { assembleGcRoots } from './artifact-gc-roots.js';
 import { planArtifactGc } from './artifact-gc.js';
 
@@ -20,6 +20,8 @@ export interface GcExpireLease {
   readonly store: GcLeaseStore;
   readonly ownerId: string;
   readonly ttlMs: number;
+  /** Clock used by the lease heartbeat; defaults to the wall clock. */
+  readonly clock?: () => Date;
 }
 
 export interface GcExpireInput {
@@ -87,8 +89,9 @@ export interface GcExpireStores {
  *
  * With a `lease` supplied the whole deletion pass runs under the U28
  * single-owner fence: a held or unreadable lease refuses the run before
- * anything is deleted, and the lease is released afterwards even when
- * the run refuses on unassemblable roots. Dry runs are read-only and
+ * anything is deleted, the window is renewed at each delete so a long pass
+ * cannot silently lose the fence, and the lease is released afterwards even
+ * when the run refuses on unassemblable roots. Dry runs are read-only and
  * deliberately do not take the lease.
  */
 export async function expireGcQuarantine(
@@ -96,7 +99,7 @@ export async function expireGcQuarantine(
   input: GcExpireInput,
 ): Promise<GcExpireReport> {
   const lease = input.dryRun ? undefined : input.lease;
-  let granted: { readonly generation: number } | undefined;
+  let granted: { readonly generation: number; readonly heartbeat: GcLeaseHeartbeat } | undefined;
   if (lease !== undefined) {
     const acquired = await lease.store.acquire({ ownerId: lease.ownerId, now: input.now, ttlMs: lease.ttlMs });
     if (acquired.status === 'denied') {
@@ -107,10 +110,20 @@ export async function expireGcQuarantine(
           : 'gc lease fence unreadable: refusing to start a destructive pass',
       };
     }
-    granted = { generation: acquired.generation };
+    granted = {
+      generation: acquired.generation,
+      heartbeat: new GcLeaseHeartbeat({
+        store: lease.store,
+        ownerId: lease.ownerId,
+        generation: acquired.generation,
+        ttlMs: lease.ttlMs,
+        grantedAt: input.now,
+        ...(lease.clock === undefined ? {} : { clock: lease.clock }),
+      }),
+    };
   }
   try {
-    return await runPass(stores, input);
+    return await runPass(stores, input, granted?.heartbeat);
   } finally {
     if (lease !== undefined && granted !== undefined) {
       await lease.store.release({ ownerId: lease.ownerId, generation: granted.generation });
@@ -118,7 +131,11 @@ export async function expireGcQuarantine(
   }
 }
 
-async function runPass(stores: GcExpireStores, input: GcExpireInput): Promise<GcExpireReport> {
+async function runPass(
+  stores: GcExpireStores,
+  input: GcExpireInput,
+  heartbeat?: GcLeaseHeartbeat,
+): Promise<GcExpireReport> {
   let roots;
   try {
     roots = await assembleGcRoots({
@@ -208,6 +225,9 @@ async function runPass(stores: GcExpireStores, input: GcExpireInput): Promise<Gc
       };
     }
     for (const entry of due) {
+      // Each delete is a destructive unit: renew before it when half the
+      // window has passed, and stop if the fence moved to another owner.
+      await heartbeat?.assert();
       if (entry.kind === 'content-hash') {
         if (input.deleteArtifact !== undefined) await input.deleteArtifact(entry.hash);
       } else {

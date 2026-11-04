@@ -392,7 +392,8 @@ retain man:v1:ff0371d8c4e2 pin
   unreachable, so a `pin` or `advance` created after the plan is retained. The
   index-job ledger is snapshotted immediately before the pass takes the lease,
   the same pre-fence window `index gc --apply` and `index gc expire --apply`
-  accept.
+  accept. The lease window is renewed as the pass deletes, so a long prune
+  cannot silently outlive its fence.
 - Only revision manifest JSON is deleted. Content-addressed artifacts are shared
   and stay with artifact GC, which re-checks reachability after quarantine.
 - An apply prints `applied pruneable N removed N retained N`, then one
@@ -474,7 +475,9 @@ artifact-quarantined repo:v1:documented file:v1:ff0371d8c4e2
 - A dry run does not accept `--grace`: it stamps no deadline.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
   anything is written. Concurrent passes therefore cannot quarantine from two
-  reachability snapshots at once.
+  reachability snapshots at once. The window is renewed while the pass is still
+  planning or writing, so a long cycle cannot let the fence expire underneath
+  it.
 - Exit `0` when the pass wrote its plan; `1` when it is refused; `2` for a usage
   error.
 
@@ -546,7 +549,10 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   row is never released as "deleted" while its record survives.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
   anything is released. The lease is released afterwards even when the pass
-  refuses partway.
+  refuses partway, and its window is renewed at each delete, so a long pass
+  cannot silently outlive its fence. A pass that loses the fence to a newer
+  generation stops instead of deleting under a lease it no longer owns; rows
+  already released stay deleted, and the remaining rows stay in the ledger.
 - Retained rows stay in the ledger, so a later run can delete them once their
   deadline passes or their reachability is settled. That does not hold for a row
   whose deadline is unreadable: it is retained forever, as described above.

@@ -2,7 +2,7 @@ import type { CanonicalRefStore } from './canonical-ref-store.js';
 import type { CanonicalManifestStore } from './canonical-manifest-store.js';
 import type { GoalOverlayStore } from './goal-overlay-store.js';
 import type { RevisionPinRegistry } from './revision-pin-registry.js';
-import type { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseHeartbeat, type GcLeaseStore } from './gc-lease.js';
 
 export type RevisionRetainReason =
   | 'canonical-ref'
@@ -22,6 +22,8 @@ export interface RevisionPruneLease {
   readonly store: GcLeaseStore;
   readonly ownerId: string;
   readonly ttlMs: number;
+  /** Clock used by the lease heartbeat; defaults to the wall clock. */
+  readonly clock?: () => Date;
 }
 
 export interface RevisionPruneDeps {
@@ -67,7 +69,8 @@ export type RevisionPruneReport = RevisionPrunePlan | { readonly status: 'refuse
  * decision is auditable. Dry-run plans without deleting; idempotent.
  *
  * With a `lease` supplied the delete pass runs under the U28 single-owner
- * fence: a held or unreadable lease refuses before any planning work, and
+ * fence: a held or unreadable lease refuses before any planning work, the
+ * window is renewed at each delete so a long pass cannot silently lose it, and
  * the lease is released afterwards even when a strict root read throws.
  * The roots are read inside this call, so an apply re-checks refs, pins,
  * overlay bases and manifest rows at execution time rather than trusting an
@@ -93,11 +96,12 @@ export async function pruneRevisionManifests(deps: RevisionPruneDeps): Promise<R
     };
   }
 
-  let granted: { readonly generation: number } | undefined;
+  let granted: { readonly generation: number; readonly heartbeat: GcLeaseHeartbeat } | undefined;
   if (lease !== undefined) {
+    const now = deps.now ?? new Date();
     const acquired = await lease.store.acquire({
       ownerId: lease.ownerId,
-      now: deps.now ?? new Date(),
+      now,
       ttlMs: lease.ttlMs,
     });
     if (acquired.status === 'denied') {
@@ -108,11 +112,21 @@ export async function pruneRevisionManifests(deps: RevisionPruneDeps): Promise<R
           : 'gc lease fence unreadable: refusing to start a destructive pass',
       };
     }
-    granted = { generation: acquired.generation };
+    granted = {
+      generation: acquired.generation,
+      heartbeat: new GcLeaseHeartbeat({
+        store: lease.store,
+        ownerId: lease.ownerId,
+        generation: acquired.generation,
+        ttlMs: lease.ttlMs,
+        grantedAt: now,
+        ...(lease.clock === undefined ? {} : { clock: lease.clock }),
+      }),
+    };
   }
 
   try {
-    return await runPass(deps);
+    return await runPass(deps, granted?.heartbeat);
   } finally {
     if (lease !== undefined && granted !== undefined) {
       await lease.store.release({ ownerId: lease.ownerId, generation: granted.generation });
@@ -120,7 +134,10 @@ export async function pruneRevisionManifests(deps: RevisionPruneDeps): Promise<R
   }
 }
 
-async function runPass(deps: RevisionPruneDeps): Promise<RevisionPrunePlan> {
+async function runPass(
+  deps: RevisionPruneDeps,
+  heartbeat?: GcLeaseHeartbeat,
+): Promise<RevisionPrunePlan> {
   const retainedBy = new Map<string, RevisionRetainReason[]>();
 
   const retain = (manifestId: string, reason: RevisionRetainReason): void => {
@@ -155,6 +172,9 @@ async function runPass(deps: RevisionPruneDeps): Promise<RevisionPrunePlan> {
   const removed: string[] = [];
   if (!deps.dryRun) {
     for (const manifestId of pruneable) {
+      // Renew at each delete when half the window has passed, and stop if the
+      // fence moved to a newer generation while this pass was planning.
+      await heartbeat?.assert();
       if (await deps.manifests.delete(manifestId)) removed.push(manifestId);
     }
   }

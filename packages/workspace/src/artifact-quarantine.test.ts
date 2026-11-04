@@ -29,6 +29,26 @@ describe('artifact quarantine ledger (#210 U21)', () => {
     }
   });
 
+  it('never releases a candidate whose deadline leaves the representable range', async () => {
+    const { store, dir, now } = await tempStore();
+    try {
+      // A hand-edited or corrupted ledger can carry a negative grace that sums
+      // to a time in the past but outside the range a Date can represent. The
+      // row has no provable deadline, so the ledger must retain it.
+      await mkdir(path.join(dir, 'quarantine'), { recursive: true });
+      await writeFile(
+        path.join(dir, 'quarantine', 'candidates.json'),
+        JSON.stringify([{ kind: 'content-hash', hash: H('9'), quarantinedAt: T0.toISOString(), graceMs: -9e15 }]),
+        'utf8',
+      );
+      const released = await store.releaseDue({ now, isReachable: async () => false });
+      expect(released).toEqual([]);
+      expect(await store.list()).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('releases an expired candidate that is still unreachable and clears the ledger entry', async () => {
     const { store, dir, now } = await tempStore();
     try {

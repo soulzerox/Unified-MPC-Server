@@ -518,6 +518,9 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   delete). Content-hash rows release the ledger entry only: the canonical store
   holds no content-addressed bytes — Git owns the file content — so there is
   nothing else to delete.
+- A row whose grace deadline cannot be placed on the timeline is retained, not
+  deleted: `index gc status` reports the same row as `until unreadable`, so a
+  destructive pass that expired it would contradict the read-only surface.
 - A record delete that fails for any reason other than "already gone" aborts the
   pass: the row stays in the ledger, `failed to delete canonical artifact ...`
   reports the key, the repository and the cause, and the lease is still
@@ -550,7 +553,7 @@ $ unified-mpc index gc status
 gc status: healthy
 lease free
 quarantine 2 (due 1, in-grace 1)
-  due 4d1c0a1f8b25 until 2026-11-11T00:00:00.000Z
+  due 4d1c0a1f8b25 until 2026-11-03T00:00:00.000Z
   in-grace repo:v1:documented file:v1:9b1c4f2e7a60 until 2026-11-11T00:00:00.000Z
 ```
 
@@ -561,7 +564,10 @@ quarantine 2 (due 1, in-grace 1)
   describes a retired record, which still keeps the generation monotonic.
 - `due` rows have passed their grace deadline and are still in the ledger;
   `in-grace` rows are not candidates yet. A row whose own deadline cannot be
-  read prints `until unreadable` and is never counted as due.
+  placed on the timeline — an unparseable `quarantinedAt`, a grace that is not a
+  finite number, or a sum outside the range a `Date` can represent — prints
+  `until unreadable` and is never counted as due. The expire passes use the same
+  rule, so a row this snapshot calls unreadable is retained, not deleted.
 - Reachability is not evaluated here. `index gc expire --dry-run` owns that
   verdict, so `due 2` means "two rows would be re-checked", not "two deletions".
 - An unreadable ledger throws and exits `1` instead of reporting `due 0`.

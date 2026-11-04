@@ -9,7 +9,7 @@ import type {
   QuarantineEntry,
   QuarantineTarget,
 } from './artifact-quarantine.js';
-import { quarantineEntryTarget } from './artifact-quarantine.js';
+import { quarantineDeadline, quarantineEntryTarget } from './artifact-quarantine.js';
 import type { CanonicalArtifactStore } from './canonical-artifact-store.js';
 import { collectRetainedManifestIds, planRepositoryArtifactGc } from './artifact-key-gc.js';
 import type { GcLeaseStore } from './gc-lease.js';
@@ -179,8 +179,12 @@ async function runPass(stores: GcExpireStores, input: GcExpireInput): Promise<Gc
   const due: QuarantineEntry[] = [];
   const kept: QuarantineEntry[] = [];
   for (const entry of entries) {
-    const expiresAt = Date.parse(entry.quarantinedAt) + entry.graceMs;
-    const expired = Number.isFinite(expiresAt) && input.now.getTime() >= expiresAt;
+    // A row whose deadline cannot be placed on the timeline is retained, never
+    // deleted: `index gc status` reports the same row as `until unreadable`, so
+    // a destructive pass that expired it would contradict the read-only
+    // surface.
+    const expiresAt = quarantineDeadline(entry);
+    const expired = expiresAt !== null && input.now.getTime() >= expiresAt;
     const reachable = entry.kind === 'content-hash'
       ? reachableHashes.has(entry.hash)
       : reachableArtifacts.has(artifactIdentity(entry.repositoryId, entry.artifactKey));

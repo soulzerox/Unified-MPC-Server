@@ -1,5 +1,5 @@
 import type { ArtifactQuarantineStore, QuarantineTarget } from './artifact-quarantine.js';
-import { quarantineEntryTarget } from './artifact-quarantine.js';
+import { quarantineDeadline, quarantineEntryTarget } from './artifact-quarantine.js';
 import type { GcLeaseStore } from './gc-lease.js';
 
 export interface GcStatusDeps {
@@ -78,13 +78,14 @@ export async function gcStatus(deps: GcStatusDeps, input: GcStatusInput): Promis
   const now = input.now.getTime();
   const rows = entries
     .map((entry): GcQuarantineRow => {
-      const quarantinedAt = Date.parse(entry.quarantinedAt);
-      const readable = Number.isFinite(quarantinedAt);
-      const expiresAt = readable ? new Date(quarantinedAt + entry.graceMs).toISOString() : null;
+      // One predicate also decides the destructive pass, so a deadline this
+      // projection calls unreadable can never be deleted by an expire run.
+      const deadline = quarantineDeadline(entry);
+      const expiresAt = deadline === null ? null : new Date(deadline).toISOString();
       // The expire pass uses the same test: `now >= deadline`. A row whose own
       // deadline cannot be read is never due, so it cannot be deleted by
       // accident.
-      const due = expiresAt !== null && now >= Date.parse(expiresAt);
+      const due = deadline !== null && now >= deadline;
       return { target: quarantineEntryTarget(entry), quarantinedAt: entry.quarantinedAt, graceMs: entry.graceMs, expiresAt, due };
     })
     .sort((a, b) => (a.due === b.due ? compareTargets(a.target, b.target) : a.due ? -1 : 1));

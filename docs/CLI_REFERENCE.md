@@ -433,6 +433,35 @@ artifact-unreachable repo:v1:documented file:v1:ff0371d8c4e2
   read; `2` when `--dry-run` is missing, `--apply` is requested, or another
   argument is unknown.
 
+### `unified-mpc index gc expire --dry-run [--json]`
+
+Prints the deletion plan for the quarantine ledger: rows whose grace deadline
+has passed and that are still unreachable when reachability is re-checked now,
+plus the rows retained because they are still inside grace or became reachable
+again. `--dry-run` is required because the real pass releases ledger rows and
+calls the physical-delete callbacks.
+
+```bash
+$ unified-mpc index gc expire --dry-run
+planned (dry-run) expired 2 retained 1
+expire 4d1c0a1f8b25
+expire repo:v1:documented file:v1:9b1c4f2e7a60
+retain repo:v1:documented file:v1:ff0371d8c4e2
+```
+
+- `expire` rows are release-and-delete candidates, not deletions. This verb has
+  no `--apply`: deletion needs the cleanup lease and delete callbacks, so it
+  ships separately.
+- A bare id is a content hash; a repository plus artifact key is the
+  repository-scoped artifact row.
+- Reachability is re-checked in this pass, so an artifact that became live again
+  after quarantine is `retain`ed even after its deadline. A refused plan (no
+  reachability roots, or a root manifest missing on disk) prints
+  `refused <reason>` and exits `1`; nothing is released.
+- Exit `0` for any plan; `1` when the plan is refused or the ledger cannot be
+  read; `2` when `--dry-run` is missing, `--apply` is requested, or another
+  argument is unknown.
+
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref

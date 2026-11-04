@@ -1051,6 +1051,76 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['gc lease fence unreadable']);
   });
 
+  it('plans quarantine expiry in dry-run mode without deleting anything', async () => {
+    const content = 'a'.repeat(64);
+    const artifactKey = `file:v1:${'b'.repeat(64)}`;
+    const retainedKey = `file:v1:${'c'.repeat(64)}`;
+    const outputs: string[] = [];
+    let seenDryRun: boolean | undefined;
+    const code = await runCli(['index', 'gc', 'expire', '--dry-run'], {
+      ...baseDependencies,
+      indexGcExpire: async (input) => {
+        seenDryRun = input.dryRun;
+        return {
+          status: 'planned',
+          expired: [content, { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey }],
+          deleted: [],
+          retained: [{ kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey: retainedKey }],
+        };
+      },
+      write: (text) => outputs.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seenDryRun).toBe(true);
+    expect(outputs).toEqual([
+      `planned (dry-run) expired 2 retained 1\nexpire ${content}\nexpire repo_abc123 ${artifactKey}`
+        + `\nretain repo_abc123 ${retainedKey}`,
+    ]);
+
+    const refused: string[] = [];
+    const refusedCode = await runCli(['index', 'gc', 'expire', '--dry-run'], {
+      ...baseDependencies,
+      indexGcExpire: async () => ({ status: 'refused', reason: 'no reachability roots supplied' }),
+      write: (text) => refused.push(text),
+    });
+    expect(refusedCode).toBe(1);
+    expect(refused).toEqual(['refused no reachability roots supplied']);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'gc', 'expire', '--dry-run', '--json'], {
+      ...baseDependencies,
+      indexGcExpire: async () => ({ status: 'planned', expired: [], deleted: [], retained: [] }),
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual({ status: 'planned', expired: [], deleted: [], retained: [] });
+
+    const usage: string[] = [];
+    const usageCode = await runCli(['index', 'gc', 'expire'], {
+      ...baseDependencies,
+      writeError: (text) => usage.push(text),
+    });
+    expect(usageCode).toBe(2);
+    expect(usage[0]).toContain('index gc expire --dry-run');
+
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'gc', 'expire', '--dry-run'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'gc', 'expire', '--dry-run'], {
+      ...baseDependencies,
+      indexGcExpire: async () => { throw new Error('quarantine ledger unreadable'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['quarantine ledger unreadable']);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

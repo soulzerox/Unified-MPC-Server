@@ -805,6 +805,71 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['STORAGE_IDENTITY_DRIFT: recovery required']);
   });
 
+  it('lists stored canonical revisions and fails like every other index command', async () => {
+    const revision = {
+      manifestId: `man:v1:${'a'.repeat(64)}`,
+      repositoryId: 'repo_abc123',
+      revisionId: `rev:v1:${'b'.repeat(64)}`,
+      commitSha: 'c'.repeat(40),
+      treeOid: 'd'.repeat(40),
+      targetRef: 'refs/remotes/origin/main',
+      entryCount: 695,
+      createdAt: '2026-10-17T00:00:00.000Z',
+      refs: ['refs/remotes/origin/main'],
+      pins: [],
+      overlayGoalIds: [],
+      indexJobOperationIds: [],
+    };
+
+    const output: string[] = [];
+    const code = await runCli(['index', 'revision', 'list'], {
+      ...baseDependencies,
+      canonicalRevisionList: async () => ({ revisions: [revision] }),
+      write: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(output[0]?.split('\n')).toEqual([
+      'revisions 1',
+      `  ${revision.manifestId} commit ${revision.commitSha} tree ${revision.treeOid} entries 695 created 2026-10-17T00:00:00.000Z`,
+      '    refs refs/remotes/origin/main',
+    ]);
+
+    const empty: string[] = [];
+    const emptyCode = await runCli(['index', 'revision', 'list'], {
+      ...baseDependencies,
+      canonicalRevisionList: async () => ({ revisions: [] }),
+      write: (text) => empty.push(text),
+    });
+    expect(emptyCode).toBe(0);
+    expect(empty).toEqual(['revisions 0']);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'revision', 'list', '--json'], {
+      ...baseDependencies,
+      canonicalRevisionList: async () => ({ revisions: [revision] }),
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual({ revisions: [revision] });
+
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'revision', 'list'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'revision', 'list'], {
+      ...baseDependencies,
+      canonicalRevisionList: async () => { throw new Error('STORAGE_IDENTITY_DRIFT: recovery required'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['STORAGE_IDENTITY_DRIFT: recovery required']);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

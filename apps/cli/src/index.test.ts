@@ -6,7 +6,16 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { ok, err, type Result } from '@unified-mpc/domain';
+import { canonicalManifestId, canonicalRevisionId, computeTreeOid, fileArtifactId } from '@unified-mpc/domain';
 import type { ExtensionsService } from '@unified-mpc/extensions';
+import {
+  ArtifactQuarantineStore,
+  CanonicalArtifactStore,
+  CanonicalManifestStore,
+  CanonicalRefStore,
+  GcLeaseStore,
+  type StoredManifest,
+} from '@unified-mpc/workspace';
 import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
 
 const sourceRuntimeAdmissionIdentity = {
@@ -985,10 +994,12 @@ describe('CLI execution dispatcher', () => {
     const artifactKey = `file:v1:${'b'.repeat(64)}`;
     const outputs: string[] = [];
     let seenDryRun: boolean | undefined;
+    let seenGraceMs: number | undefined;
     const code = await runCli(['index', 'gc', '--dry-run'], {
       ...baseDependencies,
       indexGc: async (input) => {
         seenDryRun = input.dryRun;
+        seenGraceMs = input.graceMs;
         return {
           status: 'planned',
           reachable: [content],
@@ -1002,9 +1013,36 @@ describe('CLI execution dispatcher', () => {
     });
     expect(code).toBe(0);
     expect(seenDryRun).toBe(true);
+    // A dry run carries the default window so the report shape stays stable,
+    // even though it stamps no deadline.
+    expect(seenGraceMs).toBe(604_800_000);
     expect(outputs).toEqual([
       `planned (dry-run) reachable 1 unreachable 1 artifact-unreachable 1\nunreachable ${content}`
         + `\nartifact-unreachable repo_abc123 ${artifactKey}`,
+    ]);
+
+    const applied: string[] = [];
+    let appliedGraceMs: number | undefined;
+    const appliedCode = await runCli(['index', 'gc', '--apply', '--grace', '12h'], {
+      ...baseDependencies,
+      indexGc: async (input) => {
+        appliedGraceMs = input.graceMs;
+        return {
+          status: 'planned',
+          reachable: [content],
+          unreachable: [content],
+          unreachableArtifacts: [{ repositoryId: 'repo_abc123', artifactKey }],
+          quarantined: [content],
+          quarantinedArtifacts: [{ repositoryId: 'repo_abc123', artifactKey }],
+        };
+      },
+      write: (text) => applied.push(text),
+    });
+    expect(appliedCode).toBe(0);
+    expect(appliedGraceMs).toBe(43_200_000);
+    expect(applied).toEqual([
+      `applied quarantined 1 artifact-quarantined 1\nquarantined ${content}`
+        + `\nartifact-quarantined repo_abc123 ${artifactKey}`,
     ]);
 
     const refused: string[] = [];
@@ -1031,7 +1069,7 @@ describe('CLI execution dispatcher', () => {
       writeError: (text) => usage.push(text),
     });
     expect(usageCode).toBe(2);
-    expect(usage[0]).toContain('index gc --dry-run');
+    expect(usage[0]).toContain('index gc (--dry-run | --apply');
 
     const errors: string[] = [];
     const unavailable = await runCli(['index', 'gc', '--dry-run'], {
@@ -1049,6 +1087,136 @@ describe('CLI execution dispatcher', () => {
     });
     expect(thrownCode).toBe(1);
     expect(thrown).toEqual(['gc lease fence unreadable']);
+  });
+
+  it('applies a GC pass through the real canonical stores under the cleanup lease', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-apply-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const repositoryId = 'repo_abc123';
+      const ref = 'refs/remotes/origin/main';
+      const liveHash = '1'.repeat(64);
+      const deadHash = 'd'.repeat(64);
+      const manifest: StoredManifest = ((): StoredManifest => {
+        const entries = [{ path: 'live.ts', contentHash: liveHash }];
+        const commitSha = 'c'.repeat(40);
+        const treeOid = computeTreeOid(entries);
+        const revisionId = canonicalRevisionId({ repositoryId, commitSha, treeOid, targetRef: ref, parents: [] });
+        return {
+          manifestId: canonicalManifestId({ repositoryId, revisionId, entries }),
+          repositoryId,
+          revisionId,
+          commitSha,
+          treeOid,
+          targetRef: ref,
+          entries,
+          createdAt: '2026-11-04T00:00:00.000Z',
+        };
+      })();
+      const manifests = new CanonicalManifestStore(canonical);
+      await manifests.put(manifest);
+      await new CanonicalRefStore(canonical).promote(ref, {
+        expectedCurrent: null,
+        current: null,
+        target: { commitSha: manifest.commitSha, treeOid: manifest.treeOid, manifestId: manifest.manifestId },
+        targetVerified: true,
+      });
+      const artifacts = new CanonicalArtifactStore(canonical);
+      const liveArtifactKey = fileArtifactId({
+        sourceContentSha256: liveHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+      });
+      await artifacts.put({
+        kind: 'file',
+        artifactKey: liveArtifactKey,
+        repositoryId,
+        sourceContentSha256: liveHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+        bindings: [{ path: 'live.ts', manifestId: manifest.manifestId }],
+        createdAt: '2026-11-04T00:00:00.000Z',
+      });
+      const artifactKey = fileArtifactId({
+        sourceContentSha256: deadHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+      });
+      await artifacts.put({
+        kind: 'file',
+        artifactKey,
+        repositoryId,
+        sourceContentSha256: deadHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+        bindings: [],
+        createdAt: '2026-11-04T00:00:00.000Z',
+      });
+
+      // A held lease must refuse the pass before it writes a single row.
+      const lease = new GcLeaseStore(canonical);
+      const acquired = await lease.acquire({ ownerId: 'other_gc', now: new Date(), ttlMs: 60_000 });
+      if (acquired.status !== 'granted') throw new Error(`expected a granted lease, got ${acquired.status}`);
+      const refused: string[] = [];
+      const refusedCode = await runCli(['index', 'gc', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => refused.push(text),
+        writeError: () => undefined,
+      });
+      expect(refusedCode).toBe(1);
+      expect(refused[0]).toContain('refused gc lease held by other_gc');
+      expect(await new ArtifactQuarantineStore(canonical).list()).toEqual([]);
+      await lease.release({ ownerId: 'other_gc', generation: acquired.generation });
+
+      const output: string[] = [];
+      const applyErrors: string[] = [];
+      const code = await runCli(['index', 'gc', '--apply', '--grace', '1h'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => applyErrors.push(text),
+      });
+      expect(applyErrors, applyErrors.join('\n')).toEqual([]);
+      expect(code, output.join('\n')).toBe(0);
+      expect(output[0]).toContain('applied quarantined 1 artifact-quarantined 1');
+      expect(output[0]).toContain(`quarantined ${deadHash}`);
+      expect(output[0]).toContain(`artifact-quarantined ${repositoryId} ${artifactKey}`);
+
+      const entries = await new ArtifactQuarantineStore(canonical).list();
+      expect(entries).toHaveLength(2);
+      expect(entries).toContainEqual(expect.objectContaining({
+        kind: 'content-hash',
+        hash: deadHash,
+        graceMs: 3_600_000,
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        kind: 'artifact-key',
+        repositoryId,
+        artifactKey,
+        graceMs: 3_600_000,
+      }));
+      // The pass released its lease, so the next run is not blocked by itself.
+      expect(await lease.read()).toBeNull();
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('plans quarantine expiry in dry-run mode without deleting anything', async () => {

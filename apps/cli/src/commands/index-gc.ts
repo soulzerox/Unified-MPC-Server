@@ -3,33 +3,64 @@ import type { GcCycleReport } from '@unified-mpc/workspace';
 
 export interface IndexGcCommand {
   readonly kind: 'index-gc';
-  /** The only supported mode: plan the GC cycle without quarantining anything. */
-  readonly dryRun: true;
+  /** `--dry-run` plans; `--apply` is the only mutating mode. */
+  readonly dryRun: boolean;
+  /** Quarantine grace stamped on every row of an apply pass. */
+  readonly graceMs: number;
   /** Print the report as JSON instead of the operator lines. */
   readonly json: boolean;
 }
 
-const INDEX_GC_USAGE = 'Usage: unified-mpc index gc --dry-run [--json]';
+const INDEX_GC_USAGE = 'Usage: unified-mpc index gc (--dry-run | --apply [--grace <duration>]) [--json]';
 
-const APPLY_UNSUPPORTED = 'index gc cannot quarantine yet: --apply is not supported, only --dry-run';
+/** One week: the documented default quarantine window (#210 §7). */
+export const DEFAULT_GC_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const DURATION = /^([1-9][0-9]*)([smhd])$/;
+const UNIT_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 
 /**
- * Parse `index gc --dry-run`.
+ * Parse a positive `<n><s|m|h|d>` duration into milliseconds.
  *
- * `--dry-run` is required rather than defaulted so the verb cannot become a
- * mutation by omission. The real cycle quarantines and needs the cleanup lease;
- * that apply path lands separately. `--apply` is rejected with a specific
- * message so an operator learns the verb is read-only from the command itself.
+ * Deliberately small: operators write `7d`, `12h`, `30m`. Zero is rejected so a
+ * `--grace 0s` cannot turn the quarantine window into an instant delete, and
+ * anything else is a usage error rather than a silently ignored flag.
+ */
+export function parseGcGrace(value: string): number | null {
+  const match = DURATION.exec(value);
+  if (match === null) return null;
+  const units = Number(match[1]);
+  const unitMs = UNIT_MS[match[2] ?? ''];
+  if (!Number.isSafeInteger(units) || unitMs === undefined) return null;
+  const graceMs = units * unitMs;
+  return Number.isSafeInteger(graceMs) ? graceMs : null;
+}
+
+/**
+ * Parse `index gc --dry-run|--apply [--grace <duration>] [--json]`.
+ *
+ * Exactly one mode is required, never defaulted: the verb must not become a
+ * mutation by omission, and a dry run is the documented way to inspect the plan
+ * before applying it. `--grace` only makes sense on the mutating pass — the
+ * plan does not stamp a deadline — so pairing it with `--dry-run` is a usage
+ * error instead of a flag that silently does nothing.
  */
 export function parseIndexGcArgs(args: readonly string[]): Result<IndexGcCommand> {
   if (args[0] !== 'gc') return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
 
-  let dryRun = false;
+  let dryRun: boolean | undefined;
+  let graceMs: number | undefined;
   let json = false;
-  for (const argument of args.slice(1)) {
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
     if (argument === '--dry-run') {
-      if (dryRun) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+      if (dryRun !== undefined) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
       dryRun = true;
+      continue;
+    }
+    if (argument === '--apply') {
+      if (dryRun !== undefined) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+      dryRun = false;
       continue;
     }
     if (argument === '--json') {
@@ -37,25 +68,41 @@ export function parseIndexGcArgs(args: readonly string[]): Result<IndexGcCommand
       json = true;
       continue;
     }
-    if (argument === '--apply') return err(appError('INVALID_INPUT', APPLY_UNSUPPORTED));
+    if (argument === '--grace') {
+      if (graceMs !== undefined) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+      const value = args[index + 1];
+      if (value === undefined) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+      const parsed = parseGcGrace(value);
+      if (parsed === null) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+      graceMs = parsed;
+      index += 1;
+      continue;
+    }
     return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
   }
 
-  if (!dryRun) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
-  return ok({ kind: 'index-gc', dryRun: true, json });
+  if (dryRun === undefined) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+  if (graceMs !== undefined && dryRun) return err(appError('INVALID_INPUT', INDEX_GC_USAGE));
+  return ok({ kind: 'index-gc', dryRun, graceMs: graceMs ?? DEFAULT_GC_GRACE_MS, json });
 }
 
 /**
- * Render the dry-run GC cycle plan (#210 §7/§11).
+ * Render the GC cycle report (#210 §7/§11).
  *
  * Two spaces are reported because they are planned by different reachability
  * rules: `unreachable` hashes come from manifest entries, while
- * `artifact-unreachable` records are scoped to one repository. Nothing is
- * quarantined or deleted, and a refused plan is printed as the safety verdict
- * it is rather than as an empty plan.
+ * `artifact-unreachable` records are scoped to one repository. The mode is
+ * passed in rather than guessed from the report: a dry run says
+ * `planned (dry-run)` and lists candidates, while an apply pass says `applied`
+ * and lists the rows it actually wrote to the quarantine ledger. A refused
+ * pass is printed as the safety verdict it is rather than as an empty plan.
  */
-export function formatIndexGc(report: GcCycleReport): string {
+export function formatIndexGc(report: GcCycleReport, dryRun: boolean): string {
   if (report.status === 'refused') return `refused ${report.reason}`;
+  return dryRun ? renderPlan(report) : renderApplied(report);
+}
+
+function renderPlan(report: Extract<GcCycleReport, { status: 'planned' }>): string {
   const lines = [
     `planned (dry-run) reachable ${report.reachable.length} unreachable ${report.unreachable.length}`
       + ` artifact-unreachable ${report.unreachableArtifacts.length}`,
@@ -63,6 +110,18 @@ export function formatIndexGc(report: GcCycleReport): string {
   for (const contentHash of report.unreachable) lines.push(`unreachable ${contentHash}`);
   for (const artifact of report.unreachableArtifacts) {
     lines.push(`artifact-unreachable ${artifact.repositoryId} ${artifact.artifactKey}`);
+  }
+  return lines.join('\n');
+}
+
+function renderApplied(report: Extract<GcCycleReport, { status: 'planned' }>): string {
+  const lines = [
+    `applied quarantined ${report.quarantined.length}`
+      + ` artifact-quarantined ${report.quarantinedArtifacts.length}`,
+  ];
+  for (const contentHash of report.quarantined) lines.push(`quarantined ${contentHash}`);
+  for (const artifact of report.quarantinedArtifacts) {
+    lines.push(`artifact-quarantined ${artifact.repositoryId} ${artifact.artifactKey}`);
   }
   return lines.join('\n');
 }

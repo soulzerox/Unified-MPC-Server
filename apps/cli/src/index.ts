@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -15,6 +16,7 @@ import {
   CanonicalManifestStore,
   CanonicalRefStore,
   expireGcQuarantine,
+  GcLeaseStore,
   GoalOverlayStore,
   IndexJobLedger,
   pinCanonicalRevision,
@@ -215,7 +217,8 @@ export interface CliDependencies {
     readonly dryRun: true;
   }): Promise<RevisionPruneReport>;
   indexGc?(input: {
-    readonly dryRun: true;
+    readonly dryRun: boolean;
+    readonly graceMs: number;
   }): Promise<GcCycleReport>;
   indexGcExpire?(input: {
     readonly dryRun: true;
@@ -298,6 +301,7 @@ Commands:
   index revision unpin <manifest-id>     Remove the operator pin from a revision
   index revision prune --dry-run         Plan the prune of unreferenced revisions without deleting
   index gc --dry-run                     Plan artifact GC reachability without quarantining
+  index gc --apply [--grace <duration>]  Quarantine unreachable artifacts under the GC lease
   index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
@@ -458,8 +462,11 @@ Commands:
         return 1;
       }
       try {
-        const report = await dependencies.indexGc({ dryRun: parsed.value.dryRun });
-        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGc(report));
+        const report = await dependencies.indexGc({
+          dryRun: parsed.value.dryRun,
+          graceMs: parsed.value.graceMs,
+        });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGc(report, parsed.value.dryRun));
         return indexGcExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
@@ -707,6 +714,27 @@ export interface DefaultCliDependenciesOptions {
   readonly extensions?: ExtensionsService;
   /** Overrides the host probes behind `doctor`; production always uses the real ones. */
   readonly doctorProbes?: DoctorProbes;
+}
+
+/**
+ * How long one CLI GC pass may hold the single-owner cleanup lease.
+ *
+ * Generous enough to cover a full artifact list plus manifest reads on a large
+ * store, short enough that a crashed pass stops blocking the next one within a
+ * coffee break: an expired lease is deliberately takeable, and the generation
+ * fence still prevents the stale owner from releasing its successor's lease.
+ */
+const GC_LEASE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Owner stamp for the U28 cleanup lease (#210 §12).
+ *
+ * Host + pid is enough to tell two concurrent CLI passes apart while staying
+ * readable in the refusal message, which is the whole point: an operator must
+ * be able to see who holds the lease without decoding a UUID.
+ */
+function gcLeaseOwnerId(): string {
+  return `unified-mpc-cli:${os.hostname()}:${process.pid}`;
 }
 
 export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
@@ -961,6 +989,11 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         artifactCandidates.push({ repositoryId: artifact.repositoryId, artifactKey: artifact.artifactKey });
       }
       const jobs = new IndexJobLedger(root);
+      // Only the mutating pass takes the U28 fence; a dry run stays read-only
+      // and unfenced, exactly like the expire verb.
+      const lease = input.dryRun
+        ? undefined
+        : { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS };
       return runGcCycle({
         refs: new CanonicalRefStore(root),
         manifests: new CanonicalManifestStore(root),
@@ -973,10 +1006,11 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         artifactCandidates,
         indexJobManifestIds: await jobs.liveManifestIds(),
         now: new Date(),
-        // A dry run never quarantines, so the grace window is unused; the
-        // contract requires it because a non-dry pass stamps the deadline.
-        graceMs: 0,
+        // The caller's window: every row this pass writes carries the same
+        // deadline, so a later `index gc expire --apply` can prove grace.
+        graceMs: input.graceMs,
         dryRun: input.dryRun,
+        ...(lease === undefined ? {} : { lease }),
       });
     },
     indexGcExpire: async (input): Promise<GcExpireReport> => {

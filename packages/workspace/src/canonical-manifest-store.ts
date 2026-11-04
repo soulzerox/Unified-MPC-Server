@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { canonicalManifestId } from '@unified-mpc/domain';
+import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 export interface StoredManifestEntry {
   readonly path: string;
@@ -53,8 +54,21 @@ function requireManifestId(value: string): string {
  * add a commit index only when repositories grow large enough that the
  * scan shows up.
  */
+export interface CanonicalManifestStoreOptions {
+  /**
+   * Fail closed instead of skipping a record that cannot be read. A projection
+   * whose counts must be exact (`index space`) refuses rather than printing a
+   * smaller store; operator listings keep the tolerant default.
+   */
+  readonly strictReads?: boolean;
+}
+
 export class CanonicalManifestStore {
-  public constructor(private readonly root: string) {}
+  private readonly strictReads: boolean;
+
+  public constructor(private readonly root: string, options: CanonicalManifestStoreOptions = {}) {
+    this.strictReads = options.strictReads === true;
+  }
 
   public async put(manifest: StoredManifest): Promise<void> {
     const manifestId = requireManifestId(manifest.manifestId);
@@ -85,32 +99,61 @@ export class CanonicalManifestStore {
   }
 
   public async get(manifestId: string): Promise<StoredManifest | null> {
+    let id: string;
     try {
-      const raw = await readFile(this.manifestPath(requireManifestId(manifestId)), 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      return isManifest(parsed) ? parsed : null;
-    } catch {
+      id = requireManifestId(manifestId);
+    } catch (error) {
+      // The tolerant lookup treats an unusable id as an absent row (its
+      // documented `null`); a strict read refuses it like any other record it
+      // cannot read.
+      if (this.strictReads) throw error;
       return null;
     }
+    let raw: string;
+    try {
+      raw = await readFile(this.manifestPath(id), 'utf8');
+    } catch (error) {
+      if (this.strictReads && !isMissingPath(error)) {
+        throw new Error(`cannot read canonical manifest ${id}: ${errorMessage(error)}`);
+      }
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      if (this.strictReads) throw new Error(`cannot read canonical manifest ${id}: ${errorMessage(error)}`);
+      return null;
+    }
+    if (isManifest(parsed)) return parsed;
+    if (this.strictReads) throw new Error(`cannot read canonical manifest ${id}: not a canonical manifest record`);
+    return null;
   }
 
-  public async listAll(): Promise<StoredManifest[]> {
+  public async listAll(options?: ReachabilityReadOptions): Promise<StoredManifest[]> {
+    const strict = this.strictReads || isStrictRead(options);
     const manifestsDir = path.join(this.root, 'manifests');
     let files: string[];
     try {
       files = (await readdir(manifestsDir, { withFileTypes: true }))
         .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
         .map((entry) => entry.name);
-    } catch {
+    } catch (error) {
+      if (strict && !isMissingPath(error)) {
+        throw new Error(`cannot read the canonical manifests directory: ${errorMessage(error)}`);
+      }
       return [];
     }
     const manifests: StoredManifest[] = [];
     for (const file of files) {
       try {
         const parsed: unknown = JSON.parse(await readFile(path.join(manifestsDir, file), 'utf8'));
-        if (isManifest(parsed)) manifests.push(parsed);
-      } catch {
-        // Skip unreadable/corrupted manifest files rather than failing the listing.
+        if (!isManifest(parsed)) throw new Error('not a canonical manifest record');
+        manifests.push(parsed);
+      } catch (error) {
+        // Tolerant listings skip unreadable/corrupted records; a count that must
+        // be exact refuses instead, because a skipped record undercounts.
+        if (strict) throw new Error(`cannot read canonical manifest ${file}: ${errorMessage(error)}`);
       }
     }
     return manifests.sort((a, b) => a.manifestId.localeCompare(b.manifestId));

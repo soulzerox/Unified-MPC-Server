@@ -245,6 +245,19 @@ describe('logical space report from the canonical root (#210 §2)', () => {
     expect(report.reason).toMatch(/cannot read canonical artifact/);
   });
 
+  it('refuses an unreadable manifest record instead of undercounting manifests', async () => {
+    const root = await tempRoot();
+    await seeded(root);
+    await seedArtifact(root, H('a'));
+    await writeFile(path.join(root, 'manifests', 'corrupt.json'), '{not json', 'utf8');
+
+    const report = await logicalSpaceReportFromRoot(root);
+
+    expect(report.status).toBe('refused');
+    if (report.status !== 'refused') throw new Error('unreachable');
+    expect(report.reason).toMatch(/cannot read canonical manifest/);
+  });
+
   it('refuses an unreadable ref record instead of reporting a smaller store', async () => {
     const root = await tempRoot();
     await seeded(root);

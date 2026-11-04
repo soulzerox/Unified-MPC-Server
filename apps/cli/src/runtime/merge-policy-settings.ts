@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type {
   AcceptedMergeReviewOutcome,
   CommandSpec,
@@ -98,6 +99,9 @@ function parsePolicy(value: unknown): RepositoryMergePolicy | undefined {
   const mergeMethod = parseMergeMethod(value.mergeMethod);
   if (value.mergeMethod !== undefined && mergeMethod === undefined) return undefined;
 
+  const checkoutPath = value.checkoutPath === undefined ? undefined : parseCheckoutPath(value.checkoutPath);
+  if (value.checkoutPath !== undefined && checkoutPath === undefined) return undefined;
+
   return {
     repository,
     defaultBranch,
@@ -108,7 +112,20 @@ function parsePolicy(value: unknown): RepositoryMergePolicy | undefined {
       acceptedOutcomes,
     },
     ...(mergeMethod === undefined ? {} : { mergeMethod }),
+    ...(checkoutPath === undefined ? {} : { checkoutPath }),
   };
+}
+
+/**
+ * A checkout the runtime may advance must be an absolute path: a relative one
+ * would resolve against whatever directory the daemon happens to start in, so
+ * the same policy could read two different repositories.
+ */
+function parseCheckoutPath(value: unknown): string | undefined {
+  const candidate = boundedString(value, 4_096);
+  if (candidate === undefined) return undefined;
+  if (!path.isAbsolute(candidate) || candidate.includes('\u0000')) return undefined;
+  return candidate;
 }
 
 function normalizeRepository(value: string): string | undefined {

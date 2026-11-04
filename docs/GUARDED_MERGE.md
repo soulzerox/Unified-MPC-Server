@@ -158,6 +158,49 @@ request proves what GitHub is merging. Both must match the same commit:
   another host, or an SSH resolution failure fails closed as a repository
   mismatch instead of trusting the remote URL text.
 
+### Canonical advancement after a merge
+
+A policy may name the local checkout the runtime reads after it reconciles a
+merge:
+
+```json
+{
+  "repository": "owner/repo",
+  "defaultBranch": "main",
+  "checkoutPath": "/srv/checkouts/repo"
+}
+```
+
+`checkoutPath` must be absolute. A relative value is refused by the parser
+because it would resolve against whatever directory the daemon started in, so
+the same policy could read two different repositories.
+
+When a merge reconciles as `reconciled` and the observation carries its merge
+commit, the poller runs the advancement gate once for that repository:
+
+1. `git fetch` the exact branch into `refs/remotes/origin/<defaultBranch>`;
+2. refuse if that ref is not the commit the merge produced — a lagging clone
+   must not move the canonical ref backwards;
+3. run `advanceRevisionFromGit`, which classifies the delta against the active
+   manifest, persists the new manifest, CAS-promotes the ref and registers
+   artifacts.
+
+The outcome is reported in the poll summary as `canonicalAdvance`:
+
+| Value | Meaning |
+|---|---|
+| `advanced` | the ref moved to the merged commit; the report carries the manifest id |
+| `noop` | the ref already pointed at an equivalent manifest |
+| `refused` | reason included; the merge still reconciled, nothing was advanced |
+| `skipped / no_merge` | no merge reconciled in this pass |
+| `skipped / not_wired` | the runtime has no canonical root |
+
+A refused advance is never silent and never a failed reconciliation: the two
+records are separate, so an operator can see that a merge landed while the
+canonical ref did not follow it. Without `checkoutPath` the gate stays
+operator-driven through `unified-mpc index revision advance`.
+
+
 ---
 
 ## 6. Repository-Level Companion (`pnpm merge:pr`)

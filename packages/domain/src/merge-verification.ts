@@ -46,6 +46,16 @@ export interface RepositoryMergePolicy {
    * Absent means `merge`, so existing policies keep their behaviour.
    */
   readonly mergeMethod?: MergeMethod;
+  /**
+   * Absolute path of the local checkout whose `refs/remotes/origin/<defaultBranch>`
+   * the runtime advances after it reconciles a merge (#210 §3).
+   *
+   * Explicit on purpose: the canonical trust boundary is derived from that
+   * checkout's remote URL, so a policy that names no checkout must refuse
+   * instead of guessing which directory to read. Absent means the advancement
+   * gate stays operator-driven (`index revision advance`).
+   */
+  readonly checkoutPath?: string;
 }
 
 export interface MergeGateReceipt {

@@ -78,6 +78,47 @@ describe('parseRepositoryMergePolicySetting', () => {
     expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
   });
 
+  it('parses the absolute checkout whose canonical ref a merge advances', () => {
+    const value = JSON.stringify([
+      {
+        repository: 'owner/repo',
+        defaultBranch: 'main',
+        verificationMode: 'local_exact_head',
+        checkoutPath: '/srv/checkouts/repo',
+        requiredGates: [],
+        reviewPolicy: { required: false, acceptedOutcomes: [] },
+      },
+    ]);
+
+    expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toMatchObject({
+      checkoutPath: '/srv/checkouts/repo',
+    });
+  });
+
+  it.each([
+    ['a relative path', 'repos/repo'],
+    ['a path that resolves through the daemon cwd', './repo'],
+    ['a blank path', '   '],
+    ['a path carrying a NUL byte', '/srv/repo\u0000'],
+    ['an over-long path', `/${'a'.repeat(4_096)}`],
+    ['a non-string path', 42],
+  ])('refuses %s as a checkout', (_label, checkoutPath) => {
+    // A relative checkout would resolve against whatever directory the daemon
+    // started in, so the same policy could advance two different repositories.
+    const value = JSON.stringify([
+      {
+        repository: 'owner/repo',
+        defaultBranch: 'main',
+        verificationMode: 'local_exact_head',
+        checkoutPath,
+        requiredGates: [],
+        reviewPolicy: { required: false, acceptedOutcomes: [] },
+      },
+    ]);
+
+    expect(parseRepositoryMergePolicySetting(value, 'owner/repo')).toBeUndefined();
+  });
+
   it('still parses a zero-gate policy so the policy list itself stays usable', () => {
     // The evaluator blocks zero-gate merges via policy_requires_no_gates. Rejecting the
     // entry here would instead invalidate every other repository policy in the setting

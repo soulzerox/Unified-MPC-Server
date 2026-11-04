@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GitRevisionAdvanceResult, RevisionPruneReport } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GcExpireReport, GitRevisionAdvanceResult, RevisionPruneReport } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -78,6 +78,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index revision pin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index revision unpin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index revision prune(?:\s|$)/, kind: 'index-revision-prune', dispatch: 'indexRevisionPrune' },
+  { pattern: /^unified-mpc index gc expire(?:\s|$)/, kind: 'index-gc-expire', dispatch: 'indexGcExpire' },
   { pattern: /^unified-mpc index gc(?:\s|$)/, kind: 'index-gc', dispatch: 'indexGc' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
 ];
@@ -259,6 +260,15 @@ function replayDependencies(calls: string[]): CliDependencies {
         unreachableArtifacts: [{ repositoryId: 'repo:v1:documented', artifactKey: `file:v1:${'2'.repeat(64)}` }],
         quarantined: [],
         quarantinedArtifacts: [],
+      };
+    },
+    indexGcExpire: async (): Promise<GcExpireReport> => {
+      calls.push('indexGcExpire');
+      return {
+        status: 'planned',
+        expired: [`${'3'.repeat(64)}`, { kind: 'artifact-key', repositoryId: 'repo:v1:documented', artifactKey: `file:v1:${'4'.repeat(64)}` }],
+        deleted: [],
+        retained: [`${'5'.repeat(64)}`],
       };
     },
   };

@@ -14,6 +14,7 @@ import {
   CanonicalArtifactStore,
   CanonicalManifestStore,
   CanonicalRefStore,
+  expireGcQuarantine,
   GoalOverlayStore,
   IndexJobLedger,
   pinCanonicalRevision,
@@ -26,6 +27,7 @@ import {
   type CanonicalRevisionListReport,
   type CanonicalRevisionPinReport,
   type GcCycleReport,
+  type GcExpireReport,
   type GitRevisionAdvanceResult,
   type RevisionPruneReport,
   type Workspace,
@@ -107,6 +109,12 @@ import {
   parseIndexGcArgs,
   type IndexGcCommand,
 } from './commands/index-gc.js';
+import {
+  formatIndexGcExpire,
+  indexGcExpireExitCode,
+  parseIndexGcExpireArgs,
+  type IndexGcExpireCommand,
+} from './commands/index-gc-expire.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -132,6 +140,7 @@ export * from './commands/index-revision-list.js';
 export * from './commands/index-revision-pin.js';
 export * from './commands/index-revision-prune.js';
 export * from './commands/index-gc.js';
+export * from './commands/index-gc-expire.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -158,6 +167,7 @@ export type CliCommand =
   | IndexRevisionPinCommand
   | IndexRevisionPruneCommand
   | IndexGcCommand
+  | IndexGcExpireCommand
   | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
@@ -207,6 +217,9 @@ export interface CliDependencies {
   indexGc?(input: {
     readonly dryRun: true;
   }): Promise<GcCycleReport>;
+  indexGcExpire?(input: {
+    readonly dryRun: true;
+  }): Promise<GcExpireReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -238,7 +251,10 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
-    if (args[1] === 'gc') return parseIndexGcArgs(args.slice(1));
+    if (args[1] === 'gc') {
+      if (args[2] === 'expire') return parseIndexGcExpireArgs(args.slice(1));
+      return parseIndexGcArgs(args.slice(1));
+    }
     if (args[1] === 'revision') {
       if (args[2] === 'list') return parseIndexRevisionListArgs(args.slice(1));
       if (args[2] === 'pin' || args[2] === 'unpin') return parseIndexRevisionPinArgs(args.slice(1));
@@ -282,6 +298,7 @@ Commands:
   index revision unpin <manifest-id>     Remove the operator pin from a revision
   index revision prune --dry-run         Plan the prune of unreferenced revisions without deleting
   index gc --dry-run                     Plan artifact GC reachability without quarantining
+  index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -444,6 +461,20 @@ Commands:
         const report = await dependencies.indexGc({ dryRun: parsed.value.dryRun });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGc(report));
         return indexGcExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-gc-expire': {
+      if (dependencies.indexGcExpire === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexGcExpire({ dryRun: parsed.value.dryRun });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGcExpire(report));
+        return indexGcExpireExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -944,6 +975,27 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         now: new Date(),
         // A dry run never quarantines, so the grace window is unused; the
         // contract requires it because a non-dry pass stamps the deadline.
+        graceMs: 0,
+        dryRun: input.dryRun,
+      });
+    },
+    indexGcExpire: async (input): Promise<GcExpireReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      const jobs = new IndexJobLedger(root);
+      return expireGcQuarantine({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
+        quarantine: new ArtifactQuarantineStore(root),
+        artifacts: new CanonicalArtifactStore(root),
+      }, {
+        indexJobManifestIds: await jobs.liveManifestIds(),
+        now: new Date(),
+        // Each quarantine row carries its own grace deadline; the cycle-level
+        // window is unused by the expire pass, but the contract requires it.
         graceMs: 0,
         dryRun: input.dryRun,
       });

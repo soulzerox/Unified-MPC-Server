@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { canonicalManifestId } from '@unified-mpc/domain';
-import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
+import { errorMessage, isMissingPath } from './reachability-read.js';
 
 export interface StoredManifestEntry {
   readonly path: string;
@@ -40,6 +40,15 @@ function requireManifestId(value: string): string {
   return value.toLowerCase();
 }
 
+export interface CanonicalManifestStoreOptions {
+  /**
+   * Fail closed instead of skipping a record that cannot be read. A projection
+   * whose counts must be exact (`index space`) refuses rather than printing a
+   * smaller store; operator listings keep the tolerant default.
+   */
+  readonly strictReads?: boolean;
+}
+
 /**
  * Durable store for canonical revision manifests (#210 U15).
  *
@@ -53,16 +62,11 @@ function requireManifestId(value: string): string {
  * Lookups scan the per-manifest files (no side index to keep consistent);
  * add a commit index only when repositories grow large enough that the
  * scan shows up.
+ *
+ * Strictness is a property of the instance, so `get` and `listAll` can never
+ * disagree: an operator store keeps the tolerant default, a projection that
+ * must print exact counts constructs one with `strictReads`.
  */
-export interface CanonicalManifestStoreOptions {
-  /**
-   * Fail closed instead of skipping a record that cannot be read. A projection
-   * whose counts must be exact (`index space`) refuses rather than printing a
-   * smaller store; operator listings keep the tolerant default.
-   */
-  readonly strictReads?: boolean;
-}
-
 export class CanonicalManifestStore {
   private readonly strictReads: boolean;
 
@@ -130,8 +134,7 @@ export class CanonicalManifestStore {
     return null;
   }
 
-  public async listAll(options?: ReachabilityReadOptions): Promise<StoredManifest[]> {
-    const strict = this.strictReads || isStrictRead(options);
+  public async listAll(): Promise<StoredManifest[]> {
     const manifestsDir = path.join(this.root, 'manifests');
     let files: string[];
     try {
@@ -139,7 +142,7 @@ export class CanonicalManifestStore {
         .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
         .map((entry) => entry.name);
     } catch (error) {
-      if (strict && !isMissingPath(error)) {
+      if (this.strictReads && !isMissingPath(error)) {
         throw new Error(`cannot read the canonical manifests directory: ${errorMessage(error)}`);
       }
       return [];
@@ -153,7 +156,7 @@ export class CanonicalManifestStore {
       } catch (error) {
         // Tolerant listings skip unreadable/corrupted records; a count that must
         // be exact refuses instead, because a skipped record undercounts.
-        if (strict) throw new Error(`cannot read canonical manifest ${file}: ${errorMessage(error)}`);
+        if (this.strictReads) throw new Error(`cannot read canonical manifest ${file}: ${errorMessage(error)}`);
       }
     }
     return manifests.sort((a, b) => a.manifestId.localeCompare(b.manifestId));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId, computeTreeOid } from '@unified-mpc/domain';
@@ -151,6 +151,34 @@ describe('index job ledger feeds GC roots (#210 U25)', () => {
         now: NOW, graceMs: 60_000, dryRun: true,
       });
       expect(after).toMatchObject({ status: 'planned', unreachable: [H('b')] });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed on an unreadable ledger for GC planning but not for listings', async () => {
+    const { store, dir } = await ledger();
+    try {
+      await store.open('op_1', MAN('a'), NOW);
+      await mkdir(path.join(dir, 'index-jobs'), { recursive: true });
+      await writeFile(path.join(dir, 'index-jobs', 'jobs.json'), '{not json', 'utf8');
+
+      // A listing may report what it can; a GC planning read must not turn an
+      // unreadable live root into an absent one.
+      expect(await store.list()).toEqual([]);
+      await expect(store.liveManifestIds({ strict: true })).rejects.toThrow(/not valid JSON/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses strict planning on a malformed job row instead of dropping its root', async () => {
+    const { store, dir } = await ledger();
+    try {
+      await mkdir(path.join(dir, 'index-jobs'), { recursive: true });
+      await writeFile(path.join(dir, 'index-jobs', 'jobs.json'), JSON.stringify([{ operationId: 'op_1' }]), 'utf8');
+      expect(await store.liveManifestIds()).toEqual([]);
+      await expect(store.liveManifestIds({ strict: true })).rejects.toThrow(/malformed record/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

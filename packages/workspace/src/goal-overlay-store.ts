@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 export type GoalOverlayEntryKind = 'modified' | 'added' | 'deleted';
 
@@ -86,13 +87,15 @@ export class GoalOverlayStore {
     return overlay;
   }
 
-  public async listIds(): Promise<string[]> {
+  public async listIds(options?: ReachabilityReadOptions): Promise<string[]> {
+    const strict = isStrictRead(options);
     const overlaysDir = path.join(this.root, 'overlays');
     let names: string[];
     try {
       const entries = await readdir(overlaysDir, { withFileTypes: true });
       names = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map((entry) => entry.name);
-    } catch {
+    } catch (error) {
+      if (strict && !isMissingPath(error)) throw new Error(`cannot read the overlay directory: ${errorMessage(error)}`);
       return [];
     }
     const ids: string[] = [];
@@ -100,23 +103,39 @@ export class GoalOverlayStore {
       try {
         const raw = await readFile(path.join(overlaysDir, name), 'utf8');
         const parsed: unknown = JSON.parse(raw);
-        if (isOverlay(parsed)) ids.push(parsed.goalWorkspaceId);
-      } catch {
-        // Skip unreadable/corrupted overlay files rather than failing the listing.
+        if (!isOverlay(parsed)) throw new Error('not a goal overlay record');
+        ids.push(parsed.goalWorkspaceId);
+      } catch (error) {
+        // Tolerant listings skip unreadable overlays; a GC planning read must
+        // not, because a skipped overlay silently drops its base from the roots.
+        if (strict) throw new Error(`cannot read goal overlay ${name}: ${errorMessage(error)}`);
       }
     }
     return ids.sort();
   }
 
-  public async read(goalWorkspaceId: string): Promise<GoalOverlay | null> {
+  public async read(goalWorkspaceId: string, options?: ReachabilityReadOptions): Promise<GoalOverlay | null> {
+    const strict = isStrictRead(options);
+    let raw: string;
     try {
-      const raw = await readFile(this.overlayPath(requireGoalId(goalWorkspaceId)), 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      if (!isOverlay(parsed)) return null;
-      return parsed;
-    } catch {
+      raw = await readFile(this.overlayPath(requireGoalId(goalWorkspaceId)), 'utf8');
+    } catch (error) {
+      // A removed overlay is a real "no root"; any other read failure is not.
+      if (strict && !isMissingPath(error)) throw new Error(`cannot read goal overlay ${goalWorkspaceId}: ${errorMessage(error)}`);
       return null;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      if (strict) throw new Error(`goal overlay ${goalWorkspaceId} is not valid JSON: ${errorMessage(error)}`);
+      return null;
+    }
+    if (!isOverlay(parsed)) {
+      if (strict) throw new Error(`goal overlay ${goalWorkspaceId} is not a valid overlay record`);
+      return null;
+    }
+    return parsed;
   }
 
   public async upsert(

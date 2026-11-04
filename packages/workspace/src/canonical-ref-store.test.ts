@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { CanonicalRefState } from '@unified-mpc/domain';
@@ -112,6 +112,27 @@ describe('durable canonical ref store (#210 U7)', () => {
       // tmp+rename write leaves no torn file at the final path.
       const raw = await readFile(path.join(dir, 'refs', 'remotes', 'origin', 'main.json'), 'utf8');
       expect(JSON.parse(raw)).toEqual(C100);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a corrupt ref when listing but refuses in strict GC mode', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      await store.promote('refs/remotes/origin/main', {
+        expectedCurrent: null,
+        current: null,
+        target: C100,
+        targetVerified: true,
+      });
+      await mkdir(path.join(dir, 'refs', 'heads'), { recursive: true });
+      await writeFile(path.join(dir, 'refs', 'heads', 'feature.json'), '{not json', 'utf8');
+
+      // An operator listing reports what it can; a GC planning read must not
+      // treat an unreadable ref as an absent root.
+      expect(await store.list()).toEqual([{ ref: 'refs/remotes/origin/main', state: C100 }]);
+      await expect(store.list({ strict: true })).rejects.toThrow(/cannot read canonical ref refs\/heads\/feature/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

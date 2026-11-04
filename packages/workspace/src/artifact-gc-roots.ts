@@ -43,18 +43,20 @@ export async function assembleGcRoots(deps: GcRootAssemblerDeps): Promise<GcRoot
   const missing: string[] = [];
 
   const canonicalRefManifests: GcManifestEntries[] = [];
-  for (const { state } of await deps.refs.list()) {
+  // Strict reads: an unreadable ref, pin or overlay is not an absent root, and
+  // the tolerant listing used by operator surfaces would silently drop it.
+  for (const { state } of await deps.refs.list({ strict: true })) {
     canonicalRefManifests.push(await entriesFor(deps.manifests, state.manifestId, missing));
   }
 
   const pinnedManifests: GcManifestEntries[] = [];
-  for (const manifestId of await deps.pins.pinnedManifestIds()) {
+  for (const manifestId of await deps.pins.pinnedManifestIds({ strict: true })) {
     pinnedManifests.push(await entriesFor(deps.manifests, manifestId, missing));
   }
 
   const goalOverlayBases: GcManifestEntries[] = [];
-  for (const goalWorkspaceId of await deps.overlays.listIds()) {
-    const overlay = await deps.overlays.read(goalWorkspaceId);
+  for (const goalWorkspaceId of await deps.overlays.listIds({ strict: true })) {
+    const overlay = await deps.overlays.read(goalWorkspaceId, { strict: true });
     if (overlay === null) continue;
     goalOverlayBases.push(await entriesFor(deps.manifests, overlay.baseManifestId, missing));
   }

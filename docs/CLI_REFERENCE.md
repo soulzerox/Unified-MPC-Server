@@ -451,8 +451,8 @@ artifact-quarantined repo:v1:documented file:v1:ff0371d8c4e2
 ```
 
 - `--grace` sets the quarantine window: `<n><s|m|h|d>`, default `7d`, zero
-  rejected. Nothing is deleted here; expiry (`index gc expire`, dry-run only
-  today) is the step that releases due rows after a reachability re-check.
+  rejected. Nothing is deleted here; `index gc expire` is the step that
+  releases due rows after a reachability re-check.
 - A dry run does not accept `--grace`: it stamps no deadline.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
   anything is written. Concurrent passes therefore cannot quarantine from two
@@ -460,13 +460,13 @@ artifact-quarantined repo:v1:documented file:v1:ff0371d8c4e2
 - Exit `0` when the pass wrote its plan; `1` when it is refused; `2` for a usage
   error.
 
-### `unified-mpc index gc expire --dry-run [--json]`
+### `unified-mpc index gc expire --dry-run|--apply [--json]`
 
-Prints the deletion plan for the quarantine ledger: rows whose grace deadline
-has passed and that are still unreachable when reachability is re-checked now,
-plus the rows retained because they are still inside grace or became reachable
-again. `--dry-run` is required because the real pass releases ledger rows and
-calls the physical-delete callbacks.
+Plans or performs the deletion step for the quarantine ledger: rows whose grace
+deadline has passed and that are still unreachable when reachability is
+re-checked now, plus the rows retained because they are still inside grace or
+became reachable again. Exactly one mode is required: this is the destructive
+step, so it must not become a mutation by omission.
 
 ```bash
 $ unified-mpc index gc expire --dry-run
@@ -476,18 +476,54 @@ expire repo:v1:documented file:v1:9b1c4f2e7a60
 retain repo:v1:documented file:v1:ff0371d8c4e2
 ```
 
-- `expire` rows are release-and-delete candidates, not deletions. This verb has
-  no `--apply`: deletion needs the cleanup lease and delete callbacks, so it
-  ships separately.
+- `expire` rows are release-and-delete candidates, not deletions.
 - A bare id is a content hash; a repository plus artifact key is the
   repository-scoped artifact row.
 - Reachability is re-checked in this pass, so an artifact that became live again
   after quarantine is `retain`ed even after its deadline. A refused plan (no
-  reachability roots, or a root manifest missing on disk) prints
-  `refused <reason>` and exits `1`; nothing is released.
+  reachability roots, a root manifest missing on disk, an unreadable ref/pin/
+  overlay or index-job ledger) prints `refused <reason>` and exits `1`; nothing
+  is released.
 - Exit `0` for any plan; `1` when the plan is refused or the ledger cannot be
-  read; `2` when `--dry-run` is missing, `--apply` is requested, or another
-  argument is unknown.
+  read; `2` when neither mode is given, both are given, or another argument is
+  unknown.
+
+#### `unified-mpc index gc expire --apply [--json]`
+
+The destructive pass. Takes the GC lease, re-checks reachability, then releases
+every due row and calls the delete callbacks before removing it from the ledger.
+
+```bash
+$ unified-mpc index gc expire --apply
+applied due 2 released 2 retained 1
+released 4d1c0a1f8b25
+released repo:v1:documented file:v1:9b1c4f2e7a60
+retain repo:v1:documented file:v1:ff0371d8c4e2
+```
+
+- Artifact-key rows delete the canonical artifact record (the store's physical
+  delete). Content-hash rows release the ledger entry only: the canonical store
+  holds no content-addressed bytes — Git owns the file content — so there is
+  nothing else to delete.
+- A record delete that fails for any reason other than "already gone" aborts the
+  pass: the row stays in the ledger, `failed to delete canonical artifact ...`
+  reports the key, the repository and the cause, and the lease is still
+  released. An already-missing record is a no-op, so re-running converges.
+- A ledger that cannot be read (permission error, corrupt JSON, non-array
+  document) exits `1` instead of being reported as an empty ledger: `due 0` must
+  never stand in for "the ledger is unreadable".
+- Reachability roots are read strictly: a ref, pin, overlay or index-job ledger
+  file that cannot be read refuses the pass instead of being dropped. A dropped
+  root would make live artifacts look unreachable and get them deleted.
+- A due artifact-key row without a wired record delete refuses the pass: the
+  row is never released as "deleted" while its record survives.
+- A held or unreadable lease prints `refused gc lease ...` and exits `1` before
+  anything is released. The lease is released afterwards even when the pass
+  refuses partway.
+- Retained rows stay in the ledger, so a later run can delete them once their
+  deadline passes or their reachability is settled.
+- Exit `0` when the pass applied; `1` when it is refused or the ledger cannot be
+  read; `2` for a usage error.
 
 ### `unified-mpc index status [--json]`
 
@@ -515,6 +551,9 @@ orphaned-pins 0
 - Counts are always printed; the offending ids (`dangling-refs`,
   `missing-overlay-bases`, `orphaned-pins`) are listed under their count only
   when present.
+- A quarantine ledger that cannot be read exits `1` with the error instead of
+  printing fabricated counts: `quarantined 0` must never stand in for
+  "unreadable ledger".
 - `quarantined` counts rows waiting for GC, and `active-jobs` counts unsettled
   index jobs — neither is claimed as indexed content.
 - Exit `0` only for `healthy`; `1` for `degraded`, after printing the report; `2`

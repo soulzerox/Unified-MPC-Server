@@ -139,12 +139,17 @@ async function runCycle(stores: GcCycleStores, input: GcCycleInput): Promise<GcC
         reason: 'artifact candidates supplied but no artifact store is wired: refusing to plan artifact-key GC',
       };
     }
-    const retainedManifestIds = await collectRetainedManifestIds({
-      refs: stores.refs,
-      pins: stores.pins,
-      overlays: stores.overlays,
-      indexJobManifestIds: input.indexJobManifestIds,
-    });
+    let retainedManifestIds: string[];
+    try {
+      retainedManifestIds = await collectRetainedManifestIds({
+        refs: stores.refs,
+        pins: stores.pins,
+        overlays: stores.overlays,
+        indexJobManifestIds: input.indexJobManifestIds,
+      });
+    } catch (error) {
+      return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
+    }
     for (const [repositoryId, keys] of groupByRepository(artifactCandidates)) {
       const artifactPlan = await planRepositoryArtifactGc({ store: artifacts, repositoryId, retainedManifestIds, candidates: keys });
       if (artifactPlan.status !== 'planned') {

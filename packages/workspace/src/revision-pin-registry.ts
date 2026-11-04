@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 export type RevisionPinReason =
   | 'canonical-ref'
@@ -79,13 +80,15 @@ export class RevisionPinRegistry {
     return true;
   }
 
-  public async pinnedManifestIds(): Promise<string[]> {
+  public async pinnedManifestIds(options?: ReachabilityReadOptions): Promise<string[]> {
+    const strict = isStrictRead(options);
     const pinsDir = path.join(this.root, 'pins');
     let names: string[];
     try {
       const entries = await readdir(pinsDir, { withFileTypes: true });
       names = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map((entry) => entry.name);
-    } catch {
+    } catch (error) {
+      if (strict && !isMissingPath(error)) throw new Error(`cannot read the pin directory: ${errorMessage(error)}`);
       return [];
     }
     const ids: string[] = [];
@@ -93,11 +96,14 @@ export class RevisionPinRegistry {
       try {
         const raw = await readFile(path.join(pinsDir, name), 'utf8');
         const parsed: unknown = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.some(isPin) && MANIFEST_ID.test(name.replace(/\.json$/, ''))) {
-          ids.push(name.replace(/\.json$/, ''));
+        if (!(Array.isArray(parsed) && parsed.some(isPin) && MANIFEST_ID.test(name.replace(/\.json$/, '')))) {
+          throw new Error('not a revision pin record');
         }
-      } catch {
-        // Skip unreadable/corrupted pin files rather than failing the listing.
+        ids.push(name.replace(/\.json$/, ''));
+      } catch (error) {
+        // Tolerant listings skip unreadable pins; a GC planning read must not,
+        // because a skipped pin silently removes its manifest from the roots.
+        if (strict) throw new Error(`cannot read revision pin ${name}: ${errorMessage(error)}`);
       }
     }
     return ids.sort();

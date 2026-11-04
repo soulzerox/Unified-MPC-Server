@@ -221,7 +221,7 @@ export interface CliDependencies {
     readonly graceMs: number;
   }): Promise<GcCycleReport>;
   indexGcExpire?(input: {
-    readonly dryRun: true;
+    readonly dryRun: boolean;
   }): Promise<GcExpireReport>;
   publishCredential?(
     command: PublishCredentialCommand,
@@ -303,6 +303,7 @@ Commands:
   index gc --dry-run                     Plan artifact GC reachability without quarantining
   index gc --apply [--grace <duration>]  Quarantine unreachable artifacts under the GC lease
   index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
+  index gc expire --apply                Release due quarantine rows and delete artifacts
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -480,7 +481,7 @@ Commands:
       }
       try {
         const report = await dependencies.indexGcExpire({ dryRun: parsed.value.dryRun });
-        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGcExpire(report));
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGcExpire(report, parsed.value.dryRun));
         return indexGcExpireExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
@@ -964,7 +965,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         overlays: new GoalOverlayStore(root),
         // The ledger is read immediately before planning so a live index job
         // cannot have its manifest collected by a plan built from a stale list.
-        indexJobManifestIds: await jobs.liveManifestIds(),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         dryRun: input.dryRun,
       });
     },
@@ -1004,7 +1005,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       }, {
         candidates: [...contentHashes].sort(),
         artifactCandidates,
-        indexJobManifestIds: await jobs.liveManifestIds(),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         now: new Date(),
         // The caller's window: every row this pass writes carries the same
         // deadline, so a later `index gc expire --apply` can prove grace.
@@ -1017,21 +1018,54 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       const dataPath = resolveDataPathFromShared();
       assertStorageIdentitySafe(dataPath);
       const root = path.join(dataPath, 'canonical');
+      const artifacts = new CanonicalArtifactStore(root);
       const jobs = new IndexJobLedger(root);
+      // Only the mutating pass takes the U28 fence and owns the delete
+      // callbacks; a plan is read-only and unfenced.
+      const lease = input.dryRun
+        ? undefined
+        : { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS };
       return expireGcQuarantine({
         refs: new CanonicalRefStore(root),
         manifests: new CanonicalManifestStore(root),
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         quarantine: new ArtifactQuarantineStore(root),
-        artifacts: new CanonicalArtifactStore(root),
+        artifacts,
       }, {
-        indexJobManifestIds: await jobs.liveManifestIds(),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         now: new Date(),
         // Each quarantine row carries its own grace deadline; the cycle-level
         // window is unused by the expire pass, but the contract requires it.
         graceMs: 0,
         dryRun: input.dryRun,
+        ...(lease === undefined ? {} : {
+          // Artifact-key rows name a record this store owns, so deleting the
+          // record is the physical delete. Content-hash rows deliberately get
+          // no callback: the canonical store holds no content-addressed bytes
+          // (Git owns them), so releasing the ledger row is all there is.
+          //
+          // A failed delete aborts the pass instead of releasing the row: the
+          // ledger must keep the evidence until the record is really gone, or
+          // a permission error would silently orphan the artifact. An
+          // already-missing record is a no-op, so a retry after a failure
+          // converges. `delete` is the fail-closed call: it throws for any
+          // failure other than "already gone", and it never reads the record,
+          // so an unreadable or corrupt file can still be removed by path.
+          //
+          // The cause is preserved in the message: without it an operator sees
+          // only which key failed, not whether the store is read-only, out of
+          // space or unreadable.
+          deleteStoredArtifact: async (repositoryId: string, artifactKey: string): Promise<void> => {
+            try {
+              await artifacts.delete(repositoryId, artifactKey);
+            } catch (error) {
+              const cause = error instanceof Error ? error.message : String(error);
+              throw new Error(`failed to delete canonical artifact ${artifactKey} in ${repositoryId}: ${cause}`);
+            }
+          },
+          lease,
+        }),
       });
     },
     publishCredential: async (

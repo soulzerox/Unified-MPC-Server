@@ -33,6 +33,10 @@ export interface GcExpireInput {
    * Physical delete of one released canonical artifact (#210 §1). The row
    * carries its owning repository precisely so this callback can resolve the
    * record; `CanonicalArtifactStore.delete` is the natural implementation.
+   *
+   * The callback must throw when the record cannot be removed. Swallowing the
+   * failure here would release the ledger row and orphan the record with no
+   * evidence left to retry from, which is the opposite of the domain contract.
    */
   readonly deleteStoredArtifact?: (repositoryId: string, artifactKey: string) => Promise<void>;
   /**
@@ -150,12 +154,19 @@ async function runPass(stores: GcExpireStores, input: GcExpireInput): Promise<Gc
         reason: 'artifact-key quarantine rows present but no artifact store is wired: refusing the destructive pass',
       };
     }
-    const retainedManifestIds = await collectRetainedManifestIds({
-      refs: stores.refs,
-      pins: stores.pins,
-      overlays: stores.overlays,
-      indexJobManifestIds: input.indexJobManifestIds,
-    });
+    let retainedManifestIds: string[];
+    try {
+      retainedManifestIds = await collectRetainedManifestIds({
+        refs: stores.refs,
+        pins: stores.pins,
+        overlays: stores.overlays,
+        indexJobManifestIds: input.indexJobManifestIds,
+      });
+    } catch (error) {
+      // Strict root reads refuse rather than dropping a root they cannot read:
+      // a dropped root would make live artifacts look unreachable.
+      return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
+    }
     for (const [repositoryId, keys] of groupByRepository(artifactEntries)) {
       const artifactPlan = await planRepositoryArtifactGc({ store: artifacts, repositoryId, retainedManifestIds, candidates: keys });
       if (artifactPlan.status !== 'planned') {
@@ -183,11 +194,20 @@ async function runPass(stores: GcExpireStores, input: GcExpireInput): Promise<Gc
 
   const deleted: QuarantineTarget[] = [];
   if (!input.dryRun && due.length > 0) {
+    if (due.some(isArtifactKeyEntry) && input.deleteStoredArtifact === undefined) {
+      // An artifact-key row is only handled when the record is deleted. Without
+      // that callback the pass would release the ledger row and report it as
+      // deleted while the record survives with no evidence left to retry from.
+      return {
+        status: 'refused',
+        reason: 'artifact-key quarantine rows are due but no artifact delete is wired: refusing the destructive pass',
+      };
+    }
     for (const entry of due) {
       if (entry.kind === 'content-hash') {
         if (input.deleteArtifact !== undefined) await input.deleteArtifact(entry.hash);
-      } else if (input.deleteStoredArtifact !== undefined) {
-        await input.deleteStoredArtifact(entry.repositoryId, entry.artifactKey);
+      } else {
+        await input.deleteStoredArtifact!(entry.repositoryId, entry.artifactKey);
       }
       deleted.push(quarantineEntryTarget(entry));
     }

@@ -2,18 +2,27 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import type { RepositoryMergePolicy } from '@unified-mpc/domain';
-import { advanceRevisionFromGit, type CanonicalGitSource } from '@unified-mpc/workspace';
+import {
+  advanceRevisionFromGit,
+  CanonicalManifestStore,
+  CanonicalRefStore,
+  repositoryIdForRemoteUrl,
+  type CanonicalGitSource,
+  type GitRevisionAdvanceResult,
+} from '@unified-mpc/workspace';
 
 import { createCanonicalGitSource } from './canonical-git-source.js';
 
 const execFileAsync = promisify(execFile);
 
 const FETCH_TIMEOUT_MS = 120_000;
-const FETCH_MAX_BUFFER = 4 * 1024 * 1024;
+const ANCESTRY_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER = 4 * 1024 * 1024;
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 export interface CanonicalAdvanceRequest {
   readonly policy: RepositoryMergePolicy;
-  /** Exact commit the merge produced; the local ref must already be there. */
+  /** Exact commit the merge produced; the fetched ref must contain it. */
   readonly expectedCommitSha: string;
 }
 
@@ -37,6 +46,8 @@ export interface CanonicalMergeAdvanceDeps {
   readonly now?: () => Date;
   /** Test seam: fetch without spawning Git. Production fetches the exact branch. */
   readonly fetchBranch?: (checkoutPath: string, branch: string) => Promise<void>;
+  /** Test seam: ancestry without spawning Git. */
+  readonly isAncestor?: (checkoutPath: string, ancestor: string, descendant: string) => Promise<boolean>;
   /** Test seam: the Git view of one checkout. Production shells out to Git. */
   readonly sourceFor?: (checkoutPath: string) => CanonicalGitSource;
 }
@@ -57,6 +68,32 @@ export function canonicalRefForBranch(branch: string): string {
   return `refs/remotes/origin/${branch}`;
 }
 
+/**
+ * Project one gate result onto the poller's outcome vocabulary.
+ *
+ * Exported so every branch — including the concurrent-promotion conflict that
+ * is hard to stage through the gate — is covered by a direct test.
+ */
+export function canonicalAdvanceOutcome(
+  result: GitRevisionAdvanceResult,
+  targetRef: string,
+): CanonicalAdvanceOutcome {
+  if (result.status === 'conflict') {
+    return refused(`${targetRef} advanced concurrently (now ${result.currentCommitSha ?? 'unknown'})`);
+  }
+  if (result.status === 'refused') {
+    return refused(result.reason);
+  }
+  return {
+    status: result.status === 'promoted' ? 'advanced' : 'noop',
+    ref: targetRef,
+    commitSha: result.commitSha,
+    manifestId: result.manifestId,
+    reusedPaths: result.reuse.reusedPaths.length,
+    changedPaths: result.reuse.newPaths.length,
+  };
+}
+
 async function fetchBranch(checkoutPath: string, branch: string): Promise<void> {
   // Explicit refspec: the update must not depend on the checkout's configured
   // fetch refspec, and a force-updated branch still has to land on the exact
@@ -64,8 +101,22 @@ async function fetchBranch(checkoutPath: string, branch: string): Promise<void> 
   await execFileAsync(
     'git',
     ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${canonicalRefForBranch(branch)}`],
-    { cwd: checkoutPath, timeout: FETCH_TIMEOUT_MS, maxBuffer: FETCH_MAX_BUFFER },
+    { cwd: checkoutPath, timeout: FETCH_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
   );
+}
+
+async function gitIsAncestor(checkoutPath: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['merge-base', '--is-ancestor', ancestor, descendant],
+      { cwd: checkoutPath, timeout: ANCESTRY_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER });
+    return true;
+  } catch (error) {
+    // Exit code 1 is Git's "not an ancestor" answer. Anything else (missing
+    // object, spawn failure) means the question could not be answered, and an
+    // unanswered ancestry question must not authorize an advance.
+    if ((error as { code?: unknown }).code === 1) return false;
+    throw error;
+  }
 }
 
 /**
@@ -80,10 +131,14 @@ async function fetchBranch(checkoutPath: string, branch: string): Promise<void> 
  *
  * - no `checkoutPath` on the policy: refused, never inferred from the
  *   repository name or the workspace registry;
+ * - the canonical store is already bound to another repository: refused. One
+ *   canonical root holds one repository namespace (`refs/...` carries no
+ *   repository id), so a second repository advancing the same branch would
+ *   overwrite the first ref and unroot its manifest from GC;
  * - the fetch fails or the ref does not resolve: refused, because an advance
  *   against a checkout that cannot see the merge would record a different
  *   revision;
- * - the local ref is not the commit the merge produced: refused as a stale
+ * - the fetched ref does not contain the merged commit: refused as a stale
  *   checkout. Advancing anyway would move the canonical ref *backwards* when
  *   the local clone lags behind, which is worse than reporting the lag;
  * - the gate itself refuses (unverifiable base manifest, unsupported tree
@@ -93,6 +148,7 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
   const now = deps.now ?? ((): Date => new Date());
   const sourceFor = deps.sourceFor ?? createCanonicalGitSource;
   const fetch = deps.fetchBranch ?? fetchBranch;
+  const isAncestor = deps.isAncestor ?? gitIsAncestor;
 
   return async (request: CanonicalAdvanceRequest): Promise<CanonicalAdvanceOutcome> => {
     const { policy } = request;
@@ -101,18 +157,41 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
       return refused(`no checkout mapped for ${policy.repository}; set checkoutPath to advance its canonical ref`);
     }
     const expectedCommitSha = request.expectedCommitSha.trim().toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(expectedCommitSha)) {
+    if (!COMMIT_SHA.test(expectedCommitSha)) {
       return refused(`merged commit '${request.expectedCommitSha}' is not an exact Git commit id`);
     }
 
     const targetRef = canonicalRefForBranch(policy.defaultBranch);
+    const source = sourceFor(checkoutPath);
+
+    let repositoryId: string;
+    try {
+      const remote = await source.remoteUrl();
+      if (remote === null) {
+        return refused(`${checkoutPath} has no remote; the canonical trust boundary is unknown`);
+      }
+      repositoryId = repositoryIdForRemoteUrl(remote);
+    } catch (error) {
+      return refused(`cannot read the remote of ${checkoutPath}: ${errorMessage(error)}`);
+    }
+
+    // One canonical root holds one repository namespace. Refusing here keeps a
+    // second policy from silently replacing the first repository's ref.
+    try {
+      const bound = await boundedRepository(deps.canonicalRoot, targetRef);
+      if (bound !== undefined && bound !== repositoryId) {
+        return refused(`${targetRef} in the canonical store is bound to ${bound}, not ${repositoryId}`);
+      }
+    } catch (error) {
+      return refused(`cannot read the canonical ref ${targetRef}: ${errorMessage(error)}`);
+    }
+
     try {
       await fetch(checkoutPath, policy.defaultBranch);
     } catch (error) {
       return refused(`cannot fetch ${policy.defaultBranch} in ${checkoutPath}: ${errorMessage(error)}`);
     }
 
-    const source = sourceFor(checkoutPath);
     let resolved;
     try {
       resolved = await source.resolveRevision(targetRef);
@@ -122,8 +201,15 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
     if (resolved === null) {
       return refused(`${targetRef} does not resolve in ${checkoutPath}`);
     }
-    if (resolved.commitSha !== expectedCommitSha) {
-      return refused(`${targetRef} is ${resolved.commitSha}, not the merged commit ${expectedCommitSha}`);
+
+    let ancestor: boolean;
+    try {
+      ancestor = await isAncestor(checkoutPath, expectedCommitSha, resolved.commitSha);
+    } catch (error) {
+      return refused(`cannot verify ${expectedCommitSha} is on ${targetRef}: ${errorMessage(error)}`);
+    }
+    if (!ancestor) {
+      return refused(`${targetRef} at ${resolved.commitSha} does not contain the merged commit ${expectedCommitSha}`);
     }
 
     const result = await advanceRevisionFromGit({
@@ -131,23 +217,18 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
       source,
       targetRef,
       now: now(),
+      repositoryId,
     });
-
-    if (result.status === 'conflict') {
-      return refused(`${targetRef} advanced concurrently (now ${result.currentCommitSha ?? 'unknown'})`);
-    }
-    if (result.status === 'refused') {
-      return refused(result.reason);
-    }
-    return {
-      status: result.status === 'promoted' ? 'advanced' : 'noop',
-      ref: targetRef,
-      commitSha: result.commitSha,
-      manifestId: result.manifestId,
-      reusedPaths: result.reuse.reusedPaths.length,
-      changedPaths: result.reuse.newPaths.length,
-    };
+    return canonicalAdvanceOutcome(result, targetRef);
   };
+}
+
+/** Repository id the active ref is bound to, or undefined when the ref is unset or unreadable. */
+async function boundedRepository(canonicalRoot: string, targetRef: string): Promise<string | undefined> {
+  const active = await new CanonicalRefStore(canonicalRoot).read(targetRef);
+  if (active === null) return undefined;
+  const manifest = await new CanonicalManifestStore(canonicalRoot).get(active.manifestId);
+  return manifest?.repositoryId;
 }
 
 function errorMessage(error: unknown): string {

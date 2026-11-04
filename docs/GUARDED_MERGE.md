@@ -167,23 +167,39 @@ merge:
 {
   "repository": "owner/repo",
   "defaultBranch": "main",
+  "verificationMode": "local_exact_head",
+  "requiredGates": [{ "name": "test", "source": "local_command" }],
+  "reviewPolicy": { "required": true, "acceptedOutcomes": ["clean_llm_review"] },
   "checkoutPath": "/srv/checkouts/repo"
 }
 ```
+
+`checkoutPath` is the only field this section adds; the other fields are
+required by the policy parser, and an entry missing one invalidates the whole
+policy list rather than only itself.
 
 `checkoutPath` must be absolute. A relative value is refused by the parser
 because it would resolve against whatever directory the daemon started in, so
 the same policy could read two different repositories.
 
+One canonical store holds one repository namespace: refs are keyed by Git ref
+path (`refs/remotes/origin/main`) and carry no repository id. A second policy
+whose checkout is a different repository therefore refuses with
+`bound to <repository id>` instead of replacing the first ref and unrooting its
+manifest from GC.
+
 When a merge reconciles as `reconciled` and the observation carries its merge
 commit, the poller runs the advancement gate once for that repository:
 
 1. `git fetch` the exact branch into `refs/remotes/origin/<defaultBranch>`;
-2. refuse if that ref is not the commit the merge produced — a lagging clone
-   must not move the canonical ref backwards;
+2. refuse unless the fetched ref contains the merge commit as an ancestor — a
+   lagging clone must not move the canonical ref backwards;
 3. run `advanceRevisionFromGit`, which classifies the delta against the active
    manifest, persists the new manifest, CAS-promotes the ref and registers
    artifacts.
+
+The newest merge is chosen by `mergedAt`, not by feed order: a comment or label
+moves a pull request later in the `updatedAt` feed without merging anything.
 
 The outcome is reported in the poll summary as `canonicalAdvance`:
 
@@ -194,11 +210,14 @@ The outcome is reported in the poll summary as `canonicalAdvance`:
 | `refused` | reason included; the merge still reconciled, nothing was advanced |
 | `skipped / no_merge` | no merge reconciled in this pass |
 | `skipped / not_wired` | the runtime has no canonical root |
+| `skipped / inspect_required` | a merge needed inspection, so the pass advanced nothing |
 
 A refused advance is never silent and never a failed reconciliation: the two
 records are separate, so an operator can see that a merge landed while the
-canonical ref did not follow it. Without `checkoutPath` the gate stays
-operator-driven through `unified-mpc index revision advance`.
+canonical ref did not follow it. The HTTP runtime logs one line per refusal
+(`Unified-MPC canonical advance refused repository=… reason=…`) for every pass,
+including scheduled ones. Without `checkoutPath` the gate stays operator-driven
+through `unified-mpc index revision advance`.
 
 
 ---

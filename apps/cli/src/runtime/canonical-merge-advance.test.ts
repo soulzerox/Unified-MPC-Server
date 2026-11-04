@@ -4,8 +4,18 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { RepositoryMergePolicy } from '@unified-mpc/domain';
-import type { CanonicalGitRevision, CanonicalGitSource, CanonicalGitTreeEntry } from '@unified-mpc/workspace';
-import { canonicalRefForBranch, createCanonicalMergeAdvance } from './canonical-merge-advance.js';
+import type {
+  CanonicalGitRevision,
+  CanonicalGitSource,
+  CanonicalGitTreeEntry,
+  GitRevisionAdvanceResult,
+} from '@unified-mpc/workspace';
+import {
+  canonicalAdvanceOutcome,
+  canonicalRefForBranch,
+  createCanonicalMergeAdvance,
+  type CanonicalAdvanceAfterMerge,
+} from './canonical-merge-advance.js';
 
 const REF = 'refs/remotes/origin/main';
 const COMMIT = 'a'.repeat(40);
@@ -64,19 +74,83 @@ async function tempRoot(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), 'canonical-merge-advance-'));
 }
 
+function advanceWith(
+  canonicalRoot: string,
+  overrides: {
+    readonly source?: CanonicalGitSource;
+    readonly fetchBranch?: (checkoutPath: string, branch: string) => Promise<void>;
+    readonly isAncestor?: (checkoutPath: string, ancestor: string, descendant: string) => Promise<boolean>;
+  } = {},
+): CanonicalAdvanceAfterMerge {
+  return createCanonicalMergeAdvance({
+    canonicalRoot,
+    now: (): Date => new Date('2026-11-04T00:00:00.000Z'),
+    fetchBranch: overrides.fetchBranch ?? (async (): Promise<void> => undefined),
+    isAncestor: overrides.isAncestor ?? (async (): Promise<boolean> => true),
+    sourceFor: () => overrides.source ?? new FakeGit(),
+  });
+}
+
 describe('canonical ref for a merge branch (#210 §2)', () => {
   it('reads the origin remote-tracking ref, never a local branch', () => {
     expect(canonicalRefForBranch('main')).toBe('refs/remotes/origin/main');
   });
 });
 
+describe('gate result projection (#210 §3)', () => {
+  const reuse = { reusedPaths: ['a.ts', 'b.ts'], newPaths: ['c.ts'], renamedPaths: [], deletedPaths: [] };
+  // The projection reads only status, ids and reuse counts, so these fixtures
+  // carry exactly those fields instead of a full GitRevisionAdvanceReport.
+  const result = (value: object): GitRevisionAdvanceResult => value as GitRevisionAdvanceResult;
+  const target = { commitSha: COMMIT, treeOid: 't', manifestId: 'man:v1:x' };
+
+  it('reports a promotion as advanced with the reuse counts', () => {
+    const outcome = canonicalAdvanceOutcome(
+      result({ status: 'promoted', manifestId: 'man:v1:x', decision: { action: 'promote', target }, commitSha: COMMIT, reuse }),
+      REF,
+    );
+
+    expect(outcome).toEqual({
+      status: 'advanced',
+      ref: REF,
+      commitSha: COMMIT,
+      manifestId: 'man:v1:x',
+      reusedPaths: 2,
+      changedPaths: 1,
+    });
+  });
+
+  it('reports an unchanged manifest as a noop', () => {
+    const outcome = canonicalAdvanceOutcome(
+      result({ status: 'noop', manifestId: 'man:v1:x', decision: { action: 'noop', target }, commitSha: COMMIT, reuse }),
+      REF,
+    );
+
+    expect(outcome).toMatchObject({ status: 'noop', manifestId: 'man:v1:x' });
+  });
+
+  it('reports a concurrent promotion as a refusal naming the new head', () => {
+    const outcome = canonicalAdvanceOutcome(
+      result({ status: 'conflict', targetRef: REF, currentCommitSha: 'b'.repeat(40) }),
+      REF,
+    );
+
+    expect(outcome).toMatchObject({ status: 'refused' });
+    if (outcome.status !== 'refused') throw new Error('unexpected');
+    expect(outcome.reason).toContain('advanced concurrently');
+    expect(outcome.reason).toContain('b'.repeat(40));
+  });
+
+  it('reports a gate rejection verbatim', () => {
+    const outcome = canonicalAdvanceOutcome(result({ status: 'refused', targetRef: REF, reason: 'unverifiable entries: a.ts' }), REF);
+
+    expect(outcome).toEqual({ status: 'refused', reason: 'unverifiable entries: a.ts' });
+  });
+});
+
 describe('canonical advance after merge (#210 §3)', () => {
   it('refuses when the policy names no checkout instead of guessing one', async () => {
-    const advance = createCanonicalMergeAdvance({
-      canonicalRoot: '/nonexistent',
-      fetchBranch: async () => undefined,
-      sourceFor: () => new FakeGit(),
-    });
+    const advance = advanceWith('/nonexistent');
 
     const outcome = await advance({
       policy: { ...policy, checkoutPath: undefined },
@@ -89,11 +163,7 @@ describe('canonical advance after merge (#210 §3)', () => {
   });
 
   it('refuses a commit id that is not an exact Git sha', async () => {
-    const advance = createCanonicalMergeAdvance({
-      canonicalRoot: '/nonexistent',
-      fetchBranch: async () => undefined,
-      sourceFor: () => new FakeGit(),
-    });
+    const advance = advanceWith('/nonexistent');
 
     const outcome = await advance({ policy, expectedCommitSha: 'a1b2c3' });
 
@@ -107,6 +177,7 @@ describe('canonical advance after merge (#210 §3)', () => {
     const advance = createCanonicalMergeAdvance({
       canonicalRoot: '/nonexistent',
       fetchBranch: async () => { throw new Error('could not read from remote'); },
+      isAncestor: async () => true,
       sourceFor,
     });
 
@@ -115,36 +186,47 @@ describe('canonical advance after merge (#210 §3)', () => {
     expect(outcome).toMatchObject({ status: 'refused' });
     if (outcome.status !== 'refused') throw new Error('unexpected');
     expect(outcome.reason).toMatch(/cannot fetch main/);
-    expect(sourceFor).not.toHaveBeenCalled();
   });
 
-  it('refuses a stale checkout instead of moving the canonical ref backwards', async () => {
+  it('refuses a checkout that does not contain the merged commit', async () => {
     const root = await tempRoot();
     try {
-      const advance = createCanonicalMergeAdvance({
-        canonicalRoot: root,
-        fetchBranch: async () => undefined,
-        sourceFor: () => new FakeGit({ 'src/a.ts': 'a' }, 'b'.repeat(40)),
-      });
+      const advance = advanceWith(root, { isAncestor: async () => false });
 
       const outcome = await advance({ policy, expectedCommitSha: COMMIT });
 
       expect(outcome).toMatchObject({ status: 'refused' });
       if (outcome.status !== 'refused') throw new Error('unexpected');
-      expect(outcome.reason).toMatch(/not the merged commit/);
+      expect(outcome.reason).toMatch(/does not contain the merged commit/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when the ancestry question cannot be answered at all', async () => {
+    const root = await tempRoot();
+    try {
+      const advance = advanceWith(root, { isAncestor: async () => { throw new Error('bad object'); } });
+
+      const outcome = await advance({ policy, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'refused' });
+      if (outcome.status !== 'refused') throw new Error('unexpected');
+      expect(outcome.reason).toMatch(/cannot verify/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
   it('refuses when the branch ref does not resolve in the checkout', async () => {
-    const advance = createCanonicalMergeAdvance({
-      canonicalRoot: '/nonexistent',
-      fetchBranch: async () => undefined,
-      sourceFor: () => ({
-        ...new FakeGit(),
+    const base = new FakeGit();
+    const advance = advanceWith('/nonexistent', {
+      source: {
         resolveRevision: async (): Promise<CanonicalGitRevision | null> => null,
-      }),
+        listTree: (): ReturnType<CanonicalGitSource['listTree']> => base.listTree(),
+        hashBlobs: (oids: readonly string[]): ReturnType<CanonicalGitSource['hashBlobs']> => base.hashBlobs(oids),
+        remoteUrl: (): Promise<string | null> => base.remoteUrl(),
+      },
     });
 
     const outcome = await advance({ policy, expectedCommitSha: COMMIT });
@@ -157,12 +239,7 @@ describe('canonical advance after merge (#210 §3)', () => {
   it('advances the canonical ref to the merged commit, then reports a noop on the same commit', async () => {
     const root = await tempRoot();
     try {
-      const advance = createCanonicalMergeAdvance({
-        canonicalRoot: root,
-        now: () => new Date('2026-11-04T00:00:00.000Z'),
-        fetchBranch: async () => undefined,
-        sourceFor: () => new FakeGit(),
-      });
+      const advance = advanceWith(root);
 
       const first = await advance({ policy, expectedCommitSha: COMMIT });
 
@@ -178,21 +255,37 @@ describe('canonical advance after merge (#210 §3)', () => {
     }
   });
 
-  it('passes a gate refusal through instead of reporting an advance', async () => {
+  it('refuses a second repository into a canonical root already bound to another one', async () => {
     const root = await tempRoot();
     try {
-      const advance = createCanonicalMergeAdvance({
-        canonicalRoot: root,
-        fetchBranch: async () => undefined,
-        // A checkout with no remote cannot be given a trust boundary.
-        sourceFor: () => new FakeGit({ 'src/a.ts': 'a' }, COMMIT, null),
-      });
+      const advance = advanceWith(root);
+      const first = await advance({ policy, expectedCommitSha: COMMIT });
+      expect(first.status).toBe('advanced');
+
+      // Same branch ref, different trust boundary: the ref store keys by Git ref
+      // path only, so this must refuse instead of replacing the first repository.
+      const second = await advanceWith(root, {
+        source: new FakeGit({ 'src/b.ts': 'b' }, COMMIT, 'git@github.com:other/repo.git'),
+      })({ policy: { ...policy, repository: 'other/repo' }, expectedCommitSha: COMMIT });
+
+      expect(second).toMatchObject({ status: 'refused' });
+      if (second.status !== 'refused') throw new Error('unexpected');
+      expect(second.reason).toMatch(/bound to/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a checkout with no remote, because the trust boundary is unknown', async () => {
+    const root = await tempRoot();
+    try {
+      const advance = advanceWith(root, { source: new FakeGit({ 'src/a.ts': 'a' }, COMMIT, null) });
 
       const outcome = await advance({ policy, expectedCommitSha: COMMIT });
 
       expect(outcome).toMatchObject({ status: 'refused' });
       if (outcome.status !== 'refused') throw new Error('unexpected');
-      expect(outcome.reason).toMatch(/remote/);
+      expect(outcome.reason).toMatch(/no remote/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

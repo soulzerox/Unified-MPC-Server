@@ -703,6 +703,16 @@ export function createStdioMcpRuntime(
       // canonical ref. Policies without `checkoutPath` still reconcile; they
       // report `refused` instead of advancing a checkout nobody named.
       canonicalAdvance: createCanonicalMergeAdvance({ canonicalRoot: path.join(dataPath, 'canonical') }),
+      // The scheduled pass has no caller reading its summary, so a refused
+      // advance is surfaced here or not at all.
+      onSummary: (summary): void => {
+        for (const entry of summary.repositories) {
+          if (entry.canonicalAdvance.status !== 'refused') continue;
+          process.stderr.write(
+            `Unified-MPC canonical advance refused repository=${entry.repository} reason=${entry.canonicalAdvance.reason}\n`,
+          );
+        }
+      },
     },
   );
   const codexService = new CodexService(workspaceRepository, {

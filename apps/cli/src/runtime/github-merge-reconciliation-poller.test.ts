@@ -8,6 +8,7 @@ import {
   type GitHubClosedPullRequestFeedResult,
   type MergeReconciliationPollCursor,
   type MergeReconciliationPollStateStore,
+  type MergeReconciliationPollSummary,
 } from './github-merge-reconciliation-poller.js';
 
 const policy: RepositoryMergePolicy = {
@@ -610,5 +611,78 @@ describe('canonical advance after a reconciled merge (#210 §3)', () => {
     const result = await poller.reconcileOnce();
 
     expect(result.repositories[0]?.canonicalAdvance).toEqual({ status: 'skipped', reason: 'not_wired' });
+  });
+
+  it('picks the merge commit by mergedAt, not by feed order', async () => {
+    const advance = vi.fn(async () => ({
+      status: 'advanced' as const,
+      ref: 'refs/remotes/origin/main',
+      commitSha: MERGE_SHA,
+      manifestId: 'man:v1:x',
+      reusedPaths: 0,
+      changedPaths: 0,
+    }));
+    const olderMerge = 'e'.repeat(40);
+    const newerMerge = 'f'.repeat(40);
+    const poller = new GitHubMergeReconciliationPoller(
+      () => [policy],
+      feedWith([
+        // A comment on #282 moved it later in the feed, but #283 merged last.
+        { pullRequest: 283, updatedAt: '2026-10-07T06:00:01Z', mergedAt: '2026-10-07T06:00:01Z' },
+        { pullRequest: 282, updatedAt: '2026-10-07T06:00:05Z', mergedAt: '2026-10-07T06:00:00Z' },
+      ]),
+      memoryState().store,
+      {
+        reconcile: vi.fn(async ({ pullRequest }: { readonly pullRequest: number }) => ({
+          status: 'reconciled' as const,
+          record: reconciledRecord(pullRequest, pullRequest === 282 ? olderMerge : newerMerge),
+        })),
+      },
+      { now: (): Date => new Date('2026-10-07T06:00:00.900Z'), canonicalAdvance: advance },
+    );
+
+    await poller.reconcileOnce();
+
+    expect(advance).toHaveBeenCalledWith({ policy, expectedCommitSha: newerMerge });
+  });
+
+  it('reports a skipped advance with its reason when a merge needs inspection', async () => {
+    const advance = vi.fn();
+    const poller = new GitHubMergeReconciliationPoller(
+      () => [policy],
+      feedWith(updates),
+      memoryState().store,
+      { reconcile: vi.fn(async () => ({ status: 'inspect_required' as const, reason: 'receipt_store_error' })) },
+      { now: (): Date => new Date('2026-10-07T06:00:00.900Z'), canonicalAdvance: advance },
+    );
+
+    const result = await poller.reconcileOnce();
+
+    expect(advance).not.toHaveBeenCalled();
+    expect(result.repositories[0]?.canonicalAdvance).toEqual({ status: 'skipped', reason: 'inspect_required' });
+  });
+
+  it('hands every completed pass to the summary observer, and survives a throwing observer', async () => {
+    const seen: MergeReconciliationPollSummary[] = [];
+    const poller = new GitHubMergeReconciliationPoller(
+      () => [policy],
+      feedWith(updates),
+      memoryState().store,
+      { reconcile: vi.fn(async () => ({ status: 'reconciled' as const, record: reconciledRecord(282, MERGE_SHA) })) },
+      {
+        now: (): Date => new Date('2026-10-07T06:00:00.900Z'),
+        onSummary: (summary): void => {
+          seen.push(summary);
+          throw new Error('observer exploded');
+        },
+      },
+    );
+
+    const result = await poller.reconcileOnce();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.repositories[0]?.reconciled).toBe(1);
+    // The observer's failure must not change the pass result.
+    expect(result.repositories[0]?.status).toBe('ok');
   });
 });

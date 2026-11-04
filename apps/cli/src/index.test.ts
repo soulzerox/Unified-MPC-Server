@@ -647,6 +647,86 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['database is locked']);
   });
 
+  it('advances the canonical revision index for an exact Git ref', async () => {
+    const output: string[] = [];
+    const seen: Array<{ ref: string; repositoryId?: string }> = [];
+    const report = {
+      status: 'promoted' as const,
+      repositoryId: 'repo:v1:abc',
+      targetRef: 'refs/remotes/origin/main',
+      commitSha: 'c'.repeat(40),
+      gitTreeOid: 'd'.repeat(40),
+      unifiedTreeOid: 'e'.repeat(64),
+      revisionId: 'rev:v1:f',
+      manifestId: 'man:v1:1',
+      reuse: { reusedPaths: ['a.ts', 'b.ts'], newPaths: ['c.ts'], renamedPaths: [], deletedPaths: [] },
+      artifacts: { status: 'registered' as const, registered: 1, reused: 2, unclassified: [] },
+    };
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      indexRevisionAdvance: async (input) => {
+        seen.push(input);
+        return report;
+      },
+      write: (text) => output.push(text),
+    };
+
+    const code = await runCli(['index', 'revision', 'advance'], deps);
+    expect(code).toBe(0);
+    expect(seen).toEqual([{ ref: 'refs/remotes/origin/main' }]);
+    expect(output).toHaveLength(1);
+    expect(output[0]?.split('\n')).toEqual([
+      'canonical refs/remotes/origin/main: promoted',
+      `commit ${'c'.repeat(40)}`,
+      `tree ${'d'.repeat(40)}`,
+      'manifest man:v1:1',
+      'repository repo:v1:abc',
+      'reuse reused=2 new=1 renamed=0 deleted=0',
+      'artifacts reused=2 registered=1 unclassified=0',
+    ]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'revision', 'advance', '--ref', 'refs/heads/main', '--json'], {
+      ...baseDependencies,
+      indexRevisionAdvance: async (input) => {
+        seen.push(input);
+        return report;
+      },
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(seen.at(-1)).toEqual({ ref: 'refs/heads/main' });
+    expect(JSON.parse(json[0] ?? '{}')).toEqual(report);
+  });
+
+  it('fails the canonical index command on refusal, conflict and an unavailable service', async () => {
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'revision', 'advance'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const refused: string[] = [];
+    const refusedCode = await runCli(['index', 'revision', 'advance'], {
+      ...baseDependencies,
+      indexRevisionAdvance: async () => ({ status: 'refused', targetRef: 'refs/remotes/origin/main', reason: 'no remote' }),
+      write: (text) => refused.push(text),
+    });
+    expect(refusedCode).toBe(1);
+    expect(refused).toEqual(['canonical refs/remotes/origin/main: refused\nreason no remote']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'revision', 'advance'], {
+      ...baseDependencies,
+      indexRevisionAdvance: async () => { throw new Error('git is not installed'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['git is not installed']);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

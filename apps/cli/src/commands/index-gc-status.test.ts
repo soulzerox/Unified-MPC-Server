@@ -63,6 +63,22 @@ describe('formatIndexGcStatus', () => {
     })).toContain('lease held by gc_owner until 2026-11-04T00:01:00.000Z (generation 3, expired)');
   });
 
+  it('leaves a live held lease unmarked instead of calling it expired', () => {
+    const text = formatIndexGcStatus({
+      ...emptyReport,
+      lease: {
+        status: 'held',
+        ownerId: 'gc_owner',
+        generation: 1,
+        acquiredAt: '2026-11-03T23:59:00.000Z',
+        expiresAt: DEADLINE,
+        expired: false,
+      },
+    });
+    expect(text).toContain('lease held by gc_owner until 2026-11-04T00:01:00.000Z (generation 1)');
+    expect(text).not.toContain(', expired');
+  });
+
   it('reports a released lease as released and a corrupt one as degraded', () => {
     expect(formatIndexGcStatus({
       ...emptyReport,

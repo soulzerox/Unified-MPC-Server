@@ -250,7 +250,12 @@ export class CanonicalRefStore {
     input: CanonicalRefPromoteInput,
     lock: HeldRefLock,
   ): Promise<AdvancementDecision> {
-    const current = (await this.read(ref)) ?? null;
+    // The baseline read is strict: a ref file that exists but cannot be parsed
+    // is corruption, not "never promoted". A tolerant read would return null,
+    // let the first-ever branch overwrite the evidence, and report a clean
+    // advance. `read` still returns null only for a genuinely missing file, so
+    // a legitimate first promotion keeps working.
+    const current = await this.read(ref, { strict: true });
     const effectiveCurrent = input.current !== undefined ? input.current : current;
     // First-ever promote: no current state exists. The U6 gate works on
     // concrete states, so the store normalizes the unset case here —

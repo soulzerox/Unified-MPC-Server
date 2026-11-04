@@ -8,6 +8,7 @@ import {
 } from '@unified-mpc/domain';
 import type { CanonicalRefStore } from './canonical-ref-store.js';
 import { CanonicalManifestStore, type StoredManifest } from './canonical-manifest-store.js';
+import { errorMessage } from './reachability-read.js';
 
 export interface AdvanceRevisionInput {
   readonly canonicalRef: string;
@@ -54,19 +55,27 @@ function sorted(values: readonly string[]): string[] {
  * guarantee.
  *
  * Fail-closed rules: a ref bound to a different repository (only the ids named
- * by `adoptedRepositoryIds` may migrate it), an active ref without a readable
- * base manifest, or a base/target entry whose content hash is unverifiable, is
- * rejected before anything is written. The manifest is persisted before the ref
- * moves, so a reader that follows the ref always finds its manifest; a losing
- * promotion therefore leaves one unreferenced manifest, which is an ordinary GC
- * candidate.
+ * by `adoptedRepositoryIds` may migrate it), a ref file that exists but cannot
+ * be parsed (never treated as "never promoted"), an active ref without a
+ * readable base manifest, or a base/target entry whose content hash is
+ * unverifiable, is rejected before anything is written. The manifest is
+ * persisted before the ref moves, so a reader that follows the ref always finds
+ * its manifest; a losing promotion therefore leaves one unreferenced manifest,
+ * which is an ordinary GC candidate.
  */
 export async function advanceCanonicalRevision(
   manifests: CanonicalManifestStore,
   refs: CanonicalRefStore,
   input: AdvanceRevisionInput,
 ): Promise<AdvanceRevisionResult> {
-  const live = await refs.read(input.canonicalRef);
+  let live: CanonicalRefState | null;
+  try {
+    // Strict: a corrupt ref file must be a refusal, not an empty candidate set
+    // that the promotion below would overwrite as a first-ever advance.
+    live = await refs.read(input.canonicalRef, { strict: true });
+  } catch (error) {
+    return { status: 'rejected', reason: errorMessage(error), ...EMPTY };
+  }
   const base = live === null ? null : await manifests.get(live.manifestId);
   if (live !== null && base === null) {
     return { status: 'rejected', reason: `active ref ${input.canonicalRef} has no readable base manifest`, ...EMPTY };
@@ -129,15 +138,24 @@ export async function advanceCanonicalRevision(
   };
   await manifests.put(manifest);
 
-  const decision = await refs.promote(input.canonicalRef, {
-    expectedCurrent: input.expectedCurrent,
-    // No `current`: the store must compare against the state on disk at promote
-    // time. Passing the snapshot read here would make the comparison
-    // self-referential (`expectedCurrent === current` by construction) and let
-    // two advances that read the same snapshot both win.
-    target: state,
-    targetVerified: input.targetVerified,
-  });
+  let decision: AdvancementDecision;
+  try {
+    decision = await refs.promote(input.canonicalRef, {
+      expectedCurrent: input.expectedCurrent,
+      // No `current`: the store must compare against the state on disk at
+      // promote time. Passing the snapshot read here would make the comparison
+      // self-referential (`expectedCurrent === current` by construction) and let
+      // two advances that read the same snapshot both win.
+      target: state,
+      targetVerified: input.targetVerified,
+    });
+  } catch (error) {
+    // The promotion's baseline read happens under the ref lock. A ref that
+    // becomes unreadable after the check above must refuse here rather than be
+    // overwritten; the store throws instead of returning a decision precisely
+    // because corruption has no truthful decision.
+    return { status: 'rejected', reason: errorMessage(error), ...report };
+  }
   if (decision.action === 'promote' || decision.action === 'noop') {
     return {
       status: decision.action === 'promote' ? 'promoted' : 'noop',

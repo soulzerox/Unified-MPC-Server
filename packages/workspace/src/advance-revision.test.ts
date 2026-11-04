@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalRevisionId } from '@unified-mpc/domain';
@@ -342,6 +342,75 @@ describe('advance canonical revision (#210 U16)', () => {
       expect(result.status).toBe('promoted');
       const live = await refs.read(REF);
       expect((await manifests.get(live!.manifestId))?.repositoryId).toBe(REPO);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a corrupt active ref instead of overwriting it as first-ever', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      const refPath = path.join(dir, 'refs', 'remotes', 'origin', 'main.json');
+      await mkdir(path.dirname(refPath), { recursive: true });
+      await writeFile(refPath, '{not json', 'utf8');
+
+      const result = await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('c'.repeat(40)),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+
+      expect(result.status).toBe('rejected');
+      if (result.status === 'rejected') {
+        expect(result.reason).toMatch(/cannot read canonical ref refs\/remotes\/origin\/main/);
+      }
+      // The corrupt record is evidence for an operator; a tolerant read would
+      // have reported a first-ever promotion and replaced it.
+      expect(await readFile(refPath, 'utf8')).toBe('{not json');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects when the ref becomes unreadable between the gate read and the promotion', async () => {
+    const { manifests, dir } = await tempPair();
+    try {
+      let reads = 0;
+      const flaky = new (class extends CanonicalRefStore {
+        public override async read(
+          ...args: Parameters<CanonicalRefStore['read']>
+        ): Promise<Awaited<ReturnType<CanonicalRefStore['read']>>> {
+          reads += 1;
+          // The gate's first read sees "never promoted"; the promotion's
+          // read under the lock hits corruption that landed in between.
+          if (reads === 2) throw new Error('cannot read canonical ref refs/remotes/origin/main: EACCES');
+          return super.read(...args);
+        }
+      })(dir);
+
+      const result = await advanceCanonicalRevision(manifests, flaky, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('c'.repeat(40)),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+
+      expect(result.status).toBe('rejected');
+      if (result.status === 'rejected') {
+        expect(result.reason).toMatch(/EACCES/);
+      }
+      // The ref was never written; the manifest put before promotion is the
+      // documented unreferenced GC candidate.
+      expect(await flaky.read(REF)).toBeNull();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

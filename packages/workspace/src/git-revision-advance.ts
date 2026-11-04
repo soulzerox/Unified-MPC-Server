@@ -1,12 +1,13 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { canonicalRevisionId } from '@unified-mpc/domain';
+import { canonicalRevisionId, type CanonicalRefState } from '@unified-mpc/domain';
 
 import { advanceCanonicalRevision, type AdvanceReuseReport } from './advance-revision.js';
 import { CanonicalArtifactStore } from './canonical-artifact-store.js';
 import { CanonicalManifestStore } from './canonical-manifest-store.js';
 import { CanonicalRefStore } from './canonical-ref-store.js';
+import { errorMessage } from './reachability-read.js';
 import {
   registerManifestArtifacts,
   type ArtifactClassification,
@@ -285,8 +286,15 @@ export async function advanceRevisionFromGit(input: GitRevisionAdvanceInput): Pr
   const artifacts = new CanonicalArtifactStore(input.root);
 
   // Read the believed-current state before the (potentially slow) hashing pass
-  // so a concurrent advance is detected as a conflict at promote time.
-  const expectedCurrent = await refs.read(targetRef);
+  // so a concurrent advance is detected as a conflict at promote time. Strict:
+  // a corrupt ref must refuse before any hashing or write, not read as "never
+  // promoted" and be replaced by this advance.
+  let expectedCurrent: CanonicalRefState | null;
+  try {
+    expectedCurrent = await refs.read(targetRef, { strict: true });
+  } catch (error) {
+    return refused(targetRef, errorMessage(error));
+  }
 
   const tree = await source.listTree(revision.commitSha);
   const unsupported = tree.filter((entry) => !BLOB_MODES.has(entry.mode)).map((entry) => entry.path);

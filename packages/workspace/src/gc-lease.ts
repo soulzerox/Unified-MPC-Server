@@ -222,3 +222,74 @@ export class GcLeaseStore {
     await rename(tmpPath, finalPath);
   }
 }
+
+export interface GcLeaseHeartbeatInput {
+  readonly store: GcLeaseStore;
+  readonly ownerId: string;
+  readonly generation: number;
+  readonly ttlMs: number;
+  /** Grant time; the first renewal falls due half a window later. */
+  readonly grantedAt: Date;
+  /** Injectable clock; defaults to the wall clock. Tests drive it directly. */
+  readonly clock?: () => Date;
+}
+
+/**
+ * Keeps the single-owner fence alive across a long destructive pass.
+ *
+ * The lease is granted with a fixed TTL, so a pass that outlives the window
+ * would let the record expire while it is still deleting: another process
+ * could then acquire the fence and run a second destructive pass on the same
+ * store. `renew` has always supported extending the window, but nothing called
+ * it. A heartbeat renews halfway through each window, leaving the remaining
+ * half as headroom for the work item that is currently running.
+ *
+ * It ticks at destructive units of work instead of on a timer: no interval to
+ * tear down, no work while the pass is idle, and a renewal is only written
+ * when one is actually due.
+ */
+export class GcLeaseHeartbeat {
+  private readonly clock: () => Date;
+  private lastRenewedAt: number;
+
+  public constructor(private readonly input: GcLeaseHeartbeatInput) {
+    this.clock = input.clock ?? ((): Date => new Date());
+    this.lastRenewedAt = input.grantedAt.getTime();
+  }
+
+  /**
+   * Renew when half the window has elapsed. Returns false when the record is
+   * no longer this run's: released, unreadable, or replaced by a newer
+   * generation. False is terminal for the pass — it must not delete anything
+   * else under a fence it no longer owns.
+   */
+  public async ensure(): Promise<boolean> {
+    const now = this.clock();
+    const interval = Math.max(1, Math.floor(this.input.ttlMs / 2));
+    if (now.getTime() - this.lastRenewedAt < interval) return true;
+    const renewed = await this.input.store.renew({
+      ownerId: this.input.ownerId,
+      generation: this.input.generation,
+      now,
+      ttlMs: this.input.ttlMs,
+    });
+    if (renewed) this.lastRenewedAt = now.getTime();
+    return renewed;
+  }
+
+  /** Fail closed at a destructive boundary; see `ensure`. */
+  public async assert(): Promise<void> {
+    if (await this.ensure()) return;
+    throw new GcLeaseLostError(
+      `gc lease ${this.input.ownerId}#${this.input.generation} is no longer held: stopping the destructive pass`,
+    );
+  }
+}
+
+/** The pass no longer owns the fence; nothing else may be deleted. */
+export class GcLeaseLostError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'GcLeaseLostError';
+  }
+}

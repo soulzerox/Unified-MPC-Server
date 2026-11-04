@@ -7,12 +7,14 @@ import { assembleGcRoots } from './artifact-gc-roots.js';
 import type { ArtifactQuarantineStore, QuarantineTarget } from './artifact-quarantine.js';
 import type { CanonicalArtifactStore } from './canonical-artifact-store.js';
 import { collectRetainedManifestIds, planRepositoryArtifactGc } from './artifact-key-gc.js';
-import type { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseHeartbeat, type GcLeaseStore } from './gc-lease.js';
 
 export interface GcCycleLease {
   readonly store: GcLeaseStore;
   readonly ownerId: string;
   readonly ttlMs: number;
+  /** Clock used by the lease heartbeat; defaults to the wall clock. */
+  readonly clock?: () => Date;
 }
 
 /** One prunable canonical artifact: a key is only resolvable inside its repository. */
@@ -76,8 +78,10 @@ export interface GcCycleStores {
  *
  * A non-dry run holds the U28 cleanup lease for the whole cycle (a held
  * or unreadable fence refuses before anything is quarantined) and
- * releases it in a finally, even on refusal. Dry runs are read-only and
- * deliberately unfenced.
+ * releases it in a finally, even on refusal. The window is renewed while the
+ * cycle is still working, so a long plan cannot let the fence expire and admit
+ * a concurrent destructive pass. Dry runs are read-only and deliberately
+ * unfenced.
  *
  * Artifact candidates (optional) are planned in the same pass with the
  * repository-scoped artifact-key planner and quarantined under that one
@@ -89,7 +93,7 @@ export async function runGcCycle(
   input: GcCycleInput,
 ): Promise<GcCycleReport> {
   const lease = input.dryRun ? undefined : input.lease;
-  let granted: number | undefined;
+  let granted: { readonly generation: number; readonly heartbeat: GcLeaseHeartbeat } | undefined;
   if (lease !== undefined) {
     const acquired = await lease.store.acquire({ ownerId: lease.ownerId, now: input.now, ttlMs: lease.ttlMs });
     if (acquired.status === 'denied') {
@@ -100,18 +104,32 @@ export async function runGcCycle(
           : 'gc lease fence unreadable: refusing to start a mutating cycle',
       };
     }
-    granted = acquired.generation;
+    granted = {
+      generation: acquired.generation,
+      heartbeat: new GcLeaseHeartbeat({
+        store: lease.store,
+        ownerId: lease.ownerId,
+        generation: acquired.generation,
+        ttlMs: lease.ttlMs,
+        grantedAt: input.now,
+        ...(lease.clock === undefined ? {} : { clock: lease.clock }),
+      }),
+    };
   }
   try {
-    return await runCycle(stores, input);
+    return await runCycle(stores, input, granted?.heartbeat);
   } finally {
     if (lease !== undefined && granted !== undefined) {
-      await lease.store.release({ ownerId: lease.ownerId, generation: granted });
+      await lease.store.release({ ownerId: lease.ownerId, generation: granted.generation });
     }
   }
 }
 
-async function runCycle(stores: GcCycleStores, input: GcCycleInput): Promise<GcCycleReport> {
+async function runCycle(
+  stores: GcCycleStores,
+  input: GcCycleInput,
+  heartbeat?: GcLeaseHeartbeat,
+): Promise<GcCycleReport> {
   let roots: GcRootSet;
   try {
     roots = await assembleGcRoots({
@@ -166,6 +184,9 @@ async function runCycle(stores: GcCycleStores, input: GcCycleInput): Promise<GcC
       ...unreachableArtifacts.map((artifact): QuarantineTarget => ({ kind: 'artifact-key', ...artifact })),
     ];
     if (targets.length > 0) {
+      // Planning can outlast the acquisition window; renew before the only
+      // write this pass makes, and abort if the fence moved to another owner.
+      await heartbeat?.assert();
       await stores.quarantine.quarantine(targets, { now: input.now, graceMs: input.graceMs });
     }
   }

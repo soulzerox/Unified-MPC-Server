@@ -5,7 +5,7 @@ import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId } from '@unified-mpc/domain';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import { CanonicalManifestStore, type StoredManifest } from './canonical-manifest-store.js';
-import { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
 import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { pruneRevisionManifests, type RevisionPruneLease } from './revision-prune.js';
@@ -153,6 +153,50 @@ describe('revision manifest prune apply (#210 §12)', () => {
         ownerId: LEASE_OWNER,
         generation: 1,
       });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops pruning when a newer generation takes the fence mid-pass', async () => {
+    const s = await scenario();
+    try {
+      const secondStale = manifestFor('a'.repeat(40), [{ path: 'older.ts', contentHash: H('6') }]);
+      await s.manifests.put(secondStale);
+      const grantAt = new Date('2026-10-17T00:02:00.000Z');
+      let now = grantAt;
+      let handedOver = false;
+      // The first delete simulates a competing operator acquiring the fence
+      // after the pass read its roots; the pass must not delete anything else.
+      const wrapped = {
+        get: (manifestId: string) => s.manifests.get(manifestId),
+        listAll: () => s.manifests.listAll(),
+        delete: async (manifestId: string): Promise<boolean> => {
+          if (!handedOver) {
+            handedOver = true;
+            const held = await s.lease.read();
+            if (held === null) throw new Error('expected a held lease');
+            await s.lease.release({ ownerId: LEASE_OWNER, generation: held.generation });
+            await s.lease.acquire({ ownerId: 'gc_successor', now, ttlMs: 60_000 });
+            now = new Date(now.getTime() + 30_000);
+          }
+          return s.manifests.delete(manifestId);
+        },
+      } as unknown as CanonicalManifestStore;
+      await expect(pruneRevisionManifests({
+        ...s,
+        manifests: wrapped,
+        indexJobManifestIds: [],
+        dryRun: false,
+        now: grantAt,
+        lease: { store: s.lease, ownerId: LEASE_OWNER, ttlMs: 60_000, clock: () => now },
+      })).rejects.toThrow(GcLeaseLostError);
+      // One stale manifest was removed under the fence; its sibling survives.
+      const survivors = await Promise.all(
+        [s.stale, secondStale].map(async (m) => (await s.manifests.get(m.manifestId)) !== null),
+      );
+      expect(survivors.filter(Boolean)).toHaveLength(1);
+      expect(await s.lease.inspect()).toMatchObject({ status: 'held', ownerId: 'gc_successor', generation: 2 });
     } finally {
       await rm(s.dir, { recursive: true, force: true });
     }

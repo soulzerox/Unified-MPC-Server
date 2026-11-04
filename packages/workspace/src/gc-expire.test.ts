@@ -10,7 +10,7 @@ import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { ArtifactQuarantineStore } from './artifact-quarantine.js';
 import { expireGcQuarantine } from './gc-expire.js';
-import { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -248,6 +248,67 @@ describe('expire under the GC cleanup lease (#210 U29)', () => {
         lease: { store: lease, ownerId: 'gc_next', ttlMs: GRACE },
       });
       expect(second).toMatchObject({ status: 'planned', deleted: [H('6')] });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('renews the window at each delete when the pass outlives half of it', async () => {
+    const { dir, stores, quarantine } = await setup();
+    try {
+      // A second due row gives the pass two destructive units, so the renewal
+      // is observable between them.
+      await quarantine.quarantine([H('6')], { now: at(0), graceMs: GRACE });
+      const lease = new GcLeaseStore(dir);
+      const grantAt = at(GRACE * 2);
+      let now = grantAt;
+      const expiries: string[] = [];
+      const result = await expireGcQuarantine(stores, {
+        indexJobManifestIds: [], now: grantAt, graceMs: GRACE, dryRun: false,
+        deleteArtifact: async () => {
+          const held = await lease.inspect();
+          if (held.status !== 'held') throw new Error(`expected a held lease, got ${held.status}`);
+          expiries.push(held.expiresAt);
+          // Cross the half window so the next delete is forced to renew.
+          now = new Date(now.getTime() + GRACE);
+        },
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE, clock: () => now },
+      });
+      expect(result).toMatchObject({ status: 'planned', deleted: [H('5'), H('6')] });
+      // The first delete runs inside the original window; the second runs
+      // inside the renewed one, one full TTL later.
+      expect(expiries).toEqual([at(GRACE * 3).toISOString(), at(GRACE * 4).toISOString()]);
+      expect(await lease.read()).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts the pass when a newer generation takes the fence', async () => {
+    const { dir, stores, quarantine } = await setup();
+    try {
+      await quarantine.quarantine([H('6')], { now: at(0), graceMs: GRACE });
+      const lease = new GcLeaseStore(dir);
+      const grantAt = at(GRACE * 2);
+      let now = grantAt;
+      const deleted: string[] = [];
+      await expect(expireGcQuarantine(stores, {
+        indexJobManifestIds: [], now: grantAt, graceMs: GRACE, dryRun: false,
+        deleteArtifact: async (hash) => {
+          deleted.push(hash);
+          const held = await lease.read();
+          if (held === null) throw new Error('expected a held lease');
+          await lease.release({ ownerId: 'gc_me', generation: held.generation });
+          await lease.acquire({ ownerId: 'gc_successor', now, ttlMs: GRACE });
+          now = new Date(now.getTime() + GRACE);
+        },
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE, clock: () => now },
+      })).rejects.toThrow(GcLeaseLostError);
+      // Exactly one artifact was deleted; the ledger was never released, so a
+      // retry still has the evidence and converges on the already-gone record.
+      expect(deleted).toEqual([H('5')]);
+      expect(await quarantine.list()).toHaveLength(2);
+      expect(await lease.inspect()).toMatchObject({ status: 'held', ownerId: 'gc_successor', generation: 2 });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

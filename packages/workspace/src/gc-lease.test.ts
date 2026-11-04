@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseHeartbeat, GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
 
 const T0 = new Date('2026-10-17T00:00:00.000Z');
 const at = (ms: number): Date => new Date(T0.getTime() + ms);
@@ -104,6 +104,78 @@ describe('GC cleanup lease (#210 U28)', () => {
       expect(await readFile(path.join(dir, 'gc', 'lease.json'), 'utf8')).toBe('{ not json');
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('GC lease heartbeat (#210 §12)', () => {
+  async function granted(): Promise<{
+    leases: GcLeaseStore;
+    dir: string;
+    generation: number;
+    tick: (value: Date) => void;
+    heartbeat: GcLeaseHeartbeat;
+  }> {
+    const { leases, dir } = await store();
+    const result = await leases.acquire({ ownerId: 'gc_a', now: T0, ttlMs: TTL });
+    if (result.status !== 'granted') throw new Error('expected grant');
+    let now = T0;
+    const heartbeat = new GcLeaseHeartbeat({
+      store: leases,
+      ownerId: 'gc_a',
+      generation: result.generation,
+      ttlMs: TTL,
+      grantedAt: T0,
+      clock: (): Date => now,
+    });
+    return { leases, dir, generation: result.generation, tick: (value: Date): void => { now = value; }, heartbeat };
+  }
+
+  it('writes nothing before half the window has elapsed', async () => {
+    const s = await granted();
+    try {
+      s.tick(at(TTL / 2 - 1));
+      await expect(s.heartbeat.ensure()).resolves.toBe(true);
+      // The original deadline is untouched: no renewal was needed yet.
+      expect(await s.leases.inspect()).toMatchObject({ status: 'held', expiresAt: at(TTL).toISOString() });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('renews at half the window and then waits for the next half', async () => {
+    const s = await granted();
+    try {
+      s.tick(at(TTL / 2));
+      await expect(s.heartbeat.ensure()).resolves.toBe(true);
+      const extended = at(TTL / 2 + TTL).toISOString();
+      expect(await s.leases.inspect()).toMatchObject({ status: 'held', generation: s.generation, expiresAt: extended });
+      // The window restarts at the renewal, so the next tick is due a half
+      // window later, not immediately.
+      s.tick(at(TTL - 1));
+      await expect(s.heartbeat.ensure()).resolves.toBe(true);
+      expect(await s.leases.inspect()).toMatchObject({ status: 'held', expiresAt: extended });
+      // A now-past-the-old-deadline acquisition still sees a live fence.
+      const denied = await s.leases.acquire({ ownerId: 'gc_b', now: at(TTL + 1), ttlMs: TTL });
+      expect(denied).toMatchObject({ status: 'denied', reason: 'held', holder: 'gc_a' });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed once a newer generation owns the fence', async () => {
+    const s = await granted();
+    try {
+      await s.leases.release({ ownerId: 'gc_a', generation: s.generation });
+      const successor = await s.leases.acquire({ ownerId: 'gc_b', now: at(TTL + 1), ttlMs: TTL });
+      expect(successor).toMatchObject({ status: 'granted', generation: 2 });
+      s.tick(at(TTL + 2));
+      await expect(s.heartbeat.ensure()).resolves.toBe(false);
+      await expect(s.heartbeat.assert()).rejects.toThrow(GcLeaseLostError);
+      // The successor's record is never rewritten or released by the stale run.
+      expect(await s.leases.inspect()).toMatchObject({ status: 'held', ownerId: 'gc_b', generation: 2 });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
     }
   });
 });

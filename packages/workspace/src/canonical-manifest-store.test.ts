@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId } from '@unified-mpc/domain';
@@ -96,6 +96,75 @@ describe('canonical manifest store (#210 U15)', () => {
       await rm(row);
       await mkdir(path.join(row, 'child'), { recursive: true });
       await expect(store.delete(main.manifestId)).rejects.toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a corrupt row when listing tolerantly and refuses it when reads are strict', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'manifest-store-'));
+    try {
+      const store = new CanonicalManifestStore(dir);
+      const main = manifest();
+      await store.put(main);
+      await writeFile(path.join(dir, 'manifests', 'corrupt.json'), '{not json', 'utf8');
+
+      expect(await store.listAll()).toEqual([main]);
+      await expect(new CanonicalManifestStore(dir, { strictReads: true }).listAll())
+        .rejects.toThrow(/cannot read canonical manifest corrupt\.json/);
+      // The tolerant row lookup stays available to operator surfaces.
+      expect(await store.get(main.manifestId)).toEqual(main);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unreadable or non-record row on a strict read but tolerates a missing directory', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'manifest-store-'));
+    try {
+      const strict = new CanonicalManifestStore(dir, { strictReads: true });
+      expect(await strict.listAll()).toEqual([]);
+
+      await mkdir(path.join(dir, 'manifests'), { recursive: true });
+      const target = manifest();
+      const row = path.join(dir, 'manifests', `${target.manifestId}.json`);
+      await writeFile(row, '{not json', 'utf8');
+      await expect(strict.get(target.manifestId)).rejects.toThrow(/cannot read canonical manifest/);
+
+      await writeFile(row, JSON.stringify({ manifestId: target.manifestId }), 'utf8');
+      await expect(strict.get(target.manifestId)).rejects.toThrow(/not a canonical manifest record/);
+
+      expect(await new CanonicalManifestStore(dir).get(target.manifestId)).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a malformed id as an absent row unless reads are strict', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'manifest-store-'));
+    try {
+      expect(await new CanonicalManifestStore(dir).get('not-a-manifest-id')).toBeNull();
+      const strict = new CanonicalManifestStore(dir, { strictReads: true });
+      await expect(strict.get('not-a-manifest-id')).rejects.toThrow(/invalid manifest id/);
+      // A well-formed id with no row is legitimately absent, even when strict.
+      expect(await strict.get(manifest().manifestId)).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unreadable manifests directory on a strict read', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'manifest-store-'));
+    try {
+      // A regular file where the directory belongs makes readdir/readFile fail
+      // with ENOTDIR, which is not the legitimately-missing path.
+      await writeFile(path.join(dir, 'manifests'), '', 'utf8');
+      const strict = new CanonicalManifestStore(dir, { strictReads: true });
+      await expect(strict.listAll()).rejects.toThrow(/cannot read the canonical manifests directory/);
+      const id = manifest().manifestId;
+      await expect(strict.get(id)).rejects.toThrow(/cannot read canonical manifest/);
+      expect(await new CanonicalManifestStore(dir).listAll()).toEqual([]);
+      expect(await new CanonicalManifestStore(dir).get(id)).toBeNull();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

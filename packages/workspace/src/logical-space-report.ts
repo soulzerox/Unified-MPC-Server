@@ -122,8 +122,8 @@ export async function logicalSpaceReport(deps: LogicalSpaceDeps): Promise<Logica
 /**
  * Store-backed entry point for `<data>/canonical` (#210 §2).
  *
- * Every read is strict: the artifact listing, the index-job ledger, refs, pins
- * and Goal overlays. A record that cannot be read becomes `refused` — a
+ * Every read is strict: the artifact listing, manifests, the index-job ledger,
+ * refs, pins and Goal overlays. A record that cannot be read becomes `refused` — a
  * tolerant listing would silently drop it and report a smaller, "measured"
  * store, which is exactly the undercount this projection must never print.
  */
@@ -140,7 +140,7 @@ export async function logicalSpaceReportFromRoot(root: string): Promise<LogicalS
     }
     return await logicalSpaceReport({
       refs: new CanonicalRefStore(root),
-      manifests: new CanonicalManifestStore(root),
+      manifests: new CanonicalManifestStore(root, { strictReads: true }),
       pins: new RevisionPinRegistry(root),
       overlays: new GoalOverlayStore(root),
       indexJobManifestIds: await new IndexJobLedger(root).liveManifestIds({ strict: true }),

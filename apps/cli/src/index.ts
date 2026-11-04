@@ -16,6 +16,7 @@ import {
   GoalOverlayStore,
   IndexJobLedger,
   pinCanonicalRevision,
+  pruneRevisionManifests,
   RevisionPinRegistry,
   unpinCanonicalRevision,
   WorkspaceService,
@@ -23,6 +24,7 @@ import {
   type CanonicalRevisionListReport,
   type CanonicalRevisionPinReport,
   type GitRevisionAdvanceResult,
+  type RevisionPruneReport,
   type Workspace,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
@@ -91,6 +93,11 @@ import {
   parseIndexRevisionPinArgs,
   type IndexRevisionPinCommand,
 } from './commands/index-revision-pin.js';
+import {
+  formatCanonicalRevisionPrune,
+  parseIndexRevisionPruneArgs,
+  type IndexRevisionPruneCommand,
+} from './commands/index-revision-prune.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -114,6 +121,7 @@ export * from './commands/storage.js';
 export * from './commands/index-revision.js';
 export * from './commands/index-revision-list.js';
 export * from './commands/index-revision-pin.js';
+export * from './commands/index-revision-prune.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -138,6 +146,7 @@ export type CliCommand =
   | IndexRevisionCommand
   | IndexRevisionListCommand
   | IndexRevisionPinCommand
+  | IndexRevisionPruneCommand
   | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
@@ -181,6 +190,9 @@ export interface CliDependencies {
     readonly manifestId: string;
     readonly note?: string;
   }): Promise<CanonicalRevisionPinReport>;
+  indexRevisionPrune?(input: {
+    readonly dryRun: true;
+  }): Promise<RevisionPruneReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -215,8 +227,9 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
     if (args[1] === 'revision') {
       if (args[2] === 'list') return parseIndexRevisionListArgs(args.slice(1));
       if (args[2] === 'pin' || args[2] === 'unpin') return parseIndexRevisionPinArgs(args.slice(1));
+      if (args[2] === 'prune') return parseIndexRevisionPruneArgs(args.slice(1));
       if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
-      return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|advance ...'));
+      return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|prune|advance ...'));
     }
     return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision ...'));
   }
@@ -252,6 +265,7 @@ Commands:
   index revision list [--json]           List stored revision manifests and what still references them
   index revision pin <manifest-id>       Pin a revision with the operator reason
   index revision unpin <manifest-id>     Remove the operator pin from a revision
+  index revision prune --dry-run         Plan the prune of unreferenced revisions without deleting
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -385,6 +399,20 @@ Commands:
           ...(parsed.value.note === undefined ? {} : { note: parsed.value.note }),
         });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPin(report));
+        return 0;
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-revision-prune': {
+      if (dependencies.indexRevisionPrune === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexRevisionPrune({ dryRun: parsed.value.dryRun });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPrune(report));
         return 0;
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
@@ -834,6 +862,22 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           ...(input.note === undefined ? {} : { note: input.note }),
         })
         : unpinCanonicalRevision(deps, { manifestId: input.manifestId });
+    },
+    indexRevisionPrune: async (input): Promise<RevisionPruneReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      const jobs = new IndexJobLedger(root);
+      return pruneRevisionManifests({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
+        // The ledger is read immediately before planning so a live index job
+        // cannot have its manifest collected by a plan built from a stale list.
+        indexJobManifestIds: await jobs.liveManifestIds(),
+        dryRun: input.dryRun,
+      });
     },
     publishCredential: async (
       command: PublishCredentialCommand,

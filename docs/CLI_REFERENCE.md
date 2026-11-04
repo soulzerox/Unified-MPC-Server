@@ -372,6 +372,34 @@ pins none
   the store cannot be written; `2` for arguments that are not `pin|unpin` plus
   one manifest id and an optional `--note` (pin only) or `--json`.
 
+### `unified-mpc index revision prune --dry-run [--json]`
+
+Prints the plan a prune would execute: every stored revision manifest that no
+canonical ref, pin, Goal overlay base or unsettled index job still holds, plus
+every revision the planner retains and the root that holds it. The command only
+reads; `--dry-run` is required rather than defaulted.
+
+```bash
+$ unified-mpc index revision prune --dry-run
+planned (dry-run) pruneable 1 retained 2
+prune man:v1:9b1c4f2e7a60
+retain man:v1:3c9f1e7a5d2b canonical-ref
+retain man:v1:ff0371d8c4e2 pin
+```
+
+- `prune` lines are candidates for a later deletion slice, not deletions. This
+  verb has no `--apply`: deletion needs a fence that re-checks pins and index
+  jobs under the same lock that removes the manifest, so it ships separately.
+- `retain` lines name why the planner kept a revision: `canonical-ref`, `pin`,
+  `overlay-base` or `index-job`.
+- A plan with nothing to collect prints `planned (dry-run) pruneable 0 retained N`
+  and still exits `0`.
+- The plan is advisory: a concurrent `pin` or `advance` can change
+  reachability, so re-run the plan before acting on it.
+- Exit `0` for any successful plan; `1` when the store cannot be read; `2` when
+  `--dry-run` is missing, `--apply` is requested, or another argument is
+  unknown.
+
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref

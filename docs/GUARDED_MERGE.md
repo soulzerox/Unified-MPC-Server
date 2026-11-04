@@ -191,10 +191,13 @@ manifest from GC.
 When a merge reconciles as `reconciled` and the observation carries its merge
 commit, the poller runs the advancement gate once for that repository:
 
-1. `git fetch` the exact branch into `refs/remotes/origin/<defaultBranch>`;
-2. refuse unless the fetched ref contains the merge commit as an ancestor — a
+1. refuse unless the checkout's `origin` resolves to a github.com repository
+   equal to the policy's `repository` — a shared or mistyped `checkoutPath`
+   must not fetch another repository's branch and bind the ref to it;
+2. `git fetch` the exact branch into `refs/remotes/origin/<defaultBranch>`;
+3. refuse unless the fetched ref contains the merge commit as an ancestor — a
    lagging clone must not move the canonical ref backwards;
-3. run `advanceRevisionFromGit`, which classifies the delta against the active
+4. run `advanceRevisionFromGit`, which classifies the delta against the active
    manifest, persists the new manifest, CAS-promotes the ref and registers
    artifacts.
 
@@ -205,9 +208,9 @@ The outcome is reported in the poll summary as `canonicalAdvance`:
 
 | Value | Meaning |
 |---|---|
-| `advanced` | the ref moved to the merged commit; the report carries the manifest id |
+| `advanced` | the ref moved to the fetched branch head, which contains the merged commit; the report carries the manifest id |
 | `noop` | the ref already pointed at an equivalent manifest |
-| `refused` | reason included; the merge still reconciled, nothing was advanced |
+| `refused` | reason included — including a policy with no `checkoutPath`; the merge still reconciled, nothing was advanced |
 | `skipped / no_merge` | no merge reconciled in this pass |
 | `skipped / not_wired` | the runtime has no canonical root |
 | `skipped / inspect_required` | a merge needed inspection, so the pass advanced nothing |

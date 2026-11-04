@@ -294,6 +294,41 @@ describe('MergeReconciliationService', () => {
     }
   });
 
+  it('re-observes the same merge when only the runtime checkout path changed', async () => {
+    const database = new SqliteDatabase(':memory:');
+    try {
+      const history = new SqliteMergeReconciliationRepository(database);
+      const service = new MergeReconciliationService(
+        reader({ receiptRef: RECEIPT_REF, receipt }),
+        history,
+        () => new Date('2026-10-07T01:31:00.000Z'),
+      );
+
+      const first = await service.reconcile({
+        policy,
+        expectedMergeMethod: 'merge',
+        observation,
+        receiptRef: RECEIPT_REF,
+      });
+      // `checkoutPath` is runtime wiring; adopting or moving it must not make a
+      // recorded merge conflict with its own re-observation, which would stall
+      // the poll cursor.
+      const repeated = await service.reconcile({
+        policy: { ...policy, checkoutPath: '/srv/checkouts/repo' },
+        expectedMergeMethod: 'merge',
+        observation: { ...observation, observedAt: '2026-10-07T01:40:00.000Z' },
+        receiptRef: RECEIPT_REF,
+      });
+
+      expect(first).toMatchObject({ status: 'reconciled' });
+      expect(repeated).toMatchObject({ status: 'reconciled' });
+      if (repeated.status === 'inspect_required') throw new Error(repeated.reason);
+      expect(repeated.record.policy).not.toHaveProperty('checkoutPath');
+    } finally {
+      database.close();
+    }
+  });
+
   it('never claims reconciliation when durable history persistence fails', async () => {
     const failingWriter: MergeReconciliationHistoryWriter = {
       async append(): Promise<never> {

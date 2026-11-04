@@ -12,13 +12,15 @@ import {
 } from '@unified-mpc/workspace';
 
 import { createCanonicalGitSource } from './canonical-git-source.js';
+import { githubRepositoryFromRemote } from './github-remote.js';
 
 const execFileAsync = promisify(execFile);
 
 const FETCH_TIMEOUT_MS = 120_000;
 const ANCESTRY_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER = 4 * 1024 * 1024;
-const COMMIT_SHA = /^[0-9a-f]{40}$/;
+/** Object id width: SHA-1 repositories use 40, SHA-256 repositories use 64. */
+const COMMIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 export interface CanonicalAdvanceRequest {
   readonly policy: RepositoryMergePolicy;
@@ -170,6 +172,17 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
       if (remote === null) {
         return refused(`${checkoutPath} has no remote; the canonical trust boundary is unknown`);
       }
+      // The checkout must be the repository the policy is about. Without this
+      // check a wrong or shared `checkoutPath` would fetch *that* repository's
+      // branch, promote its tree under this policy, and bind the canonical ref
+      // to the wrong repository id — permanently refusing the correct checkout.
+      const remoteRepository = await githubRepositoryFromRemote(remote).catch(() => undefined);
+      if (remoteRepository === undefined
+        || remoteRepository.toLowerCase() !== policy.repository.trim().toLowerCase()) {
+        return refused(
+          `${checkoutPath} origin is ${remoteRepository ?? 'not a verified github.com repository'}, not ${policy.repository}`,
+        );
+      }
       repositoryId = repositoryIdForRemoteUrl(remote);
     } catch (error) {
       return refused(`cannot read the remote of ${checkoutPath}: ${errorMessage(error)}`);
@@ -223,9 +236,15 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
   };
 }
 
-/** Repository id the active ref is bound to, or undefined when the ref is unset or unreadable. */
+/**
+ * Repository id the active ref is bound to, or undefined when no ref exists.
+ *
+ * The read is strict: a corrupt ref file must not read as "unbound" and get
+ * overwritten as a first-ever promotion, so the caller's catch turns an
+ * unreadable ref into a refusal.
+ */
 async function boundedRepository(canonicalRoot: string, targetRef: string): Promise<string | undefined> {
-  const active = await new CanonicalRefStore(canonicalRoot).read(targetRef);
+  const active = await new CanonicalRefStore(canonicalRoot).read(targetRef, { strict: true });
   if (active === null) return undefined;
   const manifest = await new CanonicalManifestStore(canonicalRoot).get(active.manifestId);
   return manifest?.repositoryId;

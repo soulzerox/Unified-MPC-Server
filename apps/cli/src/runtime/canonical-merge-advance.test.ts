@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { RepositoryMergePolicy } from '@unified-mpc/domain';
@@ -271,6 +271,68 @@ describe('canonical advance after merge (#210 §3)', () => {
       expect(second).toMatchObject({ status: 'refused' });
       if (second.status !== 'refused') throw new Error('unexpected');
       expect(second.reason).toMatch(/bound to/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a checkout whose origin is a different repository than the policy', async () => {
+    const root = await tempRoot();
+    try {
+      // A fork shares commit objects, so ancestry alone would not catch this:
+      // the advance would promote the fork's branch under this policy.
+      const advance = advanceWith(root, {
+        source: new FakeGit({ 'src/a.ts': 'a' }, COMMIT, 'git@github.com:someone-else/repo.git'),
+      });
+
+      const outcome = await advance({ policy, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'refused' });
+      if (outcome.status !== 'refused') throw new Error('unexpected');
+      expect(outcome.reason).toMatch(/origin is someone-else\/repo, not example\/repo/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the same repository over a different remote URL form', async () => {
+    const root = await tempRoot();
+    try {
+      const advance = advanceWith(root, {
+        source: new FakeGit({ 'src/a.ts': 'a' }, COMMIT, 'https://github.com/Example/Repo.git'),
+      });
+
+      const outcome = await advance({ policy: { ...policy, repository: 'example/repo' }, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'advanced' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a corrupt canonical ref instead of overwriting it as a first promotion', async () => {
+    const root = await tempRoot();
+    try {
+      const refFile = path.join(root, 'refs', 'remotes', 'origin', 'main.json');
+      await mkdir(path.dirname(refFile), { recursive: true });
+      await writeFile(refFile, '{"commitSha": 42}', 'utf8');
+
+      const outcome = await advanceWith(root)({ policy, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'refused' });
+      if (outcome.status !== 'refused') throw new Error('unexpected');
+      expect(outcome.reason).toMatch(/cannot read the canonical ref/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a SHA-256 commit id', async () => {
+    const root = await tempRoot();
+    try {
+      const outcome = await advanceWith(root)({ policy, expectedCommitSha: 'c'.repeat(64) });
+
+      expect(outcome).toMatchObject({ status: 'advanced' });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

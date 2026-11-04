@@ -57,13 +57,24 @@ export class CanonicalRefStore {
     return states.sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
   }
 
-  public async read(ref: string): Promise<CanonicalRefState | null> {
+  public async read(ref: string, options?: ReachabilityReadOptions): Promise<CanonicalRefState | null> {
+    let raw: string;
     try {
-      const raw = await readFile(this.refPath(ref), 'utf8');
+      raw = await readFile(this.refPath(ref), 'utf8');
+    } catch (error) {
+      // A missing ref is the ordinary "never promoted" case. Any other read
+      // failure is not: a strict caller (the advancement gate) must see it.
+      if (isStrictRead(options) && !isMissingPath(error)) {
+        throw new Error(`cannot read canonical ref ${ref}: ${errorMessage(error)}`);
+      }
+      return null;
+    }
+    try {
       const parsed: unknown = JSON.parse(raw);
-      if (!isRefState(parsed)) return null;
+      if (!isRefState(parsed)) throw new Error('not a canonical ref state');
       return parsed;
-    } catch {
+    } catch (error) {
+      if (isStrictRead(options)) throw new Error(`cannot read canonical ref ${ref}: ${errorMessage(error)}`);
       return null;
     }
   }

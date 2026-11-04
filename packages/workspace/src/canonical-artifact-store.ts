@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileArtifactId, semanticArtifactId } from '@unified-mpc/domain';
+import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 /**
  * Source provenance binding an artifact key to a place a specific revision
@@ -174,9 +175,13 @@ export class CanonicalArtifactStore {
    * A GC pass needs the candidate universe before it knows which repositories
    * to scope; asking per repository would hide records whose manifest moved or
    * was already pruned. Read-only and sorted by artifact key.
+   *
+   * The default listing is tolerant because operator surfaces must still report
+   * what they can. A caller that reports or acts on the count asks for `strict`
+   * instead: a record it cannot read is then a refusal, never a smaller store.
    */
-  public async list(): Promise<StoredArtifact[]> {
-    return this.listAll();
+  public async list(options?: ReachabilityReadOptions): Promise<StoredArtifact[]> {
+    return this.listAll(options);
   }
 
   /**
@@ -295,23 +300,30 @@ export class CanonicalArtifactStore {
     return { ...existing, bindings: mergeBindings(existing.bindings, incoming.bindings) };
   }
 
-  private async listAll(): Promise<StoredArtifact[]> {
+  private async listAll(options?: ReachabilityReadOptions): Promise<StoredArtifact[]> {
+    const strict = isStrictRead(options);
     const artifactsDir = path.join(this.root, 'artifacts');
     let files: string[];
     try {
       files = (await readdir(artifactsDir, { withFileTypes: true }))
         .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
         .map((entry) => entry.name);
-    } catch {
+    } catch (error) {
+      if (strict && !isMissingPath(error)) {
+        throw new Error(`cannot read the canonical artifacts directory: ${errorMessage(error)}`);
+      }
       return [];
     }
     const artifacts: StoredArtifact[] = [];
     for (const file of files) {
       try {
         const parsed: unknown = JSON.parse(await readFile(path.join(artifactsDir, file), 'utf8'));
-        if (isArtifact(parsed)) artifacts.push(parsed);
-      } catch {
-        // Skip unreadable/corrupted records rather than failing the listing.
+        if (!isArtifact(parsed)) throw new Error('not a canonical artifact record');
+        artifacts.push(parsed);
+      } catch (error) {
+        // Tolerant listings skip unreadable/corrupted records; a count that must
+        // be exact refuses instead, because a skipped record undercounts.
+        if (strict) throw new Error(`cannot read canonical artifact ${file}: ${errorMessage(error)}`);
       }
     }
     return artifacts.sort((a, b) => a.artifactKey.localeCompare(b.artifactKey));

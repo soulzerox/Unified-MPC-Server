@@ -1,10 +1,12 @@
-import type { CanonicalRefStore } from './canonical-ref-store.js';
-import type { CanonicalManifestStore } from './canonical-manifest-store.js';
-import type { GoalOverlayStore } from './goal-overlay-store.js';
-import type { RevisionPinRegistry } from './revision-pin-registry.js';
+import { CanonicalArtifactStore } from './canonical-artifact-store.js';
+import { CanonicalManifestStore } from './canonical-manifest-store.js';
+import { CanonicalRefStore } from './canonical-ref-store.js';
+import { GoalOverlayStore } from './goal-overlay-store.js';
+import { IndexJobLedger } from './index-job-ledger.js';
+import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { assembleGcRoots } from './artifact-gc-roots.js';
 import { planArtifactGc } from './artifact-gc.js';
-import { pruneRevisionManifests } from './revision-prune.js';
+import { pruneRevisionManifests, type RevisionPrunePlan } from './revision-prune.js';
 
 export interface LogicalSpaceDeps {
   readonly refs: CanonicalRefStore;
@@ -61,12 +63,19 @@ export type LogicalSpaceReport =
  * `SqliteDatabase.physicalMetrics` in `@unified-mpc/storage`. Row deletion and
  * revision prune are not compaction, so this report must never imply shrinkage.
  *
- * Fail closed: when reachability roots are absent or a root manifest is missing
- * on disk, the report is `refused` rather than a zero-retention count that
- * would make everything look deletable.
+ * Fail closed: when reachability roots are absent, a root manifest is missing
+ * on disk, or a root store cannot be read, the report is `refused` rather than
+ * a zero-retention count that would make everything look deletable.
  */
 export async function logicalSpaceReport(deps: LogicalSpaceDeps): Promise<LogicalSpaceReport> {
-  const prune = await pruneRevisionManifests({ ...deps, dryRun: true });
+  let prune: RevisionPrunePlan;
+  try {
+    // The planner reads refs/pins/overlays strictly and throws on an unreadable
+    // root; a report must refuse there instead of surfacing the raw throw.
+    prune = await pruneRevisionManifests({ ...deps, dryRun: true });
+  } catch (error) {
+    return { status: 'refused', reason: error instanceof Error ? error.message : 'failed to plan the revision prune' };
+  }
 
   let roots;
   try {
@@ -108,4 +117,36 @@ export async function logicalSpaceReport(deps: LogicalSpaceDeps): Promise<Logica
       unreferencedBytes: sumBytes(unreferencedHashes),
     },
   };
+}
+
+/**
+ * Store-backed entry point for `<data>/canonical` (#210 §2).
+ *
+ * Every read is strict: the artifact listing, the index-job ledger, refs, pins
+ * and Goal overlays. A record that cannot be read becomes `refused` — a
+ * tolerant listing would silently drop it and report a smaller, "measured"
+ * store, which is exactly the undercount this projection must never print.
+ */
+export async function logicalSpaceReportFromRoot(root: string): Promise<LogicalSpaceReport> {
+  try {
+    const stored = await new CanonicalArtifactStore(root).list({ strict: true });
+    const contentHashes = new Set<string>();
+    for (const artifact of stored) {
+      // Semantic (chunk) artifacts are owned by the Thai-RAG GC boundary, and
+      // the reachability planner reads file bindings only, so counting chunk
+      // keys here would report every one of them as unreferenced.
+      if (artifact.kind !== 'file') continue;
+      contentHashes.add(artifact.sourceContentSha256);
+    }
+    return await logicalSpaceReport({
+      refs: new CanonicalRefStore(root),
+      manifests: new CanonicalManifestStore(root),
+      pins: new RevisionPinRegistry(root),
+      overlays: new GoalOverlayStore(root),
+      indexJobManifestIds: await new IndexJobLedger(root).liveManifestIds({ strict: true }),
+      artifactCandidates: [...contentHashes].sort(),
+    });
+  } catch (error) {
+    return { status: 'refused', reason: error instanceof Error ? error.message : 'failed to read the canonical store' };
+  }
 }

@@ -213,6 +213,39 @@ describe('canonical artifact store (#210 §1/§6)', () => {
     });
   });
 
+  it('refuses a strict listing instead of silently undercounting a corrupt record', async () => {
+    await withStore(async (store, root) => {
+      const good = fileArtifact();
+      await store.put(good);
+      const artifactsDir = path.join(root, 'artifacts');
+      await writeFile(path.join(artifactsDir, 'corrupt.json'), '{not json', 'utf8');
+
+      // Operator surfaces keep reporting what they can...
+      expect(await store.list()).toEqual([good]);
+      // ...but a count that must be exact refuses, naming the record it could
+      // not read: a skipped record would print a smaller "measured" store.
+      await expect(store.list({ strict: true })).rejects.toThrow(/cannot read canonical artifact corrupt\.json/);
+    });
+  });
+
+  it('refuses a strict listing of a JSON file that is not an artifact record', async () => {
+    await withStore(async (store, root) => {
+      await store.put(fileArtifact());
+      const artifactsDir = path.join(root, 'artifacts');
+      await writeFile(path.join(artifactsDir, 'not-a-record.json'), '{"kind":"file"}', 'utf8');
+
+      await expect(store.list({ strict: true })).rejects.toThrow(/not a canonical artifact record/);
+    });
+  });
+
+  it('treats a missing artifacts directory as an empty strict listing', async () => {
+    await withStore(async (store) => {
+      // Nothing has been written yet: "no records" is a real answer, not a
+      // read failure, so the strict read stays empty instead of refusing.
+      expect(await store.list({ strict: true })).toEqual([]);
+    });
+  });
+
   it('deletes a corrupt record by path instead of treating it as missing', async () => {
     await withStore(async (store, root) => {
       const artifact = fileArtifact();

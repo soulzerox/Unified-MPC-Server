@@ -629,7 +629,8 @@ bytes reachable=unmeasured unreferenced=unmeasured
   and revision prune leave the file size to `storage metrics`.
 - `refused <reason>` exits `1`: when a reachability root manifest is missing or a
   store cannot be read, a zero-retention count would make every artifact look
-  deletable.
+  deletable. A corrupt or unreadable artifact record refuses the report as well —
+  skipping it would print a smaller store as if it had been measured.
 - Artifact counts are content hashes deduped across trust boundaries, which is
   the space the reachability planner consumes; repository-scoped artifact-key
   reachability stays with `index gc`. Chunk (semantic) artifacts are excluded:

@@ -1403,6 +1403,107 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('refuses every GC verb when the index-job ledger cannot be read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-ledger-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const { repositoryId, manifest, deadArtifactKey, deadHash } = await seedCanonicalGcFixture(dataPath);
+      const quarantine = new ArtifactQuarantineStore(canonical);
+      await quarantine.quarantine([
+        deadHash,
+        { kind: 'artifact-key', repositoryId, artifactKey: deadArtifactKey },
+      ], { now: new Date('2026-11-01T00:00:00.000Z'), graceMs: 60_000 });
+
+      // A prunable row proves the refusal keeps destructive work undone, not
+      // merely that it happens to have nothing to do.
+      const staleEntries = [{ path: 'stale.ts', contentHash: 'e'.repeat(64) }];
+      const staleCommit = 'e'.repeat(40);
+      const staleTreeOid = computeTreeOid(staleEntries);
+      const staleRevisionId = canonicalRevisionId({
+        repositoryId: GC_FIXTURE_REPOSITORY,
+        commitSha: staleCommit,
+        treeOid: staleTreeOid,
+        targetRef: GC_FIXTURE_REF,
+        parents: [],
+      });
+      const stale: StoredManifest = {
+        manifestId: canonicalManifestId({
+          repositoryId: GC_FIXTURE_REPOSITORY,
+          revisionId: staleRevisionId,
+          entries: staleEntries,
+        }),
+        repositoryId: GC_FIXTURE_REPOSITORY,
+        revisionId: staleRevisionId,
+        commitSha: staleCommit,
+        treeOid: staleTreeOid,
+        targetRef: GC_FIXTURE_REF,
+        entries: staleEntries,
+        createdAt: GC_FIXTURE_CREATED_AT,
+      };
+      const manifests = new CanonicalManifestStore(canonical);
+      await manifests.put(stale);
+
+      // The planner reads the ledger strictly, but the CLI reads it first; a
+      // throw there would print a bare error where the docs promise refused.
+      await mkdir(path.join(canonical, 'index-jobs'), { recursive: true });
+      await writeFile(path.join(canonical, 'index-jobs', 'jobs.json'), '{not json', 'utf8');
+
+      for (const args of [
+        ['index', 'revision', 'prune', '--apply'],
+        ['index', 'gc', '--apply', '--grace', '1h'],
+        ['index', 'gc', 'expire', '--apply'],
+      ]) {
+        const output: string[] = [];
+        const errors: string[] = [];
+        const code = await runCli(args, {
+          ...createDefaultCliDependencies(),
+          write: (text) => output.push(text),
+          writeError: (text) => errors.push(text),
+        });
+        expect(errors, `${args.join(' ')}\n${errors.join('\n')}`).toEqual([]);
+        expect(code, output.join('\n')).toBe(1);
+        // The exact reason depends on the failure (unreadable file vs corrupt
+        // JSON), but it must be the ledger refusal, not a bare dispatcher error.
+        expect(output.join('\n')).toContain('refused');
+        expect(output.join('\n')).toContain('index job ledger');
+      }
+
+      // No manifest was pruned, no row was quarantined or released, no artifact
+      // was deleted and no lease was taken by any of the refused verbs.
+      expect(await manifests.get(stale.manifestId)).not.toBeNull();
+      expect(await manifests.get(manifest.manifestId)).not.toBeNull();
+      expect(await quarantine.list()).toHaveLength(2);
+      await expect(new CanonicalArtifactStore(canonical).has(repositoryId, deadArtifactKey)).resolves.toBe(true);
+      expect(await new GcLeaseStore(canonical).read()).toBeNull();
+
+      // JSON mode reports the refusal instead of emitting nothing at all.
+      const json: string[] = [];
+      const jsonCode = await runCli(['index', 'gc', 'expire', '--dry-run', '--json'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => json.push(text),
+        writeError: () => undefined,
+      });
+      expect(jsonCode).toBe(1);
+      expect(JSON.parse(json.join('\n'))).toMatchObject({ status: 'refused' });
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('applies a revision prune through the real canonical stores under the cleanup lease', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-prune-apply-'));
     const dataPath = path.join(root, 'data');

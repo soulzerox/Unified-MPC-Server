@@ -20,7 +20,7 @@ import {
   gcStatus,
   GoalOverlayStore,
   IndexJobLedger,
-  logicalSpaceReport,
+  logicalSpaceReportFromRoot,
   pinCanonicalRevision,
   pruneRevisionManifests,
   RevisionPinRegistry,
@@ -994,26 +994,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     canonicalLogicalSpace: async (): Promise<LogicalSpaceReport> => {
       const dataPath = resolveDataPathFromShared();
       assertStorageIdentitySafe(dataPath);
-      const root = path.join(dataPath, 'canonical');
-      const artifacts = new CanonicalArtifactStore(root);
-      const stored = await artifacts.list();
-      const contentHashes = new Set<string>();
-      for (const artifact of stored) {
-        // Semantic (chunk) artifacts are owned by the Thai-RAG GC boundary, and
-        // the reachability planner reads file bindings only, so counting chunk
-        // keys here would report every one of them as unreferenced.
-        if (artifact.kind !== 'file') continue;
-        contentHashes.add(artifact.sourceContentSha256);
-      }
-      const jobs = new IndexJobLedger(root);
-      return logicalSpaceReport({
-        refs: new CanonicalRefStore(root),
-        manifests: new CanonicalManifestStore(root),
-        pins: new RevisionPinRegistry(root),
-        overlays: new GoalOverlayStore(root),
-        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
-        artifactCandidates: [...contentHashes].sort(),
-      });
+      return logicalSpaceReportFromRoot(path.join(dataPath, 'canonical'));
     },
     canonicalRevisionPin: async (input): Promise<CanonicalRevisionPinReport> => {
       const dataPath = resolveDataPathFromShared();

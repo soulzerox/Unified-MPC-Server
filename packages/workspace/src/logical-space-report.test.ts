@@ -1,13 +1,14 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { canonicalManifestId, canonicalRevisionId, computeTreeOid } from '@unified-mpc/domain';
+import { canonicalManifestId, canonicalRevisionId, computeTreeOid, fileArtifactId } from '@unified-mpc/domain';
+import { CanonicalArtifactStore } from './canonical-artifact-store.js';
 import { CanonicalManifestStore } from './canonical-manifest-store.js';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
-import { logicalSpaceReport } from './logical-space-report.js';
+import { logicalSpaceReport, logicalSpaceReportFromRoot } from './logical-space-report.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -84,6 +85,26 @@ async function seeded(root: string): Promise<{
     targetVerified: true,
   });
   return { refs, manifests, pins, overlays, liveManifestId, orphanManifestId };
+}
+
+/** Register one file artifact so the store-backed report has a candidate. */
+async function seedArtifact(root: string, contentHash: string): Promise<void> {
+  await new CanonicalArtifactStore(root).put({
+    kind: 'file',
+    artifactKey: fileArtifactId({
+      sourceContentSha256: contentHash,
+      language: 'typescript',
+      sourceKind: 'source',
+      representationVersion: 'v1',
+    }),
+    repositoryId: REPO,
+    sourceContentSha256: contentHash,
+    language: 'typescript',
+    sourceKind: 'source',
+    representationVersion: 'v1',
+    bindings: [{ path: 'live.ts' }],
+    createdAt: '2026-10-18T00:00:00.000Z',
+  });
 }
 
 describe('logical space report (#210 §2 logical counts)', () => {
@@ -194,5 +215,64 @@ describe('logical space report (#210 §2 logical counts)', () => {
     for (const physical of ['databaseBytes', 'walBytes', 'shmBytes', 'pageCount', 'freelistCount', 'checkpoint']) {
       expect(physical in report).toBe(false);
     }
+  });
+});
+
+describe('logical space report from the canonical root (#210 §2)', () => {
+  it('measures a seeded store from the root alone', async () => {
+    const root = await tempRoot();
+    await seeded(root);
+    await seedArtifact(root, H('a'));
+
+    const report = await logicalSpaceReportFromRoot(root);
+
+    expect(report.status).toBe('measured');
+    if (report.status !== 'measured') throw new Error('unreachable');
+    expect(report.manifests).toMatchObject({ total: 2, retained: 1, prunable: 1 });
+    expect(report.artifacts).toMatchObject({ total: 1, reachable: 1, unreferenced: 0 });
+  });
+
+  it('refuses an unreadable artifact record instead of undercounting it', async () => {
+    const root = await tempRoot();
+    await seeded(root);
+    await seedArtifact(root, H('a'));
+    await writeFile(path.join(root, 'artifacts', 'corrupt.json'), '{not json', 'utf8');
+
+    const report = await logicalSpaceReportFromRoot(root);
+
+    expect(report.status).toBe('refused');
+    if (report.status !== 'refused') throw new Error('unreachable');
+    expect(report.reason).toMatch(/cannot read canonical artifact/);
+  });
+
+  it('refuses an unreadable ref record instead of reporting a smaller store', async () => {
+    const root = await tempRoot();
+    await seeded(root);
+    await seedArtifact(root, H('a'));
+    await writeFile(path.join(root, 'refs', 'remotes', 'origin', 'main.json'), '{not json', 'utf8');
+
+    const report = await logicalSpaceReportFromRoot(root);
+
+    expect(report.status).toBe('refused');
+    if (report.status !== 'refused') throw new Error('unreachable');
+    expect(report.reason).toMatch(/cannot read canonical ref/);
+  });
+
+  it('returns refused rather than throwing when a root store cannot be read', async () => {
+    const root = await tempRoot();
+    const { refs, manifests, pins, overlays } = await seeded(root);
+    await writeFile(path.join(root, 'refs', 'remotes', 'origin', 'main.json'), '{not json', 'utf8');
+
+    // The prune planner reads roots strictly; a direct caller of the
+    // deps-based report must get the documented refusal, not a raw throw.
+    const report = await logicalSpaceReport({
+      refs, manifests, pins, overlays,
+      indexJobManifestIds: [],
+      artifactCandidates: [H('a')],
+    });
+
+    expect(report.status).toBe('refused');
+    if (report.status !== 'refused') throw new Error('unreachable');
+    expect(report.reason).toMatch(/cannot read canonical ref/);
   });
 });

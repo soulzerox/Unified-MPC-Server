@@ -102,6 +102,23 @@ describe('artifact quarantine ledger (#210 U21)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('rejects a grace window that would stamp an unrepresentable deadline', async () => {
+    const { store, dir, now } = await tempStore();
+    try {
+      // A safe-integer window can still push `now + graceMs` past the range a
+      // Date can represent. Stamping that row would create a quarantine entry
+      // that no expire pass can ever prove due, so the write is refused.
+      await expect(store.quarantine([H('1')], { now, graceMs: Number.MAX_SAFE_INTEGER }))
+        .rejects.toThrow(/representable time range/);
+      expect(await store.list()).toEqual([]);
+      // A large but representable window is still accepted.
+      await store.quarantine([H('2')], { now, graceMs: 365 * 24 * 60 * 60 * 1000 });
+      expect(await store.list()).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('artifact-key quarantine rows (#210 §1/U21)', () => {

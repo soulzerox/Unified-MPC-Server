@@ -74,9 +74,22 @@ function requireArtifactKey(value: unknown): string {
   return value.toLowerCase();
 }
 
-function requireGraceMs(value: number): number {
+/**
+ * Validate the grace window a caller asks for.
+ *
+ * The window is checked against the caller's own `now`: a store write must not
+ * create a row whose deadline leaves the range a `Date` can represent, because
+ * `quarantineDeadline` would then report it as unreadable forever — retained by
+ * every pass, deletable by no verb. Refusing at the write boundary keeps the
+ * unreadable set limited to rows corrupted outside this API.
+ */
+function requireGraceMs(value: number, now: Date): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error('graceMs must be a positive safe integer');
+  }
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs) || Math.abs(nowMs + value) > MAX_TIME_MS) {
+    throw new Error('graceMs would place the grace deadline outside the representable time range');
   }
   return value;
 }
@@ -177,7 +190,7 @@ export class ArtifactQuarantineStore {
   public constructor(private readonly root: string) {}
 
   public async quarantine(targets: readonly QuarantineTarget[], options: QuarantineOptions): Promise<QuarantineEntry[]> {
-    const graceMs = requireGraceMs(options.graceMs);
+    const graceMs = requireGraceMs(options.graceMs, options.now);
     const entries = await this.readAll();
     const byIdentity = new Map(entries.map((entry) => [identityKey(entry), entry]));
     for (const target of targets) {

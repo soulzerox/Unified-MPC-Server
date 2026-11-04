@@ -400,14 +400,15 @@ retain man:v1:ff0371d8c4e2 pin
   `--dry-run` is missing, `--apply` is requested, or another argument is
   unknown.
 
-### `unified-mpc index gc --dry-run [--json]`
+### `unified-mpc index gc --dry-run|--apply [--grace <duration>] [--json]`
 
-Prints the artifact GC plan without quarantining anything: the content hashes
-and repository-scoped artifact keys reachable from every retained revision
-(canonical refs, pins, Goal overlay bases, unsettled index jobs), the ones no
-retained revision references, and the counts for each. `--dry-run` is required
-rather than defaulted because the real cycle writes quarantine rows under the
-cleanup lease.
+Plans the artifact GC cycle: the content hashes and repository-scoped artifact
+keys reachable from every retained revision (canonical refs, pins, Goal overlay
+bases, unsettled index jobs), and the ones no retained revision references.
+`--dry-run` prints that plan; `--apply` writes the unreachable set to the
+quarantine ledger under the single-owner cleanup lease. Exactly one mode is
+required rather than defaulted, so the verb never becomes a mutation by
+omission.
 
 ```bash
 $ unified-mpc index gc --dry-run
@@ -430,8 +431,34 @@ artifact-unreachable repo:v1:documented file:v1:ff0371d8c4e2
 - The plan is advisory: a concurrent `advance`, `pin` or index job can change
   reachability, so re-run it before acting on it.
 - Exit `0` for any plan; `1` when the plan is refused or the store cannot be
-  read; `2` when `--dry-run` is missing, `--apply` is requested, or another
-  argument is unknown.
+  read; `2` when neither mode is given, both are given, or another argument is
+  unknown.
+
+### `unified-mpc index gc --apply [--grace <duration>] [--json]`
+
+The mutating pass. Takes the GC lease, re-plans against the roots it reads at
+that moment, and appends the unreachable content hashes and artifact keys to the
+quarantine ledger with one shared grace deadline. Existing rows keep their
+original quarantine time, so re-running the pass never extends a deadline.
+
+```bash
+$ unified-mpc index gc --apply --grace 7d
+applied quarantined 2 artifact-quarantined 2
+quarantined 9b1c4f2e7a60
+quarantined ff0371d8c4e2
+artifact-quarantined repo:v1:documented file:v1:9b1c4f2e7a60
+artifact-quarantined repo:v1:documented file:v1:ff0371d8c4e2
+```
+
+- `--grace` sets the quarantine window: `<n><s|m|h|d>`, default `7d`, zero
+  rejected. Nothing is deleted here; expiry (`index gc expire`, dry-run only
+  today) is the step that releases due rows after a reachability re-check.
+- A dry run does not accept `--grace`: it stamps no deadline.
+- A held or unreadable lease prints `refused gc lease ...` and exits `1` before
+  anything is written. Concurrent passes therefore cannot quarantine from two
+  reachability snapshots at once.
+- Exit `0` when the pass wrote its plan; `1` when it is refused; `2` for a usage
+  error.
 
 ### `unified-mpc index gc expire --dry-run [--json]`
 

@@ -792,6 +792,30 @@ function gcLeaseOwnerId(): string {
   return `unified-mpc-cli:${os.hostname()}:${process.pid}`;
 }
 
+type StrictIndexJobRead =
+  | { readonly status: 'read'; readonly manifestIds: readonly string[] }
+  | { readonly status: 'refused'; readonly reason: string };
+
+/**
+ * Read the index-job ledger as a GC input without letting a raw throw escape.
+ *
+ * A corrupt or unreadable ledger fails closed in the planner, but a throw from
+ * the CLI's own pre-pass read would print a bare error message while the docs
+ * promise `refused <reason>`. Both GC verbs and the revision prune read the
+ * ledger before their pass, so they share one mapping instead of three
+ * near-identical try/catch blocks.
+ */
+async function readIndexJobManifestsForGc(jobs: IndexJobLedger): Promise<StrictIndexJobRead> {
+  try {
+    return { status: 'read', manifestIds: await jobs.liveManifestIds({ strict: true }) };
+  } catch (error) {
+    return {
+      status: 'refused',
+      reason: error instanceof Error ? error.message : 'failed to read the index job ledger',
+    };
+  }
+}
+
 export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
   let workspaceState: {
     readonly database: SqliteDatabase;
@@ -1017,6 +1041,11 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       assertStorageIdentitySafe(dataPath);
       const root = path.join(dataPath, 'canonical');
       const jobs = new IndexJobLedger(root);
+      // The ledger is read immediately before the pass so a live index job
+      // cannot have its manifest collected by a plan built from a stale list.
+      // A refusal returns before the lease is taken, so nothing is deleted.
+      const ledger = await readIndexJobManifestsForGc(jobs);
+      if (ledger.status === 'refused') return ledger;
       // Only the mutating pass takes the U28 fence; a plan stays read-only and
       // unfenced, exactly like the artifact GC verbs.
       const lease = input.dryRun
@@ -1027,9 +1056,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         manifests: new CanonicalManifestStore(root),
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
-        // The ledger is read immediately before the pass so a live index job
-        // cannot have its manifest collected by a plan built from a stale list.
-        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
+        indexJobManifestIds: ledger.manifestIds,
         dryRun: input.dryRun,
         now: new Date(),
         ...(lease === undefined ? {} : { lease }),
@@ -1063,6 +1090,9 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         artifactCandidates.push({ repositoryId: artifact.repositoryId, artifactKey: artifact.artifactKey });
       }
       const jobs = new IndexJobLedger(root);
+      // A refusal returns before the lease is taken, so nothing is quarantined.
+      const ledger = await readIndexJobManifestsForGc(jobs);
+      if (ledger.status === 'refused') return ledger;
       // Only the mutating pass takes the U28 fence; a dry run stays read-only
       // and unfenced, exactly like the expire verb.
       const lease = input.dryRun
@@ -1078,7 +1108,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       }, {
         candidates: [...contentHashes].sort(),
         artifactCandidates,
-        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
+        indexJobManifestIds: ledger.manifestIds,
         now: new Date(),
         // The caller's window: every row this pass writes carries the same
         // deadline, so a later `index gc expire --apply` can prove grace.
@@ -1093,6 +1123,9 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       const root = path.join(dataPath, 'canonical');
       const artifacts = new CanonicalArtifactStore(root);
       const jobs = new IndexJobLedger(root);
+      // A refusal returns before the lease is taken, so nothing is released.
+      const ledger = await readIndexJobManifestsForGc(jobs);
+      if (ledger.status === 'refused') return ledger;
       // Only the mutating pass takes the U28 fence and owns the delete
       // callbacks; a plan is read-only and unfenced.
       const lease = input.dryRun
@@ -1106,7 +1139,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         quarantine: new ArtifactQuarantineStore(root),
         artifacts,
       }, {
-        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
+        indexJobManifestIds: ledger.manifestIds,
         now: new Date(),
         // Each quarantine row carries its own grace deadline; the cycle-level
         // window is unused by the expire pass, but the contract requires it.

@@ -398,7 +398,8 @@ retain man:v1:ff0371d8c4e2 pin
 - An apply prints `applied pruneable N removed N retained N`, then one
   `removed <id>` line per deleted manifest and the `retain` lines. A refused
   pass prints `refused <reason>`: another owner holds the lease, the fence
-  record is unreadable, or the pass ran without a lease.
+  record is unreadable, the index-job ledger cannot be read, or the pass ran
+  without a lease.
 - A manifest row that exists but cannot be deleted fails the pass with the
   failing path in the error, so `removed` never claims a row that is still on
   disk.
@@ -439,10 +440,10 @@ artifact-unreachable repo:v1:documented file:v1:ff0371d8c4e2
   artifact-key planner only reads file bindings, so listing them here would mark
   every chunk collectible.
 - A refusal (no reachability roots, a root manifest missing on disk, no
-  artifact reachability evidence, or an artifact record the store cannot read)
-  prints `refused <reason>` and exits `1`: a GC plan that cannot prove
-  reachability must not look like an empty plan. A skipped corrupt record would
-  hide both a candidate and the bindings that keep live artifacts reachable.
+  artifact reachability evidence, an artifact record or index-job ledger that
+  cannot be read) prints `refused <reason>` and exits `1`: a GC plan that cannot
+  prove reachability must not look like an empty plan. A skipped corrupt record
+  would hide both a candidate and the bindings that keep live artifacts reachable.
 - The plan is advisory: a concurrent `advance`, `pin` or index job can change
   reachability, so re-run it before acting on it.
 - Exit `0` for any plan; `1` when the plan is refused or the store cannot be
@@ -499,8 +500,8 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
 - Reachability is re-checked in this pass, so an artifact that became live again
   after quarantine is `retain`ed even after its deadline. A refused plan (no
   reachability roots, a root manifest missing on disk, an unreadable ref/pin/
-  overlay or index-job ledger) prints `refused <reason>` and exits `1`; nothing
-  is released.
+  overlay/index-job ledger, or an artifact record that cannot be read) prints
+  `refused <reason>` and exits `1`; nothing is released.
 - Exit `0` for any plan; `1` when the plan is refused or the ledger cannot be
   read; `2` when neither mode is given, both are given, or another argument is
   unknown.

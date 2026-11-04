@@ -870,6 +870,57 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['STORAGE_IDENTITY_DRIFT: recovery required']);
   });
 
+  it('pins and unpins operator revisions and fails like every other index command', async () => {
+    const manifestId = `man:v1:${'a'.repeat(64)}`;
+    const seen: Array<{ action: string; manifestId: string; note?: string }> = [];
+    const output: string[] = [];
+    const code = await runCli(['index', 'revision', 'pin', manifestId, '--note', 'keep for audit'], {
+      ...baseDependencies,
+      canonicalRevisionPin: async (input) => {
+        seen.push(input);
+        return { manifestId, action: 'pinned', pins: ['user-pin'] };
+      },
+      write: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seen).toEqual([{ action: 'pin', manifestId, note: 'keep for audit' }]);
+    expect(output).toEqual([`pinned ${manifestId} reason user-pin\npins user-pin`]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'revision', 'unpin', manifestId, '--json'], {
+      ...baseDependencies,
+      canonicalRevisionPin: async (input) => ({ manifestId: input.manifestId, action: 'unpinned', pins: [] }),
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual({ manifestId, action: 'unpinned', pins: [] });
+
+    const usage: string[] = [];
+    const usageCode = await runCli(['index', 'revision', 'pin'], {
+      ...baseDependencies,
+      writeError: (text) => usage.push(text),
+    });
+    expect(usageCode).toBe(2);
+    expect(usage[0]).toContain('index revision pin <manifest-id>');
+
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'revision', 'pin', manifestId], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'revision', 'pin', manifestId], {
+      ...baseDependencies,
+      canonicalRevisionPin: async () => { throw new Error(`unknown revision manifest: ${manifestId}`); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual([`unknown revision manifest: ${manifestId}`]);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

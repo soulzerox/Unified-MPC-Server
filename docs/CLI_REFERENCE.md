@@ -332,6 +332,46 @@ revisions 2
 - Exit `0` for any successful read; `1` when the store cannot be read; `2` for
   arguments that are not `list` plus an optional `--json`.
 
+### `unified-mpc index revision pin <manifest-id> [--note <text>] [--json]`
+
+Adds the operator pin (`user-pin`) to one stored revision. A pin is
+reachability evidence for revision prune and artifact GC, not a deletion: a
+pinned manifest is reported as a blocking reason and left alone.
+
+```bash
+$ unified-mpc index revision pin man:v1:3c9f1e7a5d2b8c4f6a0e2d4c8b6a4f2e0d8c6b4a2f0e8d6c4b2a0f8e6d4c2b0a --note "keep for audit"
+pinned man:v1:3c9f1e7a5d2b8c4f6a0e2d4c8b6a4f2e0d8c6b4a2f0e8d6c4b2a0f8e6d4c2b0a reason user-pin
+pins user-pin
+```
+
+- The command only ever writes `user-pin`. Other reasons (`canonical-ref`,
+  `goal-base`, `goal-overlay`, `index-job`, `rollback`) are owned by the store
+  that depends on the revision and are never touched by the CLI.
+- A well-formed id whose manifest is not stored is refused (`unknown revision
+  manifest`) instead of leaving an orphan pin the store verify path would report
+  as degraded.
+- Re-pinning refreshes the note and timestamp; the reason is not duplicated.
+
+### `unified-mpc index revision unpin <manifest-id> [--json]`
+
+Removes only the operator pin. Every remaining reason is printed, so a revision
+that is still held by a canonical ref or a Goal base is visibly not collectible.
+
+```bash
+$ unified-mpc index revision unpin man:v1:3c9f1e7a5d2b8c4f6a0e2d4c8b6a4f2e0d8c6b4a2f0e8d6c4b2a0f8e6d4c2b0a
+unpinned man:v1:3c9f1e7a5d2b8c4f6a0e2d4c8b6a4f2e0d8c6b4a2f0e8d6c4b2a0f8e6d4c2b0a
+pins none
+```
+
+- Unpinning is idempotent: when no operator pin exists the command prints
+  `not-pinned` and the remaining reasons, and still exits `0`.
+- The manifest does not have to exist. Unpinning a revision whose manifest was
+  already deleted is how an orphan pin is cleaned up, so this command is the
+  supported repair for that degraded state.
+- Exit `0` for any successful pin or unpin; `1` when the manifest is unknown or
+  the store cannot be written; `2` for arguments that are not `pin|unpin` plus
+  one manifest id and an optional `--note` (pin only) or `--json`.
+
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref

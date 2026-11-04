@@ -1,6 +1,7 @@
 import { fileArtifactId } from '@unified-mpc/domain';
 import type { CanonicalArtifactStore, StoredFileArtifact } from './canonical-artifact-store.js';
 import type { CanonicalManifestStore } from './canonical-manifest-store.js';
+import { errorMessage } from './reachability-read.js';
 
 /**
  * Caller policy for one manifest path: is it a source artifact, and how does it
@@ -121,13 +122,20 @@ export async function registerManifestArtifacts(
 
   // Reuse is measured against what existed before this pass, so two identical
   // files inside one manifest do not report themselves as reuse of each other.
+  // Both phases touch the store, so both belong to the fail-closed guard: a
+  // store error here happens after the ref moved, and the caller must see a
+  // reported artifact refusal rather than an exception it cannot place.
   const existedBefore = new Set<string>();
-  for (const artifactKey of new Set(planned.map((item) => item.artifact.artifactKey))) {
-    if (await input.store.has(manifest.repositoryId, artifactKey)) existedBefore.add(artifactKey);
-  }
+  try {
+    for (const artifactKey of new Set(planned.map((item) => item.artifact.artifactKey))) {
+      if (await input.store.has(manifest.repositoryId, artifactKey)) existedBefore.add(artifactKey);
+    }
 
-  for (const item of planned) {
-    await input.store.put(item.artifact);
+    for (const item of planned) {
+      await input.store.put(item.artifact);
+    }
+  } catch (error) {
+    return { status: 'refused', reason: errorMessage(error) };
   }
 
   const classifiedPaths = new Set(planned.map((item) => item.path));

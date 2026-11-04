@@ -36,6 +36,8 @@ export type CanonicalAdvanceOutcome =
     readonly manifestId: string;
     readonly reusedPaths: number;
     readonly changedPaths: number;
+    /** Artifact registration outlives the ref move; a refusal here must be visible. */
+    readonly artifacts: { readonly status: 'registered' | 'refused'; readonly reason?: string };
   }
   | { readonly status: 'refused'; readonly reason: string };
 
@@ -93,6 +95,11 @@ export function canonicalAdvanceOutcome(
     manifestId: result.manifestId,
     reusedPaths: result.reuse.reusedPaths.length,
     changedPaths: result.reuse.newPaths.length,
+    // The ref moved; artifacts are re-derivable metadata. Report their outcome
+    // instead of reporting a clean advance over a refused registration.
+    artifacts: result.artifacts.status === 'registered'
+      ? { status: 'registered' }
+      : { status: 'refused', reason: result.artifacts.reason },
   };
 }
 

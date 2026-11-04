@@ -707,10 +707,20 @@ export function createStdioMcpRuntime(
       // advance is surfaced here or not at all.
       onSummary: (summary): void => {
         for (const entry of summary.repositories) {
-          if (entry.canonicalAdvance.status !== 'refused') continue;
-          process.stderr.write(
-            `Unified-MPC canonical advance refused repository=${entry.repository} reason=${entry.canonicalAdvance.reason}\n`,
-          );
+          if (entry.canonicalAdvance.status === 'refused') {
+            process.stderr.write(
+              `Unified-MPC canonical advance refused repository=${entry.repository} reason=${entry.canonicalAdvance.reason}\n`,
+            );
+            continue;
+          }
+          // The ref moved, so this is not a refusal — but a registration gap
+          // would otherwise leave no trace in an unattended pass.
+          if (entry.canonicalAdvance.status !== 'skipped'
+            && entry.canonicalAdvance.artifacts.status === 'refused') {
+            process.stderr.write(
+              `Unified-MPC canonical advance registered no artifacts repository=${entry.repository} reason=${entry.canonicalAdvance.artifacts.reason ?? 'unknown'}\n`,
+            );
+          }
         }
       },
     },

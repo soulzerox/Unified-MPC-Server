@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -7,6 +7,23 @@ import {
   type CanonicalRefState,
 } from '@unified-mpc/domain';
 import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
+
+/** How long a promoter waits for a peer to finish before giving up. */
+const LOCK_ATTEMPTS = 400;
+const LOCK_RETRY_MS = 25;
+/** A lock older than this was left by a crashed promoter and is reclaimed. */
+const LOCK_STALE_MS = 30_000;
+
+async function isStaleLock(lockPath: string): Promise<boolean> {
+  try {
+    const info = await stat(lockPath);
+    return Date.now() - info.mtimeMs > LOCK_STALE_MS;
+  } catch (error) {
+    // Raced with the holder releasing it: the next create attempt decides.
+    if (isMissingPath(error)) return true;
+    throw error;
+  }
+}
 
 export interface CanonicalRefPromoteInput {
   /** State the promoter believes is current (CAS expected). */
@@ -83,6 +100,21 @@ export class CanonicalRefStore {
     ref: string,
     input: CanonicalRefPromoteInput,
   ): Promise<AdvancementDecision> {
+    // Read, decide and write are one critical section: without the lock two
+    // promoters can both read the same state, both decide `promote`, and both
+    // rename, so the loser reports a promotion the ref no longer holds.
+    const release = await this.acquireRefLock(ref);
+    try {
+      return await this.promoteLocked(ref, input);
+    } finally {
+      await release();
+    }
+  }
+
+  private async promoteLocked(
+    ref: string,
+    input: CanonicalRefPromoteInput,
+  ): Promise<AdvancementDecision> {
     const current = (await this.read(ref)) ?? null;
     const effectiveCurrent = input.current !== undefined ? input.current : current;
     // First-ever promote: no current state exists. The U6 gate works on
@@ -122,6 +154,36 @@ export class CanonicalRefStore {
     await writeFile(tmpPath, JSON.stringify(input.target, null, 2), { mode: 0o600 });
     await rename(tmpPath, finalPath);
     return decision;
+  }
+
+  /**
+   * Cross-process lock for one ref file.
+   *
+   * `wx` creation is atomic on every filesystem the store targets, and a lock
+   * left behind by a crashed promoter is reclaimed once it is older than
+   * LOCK_STALE_MS, so a dead process cannot wedge a ref. The lock is a sibling
+   * of the ref file and never matches the `.json` listing, so readers ignore it.
+   */
+  private async acquireRefLock(ref: string): Promise<() => Promise<void>> {
+    const lockPath = `${this.refPath(ref)}.lock`;
+    await mkdir(path.dirname(lockPath), { recursive: true });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const handle = await open(lockPath, 'wx', 0o600);
+        await handle.close();
+        return async (): Promise<void> => { await rm(lockPath, { force: true }); };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (await isStaleLock(lockPath)) {
+          await rm(lockPath, { force: true });
+          continue;
+        }
+        if (attempt >= LOCK_ATTEMPTS) {
+          throw new Error(`canonical ref ${ref} is locked by another promoter`);
+        }
+        await new Promise((resolve) => { setTimeout(resolve, LOCK_RETRY_MS); });
+      }
+    }
   }
 
   private refPath(ref: string): string {

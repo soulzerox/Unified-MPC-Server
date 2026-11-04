@@ -15,6 +15,11 @@ const C101: CanonicalRefState = {
   treeOid: 'e'.repeat(40),
   manifestId: 'man:v1:' + 'f'.repeat(64),
 };
+const C102: CanonicalRefState = {
+  commitSha: '1'.repeat(40),
+  treeOid: '2'.repeat(40),
+  manifestId: 'man:v1:' + '3'.repeat(64),
+};
 
 async function tempStore(): Promise<{ store: CanonicalRefStore; dir: string }> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'canonical-ref-'));
@@ -49,6 +54,31 @@ describe('durable canonical ref store (#210 U7)', () => {
       });
       const reopened = new CanonicalRefStore(dir);
       expect(await reopened.read('refs/remotes/origin/main')).toEqual(C100);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes two promoters holding the same expected state', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      await store.promote('refs/remotes/origin/main', {
+        expectedCurrent: null,
+        current: null,
+        target: C100,
+        targetVerified: true,
+      });
+      // Both read C100 and both want to promote: only one may win, or the loser
+      // reports a promotion the ref no longer holds.
+      const decisions = await Promise.all([
+        store.promote('refs/remotes/origin/main', { expectedCurrent: C100, target: C101, targetVerified: true }),
+        store.promote('refs/remotes/origin/main', { expectedCurrent: C100, target: C102, targetVerified: true }),
+      ]);
+
+      expect(decisions.filter((decision) => decision.action === 'promote')).toHaveLength(1);
+      expect(decisions.filter((decision) => decision.action === 'conflict')).toHaveLength(1);
+      const live = await store.read('refs/remotes/origin/main');
+      expect([C101, C102]).toContainEqual(live);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

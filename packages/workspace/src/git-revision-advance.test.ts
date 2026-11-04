@@ -297,6 +297,13 @@ describe('repository identity from remote URL (#210 §1)', () => {
     expect(repositoryIdForRemoteUrl('git@github.com:example/repo')).toBe(base);
     expect(repositoryIdForRemoteUrl('git@github.com:example/repo.git/')).toBe(base);
     expect(repositoryIdForRemoteUrl('  git@github.com:example/repo.git  ')).toBe(base);
+    // The same repository over HTTPS, SSH URL syntax or a different case must
+    // not become a second trust boundary: a checkout whose URL form changes
+    // would otherwise be refused by the ref it already bound.
+    expect(repositoryIdForRemoteUrl('https://github.com/example/repo')).toBe(base);
+    expect(repositoryIdForRemoteUrl('https://github.com/example/repo.git')).toBe(base);
+    expect(repositoryIdForRemoteUrl('ssh://git@github.com/example/repo.git')).toBe(base);
+    expect(repositoryIdForRemoteUrl('git@github.com:Example/Repo.git')).toBe(base);
     expect(repositoryIdForRemoteUrl('git@github.com:example/other.git')).not.toBe(base);
     expect(base.startsWith('repo:v1:')).toBe(true);
   });

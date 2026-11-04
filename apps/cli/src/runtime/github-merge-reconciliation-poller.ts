@@ -75,6 +75,8 @@ export type MergeReconciliationPollCanonicalAdvance =
     readonly ref: string;
     readonly commitSha: string;
     readonly manifestId: string;
+    /** Artifact registration is metadata over a moved ref; its failure is reported, not swallowed. */
+    readonly artifacts: { readonly status: 'registered' | 'refused'; readonly reason?: string };
   }
   | { readonly status: 'refused'; readonly reason: string }
   | { readonly status: 'skipped'; readonly reason: 'no_merge' | 'not_wired' | 'inspect_required' };
@@ -302,7 +304,13 @@ export class GitHubMergeReconciliationPoller {
       const outcome = await this.canonicalAdvance({ policy, expectedCommitSha: mergedCommitSha });
       return outcome.status === 'refused'
         ? { status: 'refused', reason: outcome.reason }
-        : { status: outcome.status, ref: outcome.ref, commitSha: outcome.commitSha, manifestId: outcome.manifestId };
+        : {
+          status: outcome.status,
+          ref: outcome.ref,
+          commitSha: outcome.commitSha,
+          manifestId: outcome.manifestId,
+          artifacts: outcome.artifacts,
+        };
     } catch (error) {
       return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
     }

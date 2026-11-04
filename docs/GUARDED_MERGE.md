@@ -182,11 +182,13 @@ policy list rather than only itself.
 because it would resolve against whatever directory the daemon started in, so
 the same policy could read two different repositories.
 
-One canonical store holds one repository namespace: refs are keyed by Git ref
-path (`refs/remotes/origin/main`) and carry no repository id. A second policy
-whose checkout is a different repository therefore refuses with
-`bound to <repository id>` instead of replacing the first ref and unrooting its
-manifest from GC.
+One canonical ref holds one repository: refs are keyed by Git ref path
+(`refs/remotes/origin/main`) and carry no repository id, so the binding is per
+ref. A second policy whose checkout is a different repository advancing the
+*same* branch therefore refuses with `bound to <repository id>` instead of
+replacing the first ref and unrooting its manifest from GC. A policy with a
+different `defaultBranch` targets a different ref and is admitted — the guard
+is per ref, not per store root.
 
 When a merge reconciles as `reconciled` and the observation carries its merge
 commit, the poller runs the advancement gate once for that repository:
@@ -225,6 +227,11 @@ canonical ref did not follow it. The HTTP runtime logs one line per refusal
 (`Unified-MPC canonical advance refused repository=… reason=…`) for every pass,
 including scheduled ones. Without `checkoutPath` the gate stays operator-driven
 through `unified-mpc index revision advance`.
+
+Artifact registration is metadata over a ref that has already moved: a refused
+registration is reported in `canonicalAdvance.artifacts` and logged
+(`… registered no artifacts repository=… reason=…`), and never rewrites the
+advance as a refusal — the ref did move, and saying otherwise would hide it.
 
 
 ---

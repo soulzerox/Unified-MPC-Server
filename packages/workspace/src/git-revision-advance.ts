@@ -103,6 +103,13 @@ export type GitRevisionAdvanceResult =
   | { readonly status: 'refused'; readonly targetRef: string; readonly reason: string };
 
 const REPOSITORY_ID_PREFIX = 'repo:v1:';
+/**
+ * GitHub remote in each form the tooling meets: `git@github.com:owner/repo`,
+ * `ssh://git@github.com/owner/repo` and `https://github.com/owner/repo`
+ * (optionally with credentials on the HTTPS form). Everything else keeps the
+ * trimmed raw text as its identity.
+ */
+const GITHUB_REMOTE = /^(?:git@|ssh:\/\/git@|https?:\/\/(?:[^@/]+@)?)(github\.com)[:/]([^/]+)\/([^/]+)$/i;
 const BLOB_MODES = new Set(['100644', '100755', '120000']);
 const CONTENT_HASH = /^[a-f0-9]{64}$/;
 
@@ -119,7 +126,18 @@ const CONTENT_HASH = /^[a-f0-9]{64}$/;
 export function repositoryIdForRemoteUrl(remoteUrl: string): string {
   const normalized = remoteUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
   if (normalized.length === 0) throw new TypeError('remote URL must not be empty');
-  return `${REPOSITORY_ID_PREFIX}${createHash('sha256').update(normalized, 'utf8').digest('hex')}`;
+  // One repository has one identity: the same GitHub repository reached over
+  // SSH, an SSH host alias, HTTPS or a different case must not become a second
+  // trust boundary, or a checkout that changes URL form is refused forever by
+  // the canonical ref it already bound.
+  const github = GITHUB_REMOTE.exec(normalized);
+  const identity = github === null ? normalized : githubIdentity(github.slice(1));
+  return `${REPOSITORY_ID_PREFIX}${createHash('sha256').update(identity, 'utf8').digest('hex')}`;
+}
+
+function githubIdentity(parts: readonly string[]): string {
+  const [host = '', owner = '', repo = ''] = parts;
+  return `${host.toLowerCase()}/${owner.toLowerCase()}/${repo.toLowerCase()}`;
 }
 
 /**

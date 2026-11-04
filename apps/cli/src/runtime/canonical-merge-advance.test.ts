@@ -107,7 +107,14 @@ describe('gate result projection (#210 §3)', () => {
 
   it('reports a promotion as advanced with the reuse counts', () => {
     const outcome = canonicalAdvanceOutcome(
-      result({ status: 'promoted', manifestId: 'man:v1:x', decision: { action: 'promote', target }, commitSha: COMMIT, reuse }),
+      result({
+        status: 'promoted',
+        manifestId: 'man:v1:x',
+        decision: { action: 'promote', target },
+        commitSha: COMMIT,
+        reuse,
+        artifacts: { status: 'registered', registered: 3, reused: 0, unclassified: [] },
+      }),
       REF,
     );
 
@@ -118,16 +125,44 @@ describe('gate result projection (#210 §3)', () => {
       manifestId: 'man:v1:x',
       reusedPaths: 2,
       changedPaths: 1,
+      artifacts: { status: 'registered' },
     });
   });
 
   it('reports an unchanged manifest as a noop', () => {
     const outcome = canonicalAdvanceOutcome(
-      result({ status: 'noop', manifestId: 'man:v1:x', decision: { action: 'noop', target }, commitSha: COMMIT, reuse }),
+      result({
+        status: 'noop',
+        manifestId: 'man:v1:x',
+        decision: { action: 'noop', target },
+        commitSha: COMMIT,
+        reuse,
+        artifacts: { status: 'registered', registered: 3, reused: 0, unclassified: [] },
+      }),
       REF,
     );
 
     expect(outcome).toMatchObject({ status: 'noop', manifestId: 'man:v1:x' });
+  });
+
+  it('keeps a moved ref advanced while reporting a refused registration', () => {
+    const outcome = canonicalAdvanceOutcome(
+      result({
+        status: 'promoted',
+        manifestId: 'man:v1:x',
+        decision: { action: 'promote', target },
+        commitSha: COMMIT,
+        reuse,
+        artifacts: { status: 'refused', reason: 'artifact store is read-only' },
+      }),
+      REF,
+    );
+
+    expect(outcome).toMatchObject({
+      status: 'advanced',
+      commitSha: COMMIT,
+      artifacts: { status: 'refused', reason: 'artifact store is read-only' },
+    });
   });
 
   it('reports a concurrent promotion as a refusal naming the new head', () => {

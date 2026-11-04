@@ -76,9 +76,12 @@ function reasons(pins: readonly RevisionPin[]): RevisionPinReason[] {
  * The pin and the manifest read happen under the shared GC lease, so a
  * concurrent `index revision prune` cannot snapshot the pins before this write
  * and then delete the manifest anyway: prune refuses while this command holds
- * the fence, and this command refuses while prune holds it. The manifest is
- * re-read inside the fence, so a revision pruned before the pin is refused
- * rather than pinned as an orphan.
+ * the fence, and this command refuses while prune holds it. The lease is a
+ * single-host read-then-write record rather than an atomic compare-and-swap, so
+ * two simultaneous acquirers can both be granted; that residual window is
+ * inherited from `GcLeaseStore` and bounded by the same single-host ceiling as
+ * the other canonical stores. The manifest is re-read inside the fence, so a
+ * revision pruned before the pin is refused rather than pinned as an orphan.
  */
 export async function pinCanonicalRevision(
   deps: CanonicalRevisionPinDeps,

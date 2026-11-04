@@ -14,6 +14,7 @@ import {
   CanonicalManifestStore,
   CanonicalRefStore,
   GcLeaseStore,
+  RevisionPinRegistry,
   type StoredManifest,
 } from '@unified-mpc/workspace';
 import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
@@ -1505,6 +1506,63 @@ describe('CLI execution dispatcher', () => {
       });
       expect(jsonCode).toBe(1);
       expect(JSON.parse(json.join('\n'))).toMatchObject({ status: 'refused' });
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('pins a revision through the real canonical store under the shared cleanup lease', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-revision-pin-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const { manifest } = await seedCanonicalGcFixture(dataPath);
+      const pins = new RevisionPinRegistry(canonical);
+
+      // The pin must take the same lease record a prune holds. If the default
+      // wiring skipped the lease, this held fence would not refuse the pin.
+      const lease = new GcLeaseStore(canonical);
+      const held = await lease.acquire({ ownerId: 'other_gc', now: new Date(), ttlMs: 60_000 });
+      if (held.status !== 'granted') throw new Error(`expected a granted lease, got ${held.status}`);
+      const refused: string[] = [];
+      const refusedCode = await runCli(['index', 'revision', 'pin', manifest.manifestId], {
+        ...createDefaultCliDependencies(),
+        write: () => undefined,
+        writeError: (text) => refused.push(text),
+      });
+      expect(refusedCode, refused.join('\n')).toBe(1);
+      expect(refused).toEqual([expect.stringContaining('gc lease held by other_gc')]);
+      expect(await pins.isPinned(manifest.manifestId)).toBe(false);
+      await lease.release({ ownerId: 'other_gc', generation: held.generation });
+
+      const output: string[] = [];
+      const errors: string[] = [];
+      const code = await runCli(['index', 'revision', 'pin', manifest.manifestId, '--note', 'keep for audit'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => errors.push(text),
+      });
+      expect(errors, errors.join('\n')).toEqual([]);
+      expect(code, output.join('\n')).toBe(0);
+      expect(output).toEqual([`pinned ${manifest.manifestId} reason user-pin\npins user-pin`]);
+      expect(await pins.list(manifest.manifestId)).toEqual([
+        expect.objectContaining({ reason: 'user-pin', note: 'keep for audit' }),
+      ]);
+      // The command released its fence, so a later destructive pass is not blocked.
+      expect(await lease.read()).toBeNull();
     } finally {
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;

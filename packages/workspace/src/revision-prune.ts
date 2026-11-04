@@ -76,11 +76,10 @@ export type RevisionPruneReport = RevisionPrunePlan | { readonly status: 'refuse
  * overlay bases and manifest rows at execution time rather than trusting an
  * earlier plan; the caller-supplied index-job ledger is a snapshot taken
  * immediately before the pass, not re-read inside the fence. A pin that lands
- * after this pass
- * reads the registry but before its manifest row is deleted is still
- * ignored: that bounded window is the same one `index gc expire --apply`
- * accepts, and it is documented instead of closed with a store-wide writer
- * lock. Dry runs are read-only and deliberately never take the lease.
+ * while this pass holds the lease is refused by the pin's own fence, and a pin
+ * that lands before the pass takes the lease is visible to the registry
+ * snapshot, so the snapshot/delete window is not open to a new pin. Dry runs
+ * are read-only and deliberately never take the lease.
  */
 export function pruneRevisionManifests(
   deps: RevisionPruneDeps & { readonly dryRun: true },

@@ -1,6 +1,7 @@
 import type { CanonicalArtifactStore } from './canonical-artifact-store.js';
 import type { CanonicalRefStore } from './canonical-ref-store.js';
 import type { GoalOverlayStore } from './goal-overlay-store.js';
+import { errorMessage } from './reachability-read.js';
 import type { RevisionPinRegistry } from './revision-pin-registry.js';
 
 export type ArtifactKeyPlan =
@@ -83,6 +84,12 @@ export async function collectRetainedManifestIds(deps: RetainedManifestDeps): Pr
  * reachability evidence is scoped to the same repository so an identical key
  * held in another trust boundary can never make this boundary's copy look
  * reachable. Which manifests are roots stays caller policy (#145 scheduling).
+ *
+ * Every store read is strict. The tolerant listing skips a record it cannot
+ * read, and a skipped record loses its bindings: the key then looks
+ * unreachable and the destructive pass would delete a live artifact (or hide a
+ * candidate from the plan). A read failure is a `refused` verdict, never a
+ * smaller reachability set.
  */
 export async function planRepositoryArtifactGc(input: {
   readonly store: CanonicalArtifactStore;
@@ -90,12 +97,20 @@ export async function planRepositoryArtifactGc(input: {
   readonly retainedManifestIds: readonly string[];
   readonly candidates?: readonly string[];
 }): Promise<ArtifactKeyPlan> {
-  const candidates = input.candidates
-    ?? (await input.store.listRepository(input.repositoryId)).map((artifact) => artifact.artifactKey);
-  const referencedKeys = await input.store.artifactKeysReferencedBy(input.retainedManifestIds, input.repositoryId);
-  return planArtifactKeyGc({
-    retainedManifestIds: input.retainedManifestIds,
-    referencedKeys,
-    candidates,
-  });
+  try {
+    const candidates = input.candidates
+      ?? (await input.store.listRepository(input.repositoryId, { strict: true })).map((artifact) => artifact.artifactKey);
+    const referencedKeys = await input.store.artifactKeysReferencedBy(
+      input.retainedManifestIds,
+      input.repositoryId,
+      { strict: true },
+    );
+    return planArtifactKeyGc({
+      retainedManifestIds: input.retainedManifestIds,
+      referencedKeys,
+      candidates,
+    });
+  } catch (error) {
+    return { status: 'refused', reason: errorMessage(error) };
+  }
 }

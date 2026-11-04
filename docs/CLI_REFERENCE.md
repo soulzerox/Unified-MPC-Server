@@ -438,9 +438,11 @@ artifact-unreachable repo:v1:documented file:v1:ff0371d8c4e2
 - Chunk artifacts are excluded. The Thai-RAG index owns semantic chunks and the
   artifact-key planner only reads file bindings, so listing them here would mark
   every chunk collectible.
-- A refusal (no reachability roots, a root manifest missing on disk, or no
-  artifact reachability evidence) prints `refused <reason>` and exits `1`: a GC
-  plan that cannot prove reachability must not look like an empty plan.
+- A refusal (no reachability roots, a root manifest missing on disk, no
+  artifact reachability evidence, or an artifact record the store cannot read)
+  prints `refused <reason>` and exits `1`: a GC plan that cannot prove
+  reachability must not look like an empty plan. A skipped corrupt record would
+  hide both a candidate and the bindings that keep live artifacts reachable.
 - The plan is advisory: a concurrent `advance`, `pin` or index job can change
   reachability, so re-run it before acting on it.
 - Exit `0` for any plan; `1` when the plan is refused or the store cannot be
@@ -525,7 +527,9 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   destructive pass that expired it would contradict the read-only surface. Such
   a row can never become due, so an operator has to remove it from
   `quarantine/candidates.json`; `index gc --apply` refuses a `--grace` window
-  that would stamp one, so this state only comes from a hand-edited ledger.
+  that would stamp one, so a build with that check cannot create the state. A
+  store written by an older build that accepted such a window can still carry
+  these rows across the upgrade.
 - A record delete that fails for any reason other than "already gone" aborts the
   pass: the row stays in the ledger, `failed to delete canonical artifact ...`
   reports the key, the repository and the cause, and the lease is still
@@ -533,9 +537,10 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
 - A ledger that cannot be read (permission error, corrupt JSON, non-array
   document) exits `1` instead of being reported as an empty ledger: `due 0` must
   never stand in for "the ledger is unreadable".
-- Reachability roots are read strictly: a ref, pin, overlay or index-job ledger
-  file that cannot be read refuses the pass instead of being dropped. A dropped
-  root would make live artifacts look unreachable and get them deleted.
+- Reachability roots and artifact records are read strictly: a ref, pin,
+  overlay or index-job ledger file, or an artifact record, that cannot be read
+  refuses the pass instead of being dropped. A dropped root or binding would
+  make live artifacts look unreachable and get them deleted.
 - A due artifact-key row without a wired record delete refuses the pass: the
   row is never released as "deleted" while its record survives.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before

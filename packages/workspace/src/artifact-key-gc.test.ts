@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId, computeTreeOid, fileArtifactId } from '@unified-mpc/domain';
@@ -141,6 +141,34 @@ describe('artifact-key GC planner (#210 §7)', () => {
         reachable: [live.artifactKey, retired.artifactKey].sort(),
         unreachable: [unbound.artifactKey],
       });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses instead of dropping the bindings of a record it cannot read', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'artifact-key-gc-'));
+    try {
+      const store = new CanonicalArtifactStore(dir);
+      const live = fileArtifact(REPO, '7'.repeat(64), [M1]);
+      const visible = fileArtifact(REPO, '8'.repeat(64), [M1]);
+      const hidden = fileArtifact(REPO, '9'.repeat(64), [M1]);
+      for (const artifact of [live, visible, hidden]) await store.put(artifact);
+      // Corrupt the record that proves `hidden` is still referenced. `visible`
+      // keeps the referenced set non-empty, so a tolerant read would classify
+      // `hidden` as unreachable and the destructive pass would delete a live
+      // artifact instead of refusing.
+      const artifactsDir = path.join(dir, 'artifacts');
+      const hiddenFile = (await readdir(artifactsDir)).find((file) => file.endsWith(`${hidden.artifactKey}.json`));
+      if (hiddenFile === undefined) throw new Error('expected the hidden artifact record');
+      await writeFile(path.join(artifactsDir, hiddenFile), '{not json', 'utf8');
+
+      // Both the candidate universe and the reachability evidence are strict.
+      expect(await planRepositoryArtifactGc({ store, repositoryId: REPO, retainedManifestIds: [M1] }))
+        .toEqual({ status: 'refused', reason: expect.stringContaining('cannot read canonical artifact') });
+      expect(await planRepositoryArtifactGc({
+        store, repositoryId: REPO, retainedManifestIds: [M1], candidates: [visible.artifactKey, hidden.artifactKey],
+      })).toEqual({ status: 'refused', reason: expect.stringContaining('cannot read canonical artifact') });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

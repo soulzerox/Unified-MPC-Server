@@ -165,8 +165,13 @@ export class CanonicalArtifactStore {
     return (await this.get(repositoryId, artifactKey)) !== null;
   }
 
-  public async listRepository(repositoryId: string): Promise<StoredArtifact[]> {
-    return (await this.listAll()).filter((artifact) => artifact.repositoryId === repositoryId);
+  /**
+   * Every record in one trust boundary. `strict` is for destructive planning:
+   * a record the listing cannot read must refuse the plan instead of silently
+   * leaving the store.
+   */
+  public async listRepository(repositoryId: string, options?: ReachabilityReadOptions): Promise<StoredArtifact[]> {
+    return (await this.listAll(options)).filter((artifact) => artifact.repositoryId === repositoryId);
   }
 
   /**
@@ -190,15 +195,20 @@ export class CanonicalArtifactStore {
    * are retained (#210 §7). Pass `repositoryId` to scope the evidence to one
    * trust boundary: the same key may legitimately exist in two boundaries and
    * a binding in one must never make the other boundary's copy look reachable.
+   *
+   * A GC verdict must pass `strict`. The tolerant listing skips a record it
+   * cannot read, which drops that record's bindings: its key then looks
+   * unreachable and the destructive pass would delete a live artifact.
    */
   public async artifactKeysReferencedBy(
     manifestIds: readonly string[],
     repositoryId?: string,
+    options?: ReachabilityReadOptions,
   ): Promise<string[]> {
     const wanted = new Set(manifestIds.map((manifestId) => requireManifestId(manifestId)));
     const scoped = repositoryId === undefined ? undefined : requireIdentityPart('repositoryId', repositoryId);
     const keys = new Set<string>();
-    for (const artifact of await this.listAll()) {
+    for (const artifact of await this.listAll(options)) {
       if (artifact.kind !== 'file') continue;
       if (scoped !== undefined && artifact.repositoryId !== scoped) continue;
       if (artifact.bindings.some((binding) => binding.manifestId !== undefined && wanted.has(binding.manifestId))) {

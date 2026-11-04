@@ -119,9 +119,15 @@ describe('canonical revision pin (#210 §7)', () => {
 
   it('refuses a malformed manifest id before taking the fence', async () => {
     await withStores(async ({ manifests, pins, lease }) => {
+      // A held fence is the ordering proof: if the id check moved inside the
+      // fenced block, the held lease would refuse the call with the lease
+      // error instead of the invalid-id error.
+      const held = await lease.acquire({ ownerId: 'gc_prune', now: new Date(), ttlMs: 60_000 });
+      if (held.status !== 'granted') throw new Error(`expected a granted lease, got ${held.status}`);
       await expect(pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, { manifestId: 'not-a-manifest' }))
         .rejects.toThrow(/invalid manifest id/);
-      expect(await lease.read()).toBeNull();
+      // Validation failed before the fence, so it did not release the holder.
+      expect(await lease.read()).toMatchObject({ ownerId: 'gc_prune', generation: held.generation });
     });
   });
 

@@ -1031,7 +1031,8 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       };
       if (input.action === 'unpin') return unpinCanonicalRevision(deps, { manifestId: input.manifestId });
       // Pinning takes the same single-owner fence a prune does, so it cannot
-      // land between the prune's pin snapshot and the manifest delete.
+      // land between the prune's pin snapshot and the manifest delete, apart
+      // from the lease's inherited double-grant race.
       return pinCanonicalRevision({
         ...deps,
         lease: { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS },

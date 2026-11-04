@@ -351,8 +351,11 @@ pins user-pin
   manifest`) instead of leaving an orphan pin the store verify path would report
   as degraded.
 - The pin takes the same single-owner GC lease as `index revision prune` and
-  `index gc`, so it cannot land in the window between a prune's pin snapshot
-  and its manifest delete. A destructive pass that already holds the lease
+  `index gc`, so under that fence it cannot land in the window between a
+  prune's pin snapshot and its manifest delete. The lease is a single-host
+  read-then-write record rather than an atomic compare-and-swap, so two
+  simultaneous acquirers can both be granted; that residual window is inherited
+  from the lease primitive. A destructive pass that already holds the lease
   refuses the pin with `gc lease held by ...`; retry after it finishes. The
   manifest is re-read under the fence, so a revision pruned before the pin is
   refused rather than pinned as an orphan.
@@ -415,9 +418,11 @@ retain man:v1:ff0371d8c4e2 pin
   `overlay-base` or `index-job`.
 - A plan with nothing to collect prints `planned (dry-run) pruneable 0 retained N`
   and still exits `0`.
-- The residual race is bounded and documented: a pin that lands after `--apply`
-  reads the registry but before the manifest row is deleted is still pruned, the
-  same window `index gc expire --apply` accepts.
+- A pin that lands while `--apply` holds the lease is refused (`gc lease held by
+  ...`), because the pin takes the same fence the pass holds; a pin that lands
+  before the pass takes the lease is visible to its registry snapshot. Apart
+  from the lease's inherited double-grant race, the pin and the pass cannot
+  interleave in the snapshot/delete window.
 - Exit `0` for a plan or a completed pass; `1` when the pass refuses, the store
   cannot be read, or a manifest cannot be deleted; `2` when neither mode, both
   modes, or another argument is given.

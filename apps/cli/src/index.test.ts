@@ -727,6 +727,84 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['git is not installed']);
   });
 
+  it('reports canonical store status and exits non-zero when degraded', async () => {
+    const report = {
+      status: 'healthy' as const,
+      refs: [{ ref: 'refs/remotes/origin/main', manifestId: 'man:v1:abc', commitSha: 'c'.repeat(40) }],
+      manifestCount: 1,
+      pinCount: 0,
+      overlayCount: 0,
+      quarantinedCount: 0,
+      activeJobCount: 0,
+      danglingRefs: [],
+      missingOverlayBases: [],
+      orphanedPins: [],
+    };
+    const output: string[] = [];
+    const seen: string[] = [];
+    const code = await runCli(['index', 'status'], {
+      ...baseDependencies,
+      canonicalStatus: async () => {
+        seen.push('canonicalStatus');
+        return report;
+      },
+      write: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seen).toEqual(['canonicalStatus']);
+    expect(output[0]?.split('\n')).toEqual([
+      'canonical store: healthy',
+      'refs 1',
+      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)}`,
+      'manifests 1',
+      'pins 0',
+      'overlays 0',
+      'quarantined 0',
+      'active-jobs 0',
+      'dangling-refs 0',
+      'missing-overlay-bases 0',
+      'orphaned-pins 0',
+    ]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'status', '--json'], {
+      ...baseDependencies,
+      canonicalStatus: async () => report,
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual(report);
+
+    const degraded: string[] = [];
+    const degradedCode = await runCli(['index', 'status'], {
+      ...baseDependencies,
+      canonicalStatus: async () => ({ ...report, status: 'degraded', orphanedPins: ['man:v1:orphan'] }),
+      write: (text) => degraded.push(text),
+    });
+    expect(degradedCode).toBe(1);
+    expect(degraded[0]).toContain('canonical store: degraded');
+    expect(degraded[0]).toContain('orphaned-pins 1\n  man:v1:orphan');
+  });
+
+  it('fails the canonical status command when the service is unavailable or throws', async () => {
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'status'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'status'], {
+      ...baseDependencies,
+      canonicalStatus: async () => { throw new Error('STORAGE_IDENTITY_DRIFT: recovery required'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['STORAGE_IDENTITY_DRIFT: recovery required']);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

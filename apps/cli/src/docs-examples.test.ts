@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { GitRevisionAdvanceResult } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, GitRevisionAdvanceResult } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -74,6 +74,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc storage recover(?:\s|$)/, kind: 'storage-recover', dispatch: 'storageRecover' },
   { pattern: /^unified-mpc storage metrics(?:\s|$)/, kind: 'storage-metrics', dispatch: 'storageMetrics' },
   { pattern: /^unified-mpc index revision advance(?:\s|$)/, kind: 'index-revision-advance', dispatch: 'indexRevisionAdvance' },
+  { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
 ];
 
 /**
@@ -191,6 +192,21 @@ function replayDependencies(calls: string[]): CliDependencies {
         manifestId: 'man:v1:documented',
         reuse: { reusedPaths: [], newPaths: [], renamedPaths: [], deletedPaths: [] },
         artifacts: { status: 'registered', registered: 0, reused: 0, unclassified: [] },
+      };
+    },
+    canonicalStatus: async (): Promise<CanonicalStatusReport> => {
+      calls.push('canonicalStatus');
+      return {
+        status: 'healthy',
+        refs: [{ ref: 'refs/remotes/origin/main', manifestId: 'man:v1:documented', commitSha: '0'.repeat(40) }],
+        manifestCount: 1,
+        pinCount: 0,
+        overlayCount: 0,
+        quarantinedCount: 0,
+        activeJobCount: 0,
+        danglingRefs: [],
+        missingOverlayBases: [],
+        orphanedPins: [],
       };
     },
   };

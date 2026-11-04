@@ -220,4 +220,28 @@ describe('durable canonical ref store (#210 U7)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('refuses to promote over a corrupt ref instead of treating it as unset', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      const refPath = path.join(dir, 'refs', 'heads', 'feature.json');
+      await mkdir(path.dirname(refPath), { recursive: true });
+      await writeFile(refPath, '{not json', 'utf8');
+
+      // The baseline read under the lock is strict: corruption must refuse the
+      // promotion, not read as "never promoted" and let the first-ever branch
+      // overwrite the evidence with a reported success.
+      await expect(store.promote('refs/heads/feature', {
+        expectedCurrent: null,
+        target: C100,
+        targetVerified: true,
+      })).rejects.toThrow(/cannot read canonical ref refs\/heads\/feature/);
+
+      expect(await readFile(refPath, 'utf8')).toBe('{not json');
+      // A rejected promotion must not strand the ref behind its lock.
+      await expect(readFile(`${refPath}.lock`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

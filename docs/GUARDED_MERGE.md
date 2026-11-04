@@ -216,7 +216,9 @@ commit, the poller runs the advancement gate once for that repository:
    resolves the ref again, so a fetch that lands in between refuses instead of
    promoting a commit nothing checked. The CAS compares the pre-hash state with
    the ref as it is on disk at promote time, so two pollers advancing the same
-   branch cannot both win.
+   branch cannot both win. That baseline read is strict: an existing ref file
+   that cannot be parsed is reported as a refusal, never read as "never
+   promoted" and overwritten by the first-ever branch.
 
 The newest merge is chosen by `mergedAt`, not by feed order: a comment or label
 moves a pull request later in the `updatedAt` feed without merging anything.
@@ -237,7 +239,8 @@ records are separate, so an operator can see that a merge landed while the
 canonical ref did not follow it. The HTTP runtime logs one line per refusal
 (`Unified-MPC canonical advance refused repository=… reason=…`) for every pass,
 including scheduled ones. Without `checkoutPath` the gate stays operator-driven
-through `unified-mpc index revision advance`.
+through `unified-mpc index revision advance`; that path applies the same strict
+baseline, so a corrupt ref refuses instead of being replaced.
 
 Artifact registration is metadata over a ref that has already moved: a refused
 registration is reported in `canonicalAdvance.artifacts` and logged

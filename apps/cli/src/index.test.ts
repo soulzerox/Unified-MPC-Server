@@ -1872,6 +1872,43 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('exits 1 instead of reporting due 0 when the quarantine ledger is unreadable', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-status-ledger-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = path.join(root, 'home');
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await mkdir(path.join(canonical, 'quarantine'), { recursive: true });
+      await writeFile(path.join(canonical, 'quarantine', 'candidates.json'), '{not json', 'utf8');
+
+      const output: string[] = [];
+      const errors: string[] = [];
+      const code = await runCli(['index', 'gc', 'status'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => errors.push(text),
+      });
+      // A ledger that cannot be read must fail closed at the CLI boundary: an
+      // empty projection would report "due 0" while rows are still on disk.
+      expect(code).toBe(1);
+      expect(output).toEqual([]);
+      expect(errors.join('\n')).toContain('artifact quarantine ledger is not valid JSON');
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('plans quarantine expiry in dry-run mode without deleting anything', async () => {
     const content = 'a'.repeat(64);
     const artifactKey = `file:v1:${'b'.repeat(64)}`;

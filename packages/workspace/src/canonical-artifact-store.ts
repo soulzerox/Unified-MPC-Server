@@ -169,6 +169,17 @@ export class CanonicalArtifactStore {
   }
 
   /**
+   * Every artifact record across trust boundaries (#210 §7).
+   *
+   * A GC pass needs the candidate universe before it knows which repositories
+   * to scope; asking per repository would hide records whose manifest moved or
+   * was already pruned. Read-only and sorted by artifact key.
+   */
+  public async list(): Promise<StoredArtifact[]> {
+    return this.listAll();
+  }
+
+  /**
    * Artifact keys referenced by any of the given manifests — the projection a
    * reachability pass consumes to keep artifacts alive while their manifests
    * are retained (#210 §7). Pass `repositoryId` to scope the evidence to one

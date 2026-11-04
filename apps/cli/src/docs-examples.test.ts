@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
+import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
 import {
   parseCliArgs,
   runCli,
@@ -69,6 +70,8 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc publish-credential grant(?:\s|$)/, kind: 'publish-credential-grant', dispatch: 'publishCredential' },
   { pattern: /^unified-mpc publish-credential revoke(?:\s|$)/, kind: 'publish-credential-revoke', dispatch: 'publishCredential' },
   { pattern: /^unified-mpc publish-credential status(?:\s|$)/, kind: 'publish-credential-status', dispatch: 'publishCredential' },
+  { pattern: /^unified-mpc storage recover(?:\s|$)/, kind: 'storage-recover', dispatch: 'storageRecover' },
+  { pattern: /^unified-mpc storage metrics(?:\s|$)/, kind: 'storage-metrics', dispatch: 'storageMetrics' },
 ];
 
 /**
@@ -140,6 +143,38 @@ function replayDependencies(calls: string[]): CliDependencies {
       calls.push('publishCredential');
       write('publish credential replayed');
       return 0;
+    },
+    storageRecover: async (): Promise<StorageRecoveryResult> => {
+      calls.push('storageRecover');
+      return {
+        status: 'not_needed',
+        sourcePath: null,
+        destinationPath: '/tmp/documented/unified-mpc.sqlite',
+        canonicalBackupId: null,
+        sourceBackupId: null,
+        migratedBackupId: null,
+        provenancePath: null,
+      };
+    },
+    storageMetrics: async (): Promise<SqlitePhysicalMetrics> => {
+      calls.push('storageMetrics');
+      return {
+        measuredAt: '2026-11-04T00:00:00.000Z',
+        inMemory: false,
+        databasePath: '/tmp/documented/unified-mpc.sqlite',
+        databaseBytes: 8192,
+        walBytes: 0,
+        shmBytes: 0,
+        pageSizeBytes: 4096,
+        pageCount: 2,
+        freelistCount: 0,
+        freelistBytes: 0,
+        liveBytes: 8192,
+        freelistRatio: 0,
+        checkpoint: { mode: 'passive', busy: false, walPages: 0, checkpointedPages: 0, truncated: false },
+        compactionRecommended: false,
+        compactionReason: null,
+      };
     },
   };
 }

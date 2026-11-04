@@ -189,7 +189,68 @@ never enters them.
 
 ---
 
-## 8. Exit Code Contract
+## 8. Storage Commands
+
+Operator surface for the SQLite file that backs the workspace registry, audit log,
+settings and goal runtime. Both commands print their report on stdout; a failure
+prints on stderr and exits `1`.
+
+### `unified-mpc storage recover`
+
+Replaces the canonical database with one unambiguous historical SQLite file, for
+example after an interrupted upgrade left the runtime reading an empty store.
+
+```bash
+$ unified-mpc storage recover
+storage recovery not needed
+```
+
+When a historical database is present, the command names the source it moved
+aside, the destination now in use, and the provenance record it wrote:
+
+```text
+storage recovered: /home/operator/.local/share/unified-mpc/legacy.sqlite -> /home/operator/.local/share/unified-mpc/unified-mpc.sqlite
+provenance: /home/operator/.local/share/unified-mpc/recovery/provenance.json
+```
+
+Recovery refuses to act when more than one candidate matches, or when the
+canonical database became populated after the replacement decision, so a rerun
+cannot merge two unrelated histories. `storage recovery not needed` is a success
+with exit `0`, not a skipped failure.
+
+### `unified-mpc storage metrics [--json]`
+
+Reports physical space for the canonical database. Logical GC deletes rows and
+never shrinks the file, so these numbers keep "rows gone" and "bytes reclaimed"
+apart.
+
+```bash
+$ unified-mpc storage metrics
+database	/home/operator/.local/share/unified-mpc/unified-mpc.sqlite
+bytes	db=4116480 wal=0 shm=32768 live=3317760
+pages	size=4096 count=1005 freelist=195 (798720 bytes, 0.1940)
+checkpoint	mode=passive busy=false walPages=0 checkpointedPages=0 truncated=false
+compaction	recommended=false reason=none
+```
+
+`--json` prints the unprojected metrics document instead of the operator lines:
+
+```bash
+$ unified-mpc storage metrics --json
+{"measuredAt":"2026-11-04T00:00:00.000Z","inMemory":false,"databasePath":"/home/operator/.local/share/unified-mpc/unified-mpc.sqlite","databaseBytes":4116480,"walBytes":0,"shmBytes":32768,"pageSizeBytes":4096,"pageCount":1005,"freelistCount":195,"freelistBytes":798720,"liveBytes":3317760,"freelistRatio":0.19402985074626866,"checkpoint":{"mode":"passive","busy":false,"walPages":0,"checkpointedPages":0,"truncated":false},"compactionRecommended":false,"compactionReason":null}
+```
+
+Any other flag is refused with the usage line and exit `2`, so a typo cannot
+silently become a report nobody asked for. The command is evidence only: it never
+vacuums, truncates or checkpoints destructively. `compaction.recommended` flips
+to `true` only when the freelist is both at least 25% of the file and at least
+64 MiB, and `reason` then names the measured bytes, ratio and thresholds.
+Compaction itself stays a separate bounded maintenance step under the existing
+owner fence.
+
+---
+
+## 9. Exit Code Contract
 
 The `unified-mpc` CLI adheres to a deterministic exit code contract:
 - `0`: Success / normal termination.

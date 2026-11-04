@@ -74,12 +74,12 @@ The obsolete `.agents/skills/lnwjud-scheduled-continuation/SKILL.md` path is del
 - External MCP execution is fail-closed without current descriptor/catalog fingerprints. Child calls enforce declared input/output schema checks, 1 MiB argument and 8 MiB result limits, and a safe inherited environment allowlist.
 - Config mutation lock publishes a staged owner directory atomically, removes only its own owner record on release, and reclaims a lock only when the recorded owner PID is provably dead. Cross-process serialization self-check passes.
 - Checkpoint key storage validates and hardens every existing parent ancestor and requires key file mode `0600`.
-- `release:verify` prints and validates exact `HEAD`, rejects dirty trees, and accepts optional `RELEASE_EXPECTED_SHA`. CI actions are pinned to immutable commit SHAs.
+- `release:verify` prints and validates exact `HEAD`, rejects dirty trees, and accepts optional `RELEASE_EXPECTED_SHA`. The repository ships no hosted CI workflow, so there is no third-party action to pin: every gate under `scripts/` runs on the operator host.
 
 ## Remaining release blockers
 
-- Rust blocker resolved locally: stable `rustc 1.98.1 (48a229cea 2026-09-01)` was reinstalled, and `cargo test --manifest-path native/linux-host/Cargo.toml --locked` passed with 39/39 tests. Earlier repair hit host proxy/network `InvalidContentType`; a future reinstall must stop on that error rather than bypass Rust verification. CI now installs the repository toolchain before `release:verify`.
-- `gh` is absent; exact GitHub Actions run evidence cannot be collected locally.
+- Rust blocker resolved locally: stable `rustc 1.98.1 (48a229cea 2026-09-01)` was reinstalled, and `cargo test --manifest-path native/linux-host/Cargo.toml --locked` passed with 39/39 tests. Earlier repair hit host proxy/network `InvalidContentType`; a future reinstall must stop on that error rather than bypass Rust verification. The Rust toolchain is a host prerequisite: no hosted CI installs it, so `release:verify` fails on a machine where `rustup` was never provisioned.
+- `gh` is installed and is the evidence path for pull requests, reviews and merges, but this repository has no GitHub Actions workflows, so there is no hosted run to cite. Local `verify:local` receipts under `.unified-mpc/local-verify/` are the merge evidence, and the guarded `merge:pr` refuses without one.
 - Live Cloudflare tunnel and ChatGPT Web acceptance remain unrun.
 - Recovery startup reconciliation is intentionally report-only; unsafe/orphan records block runtime startup and remain operator-visible.
 

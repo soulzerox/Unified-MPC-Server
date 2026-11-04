@@ -297,6 +297,11 @@ describe('GC cycle artifact-key quarantine (#210 §1/§7)', () => {
       });
       expect(report).toMatchObject({ status: 'planned', quarantined: [] });
       if (report.status !== 'planned') throw new Error('unexpected');
+      expect([...report.unreachableArtifacts].sort(byArtifactKey)).toEqual(
+        [deps.retired, deps.unbound]
+          .map((artifact) => ({ repositoryId: REPO, artifactKey: artifact.artifactKey }))
+          .sort(byArtifactKey),
+      );
       expect([...report.quarantinedArtifacts].sort(byArtifactKey)).toEqual(
         [deps.retired, deps.unbound]
           .map((artifact) => ({ repositoryId: REPO, artifactKey: artifact.artifactKey }))
@@ -362,6 +367,12 @@ describe('GC cycle artifact-key quarantine (#210 §1/§7)', () => {
         now: NOW, graceMs: GRACE, dryRun: true,
       });
       expect(report).toMatchObject({ status: 'planned', quarantinedArtifacts: [] });
+      if (report.status !== 'planned') throw new Error('unexpected');
+      expect([...report.unreachableArtifacts].sort(byArtifactKey)).toEqual(
+        [deps.retired, deps.unbound]
+          .map((artifact) => ({ repositoryId: REPO, artifactKey: artifact.artifactKey }))
+          .sort(byArtifactKey),
+      );
       expect(await deps.quarantine.list()).toEqual([]);
     } finally {
       await rm(deps.dir, { recursive: true, force: true });

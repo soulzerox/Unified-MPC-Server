@@ -11,6 +11,7 @@ import {
   ArtifactQuarantineStore,
   canonicalRevisionList,
   canonicalStatus,
+  CanonicalArtifactStore,
   CanonicalManifestStore,
   CanonicalRefStore,
   GoalOverlayStore,
@@ -18,11 +19,13 @@ import {
   pinCanonicalRevision,
   pruneRevisionManifests,
   RevisionPinRegistry,
+  runGcCycle,
   unpinCanonicalRevision,
   WorkspaceService,
   type CanonicalStatusReport,
   type CanonicalRevisionListReport,
   type CanonicalRevisionPinReport,
+  type GcCycleReport,
   type GitRevisionAdvanceResult,
   type RevisionPruneReport,
   type Workspace,
@@ -98,6 +101,12 @@ import {
   parseIndexRevisionPruneArgs,
   type IndexRevisionPruneCommand,
 } from './commands/index-revision-prune.js';
+import {
+  formatIndexGc,
+  indexGcExitCode,
+  parseIndexGcArgs,
+  type IndexGcCommand,
+} from './commands/index-gc.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -122,6 +131,7 @@ export * from './commands/index-revision.js';
 export * from './commands/index-revision-list.js';
 export * from './commands/index-revision-pin.js';
 export * from './commands/index-revision-prune.js';
+export * from './commands/index-gc.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -147,6 +157,7 @@ export type CliCommand =
   | IndexRevisionListCommand
   | IndexRevisionPinCommand
   | IndexRevisionPruneCommand
+  | IndexGcCommand
   | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
@@ -193,6 +204,9 @@ export interface CliDependencies {
   indexRevisionPrune?(input: {
     readonly dryRun: true;
   }): Promise<RevisionPruneReport>;
+  indexGc?(input: {
+    readonly dryRun: true;
+  }): Promise<GcCycleReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -224,6 +238,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
+    if (args[1] === 'gc') return parseIndexGcArgs(args.slice(1));
     if (args[1] === 'revision') {
       if (args[2] === 'list') return parseIndexRevisionListArgs(args.slice(1));
       if (args[2] === 'pin' || args[2] === 'unpin') return parseIndexRevisionPinArgs(args.slice(1));
@@ -231,7 +246,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
       if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
       return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|prune|advance ...'));
     }
-    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision ...'));
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision|gc ...'));
   }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
@@ -266,6 +281,7 @@ Commands:
   index revision pin <manifest-id>       Pin a revision with the operator reason
   index revision unpin <manifest-id>     Remove the operator pin from a revision
   index revision prune --dry-run         Plan the prune of unreferenced revisions without deleting
+  index gc --dry-run                     Plan artifact GC reachability without quarantining
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -414,6 +430,20 @@ Commands:
         const report = await dependencies.indexRevisionPrune({ dryRun: parsed.value.dryRun });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPrune(report));
         return 0;
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-gc': {
+      if (dependencies.indexGc === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexGc({ dryRun: parsed.value.dryRun });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGc(report));
+        return indexGcExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -876,6 +906,45 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         // The ledger is read immediately before planning so a live index job
         // cannot have its manifest collected by a plan built from a stale list.
         indexJobManifestIds: await jobs.liveManifestIds(),
+        dryRun: input.dryRun,
+      });
+    },
+    indexGc: async (input): Promise<GcCycleReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      const artifacts = new CanonicalArtifactStore(root);
+      const stored = await artifacts.list();
+      const contentHashes = new Set<string>();
+      const artifactCandidates: { repositoryId: string; artifactKey: string }[] = [];
+      const seen = new Set<string>();
+      for (const artifact of stored) {
+        // Semantic (chunk) artifacts are owned by the Thai-RAG GC boundary, and
+        // the artifact-key planner reads file bindings only, so feeding chunk
+        // keys here would mark every one of them unreachable.
+        if (artifact.kind !== 'file') continue;
+        contentHashes.add(artifact.sourceContentSha256);
+        const identity = `${artifact.repositoryId}\u0000${artifact.artifactKey}`;
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        artifactCandidates.push({ repositoryId: artifact.repositoryId, artifactKey: artifact.artifactKey });
+      }
+      const jobs = new IndexJobLedger(root);
+      return runGcCycle({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
+        quarantine: new ArtifactQuarantineStore(root),
+        artifacts,
+      }, {
+        candidates: [...contentHashes].sort(),
+        artifactCandidates,
+        indexJobManifestIds: await jobs.liveManifestIds(),
+        now: new Date(),
+        // A dry run never quarantines, so the grace window is unused; the
+        // contract requires it because a non-dry pass stamps the deadline.
+        graceMs: 0,
         dryRun: input.dryRun,
       });
     },

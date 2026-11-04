@@ -42,6 +42,12 @@ export type GcCycleReport =
     readonly status: 'planned';
     readonly reachable: readonly string[];
     readonly unreachable: readonly string[];
+    /**
+     * Artifact keys the plan would quarantine. Unlike `quarantinedArtifacts`
+     * this is populated in a dry run too, so a read-only caller can see the
+     * plan instead of an empty list that looks like nothing to collect.
+     */
+    readonly unreachableArtifacts: readonly GcCycleArtifactCandidate[];
     readonly quarantined: readonly string[];
     readonly quarantinedArtifacts: readonly GcCycleArtifactCandidate[];
   }
@@ -64,8 +70,9 @@ export interface GcCycleStores {
  * jobs -> GcRootSet), `planArtifactGc` (plan), then `quarantine()`
  * records the unreachable candidates unless dry-run. Reports both the
  * plan and what was quarantined so a caller can distinguish
- * already-quarantined from newly-quarantined hashes. Read-only aside
- * from the quarantine ledger; deletion stays a separate scheduled step.
+ * already-quarantined from newly-quarantined hashes; `unreachableArtifacts` is
+ * the planned artifact-key set in both modes. Read-only aside from the
+ * quarantine ledger; deletion stays a separate scheduled step.
  *
  * A non-dry run holds the U28 cleanup lease for the whole cycle (a held
  * or unreadable fence refuses before anything is quarantined) and
@@ -161,6 +168,7 @@ async function runCycle(stores: GcCycleStores, input: GcCycleInput): Promise<GcC
     status: 'planned',
     reachable: plan.reachable,
     unreachable: plan.unreachable,
+    unreachableArtifacts,
     quarantined: input.dryRun ? [] : [...plan.unreachable],
     quarantinedArtifacts: input.dryRun ? [] : unreachableArtifacts,
   };

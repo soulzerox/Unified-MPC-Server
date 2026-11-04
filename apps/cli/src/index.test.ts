@@ -980,6 +980,77 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['canonical store is unreadable']);
   });
 
+  it('plans an index GC cycle in dry-run mode with the safety verdict exit code', async () => {
+    const content = 'a'.repeat(64);
+    const artifactKey = `file:v1:${'b'.repeat(64)}`;
+    const outputs: string[] = [];
+    let seenDryRun: boolean | undefined;
+    const code = await runCli(['index', 'gc', '--dry-run'], {
+      ...baseDependencies,
+      indexGc: async (input) => {
+        seenDryRun = input.dryRun;
+        return {
+          status: 'planned',
+          reachable: [content],
+          unreachable: [content],
+          unreachableArtifacts: [{ repositoryId: 'repo_abc123', artifactKey }],
+          quarantined: [],
+          quarantinedArtifacts: [],
+        };
+      },
+      write: (text) => outputs.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seenDryRun).toBe(true);
+    expect(outputs).toEqual([
+      `planned (dry-run) reachable 1 unreachable 1 artifact-unreachable 1\nunreachable ${content}`
+        + `\nartifact-unreachable repo_abc123 ${artifactKey}`,
+    ]);
+
+    const refused: string[] = [];
+    const refusedCode = await runCli(['index', 'gc', '--dry-run'], {
+      ...baseDependencies,
+      indexGc: async () => ({ status: 'refused', reason: 'no reachability roots supplied' }),
+      write: (text) => refused.push(text),
+    });
+    expect(refusedCode).toBe(1);
+    expect(refused).toEqual(['refused no reachability roots supplied']);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'gc', '--dry-run', '--json'], {
+      ...baseDependencies,
+      indexGc: async () => ({ status: 'refused', reason: 'missing manifests on disk' }),
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(1);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual({ status: 'refused', reason: 'missing manifests on disk' });
+
+    const usage: string[] = [];
+    const usageCode = await runCli(['index', 'gc'], {
+      ...baseDependencies,
+      writeError: (text) => usage.push(text),
+    });
+    expect(usageCode).toBe(2);
+    expect(usage[0]).toContain('index gc --dry-run');
+
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'gc', '--dry-run'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'gc', '--dry-run'], {
+      ...baseDependencies,
+      indexGc: async () => { throw new Error('gc lease fence unreadable'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['gc lease fence unreadable']);
+  });
+
   it('reports storage recovery failures without crashing the CLI dispatcher', async () => {
     const errors: string[] = [];
     const deps: CliDependencies = {

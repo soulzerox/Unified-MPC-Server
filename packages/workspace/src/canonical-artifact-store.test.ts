@@ -116,6 +116,24 @@ describe('canonical artifact store (#210 §1/§6)', () => {
     });
   });
 
+  it('lists every record across trust boundaries for a GC candidate universe', async () => {
+    await withStore(async (store) => {
+      const here = fileArtifact();
+      const there = fileArtifact({ repositoryId: OTHER_REPO });
+      const chunk = chunkArtifact();
+      await store.put(here);
+      await store.put(there);
+      await store.put(chunk);
+
+      const listed = await store.list();
+      expect(listed.map((artifact) => `${artifact.repositoryId}:${artifact.artifactKey}`).sort()).toEqual([
+        `${OTHER_REPO}:${there.artifactKey}`,
+        `${REPO}:${here.artifactKey}`,
+        `${REPO}:${chunk.artifactKey}`,
+      ].sort());
+    });
+  });
+
   it('unions bindings on re-put and appends idempotently', async () => {
     await withStore(async (store) => {
       const first = fileArtifact({

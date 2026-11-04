@@ -400,6 +400,39 @@ retain man:v1:ff0371d8c4e2 pin
   `--dry-run` is missing, `--apply` is requested, or another argument is
   unknown.
 
+### `unified-mpc index gc --dry-run [--json]`
+
+Prints the artifact GC plan without quarantining anything: the content hashes
+and repository-scoped artifact keys reachable from every retained revision
+(canonical refs, pins, Goal overlay bases, unsettled index jobs), the ones no
+retained revision references, and the counts for each. `--dry-run` is required
+rather than defaulted because the real cycle writes quarantine rows under the
+cleanup lease.
+
+```bash
+$ unified-mpc index gc --dry-run
+planned (dry-run) reachable 693 unreachable 2 artifact-unreachable 2
+unreachable 9b1c4f2e7a60
+unreachable ff0371d8c4e2
+artifact-unreachable repo:v1:documented file:v1:9b1c4f2e7a60
+artifact-unreachable repo:v1:documented file:v1:ff0371d8c4e2
+```
+
+- `unreachable` lines are content hashes and `artifact-unreachable` lines carry
+  the owning repository, because an artifact key is only resolvable inside one
+  trust boundary. The same content can appear in both id spaces.
+- Chunk artifacts are excluded. The Thai-RAG index owns semantic chunks and the
+  artifact-key planner only reads file bindings, so listing them here would mark
+  every chunk collectible.
+- A refusal (no reachability roots, a root manifest missing on disk, or no
+  artifact reachability evidence) prints `refused <reason>` and exits `1`: a GC
+  plan that cannot prove reachability must not look like an empty plan.
+- The plan is advisory: a concurrent `advance`, `pin` or index job can change
+  reachability, so re-run it before acting on it.
+- Exit `0` for any plan; `1` when the plan is refused or the store cannot be
+  read; `2` when `--dry-run` is missing, `--apply` is requested, or another
+  argument is unknown.
+
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref

@@ -10,7 +10,7 @@ import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { ArtifactQuarantineStore } from './artifact-quarantine.js';
 import { runGcCycle, type GcCycleStores } from './gc-cycle.js';
-import { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -166,6 +166,72 @@ describe('GC cycle under the cleanup lease (#210 U30)', () => {
       expect(report).toMatchObject({ status: 'planned', quarantined: [H('2')] });
       expect((await deps.quarantine.list()).map((entry) => entry.hash)).toEqual([H('2')]);
       expect(await lease.read()).toBeNull();
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('renews the window before the quarantine write when planning outlives half of it', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      let now = NOW;
+      // Planning reads the overlay roots before the single write; advancing the
+      // clock there makes the boundary renewal due exactly when the pass would
+      // otherwise quarantine under the original window.
+      const listIds = deps.overlays.listIds.bind(deps.overlays);
+      deps.overlays.listIds = async (options): Promise<string[]> => {
+        const ids = await listIds(options);
+        now = new Date(NOW.getTime() + GRACE);
+        return ids;
+      };
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE, clock: () => now },
+      });
+      expect(report).toMatchObject({ status: 'planned', quarantined: [H('2')] });
+      expect((await deps.quarantine.list()).map((entry) => entry.hash)).toEqual([H('2')]);
+      // Renewal moved the deadline from the original window to one TTL after
+      // the half-window point; release retires the record without erasing it.
+      expect(await lease.inspect()).toMatchObject({
+        status: 'released',
+        ownerId: 'gc_me',
+        expiresAt: new Date(NOW.getTime() + GRACE * 2).toISOString(),
+      });
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops before the quarantine write when a newer generation takes the fence', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      let now = NOW;
+      const listIds = deps.overlays.listIds.bind(deps.overlays);
+      deps.overlays.listIds = async (options): Promise<string[]> => {
+        const ids = await listIds(options);
+        const held = await lease.read();
+        if (held === null) throw new Error('expected a held lease');
+        await lease.release({ ownerId: 'gc_me', generation: held.generation });
+        await lease.acquire({ ownerId: 'gc_successor', now, ttlMs: GRACE });
+        now = new Date(NOW.getTime() + GRACE);
+        return ids;
+      };
+      await expect(runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE, clock: () => now },
+      })).rejects.toThrow(GcLeaseLostError);
+      expect(await deps.quarantine.list()).toEqual([]);
+      expect(await lease.inspect()).toMatchObject({
+        status: 'held',
+        ownerId: 'gc_successor',
+        generation: 2,
+      });
     } finally {
       await rm(deps.dir, { recursive: true, force: true });
     }

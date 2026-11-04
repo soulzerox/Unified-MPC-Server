@@ -6,7 +6,7 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { AuditService } from '@unified-mpc/audit';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import { DoctorService, WorkspaceSelectionService, type DoctorProbes, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
-import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { advanceRevisionFromGit, WorkspaceService, type GitRevisionAdvanceResult, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
@@ -52,6 +52,13 @@ import { parseToolsArgs, type ToolsCommand, type ToolSummary } from './commands/
 import { parseStorageArgs, type StorageCommand } from './commands/storage.js';
 import { runStorageMetricsCommand } from './commands/storage-metrics.js';
 import {
+  formatIndexRevisionAdvance,
+  indexRevisionAdvanceExitCode,
+  parseIndexRevisionArgs,
+  type IndexRevisionCommand,
+} from './commands/index-revision.js';
+import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
+import {
   parsePublishCredentialArgs,
   readPublishCredentialSecret,
   resolveGitPushUrls,
@@ -70,6 +77,7 @@ export * from './commands/sync.js';
 export * from './commands/web.js';
 export * from './commands/tools.js';
 export * from './commands/storage.js';
+export * from './commands/index-revision.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -91,6 +99,7 @@ export type CliCommand =
   | PruneServerCommand
   | SyncCommand
   | StorageCommand
+  | IndexRevisionCommand
   | PublishCredentialCommand
   | WebCommand
   | ToolsCommand;
@@ -122,6 +131,10 @@ export interface CliDependencies {
   sync?(targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>>;
   storageRecover?(): Promise<StorageRecoveryResult>;
   storageMetrics?(): Promise<SqlitePhysicalMetrics>;
+  indexRevisionAdvance?(input: {
+    readonly ref: string;
+    readonly repositoryId?: string;
+  }): Promise<GitRevisionAdvanceResult>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -151,6 +164,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'prune') return parsePruneArgs(args.slice(1));
   if (args[0] === 'sync') return parseSyncArgs(args.slice(1));
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
+  if (args[0] === 'index') return parseIndexRevisionArgs(args.slice(1));
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
@@ -179,6 +193,7 @@ Commands:
   prune server <name>                    Prune an installed MCP server
   storage recover                        Recover one unambiguous historical SQLite database safely
   storage metrics [--json]               Report SQLite db/WAL/SHM bytes, page/freelist counts and compaction evidence
+  index revision advance [--ref <ref>]   Advance the canonical revision pointer from an exact Git tree
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
   publish-credential status <lease>      Show lease expiry and hosts without the secret
@@ -267,6 +282,23 @@ Commands:
         write,
         writeError,
       );
+    }
+    case 'index-revision-advance': {
+      if (dependencies.indexRevisionAdvance === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexRevisionAdvance({
+          ref: parsed.value.ref,
+          ...(parsed.value.repositoryId === undefined ? {} : { repositoryId: parsed.value.repositoryId }),
+        });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexRevisionAdvance(report));
+        return indexRevisionAdvanceExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
     }
     case 'publish-credential-grant':
     case 'publish-credential-revoke':
@@ -647,6 +679,17 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     storageRecover: async (): Promise<StorageRecoveryResult> =>
       recoverHistoricalStorageIdentity(resolveDataPathFromShared()),
     storageMetrics: async (): Promise<SqlitePhysicalMetrics> => getWorkspaceState().database.physicalMetrics(),
+    indexRevisionAdvance: async (input): Promise<GitRevisionAdvanceResult> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      return advanceRevisionFromGit({
+        root: path.join(dataPath, 'canonical'),
+        source: createCanonicalGitSource(process.cwd()),
+        targetRef: input.ref,
+        now: new Date(),
+        ...(input.repositoryId === undefined ? {} : { repositoryId: input.repositoryId }),
+      });
+    },
     publishCredential: async (
       command: PublishCredentialCommand,
       write: (text: string) => void,

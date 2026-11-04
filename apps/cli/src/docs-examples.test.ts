@@ -5,6 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
+import type { GitRevisionAdvanceResult } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -72,6 +73,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc publish-credential status(?:\s|$)/, kind: 'publish-credential-status', dispatch: 'publishCredential' },
   { pattern: /^unified-mpc storage recover(?:\s|$)/, kind: 'storage-recover', dispatch: 'storageRecover' },
   { pattern: /^unified-mpc storage metrics(?:\s|$)/, kind: 'storage-metrics', dispatch: 'storageMetrics' },
+  { pattern: /^unified-mpc index revision advance(?:\s|$)/, kind: 'index-revision-advance', dispatch: 'indexRevisionAdvance' },
 ];
 
 /**
@@ -174,6 +176,21 @@ function replayDependencies(calls: string[]): CliDependencies {
         checkpoint: { mode: 'passive', busy: false, walPages: 0, checkpointedPages: 0, truncated: false },
         compactionRecommended: false,
         compactionReason: null,
+      };
+    },
+    indexRevisionAdvance: async (): Promise<GitRevisionAdvanceResult> => {
+      calls.push('indexRevisionAdvance');
+      return {
+        status: 'noop',
+        repositoryId: 'repo:v1:documented',
+        targetRef: 'refs/remotes/origin/main',
+        commitSha: '0'.repeat(40),
+        gitTreeOid: '0'.repeat(40),
+        unifiedTreeOid: '0'.repeat(64),
+        revisionId: 'rev:v1:documented',
+        manifestId: 'man:v1:documented',
+        reuse: { reusedPaths: [], newPaths: [], renamedPaths: [], deletedPaths: [] },
+        artifacts: { status: 'registered', registered: 0, reused: 0, unclassified: [] },
       };
     },
   };

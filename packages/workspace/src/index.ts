@@ -15,6 +15,7 @@ export * from './canonical-artifact-store.js';
 export * from './manifest-artifact-registration.js';
 export * from './file-artifact-resolution.js';
 export * from './advance-revision.js';
+export * from './git-revision-advance.js';
 export * from './artifact-gc.js';
 export * from './artifact-gc-roots.js';
 export * from './artifact-key-gc.js';

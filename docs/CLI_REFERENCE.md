@@ -250,7 +250,64 @@ owner fence.
 
 ---
 
-## 9. Exit Code Contract
+## 9. Canonical Revision Index
+
+Operator surface for the content-addressed canonical store (#210): refs,
+revision manifests and file artifacts under `<dataPath>/canonical`. The command
+never fetches, so run `git fetch` first — recording an advance to a commit the
+ref does not actually point at would make the manifest lie.
+
+### `unified-mpc index revision advance [--ref <ref>] [--repository-id <id>] [--json]`
+
+Resolves the exact commit `--ref` points at (default `refs/remotes/origin/main`),
+reads that commit's **Git tree** — not the worktree — hashes every blob, and runs
+the advancement gate: classify the delta against the active manifest, persist the
+manifest, compare-and-swap the ref, then register the manifest's entries as
+content-addressed file artifacts.
+
+```bash
+$ unified-mpc index revision advance
+canonical refs/remotes/origin/main: promoted
+commit 4d1c0a1f8b25e0e4c9a7b3d2f6a1c8e09b7d5f21
+tree 7a3f9c1e2d4b6a8f0c5e7d9b1a3f5c7e9d0b2a4c
+manifest man:v1:3c9f1e7a5d2b8c4f6a0e2d4c8b6a4f2e0d8c6b4a2f0e8d6c4b2a0f8e6d4c2b0a
+repository repo:v1:5b2e8c0a4f6d2b8e0c4a6f8d2b4e6c8a0f2d4b6e8c0a2f4d6b8e0c2a4f6d8b0e
+reuse reused=1063 new=3 renamed=0 deleted=0
+artifacts reused=890 registered=3 unclassified=173
+```
+
+- `reuse reused=…` is the §3 evidence that unchanged paths were *reused*, not
+  re-embedded; `renamed=…` counts paths whose content moved to a new path and
+  therefore demanded no new artifact.
+- `artifacts registered=…` counts only artifacts this pass actually created, so
+  a rerun reports `registered=0` and the same `reused=…`. `unclassified=…` counts
+  manifest paths the source policy does not classify (binary assets, lockfiles);
+  they are reported, never claimed as indexed.
+- The command refuses, before writing anything, an unresolvable ref, a tree entry
+  that is not a blob (a submodule gitlink has no decided semantics yet), a
+  content hash that is not an exact SHA-256, or a repository with no remote and no
+  `--repository-id`.
+- `--repository-id` pins the trust boundary instead of deriving it from the
+  remote URL. Reuse is never claimed across boundaries, so changing it starts a
+  new, empty artifact namespace.
+- A conflict (another writer advanced the same ref during the pass) and a
+  refusal both exit `1`; so does a promotion whose artifact registration was
+  refused, because that store is durable but incomplete.
+
+`--json` prints the unprojected report instead of the operator lines:
+
+```bash
+$ unified-mpc index revision advance --json
+{"status":"noop","repositoryId":"repo:v1:5b2e","targetRef":"refs/remotes/origin/main","commitSha":"4d1c0a1f8b25","gitTreeOid":"7a3f9c1e2d4b","unifiedTreeOid":"9f0e…","revisionId":"rev:v1:…","manifestId":"man:v1:…","reuse":{"reusedPaths":["src/a.ts"],"newPaths":[],"renamedPaths":[],"deletedPaths":[]},"artifacts":{"status":"registered","registered":0,"reused":1,"unclassified":[]}}
+```
+
+Exit code `0` means the ref is at that revision and every classified entry has an
+artifact record; `1` means the store needs attention; `2` means the arguments
+were not understood.
+
+---
+
+## 10. Exit Code Contract
 
 The `unified-mpc` CLI adheres to a deterministic exit code contract:
 - `0`: Success / normal termination.

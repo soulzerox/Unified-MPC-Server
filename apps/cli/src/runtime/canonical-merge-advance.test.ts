@@ -4,11 +4,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { RepositoryMergePolicy } from '@unified-mpc/domain';
-import type {
-  CanonicalGitRevision,
-  CanonicalGitSource,
-  CanonicalGitTreeEntry,
-  GitRevisionAdvanceResult,
+import {
+  CanonicalRefStore,
+  type CanonicalGitRevision,
+  type CanonicalGitSource,
+  type CanonicalGitTreeEntry,
+  type GitRevisionAdvanceResult,
 } from '@unified-mpc/workspace';
 import {
   canonicalAdvanceOutcome,
@@ -250,6 +251,33 @@ describe('canonical advance after merge (#210 §3)', () => {
       const second = await advance({ policy, expectedCommitSha: COMMIT });
 
       expect(second).toMatchObject({ status: 'noop', ref: REF, manifestId: first.manifestId });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when the branch ref moves between the ancestry check and the gate', async () => {
+    const root = await tempRoot();
+    try {
+      // The gate resolves the ref a second time. A fetch that lands in between
+      // must not promote a commit the ancestry check never saw.
+      const fake = new FakeGit();
+      const movedTo = 'b'.repeat(40);
+      const advance = advanceWith(root, {
+        source: fake,
+        isAncestor: async (): Promise<boolean> => {
+          fake.commitSha = movedTo;
+          return true;
+        },
+      });
+
+      const outcome = await advance({ policy, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'refused' });
+      if (outcome.status !== 'refused') throw new Error('unexpected');
+      expect(outcome.reason).toMatch(/moved to/);
+      expect(outcome.reason).toContain(movedTo);
+      expect(await new CanonicalRefStore(root).read(REF)).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -143,6 +143,8 @@ async function gitIsAncestor(checkoutPath: string, ancestor: string, descendant:
  * - the fetched ref does not contain the merged commit: refused as a stale
  *   checkout. Advancing anyway would move the canonical ref *backwards* when
  *   the local clone lags behind, which is worse than reporting the lag;
+ * - the ref moves between the ancestry check and the gate's own resolution:
+ *   refused, because the gate would otherwise promote a commit no check saw;
  * - the gate itself refuses (unverifiable base manifest, unsupported tree
  *   entry, concurrent promotion): passed through unchanged.
  */
@@ -231,6 +233,10 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
       targetRef,
       now: now(),
       repositoryId,
+      // Pin the commit the ancestry check approved: the gate resolves the ref
+      // again, and a fetch landing in between must refuse rather than promote a
+      // commit nothing verified.
+      commitSha: resolved.commitSha,
     });
     return canonicalAdvanceOutcome(result, targetRef);
   };

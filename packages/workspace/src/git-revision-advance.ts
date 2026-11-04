@@ -64,6 +64,15 @@ export interface GitRevisionAdvanceInput {
   readonly now: Date;
   /** Pins the trust boundary instead of deriving it from the remote URL. */
   readonly repositoryId?: string;
+  /**
+   * Exact commit the caller already verified for `targetRef`.
+   *
+   * The advance resolves the ref itself, so a caller that checked ancestry (or
+   * anything else) against an earlier resolution would otherwise promote a
+   * commit its check never saw: a concurrent fetch can move the ref between the
+   * two reads. Pinning turns that race into a refusal instead of a promotion.
+   */
+  readonly commitSha?: string;
 }
 
 export interface GitRevisionAdvanceReport {
@@ -202,6 +211,12 @@ export async function advanceRevisionFromGit(input: GitRevisionAdvanceInput): Pr
   const revision = await source.resolveRevision(targetRef);
   if (revision === null) {
     return refused(targetRef, `ref ${targetRef} does not resolve to a commit`);
+  }
+  if (input.commitSha !== undefined && revision.commitSha !== input.commitSha) {
+    return refused(
+      targetRef,
+      `ref ${targetRef} moved to ${revision.commitSha} after the caller verified ${input.commitSha}`,
+    );
   }
 
   let repositoryId = input.repositoryId;

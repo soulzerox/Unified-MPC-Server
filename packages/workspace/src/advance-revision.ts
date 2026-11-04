@@ -109,7 +109,10 @@ export async function advanceCanonicalRevision(
 
   const decision = await refs.promote(input.canonicalRef, {
     expectedCurrent: input.expectedCurrent,
-    current: live,
+    // No `current`: the store must compare against the state on disk at promote
+    // time. Passing the snapshot read here would make the comparison
+    // self-referential (`expectedCurrent === current` by construction) and let
+    // two advances that read the same snapshot both win.
     target: state,
     targetVerified: input.targetVerified,
   });

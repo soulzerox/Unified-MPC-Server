@@ -102,8 +102,14 @@ export class CanonicalRefStore {
       await rename(tmpPath, finalPath);
       return { action: 'promote', target: input.target };
     }
+    // A promoter that believed the ref was unset loses to the state already on
+    // disk. Falling back to `effectiveCurrent` here would compare the belief
+    // against itself and let the second writer overwrite the first.
+    if (input.expectedCurrent === null) {
+      return { action: 'conflict', current: effectiveCurrent };
+    }
     const decision = decideCanonicalAdvancement({
-      expectedCurrent: input.expectedCurrent ?? effectiveCurrent,
+      expectedCurrent: input.expectedCurrent,
       current: effectiveCurrent,
       target: input.target,
       targetVerified: input.targetVerified,

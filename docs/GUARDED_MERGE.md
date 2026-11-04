@@ -199,7 +199,11 @@ commit, the poller runs the advancement gate once for that repository:
    lagging clone must not move the canonical ref backwards;
 4. run `advanceRevisionFromGit`, which classifies the delta against the active
    manifest, persists the new manifest, CAS-promotes the ref and registers
-   artifacts.
+   artifacts. The advance is pinned to the commit step 3 approved: the gate
+   resolves the ref again, so a fetch that lands in between refuses instead of
+   promoting a commit nothing checked. The CAS compares the pre-hash state with
+   the ref as it is on disk at promote time, so two pollers advancing the same
+   branch cannot both win.
 
 The newest merge is chosen by `mergedAt`, not by feed order: a comment or label
 moves a pull request later in the `updatedAt` feed without merging anything.

@@ -100,6 +100,55 @@ describe('advance canonical revision (#210 U16)', () => {
     }
   });
 
+  it('conflicts when the ref changed on disk after the caller read it', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('c'.repeat(40)),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+      const winner = await refs.read(REF);
+
+      // The gate's own read sees "never promoted" while the store's promote-time
+      // read sees the winner. Comparing the expectation against the caller's
+      // snapshot instead of the ref on disk would promote over the winner.
+      const staleView = new (class extends CanonicalRefStore {
+        private first = true;
+        public override async read(
+          ...args: Parameters<CanonicalRefStore['read']>
+        ): Promise<Awaited<ReturnType<CanonicalRefStore['read']>>> {
+          if (this.first) {
+            this.first = false;
+            return null;
+          }
+          return super.read(...args);
+        }
+      })(dir);
+
+      const result = await advanceCanonicalRevision(manifests, staleView, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('e'.repeat(40)),
+        commitSha: 'e'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('9') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T02:00:00.000Z',
+      });
+
+      expect(result).toMatchObject({ status: 'conflict' });
+      expect(await refs.read(REF)).toEqual(winner);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('is a no-op when the target equals the active revision', async () => {
     const { refs, manifests, dir } = await tempPair();
     try {

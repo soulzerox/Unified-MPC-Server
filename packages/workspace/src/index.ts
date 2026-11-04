@@ -33,6 +33,7 @@ export * from './canonical-status.js';
 export * from './canonical-revision-list.js';
 export * from './canonical-revision-pin.js';
 export * from './gc-lease.js';
+export * from './gc-status.js';
 export * from './goal-overlay-store.js';
 export * from './goal-base-pin.js';
 export * from './goal-admission.js';

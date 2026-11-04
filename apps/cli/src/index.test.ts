@@ -1353,6 +1353,119 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('reports the GC lease and quarantine deadlines without mutating either', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-status-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const { repositoryId, deadArtifactKey, deadHash } = await seedCanonicalGcFixture(dataPath);
+      const now = new Date();
+      const quarantine = new ArtifactQuarantineStore(canonical);
+      await quarantine.quarantine([deadHash, { kind: 'artifact-key', repositoryId, artifactKey: deadArtifactKey }], {
+        now: new Date(now.getTime() - 120_000),
+        graceMs: 60_000,
+      });
+      await quarantine.quarantine([`${'7'.repeat(64)}`], { now, graceMs: 3_600_000 });
+
+      const lease = new GcLeaseStore(canonical);
+      const acquired = await lease.acquire({ ownerId: 'gc_status_probe', now, ttlMs: 60_000 });
+      if (acquired.status !== 'granted') throw new Error(`expected a granted lease, got ${acquired.status}`);
+
+      const output: string[] = [];
+      const code = await runCli(['index', 'gc', 'status'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: () => undefined,
+      });
+      expect(code, output.join('\n')).toBe(0);
+      expect(output[0]?.split('\n')[0]).toBe('gc status: healthy');
+      expect(output[0]).toContain('lease held by gc_status_probe');
+      expect(output[0]).toContain('(generation 1)');
+      expect(output[0]).toContain('quarantine 3 (due 2, in-grace 1)');
+      expect(output[0]).toContain(`  due ${deadHash} until`);
+      expect(output[0]).toContain(`  due ${repositoryId} ${deadArtifactKey} until`);
+
+      const json: string[] = [];
+      const jsonCode = await runCli(['index', 'gc', 'status', '--json'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => json.push(text),
+        writeError: () => undefined,
+      });
+      expect(jsonCode).toBe(0);
+      const report = JSON.parse(json.join('\n')) as {
+        status: string;
+        lease: { status: string; ownerId: string };
+        quarantine: { total: number; due: number; inGrace: number };
+      };
+      expect(report.status).toBe('healthy');
+      expect(report.lease).toMatchObject({ status: 'held', ownerId: 'gc_status_probe' });
+      expect(report.quarantine).toMatchObject({ total: 3, due: 2, inGrace: 1 });
+
+      // A status read never reaps: the probe's lease and every ledger row survive.
+      expect(await lease.read()).toMatchObject({ ownerId: 'gc_status_probe' });
+      expect(await quarantine.list()).toHaveLength(3);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 1 on a corrupt lease record and 2 on a usage error', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-status-corrupt-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    // Isolate HOME/XDG too: the default dependencies refuse to run while a real
+    // historical database exists next to a temp data path with no gateway settings.
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = path.join(root, 'home');
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await mkdir(path.join(canonical, 'gc'), { recursive: true });
+      await writeFile(path.join(canonical, 'gc', 'lease.json'), '{not json', 'utf8');
+
+      const output: string[] = [];
+      const code = await runCli(['index', 'gc', 'status'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: () => undefined,
+      });
+      // A corrupt fence is a real answer: the next --apply will refuse on it.
+      expect(code).toBe(1);
+      expect(output[0]).toContain('gc status: degraded');
+      expect(output[0]).toContain('lease corrupt');
+
+      const usage = await runCli(['index', 'gc', 'status', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: () => undefined,
+        writeError: () => undefined,
+      });
+      expect(usage).toBe(2);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('plans quarantine expiry in dry-run mode without deleting anything', async () => {
     const content = 'a'.repeat(64);
     const artifactKey = `file:v1:${'b'.repeat(64)}`;

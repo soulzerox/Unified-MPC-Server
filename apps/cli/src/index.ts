@@ -17,6 +17,7 @@ import {
   CanonicalRefStore,
   expireGcQuarantine,
   GcLeaseStore,
+  gcStatus,
   GoalOverlayStore,
   IndexJobLedger,
   pinCanonicalRevision,
@@ -30,6 +31,7 @@ import {
   type CanonicalRevisionPinReport,
   type GcCycleReport,
   type GcExpireReport,
+  type GcStatusReport,
   type GitRevisionAdvanceResult,
   type RevisionPruneReport,
   type Workspace,
@@ -117,6 +119,12 @@ import {
   parseIndexGcExpireArgs,
   type IndexGcExpireCommand,
 } from './commands/index-gc-expire.js';
+import {
+  formatIndexGcStatus,
+  indexGcStatusExitCode,
+  parseIndexGcStatusArgs,
+  type IndexGcStatusCommand,
+} from './commands/index-gc-status.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -170,6 +178,7 @@ export type CliCommand =
   | IndexRevisionPruneCommand
   | IndexGcCommand
   | IndexGcExpireCommand
+  | IndexGcStatusCommand
   | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
@@ -223,6 +232,7 @@ export interface CliDependencies {
   indexGcExpire?(input: {
     readonly dryRun: boolean;
   }): Promise<GcExpireReport>;
+  indexGcStatus?(): Promise<GcStatusReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -256,6 +266,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
     if (args[1] === 'gc') {
       if (args[2] === 'expire') return parseIndexGcExpireArgs(args.slice(1));
+      if (args[2] === 'status') return parseIndexGcStatusArgs(args.slice(1));
       return parseIndexGcArgs(args.slice(1));
     }
     if (args[1] === 'revision') {
@@ -304,6 +315,7 @@ Commands:
   index gc --apply [--grace <duration>]  Quarantine unreachable artifacts under the GC lease
   index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
   index gc expire --apply                Release due quarantine rows and delete artifacts
+  index gc status [--json]               Report the GC lease and quarantine deadlines
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -483,6 +495,20 @@ Commands:
         const report = await dependencies.indexGcExpire({ dryRun: parsed.value.dryRun });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGcExpire(report, parsed.value.dryRun));
         return indexGcExpireExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-gc-status': {
+      if (dependencies.indexGcStatus === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexGcStatus();
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGcStatus(report));
+        return indexGcStatusExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -1067,6 +1093,17 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           lease,
         }),
       });
+    },
+    indexGcStatus: async (): Promise<GcStatusReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      // Read-only: the lease is inspected, never acquired, and the ledger is
+      // listed without a reachability plan.
+      return gcStatus(
+        { quarantine: new ArtifactQuarantineStore(root), lease: new GcLeaseStore(root) },
+        { now: new Date() },
+      );
     },
     publishCredential: async (
       command: PublishCredentialCommand,

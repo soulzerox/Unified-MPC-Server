@@ -525,6 +525,39 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
 - Exit `0` when the pass applied; `1` when it is refused or the ledger cannot be
   read; `2` for a usage error.
 
+### `unified-mpc index gc status [--json]`
+
+Read-only snapshot of the two inputs that decide whether a destructive pass is
+safe right now: the GC lease record and the quarantine ledger. It never takes
+the lease, never releases a row and never judges reachability, so it is safe to
+run at any time, including while a pass is running.
+
+```bash
+$ unified-mpc index gc status
+gc status: healthy
+lease free
+quarantine 2 (due 1, in-grace 1)
+  due 4d1c0a1f8b25 until 2026-11-11T00:00:00.000Z
+  in-grace repo:v1:documented file:v1:9b1c4f2e7a60 until 2026-11-11T00:00:00.000Z
+```
+
+- `lease free` — no holder. `lease held by <owner> until <deadline>
+  (generation <n>)` adds `expired` once the deadline has passed: an expired
+  record is takeable by the next `--apply`, so a status that said "held" would
+  claim a fence that would not hold. `lease released by <owner> at <time>`
+  describes a retired record, which still keeps the generation monotonic.
+- `due` rows have passed their grace deadline and are still in the ledger;
+  `in-grace` rows are not candidates yet. A row whose own deadline cannot be
+  read prints `until unreadable` and is never counted as due.
+- Reachability is not evaluated here. `index gc expire --dry-run` owns that
+  verdict, so `due 2` means "two rows would be re-checked", not "two deletions".
+- An unreadable ledger throws and exits `1` instead of reporting `due 0`.
+- A corrupt lease record prints `lease corrupt` and `gc status: degraded`, and
+  exits `1`: the next `--apply` will refuse on it, so this is a real answer
+  rather than a transient error.
+- Exit `0` for any healthy snapshot, `1` when the lease record is corrupt or a
+  store cannot be read, `2` for a usage error.
+
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref

@@ -104,6 +104,7 @@ import {
 } from './commands/index-revision-pin.js';
 import {
   formatCanonicalRevisionPrune,
+  indexRevisionPruneExitCode,
   parseIndexRevisionPruneArgs,
   type IndexRevisionPruneCommand,
 } from './commands/index-revision-prune.js';
@@ -223,7 +224,7 @@ export interface CliDependencies {
     readonly note?: string;
   }): Promise<CanonicalRevisionPinReport>;
   indexRevisionPrune?(input: {
-    readonly dryRun: true;
+    readonly dryRun: boolean;
   }): Promise<RevisionPruneReport>;
   indexGc?(input: {
     readonly dryRun: boolean;
@@ -310,7 +311,7 @@ Commands:
   index revision list [--json]           List stored revision manifests and what still references them
   index revision pin <manifest-id>       Pin a revision with the operator reason
   index revision unpin <manifest-id>     Remove the operator pin from a revision
-  index revision prune --dry-run         Plan the prune of unreferenced revisions without deleting
+  index revision prune --dry-run|--apply Plan or apply the prune of unreferenced revisions
   index gc --dry-run                     Plan artifact GC reachability without quarantining
   index gc --apply [--grace <duration>]  Quarantine unreachable artifacts under the GC lease
   index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
@@ -462,8 +463,8 @@ Commands:
       }
       try {
         const report = await dependencies.indexRevisionPrune({ dryRun: parsed.value.dryRun });
-        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPrune(report));
-        return 0;
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionPrune(report, parsed.value.dryRun));
+        return indexRevisionPruneExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -984,15 +985,22 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       assertStorageIdentitySafe(dataPath);
       const root = path.join(dataPath, 'canonical');
       const jobs = new IndexJobLedger(root);
+      // Only the mutating pass takes the U28 fence; a plan stays read-only and
+      // unfenced, exactly like the artifact GC verbs.
+      const lease = input.dryRun
+        ? undefined
+        : { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS };
       return pruneRevisionManifests({
         refs: new CanonicalRefStore(root),
         manifests: new CanonicalManifestStore(root),
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
-        // The ledger is read immediately before planning so a live index job
+        // The ledger is read immediately before the pass so a live index job
         // cannot have its manifest collected by a plan built from a stale list.
         indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         dryRun: input.dryRun,
+        now: new Date(),
+        ...(lease === undefined ? {} : { lease }),
       });
     },
     indexGc: async (input): Promise<GcCycleReport> => {

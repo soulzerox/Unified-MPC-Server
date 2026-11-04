@@ -1066,7 +1066,7 @@ describe('CLI execution dispatcher', () => {
       writeError: (text) => usage.push(text),
     });
     expect(usageCode).toBe(2);
-    expect(usage[0]).toContain('index revision prune --dry-run');
+    expect(usage[0]).toContain('index revision prune --dry-run|--apply');
 
     const errors: string[] = [];
     const unavailable = await runCli(['index', 'revision', 'prune', '--dry-run'], {
@@ -1084,6 +1084,39 @@ describe('CLI execution dispatcher', () => {
     });
     expect(thrownCode).toBe(1);
     expect(thrown).toEqual(['canonical store is unreadable']);
+
+    const applied: string[] = [];
+    let seenApplyDryRun: boolean | undefined;
+    const appliedCode = await runCli(['index', 'revision', 'prune', '--apply'], {
+      ...baseDependencies,
+      indexRevisionPrune: async (input) => {
+        seenApplyDryRun = input.dryRun;
+        return {
+          status: 'planned',
+          pruneable: [stale],
+          removed: [stale],
+          retained: [{ manifestId: live, reason: 'canonical-ref' }],
+        };
+      },
+      write: (text) => applied.push(text),
+    });
+    expect(appliedCode).toBe(0);
+    expect(seenApplyDryRun).toBe(false);
+    expect(applied).toEqual([
+      `applied pruneable 1 removed 1 retained 1\nremoved ${stale}\nretain ${live} canonical-ref`,
+    ]);
+
+    const refused: string[] = [];
+    const refusedCode = await runCli(['index', 'revision', 'prune', '--apply'], {
+      ...baseDependencies,
+      indexRevisionPrune: async () => ({
+        status: 'refused',
+        reason: 'gc lease held by other_gc until 2026-11-04T00:15:00.000Z',
+      }),
+      write: (text) => refused.push(text),
+    });
+    expect(refusedCode).toBe(1);
+    expect(refused).toEqual(['refused gc lease held by other_gc until 2026-11-04T00:15:00.000Z']);
   });
 
   it('plans an index GC cycle in dry-run mode with the safety verdict exit code', async () => {
@@ -1242,6 +1275,92 @@ describe('CLI execution dispatcher', () => {
         graceMs: 3_600_000,
       }));
       // The pass released its lease, so the next run is not blocked by itself.
+      expect(await lease.read()).toBeNull();
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('applies a revision prune through the real canonical stores under the cleanup lease', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-prune-apply-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const { manifest, liveArtifactKey } = await seedCanonicalGcFixture(dataPath);
+      const staleEntries = [{ path: 'stale.ts', contentHash: 'e'.repeat(64) }];
+      const staleCommit = 'e'.repeat(40);
+      const staleTreeOid = computeTreeOid(staleEntries);
+      const staleRevisionId = canonicalRevisionId({
+        repositoryId: GC_FIXTURE_REPOSITORY,
+        commitSha: staleCommit,
+        treeOid: staleTreeOid,
+        targetRef: GC_FIXTURE_REF,
+        parents: [],
+      });
+      const stale: StoredManifest = {
+        manifestId: canonicalManifestId({
+          repositoryId: GC_FIXTURE_REPOSITORY,
+          revisionId: staleRevisionId,
+          entries: staleEntries,
+        }),
+        repositoryId: GC_FIXTURE_REPOSITORY,
+        revisionId: staleRevisionId,
+        commitSha: staleCommit,
+        treeOid: staleTreeOid,
+        targetRef: GC_FIXTURE_REF,
+        entries: staleEntries,
+        createdAt: GC_FIXTURE_CREATED_AT,
+      };
+      const manifests = new CanonicalManifestStore(canonical);
+      await manifests.put(stale);
+
+      // A held lease must refuse the pass before it deletes a single row.
+      const lease = new GcLeaseStore(canonical);
+      const acquired = await lease.acquire({ ownerId: 'other_gc', now: new Date(), ttlMs: 60_000 });
+      if (acquired.status !== 'granted') throw new Error(`expected a granted lease, got ${acquired.status}`);
+      const refused: string[] = [];
+      const refusedCode = await runCli(['index', 'revision', 'prune', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => refused.push(text),
+        writeError: () => undefined,
+      });
+      expect(refusedCode, refused.join('\n')).toBe(1);
+      expect(refused[0]).toContain('refused gc lease held by other_gc');
+      expect(await manifests.get(stale.manifestId)).not.toBeNull();
+      await lease.release({ ownerId: 'other_gc', generation: acquired.generation });
+
+      const output: string[] = [];
+      const applyErrors: string[] = [];
+      const code = await runCli(['index', 'revision', 'prune', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => applyErrors.push(text),
+      });
+      expect(applyErrors, applyErrors.join('\n')).toEqual([]);
+      expect(code, output.join('\n')).toBe(0);
+      expect(output[0]).toContain('applied pruneable 1 removed 1 retained 1');
+      expect(output[0]).toContain(`removed ${stale.manifestId}`);
+      expect(output[0]).toContain(`retain ${manifest.manifestId} canonical-ref`);
+
+      expect(await manifests.get(stale.manifestId)).toBeNull();
+      expect(await manifests.get(manifest.manifestId)).not.toBeNull();
+      // Prune deletes manifest JSON only: shared artifacts stay for artifact GC.
+      await expect(new CanonicalArtifactStore(canonical).has(GC_FIXTURE_REPOSITORY, liveArtifactKey))
+        .resolves.toBe(true);
+      // The pass released its lease, so the next destructive pass is not blocked.
       expect(await lease.read()).toBeNull();
     } finally {
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;

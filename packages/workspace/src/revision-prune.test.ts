@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId } from '@unified-mpc/domain';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import { CanonicalManifestStore, type StoredManifest } from './canonical-manifest-store.js';
+import { GcLeaseStore } from './gc-lease.js';
 import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
-import { pruneRevisionManifests } from './revision-prune.js';
+import { pruneRevisionManifests, type RevisionPruneLease } from './revision-prune.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -29,12 +30,19 @@ function manifestFor(commitSha: string, entries: readonly { path: string; conten
   };
 }
 
+const LEASE_OWNER = 'test-prune';
+
+function leaseFor(store: GcLeaseStore): RevisionPruneLease {
+  return { store, ownerId: LEASE_OWNER, ttlMs: 60_000 };
+}
+
 async function scenario(): Promise<{
   dir: string;
   refs: CanonicalRefStore;
   manifests: CanonicalManifestStore;
   pins: RevisionPinRegistry;
   overlays: GoalOverlayStore;
+  lease: GcLeaseStore;
   active: StoredManifest;
   pinned: StoredManifest;
   overlayBase: StoredManifest;
@@ -45,6 +53,7 @@ async function scenario(): Promise<{
   const manifests = new CanonicalManifestStore(dir);
   const pins = new RevisionPinRegistry(dir);
   const overlays = new GoalOverlayStore(dir);
+  const lease = new GcLeaseStore(dir);
   const active = manifestFor('c'.repeat(40), [{ path: 'live.ts', contentHash: H('1') }]);
   const pinned = manifestFor('d'.repeat(40), [{ path: 'lkg.ts', contentHash: H('2') }]);
   const overlayBase = manifestFor('e'.repeat(40), [{ path: 'base.ts', contentHash: H('3') }]);
@@ -59,7 +68,7 @@ async function scenario(): Promise<{
   await overlays.create('goal-1', {
     baseCommitSha: overlayBase.commitSha, baseTreeOid: overlayBase.treeOid, baseManifestId: overlayBase.manifestId,
   });
-  return { dir, refs, manifests, pins, overlays, active, pinned, overlayBase, stale };
+  return { dir, refs, manifests, pins, overlays, lease, active, pinned, overlayBase, stale };
 }
 
 describe('revision manifest prune (#210 U20)', () => {
@@ -80,7 +89,10 @@ describe('revision manifest prune (#210 U20)', () => {
     try {
       const job = manifestFor('9'.repeat(40), [{ path: 'job.ts', contentHash: H('5') }]);
       await s.manifests.put(job);
-      const report = await pruneRevisionManifests({ ...s, indexJobManifestIds: [job.manifestId], dryRun: false });
+      const report = await pruneRevisionManifests({
+        ...s, indexJobManifestIds: [job.manifestId], dryRun: false, lease: leaseFor(s.lease),
+      });
+      if (report.status !== 'planned') throw new Error(`expected a plan, got ${report.reason}`);
       expect(report.pruneable).toEqual([s.stale.manifestId]);
       expect(report.removed).toEqual([s.stale.manifestId]);
       for (const keep of [s.active, s.pinned, s.overlayBase, job]) {
@@ -113,9 +125,129 @@ describe('revision manifest prune (#210 U20)', () => {
   it('is idempotent — a second prune finds nothing left', async () => {
     const s = await scenario();
     try {
-      await pruneRevisionManifests({ ...s, indexJobManifestIds: [], dryRun: false });
-      const again = await pruneRevisionManifests({ ...s, indexJobManifestIds: [], dryRun: false });
+      await pruneRevisionManifests({ ...s, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease) });
+      const again = await pruneRevisionManifests({ ...s, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease) });
       expect(again).toMatchObject({ status: 'planned', pruneable: [], removed: [] });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('revision manifest prune apply (#210 §12)', () => {
+  it('deletes only unreachable manifests and releases the lease', async () => {
+    const s = await scenario();
+    try {
+      const report = await pruneRevisionManifests({
+        ...s, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease),
+      });
+      if (report.status !== 'planned') throw new Error(`expected a plan, got ${report.reason}`);
+      expect(report.pruneable).toEqual([s.stale.manifestId]);
+      expect(report.removed).toEqual([s.stale.manifestId]);
+      expect(await s.manifests.get(s.stale.manifestId)).toBeNull();
+      expect(await s.manifests.get(s.active.manifestId)).not.toBeNull();
+      // Release retires the record instead of deleting it, so the generation
+      // stays monotonic for the next destructive pass.
+      expect(await s.lease.inspect()).toMatchObject({
+        status: 'released',
+        ownerId: LEASE_OWNER,
+        generation: 1,
+      });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an apply with no lease and deletes nothing', async () => {
+    const s = await scenario();
+    try {
+      const { lease: _lease, ...stores } = s;
+      const report = await pruneRevisionManifests({ ...stores, indexJobManifestIds: [], dryRun: false });
+      expect(report).toMatchObject({ status: 'refused' });
+      if (report.status !== 'refused') throw new Error('expected a refusal');
+      expect(report.reason).toContain('lease');
+      expect(await s.manifests.get(s.stale.manifestId)).not.toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses while another owner holds the lease and deletes nothing', async () => {
+    const s = await scenario();
+    try {
+      const acquired = await s.lease.acquire({ ownerId: 'other_gc', now: new Date(), ttlMs: 60_000 });
+      if (acquired.status !== 'granted') throw new Error(`expected a granted lease, got ${acquired.status}`);
+      const report = await pruneRevisionManifests({
+        ...s, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease),
+      });
+      expect(report).toMatchObject({ status: 'refused' });
+      if (report.status !== 'refused') throw new Error('expected a refusal');
+      expect(report.reason).toContain('held by other_gc');
+      expect(await s.manifests.get(s.stale.manifestId)).not.toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unreadable lease fence and deletes nothing', async () => {
+    const s = await scenario();
+    try {
+      await mkdir(path.join(s.dir, 'gc'), { recursive: true });
+      await writeFile(path.join(s.dir, 'gc', 'lease.json'), '{not a lease');
+      const report = await pruneRevisionManifests({
+        ...s, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease),
+      });
+      expect(report).toMatchObject({ status: 'refused' });
+      if (report.status !== 'refused') throw new Error('expected a refusal');
+      expect(report.reason).toContain('unreadable');
+      expect(await s.manifests.get(s.stale.manifestId)).not.toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never takes the lease for a dry run, even when one is supplied', async () => {
+    const s = await scenario();
+    try {
+      const report = await pruneRevisionManifests({
+        ...s, indexJobManifestIds: [], dryRun: true, lease: leaseFor(s.lease),
+      });
+      expect(report.status).toBe('planned');
+      expect(await s.lease.inspect()).toEqual({ status: 'free' });
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-checks pins at apply time: a pin created after the plan is retained', async () => {
+    const s = await scenario();
+    try {
+      const plan = await pruneRevisionManifests({ ...s, indexJobManifestIds: [], dryRun: true });
+      expect(plan.pruneable).toEqual([s.stale.manifestId]);
+
+      await s.pins.pin(s.stale.manifestId, 'rollback', 'pinned after the plan');
+      const applied = await pruneRevisionManifests({
+        ...s, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease),
+      });
+      if (applied.status !== 'planned') throw new Error(`expected a plan, got ${applied.reason}`);
+      expect(applied.pruneable).toEqual([]);
+      expect(applied.removed).toEqual([]);
+      expect(await s.manifests.get(s.stale.manifestId)).not.toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('releases the lease even when the pass throws', async () => {
+    const s = await scenario();
+    try {
+      const refs = {
+        list: async (): Promise<never> => { throw new Error('refs unreadable'); },
+      } as unknown as CanonicalRefStore;
+      await expect(pruneRevisionManifests({
+        ...s, refs, indexJobManifestIds: [], dryRun: false, lease: leaseFor(s.lease),
+      })).rejects.toThrow('refs unreadable');
+      expect(await s.lease.inspect()).toMatchObject({ status: 'released', generation: 1 });
     } finally {
       await rm(s.dir, { recursive: true, force: true });
     }

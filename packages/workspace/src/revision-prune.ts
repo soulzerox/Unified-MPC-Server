@@ -70,8 +70,10 @@ export type RevisionPruneReport = RevisionPrunePlan | { readonly status: 'refuse
  * fence: a held or unreadable lease refuses before any planning work, and
  * the lease is released afterwards even when a strict root read throws.
  * The roots are read inside this call, so an apply re-checks refs, pins,
- * overlay bases and the caller-supplied index-job ledger at execution time
- * rather than trusting an earlier plan. A pin that lands after this pass
+ * overlay bases and manifest rows at execution time rather than trusting an
+ * earlier plan; the caller-supplied index-job ledger is a snapshot taken
+ * immediately before the pass, not re-read inside the fence. A pin that lands
+ * after this pass
  * reads the registry but before its manifest row is deleted is still
  * ignored: that bounded window is the same one `index gc expire --apply`
  * accepts, and it is documented instead of closed with a store-wide writer

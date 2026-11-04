@@ -387,15 +387,21 @@ retain man:v1:ff0371d8c4e2 pin
 ```
 
 - `--dry-run` prints `prune` candidates and never writes. `--apply` takes the
-  single-owner GC lease, re-reads every reachability root at execution time and
-  deletes only the manifests that are still unreachable, so a `pin` or `advance`
-  created after the plan is retained.
+  single-owner GC lease and re-reads refs, pins, overlay bases and manifest rows
+  inside the fenced pass, deleting only the manifests that are still
+  unreachable, so a `pin` or `advance` created after the plan is retained. The
+  index-job ledger is snapshotted immediately before the pass takes the lease,
+  the same pre-fence window `index gc --apply` and `index gc expire --apply`
+  accept.
 - Only revision manifest JSON is deleted. Content-addressed artifacts are shared
   and stay with artifact GC, which re-checks reachability after quarantine.
 - An apply prints `applied pruneable N removed N retained N`, then one
   `removed <id>` line per deleted manifest and the `retain` lines. A refused
   pass prints `refused <reason>`: another owner holds the lease, the fence
   record is unreadable, or the pass ran without a lease.
+- A manifest row that exists but cannot be deleted fails the pass with the
+  failing path in the error, so `removed` never claims a row that is still on
+  disk.
 - `retain` lines name why the planner kept a revision: `canonical-ref`, `pin`,
   `overlay-base` or `index-job`.
 - A plan with nothing to collect prints `planned (dry-run) pruneable 0 retained N`
@@ -403,9 +409,9 @@ retain man:v1:ff0371d8c4e2 pin
 - The residual race is bounded and documented: a pin that lands after `--apply`
   reads the registry but before the manifest row is deleted is still pruned, the
   same window `index gc expire --apply` accepts.
-- Exit `0` for a plan or a completed pass; `1` when the pass refuses or the
-  store cannot be read; `2` when neither mode, both modes, or another argument
-  is given.
+- Exit `0` for a plan or a completed pass; `1` when the pass refuses, the store
+  cannot be read, or a manifest cannot be deleted; `2` when neither mode, both
+  modes, or another argument is given.
 
 ### `unified-mpc index gc --dry-run|--apply [--grace <duration>] [--json]`
 

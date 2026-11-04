@@ -144,12 +144,20 @@ export class CanonicalManifestStore {
     return manifests.sort((a, b) => a.manifestId.localeCompare(b.manifestId));
   }
 
+  /**
+   * Delete one manifest row.
+   *
+   * `false` means the row was already absent. Any other failure is rethrown:
+   * a caller such as `index revision prune --apply` must fail the pass and name
+   * the path, not report a still-present row as removed.
+   */
   public async delete(manifestId: string): Promise<boolean> {
     try {
       await rm(this.manifestPath(requireManifestId(manifestId)), { force: false });
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
     }
   }
 

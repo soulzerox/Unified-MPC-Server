@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId } from '@unified-mpc/domain';
@@ -79,6 +79,23 @@ describe('canonical manifest store (#210 U15)', () => {
       expect(await reopened.delete(main.manifestId)).toBe(true);
       expect(await reopened.get(main.manifestId)).toBeNull();
       expect(await reopened.delete(main.manifestId)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns false only when the row is already absent and rethrows a failed delete', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'manifest-store-'));
+    try {
+      const store = new CanonicalManifestStore(dir);
+      const main = manifest();
+      await store.put(main);
+      // Replace the row with a non-empty directory: a non-recursive rm cannot
+      // remove it, so delete must fail rather than look like an absent row.
+      const row = path.join(dir, 'manifests', `${main.manifestId}.json`);
+      await rm(row);
+      await mkdir(path.join(row, 'child'), { recursive: true });
+      await expect(store.delete(main.manifestId)).rejects.toThrow();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -203,12 +203,25 @@ export class CanonicalArtifactStore {
     return [...keys].sort();
   }
 
+  /**
+   * Remove one artifact record and report whether it existed.
+   *
+   * Returns `false` only when the record is already gone (ENOENT). Every other
+   * failure — permissions, a read-only mount, an IO error — throws, because a
+   * destructive pass must never read "could not delete" as "nothing to
+   * delete": the quarantine row would then be released while the record
+   * survives, with no ledger evidence left to retry from (#210 §7).
+   *
+   * The record is removed by path, never read first, so a corrupt or
+   * unreadable record file is still deletable.
+   */
   public async delete(repositoryId: string, artifactKey: string): Promise<boolean> {
     try {
       await rm(this.artifactPath(repositoryId, artifactKey.trim().toLowerCase()), { force: false });
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
     }
   }
 

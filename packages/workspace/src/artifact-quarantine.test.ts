@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ArtifactQuarantineStore, quarantineEntryTarget } from './artifact-quarantine.js';
@@ -162,6 +162,37 @@ describe('artifact-key quarantine rows (#210 §1/U21)', () => {
       expect(await store.list()).toEqual([
         { kind: 'content-hash', hash: H('4'), quarantinedAt: T0.toISOString(), graceMs: GRACE },
       ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed on an unreadable ledger instead of reporting it as empty', async () => {
+    const { store, dir, now } = await tempStore();
+    try {
+      const file = path.join(dir, 'quarantine', 'candidates.json');
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, '{not json', 'utf8');
+
+      // An empty answer here would make every GC pass report "due 0" while
+      // rows are still on disk, and a later quarantine would overwrite them.
+      await expect(store.list()).rejects.toThrow(/not valid JSON/);
+      await expect(store.quarantine([H('1')], { now, graceMs: GRACE })).rejects.toThrow(/not valid JSON/);
+      await expect(store.release([H('2')])).rejects.toThrow(/not valid JSON/);
+      expect(await readFile(file, 'utf8')).toBe('{not json');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a missing ledger as empty but a non-array ledger as corrupt', async () => {
+    const { store, dir } = await tempStore();
+    try {
+      expect(await store.list()).toEqual([]);
+      const file = path.join(dir, 'quarantine', 'candidates.json');
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, JSON.stringify({ rows: [] }), 'utf8');
+      await expect(store.list()).rejects.toThrow(/not an array/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

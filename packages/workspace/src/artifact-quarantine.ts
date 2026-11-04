@@ -210,19 +210,31 @@ export class ArtifactQuarantineStore {
   }
 
   private async readAll(): Promise<QuarantineEntry[]> {
+    let raw: string;
     try {
-      const raw = await readFile(this.quarantinePath(), 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      const entries: QuarantineEntry[] = [];
-      for (const value of parsed) {
-        const entry = normalizeRow(value);
-        if (entry !== null) entries.push(entry);
-      }
-      return entries.sort(byIdentityKey);
-    } catch {
-      return [];
+      raw = await readFile(this.quarantinePath(), 'utf8');
+    } catch (error) {
+      // A missing ledger is an empty ledger; any other read failure is not.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`artifact quarantine ledger is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // An unreadable ledger must fail closed: reporting it as empty would let a
+    // later quarantine overwrite the evidence and make every GC pass report
+    // "due 0" while rows are still on disk. Dropped *rows* keep the original
+    // tolerance; only a ledger that cannot be read is an error.
+    if (!Array.isArray(parsed)) throw new Error('artifact quarantine ledger is not an array');
+    const entries: QuarantineEntry[] = [];
+    for (const value of parsed) {
+      const entry = normalizeRow(value);
+      if (entry !== null) entries.push(entry);
+    }
+    return entries.sort(byIdentityKey);
   }
 
   private async write(entries: readonly QuarantineEntry[]): Promise<void> {

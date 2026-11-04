@@ -504,6 +504,13 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   delete). Content-hash rows release the ledger entry only: the canonical store
   holds no content-addressed bytes — Git owns the file content — so there is
   nothing else to delete.
+- A record delete that fails for any reason other than "already gone" aborts the
+  pass: the row stays in the ledger, `failed to delete canonical artifact ...`
+  reports the key, the repository and the cause, and the lease is still
+  released. An already-missing record is a no-op, so re-running converges.
+- A ledger that cannot be read (permission error, corrupt JSON, non-array
+  document) exits `1` instead of being reported as an empty ledger: `due 0` must
+  never stand in for "the ledger is unreadable".
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
   anything is released. The lease is released afterwards even when the pass
   refuses partway.

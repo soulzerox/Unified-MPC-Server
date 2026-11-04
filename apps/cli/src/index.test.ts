@@ -1322,6 +1322,9 @@ describe('CLI execution dispatcher', () => {
       ], { now: new Date('2026-11-01T00:00:00.000Z'), graceMs: 60_000 });
 
       const artifactsDir = path.join(canonical, 'artifacts');
+      // root ignores the directory mode, so the failure path would never be
+      // exercised there.
+      if (process.geteuid?.() === 0) return;
       await chmod(artifactsDir, 0o500);
       try {
         const errors: string[] = [];

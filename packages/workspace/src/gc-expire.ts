@@ -33,6 +33,10 @@ export interface GcExpireInput {
    * Physical delete of one released canonical artifact (#210 §1). The row
    * carries its owning repository precisely so this callback can resolve the
    * record; `CanonicalArtifactStore.delete` is the natural implementation.
+   *
+   * The callback must throw when the record cannot be removed. Swallowing the
+   * failure here would release the ledger row and orphan the record with no
+   * evidence left to retry from, which is the opposite of the domain contract.
    */
   readonly deleteStoredArtifact?: (repositoryId: string, artifactKey: string) => Promise<void>;
   /**

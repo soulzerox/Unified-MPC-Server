@@ -1048,12 +1048,20 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           // A failed delete aborts the pass instead of releasing the row: the
           // ledger must keep the evidence until the record is really gone, or
           // a permission error would silently orphan the artifact. An
-          // already-missing record is a no-op, so a retry after such a failure
-          // converges.
+          // already-missing record is a no-op, so a retry after a failure
+          // converges. `delete` is the fail-closed call: it throws for any
+          // failure other than "already gone", and it never reads the record,
+          // so an unreadable or corrupt file can still be removed by path.
+          //
+          // The cause is preserved in the message: without it an operator sees
+          // only which key failed, not whether the store is read-only, out of
+          // space or unreadable.
           deleteStoredArtifact: async (repositoryId: string, artifactKey: string): Promise<void> => {
-            if (!(await artifacts.has(repositoryId, artifactKey))) return;
-            if (!(await artifacts.delete(repositoryId, artifactKey))) {
-              throw new Error(`failed to delete canonical artifact ${artifactKey} in ${repositoryId}`);
+            try {
+              await artifacts.delete(repositoryId, artifactKey);
+            } catch (error) {
+              const cause = error instanceof Error ? error.message : String(error);
+              throw new Error(`failed to delete canonical artifact ${artifactKey} in ${repositoryId}: ${cause}`);
             }
           },
           lease,

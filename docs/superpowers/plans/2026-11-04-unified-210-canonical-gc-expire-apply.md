@@ -34,7 +34,11 @@ slice closes the #210 deletion loop.
 - Only `--apply` constructs the U28 lease (same owner/TTL as `gc --apply`) and
   the delete callback:
   - `deleteStoredArtifact` calls `CanonicalArtifactStore.delete` — that record is
-    the store's physical artifact.
+    the store's physical artifact. `delete` fails closed: it returns `false` only
+    for an already-missing record and throws for every other failure, and it
+    removes the record by path so a corrupt or unreadable file is still
+    deletable. The CLI wraps the throw with the artifact key and repository and
+    keeps the underlying cause.
   - no callback for content hashes, deliberately: the canonical store keeps no
     content-addressed bytes, so those rows are Git-owned content and releasing
     the ledger entry is the only deletion that exists. This answers the open
@@ -53,9 +57,14 @@ slice closes the #210 deletion loop.
 - No scheduling or janitor loop (#80/#145 own periodic runs).
 - No content-addressed blob deletion; no such storage exists in this store.
 - No repair of a partially failing delete: a failed record delete throws, the
-  dispatcher reports it, the ledger row survives and the lease is released in
-  the `finally`. Re-running is safe because an already-missing record is a
-  no-op and released rows are gone.
+  dispatcher reports it with the underlying cause, the ledger row survives and
+  the lease is released in the `finally`. Re-running is safe because an
+  already-missing record is a no-op and released rows are gone.
+- No ledger reset: an unreadable quarantine ledger (`EACCES`, corrupt JSON, or a
+  non-array document) now throws instead of reading as an empty ledger, so a
+  later quarantine cannot overwrite evidence and a GC pass cannot report
+  `due 0` while rows are still on disk. Malformed individual rows keep the
+  original drop-on-read tolerance.
 - No lease renewal; the same TTL ceiling noted on #630 applies.
 
 ## Verification

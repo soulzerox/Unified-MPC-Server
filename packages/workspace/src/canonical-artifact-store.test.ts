@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileArtifactId, semanticArtifactId } from '@unified-mpc/domain';
@@ -209,6 +210,39 @@ describe('canonical artifact store (#210 §1/§6)', () => {
       expect(await store.listRepository(OTHER_REPO)).toEqual([]);
       expect(await store.delete(REPO, 'file:v1:' + 'a'.repeat(64))).toBe(false);
       expect((await readdir(artifactsDir)).length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('deletes a corrupt record by path instead of treating it as missing', async () => {
+    await withStore(async (store, root) => {
+      const artifact = fileArtifact();
+      const digest = createHash('sha256').update(REPO, 'utf8').digest('hex');
+      const recordPath = path.join(root, 'artifacts', `${digest}.${artifact.artifactKey}.json`);
+      await mkdir(path.dirname(recordPath), { recursive: true });
+      await writeFile(recordPath, '{not json', 'utf8');
+
+      // A record that cannot be read is still deletable: the destructive path
+      // must never depend on parsing the thing it is removing.
+      expect(await store.delete(REPO, artifact.artifactKey)).toBe(true);
+      await expect(access(recordPath)).rejects.toThrow();
+    });
+  });
+
+  it('throws when a record cannot be removed instead of reporting it missing', async () => {
+    if (process.geteuid?.() === 0) return; // root ignores the directory mode
+    await withStore(async (store, root) => {
+      const artifact = fileArtifact();
+      await store.put(artifact);
+      const artifactsDir = path.join(root, 'artifacts');
+      await chmod(artifactsDir, 0o500);
+      try {
+        // A failed unlink must surface: `false` would tell the GC pass the
+        // record is gone, releasing the ledger row and orphaning the record.
+        await expect(store.delete(REPO, artifact.artifactKey)).rejects.toThrow();
+        expect(await store.get(REPO, artifact.artifactKey)).toEqual(artifact);
+      } finally {
+        await chmod(artifactsDir, 0o700);
+      }
     });
   });
 });

@@ -551,8 +551,10 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   anything is released. The lease is released afterwards even when the pass
   refuses partway, and its window is renewed at each delete, so a long pass
   cannot silently outlive its fence. A pass that loses the fence to a newer
-  generation stops instead of deleting under a lease it no longer owns; rows
-  already released stay deleted, and the remaining rows stay in the ledger.
+  generation stops before the next delete. Artifacts deleted before the abort
+  stay deleted, and every due row stays in the ledger because the ledger is
+  released only after the whole delete loop, so a retry re-processes the due
+  set (an already-deleted record is a no-op).
 - Retained rows stay in the ledger, so a later run can delete them once their
   deadline passes or their reachability is settled. That does not hold for a row
   whose deadline is unreadable: it is retained forever, as described above.

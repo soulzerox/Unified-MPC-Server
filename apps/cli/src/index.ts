@@ -1044,8 +1044,17 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           // record is the physical delete. Content-hash rows deliberately get
           // no callback: the canonical store holds no content-addressed bytes
           // (Git owns them), so releasing the ledger row is all there is.
+          //
+          // A failed delete aborts the pass instead of releasing the row: the
+          // ledger must keep the evidence until the record is really gone, or
+          // a permission error would silently orphan the artifact. An
+          // already-missing record is a no-op, so a retry after such a failure
+          // converges.
           deleteStoredArtifact: async (repositoryId: string, artifactKey: string): Promise<void> => {
-            await artifacts.delete(repositoryId, artifactKey);
+            if (!(await artifacts.has(repositoryId, artifactKey))) return;
+            if (!(await artifacts.delete(repositoryId, artifactKey))) {
+              throw new Error(`failed to delete canonical artifact ${artifactKey} in ${repositoryId}`);
+            }
           },
           lease,
         }),

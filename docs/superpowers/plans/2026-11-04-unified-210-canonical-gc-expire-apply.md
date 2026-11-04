@@ -52,9 +52,10 @@ slice closes the #210 deletion loop.
 
 - No scheduling or janitor loop (#80/#145 own periodic runs).
 - No content-addressed blob deletion; no such storage exists in this store.
-- No repair of a partially failing delete: the pass throws, the dispatcher
-  reports it, and the lease is released in the `finally`. Re-running is safe
-  because released rows are gone and surviving rows keep their deadline.
+- No repair of a partially failing delete: a failed record delete throws, the
+  dispatcher reports it, the ledger row survives and the lease is released in
+  the `finally`. Re-running is safe because an already-missing record is a
+  no-op and released rows are gone.
 - No lease renewal; the same TTL ceiling noted on #630 applies.
 
 ## Verification

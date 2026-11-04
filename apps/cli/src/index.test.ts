@@ -28,6 +28,103 @@ const sourceRuntimeAdmissionIdentity = {
   runtimeStartedAt: '2026-09-28T00:00:00.000Z',
 } as const;
 
+const GC_FIXTURE_REPOSITORY = 'repo_abc123';
+const GC_FIXTURE_REF = 'refs/remotes/origin/main';
+const GC_FIXTURE_LIVE_HASH = '1'.repeat(64);
+const GC_FIXTURE_DEAD_HASH = 'd'.repeat(64);
+const GC_FIXTURE_CREATED_AT = '2026-11-04T00:00:00.000Z';
+
+interface CanonicalGcFixture {
+  readonly canonical: string;
+  readonly repositoryId: string;
+  readonly manifest: StoredManifest;
+  readonly liveArtifactKey: string;
+  readonly deadArtifactKey: string;
+  readonly deadHash: string;
+}
+
+/**
+ * Minimal honest canonical store for the GC verbs: one ref -> manifest with a
+ * live artifact binding (reachability evidence) plus one registered artifact no
+ * manifest references (a real candidate). Shared by the apply/expire tests so
+ * the fixture cannot drift between the plan and the delete side.
+ */
+async function seedCanonicalGcFixture(dataPath: string): Promise<CanonicalGcFixture> {
+  const canonical = path.join(dataPath, 'canonical');
+  const entries = [{ path: 'live.ts', contentHash: GC_FIXTURE_LIVE_HASH }];
+  const commitSha = 'c'.repeat(40);
+  const treeOid = computeTreeOid(entries);
+  const revisionId = canonicalRevisionId({
+    repositoryId: GC_FIXTURE_REPOSITORY,
+    commitSha,
+    treeOid,
+    targetRef: GC_FIXTURE_REF,
+    parents: [],
+  });
+  const manifest: StoredManifest = {
+    manifestId: canonicalManifestId({ repositoryId: GC_FIXTURE_REPOSITORY, revisionId, entries }),
+    repositoryId: GC_FIXTURE_REPOSITORY,
+    revisionId,
+    commitSha,
+    treeOid,
+    targetRef: GC_FIXTURE_REF,
+    entries,
+    createdAt: GC_FIXTURE_CREATED_AT,
+  };
+  await new CanonicalManifestStore(canonical).put(manifest);
+  await new CanonicalRefStore(canonical).promote(GC_FIXTURE_REF, {
+    expectedCurrent: null,
+    current: null,
+    target: { commitSha: manifest.commitSha, treeOid: manifest.treeOid, manifestId: manifest.manifestId },
+    targetVerified: true,
+  });
+
+  const artifacts = new CanonicalArtifactStore(canonical);
+  const liveArtifactKey = fileArtifactId({
+    sourceContentSha256: GC_FIXTURE_LIVE_HASH,
+    language: 'typescript',
+    sourceKind: 'source',
+    representationVersion: 'v1',
+  });
+  await artifacts.put({
+    kind: 'file',
+    artifactKey: liveArtifactKey,
+    repositoryId: GC_FIXTURE_REPOSITORY,
+    sourceContentSha256: GC_FIXTURE_LIVE_HASH,
+    language: 'typescript',
+    sourceKind: 'source',
+    representationVersion: 'v1',
+    bindings: [{ path: 'live.ts', manifestId: manifest.manifestId }],
+    createdAt: GC_FIXTURE_CREATED_AT,
+  });
+  const deadArtifactKey = fileArtifactId({
+    sourceContentSha256: GC_FIXTURE_DEAD_HASH,
+    language: 'typescript',
+    sourceKind: 'source',
+    representationVersion: 'v1',
+  });
+  await artifacts.put({
+    kind: 'file',
+    artifactKey: deadArtifactKey,
+    repositoryId: GC_FIXTURE_REPOSITORY,
+    sourceContentSha256: GC_FIXTURE_DEAD_HASH,
+    language: 'typescript',
+    sourceKind: 'source',
+    representationVersion: 'v1',
+    bindings: [],
+    createdAt: GC_FIXTURE_CREATED_AT,
+  });
+
+  return {
+    canonical,
+    repositoryId: GC_FIXTURE_REPOSITORY,
+    manifest,
+    liveArtifactKey,
+    deadArtifactKey,
+    deadHash: GC_FIXTURE_DEAD_HASH,
+  };
+}
+
 describe('CLI argument parser', () => {
   it('parses workspace, MCP, doctor, and Codex doctor commands', () => {
     expect(parseCliArgs(['workspace', 'add', '/home/qwerty/project'])).toEqual({
@@ -1101,69 +1198,7 @@ describe('CLI execution dispatcher', () => {
     process.env.HOME = home;
     process.env.XDG_DATA_HOME = path.join(root, 'xdg');
     try {
-      const repositoryId = 'repo_abc123';
-      const ref = 'refs/remotes/origin/main';
-      const liveHash = '1'.repeat(64);
-      const deadHash = 'd'.repeat(64);
-      const manifest: StoredManifest = ((): StoredManifest => {
-        const entries = [{ path: 'live.ts', contentHash: liveHash }];
-        const commitSha = 'c'.repeat(40);
-        const treeOid = computeTreeOid(entries);
-        const revisionId = canonicalRevisionId({ repositoryId, commitSha, treeOid, targetRef: ref, parents: [] });
-        return {
-          manifestId: canonicalManifestId({ repositoryId, revisionId, entries }),
-          repositoryId,
-          revisionId,
-          commitSha,
-          treeOid,
-          targetRef: ref,
-          entries,
-          createdAt: '2026-11-04T00:00:00.000Z',
-        };
-      })();
-      const manifests = new CanonicalManifestStore(canonical);
-      await manifests.put(manifest);
-      await new CanonicalRefStore(canonical).promote(ref, {
-        expectedCurrent: null,
-        current: null,
-        target: { commitSha: manifest.commitSha, treeOid: manifest.treeOid, manifestId: manifest.manifestId },
-        targetVerified: true,
-      });
-      const artifacts = new CanonicalArtifactStore(canonical);
-      const liveArtifactKey = fileArtifactId({
-        sourceContentSha256: liveHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-      });
-      await artifacts.put({
-        kind: 'file',
-        artifactKey: liveArtifactKey,
-        repositoryId,
-        sourceContentSha256: liveHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-        bindings: [{ path: 'live.ts', manifestId: manifest.manifestId }],
-        createdAt: '2026-11-04T00:00:00.000Z',
-      });
-      const artifactKey = fileArtifactId({
-        sourceContentSha256: deadHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-      });
-      await artifacts.put({
-        kind: 'file',
-        artifactKey,
-        repositoryId,
-        sourceContentSha256: deadHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-        bindings: [],
-        createdAt: '2026-11-04T00:00:00.000Z',
-      });
+      const { repositoryId, deadArtifactKey: artifactKey, deadHash } = await seedCanonicalGcFixture(dataPath);
 
       // A held lease must refuse the pass before it writes a single row.
       const lease = new GcLeaseStore(canonical);
@@ -1231,66 +1266,8 @@ describe('CLI execution dispatcher', () => {
     process.env.HOME = home;
     process.env.XDG_DATA_HOME = path.join(root, 'xdg');
     try {
-      const repositoryId = 'repo_abc123';
-      const ref = 'refs/remotes/origin/main';
-      const liveHash = '1'.repeat(64);
-      const deadHash = 'd'.repeat(64);
-      const entries = [{ path: 'live.ts', contentHash: liveHash }];
-      const commitSha = 'c'.repeat(40);
-      const treeOid = computeTreeOid(entries);
-      const revisionId = canonicalRevisionId({ repositoryId, commitSha, treeOid, targetRef: ref, parents: [] });
-      const manifest: StoredManifest = {
-        manifestId: canonicalManifestId({ repositoryId, revisionId, entries }),
-        repositoryId,
-        revisionId,
-        commitSha,
-        treeOid,
-        targetRef: ref,
-        entries,
-        createdAt: '2026-11-04T00:00:00.000Z',
-      };
-      await new CanonicalManifestStore(canonical).put(manifest);
-      await new CanonicalRefStore(canonical).promote(ref, {
-        expectedCurrent: null,
-        current: null,
-        target: { commitSha: manifest.commitSha, treeOid: manifest.treeOid, manifestId: manifest.manifestId },
-        targetVerified: true,
-      });
+      const { repositoryId, liveArtifactKey, deadArtifactKey, deadHash } = await seedCanonicalGcFixture(dataPath);
       const artifacts = new CanonicalArtifactStore(canonical);
-      const liveArtifactKey = fileArtifactId({
-        sourceContentSha256: liveHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-      });
-      await artifacts.put({
-        kind: 'file',
-        artifactKey: liveArtifactKey,
-        repositoryId,
-        sourceContentSha256: liveHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-        bindings: [{ path: 'live.ts', manifestId: manifest.manifestId }],
-        createdAt: '2026-11-04T00:00:00.000Z',
-      });
-      const deadArtifactKey = fileArtifactId({
-        sourceContentSha256: deadHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-      });
-      await artifacts.put({
-        kind: 'file',
-        artifactKey: deadArtifactKey,
-        repositoryId,
-        sourceContentSha256: deadHash,
-        language: 'typescript',
-        sourceKind: 'source',
-        representationVersion: 'v1',
-        bindings: [],
-        createdAt: '2026-11-04T00:00:00.000Z',
-      });
       const quarantine = new ArtifactQuarantineStore(canonical);
       await quarantine.quarantine([
         deadHash,
@@ -1315,6 +1292,53 @@ describe('CLI execution dispatcher', () => {
       await expect(artifacts.has(repositoryId, liveArtifactKey)).resolves.toBe(true);
       expect(await quarantine.list()).toEqual([]);
       expect(await new GcLeaseStore(canonical).read()).toBeNull();
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a due quarantine row when the artifact delete fails, and still releases the lease', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-expire-fail-'));
+    const dataPath = path.join(root, 'data');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const { canonical, repositoryId, deadArtifactKey, deadHash } = await seedCanonicalGcFixture(dataPath);
+      const quarantine = new ArtifactQuarantineStore(canonical);
+      await quarantine.quarantine([
+        deadHash,
+        { kind: 'artifact-key', repositoryId, artifactKey: deadArtifactKey },
+      ], { now: new Date('2026-11-01T00:00:00.000Z'), graceMs: 60_000 });
+
+      const artifactsDir = path.join(canonical, 'artifacts');
+      await chmod(artifactsDir, 0o500);
+      try {
+        const errors: string[] = [];
+        const code = await runCli(['index', 'gc', 'expire', '--apply'], {
+          ...createDefaultCliDependencies(),
+          write: () => undefined,
+          writeError: (text) => errors.push(text),
+        });
+        expect(code).toBe(1);
+        expect(errors[0]).toContain('failed to delete canonical artifact');
+        // The release runs after the callbacks, so a failed delete keeps the
+        // evidence instead of orphaning the record.
+        expect(await quarantine.list()).toHaveLength(2);
+        expect(await new GcLeaseStore(canonical).read()).toBeNull();
+      } finally {
+        await chmod(artifactsDir, 0o700);
+      }
     } finally {
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;

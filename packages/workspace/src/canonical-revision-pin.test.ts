@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId, computeTreeOid } from '@unified-mpc/domain';
 import { CanonicalManifestStore } from './canonical-manifest-store.js';
+import { GcLeaseStore } from './gc-lease.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { pinCanonicalRevision, unpinCanonicalRevision } from './canonical-revision-pin.js';
 
@@ -29,13 +30,22 @@ function manifestFixture(seed: string): ManifestFixture {
   return { manifestId, revisionId, commitSha, treeOid, entries };
 }
 
-async function withStores(
-  run: (stores: { manifests: CanonicalManifestStore; pins: RevisionPinRegistry; fixture: ManifestFixture }) => Promise<void>,
-): Promise<void> {
+interface PinStores {
+  readonly dir: string;
+  readonly manifests: CanonicalManifestStore;
+  readonly pins: RevisionPinRegistry;
+  readonly lease: GcLeaseStore;
+  readonly fixture: ManifestFixture;
+}
+
+const LEASE = { ownerId: 'pin_fence_test', ttlMs: 60_000 };
+
+async function withStores(run: (stores: PinStores) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'canonical-revision-pin-'));
   try {
     const manifests = new CanonicalManifestStore(dir);
     const pins = new RevisionPinRegistry(dir);
+    const lease = new GcLeaseStore(dir);
     const fixture = manifestFixture('a');
     await manifests.put({
       manifestId: fixture.manifestId,
@@ -47,7 +57,7 @@ async function withStores(
       entries: fixture.entries,
       createdAt: '2026-10-17T00:00:00.000Z',
     });
-    await run({ manifests, pins, fixture });
+    await run({ dir, manifests, pins, lease, fixture });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -55,8 +65,8 @@ async function withStores(
 
 describe('canonical revision pin (#210 §7)', () => {
   it('pins an existing revision with the operator reason and note', async () => {
-    await withStores(async ({ manifests, pins, fixture }) => {
-      const report = await pinCanonicalRevision({ manifests, pins }, {
+    await withStores(async ({ manifests, pins, lease, fixture }) => {
+      const report = await pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, {
         manifestId: fixture.manifestId,
         note: 'keep for audit',
       });
@@ -69,13 +79,16 @@ describe('canonical revision pin (#210 §7)', () => {
       const stored = await pins.list(fixture.manifestId);
       expect(stored).toHaveLength(1);
       expect(stored[0]).toMatchObject({ reason: 'user-pin', note: 'keep for audit' });
+      // The fence is released: a subsequent prune can take it.
+      expect(await lease.read()).toBeNull();
     });
   });
 
   it('re-pinning refreshes the note without duplicating the reason', async () => {
-    await withStores(async ({ manifests, pins, fixture }) => {
-      await pinCanonicalRevision({ manifests, pins }, { manifestId: fixture.manifestId, note: 'first' });
-      const report = await pinCanonicalRevision({ manifests, pins }, { manifestId: fixture.manifestId, note: 'second' });
+    await withStores(async ({ manifests, pins, lease, fixture }) => {
+      const deps = { manifests, pins, lease: { store: lease, ...LEASE } };
+      await pinCanonicalRevision(deps, { manifestId: fixture.manifestId, note: 'first' });
+      const report = await pinCanonicalRevision(deps, { manifestId: fixture.manifestId, note: 'second' });
 
       expect(report.action).toBe('pinned');
       const stored = await pins.list(fixture.manifestId);
@@ -85,9 +98,9 @@ describe('canonical revision pin (#210 §7)', () => {
   });
 
   it('never touches system-owned pin reasons', async () => {
-    await withStores(async ({ manifests, pins, fixture }) => {
+    await withStores(async ({ manifests, pins, lease, fixture }) => {
       await pins.pin(fixture.manifestId, 'goal-base', 'goal_a');
-      const report = await pinCanonicalRevision({ manifests, pins }, { manifestId: fixture.manifestId });
+      const report = await pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, { manifestId: fixture.manifestId });
 
       expect(report.pins).toEqual(['goal-base', 'user-pin']);
       const stored = await pins.list(fixture.manifestId);
@@ -96,16 +109,40 @@ describe('canonical revision pin (#210 §7)', () => {
   });
 
   it('refuses to pin a manifest that does not exist and writes no pin', async () => {
-    await withStores(async ({ manifests, pins }) => {
-      await expect(pinCanonicalRevision({ manifests, pins }, { manifestId: MISSING }))
+    await withStores(async ({ manifests, pins, lease }) => {
+      await expect(pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, { manifestId: MISSING }))
         .rejects.toThrow(`unknown revision manifest: ${MISSING}`);
       expect(await pins.isPinned(MISSING)).toBe(false);
+      expect(await lease.read()).toBeNull();
     });
   });
 
-  it('refuses a malformed manifest id', async () => {
-    await withStores(async ({ manifests, pins }) => {
-      await expect(pinCanonicalRevision({ manifests, pins }, { manifestId: 'not-a-manifest' })).rejects.toThrow(/invalid manifest id/);
+  it('refuses a malformed manifest id before taking the fence', async () => {
+    await withStores(async ({ manifests, pins, lease }) => {
+      await expect(pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, { manifestId: 'not-a-manifest' }))
+        .rejects.toThrow(/invalid manifest id/);
+      expect(await lease.read()).toBeNull();
+    });
+  });
+
+  it('refuses to pin while a destructive pass holds the lease', async () => {
+    await withStores(async ({ manifests, pins, lease, fixture }) => {
+      await lease.acquire({ ownerId: 'gc_prune', now: new Date(), ttlMs: 60_000 });
+      await expect(pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, { manifestId: fixture.manifestId }))
+        .rejects.toThrow(/gc lease held by gc_prune/);
+      expect(await pins.isPinned(fixture.manifestId)).toBe(false);
+    });
+  });
+
+  it('refuses to pin when the fence record is unreadable', async () => {
+    await withStores(async ({ dir, manifests, pins, lease, fixture }) => {
+      // Create the store's directory through the supported API, then corrupt
+      // the record so the fence read cannot classify it as free.
+      await lease.acquire({ ownerId: 'previous', now: new Date(), ttlMs: 60_000 });
+      await writeFile(path.join(dir, 'gc', 'lease.json'), '{ broken', 'utf8');
+      await expect(pinCanonicalRevision({ manifests, pins, lease: { store: lease, ...LEASE } }, { manifestId: fixture.manifestId }))
+        .rejects.toThrow(/fence unreadable/);
+      expect(await pins.isPinned(fixture.manifestId)).toBe(false);
     });
   });
 

@@ -1,7 +1,26 @@
 import type { CanonicalManifestStore } from './canonical-manifest-store.js';
+import type { GcLeaseStore } from './gc-lease.js';
 import type { RevisionPin, RevisionPinReason, RevisionPinRegistry } from './revision-pin-registry.js';
 
+/**
+ * The same single-owner fence revision prune takes. A pin that holds it cannot
+ * interleave with a prune's pin snapshot, and a prune that holds it makes the
+ * pin refuse instead of writing evidence the prune has already passed.
+ */
+export interface CanonicalRevisionPinLease {
+  readonly store: GcLeaseStore;
+  readonly ownerId: string;
+  readonly ttlMs: number;
+}
+
 export interface CanonicalRevisionPinDeps {
+  readonly manifests: CanonicalManifestStore;
+  readonly pins: RevisionPinRegistry;
+  /** Required: the CLI always supplies the shared GC lease. */
+  readonly lease: CanonicalRevisionPinLease;
+}
+
+export interface CanonicalRevisionUnpinDeps {
   readonly manifests: CanonicalManifestStore;
   readonly pins: RevisionPinRegistry;
 }
@@ -53,15 +72,37 @@ function reasons(pins: readonly RevisionPin[]): RevisionPinReason[] {
  * Pinning is idempotent: re-pinning the same revision refreshes the operator
  * note and timestamp without duplicating the reason, and system-owned reasons
  * on the same manifest are never touched.
+ *
+ * The pin and the manifest read happen under the shared GC lease, so a
+ * concurrent `index revision prune` cannot snapshot the pins before this write
+ * and then delete the manifest anyway: prune refuses while this command holds
+ * the fence, and this command refuses while prune holds it. The manifest is
+ * re-read inside the fence, so a revision pruned before the pin is refused
+ * rather than pinned as an orphan.
  */
 export async function pinCanonicalRevision(
   deps: CanonicalRevisionPinDeps,
   input: CanonicalRevisionPinInput,
 ): Promise<CanonicalRevisionPinReport> {
-  const manifest = await deps.manifests.get(requireManifestId(input.manifestId));
-  if (manifest === null) throw new Error(`unknown revision manifest: ${input.manifestId}`);
-  const pins = await deps.pins.pin(manifest.manifestId, OPERATOR_PIN_REASON, input.note ?? '');
-  return { manifestId: manifest.manifestId, action: 'pinned', pins: reasons(pins) };
+  const manifestId = requireManifestId(input.manifestId);
+  const acquired = await deps.lease.store.acquire({
+    ownerId: deps.lease.ownerId,
+    now: new Date(),
+    ttlMs: deps.lease.ttlMs,
+  });
+  if (acquired.status === 'denied') {
+    throw new Error(acquired.reason === 'held'
+      ? `gc lease held by ${acquired.holder} until ${acquired.expiresAt}: refusing to pin while a destructive pass runs`
+      : 'gc lease fence unreadable: refusing to pin a revision');
+  }
+  try {
+    const manifest = await deps.manifests.get(manifestId);
+    if (manifest === null) throw new Error(`unknown revision manifest: ${input.manifestId}`);
+    const pins = await deps.pins.pin(manifest.manifestId, OPERATOR_PIN_REASON, input.note ?? '');
+    return { manifestId: manifest.manifestId, action: 'pinned', pins: reasons(pins) };
+  } finally {
+    await deps.lease.store.release({ ownerId: deps.lease.ownerId, generation: acquired.generation });
+  }
 }
 
 /**
@@ -76,7 +117,7 @@ export async function pinCanonicalRevision(
  * `not-pinned` and still lists whatever system-owned reasons remain.
  */
 export async function unpinCanonicalRevision(
-  deps: CanonicalRevisionPinDeps,
+  deps: CanonicalRevisionUnpinDeps,
   input: CanonicalRevisionPinInput,
 ): Promise<CanonicalRevisionPinReport> {
   const removed = await deps.pins.unpin(requireManifestId(input.manifestId), OPERATOR_PIN_REASON);

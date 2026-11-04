@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { canonicalManifestId, canonicalRevisionId, fileArtifactId } from '@unified-mpc/domain';
@@ -457,6 +457,51 @@ describe('expire artifact-key rows (#210 §1/U23)', () => {
         expired: [{ kind: 'artifact-key', repositoryId: REPO, artifactKey: fixture.unbound.artifactKey }],
         deleted: [],
       });
+      expect(await fixture.quarantine.list()).toHaveLength(1);
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a destructive pass when a due artifact key has no delete callback', async () => {
+    const fixture = await artifactFixture();
+    try {
+      await fixture.quarantine.quarantine([keyTarget(fixture.unbound)], { now: at(0), graceMs: GRACE });
+      const result = await expireGcQuarantine(fixture.stores, {
+        indexJobManifestIds: [], now: at(GRACE * 2), graceMs: GRACE, dryRun: false,
+      });
+      // Releasing the row without deleting the record would orphan it with no
+      // evidence left to retry from, so the pass must refuse up front.
+      expect(result).toMatchObject({ status: 'refused' });
+      if (result.status !== 'refused') throw new Error('unexpected');
+      expect(result.reason).toMatch(/no artifact delete is wired/);
+      expect(await fixture.quarantine.list()).toHaveLength(1);
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['canonical ref', path.join('refs', 'remotes', 'origin', 'main.json')],
+    ['revision pin', path.join('pins', `man:v1:${'d'.repeat(64)}.json`)],
+    ['goal overlay', path.join('overlays', 'goal-unreadable.json')],
+  ])('refuses instead of deleting when a %s file cannot be read', async (_kind, relativePath) => {
+    const fixture = await artifactFixture();
+    try {
+      await fixture.quarantine.quarantine([keyTarget(fixture.retired)], { now: at(0), graceMs: GRACE });
+      const target = path.join(fixture.dir, relativePath);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, '{not json', 'utf8');
+
+      const deletedArtifacts: string[] = [];
+      const result = await expireGcQuarantine(fixture.stores, {
+        indexJobManifestIds: [], now: at(GRACE * 2), graceMs: GRACE, dryRun: false,
+        deleteStoredArtifact: async (_repositoryId, artifactKey) => { deletedArtifacts.push(artifactKey); },
+      });
+      // An unreadable root is not an absent root: refusing keeps the live
+      // artifact and its ledger evidence instead of deleting on a partial plan.
+      expect(result).toMatchObject({ status: 'refused' });
+      expect(deletedArtifacts).toEqual([]);
       expect(await fixture.quarantine.list()).toHaveLength(1);
     } finally {
       await rm(fixture.dir, { recursive: true, force: true });

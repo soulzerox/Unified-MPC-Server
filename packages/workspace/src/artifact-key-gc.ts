@@ -61,14 +61,15 @@ export interface RetainedManifestDeps {
  * Manifest ids that currently keep artifacts reachable (#210 §7) — the
  * id-level counterpart of U18's entry-level assembler. Callers that need the
  * missing-manifest fail-closed guarantee still run `assembleGcRoots`; this
- * only resolves *which* manifests are roots.
+ * only resolves *which* manifests are roots, so it reads the root stores in
+ * strict mode too: an unreadable ref/pin/overlay must not look absent.
  */
 export async function collectRetainedManifestIds(deps: RetainedManifestDeps): Promise<string[]> {
   const ids = new Set<string>();
-  for (const { state } of await deps.refs.list()) ids.add(state.manifestId);
-  for (const manifestId of await deps.pins.pinnedManifestIds()) ids.add(manifestId);
-  for (const goalWorkspaceId of await deps.overlays.listIds()) {
-    const overlay = await deps.overlays.read(goalWorkspaceId);
+  for (const { state } of await deps.refs.list({ strict: true })) ids.add(state.manifestId);
+  for (const manifestId of await deps.pins.pinnedManifestIds({ strict: true })) ids.add(manifestId);
+  for (const goalWorkspaceId of await deps.overlays.listIds({ strict: true })) {
+    const overlay = await deps.overlays.read(goalWorkspaceId, { strict: true });
     if (overlay !== null) ids.add(overlay.baseManifestId);
   }
   for (const manifestId of deps.indexJobManifestIds) ids.add(manifestId);

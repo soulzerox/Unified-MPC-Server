@@ -481,8 +481,9 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   repository-scoped artifact row.
 - Reachability is re-checked in this pass, so an artifact that became live again
   after quarantine is `retain`ed even after its deadline. A refused plan (no
-  reachability roots, or a root manifest missing on disk) prints
-  `refused <reason>` and exits `1`; nothing is released.
+  reachability roots, a root manifest missing on disk, an unreadable ref/pin/
+  overlay or index-job ledger) prints `refused <reason>` and exits `1`; nothing
+  is released.
 - Exit `0` for any plan; `1` when the plan is refused or the ledger cannot be
   read; `2` when neither mode is given, both are given, or another argument is
   unknown.
@@ -511,6 +512,11 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
 - A ledger that cannot be read (permission error, corrupt JSON, non-array
   document) exits `1` instead of being reported as an empty ledger: `due 0` must
   never stand in for "the ledger is unreadable".
+- Reachability roots are read strictly: a ref, pin, overlay or index-job ledger
+  file that cannot be read refuses the pass instead of being dropped. A dropped
+  root would make live artifacts look unreachable and get them deleted.
+- A due artifact-key row without a wired record delete refuses the pass: the
+  row is never released as "deleted" while its record survives.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
   anything is released. The lease is released afterwards even when the pass
   refuses partway.
@@ -545,6 +551,9 @@ orphaned-pins 0
 - Counts are always printed; the offending ids (`dangling-refs`,
   `missing-overlay-bases`, `orphaned-pins`) are listed under their count only
   when present.
+- A quarantine ledger that cannot be read exits `1` with the error instead of
+  printing fabricated counts: `quarantined 0` must never stand in for
+  "unreadable ledger".
 - `quarantined` counts rows waiting for GC, and `active-jobs` counts unsettled
   index jobs — neither is claimed as indexed content.
 - Exit `0` only for `healthy`; `1` for `degraded`, after printing the report; `2`

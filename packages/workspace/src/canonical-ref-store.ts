@@ -6,6 +6,7 @@ import {
   type AdvancementDecision,
   type CanonicalRefState,
 } from '@unified-mpc/domain';
+import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 export interface CanonicalRefPromoteInput {
   /** State the promoter believes is current (CAS expected). */
@@ -28,12 +29,16 @@ export interface CanonicalRefPromoteInput {
 export class CanonicalRefStore {
   public constructor(private readonly root: string) {}
 
-  public async list(): Promise<ReadonlyArray<{ readonly ref: string; readonly state: CanonicalRefState }>> {
+  public async list(options?: ReachabilityReadOptions): Promise<ReadonlyArray<{ readonly ref: string; readonly state: CanonicalRefState }>> {
+    const strict = isStrictRead(options);
     const refsDir = path.join(this.root, 'refs');
     let files: Array<{ path: string; ref: string }>;
     try {
       files = await collectJsonFiles(refsDir, 'refs/');
-    } catch {
+    } catch (error) {
+      if (strict && !isMissingPath(error)) {
+        throw new Error(`cannot read the canonical refs directory: ${errorMessage(error)}`);
+      }
       return [];
     }
     const states: Array<{ ref: string; state: CanonicalRefState }> = [];
@@ -41,9 +46,12 @@ export class CanonicalRefStore {
       try {
         const raw = await readFile(file.path, 'utf8');
         const parsed: unknown = JSON.parse(raw);
-        if (isRefState(parsed)) states.push({ ref: file.ref, state: parsed });
-      } catch {
-        // Skip unreadable/corrupted ref files rather than failing the listing.
+        if (!isRefState(parsed)) throw new Error('not a canonical ref state');
+        states.push({ ref: file.ref, state: parsed });
+      } catch (error) {
+        // Tolerant listings skip unreadable refs; a GC planning read must not,
+        // because a skipped ref silently removes its manifest from the roots.
+        if (strict) throw new Error(`cannot read canonical ref ${file.ref}: ${errorMessage(error)}`);
       }
     }
     return states.sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));

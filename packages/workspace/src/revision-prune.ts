@@ -51,11 +51,14 @@ export async function pruneRevisionManifests(deps: RevisionPruneDeps): Promise<R
     else if (!reasons.includes(reason)) reasons.push(reason);
   };
 
-  for (const { state } of await deps.refs.list()) {
+  // Strict root reads: this function can delete manifest rows, so an unreadable
+  // ref/pin/overlay must refuse the plan rather than look like an absent root
+  // and let a still-referenced manifest be pruned.
+  for (const { state } of await deps.refs.list({ strict: true })) {
     if ((await deps.manifests.get(state.manifestId)) !== null) retain(state.manifestId, 'canonical-ref');
   }
-  for (const goalWorkspaceId of await deps.overlays.listIds()) {
-    const overlay = await deps.overlays.read(goalWorkspaceId);
+  for (const goalWorkspaceId of await deps.overlays.listIds({ strict: true })) {
+    const overlay = await deps.overlays.read(goalWorkspaceId, { strict: true });
     if (overlay !== null && (await deps.manifests.get(overlay.baseManifestId)) !== null) {
       retain(overlay.baseManifestId, 'overlay-base');
     }
@@ -63,7 +66,7 @@ export async function pruneRevisionManifests(deps: RevisionPruneDeps): Promise<R
   for (const manifestId of deps.indexJobManifestIds) {
     if ((await deps.manifests.get(manifestId)) !== null) retain(manifestId, 'index-job');
   }
-  for (const manifestId of await deps.pins.pinnedManifestIds()) {
+  for (const manifestId of await deps.pins.pinnedManifestIds({ strict: true })) {
     if ((await deps.manifests.get(manifestId)) !== null) retain(manifestId, 'pin');
   }
 

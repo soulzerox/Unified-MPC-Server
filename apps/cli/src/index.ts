@@ -965,7 +965,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         overlays: new GoalOverlayStore(root),
         // The ledger is read immediately before planning so a live index job
         // cannot have its manifest collected by a plan built from a stale list.
-        indexJobManifestIds: await jobs.liveManifestIds(),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         dryRun: input.dryRun,
       });
     },
@@ -1005,7 +1005,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       }, {
         candidates: [...contentHashes].sort(),
         artifactCandidates,
-        indexJobManifestIds: await jobs.liveManifestIds(),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         now: new Date(),
         // The caller's window: every row this pass writes carries the same
         // deadline, so a later `index gc expire --apply` can prove grace.
@@ -1033,7 +1033,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         quarantine: new ArtifactQuarantineStore(root),
         artifacts,
       }, {
-        indexJobManifestIds: await jobs.liveManifestIds(),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
         now: new Date(),
         // Each quarantine row carries its own grace deadline; the cycle-level
         // window is unused by the expire pass, but the contract requires it.

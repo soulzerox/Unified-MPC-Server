@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 export type IndexJobStatus = 'pending' | 'active';
 
@@ -96,9 +97,9 @@ export class IndexJobLedger {
     return [...(await this.readAll()).values()].sort((a, b) => (a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0));
   }
 
-  public async liveManifestIds(): Promise<string[]> {
+  public async liveManifestIds(options?: ReachabilityReadOptions): Promise<string[]> {
     const live = new Set<string>();
-    for (const record of (await this.readAll()).values()) {
+    for (const record of (await this.readAll(options)).values()) {
       live.add(record.manifestId);
     }
     return [...live].sort();
@@ -108,19 +109,37 @@ export class IndexJobLedger {
     return path.join(this.root, 'index-jobs', 'jobs.json');
   }
 
-  private async readAll(): Promise<Map<string, IndexJobRecord>> {
+  private async readAll(options?: ReachabilityReadOptions): Promise<Map<string, IndexJobRecord>> {
+    const strict = isStrictRead(options);
+    let raw: string;
     try {
-      const raw = await readFile(this.ledgerPath(), 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return new Map();
-      const jobs = new Map<string, IndexJobRecord>();
-      for (const value of parsed) {
-        if (isRecord(value)) jobs.set(value.operationId, value);
-      }
-      return jobs;
-    } catch {
+      raw = await readFile(this.ledgerPath(), 'utf8');
+    } catch (error) {
+      if (strict && !isMissingPath(error)) throw new Error(`cannot read the index job ledger: ${errorMessage(error)}`);
       return new Map();
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      if (strict) throw new Error(`index job ledger is not valid JSON: ${errorMessage(error)}`);
+      return new Map();
+    }
+    if (!Array.isArray(parsed)) {
+      if (strict) throw new Error('index job ledger is not an array');
+      return new Map();
+    }
+    const jobs = new Map<string, IndexJobRecord>();
+    for (const value of parsed) {
+      // A malformed row can name a live manifest, so a GC planning read refuses
+      // instead of silently dropping that root. Tolerant callers keep skipping.
+      if (!isRecord(value)) {
+        if (strict) throw new Error('index job ledger contains a malformed record');
+        continue;
+      }
+      jobs.set(value.operationId, value);
+    }
+    return jobs;
   }
 
   private async write(jobs: ReadonlyMap<string, IndexJobRecord>): Promise<void> {

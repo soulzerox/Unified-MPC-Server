@@ -45,7 +45,27 @@ slice closes the #210 deletion loop.
     policy question recorded on #628/#630.
 - Help gains the apply line.
 
-### 3. Docs and guard
+### 3. Fail-closed reachability roots (`packages/workspace`)
+
+The destructive pass derives its only garbage verdict from the refs, pins,
+overlays and index-job ledger. Those readers used to swallow read/parse errors
+and return a smaller set, which a *listing* may do but a *delete plan* may not:
+one unreadable ref/pin/overlay/ledger file would silently drop a live root and
+make its artifacts look unreachable.
+
+- `CanonicalRefStore.list`, `RevisionPinRegistry.pinnedManifestIds`,
+  `GoalOverlayStore.listIds`/`read` and `IndexJobLedger.liveManifestIds` accept
+  `{ strict: true }` (`ReachabilityReadOptions`). Strict mode still treats a
+  missing file/directory as the legitimately empty case, and refuses on any
+  other failure or on a malformed record.
+- `assembleGcRoots`, `collectRetainedManifestIds` and `pruneRevisionManifests`
+  read strictly, because all three can end in a deletion. A thrown strict read
+  becomes `refused <reason>` (expire) or an error exit (prune), never a
+  partial plan.
+- Operator surfaces (`index status`) keep the tolerant readers, so they still
+  report what they can.
+
+### 4. Docs and guard
 
 - `docs/CLI_REFERENCE.md` §9 gains the apply subsection with the two id spaces'
   deletion semantics, the lease refusal, retained-row behavior and exit codes.
@@ -66,6 +86,16 @@ slice closes the #210 deletion loop.
   `due 0` while rows are still on disk. Malformed individual rows keep the
   original drop-on-read tolerance.
 - No lease renewal; the same TTL ceiling noted on #630 applies.
+- No tolerant reachability: `assembleGcRoots`, `collectRetainedManifestIds` and
+  `pruneRevisionManifests` now read refs, pins, overlays and the index-job
+  ledger in strict mode (`ReachabilityReadOptions`), so one unreadable root file
+  refuses the pass instead of silently dropping that root and making live
+  artifacts look unreachable. Operator surfaces keep the tolerant listing.
+- No silent skip of a due artifact-key row: if the record delete callback is not
+  wired the destructive pass refuses up front instead of releasing the ledger
+  row and reporting it as deleted.
+- No fabricated status counts: an unreadable quarantine ledger makes
+  `index status` exit `1` with the error rather than print `quarantined 0`.
 
 ## Verification
 

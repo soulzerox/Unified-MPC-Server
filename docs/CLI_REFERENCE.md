@@ -372,12 +372,11 @@ pins none
   the store cannot be written; `2` for arguments that are not `pin|unpin` plus
   one manifest id and an optional `--note` (pin only) or `--json`.
 
-### `unified-mpc index revision prune --dry-run [--json]`
+### `unified-mpc index revision prune --dry-run|--apply [--json]`
 
-Prints the plan a prune would execute: every stored revision manifest that no
-canonical ref, pin, Goal overlay base or unsettled index job still holds, plus
-every revision the planner retains and the root that holds it. The command only
-reads; `--dry-run` is required rather than defaulted.
+Plans or executes the prune of revision manifests: every stored revision that no
+canonical ref, pin, Goal overlay base or unsettled index job still holds.
+Exactly one mode is required rather than defaulted.
 
 ```bash
 $ unified-mpc index revision prune --dry-run
@@ -387,18 +386,26 @@ retain man:v1:3c9f1e7a5d2b canonical-ref
 retain man:v1:ff0371d8c4e2 pin
 ```
 
-- `prune` lines are candidates for a later deletion slice, not deletions. This
-  verb has no `--apply`: deletion needs a fence that re-checks pins and index
-  jobs under the same lock that removes the manifest, so it ships separately.
+- `--dry-run` prints `prune` candidates and never writes. `--apply` takes the
+  single-owner GC lease, re-reads every reachability root at execution time and
+  deletes only the manifests that are still unreachable, so a `pin` or `advance`
+  created after the plan is retained.
+- Only revision manifest JSON is deleted. Content-addressed artifacts are shared
+  and stay with artifact GC, which re-checks reachability after quarantine.
+- An apply prints `applied pruneable N removed N retained N`, then one
+  `removed <id>` line per deleted manifest and the `retain` lines. A refused
+  pass prints `refused <reason>`: another owner holds the lease, the fence
+  record is unreadable, or the pass ran without a lease.
 - `retain` lines name why the planner kept a revision: `canonical-ref`, `pin`,
   `overlay-base` or `index-job`.
 - A plan with nothing to collect prints `planned (dry-run) pruneable 0 retained N`
   and still exits `0`.
-- The plan is advisory: a concurrent `pin` or `advance` can change
-  reachability, so re-run the plan before acting on it.
-- Exit `0` for any successful plan; `1` when the store cannot be read; `2` when
-  `--dry-run` is missing, `--apply` is requested, or another argument is
-  unknown.
+- The residual race is bounded and documented: a pin that lands after `--apply`
+  reads the registry but before the manifest row is deleted is still pruned, the
+  same window `index gc expire --apply` accepts.
+- Exit `0` for a plan or a completed pass; `1` when the pass refuses or the
+  store cannot be read; `2` when neither mode, both modes, or another argument
+  is given.
 
 ### `unified-mpc index gc --dry-run|--apply [--grace <duration>] [--json]`
 

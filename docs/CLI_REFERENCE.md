@@ -465,7 +465,9 @@ artifact-quarantined repo:v1:documented file:v1:ff0371d8c4e2
 
 - `--grace` sets the quarantine window: `<n><s|m|h|d>`, default `7d`, zero
   rejected. Nothing is deleted here; `index gc expire` is the step that
-  releases due rows after a reachability re-check.
+  releases due rows after a reachability re-check. A window that would place
+  the deadline outside the range a date can represent is refused instead of
+  writing a row that can never expire.
 - A dry run does not accept `--grace`: it stamps no deadline.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
   anything is written. Concurrent passes therefore cannot quarantine from two
@@ -520,7 +522,10 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   nothing else to delete.
 - A row whose grace deadline cannot be placed on the timeline is retained, not
   deleted: `index gc status` reports the same row as `until unreadable`, so a
-  destructive pass that expired it would contradict the read-only surface.
+  destructive pass that expired it would contradict the read-only surface. Such
+  a row can never become due, so an operator has to remove it from
+  `quarantine/candidates.json`; `index gc --apply` refuses a `--grace` window
+  that would stamp one, so this state only comes from a hand-edited ledger.
 - A record delete that fails for any reason other than "already gone" aborts the
   pass: the row stays in the ledger, `failed to delete canonical artifact ...`
   reports the key, the repository and the cause, and the lease is still
@@ -537,7 +542,8 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   anything is released. The lease is released afterwards even when the pass
   refuses partway.
 - Retained rows stay in the ledger, so a later run can delete them once their
-  deadline passes or their reachability is settled.
+  deadline passes or their reachability is settled. That does not hold for a row
+  whose deadline is unreadable: it is retained forever, as described above.
 - Exit `0` when the pass applied; `1` when it is refused or the ledger cannot be
   read; `2` for a usage error.
 

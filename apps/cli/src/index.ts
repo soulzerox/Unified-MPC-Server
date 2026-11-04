@@ -20,6 +20,7 @@ import {
   gcStatus,
   GoalOverlayStore,
   IndexJobLedger,
+  logicalSpaceReport,
   pinCanonicalRevision,
   pruneRevisionManifests,
   RevisionPinRegistry,
@@ -33,6 +34,7 @@ import {
   type GcExpireReport,
   type GcStatusReport,
   type GitRevisionAdvanceResult,
+  type LogicalSpaceReport,
   type RevisionPruneReport,
   type Workspace,
 } from '@unified-mpc/workspace';
@@ -126,6 +128,12 @@ import {
   parseIndexGcStatusArgs,
   type IndexGcStatusCommand,
 } from './commands/index-gc-status.js';
+import {
+  formatLogicalSpace,
+  indexSpaceExitCode,
+  parseIndexSpaceArgs,
+  type IndexSpaceCommand,
+} from './commands/index-space.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -181,6 +189,7 @@ export type CliCommand =
   | IndexGcExpireCommand
   | IndexGcStatusCommand
   | IndexStatusCommand
+  | IndexSpaceCommand
   | PublishCredentialCommand
   | WebCommand
   | ToolsCommand;
@@ -217,6 +226,7 @@ export interface CliDependencies {
     readonly repositoryId?: string;
   }): Promise<GitRevisionAdvanceResult>;
   canonicalStatus?(): Promise<CanonicalStatusReport>;
+  canonicalLogicalSpace?(): Promise<LogicalSpaceReport>;
   canonicalRevisionList?(): Promise<CanonicalRevisionListReport>;
   canonicalRevisionPin?(input: {
     readonly action: 'pin' | 'unpin';
@@ -265,6 +275,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
+    if (args[1] === 'space') return parseIndexSpaceArgs(args.slice(1));
     if (args[1] === 'gc') {
       if (args[2] === 'expire') return parseIndexGcExpireArgs(args.slice(1));
       if (args[2] === 'status') return parseIndexGcStatusArgs(args.slice(1));
@@ -277,7 +288,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
       if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
       return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|prune|advance ...'));
     }
-    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision|gc ...'));
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|space|revision|gc ...'));
   }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
@@ -318,6 +329,7 @@ Commands:
   index gc expire --apply                Release due quarantine rows and delete artifacts
   index gc status [--json]               Report the GC lease and quarantine deadlines
   index status [--json]                  Report canonical store health, refs and blocking state
+  index space [--json]                   Report logical canonical-space counts, never physical bytes
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
   publish-credential status <lease>      Show lease expiry and hosts without the secret
@@ -524,6 +536,20 @@ Commands:
         const report = await dependencies.canonicalStatus();
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalStatus(report));
         return indexStatusExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-space': {
+      if (dependencies.canonicalLogicalSpace === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.canonicalLogicalSpace();
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatLogicalSpace(report));
+        return indexSpaceExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -963,6 +989,30 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         jobs: new IndexJobLedger(root),
+      });
+    },
+    canonicalLogicalSpace: async (): Promise<LogicalSpaceReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      const artifacts = new CanonicalArtifactStore(root);
+      const stored = await artifacts.list();
+      const contentHashes = new Set<string>();
+      for (const artifact of stored) {
+        // Semantic (chunk) artifacts are owned by the Thai-RAG GC boundary, and
+        // the reachability planner reads file bindings only, so counting chunk
+        // keys here would report every one of them as unreferenced.
+        if (artifact.kind !== 'file') continue;
+        contentHashes.add(artifact.sourceContentSha256);
+      }
+      const jobs = new IndexJobLedger(root);
+      return logicalSpaceReport({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
+        indexJobManifestIds: await jobs.liveManifestIds({ strict: true }),
+        artifactCandidates: [...contentHashes].sort(),
       });
     },
     canonicalRevisionPin: async (input): Promise<CanonicalRevisionPinReport> => {

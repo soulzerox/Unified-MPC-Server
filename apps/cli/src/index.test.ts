@@ -911,6 +911,83 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['STORAGE_IDENTITY_DRIFT: recovery required']);
   });
 
+  it('reports logical canonical-space counts without claiming physical bytes', async () => {
+    const report = {
+      status: 'measured' as const,
+      manifests: {
+        total: 2,
+        retained: 1,
+        prunable: 1,
+        retainedManifestIds: ['man:v1:live'],
+        prunableManifestIds: ['man:v1:orphan'],
+      },
+      artifacts: {
+        total: 2,
+        reachable: 1,
+        unreferenced: 1,
+        unreferencedHashes: ['a'.repeat(64)],
+        bytesMeasurable: false,
+        reachableBytes: null,
+        unreferencedBytes: null,
+      },
+    };
+    const output: string[] = [];
+    const seen: string[] = [];
+    const code = await runCli(['index', 'space'], {
+      ...baseDependencies,
+      canonicalLogicalSpace: async () => {
+        seen.push('canonicalLogicalSpace');
+        return report;
+      },
+      write: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seen).toEqual(['canonicalLogicalSpace']);
+    expect(output[0]?.split('\n')).toEqual([
+      'logical space: measured',
+      'manifests total=2 retained=1 prunable=1',
+      'artifacts total=2 reachable=1 unreferenced=1',
+      'bytes reachable=unmeasured unreferenced=unmeasured',
+    ]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'space', '--json'], {
+      ...baseDependencies,
+      canonicalLogicalSpace: async () => report,
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual(report);
+
+    const refused: string[] = [];
+    const refusedCode = await runCli(['index', 'space'], {
+      ...baseDependencies,
+      canonicalLogicalSpace: async () => ({ status: 'refused' as const, reason: 'missing root manifest man:v1:gone' }),
+      write: (text) => refused.push(text),
+    });
+    expect(refusedCode).toBe(1);
+    expect(refused).toEqual(['refused missing root manifest man:v1:gone']);
+  });
+
+  it('fails the logical space command when the service is unavailable or throws', async () => {
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'space'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Canonical index service is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'space'], {
+      ...baseDependencies,
+      canonicalLogicalSpace: async () => { throw new Error('CONFLICT: indexing is running'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['CONFLICT: indexing is running']);
+  });
+
   it('lists stored canonical revisions and fails like every other index command', async () => {
     const revision = {
       manifestId: `man:v1:${'a'.repeat(64)}`,

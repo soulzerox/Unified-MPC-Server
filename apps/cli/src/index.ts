@@ -1029,12 +1029,16 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         manifests: new CanonicalManifestStore(root),
         pins: new RevisionPinRegistry(root),
       };
-      return input.action === 'pin'
-        ? pinCanonicalRevision(deps, {
-          manifestId: input.manifestId,
-          ...(input.note === undefined ? {} : { note: input.note }),
-        })
-        : unpinCanonicalRevision(deps, { manifestId: input.manifestId });
+      if (input.action === 'unpin') return unpinCanonicalRevision(deps, { manifestId: input.manifestId });
+      // Pinning takes the same single-owner fence a prune does, so it cannot
+      // land between the prune's pin snapshot and the manifest delete.
+      return pinCanonicalRevision({
+        ...deps,
+        lease: { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS },
+      }, {
+        manifestId: input.manifestId,
+        ...(input.note === undefined ? {} : { note: input.note }),
+      });
     },
     indexRevisionPrune: async (input): Promise<RevisionPruneReport> => {
       const dataPath = resolveDataPathFromShared();

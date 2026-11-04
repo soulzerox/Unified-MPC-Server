@@ -350,6 +350,12 @@ pins user-pin
 - A well-formed id whose manifest is not stored is refused (`unknown revision
   manifest`) instead of leaving an orphan pin the store verify path would report
   as degraded.
+- The pin takes the same single-owner GC lease as `index revision prune` and
+  `index gc`, so it cannot land in the window between a prune's pin snapshot
+  and its manifest delete. A destructive pass that already holds the lease
+  refuses the pin with `gc lease held by ...`; retry after it finishes. The
+  manifest is re-read under the fence, so a revision pruned before the pin is
+  refused rather than pinned as an orphan.
 - Re-pinning refreshes the note and timestamp; the reason is not duplicated.
 
 ### `unified-mpc index revision unpin <manifest-id> [--json]`
@@ -368,9 +374,10 @@ pins none
 - The manifest does not have to exist. Unpinning a revision whose manifest was
   already deleted is how an orphan pin is cleaned up, so this command is the
   supported repair for that degraded state.
-- Exit `0` for any successful pin or unpin; `1` when the manifest is unknown or
-  the store cannot be written; `2` for arguments that are not `pin|unpin` plus
-  one manifest id and an optional `--note` (pin only) or `--json`.
+- Exit `0` for any successful pin or unpin; `1` when the manifest is unknown,
+  the GC lease is held or unreadable, or the store cannot be written; `2` for
+  arguments that are not `pin|unpin` plus one manifest id and an optional
+  `--note` (pin only) or `--json`.
 
 ### `unified-mpc index revision prune --dry-run|--apply [--json]`
 

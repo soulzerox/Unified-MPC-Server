@@ -6,7 +6,20 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { AuditService } from '@unified-mpc/audit';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
 import { DoctorService, WorkspaceSelectionService, type DoctorProbes, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
-import { advanceRevisionFromGit, WorkspaceService, type GitRevisionAdvanceResult, type Workspace } from '@unified-mpc/workspace';
+import {
+  advanceRevisionFromGit,
+  ArtifactQuarantineStore,
+  canonicalStatus,
+  CanonicalManifestStore,
+  CanonicalRefStore,
+  GoalOverlayStore,
+  IndexJobLedger,
+  RevisionPinRegistry,
+  WorkspaceService,
+  type CanonicalStatusReport,
+  type GitRevisionAdvanceResult,
+  type Workspace,
+} from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
@@ -57,6 +70,12 @@ import {
   parseIndexRevisionArgs,
   type IndexRevisionCommand,
 } from './commands/index-revision.js';
+import {
+  formatCanonicalStatus,
+  indexStatusExitCode,
+  parseIndexStatusArgs,
+  type IndexStatusCommand,
+} from './commands/index-status.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -100,6 +119,7 @@ export type CliCommand =
   | SyncCommand
   | StorageCommand
   | IndexRevisionCommand
+  | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
   | ToolsCommand;
@@ -135,6 +155,7 @@ export interface CliDependencies {
     readonly ref: string;
     readonly repositoryId?: string;
   }): Promise<GitRevisionAdvanceResult>;
+  canonicalStatus?(): Promise<CanonicalStatusReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -164,7 +185,11 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'prune') return parsePruneArgs(args.slice(1));
   if (args[0] === 'sync') return parseSyncArgs(args.slice(1));
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
-  if (args[0] === 'index') return parseIndexRevisionArgs(args.slice(1));
+  if (args[0] === 'index') {
+    if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
+    if (args[1] === 'revision') return parseIndexRevisionArgs(args.slice(1));
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision ...'));
+  }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
@@ -194,6 +219,7 @@ Commands:
   storage recover                        Recover one unambiguous historical SQLite database safely
   storage metrics [--json]               Report SQLite db/WAL/SHM bytes, page/freelist counts and compaction evidence
   index revision advance [--ref <ref>]   Advance the canonical revision pointer from an exact Git tree
+  index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
   publish-credential status <lease>      Show lease expiry and hosts without the secret
@@ -295,6 +321,20 @@ Commands:
         });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexRevisionAdvance(report));
         return indexRevisionAdvanceExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-status': {
+      if (dependencies.canonicalStatus === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.canonicalStatus();
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalStatus(report));
+        return indexStatusExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -688,6 +728,19 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         targetRef: input.ref,
         now: new Date(),
         ...(input.repositoryId === undefined ? {} : { repositoryId: input.repositoryId }),
+      });
+    },
+    canonicalStatus: async (): Promise<CanonicalStatusReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      return canonicalStatus({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
+        quarantine: new ArtifactQuarantineStore(root),
+        jobs: new IndexJobLedger(root),
       });
     },
     publishCredential: async (

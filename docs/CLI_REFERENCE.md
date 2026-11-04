@@ -305,6 +305,39 @@ Exit code `0` means the ref is at that revision and every classified entry has a
 artifact record; `1` means the store needs attention; `2` means the arguments
 were not understood.
 
+### `unified-mpc index status [--json]`
+
+Read-only snapshot of the canonical store: the health verdict, every active ref
+with its manifest id and commit, the store counts, and every blocking id. The
+verdict comes from the store's own consistency check, so a dangling ref, a Goal
+overlay whose pinned base manifest is gone, or a pin whose manifest is missing
+is reported as `degraded` rather than guessed at.
+
+```bash
+$ unified-mpc index status
+canonical store: healthy
+refs 1
+  refs/remotes/origin/main man:v1:3c9f1e7a5d2b commit 4d1c0a1f8b25
+manifests 1
+pins 0
+overlays 0
+quarantined 0
+active-jobs 0
+dangling-refs 0
+missing-overlay-bases 0
+orphaned-pins 0
+```
+
+- Counts are always printed; the offending ids (`dangling-refs`,
+  `missing-overlay-bases`, `orphaned-pins`) are listed under their count only
+  when present.
+- `quarantined` counts rows waiting for GC, and `active-jobs` counts unsettled
+  index jobs — neither is claimed as indexed content.
+- Exit `0` only for `healthy`; `1` for `degraded`, after printing the report; `2`
+  for arguments that are not `status` plus an optional `--json`.
+- `--json` prints the unprojected `CanonicalStatusReport` instead of the
+  operator lines.
+
 ---
 
 ## 10. Exit Code Contract

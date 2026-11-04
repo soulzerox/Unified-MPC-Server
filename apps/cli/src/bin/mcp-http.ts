@@ -5,14 +5,9 @@ import { createCrossClientHostMutationApprovalProvider, createMcpRuntimeDiagnost
 import { isUnrestricted, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { assertStorageIdentitySafe, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
-import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, desktopFullBypassAllEnabled, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
+import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, desktopFullBypassAllEnabled, resolveMcpHttpPort, startMcpHttpBeforeProvider } from '../commands/mcp-http.js';
 import { createStdioMcpRuntime } from '../runtime/stdio-mcp-runtime.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
-
-function envPort(): number {
-  const value = Number(process.env.UNIFIED_MPC_PORT ?? 18765);
-  return Number.isInteger(value) && value >= 0 && value <= 65_535 ? value : 18765;
-}
 
 function envList(name: string): readonly string[] | undefined {
   const values = (process.env[name] ?? '').split(',').map((value) => value.trim()).filter(Boolean);
@@ -61,7 +56,7 @@ async function main(): Promise<void> {
   });
   const startup = await startMcpHttpBeforeProvider({
     start: async () => startMcpHttp(createWebMcpHttpServerOptions({
-      port: envPort(),
+      port: resolveMcpHttpPort(),
       buildProvenance,
       runtimeAdmissionIdentity,
       services: runtime.services,

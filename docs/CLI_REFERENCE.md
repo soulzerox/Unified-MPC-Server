@@ -19,10 +19,18 @@ workspaces: 1
 ```
 
 ### `unified-mpc doctor`
-Performs comprehensive operational diagnostics on core databases, capabilities, and system dependencies. It prints one `[STATUS] id: message` line per check and exits non-zero when a required check fails.
+Runs the operational diagnostics the runtime itself depends on: operating system, the SQLite core database, Git, ripgrep, the workspace registry, the HTTP MCP port, and Codex. It prints one `[STATUS] id: message` line per check and exits non-zero when a required check fails.
+
+Required checks are `os`, `database`, `ripgrep`, and `mcp-port`. `git`, `workspaces`, and `codex` are informational: missing Git, a clean profile without a registered project, or no Codex install is reported as `WARN` without failing the command. A port already held by the running server is also a `WARN`, so `doctor` stays usable while Unified-MPC is up.
 ```bash
 $ unified-mpc doctor
+[PASS] os: linux x64 (6.8.0-1018-azure)
 [PASS] database: Unified MCP core operational
+[PASS] git: Git ready (/usr/bin/git)
+[PASS] ripgrep: ripgrep ready (/usr/bin/rg)
+[PASS] workspaces: 1 workspace configured
+[WARN] mcp-port: MCP port 18765 is already in use
+[WARN] codex: Codex is not installed
 ```
 
 ---

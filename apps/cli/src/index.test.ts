@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -808,6 +808,66 @@ describe('CLI execution dispatcher', () => {
     const code = await runCli(['tools', 'call', 'echo', '{"hello":"world"}'], deps);
     expect(code).toBe(0);
     expect(JSON.parse(output[0]!)).toEqual({ executed: 'echo', args: { hello: 'world' } });
+  });
+
+  it('runs the injected doctor probes instead of the retired hardcoded pass', async () => {
+    const output: string[] = [];
+    const dependencies = createDefaultCliDependencies({
+      doctorProbes: {
+        os: async () => ({ status: 'pass', message: 'linux x64' }),
+        database: async () => ({ status: 'fail', message: 'database unavailable: disk I/O error' }),
+        git: async () => ({ status: 'pass', message: 'Git ready' }),
+        ripgrep: async () => ({ status: 'pass', message: 'ripgrep ready' }),
+        workspaces: async () => ({ status: 'pass', message: '1 workspace configured' }),
+        mcpPort: async () => ({ status: 'pass', message: 'MCP port 18765 is available' }),
+        codex: async () => ({ status: 'warn', message: 'Codex is not installed' }),
+      },
+    });
+
+    const exitCode = await runCli(['doctor'], { ...dependencies, write: (text) => output.push(text) });
+
+    expect(exitCode).toBe(1);
+    expect(output.join('\n')).toContain('[FAIL] database: database unavailable: disk I/O error');
+  });
+
+  it('runs the real host probes when no override is supplied', async () => {
+    const binDirectory = await mkdtemp(path.join(os.tmpdir(), 'doctor-bin-'));
+    const dataHome = await mkdtemp(path.join(os.tmpdir(), 'doctor-data-'));
+    const previousPath = process.env.PATH;
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    try {
+      for (const name of ['rg', 'git', 'codex']) {
+        const binary = path.join(binDirectory, name);
+        await writeFile(binary, '#!/bin/sh\nexit 0\n');
+        await chmod(binary, 0o755);
+      }
+      process.env.PATH = binDirectory;
+      process.env.UNIFIED_MPC_DATA_PATH = dataHome;
+      // Keep the historical-storage drift check inside the sandbox too.
+      process.env.HOME = dataHome;
+      process.env.XDG_DATA_HOME = path.join(dataHome, 'xdg');
+
+      const output: string[] = [];
+      const exitCode = await runCli(['doctor'], { ...createDefaultCliDependencies(), write: (text) => output.push(text) });
+
+      expect(exitCode, output.join('\n')).toBe(0);
+      const lines = output.join('\n').split('\n');
+      expect(lines).toHaveLength(7);
+      expect(lines).toContain('[PASS] database: Unified MCP core operational');
+      expect(lines).toContain(`[PASS] ripgrep: ripgrep ready (${path.join(binDirectory, 'rg')})`);
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(binDirectory, { recursive: true, force: true });
+      await rm(dataHome, { recursive: true, force: true });
+    }
   });
 
   it('prints sanitized Codex discovery diagnostics from codex doctor', async () => {

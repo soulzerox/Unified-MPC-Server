@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { AuditService } from '@unified-mpc/audit';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
-import { WorkspaceSelectionService, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
+import { DoctorService, WorkspaceSelectionService, type DoctorProbes, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import { WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
@@ -28,7 +28,8 @@ import {
   type SyncTarget,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
-import { formatDoctorReport } from './commands/doctor.js';
+import { createDoctorProbes, formatDoctorReport, resolveOnPath } from './commands/doctor.js';
+import { resolveMcpHttpPort } from './commands/mcp-http.js';
 import {
   parseInstallSkillArgs,
   parseInstallServerArgs,
@@ -478,6 +479,8 @@ export interface DefaultCliDependenciesOptions {
   readonly runtimeAdmissionIdentity?: StdioMcpRuntimeOptions['runtimeAdmissionIdentity'];
   readonly thaiRagDriver?: StdioMcpRuntimeOptions['thaiRagDriver'];
   readonly extensions?: ExtensionsService;
+  /** Overrides the host probes behind `doctor`; production always uses the real ones. */
+  readonly doctorProbes?: DoctorProbes;
 }
 
 export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
@@ -619,10 +622,15 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       return err(appError('INTERNAL_ERROR', 'Direct HTTP MCP launch requires mcp-http runner'));
     },
     doctor: async (): Promise<DoctorReport> => {
-      return {
-        checks: [{ id: 'database', status: 'pass', message: 'Unified MCP core operational', required: true }],
-        exitCode: 0,
-      };
+      const probes = options.doctorProbes ?? createDoctorProbes({
+        lookupExecutable: async (executable) => resolveOnPath(executable),
+        probeDatabase: async () => {
+          getWorkspaceState().database.connection.prepare('SELECT 1').get();
+        },
+        workspaceCount: async () => (await getWorkspaceService().list()).length,
+        mcpPort: resolveMcpHttpPort(),
+      });
+      return new DoctorService(probes).run();
     },
     codexDoctor: async (): Promise<Result<CodexDiscoveryResult>> => {
       return ok({

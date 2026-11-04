@@ -74,6 +74,43 @@ describe('GC quarantine expiry (#210 U23)', () => {
     }
   });
 
+  it('retains a row whose deadline leaves the representable range while a provable row still expires', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-expire-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const manifests = new CanonicalManifestStore(dir);
+      const pins = new RevisionPinRegistry(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const quarantine = new ArtifactQuarantineStore(dir);
+      await seedLiveRoot(manifests, refs);
+      // A hand-edited or corrupted ledger: the second row sums to a time in the
+      // past that no Date can represent. It has no provable deadline, so the
+      // destructive pass must retain it instead of expiring it.
+      await mkdir(path.join(dir, 'quarantine'), { recursive: true });
+      await writeFile(
+        path.join(dir, 'quarantine', 'candidates.json'),
+        JSON.stringify([
+          { kind: 'content-hash', hash: H('a'), quarantinedAt: at(-GRACE * 10).toISOString(), graceMs: GRACE },
+          { kind: 'content-hash', hash: H('b'), quarantinedAt: T0.toISOString(), graceMs: -9e15 },
+        ]),
+        'utf8',
+      );
+      const deleted: string[] = [];
+      const result = await expireGcQuarantine(
+        { refs, manifests, pins, overlays, quarantine },
+        {
+          indexJobManifestIds: [], now: at(GRACE), graceMs: GRACE, dryRun: false,
+          deleteArtifact: async (hash) => { deleted.push(hash); },
+        },
+      );
+      expect(deleted).toEqual([H('a')]);
+      expect(result).toMatchObject({ status: 'planned', expired: [H('a')], deleted: [H('a')] });
+      expect((await quarantine.list()).map((entry) => (entry.kind === 'content-hash' ? entry.hash : entry.artifactKey))).toEqual([H('b')]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('re-resolves and refuses when the hash got referenced by a pin', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-expire-'));
     try {

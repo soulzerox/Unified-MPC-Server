@@ -135,4 +135,30 @@ describe('gc status projection (#210 §7)', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('projects an out-of-range deadline as unreadable instead of throwing', async () => {
+    const { root, quarantine, lease } = await tempStores();
+    try {
+      // `quarantinedAt` parses, but the grace sum leaves the range a Date can
+      // represent. Reading it must be a report, not a RangeError, and the row
+      // must never be due: the expire pass uses the same predicate.
+      await mkdir(path.join(root, 'quarantine'), { recursive: true });
+      await writeFile(
+        path.join(root, 'quarantine', 'candidates.json'),
+        JSON.stringify([{ kind: 'content-hash', hash: H('5'), quarantinedAt: NOW.toISOString(), graceMs: Number.MAX_SAFE_INTEGER }]),
+        'utf8',
+      );
+      const report = await gcStatus({ quarantine, lease }, { now: NOW });
+      expect(report.quarantine.rows).toEqual([{
+        target: H('5'),
+        quarantinedAt: NOW.toISOString(),
+        graceMs: Number.MAX_SAFE_INTEGER,
+        expiresAt: null,
+        due: false,
+      }]);
+      expect(report.quarantine.inGrace).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

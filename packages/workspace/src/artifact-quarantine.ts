@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-interface QuarantineTimes {
+export interface QuarantineTimes {
   readonly quarantinedAt: string;
   readonly graceMs: number;
 }
@@ -131,6 +131,27 @@ export function quarantineEntryTarget(entry: QuarantineEntry): QuarantineTarget 
     : { kind: 'artifact-key', repositoryId: entry.repositoryId, artifactKey: entry.artifactKey };
 }
 
+/** Largest time value a `Date` can represent, in epoch milliseconds. */
+const MAX_TIME_MS = 8.64e15;
+
+/**
+ * The row's grace deadline in epoch milliseconds, or `null` when its own times
+ * cannot be placed on the timeline (#210 §7).
+ *
+ * `quarantinedAt` may not parse, `graceMs` may be non-finite, and even a
+ * parseable pair can sum outside the range a `Date` can represent. Those rows
+ * have no provable deadline, so a read-only projection prints
+ * `until unreadable` and every destructive pass retains them. One predicate
+ * answers both, because a status that calls a row unreadable while an expire
+ * pass deletes it is the failure this function exists to prevent.
+ */
+export function quarantineDeadline(times: QuarantineTimes): number | null {
+  const quarantinedAt = Date.parse(times.quarantinedAt);
+  if (!Number.isFinite(quarantinedAt)) return null;
+  const deadline = quarantinedAt + times.graceMs;
+  return Number.isFinite(deadline) && Math.abs(deadline) <= MAX_TIME_MS ? deadline : null;
+}
+
 /**
  * Artifact quarantine ledger (#210 U21).
  *
@@ -186,8 +207,8 @@ export class ArtifactQuarantineStore {
     const released: QuarantineEntry[] = [];
     const retained: QuarantineEntry[] = [];
     for (const entry of entries) {
-      const expiresAt = Date.parse(entry.quarantinedAt) + entry.graceMs;
-      if (!Number.isFinite(expiresAt) || check.now.getTime() < expiresAt) {
+      const expiresAt = quarantineDeadline(entry);
+      if (expiresAt === null || check.now.getTime() < expiresAt) {
         retained.push(entry);
         continue;
       }

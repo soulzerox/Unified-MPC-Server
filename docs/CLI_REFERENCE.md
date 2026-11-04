@@ -420,9 +420,9 @@ retain man:v1:ff0371d8c4e2 pin
   and still exits `0`.
 - A pin that lands while `--apply` holds the lease is refused (`gc lease held by
   ...`), because the pin takes the same fence the pass holds; a pin that lands
-  before the pass takes the lease is visible to its registry snapshot. Under
-  that single-owner fence the pin and the pass cannot interleave in the
-  snapshot/delete window.
+  before the pass takes the lease is visible to its registry snapshot. Apart
+  from the lease's inherited double-grant race, the pin and the pass cannot
+  interleave in the snapshot/delete window.
 - Exit `0` for a plan or a completed pass; `1` when the pass refuses, the store
   cannot be read, or a manifest cannot be deleted; `2` when neither mode, both
   modes, or another argument is given.

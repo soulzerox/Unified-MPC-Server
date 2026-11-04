@@ -78,8 +78,9 @@ export type RevisionPruneReport = RevisionPrunePlan | { readonly status: 'refuse
  * immediately before the pass, not re-read inside the fence. A pin that lands
  * while this pass holds the lease is refused by the pin's own fence, and a pin
  * that lands before the pass takes the lease is visible to the registry
- * snapshot, so the snapshot/delete window is not open to a new pin. Dry runs
- * are read-only and deliberately never take the lease.
+ * snapshot. Apart from the lease's inherited double-grant race, the
+ * snapshot/delete window is not open to a new pin. Dry runs are read-only and
+ * deliberately never take the lease.
  */
 export function pruneRevisionManifests(
   deps: RevisionPruneDeps & { readonly dryRun: true },

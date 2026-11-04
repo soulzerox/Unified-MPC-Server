@@ -3,9 +3,10 @@ import type { GcLeaseStore } from './gc-lease.js';
 import type { RevisionPin, RevisionPinReason, RevisionPinRegistry } from './revision-pin-registry.js';
 
 /**
- * The same single-owner fence revision prune takes. A pin that holds it cannot
- * interleave with a prune's pin snapshot, and a prune that holds it makes the
- * pin refuse instead of writing evidence the prune has already passed.
+ * The same single-owner fence revision prune takes. Apart from the lease's
+ * inherited double-grant race, a pin that holds it cannot interleave with a
+ * prune's pin snapshot, and a prune that holds it makes the pin refuse instead
+ * of writing evidence the prune has already passed.
  */
 export interface CanonicalRevisionPinLease {
   readonly store: GcLeaseStore;

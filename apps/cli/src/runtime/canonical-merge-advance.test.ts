@@ -5,7 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RepositoryMergePolicy } from '@unified-mpc/domain';
 import {
+  advanceRevisionFromGit,
+  CanonicalManifestStore,
   CanonicalRefStore,
+  legacyRepositoryIdForRemoteUrl,
+  repositoryIdForRemoteUrl,
   type CanonicalGitRevision,
   type CanonicalGitSource,
   type CanonicalGitTreeEntry,
@@ -334,6 +338,61 @@ describe('canonical advance after merge (#210 §3)', () => {
       expect(second).toMatchObject({ status: 'refused' });
       if (second.status !== 'refused') throw new Error('unexpected');
       expect(second.reason).toMatch(/bound to/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a repository that binds the ref during another advance fetch', async () => {
+    const root = await tempRoot();
+    try {
+      const other = advanceWith(root, {
+        source: new FakeGit({ 'src/a.ts': 'a' }, COMMIT, 'git@github.com:other/repo.git'),
+      });
+      let firstManifest: string | undefined;
+      const advance = advanceWith(root, {
+        fetchBranch: async (): Promise<void> => {
+          // The pre-fetch binding check saw an unbound ref. A completes while
+          // this repository is fetching, so only the advance's own binding
+          // check can refuse the takeover.
+          const first = await other({ policy: { ...policy, repository: 'other/repo' }, expectedCommitSha: COMMIT });
+          expect(first.status).toBe('advanced');
+          firstManifest = first.status === 'advanced' ? first.manifestId : undefined;
+        },
+      });
+
+      const outcome = await advance({ policy, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'refused' });
+      if (outcome.status !== 'refused') throw new Error('unexpected');
+      expect(outcome.reason).toMatch(/bound to/);
+      expect((await new CanonicalRefStore(root).read(REF))?.manifestId).toBe(firstManifest);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('adopts a ref written under the released repository identity', async () => {
+    const root = await tempRoot();
+    try {
+      // Simulate a store produced by the released `index revision advance`:
+      // the ref is bound to the id derived from the raw remote text.
+      const seeded = await advanceRevisionFromGit({
+        root,
+        source: new FakeGit(),
+        targetRef: REF,
+        repositoryId: legacyRepositoryIdForRemoteUrl(REMOTE),
+        now: new Date('2026-11-04T00:00:00.000Z'),
+      });
+      expect(seeded.status).toBe('promoted');
+
+      const outcome = await advanceWith(root)({ policy, expectedCommitSha: COMMIT });
+
+      expect(outcome).toMatchObject({ status: 'advanced' });
+      if (outcome.status === 'refused') throw new Error(outcome.reason);
+      const live = await new CanonicalRefStore(root).read(REF);
+      expect((await new CanonicalManifestStore(root).get(live!.manifestId))?.repositoryId)
+        .toBe(repositoryIdForRemoteUrl(REMOTE));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

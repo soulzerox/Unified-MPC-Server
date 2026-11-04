@@ -188,7 +188,18 @@ ref. A second policy whose checkout is a different repository advancing the
 *same* branch therefore refuses with `bound to <repository id>` instead of
 replacing the first ref and unrooting its manifest from GC. A policy with a
 different `defaultBranch` targets a different ref and is admitted — the guard
-is per ref, not per store root.
+is per ref, not per store root. The advance repeats the check against the state
+it actually reads, so a second repository that binds the ref while this checkout
+is fetching is refused too, not just the one that was already bound.
+
+The repository id is derived from the checkout's remote URL. GitHub's SSH,
+`ssh://` and HTTPS spellings of one repository hash to one id, so a checkout
+that changes spelling does not become a second trust boundary. A ref written by
+the released `index revision advance` is bound to the pre-normalization
+derivation for the same remote; the next advance adopts that id and re-binds the
+ref to the normalized one instead of refusing the store forever. An SSH host
+alias that resolves to github.com is not normalized, because resolving it needs
+`ssh -G` side effects; such a checkout passes `--repository-id` explicitly.
 
 When a merge reconciles as `reconciled` and the observation carries its merge
 commit, the poller runs the advancement gate once for that repository:

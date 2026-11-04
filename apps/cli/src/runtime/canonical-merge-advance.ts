@@ -6,6 +6,7 @@ import {
   advanceRevisionFromGit,
   CanonicalManifestStore,
   CanonicalRefStore,
+  legacyRepositoryIdForRemoteUrl,
   repositoryIdForRemoteUrl,
   type CanonicalGitSource,
   type GitRevisionAdvanceResult,
@@ -140,10 +141,11 @@ async function gitIsAncestor(checkoutPath: string, ancestor: string, descendant:
  *
  * - no `checkoutPath` on the policy: refused, never inferred from the
  *   repository name or the workspace registry;
- * - the canonical store is already bound to another repository: refused. One
- *   canonical root holds one repository namespace (`refs/...` carries no
- *   repository id), so a second repository advancing the same branch would
- *   overwrite the first ref and unroot its manifest from GC;
+ * - the ref is already bound to another repository: refused. Refs are keyed by
+ *   Git ref path and carry no repository id, so the binding is per ref; a
+ *   second repository advancing the same branch would overwrite the first ref
+ *   and unroot its manifest from GC. A ref bound under the released identity
+ *   for this same remote is adopted and re-bound instead of refused;
  * - the fetch fails or the ref does not resolve: refused, because an advance
  *   against a checkout that cannot see the merge would record a different
  *   revision;
@@ -176,6 +178,7 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
     const source = sourceFor(checkoutPath);
 
     let repositoryId: string;
+    let legacyRepositoryId: string;
     try {
       const remote = await source.remoteUrl();
       if (remote === null) {
@@ -193,15 +196,21 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
         );
       }
       repositoryId = repositoryIdForRemoteUrl(remote);
+      // A ref written by the released operator command is bound to this id for
+      // the same remote. Adopting it re-binds the ref to the normalized id
+      // instead of refusing a store that only ever used `index revision advance`.
+      legacyRepositoryId = legacyRepositoryIdForRemoteUrl(remote);
     } catch (error) {
       return refused(`cannot read the remote of ${checkoutPath}: ${errorMessage(error)}`);
     }
 
-    // One canonical root holds one repository namespace. Refusing here keeps a
-    // second policy from silently replacing the first repository's ref.
+    // One canonical ref holds one repository namespace. Refusing here keeps a
+    // second policy from silently replacing the first repository's ref. The
+    // advance repeats this check against the state it actually reads, because a
+    // second repository can bind the ref while this one is fetching.
     try {
       const bound = await boundedRepository(deps.canonicalRoot, targetRef);
-      if (bound !== undefined && bound !== repositoryId) {
+      if (bound !== undefined && bound !== repositoryId && bound !== legacyRepositoryId) {
         return refused(`${targetRef} in the canonical store is bound to ${bound}, not ${repositoryId}`);
       }
     } catch (error) {
@@ -234,17 +243,28 @@ export function createCanonicalMergeAdvance(deps: CanonicalMergeAdvanceDeps): Ca
       return refused(`${targetRef} at ${resolved.commitSha} does not contain the merged commit ${expectedCommitSha}`);
     }
 
-    const result = await advanceRevisionFromGit({
-      root: deps.canonicalRoot,
-      source,
-      targetRef,
-      now: now(),
-      repositoryId,
-      // Pin the commit the ancestry check approved: the gate resolves the ref
-      // again, and a fetch landing in between must refuse rather than promote a
-      // commit nothing verified.
-      commitSha: resolved.commitSha,
-    });
+    let result: GitRevisionAdvanceResult;
+    try {
+      result = await advanceRevisionFromGit({
+        root: deps.canonicalRoot,
+        source,
+        targetRef,
+        now: now(),
+        repositoryId,
+        // The advance re-reads the ref under its lock. A ref bound by the
+        // released identity is the same remote and is adopted (and re-bound);
+        // any other repository is refused there.
+        adoptedRepositoryIds: [legacyRepositoryId],
+        // Pin the commit the ancestry check approved: the gate resolves the ref
+        // again, and a fetch landing in between must refuse rather than promote a
+        // commit nothing verified.
+        commitSha: resolved.commitSha,
+      });
+    } catch (error) {
+      // The gate reports its own refusals; a store or lock failure is turned
+      // into one too, so an unattended poll never dies on it.
+      return refused(`cannot advance ${targetRef}: ${errorMessage(error)}`);
+    }
     return canonicalAdvanceOutcome(result, targetRef);
   };
 }

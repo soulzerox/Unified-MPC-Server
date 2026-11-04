@@ -65,6 +65,15 @@ export interface GitRevisionAdvanceInput {
   /** Pins the trust boundary instead of deriving it from the remote URL. */
   readonly repositoryId?: string;
   /**
+   * Additional repository ids an already-bound ref may carry.
+   *
+   * A ref written before the GitHub remote forms were normalized is bound to
+   * the released id for this same remote. Naming that id here adopts the ref
+   * and re-binds it to `repositoryId` instead of refusing it forever. The list
+   * never widens the boundary to a different remote.
+   */
+  readonly adoptedRepositoryIds?: readonly string[];
+  /**
    * Exact commit the caller already verified for `targetRef`.
    *
    * The advance resolves the ref itself, so a caller that checked ancestry (or
@@ -118,21 +127,38 @@ const CONTENT_HASH = /^[a-f0-9]{64}$/;
  *
  * Content-addressed reuse is only ever claimed inside one boundary, so the
  * identity must be derived from the same observable source everywhere: the
- * remote URL, with one trailing `.git` and trailing slashes removed. A changed
- * remote therefore yields a different repository id — a new boundary — instead
- * of silently sharing artifacts with the old one. Callers that need a stable id
- * across URL forms pin `repositoryId` explicitly.
+ * remote URL. GitHub's SSH, `ssh://` and HTTPS spellings of one repository
+ * (any credentials, any case) hash `github.com/owner/repo`, because the same
+ * checkout changing spelling must not become a second trust boundary. An SSH
+ * host alias that resolves to github.com is not rewritten here — resolving it
+ * needs `ssh -G` side effects that do not belong in an identity function — so
+ * such a checkout passes `repositoryId` explicitly. Callers that need a stable
+ * id across arbitrary remotes pin `repositoryId` explicitly.
  */
 export function repositoryIdForRemoteUrl(remoteUrl: string): string {
-  const normalized = remoteUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
-  if (normalized.length === 0) throw new TypeError('remote URL must not be empty');
-  // One repository has one identity: the same GitHub repository reached over
-  // SSH, an SSH host alias, HTTPS or a different case must not become a second
-  // trust boundary, or a checkout that changes URL form is refused forever by
-  // the canonical ref it already bound.
+  const normalized = normalizeRemoteText(remoteUrl);
   const github = GITHUB_REMOTE.exec(normalized);
   const identity = github === null ? normalized : githubIdentity(github.slice(1));
   return `${REPOSITORY_ID_PREFIX}${createHash('sha256').update(identity, 'utf8').digest('hex')}`;
+}
+
+/**
+ * Repository id the released `index revision advance` derived (#210 §1).
+ *
+ * Kept only to adopt a canonical ref written before GitHub remote forms were
+ * normalized: that ref is bound to this id for the same remote, and refusing it
+ * would strand a store that only ever used the operator command. New writes use
+ * `repositoryIdForRemoteUrl`.
+ */
+export function legacyRepositoryIdForRemoteUrl(remoteUrl: string): string {
+  const normalized = normalizeRemoteText(remoteUrl);
+  return `${REPOSITORY_ID_PREFIX}${createHash('sha256').update(normalized, 'utf8').digest('hex')}`;
+}
+
+function normalizeRemoteText(remoteUrl: string): string {
+  const normalized = remoteUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  if (normalized.length === 0) throw new TypeError('remote URL must not be empty');
+  return normalized;
 }
 
 function githubIdentity(parts: readonly string[]): string {
@@ -238,6 +264,7 @@ export async function advanceRevisionFromGit(input: GitRevisionAdvanceInput): Pr
   }
 
   let repositoryId = input.repositoryId;
+  let adoptedRepositoryIds = input.adoptedRepositoryIds;
   if (repositoryId === undefined) {
     const remote = await source.remoteUrl();
     if (remote === null) {
@@ -245,6 +272,9 @@ export async function advanceRevisionFromGit(input: GitRevisionAdvanceInput): Pr
     }
     try {
       repositoryId = repositoryIdForRemoteUrl(remote);
+      // A ref written by the released operator command for this same remote is
+      // bound to the pre-normalization id; adopt it once and re-bind.
+      adoptedRepositoryIds = [legacyRepositoryIdForRemoteUrl(remote)];
     } catch (error) {
       return refused(targetRef, error instanceof Error ? error.message : String(error));
     }
@@ -304,6 +334,7 @@ export async function advanceRevisionFromGit(input: GitRevisionAdvanceInput): Pr
   const advanced = await advanceCanonicalRevision(manifests, refs, {
     canonicalRef: targetRef,
     repositoryId,
+    ...(adoptedRepositoryIds === undefined ? {} : { adoptedRepositoryIds }),
     revisionId,
     commitSha: revision.commitSha,
     targetEntries,

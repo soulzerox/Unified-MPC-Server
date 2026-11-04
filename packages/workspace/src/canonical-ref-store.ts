@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readFile, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -9,19 +10,150 @@ import {
 import { errorMessage, isMissingPath, isStrictRead, type ReachabilityReadOptions } from './reachability-read.js';
 
 /** How long a promoter waits for a peer to finish before giving up. */
-const LOCK_ATTEMPTS = 400;
+const LOCK_WAIT_MS = 90_000;
 const LOCK_RETRY_MS = 25;
-/** A lock older than this was left by a crashed promoter and is reclaimed. */
-const LOCK_STALE_MS = 30_000;
+/**
+ * A lock whose mtime is older than this was left by a crashed promoter. The
+ * holder refreshes that mtime every LOCK_HEARTBEAT_MS, so a promoter that is
+ * merely slow is never mistaken for a dead one.
+ */
+const LOCK_STALE_MS = 60_000;
+const LOCK_HEARTBEAT_MS = 15_000;
 
-async function isStaleLock(lockPath: string): Promise<boolean> {
+interface ObservedLock {
+  readonly token: string;
+  readonly stale: boolean;
+}
+
+/** A lock file moved aside by `claimLockFile`, with the owner token it held. */
+interface ClaimedLock {
+  readonly path: string;
+  readonly token: string;
+}
+
+interface HeldRefLock {
+  readonly path: string;
+  readonly token: string;
+  release(): Promise<void>;
+}
+
+/**
+ * Read the lock's owner token and whether its heartbeat is stale.
+ *
+ * The token is read *before* the mtime on purpose: if the file is replaced in
+ * between, the fresh mtime makes a live lock look held, which only delays a
+ * reclaim. Reading the mtime first could pair a new token with an old mtime and
+ * authorize deleting a lock that was just created.
+ */
+async function observeLock(lockPath: string): Promise<ObservedLock | null> {
+  let token: string;
   try {
-    const info = await stat(lockPath);
-    return Date.now() - info.mtimeMs > LOCK_STALE_MS;
+    token = (await readFile(lockPath, 'utf8')).trim();
   } catch (error) {
-    // Raced with the holder releasing it: the next create attempt decides.
-    if (isMissingPath(error)) return true;
+    if (isMissingPath(error)) return null;
     throw error;
+  }
+  let mtimeMs: number;
+  try {
+    mtimeMs = (await stat(lockPath)).mtimeMs;
+  } catch (error) {
+    if (isMissingPath(error)) return null;
+    throw error;
+  }
+  return { token, stale: Date.now() - mtimeMs > LOCK_STALE_MS };
+}
+
+async function createLockFile(lockPath: string, token: string): Promise<boolean> {
+  let handle: FileHandle;
+  try {
+    handle = await open(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw error;
+  }
+  try {
+    await handle.writeFile(`${token}\n`, 'utf8');
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(lockPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  await handle.close();
+  return true;
+}
+
+/**
+ * Take the lock file out of the way with one atomic rename.
+ *
+ * POSIX has no compare-and-delete, so removal is claim-then-verify: the caller
+ * inspects the token it actually took and restores the file when that token is
+ * not the one it meant to remove. `rename` is what makes the take atomic.
+ */
+async function claimLockFile(lockPath: string): Promise<ClaimedLock | null> {
+  const claimPath = `${lockPath}.claim-${randomUUID()}`;
+  try {
+    await rename(lockPath, claimPath);
+  } catch (error) {
+    if (isMissingPath(error)) return null;
+    throw error;
+  }
+  let token = '';
+  try {
+    token = (await readFile(claimPath, 'utf8')).trim();
+  } catch {
+    // An unreadable claim is foreign by construction and is restored below.
+  }
+  return { path: claimPath, token };
+}
+
+/**
+ * Put a displaced lock back without clobbering one created meanwhile.
+ *
+ * `link` fails when the lock path exists again, which is exactly the guard
+ * needed: restoring over a newer lock would steal it a second time. A claim
+ * that cannot be restored is dropped; its owner verifies ownership before every
+ * ref write, so it fails closed instead of writing beside the new holder.
+ */
+async function restoreClaimedLock(claim: ClaimedLock, lockPath: string): Promise<boolean> {
+  try {
+    await link(claim.path, lockPath);
+  } catch {
+    await rm(claim.path, { force: true }).catch(() => undefined);
+    return false;
+  }
+  await rm(claim.path, { force: true }).catch(() => undefined);
+  return true;
+}
+
+/**
+ * Reclaim a crashed promoter's lock. True means the caller should retry now.
+ *
+ * A lock is only discarded when the token observed as stale is still the token
+ * inside the file that was moved aside; a lock reclaimed and re-taken in the
+ * meantime is live and is restored untouched.
+ */
+async function reclaimStaleLock(lockPath: string): Promise<boolean> {
+  const observed = await observeLock(lockPath);
+  if (observed === null) return true;
+  if (!observed.stale) return false;
+  const claimed = await claimLockFile(lockPath);
+  if (claimed === null) return true;
+  if (claimed.token === observed.token) {
+    await rm(claimed.path, { force: true });
+    return true;
+  }
+  return !(await restoreClaimedLock(claimed, lockPath));
+}
+
+async function touchLock(lockPath: string, token: string): Promise<void> {
+  try {
+    const held = (await readFile(lockPath, 'utf8')).trim();
+    if (held !== token) return;
+    const now = new Date();
+    await utimes(lockPath, now, now);
+  } catch {
+    // Ownership is re-verified before every ref write; the heartbeat only
+    // keeps a lock this process still owns from looking abandoned.
   }
 }
 
@@ -103,17 +235,20 @@ export class CanonicalRefStore {
     // Read, decide and write are one critical section: without the lock two
     // promoters can both read the same state, both decide `promote`, and both
     // rename, so the loser reports a promotion the ref no longer holds.
-    const release = await this.acquireRefLock(ref);
+    const lock = await this.acquireRefLock(ref);
     try {
-      return await this.promoteLocked(ref, input);
+      return await this.promoteLocked(ref, input, lock);
     } finally {
-      await release();
+      // A failed release only leaves a lock that goes stale after
+      // LOCK_STALE_MS; it must not mask a decision that already happened.
+      await lock.release();
     }
   }
 
   private async promoteLocked(
     ref: string,
     input: CanonicalRefPromoteInput,
+    lock: HeldRefLock,
   ): Promise<AdvancementDecision> {
     const current = (await this.read(ref)) ?? null;
     const effectiveCurrent = input.current !== undefined ? input.current : current;
@@ -127,11 +262,7 @@ export class CanonicalRefStore {
       if (input.expectedCurrent !== null) {
         return { action: 'conflict', current };
       }
-      const finalPath = this.refPath(ref);
-      await mkdir(path.dirname(finalPath), { recursive: true });
-      const tmpPath = `${finalPath}.tmp-${randomUUID()}`;
-      await writeFile(tmpPath, JSON.stringify(input.target, null, 2), { mode: 0o600 });
-      await rename(tmpPath, finalPath);
+      await this.writeRefState(ref, input.target, lock);
       return { action: 'promote', target: input.target };
     }
     // A promoter that believed the ref was unset loses to the state already on
@@ -148,42 +279,81 @@ export class CanonicalRefStore {
     });
     if (decision.action !== 'promote') return decision;
 
+    await this.writeRefState(ref, input.target, lock);
+    return decision;
+  }
+
+  /**
+   * Write one ref state via tmp+rename, after proving this process still holds
+   * the lock. A promoter whose lock was reclaimed must not rename over the ref.
+   */
+  private async writeRefState(ref: string, state: CanonicalRefState, lock: HeldRefLock): Promise<void> {
     const finalPath = this.refPath(ref);
     await mkdir(path.dirname(finalPath), { recursive: true });
     const tmpPath = `${finalPath}.tmp-${randomUUID()}`;
-    await writeFile(tmpPath, JSON.stringify(input.target, null, 2), { mode: 0o600 });
+    await writeFile(tmpPath, JSON.stringify(state, null, 2), { mode: 0o600 });
+    let held: string;
+    try {
+      held = (await readFile(lock.path, 'utf8')).trim();
+    } catch {
+      await rm(tmpPath, { force: true });
+      throw new Error(`canonical ref ${ref} lock was lost before the write`);
+    }
+    if (held !== lock.token) {
+      await rm(tmpPath, { force: true });
+      throw new Error(`canonical ref ${ref} lock was lost before the write`);
+    }
     await rename(tmpPath, finalPath);
-    return decision;
   }
 
   /**
    * Cross-process lock for one ref file.
    *
-   * `wx` creation is atomic on every filesystem the store targets, and a lock
-   * left behind by a crashed promoter is reclaimed once it is older than
-   * LOCK_STALE_MS, so a dead process cannot wedge a ref. The lock is a sibling
-   * of the ref file and never matches the `.json` listing, so readers ignore it.
+   * `wx` creation is atomic on every filesystem the store targets, and the lock
+   * carries a unique owner token so a waiter never discards a lock it did not
+   * observe. The holder refreshes the lock's mtime while it works, so only a
+   * crashed promoter's lock becomes stale (after LOCK_STALE_MS) and is
+   * reclaimed. The lock is a sibling of the ref file and never matches the
+   * `.json` listing, so readers ignore it.
    */
-  private async acquireRefLock(ref: string): Promise<() => Promise<void>> {
+  private async acquireRefLock(ref: string): Promise<HeldRefLock> {
     const lockPath = `${this.refPath(ref)}.lock`;
     await mkdir(path.dirname(lockPath), { recursive: true });
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const handle = await open(lockPath, 'wx', 0o600);
-        await handle.close();
-        return async (): Promise<void> => { await rm(lockPath, { force: true }); };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (await isStaleLock(lockPath)) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
-        if (attempt >= LOCK_ATTEMPTS) {
-          throw new Error(`canonical ref ${ref} is locked by another promoter`);
-        }
-        await new Promise((resolve) => { setTimeout(resolve, LOCK_RETRY_MS); });
+    const token = randomUUID();
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      if (await createLockFile(lockPath, token)) break;
+      if (await reclaimStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        throw new Error(`canonical ref ${ref} is locked by another promoter`);
       }
+      await new Promise((resolve) => { setTimeout(resolve, LOCK_RETRY_MS); });
     }
+
+    const heartbeat = setInterval(() => { void touchLock(lockPath, token); }, LOCK_HEARTBEAT_MS);
+    heartbeat.unref();
+    return {
+      path: lockPath,
+      token,
+      release: async (): Promise<void> => {
+        clearInterval(heartbeat);
+        // The release path never deletes a lock whose token differs: a
+        // reclaim may have replaced it while this promoter was finishing.
+        await this.releaseLock(lockPath, token).catch(() => undefined);
+      },
+    };
+  }
+
+  private async releaseLock(lockPath: string, token: string): Promise<void> {
+    const observed = await observeLock(lockPath);
+    if (observed === null || observed.token !== token) return;
+    const claimed = await claimLockFile(lockPath);
+    if (claimed === null) return;
+    if (claimed.token === token) {
+      await rm(claimed.path, { force: true });
+      return;
+    }
+    await restoreClaimedLock(claimed, lockPath);
   }
 
   private refPath(ref: string): string {

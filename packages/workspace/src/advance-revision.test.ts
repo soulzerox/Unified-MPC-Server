@@ -269,4 +269,81 @@ describe('advance canonical revision (#210 U16)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('refuses to take over a ref bound to another repository', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        revisionId: revisionId('c'.repeat(40)),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+      const current = await refs.read(REF);
+      const other = 'repo_other123';
+
+      // The caller's own pre-fetch binding check can be stale: a second
+      // repository may have bound the ref while that caller was fetching. The
+      // advance must refuse against the state it actually read, not overwrite
+      // the first repository's ref.
+      const result = await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: other,
+        revisionId: canonicalRevisionId({
+          repositoryId: other, commitSha: 'd'.repeat(40), treeOid: 'd'.repeat(40), targetRef: REF, parents: [],
+        }),
+        commitSha: 'd'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('9') }],
+        expectedCurrent: current,
+        targetVerified: true,
+        createdAt: '2026-10-17T05:00:00.000Z',
+      });
+
+      expect(result).toMatchObject({ status: 'rejected', reason: expect.stringMatching(/bound to repo_abc123/) });
+      expect(await refs.read(REF)).toEqual(current);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('adopts a named previous repository id and re-binds the ref to the current one', async () => {
+    const { refs, manifests, dir } = await tempPair();
+    try {
+      const legacy = 'repo_legacy123';
+      await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: legacy,
+        revisionId: canonicalRevisionId({
+          repositoryId: legacy, commitSha: 'c'.repeat(40), treeOid: 'c'.repeat(40), targetRef: REF, parents: [],
+        }),
+        commitSha: 'c'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: null,
+        targetVerified: true,
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+
+      const result = await advanceCanonicalRevision(manifests, refs, {
+        canonicalRef: REF,
+        repositoryId: REPO,
+        adoptedRepositoryIds: [legacy],
+        revisionId: revisionId('d'.repeat(40)),
+        commitSha: 'd'.repeat(40),
+        targetEntries: [{ path: 'a.ts', contentHash: H('1') }],
+        expectedCurrent: await refs.read(REF),
+        targetVerified: true,
+        createdAt: '2026-10-17T06:00:00.000Z',
+      });
+
+      expect(result.status).toBe('promoted');
+      const live = await refs.read(REF);
+      expect((await manifests.get(live!.manifestId))?.repositoryId).toBe(REPO);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

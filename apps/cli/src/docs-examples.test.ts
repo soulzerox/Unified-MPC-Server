@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, GitRevisionAdvanceResult } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, GitRevisionAdvanceResult } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -74,6 +74,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc storage recover(?:\s|$)/, kind: 'storage-recover', dispatch: 'storageRecover' },
   { pattern: /^unified-mpc storage metrics(?:\s|$)/, kind: 'storage-metrics', dispatch: 'storageMetrics' },
   { pattern: /^unified-mpc index revision advance(?:\s|$)/, kind: 'index-revision-advance', dispatch: 'indexRevisionAdvance' },
+  { pattern: /^unified-mpc index revision list(?:\s|$)/, kind: 'index-revision-list', dispatch: 'canonicalRevisionList' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
 ];
 
@@ -207,6 +208,25 @@ function replayDependencies(calls: string[]): CliDependencies {
         danglingRefs: [],
         missingOverlayBases: [],
         orphanedPins: [],
+      };
+    },
+    canonicalRevisionList: async (): Promise<CanonicalRevisionListReport> => {
+      calls.push('canonicalRevisionList');
+      return {
+        revisions: [{
+          manifestId: `man:v1:${'0'.repeat(64)}`,
+          repositoryId: 'repo:v1:documented',
+          revisionId: `rev:v1:${'0'.repeat(64)}`,
+          commitSha: '0'.repeat(40),
+          treeOid: '0'.repeat(40),
+          targetRef: 'refs/remotes/origin/main',
+          entryCount: 695,
+          createdAt: '2026-10-17T00:00:00.000Z',
+          refs: ['refs/remotes/origin/main'],
+          pins: [],
+          overlayGoalIds: [],
+          indexJobOperationIds: [],
+        }],
       };
     },
   };

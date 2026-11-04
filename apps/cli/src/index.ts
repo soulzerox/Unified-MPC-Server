@@ -9,6 +9,7 @@ import { DoctorService, WorkspaceSelectionService, type DoctorProbes, type Docto
 import {
   advanceRevisionFromGit,
   ArtifactQuarantineStore,
+  canonicalRevisionList,
   canonicalStatus,
   CanonicalManifestStore,
   CanonicalRefStore,
@@ -17,6 +18,7 @@ import {
   RevisionPinRegistry,
   WorkspaceService,
   type CanonicalStatusReport,
+  type CanonicalRevisionListReport,
   type GitRevisionAdvanceResult,
   type Workspace,
 } from '@unified-mpc/workspace';
@@ -76,6 +78,11 @@ import {
   parseIndexStatusArgs,
   type IndexStatusCommand,
 } from './commands/index-status.js';
+import {
+  formatCanonicalRevisionList,
+  parseIndexRevisionListArgs,
+  type IndexRevisionListCommand,
+} from './commands/index-revision-list.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -97,6 +104,7 @@ export * from './commands/web.js';
 export * from './commands/tools.js';
 export * from './commands/storage.js';
 export * from './commands/index-revision.js';
+export * from './commands/index-revision-list.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -119,6 +127,7 @@ export type CliCommand =
   | SyncCommand
   | StorageCommand
   | IndexRevisionCommand
+  | IndexRevisionListCommand
   | IndexStatusCommand
   | PublishCredentialCommand
   | WebCommand
@@ -156,6 +165,7 @@ export interface CliDependencies {
     readonly repositoryId?: string;
   }): Promise<GitRevisionAdvanceResult>;
   canonicalStatus?(): Promise<CanonicalStatusReport>;
+  canonicalRevisionList?(): Promise<CanonicalRevisionListReport>;
   publishCredential?(
     command: PublishCredentialCommand,
     write: (text: string) => void,
@@ -187,7 +197,11 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
-    if (args[1] === 'revision') return parseIndexRevisionArgs(args.slice(1));
+    if (args[1] === 'revision') {
+      if (args[2] === 'list') return parseIndexRevisionListArgs(args.slice(1));
+      if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
+      return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|advance ...'));
+    }
     return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|revision ...'));
   }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
@@ -219,6 +233,7 @@ Commands:
   storage recover                        Recover one unambiguous historical SQLite database safely
   storage metrics [--json]               Report SQLite db/WAL/SHM bytes, page/freelist counts and compaction evidence
   index revision advance [--ref <ref>]   Advance the canonical revision pointer from an exact Git tree
+  index revision list [--json]           List stored revision manifests and what still references them
   index status [--json]                  Report canonical store health, refs and blocking state
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -321,6 +336,20 @@ Commands:
         });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexRevisionAdvance(report));
         return indexRevisionAdvanceExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-revision-list': {
+      if (dependencies.canonicalRevisionList === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.canonicalRevisionList();
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalRevisionList(report));
+        return 0;
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -740,6 +769,18 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         quarantine: new ArtifactQuarantineStore(root),
+        jobs: new IndexJobLedger(root),
+      });
+    },
+    canonicalRevisionList: async (): Promise<CanonicalRevisionListReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      return canonicalRevisionList({
+        refs: new CanonicalRefStore(root),
+        manifests: new CanonicalManifestStore(root),
+        pins: new RevisionPinRegistry(root),
+        overlays: new GoalOverlayStore(root),
         jobs: new IndexJobLedger(root),
       });
     },

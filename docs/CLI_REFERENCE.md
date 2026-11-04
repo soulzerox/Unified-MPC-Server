@@ -305,6 +305,33 @@ Exit code `0` means the ref is at that revision and every classified entry has a
 artifact record; `1` means the store needs attention; `2` means the arguments
 were not understood.
 
+### `unified-mpc index revision list [--json]`
+
+Read-only listing of the revision manifests the store holds, newest first, with
+every store root that still references each one: canonical refs, pin reasons,
+Goal overlay bases and unsettled index jobs.
+
+```bash
+$ unified-mpc index revision list
+revisions 2
+  man:v1:3c9f1e7a5d2b commit 4d1c0a1f8b25 tree 7a3f9c1e2d4b entries 695 created 2026-11-04T00:00:00.000Z
+    refs refs/remotes/origin/main
+  man:v1:9b1c4f2e7a60 commit 261b4942fe79 tree 5e2a7c9d1b30 entries 692 created 2026-10-30T00:00:00.000Z
+    pins rollback
+    index-jobs op_reindex
+```
+
+- One summary line per revision: manifest id, commit, Git tree OID, entry count
+  and creation time.
+- Detail lines appear only when a store still holds the revision: `refs` (ref
+  names), `pins` (pin reasons), `overlay-bases` (Goal workspace ids) and
+  `index-jobs` (operation ids). A revision with no detail lines is referenced by
+  nothing — the state a later prune slice would collect.
+- This is a report, not a health verdict: an empty store prints `revisions 0`
+  and exits `0`, and the command never mutates the store.
+- Exit `0` for any successful read; `1` when the store cannot be read; `2` for
+  arguments that are not `list` plus an optional `--json`.
+
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref

@@ -1219,6 +1219,113 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('applies quarantine expiry through the real canonical stores and deletes artifact records', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-gc-expire-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const repositoryId = 'repo_abc123';
+      const ref = 'refs/remotes/origin/main';
+      const liveHash = '1'.repeat(64);
+      const deadHash = 'd'.repeat(64);
+      const entries = [{ path: 'live.ts', contentHash: liveHash }];
+      const commitSha = 'c'.repeat(40);
+      const treeOid = computeTreeOid(entries);
+      const revisionId = canonicalRevisionId({ repositoryId, commitSha, treeOid, targetRef: ref, parents: [] });
+      const manifest: StoredManifest = {
+        manifestId: canonicalManifestId({ repositoryId, revisionId, entries }),
+        repositoryId,
+        revisionId,
+        commitSha,
+        treeOid,
+        targetRef: ref,
+        entries,
+        createdAt: '2026-11-04T00:00:00.000Z',
+      };
+      await new CanonicalManifestStore(canonical).put(manifest);
+      await new CanonicalRefStore(canonical).promote(ref, {
+        expectedCurrent: null,
+        current: null,
+        target: { commitSha: manifest.commitSha, treeOid: manifest.treeOid, manifestId: manifest.manifestId },
+        targetVerified: true,
+      });
+      const artifacts = new CanonicalArtifactStore(canonical);
+      const liveArtifactKey = fileArtifactId({
+        sourceContentSha256: liveHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+      });
+      await artifacts.put({
+        kind: 'file',
+        artifactKey: liveArtifactKey,
+        repositoryId,
+        sourceContentSha256: liveHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+        bindings: [{ path: 'live.ts', manifestId: manifest.manifestId }],
+        createdAt: '2026-11-04T00:00:00.000Z',
+      });
+      const deadArtifactKey = fileArtifactId({
+        sourceContentSha256: deadHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+      });
+      await artifacts.put({
+        kind: 'file',
+        artifactKey: deadArtifactKey,
+        repositoryId,
+        sourceContentSha256: deadHash,
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+        bindings: [],
+        createdAt: '2026-11-04T00:00:00.000Z',
+      });
+      const quarantine = new ArtifactQuarantineStore(canonical);
+      await quarantine.quarantine([
+        deadHash,
+        { kind: 'artifact-key', repositoryId, artifactKey: deadArtifactKey },
+      ], { now: new Date('2026-11-01T00:00:00.000Z'), graceMs: 60_000 });
+
+      const output: string[] = [];
+      const applyErrors: string[] = [];
+      const code = await runCli(['index', 'gc', 'expire', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => applyErrors.push(text),
+      });
+      expect(applyErrors, applyErrors.join('\n')).toEqual([]);
+      expect(code, output.join('\n')).toBe(0);
+      expect(output[0]).toContain('applied due 2 released 2 retained 0');
+      expect(output[0]).toContain(`released ${deadHash}`);
+      expect(output[0]).toContain(`released ${repositoryId} ${deadArtifactKey}`);
+
+      // Artifact-key rows delete the record; content-hash rows release only.
+      await expect(artifacts.has(repositoryId, deadArtifactKey)).resolves.toBe(false);
+      await expect(artifacts.has(repositoryId, liveArtifactKey)).resolves.toBe(true);
+      expect(await quarantine.list()).toEqual([]);
+      expect(await new GcLeaseStore(canonical).read()).toBeNull();
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('plans quarantine expiry in dry-run mode without deleting anything', async () => {
     const content = 'a'.repeat(64);
     const artifactKey = `file:v1:${'b'.repeat(64)}`;
@@ -1242,6 +1349,28 @@ describe('CLI execution dispatcher', () => {
     expect(seenDryRun).toBe(true);
     expect(outputs).toEqual([
       `planned (dry-run) expired 2 retained 1\nexpire ${content}\nexpire repo_abc123 ${artifactKey}`
+        + `\nretain repo_abc123 ${retainedKey}`,
+    ]);
+
+    const applied: string[] = [];
+    let appliedDryRun: boolean | undefined;
+    const appliedCode = await runCli(['index', 'gc', 'expire', '--apply'], {
+      ...baseDependencies,
+      indexGcExpire: async (input) => {
+        appliedDryRun = input.dryRun;
+        return {
+          status: 'planned',
+          expired: [content, { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey }],
+          deleted: [content, { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey }],
+          retained: [{ kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey: retainedKey }],
+        };
+      },
+      write: (text) => applied.push(text),
+    });
+    expect(appliedCode).toBe(0);
+    expect(appliedDryRun).toBe(false);
+    expect(applied).toEqual([
+      `applied due 2 released 2 retained 1\nreleased ${content}\nreleased repo_abc123 ${artifactKey}`
         + `\nretain repo_abc123 ${retainedKey}`,
     ]);
 
@@ -1269,7 +1398,7 @@ describe('CLI execution dispatcher', () => {
       writeError: (text) => usage.push(text),
     });
     expect(usageCode).toBe(2);
-    expect(usage[0]).toContain('index gc expire --dry-run');
+    expect(usage[0]).toContain('index gc expire (--dry-run | --apply');
 
     const errors: string[] = [];
     const unavailable = await runCli(['index', 'gc', 'expire', '--dry-run'], {

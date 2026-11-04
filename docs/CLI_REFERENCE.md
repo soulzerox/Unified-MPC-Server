@@ -607,6 +607,39 @@ orphaned-pins 0
 - `--json` prints the unprojected `CanonicalStatusReport` instead of the
   operator lines.
 
+### `unified-mpc index space [--json]`
+
+Read-only logical counterpart to `storage metrics`: it counts what the canonical
+store retains, not how many bytes the SQLite file occupies. Manifests are
+classified by the prune planner (retained by a ref, pin, Goal overlay base or
+live index job vs prunable) and file artifacts by the GC reachability planner
+(reachable vs unreferenced). Nothing is deleted and no physical fact is claimed.
+
+```bash
+$ unified-mpc index space
+logical space: measured
+manifests total=3 retained=2 prunable=1
+artifacts total=4 reachable=3 unreferenced=1
+bytes reachable=unmeasured unreferenced=unmeasured
+```
+
+- `bytes ... unmeasured` is the honest answer when the store has no measured size
+  for every counted artifact; a partial sum would read as a smaller store than it
+  is. The numbers never stand in for "the database file shrank" — row deletion
+  and revision prune leave the file size to `storage metrics`.
+- `refused <reason>` exits `1`: when a reachability root manifest is missing or a
+  store cannot be read, a zero-retention count would make every artifact look
+  deletable.
+- Artifact counts are content hashes deduped across trust boundaries, which is
+  the space the reachability planner consumes; repository-scoped artifact-key
+  reachability stays with `index gc`. Chunk (semantic) artifacts are excluded:
+  their lifecycle belongs to the Thai-RAG GC boundary, so counting them here
+  would report every one of them as unreferenced.
+- `--json` prints the unprojected `LogicalSpaceReport` instead of the operator
+  lines.
+- Exit `0` for `measured`, `1` for `refused` or an unreadable store, `2` for
+  arguments that are not `space` plus an optional `--json`.
+
 ---
 
 ## 10. Exit Code Contract

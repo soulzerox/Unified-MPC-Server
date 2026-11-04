@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, RevisionPruneReport } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, LogicalSpaceReport, RevisionPruneReport } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -82,6 +82,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index gc status(?:\s|$)/, kind: 'index-gc-status', dispatch: 'indexGcStatus' },
   { pattern: /^unified-mpc index gc(?:\s|$)/, kind: 'index-gc', dispatch: 'indexGc' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
+  { pattern: /^unified-mpc index space(?:\s|$)/, kind: 'index-space', dispatch: 'canonicalLogicalSpace' },
 ];
 
 /**
@@ -214,6 +215,28 @@ function replayDependencies(calls: string[]): CliDependencies {
         danglingRefs: [],
         missingOverlayBases: [],
         orphanedPins: [],
+      };
+    },
+    canonicalLogicalSpace: async (): Promise<LogicalSpaceReport> => {
+      calls.push('canonicalLogicalSpace');
+      return {
+        status: 'measured',
+        manifests: {
+          total: 1,
+          retained: 1,
+          prunable: 0,
+          retainedManifestIds: ['man:v1:documented'],
+          prunableManifestIds: [],
+        },
+        artifacts: {
+          total: 1,
+          reachable: 1,
+          unreferenced: 0,
+          unreferencedHashes: [],
+          bytesMeasurable: false,
+          reachableBytes: null,
+          unreferencedBytes: null,
+        },
       };
     },
     canonicalRevisionList: async (): Promise<CanonicalRevisionListReport> => {

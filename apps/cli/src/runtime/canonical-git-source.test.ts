@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { advanceRevisionFromGit, legacyRepositoryIdForRemoteUrl, repositoryIdForRemoteUrl } from '@unified-mpc/workspace';
-import { createCanonicalGitSource, resolveGoalRepositoryIds } from './canonical-git-source.js';
+import { createCanonicalGitSource, resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -174,6 +174,72 @@ describe('Goal repository identity resolution (#210 §1)', () => {
     const dir = await tempRepo();
     try {
       expect(await resolveGoalRepositoryIds(dir)).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Goal admission base branch resolution (#210 §1)', () => {
+  function policyFor(defaultBranch: string, expectedRepository = 'Example/Repo'): {
+    readonly getByRepository: (repository: string) => Promise<{ readonly defaultBranch: string } | undefined>;
+    readonly calls: string[];
+  } {
+    const calls: string[] = [];
+    return {
+      calls,
+      getByRepository: async (repository: string): Promise<{ readonly defaultBranch: string } | undefined> => {
+        calls.push(repository);
+        return repository === expectedRepository ? { defaultBranch } : undefined;
+      },
+    };
+  }
+
+  it('uses the merge policy default branch instead of main', async () => {
+    const dir = await tempRepo();
+    try {
+      await git(dir, ['remote', 'add', 'origin', 'git@github.com:Example/Repo.git']);
+      const policy = policyFor('trunk');
+
+      expect(await resolveGoalBaseBranch(dir, 'main', policy)).toBe('trunk');
+      expect(policy.calls).toEqual(['Example/Repo']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a master checkout on master when no policy exists', async () => {
+    const dir = await tempRepo();
+    try {
+      await git(dir, ['remote', 'add', 'origin', 'git@github.com:Example/Repo.git']);
+
+      expect(await resolveGoalBaseBranch(dir, 'master', policyFor('main', 'Other/Repo'))).toBe('master');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to main for a feature branch without a policy', async () => {
+    const dir = await tempRepo();
+    try {
+      await git(dir, ['remote', 'add', 'origin', 'git@github.com:Example/Repo.git']);
+
+      expect(await resolveGoalBaseBranch(dir, 'feature/x', policyFor('trunk', 'Other/Repo'))).toBe('main');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not look up a policy without a GitHub origin', async () => {
+    const dir = await tempRepo();
+    try {
+      const policy = policyFor('trunk');
+      expect(await resolveGoalBaseBranch(dir, 'main', policy)).toBe('main');
+      expect(policy.calls).toEqual([]);
+
+      await git(dir, ['remote', 'add', 'origin', '/tmp/local-origin.git']);
+      expect(await resolveGoalBaseBranch(dir, 'master', policy)).toBe('master');
+      expect(policy.calls).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

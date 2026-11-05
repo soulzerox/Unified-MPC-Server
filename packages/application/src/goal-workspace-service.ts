@@ -31,8 +31,14 @@ export interface GoalWorkspaceCreateRequest {
   readonly goalId: string;
   readonly parentWorkspaceId: string;
   readonly branchName?: string;
-  /** Omit to fetch origin/main directly; provide to explicitly pin a historical base. */
+  /** Omit to fetch the resolved base branch directly; provide to explicitly pin a historical base. */
   readonly baseRevision?: string;
+  /**
+   * Remote branch admission treats as the moving base (#210 §1). Merge
+   * reconciliation advances this branch's canonical ref, so the admission pin
+   * must read the same one. Defaults to `main`.
+   */
+  readonly baseBranch?: string;
   readonly goalWorkspaceKind?: 'git_worktree' | 'snapshot';
   readonly displayName?: string;
   readonly ownerSessionId?: string;
@@ -67,6 +73,8 @@ export interface GoalCanonicalAdmissionPort {
     readonly commitSha: string;
     /** The created Goal worktree, whose own remote identifies its repository. */
     readonly worktreePath: string;
+    /** Remote branch whose canonical ref may be pinned to this commit. */
+    readonly baseBranch: string;
   }): Promise<GoalCanonicalAdmissionOutcome>;
   /**
    * Release the Goal's canonical overlay after removal. Idempotent. The adapter
@@ -352,16 +360,17 @@ export class GoalWorkspaceService {
 
     let requestedBase = request.baseRevision;
     let movingBaseRef: string | undefined;
+    const baseBranch = request.baseBranch?.trim() || 'main';
     if (requestedBase === undefined) {
       if (this.git.refreshRemoteRef === undefined) {
-        return err(appError('INTERNAL_ERROR', 'Fresh origin/main resolution is unavailable', true));
+        return err(appError('INTERNAL_ERROR', `Fresh origin/${baseBranch} resolution is unavailable`, true));
       }
       const destinationRef = `refs/unified-mpc/admission/base-${randomUUID()}`;
-      const refreshed = await this.git.refreshRemoteRef(parent.realRootPath, 'origin', 'refs/heads/main', destinationRef);
+      const refreshed = await this.git.refreshRemoteRef(parent.realRootPath, 'origin', `refs/heads/${baseBranch}`, destinationRef);
       if (!refreshed.ok) return refreshed;
-      if (!isCommitSha(refreshed.value)) return err(appError('INTERNAL_ERROR', 'Fresh origin/main ref did not resolve to a commit SHA', true));
+      if (!isCommitSha(refreshed.value)) return err(appError('INTERNAL_ERROR', `Fresh origin/${baseBranch} ref did not resolve to a commit SHA`, true));
       requestedBase = refreshed.value;
-      movingBaseRef = 'origin/main';
+      movingBaseRef = `origin/${baseBranch}`;
     }
     const base = await this.git.run(parent.realRootPath, [
       'rev-parse', '--verify', '--end-of-options', `${requestedBase}^{commit}`,
@@ -399,7 +408,7 @@ export class GoalWorkspaceService {
       await this.removeWorktree(parent.realRootPath, worktreePath);
       return registered;
     }
-    const canonicalAdmission = await this.pinCanonicalBase(registered.value.id, resolvedBase, worktreePath);
+    const canonicalAdmission = await this.pinCanonicalBase(registered.value.id, resolvedBase, worktreePath, baseBranch);
     return ok({
       workspace: registered.value,
       worktreePath,
@@ -416,10 +425,11 @@ export class GoalWorkspaceService {
     goalWorkspaceId: string,
     commitSha: string,
     worktreePath: string,
+    baseBranch: string,
   ): Promise<GoalCanonicalAdmissionOutcome | undefined> {
     if (this.canonicalAdmission === undefined) return undefined;
     try {
-      return await this.canonicalAdmission.pinBaseAtCommit({ goalWorkspaceId, commitSha, worktreePath });
+      return await this.canonicalAdmission.pinBaseAtCommit({ goalWorkspaceId, commitSha, worktreePath, baseBranch });
     } catch (error) {
       return { status: 'failed', reason: errorMessage(error) };
     }

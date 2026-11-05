@@ -116,13 +116,18 @@ describe('stdio MCP runtime', () => {
   });
 
 
-  async function canonicalGoalFixture(projectId: string, repositoryIdOverride?: string): Promise<{
+  async function canonicalGoalFixture(
+    projectId: string,
+    repositoryIdOverride?: string,
+    branch = 'main',
+  ): Promise<{
     readonly dataPath: string;
     readonly rootPath: string;
     readonly canonicalRoot: string;
-    readonly mainSha: string;
+    readonly baseSha: string;
     readonly manifestId: string;
     readonly projectId: string;
+    readonly branch: string;
     readonly db: SqliteDatabase;
     readonly runtime: ReturnType<typeof createStdioMcpRuntime>;
   }> {
@@ -132,19 +137,20 @@ describe('stdio MCP runtime', () => {
     temporaryRoots.push(dataPath, rootPath, originPath);
     const gitAt = (cwd: string, ...args: string[]): string =>
       execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-    gitAt(originPath, 'init', '-q', '--bare', '-b', 'main');
-    gitAt(rootPath, 'init', '-q', '-b', 'main');
+    gitAt(originPath, 'init', '-q', '--bare', '-b', branch);
+    gitAt(rootPath, 'init', '-q', '-b', branch);
     gitAt(rootPath, 'config', 'user.name', 'Unified Test');
     gitAt(rootPath, 'config', 'user.email', 'test@example.invalid');
     await writeFile(path.join(rootPath, 'README.md'), 'base\n');
     gitAt(rootPath, 'add', 'README.md');
     gitAt(rootPath, 'commit', '-qm', 'base');
     gitAt(rootPath, 'remote', 'add', 'origin', originPath);
-    gitAt(rootPath, 'push', '-q', '-u', 'origin', 'main');
-    const mainSha = gitAt(rootPath, 'rev-parse', 'HEAD');
+    gitAt(rootPath, 'push', '-q', '-u', 'origin', branch);
+    const baseSha = gitAt(rootPath, 'rev-parse', 'HEAD');
+    const remoteRef = `refs/remotes/origin/${branch}`;
     const repositoryId = repositoryIdOverride ?? repositoryIdForRemoteUrl(originPath);
     const entries = [{ path: 'README.md', contentHash: createHash('sha256').update('base\n').digest('hex') }];
-    const manifestId = canonicalManifestId({ repositoryId, revisionId: mainSha, entries });
+    const manifestId = canonicalManifestId({ repositoryId, revisionId: baseSha, entries });
     const project = { id: projectId, displayName: 'Canonical pin', rootPath, realRootPath: rootPath, createdAt: '2026-11-05T00:00:00.000Z' };
     const db = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     await new SqliteWorkspaceRepository(db).insert(project);
@@ -152,20 +158,31 @@ describe('stdio MCP runtime', () => {
     await new CanonicalManifestStore(canonicalRoot).put({
       manifestId,
       repositoryId,
-      revisionId: mainSha,
-      commitSha: mainSha,
+      revisionId: baseSha,
+      commitSha: baseSha,
       treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'),
-      targetRef: 'refs/remotes/origin/main',
+      targetRef: remoteRef,
       entries,
       createdAt: '2026-11-05T00:00:00.000Z',
     });
-    await new CanonicalRefStore(canonicalRoot).promote('refs/remotes/origin/main', {
+    await new CanonicalRefStore(canonicalRoot).promote(remoteRef, {
       expectedCurrent: null,
       current: null,
-      target: { commitSha: mainSha, treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'), manifestId },
+      target: { commitSha: baseSha, treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'), manifestId },
       targetVerified: true,
     });
-    return { dataPath, rootPath, canonicalRoot, mainSha, manifestId, projectId, db, runtime: createStdioMcpRuntime(dataPath, project) };
+    const runtime = createStdioMcpRuntime(dataPath, project, false, {
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: `deploy-${projectId}`,
+        runtimeGeneration: '25700000-0000-4000-8000-000000000001',
+        runtimeBuildVersion: '4.61.0+257000000001',
+        runtimeBuildCommit: '3'.repeat(40),
+        runtimeBuildDirty: false,
+        runtimeProtocolGeneration: 1,
+        runtimeStartedAt: '2026-11-05T00:00:00.000Z',
+      },
+    });
+    return { dataPath, rootPath, canonicalRoot, baseSha, manifestId, projectId, branch, db, runtime };
   }
 
   it('pins a Goal admitted from the live canonical commit to its base manifest', async () => {
@@ -179,7 +196,7 @@ describe('stdio MCP runtime', () => {
       const overlay = await new GoalOverlayStore(fixture.canonicalRoot).read(result.value.workspaceId);
       expect(overlay).toMatchObject({
         goalWorkspaceId: result.value.workspaceId,
-        baseCommitSha: fixture.mainSha,
+        baseCommitSha: fixture.baseSha,
         baseManifestId: fixture.manifestId,
       });
     } finally {
@@ -200,6 +217,47 @@ describe('stdio MCP runtime', () => {
       expect(result?.ok).toBe(true);
       if (result === undefined || !result.ok) return;
       expect(await new GoalOverlayStore(fixture.canonicalRoot).read(result.value.workspaceId)).toBeNull();
+    } finally {
+      await fixture.runtime.close();
+      fixture.db.close();
+    }
+  });
+
+  it('admits and pins a Goal on a master checkout without a merge policy', async () => {
+    const fixture = await canonicalGoalFixture('canonical-pin-master-project', undefined, 'master');
+    try {
+      const result = await fixture.runtime.services.goalRunWorkspace?.resolveRunWorkspace(fixture.runtime.actor, {
+        workspaceId: fixture.projectId, goalKey: 'canonical-pin-master',
+      });
+      expect(result?.ok).toBe(true);
+      if (result === undefined || !result.ok) return;
+      const goalWorkspace = await new SqliteWorkspaceRepository(fixture.db).get(result.value.workspaceId);
+      // The fresh base fetch must resolve master, not the old hardcoded main.
+      expect(goalWorkspace?.baseRevision).toBe(fixture.baseSha);
+      const overlay = await new GoalOverlayStore(fixture.canonicalRoot).read(result.value.workspaceId);
+      expect(overlay).toMatchObject({
+        goalWorkspaceId: result.value.workspaceId,
+        baseCommitSha: fixture.baseSha,
+        baseManifestId: fixture.manifestId,
+      });
+      expect(await new CanonicalRefStore(fixture.canonicalRoot).read(`refs/remotes/origin/${fixture.branch}`))
+        .toMatchObject({ commitSha: fixture.baseSha });
+      expect(goalWorkspace).not.toBeNull();
+      if (goalWorkspace === null) return;
+      const acquired = await fixture.runtime.services.goals?.runGoal(fixture.runtime.actor, {
+        workspaceId: goalWorkspace.id, goalKey: 'canonical-pin-master',
+        objective: 'Verify admission on a master base.', plan: { steps: [] }, leaseSeconds: 600,
+      });
+      expect(acquired).toMatchObject({ ok: true, value: { acquired: true, leaseGeneration: 1 } });
+      if (acquired === undefined || !acquired.ok || acquired.value.leaseExpiresAt === undefined) return;
+      // Admission re-reads the moving base; it must refresh origin/master too.
+      const admitted = await fixture.runtime.services.goalRunWorkspace?.admitRunWorkspace(fixture.runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalId: acquired.value.goalId,
+        leaseGeneration: acquired.value.leaseGeneration,
+        leaseExpiresAt: acquired.value.leaseExpiresAt,
+      });
+      expect(admitted).toMatchObject({ ok: true, value: { admissionGeneration: 1 } });
     } finally {
       await fixture.runtime.close();
       fixture.db.close();

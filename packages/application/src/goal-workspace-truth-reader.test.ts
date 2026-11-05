@@ -200,6 +200,37 @@ describe('GoalWorkspaceTruthReader', () => {
     expect(git.refreshAdmissionRef).toHaveBeenCalledWith(expect.anything(), workspace.id, 'origin', 'refs/heads/main');
   });
 
+  it.each(['master', 'release/1.x'])(
+    'refreshes the moving %s base branch before classifying remote base drift',
+    async (branch): Promise<void> => {
+      const baseRef = `origin/${branch}`;
+      const privateRef = `refs/unified-mpc/admission/workspaces/workspace-1/${branch}`;
+      const currentBase = 'c'.repeat(40);
+      const git: GoalWorkspaceGitStatusPort = {
+        status: vi.fn(async () => ok({ entries: [] })),
+        refreshAdmissionRef: vi.fn(async () => ok({ ref: privateRef, sha: currentBase })),
+        observeWorkspace: vi.fn(async (_actor, _workspaceId, options) => {
+          expect(options).toMatchObject({ baseRef, resolvedBaseRef: privateRef });
+          return ok({
+            repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+            branch: 'codex/goal-1', head: 'a'.repeat(40), statusEntries: [], stagedFingerprint: 'staged',
+            dirtyFingerprint: 'dirty', baseRef, resolvedBaseRef: privateRef,
+            baseSha: currentBase, mergeBaseSha: 'b'.repeat(40),
+          });
+        }),
+      };
+      const { reader } = fixture({
+        git,
+        workspace: { ...workspace, lifecycleKind: 'goal', goalWorkspaceKind: 'git_worktree', baseRef, baseRevision: 'b'.repeat(40) },
+      });
+
+      await expect(reader.readAdmission(workspace.id)).resolves.toMatchObject({
+        baseRef, baseSha: currentBase, resolvedBaseRef: privateRef, dirtyState: 'clean',
+      });
+      expect(git.refreshAdmissionRef).toHaveBeenCalledWith(expect.anything(), workspace.id, 'origin', `refs/heads/${branch}`);
+    },
+  );
+
   it('fingerprints bounded snapshot content as non-Git admission evidence', async () => {
     const root = await mkdtemp(path.join(process.cwd(), '.goal-snapshot-'));
     try {

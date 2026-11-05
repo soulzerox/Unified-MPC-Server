@@ -21,6 +21,7 @@ export * from './artifact-gc-roots.js';
 export * from './artifact-key-gc.js';
 export * from './gc-cycle.js';
 export * from './canonical-store-verify.js';
+export * from './canonical-store-repair.js';
 export * from './revision-prune.js';
 export * from './logical-space-report.js';
 export * from './compaction-gate.js';

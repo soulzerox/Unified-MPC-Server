@@ -74,6 +74,15 @@ export class CanonicalManifestStore {
     this.strictReads = options.strictReads === true;
   }
 
+  /**
+   * Whether an unreadable record throws instead of reading as absent. A
+   * destructive caller can refuse a tolerant store rather than trusting that
+   * its own wiring remembered `strictReads`.
+   */
+  public get strict(): boolean {
+    return this.strictReads;
+  }
+
   public async put(manifest: StoredManifest): Promise<void> {
     const manifestId = requireManifestId(manifest.manifestId);
     const repositoryId = manifest.repositoryId;

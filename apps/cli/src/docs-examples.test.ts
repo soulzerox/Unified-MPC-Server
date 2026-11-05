@@ -5,7 +5,7 @@ import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
-import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, LogicalSpaceReport, RevisionPruneReport } from '@unified-mpc/workspace';
+import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, CanonicalStoreRepairReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, LogicalSpaceReport, RevisionPruneReport } from '@unified-mpc/workspace';
 import {
   parseCliArgs,
   runCli,
@@ -78,6 +78,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index revision pin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index revision unpin(?:\s|$)/, kind: 'index-revision-pin', dispatch: 'canonicalRevisionPin' },
   { pattern: /^unified-mpc index revision prune(?:\s|$)/, kind: 'index-revision-prune', dispatch: 'indexRevisionPrune' },
+  { pattern: /^unified-mpc index repair(?:\s|$)/, kind: 'index-repair', dispatch: 'indexRepair' },
   { pattern: /^unified-mpc index gc expire(?:\s|$)/, kind: 'index-gc-expire', dispatch: 'indexGcExpire' },
   { pattern: /^unified-mpc index gc status(?:\s|$)/, kind: 'index-gc-status', dispatch: 'indexGcStatus' },
   { pattern: /^unified-mpc index gc(?:\s|$)/, kind: 'index-gc', dispatch: 'indexGc' },
@@ -273,6 +274,15 @@ function replayDependencies(calls: string[]): CliDependencies {
         pruneable: [`man:v1:${'1'.repeat(64)}`],
         removed: [],
         retained: [{ manifestId: `man:v1:${'0'.repeat(64)}`, reason: 'canonical-ref' }],
+      };
+    },
+    indexRepair: async (): Promise<CanonicalStoreRepairReport> => {
+      calls.push('indexRepair');
+      return {
+        status: 'planned',
+        orphanPins: [{ manifestId: `man:v1:${'1'.repeat(64)}`, reasons: ['user-pin'] }],
+        danglingRefs: [],
+        missingOverlayBases: [],
       };
     },
     indexGc: async (): Promise<GcCycleReport> => {

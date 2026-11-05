@@ -375,8 +375,9 @@ pins none
 - Unpinning is idempotent: when no operator pin exists the command prints
   `not-pinned` and the remaining reasons, and still exits `0`.
 - The manifest does not have to exist. Unpinning a revision whose manifest was
-  already deleted is how an orphan pin is cleaned up, so this command is the
-  supported repair for that degraded state.
+  already deleted cleans up an operator orphan pin, so this command remains the
+  narrow repair when only the `user-pin` reason is in the way. `index repair`
+  removes every reason from an orphan pin (see below).
 - Exit `0` for any successful pin or unpin; `1` when the manifest is unknown,
   the GC lease is held or unreadable, or the store cannot be written; `2` for
   arguments that are not `pin|unpin` plus one manifest id and an optional
@@ -426,6 +427,52 @@ retain man:v1:ff0371d8c4e2 pin
 - Exit `0` for a plan or a completed pass; `1` when the pass refuses, the store
   cannot be read, or a manifest cannot be deleted; `2` when neither mode, both
   modes, or another argument is given.
+
+### `unified-mpc index repair --dry-run|--apply [--json]`
+
+Plans or removes the one degraded state the store can safely repair on its own:
+a revision pin whose manifest row is missing. Every reason on that pin is
+removed, because the manifest it protects no longer exists. Exactly one mode is
+required rather than defaulted.
+
+```bash
+$ unified-mpc index repair --dry-run
+planned (dry-run) orphan-pins 1
+repair man:v1:9b1c4f2e7a60 user-pin
+dangling-refs 0
+missing-overlay-bases 0
+```
+
+- `--dry-run` prints `repair` lines for the orphan pins it would remove and
+  never writes or takes the GC lease. `--apply` takes the single-owner GC lease
+  and removes the planned pins under it, renewing the lease as it removes.
+- A pin is only removed when its manifest is genuinely missing. The manifest
+  store is strict-read (a tolerant store is refused), so a corrupt manifest row
+  aborts the pass with nothing removed instead of looking like a missing row.
+  Classification of every pin finishes before the first unpin, and the row is
+  re-checked immediately before each unpin. A lease loss or write failure after
+  removals begin can leave those removals in place; re-running is idempotent.
+- Removing an orphan pin is deliberately not reachability-neutral: artifact-key
+  GC treats every pin id as retention evidence, and `assembleGcRoots` refuses
+  the whole pass while a pinned manifest is missing. The repair releases
+  artifacts bound only to the missing manifest to the normal GC grace window
+  and unblocks GC. No live ref, overlay or index job can reach those bindings.
+- The lease acquire is read-then-write, like revision prune, so the
+  single-owner guarantee has the same narrow double-grant window documented
+  there.
+- `dangling-refs` and `missing-overlay-bases` are reported, never deleted. A
+  dangling ref must be re-advanced by its owning revision gate, and a Goal
+  overlay with a missing base still holds dirty state; deleting either would
+  discard evidence or uncommitted work.
+- An apply prints `applied orphan-pins N` and one `removed <id> <reasons>` line
+  per pin it actually removed. A refused pass prints `refused <reason>`: another
+  owner holds the lease, the fence record is unreadable, or the pass ran without
+  a lease.
+- Exit `0` only when the store is healthy after the plan or pass. It exits `1`
+  for a refusal, for an unreadable store, or when dangling refs or missing
+  overlay bases remain, so a repair that cannot fully heal the store is visible
+  to scripts.
+- `2` when neither mode, both modes, or another argument is given.
 
 ### `unified-mpc index gc --dry-run|--apply [--grace <duration>] [--json]`
 

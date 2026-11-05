@@ -65,6 +65,8 @@ export interface GoalCanonicalAdmissionPort {
   pinBaseAtCommit(input: {
     readonly goalWorkspaceId: string;
     readonly commitSha: string;
+    /** The created Goal worktree, whose own remote identifies its repository. */
+    readonly worktreePath: string;
   }): Promise<GoalCanonicalAdmissionOutcome>;
   /**
    * Release the Goal's canonical overlay after removal. Idempotent. The adapter
@@ -397,7 +399,7 @@ export class GoalWorkspaceService {
       await this.removeWorktree(parent.realRootPath, worktreePath);
       return registered;
     }
-    const canonicalAdmission = await this.pinCanonicalBase(registered.value.id, resolvedBase);
+    const canonicalAdmission = await this.pinCanonicalBase(registered.value.id, resolvedBase, worktreePath);
     return ok({
       workspace: registered.value,
       worktreePath,
@@ -413,10 +415,11 @@ export class GoalWorkspaceService {
   private async pinCanonicalBase(
     goalWorkspaceId: string,
     commitSha: string,
+    worktreePath: string,
   ): Promise<GoalCanonicalAdmissionOutcome | undefined> {
     if (this.canonicalAdmission === undefined) return undefined;
     try {
-      return await this.canonicalAdmission.pinBaseAtCommit({ goalWorkspaceId, commitSha });
+      return await this.canonicalAdmission.pinBaseAtCommit({ goalWorkspaceId, commitSha, worktreePath });
     } catch (error) {
       return { status: 'failed', reason: errorMessage(error) };
     }

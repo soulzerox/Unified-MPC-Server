@@ -66,6 +66,14 @@ runtime adapter pins `canonicalRefForBranch(input.baseBranch)` instead of the
 literal `main`. The application passes the branch it resolved the moving base
 from, so the canonical ref a merge advances is exactly the ref admission reads.
 
+### 4. The admission recheck refreshes the same branch
+
+`GoalWorkspaceTruthReader.readAdmission` matched only `<remote>/main` and
+refreshed `refs/heads/main`. It now parses the branch from the recorded
+`<remote>/<branch>` base and refreshes that branch. Without this, the new
+`baseRef: origin/master|trunk` made admission report `unknown` and `run_goal`
+failed closed with `WORKSPACE_ADMISSION_STALE` even though the pin succeeded.
+
 ## Explicit non-goals
 
 - No new user-facing branch setting. The merge policy's `defaultBranch` is the
@@ -86,7 +94,7 @@ from, so the canonical ref a merge advances is exactly the ref admission reads.
 2. Red-first helper tests: a policy returns its `defaultBranch`; no policy
    keeps `master` on a `master` checkout and falls back to `main` on a feature
    branch; a checkout without `origin` falls back without a policy lookup.
-3. Runtime end-to-end: a `master` parent with no policy fetches and pins
-   `refs/remotes/origin/master`, not `main`.
+3. Runtime end-to-end: a `master` parent with no policy fetches, pins, and
+   admits against `refs/remotes/origin/master`, not `main`.
 4. Targeted `@unified-mpc/application` and `@unified-mpc/cli` suites, then
    full `verify:local` on the exact head before the review capsule.

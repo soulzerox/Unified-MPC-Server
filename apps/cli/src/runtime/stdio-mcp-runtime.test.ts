@@ -171,7 +171,18 @@ describe('stdio MCP runtime', () => {
       target: { commitSha: baseSha, treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'), manifestId },
       targetVerified: true,
     });
-    return { dataPath, rootPath, canonicalRoot, baseSha, manifestId, projectId, branch, db, runtime: createStdioMcpRuntime(dataPath, project) };
+    const runtime = createStdioMcpRuntime(dataPath, project, false, {
+      runtimeAdmissionIdentity: {
+        runtimeDeploymentId: `deploy-${projectId}`,
+        runtimeGeneration: '25700000-0000-4000-8000-000000000001',
+        runtimeBuildVersion: '4.61.0+257000000001',
+        runtimeBuildCommit: '3'.repeat(40),
+        runtimeBuildDirty: false,
+        runtimeProtocolGeneration: 1,
+        runtimeStartedAt: '2026-11-05T00:00:00.000Z',
+      },
+    });
+    return { dataPath, rootPath, canonicalRoot, baseSha, manifestId, projectId, branch, db, runtime };
   }
 
   it('pins a Goal admitted from the live canonical commit to its base manifest', async () => {
@@ -231,6 +242,22 @@ describe('stdio MCP runtime', () => {
       });
       expect(await new CanonicalRefStore(fixture.canonicalRoot).read(`refs/remotes/origin/${fixture.branch}`))
         .toMatchObject({ commitSha: fixture.baseSha });
+      expect(goalWorkspace).not.toBeNull();
+      if (goalWorkspace === null) return;
+      const acquired = await fixture.runtime.services.goals?.runGoal(fixture.runtime.actor, {
+        workspaceId: goalWorkspace.id, goalKey: 'canonical-pin-master',
+        objective: 'Verify admission on a master base.', plan: { steps: [] }, leaseSeconds: 600,
+      });
+      expect(acquired).toMatchObject({ ok: true, value: { acquired: true, leaseGeneration: 1 } });
+      if (acquired === undefined || !acquired.ok || acquired.value.leaseExpiresAt === undefined) return;
+      // Admission re-reads the moving base; it must refresh origin/master too.
+      const admitted = await fixture.runtime.services.goalRunWorkspace?.admitRunWorkspace(fixture.runtime.actor, {
+        workspaceId: goalWorkspace.id,
+        goalId: acquired.value.goalId,
+        leaseGeneration: acquired.value.leaseGeneration,
+        leaseExpiresAt: acquired.value.leaseExpiresAt,
+      });
+      expect(admitted).toMatchObject({ ok: true, value: { admissionGeneration: 1 } });
     } finally {
       await fixture.runtime.close();
       fixture.db.close();

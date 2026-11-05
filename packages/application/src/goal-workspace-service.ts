@@ -31,7 +31,7 @@ export interface GoalWorkspaceCreateRequest {
   readonly goalId: string;
   readonly parentWorkspaceId: string;
   readonly branchName?: string;
-  /** Omit to fetch origin/main directly; provide to explicitly pin a historical base. */
+  /** Omit to fetch the resolved base branch directly; provide to explicitly pin a historical base. */
   readonly baseRevision?: string;
   /**
    * Remote branch admission treats as the moving base (#210 §1). Merge

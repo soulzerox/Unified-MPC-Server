@@ -216,13 +216,16 @@ export class GoalWorkspaceTruthReader {
     }
     let resolvedBaseRef: string | undefined;
     if (workspace.baseRef !== undefined) {
-      const movingBase = /^([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/main$/.exec(workspace.baseRef);
-      if (movingBase?.[1] === undefined || this.git.refreshAdmissionRef === undefined) {
+      // `baseRef` is `<remote>/<branch>` for any configured merge-policy
+      // default branch, not only main. The remote is bounded here; the Git
+      // adapter validates the full source ref before it runs fetch.
+      const movingBase = /^([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(.+)$/.exec(workspace.baseRef);
+      if (movingBase?.[1] === undefined || movingBase[2] === undefined || this.git.refreshAdmissionRef === undefined) {
         return { workspaceId, workspaceKind: 'git', dirtyState: 'unknown', detail: 'moving base ref cannot be refreshed safely' };
       }
       let refreshed;
       try {
-        refreshed = await this.git.refreshAdmissionRef(this.actor, workspaceId, movingBase[1], 'refs/heads/main');
+        refreshed = await this.git.refreshAdmissionRef(this.actor, workspaceId, movingBase[1], `refs/heads/${movingBase[2]}`);
       } catch {
         return { workspaceId, workspaceKind: 'git', dirtyState: 'unknown', detail: 'moving base ref refresh failed' };
       }
